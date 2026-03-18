@@ -1,0 +1,19 @@
+[project]
+name = "kaillera-next-server"
+version = "0.1.0"
+description = "kaillera-next matchmaking and relay server"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+]
+
+[project.scripts]
+kaillera-server = "src.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
