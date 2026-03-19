@@ -449,15 +449,33 @@
       if (!gm) { setTimeout(waitForEmu, 100); return; }
       console.log('[netplay] emulator running — capturing stream');
 
-      // Capture the canvas as-is — don't resize it (breaks EJS rendering).
-      // Instead, use scaleResolutionDownBy on the WebRTC encoder to reduce
-      // encoding load without affecting the emulator's display.
-      const canvas = document.querySelector('#game canvas');
-      if (!canvas) { console.log('[netplay] canvas not found, retrying…'); setTimeout(waitForEmu, 200); return; }
+      // The emulator canvas is WebGL at 1280x960. Capturing it directly
+      // requires expensive GPU readback (~5MB/frame). Instead, blit onto a
+      // small 2D canvas (640x480) and capture THAT. The drawImage blit is
+      // GPU-accelerated and the 2D canvas readback is much cheaper.
+      const srcCanvas = document.querySelector('#game canvas');
+      if (!srcCanvas) { console.log('[netplay] canvas not found, retrying…'); setTimeout(waitForEmu, 200); return; }
 
-      console.log('[netplay] canvas size:', canvas.width + 'x' + canvas.height);
-      _hostStream = canvas.captureStream(60);
-      console.log('[netplay] captured stream:', _hostStream.getTracks().map(t => t.kind));
+      const captureCanvas = document.createElement('canvas');
+      captureCanvas.width = 640;
+      captureCanvas.height = 480;
+      const ctx = captureCanvas.getContext('2d');
+
+      console.log('[netplay] source canvas:', srcCanvas.width + 'x' + srcCanvas.height,
+        '→ capture canvas: 640x480');
+
+      // Blit loop: copy emulator canvas to capture canvas every frame
+      _hostStream = captureCanvas.captureStream(0);  // manual frame control
+      const captureTrack = _hostStream.getVideoTracks()[0];
+
+      function blitFrame() {
+        requestAnimationFrame(blitFrame);
+        ctx.drawImage(srcCanvas, 0, 0, 640, 480);
+        captureTrack.requestFrame();  // signal new frame to captureStream
+      }
+      blitFrame();
+
+      console.log('[netplay] capture stream started (640x480 2D blit)');
 
       // Add tracks to all existing peer connections and optimize encoding
       Object.entries(_peers).forEach(([sid, peer]) => {
@@ -558,12 +576,9 @@
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
         }
-        params.encodings[0].maxBitrate = 10_000_000;  // 10 Mbps ceiling
+        params.encodings[0].maxBitrate = 5_000_000;  // 5 Mbps (640x480 needs less)
         params.encodings[0].maxFramerate = 60;
-        // Downscale 2x at encoder level (not canvas) — reduces encoding
-        // load while keeping the host's emulator display at full resolution.
-        // 1280x960 → 640x480 encoded, which is 2x N64's native 320x240.
-        params.encodings[0].scaleResolutionDownBy = 2.0;
+        // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
         sender.setParameters(params).then(() => {
           console.log('[netplay] video encoding optimized: 60fps, 10Mbps max, 2x downscale');
