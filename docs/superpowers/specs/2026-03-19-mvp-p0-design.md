@@ -338,6 +338,70 @@ The mode selector dropdown shows the UI labels; the value stored/transmitted is 
 
 ---
 
+## Regression Prevention & Verification
+
+### Strategy
+
+The engine refactor touches working, Playwright-verified code. The approach: preserve old scripts as backups, verify the refactored engines produce identical behavior, then verify each new system before integrating.
+
+### Backup
+
+Keep original scripts as `netplay-lockstep-v4.old.js` and `netplay-streaming.old.js` until the full MVP is verified end-to-end. Delete them only after all Playwright tests pass on the refactored versions.
+
+### Playwright Test Suite
+
+Each system gets its own Playwright verification. Tests run against a live server instance (start server, open browser tabs, simulate the user flow).
+
+**Engine Refactor Verification (run first, before building new UI):**
+- **2-player lockstep:** Two tabs create/join a room via play.js with hardcoded params. Verify WebRTC connects, lockstep starts, `window._frameNum` advances past 120 on both tabs, input from tab A is received by tab B.
+- **4-player lockstep mesh:** Four tabs join. Verify all peers connect (check `window._peers` has 3 entries per tab), all tabs advance frames in sync.
+- **Player drop:** 3 players connected, one tab closes. Verify remaining 2 continue advancing frames without crashing.
+- **Late join:** 2 players running, 3rd joins mid-game. Verify the new player receives save state and catches up (frameNum within delta of others).
+- **Spectator:** Player creates room, spectator joins. Verify spectator's `window._isSpectator === true` and spectator receives video stream (check for `<video>` element or MediaStream).
+- **Streaming mode:** Host + guest via streaming engine. Verify guest receives video track, host receives guest input via data channel.
+
+**Lobby System Verification:**
+- Load `/`, enter name, click Create Room → verify redirect URL contains `?room=...&host=1&name=...&mode=lockstep-v4`
+- Load `/`, enter room code, click Join → verify redirect URL contains `?room=CODE&name=...`
+- Load `/`, enter room code, click Watch → verify redirect URL contains `?room=CODE&name=...&spectate=1`
+- Paste full invite URL into code input → verify room code is extracted
+- Name persists in localStorage across page reloads
+
+**Play Page Controller Verification:**
+- **Host flow:** Load play.html with `?room=X&host=1&name=Test`. Verify pre-game overlay visible, room code displayed, Start button disabled.
+- **Guest flow:** Second tab loads `?room=X&name=Guest`. Verify guest sees "Waiting for host to start...", player list updates with both names.
+- **Start game:** Host clicks Start. Verify overlay hides on both tabs, emulator becomes visible, `game-started` event received.
+- **End game:** Host clicks End Game. Verify overlay reappears on both tabs, players still in room, can start again.
+- **Leave game:** Guest clicks Leave. Verify redirect to `/`, host sees toast notification "Guest left", player list updates.
+- **Spectator mid-game join:** Start a game with 2 players, then a third tab joins with `?spectate=1`. Verify spectator skips overlay and sees video immediately.
+- **Notifications:** Verify toast appears when player joins, leaves, and when host transfers on disconnect.
+
+**Server Additions Verification:**
+- `start-game` from non-owner returns error
+- `end-game` from non-owner returns error
+- `GET /room/{id}` returns correct status, players, spectators
+- `GET /room/{nonexistent}` returns 404
+- Room status transitions: `lobby` → `playing` (on start) → `lobby` (on end)
+- Owner disconnect transfers ownership, new owner can start/end
+
+**Responsive Layout Verification:**
+- Playwright viewport resize to 320x568 (iPhone SE). Verify no horizontal scroll, all buttons visible and ≥44px height, game canvas fits within viewport width.
+
+**Gamepad Verification:**
+- Playwright cannot simulate real gamepads, but can verify: the gamepad detection UI element exists in the pre-game overlay, and `navigator.getGamepads` is called during the overlay phase (via console log or injected mock).
+
+### Verification Order
+
+1. Refactor engines → run engine verification tests (against a minimal test harness, not the full UI)
+2. Build server additions → run server verification tests
+3. Build lobby → run lobby tests
+4. Build play page controller → run play page tests
+5. Full integration: lobby → play → game → end → play again cycle
+
+Each step must pass before proceeding to the next.
+
+---
+
 ## What Is NOT In This Spec
 
 - Touch controls (P1.1)
