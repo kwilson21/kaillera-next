@@ -242,7 +242,12 @@
   }
 
   function endGame() {
-    socket.emit('end-game', {});
+    socket.emit('end-game', {}, function (err) {
+      if (err) {
+        console.log('[play] end-game error:', err);
+        showToast('End game failed: ' + err);
+      }
+    });
   }
 
   function leaveGame() {

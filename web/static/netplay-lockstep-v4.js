@@ -32,9 +32,8 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Desync detection: check every N frames (~15 seconds at 60fps)
-  // Off by default — toggled via toolbar button
-  const SYNC_CHECK_INTERVAL = 900;
+  // Desync detection: check every N frames (~5 seconds at 60fps)
+  const SYNC_CHECK_INTERVAL = 300;
 
   // Standard online cheats (same as other prototypes)
   const SSB64_ONLINE_CHEATS = [
@@ -112,7 +111,7 @@
   let _tickInterval      = null;    // setInterval handle for tick loop
 
   // Desync detection state
-  let _syncEnabled       = false;   // off by default, toggled via play.js
+  let _syncEnabled       = true;    // on by default, toggled via play.js
   let _pendingSyncCheck  = null;    // {frame, hash} from host, waiting to verify
   let _resyncCount       = 0;      // number of resyncs performed
 
