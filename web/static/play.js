@@ -368,9 +368,22 @@
 
   function copyLink() {
     var url = window.location.origin + '/play.html?room=' + roomCode;
-    navigator.clipboard.writeText(url).then(function () {
+    // navigator.clipboard requires HTTPS; use execCommand fallback for HTTP
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(function () {
+        showToast('Link copied!');
+      });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
       showToast('Link copied!');
-    });
+    }
   }
 
   // ── Gamepad Detection ─────────────────────────────────────────────────

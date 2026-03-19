@@ -32,6 +32,9 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
+  // Desync detection: check every N frames (~5 seconds at 60fps)
+  const SYNC_CHECK_INTERVAL = 300;
+
   // Standard online cheats (same as other prototypes)
   const SSB64_ONLINE_CHEATS = [
     { desc: 'Have All Characters',   code: '810A4938 0FF0' },
@@ -106,6 +109,10 @@
   let _manualMode        = false;   // true once enterManualMode() called
   let _stallStart        = 0;       // timestamp when current stall began
   let _tickInterval      = null;    // setInterval handle for tick loop
+
+  // Desync detection state
+  let _pendingSyncCheck  = null;    // {frame, hash} from host, waiting to verify
+  let _resyncCount       = 0;      // number of resyncs performed
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -348,6 +355,15 @@
         if (e.data === 'lockstep-ready') {
           _lockstepReadyPeers[remoteSid] = true;
           checkAllLockstepReady();
+        }
+        // Desync detection messages
+        if (e.data.substring(0, 5) === 'sync:') {
+          var parts = e.data.split(':');
+          _pendingSyncCheck = { frame: parseInt(parts[1], 10), hash: parseInt(parts[2], 10) };
+        }
+        if (e.data === 'resync-request' && _playerSlot === 0) {
+          console.log('[lockstep-v4] resync requested by', remoteSid);
+          sendResyncState();
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -632,7 +648,28 @@
 
   function handleLateJoinState(msg) {
     if (_isSpectator) return;
-    if (_running) return;  // already running, ignore duplicate
+
+    // Resync during gameplay
+    if (_running && msg.resync) {
+      console.log('[lockstep-v4] RESYNC: loading state from frame', msg.frame);
+      setStatus('Resyncing...');
+      var compressed = base64ToUint8(msg.data);
+      decompressState(compressed).then(function (bytes) {
+        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+        if (!gm) return;
+        gm.loadState(bytes);
+        _frameNum = msg.frame;
+        window._frameNum = _frameNum;
+        _resyncCount++;
+        console.log('[lockstep-v4] RESYNC complete at frame', _frameNum, '(resync #' + _resyncCount + ')');
+        setStatus('Connected -- game on!');
+      }).catch(function (err) {
+        console.log('[lockstep-v4] resync failed:', err);
+      });
+      return;
+    }
+
+    if (_running) return;  // already running, ignore duplicate late-join
 
     console.log('[lockstep-v4] received late-join state for frame', msg.frame);
     setStatus('Loading late-join state...');
@@ -650,9 +687,6 @@
       gm.loadState(bytes);
 
       // Start at the HIGHEST remote frame we've seen (not the capture frame).
-      // Existing players have advanced beyond msg.frame during the async
-      // compress/send/decompress pipeline. Starting at their current frame
-      // avoids stalling on frames they've already passed.
       var startFrame = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
       _frameNum = startFrame;
       console.log('[lockstep-v4] late-join state loaded, starting at frame',
@@ -990,6 +1024,37 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
+    // -- Desync detection --
+    if (_frameNum > 0 && _frameNum % SYNC_CHECK_INTERVAL === 0) {
+      if (_playerSlot === 0) {
+        // Host: broadcast state hash to all peers
+        var hostHash = quickStateHash();
+        var syncMsg = 'sync:' + _frameNum + ':' + hostHash;
+        for (var s = 0; s < activePeers.length; s++) {
+          try { activePeers[s].dc.send(syncMsg); } catch (_) {}
+        }
+      }
+    }
+    // Guest: check pending sync hash
+    if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
+      var localHash = quickStateHash();
+      if (localHash !== _pendingSyncCheck.hash) {
+        console.log('[lockstep-v4] DESYNC at frame', _pendingSyncCheck.frame,
+          'local:', localHash, 'host:', _pendingSyncCheck.hash);
+        setStatus('Desync detected -- requesting resync...');
+        // Request resync from host
+        var hostPeer = null;
+        var peerKeys = Object.keys(_peers);
+        for (var h = 0; h < peerKeys.length; h++) {
+          if (_peers[peerKeys[h]].slot === 0) { hostPeer = _peers[peerKeys[h]]; break; }
+        }
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          hostPeer.dc.send('resync-request');
+        }
+      }
+      _pendingSyncCheck = null;
+    }
+
     // Debug overlay -- update every 15 frames (~4x per second)
     if (_frameNum % 15 === 0) {
       var dbg = document.getElementById('np-debug');
@@ -1182,6 +1247,47 @@
     attempt();
   }
 
+  // -- Desync detection helpers -----------------------------------------------
+
+  function quickStateHash() {
+    try {
+      var gm = window.EJS_emulator.gameManager;
+      var state = gm.getState();
+      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
+      // FNV-1a hash over first 2KB of save state (CPU + early RAM)
+      var hash = 0x811c9dc5;
+      var len = Math.min(bytes.length, 2048);
+      for (var i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return hash | 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  async function sendResyncState() {
+    if (_playerSlot !== 0) return;
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep-v4] sending resync state at frame', _frameNum);
+      socket.emit('data-message', {
+        type: 'late-join-state',
+        frame: _frameNum,
+        data: b64,
+        resync: true,
+      });
+    } catch (err) {
+      console.log('[lockstep-v4] failed to send resync state:', err);
+    }
+  }
+
   // -- Init / Stop API -------------------------------------------------------
 
   var _config = null;
@@ -1236,6 +1342,8 @@
     _expectedPeerCount = 0;
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
+    _pendingSyncCheck = null;
+    _resyncCount = 0;
 
     // Clean up spectator stream
     if (_hostStream) {
