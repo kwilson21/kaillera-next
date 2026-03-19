@@ -82,152 +82,9 @@
   window._isSpectator = _isSpectator;
   window._peers       = _peers;
 
-  // ── UI ─────────────────────────────────────────────────────────────────
-
-  function buildUI() {
-    const style = document.createElement('style');
-    style.textContent = `
-      #np { position:fixed; top:12px; right:12px; z-index:9999;
-            background:#151520; border:1px solid #2a2a40; border-radius:8px;
-            padding:12px 14px; min-width:210px; font:13px/1.5 sans-serif;
-            color:#ccc; box-shadow:0 4px 16px rgba(0,0,0,.5); }
-      #np h3 { margin:0 0 10px; font-size:12px; letter-spacing:.08em;
-               text-transform:uppercase; color:#666; }
-      #np input { display:block; width:100%; padding:5px 8px; margin-bottom:6px;
-                  background:#0d0d1a; border:1px solid #333; border-radius:4px;
-                  color:#eee; font-size:12px; box-sizing:border-box; }
-      #np input:focus { outline:none; border-color:#4a6fa5; }
-      #np .row { display:flex; gap:6px; margin-bottom:6px; }
-      #np .row input { margin:0; flex:1; }
-      #np button { padding:5px 10px; border:none; border-radius:4px;
-                   background:#3a5a8a; color:#fff; font-size:12px;
-                   cursor:pointer; white-space:nowrap; }
-      #np button:hover { background:#4a6fa5; }
-      #np button:disabled { background:#2a2a40; color:#555; cursor:default; }
-      #np-status { font-size:11px; color:#777; margin-top:6px; min-height:14px; }
-      #np-debug { font-size:10px; color:#555; font-family:monospace; margin-top:4px; }
-      #np-code-display { font-size:16px; font-weight:bold; letter-spacing:.15em;
-                         color:#6af; text-align:center; padding:4px 0 2px; }
-      #guest-video { width:640px; height:480px; background:#000; display:block; }
-    `;
-    document.head.appendChild(style);
-
-    const panel = document.createElement('div');
-    panel.id = 'np';
-    panel.innerHTML = `
-      <h3>Netplay (Streaming)</h3>
-      <div style="font-size:10px; margin-bottom:8px; color:#555;">
-        <a href="?mode=lockstep" style="color:#6af; text-decoration:none;">Switch to Lockstep mode</a>
-      </div>
-      <input id="np-name" placeholder="Your name" value="Player">
-      <button id="np-create">Create Room</button>
-      <div id="np-code-display" style="display:none"></div>
-      <div class="row" style="margin-top:6px">
-        <input id="np-join-code" placeholder="Room code">
-        <button id="np-join">Join</button>
-        <button id="np-spectate">Watch</button>
-      </div>
-      <div id="np-status">Connecting to server…</div>
-      <div id="np-debug" style="display:none"></div>
-    `;
-    document.body.appendChild(panel);
-
-    document.getElementById('np-create').onclick  = createRoom;
-    document.getElementById('np-join').onclick     = joinRoom;
-    document.getElementById('np-spectate').onclick = spectateRoom;
-  }
-
   function setStatus(msg) {
-    const el = document.getElementById('np-status');
-    if (el) el.textContent = msg;
+    if (_config && _config.onStatus) _config.onStatus(msg);
     console.log('[netplay]', msg);
-  }
-
-  function setCode(code) {
-    const el = document.getElementById('np-code-display');
-    if (!el) return;
-    el.textContent = code;
-    el.style.display = code ? '' : 'none';
-    const input = document.getElementById('np-join-code');
-    if (input) input.value = code;
-  }
-
-  function disableButtons() {
-    ['np-create', 'np-join', 'np-spectate'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = true;
-    });
-  }
-
-  // ── Socket.IO ──────────────────────────────────────────────────────────
-
-  function loadSocketIO(cb) {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
-    s.onload = cb;
-    document.head.appendChild(s);
-  }
-
-  function connectSocket() {
-    socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
-    socket.on('connect',       () => setStatus('Ready'));
-    socket.on('connect_error', (e) => setStatus('Server error: ' + e.message));
-    socket.on('users-updated', onUsersUpdated);
-    socket.on('webrtc-signal', onWebRTCSignal);
-  }
-
-  // ── Room management ────────────────────────────────────────────────────
-
-  function createRoom() {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
-    sessionId  = randomCode();
-    _playerSlot = 0;
-    window._playerSlot = 0;
-
-    socket.emit('open-room', {
-      extra: {
-        sessionid: sessionId, userid: socket.id, playerId: socket.id,
-        room_name: name + "'s room", game_id: GAME_ID,
-        player_name: name, room_password: null,
-        domain: window.location.hostname,
-      },
-      maxPlayers: 4, password: null,
-    }, (err) => {
-      if (err) { setStatus('Error: ' + err); return; }
-      disableButtons();
-      setCode(sessionId);
-      setStatus('Waiting for players…');
-    });
-  }
-
-  function joinRoom() { _joinOrSpectate(false); }
-  function spectateRoom() { _joinOrSpectate(true); }
-
-  function _joinOrSpectate(spectate) {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
-    const code = document.getElementById('np-join-code').value.trim().toUpperCase();
-    if (!code) { setStatus('Enter a room code'); return; }
-
-    sessionId    = code;
-    _isSpectator = spectate;
-    window._isSpectator = spectate;
-
-    socket.emit('join-room', {
-      extra: { sessionid: sessionId, userid: socket.id, player_name: name, spectate: spectate },
-      password: null,
-    }, (err, data) => {
-      if (err) { setStatus('Error: ' + err); return; }
-      disableButtons();
-      if (!spectate && data && data.players) {
-        const myEntry = Object.values(data.players).find(p => p.socketId === socket.id);
-        if (myEntry) { _playerSlot = myEntry.slot; window._playerSlot = _playerSlot; }
-      } else if (spectate) {
-        _playerSlot = null; window._playerSlot = null;
-      }
-      setStatus(spectate ? 'Spectating…' : 'Joined — waiting for host stream…');
-      // Guest: set up keyboard tracking immediately
-      if (!spectate) setupKeyTracking();
-    });
   }
 
   // ── users-updated (star topology) ──────────────────────────────────────
@@ -260,6 +117,11 @@
       }
     }
     // Guests/spectators: wait for host to initiate (don't create connections)
+
+    // Notify controller
+    if (_config && _config.onPlayersChanged) {
+      _config.onPlayersChanged(data);
+    }
   }
 
   // ── WebRTC ─────────────────────────────────────────────────────────────
@@ -310,7 +172,7 @@
           _guestVideo.disableRemotePlayback = true;
           _guestVideo.setAttribute('playsinline', '');
 
-          const gameDiv = document.getElementById('game');
+          const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           gameDiv.innerHTML = '';
           gameDiv.appendChild(_guestVideo);
         }
@@ -878,15 +740,72 @@
     attempt();
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────
+  // -- Init / Stop API -------------------------------------------------------
 
-  function randomCode() {
-    return Math.random().toString(36).slice(2, 7).toUpperCase();
+  let _config = null;
+
+  function init(config) {
+    _config = config;
+    socket = config.socket;
+    sessionId = config.sessionId;
+    _playerSlot = config.playerSlot;
+    _isSpectator = config.isSpectator;
+
+    window._playerSlot = _playerSlot;
+    window._isSpectator = _isSpectator;
+
+    // Register socket listeners
+    socket.on('users-updated', onUsersUpdated);
+    socket.on('webrtc-signal', onWebRTCSignal);
+
+    // Guest: set up keyboard tracking immediately
+    if (!_isSpectator && _playerSlot !== 0) {
+      setupKeyTracking();
+    }
+
+    // Process current peers immediately
+    if (config.initialPlayers) {
+      onUsersUpdated(config.initialPlayers);
+    }
+    // startHost() / startGuestInputLoop() triggered from ch.onopen (same as before)
   }
 
-  window.addEventListener('DOMContentLoaded', () => {
-    buildUI();
-    loadSocketIO(connectSocket);
-  });
+  function stop() {
+    _gameRunning = false;
+    _guestLoopStarted = false;
+
+    // Close all peer connections
+    Object.keys(_peers).forEach(function (sid) {
+      const p = _peers[sid];
+      if (p.dc) try { p.dc.close(); } catch (_) {}
+      if (p.pc) try { p.pc.close(); } catch (_) {}
+    });
+    _peers = {};
+    window._peers = _peers;
+
+    // Clean up streams
+    if (_hostStream) {
+      _hostStream.getTracks().forEach(function (t) { t.stop(); });
+      _hostStream = null;
+    }
+    if (_guestVideo) {
+      _guestVideo.srcObject = null;
+      if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
+      _guestVideo = null;
+    }
+
+    _knownPlayers = {};
+    _prevSlotMasks = {};
+
+    // Remove socket listeners (no data-message — streaming doesn't use it)
+    if (socket) {
+      socket.off('users-updated', onUsersUpdated);
+      socket.off('webrtc-signal', onWebRTCSignal);
+    }
+
+    _config = null;
+  }
+
+  window.NetplayStreaming = { init: init, stop: stop };
 
 })();
