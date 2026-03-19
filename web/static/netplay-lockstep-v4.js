@@ -1288,39 +1288,44 @@
   }
 
   function applySyncState(bytes, frame) {
-    // Guest: load decompressed state (1.2ms main thread)
+    // Guest: hot-swap state without stopping the tick loop.
+    // The tick loop keeps running — we just replace the emulator state underneath it.
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
 
-    // Full stop + restart (same as proven resync flow)
-    stopSync();
     gm.loadState(bytes);
-    enterManualMode();
+
+    // Re-capture rAF runner (loadState may invalidate _pendingRunner)
+    var mod = gm.Module;
+    mod.pauseMainLoop();
+    mod.resumeMainLoop();
+
     _frameNum = frame;
     window._frameNum = _frameNum;
 
-    // Pre-fill zero input for a wide range around the sync frame.
-    // Host may be 10-30 frames ahead by the time this runs (async pipeline).
-    // Pre-filling zeros prevents stalls on frames the host already sent
-    // but were lost during the clear.
-    _localInputs = {};
-    _remoteInputs = {};
+    // Fill any gaps in input buffers around the new frame so we don't stall.
+    // Don't clear the whole buffer — keep existing inputs that are still valid.
     var pKeys = Object.keys(_peers);
     for (var pk = 0; pk < pKeys.length; pk++) {
       var pSlot = _peers[pKeys[pk]].slot;
       if (pSlot !== null && pSlot !== undefined) {
-        _remoteInputs[pSlot] = {};
-        for (var gf = frame - 30; gf <= frame + 60; gf++) {
-          _remoteInputs[pSlot][gf] = 0;
+        if (!_remoteInputs[pSlot]) _remoteInputs[pSlot] = {};
+        for (var gf = frame - DELAY_FRAMES - 5; gf <= frame + 5; gf++) {
+          if (_remoteInputs[pSlot][gf] === undefined) _remoteInputs[pSlot][gf] = 0;
         }
-        _lastRemoteFramePerSlot[pSlot] = frame + 60;
+        _lastRemoteFramePerSlot[pSlot] = Math.max(
+          _lastRemoteFramePerSlot[pSlot] || 0, frame
+        );
       }
     }
-    _lastRemoteFrame = frame + 60;
+    for (var lf = frame - DELAY_FRAMES - 5; lf <= frame + 5; lf++) {
+      if (_localInputs[lf] === undefined) _localInputs[lf] = 0;
+    }
 
-    startLockstep();
     _resyncCount++;
-    console.log('[lockstep-v4] sync #' + _resyncCount + ' applied at frame', frame);
+    if (_resyncCount <= 3 || _resyncCount % 10 === 0) {
+      console.log('[lockstep-v4] sync #' + _resyncCount + ' applied at frame', frame);
+    }
   }
 
   // -- (old desync detection helpers removed — replaced by Worker-based sync) --
