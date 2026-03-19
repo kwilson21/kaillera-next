@@ -37,9 +37,8 @@
     { desc: 'Items Off',             code: '800A4D24 0000' },
     // Disable Whispy Woods wind on Dreamland — wind is RNG-driven and
     // causes immediate desync if both emulators have different RNG state.
-    // Source: smasherx74.cht "No Wind"
-    { desc: 'No Wind (part 1)',      code: '810BA9F1 0000' },
-    { desc: 'No Wind (part 2)',      code: '800BA9F3 0000' },
+    // Source: smasherx74.cht "No Wind" — combined as single cheat entry
+    { desc: 'No Wind',               code: '810BA9F1 0000+800BA9F3 0000' },
   ];
 
   // ── State ─────────────────────────────────────────────────────────────────
