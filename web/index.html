@@ -3,38 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>kaillera-next — Play SSB64 Online</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
-    h1 { margin-bottom: 1rem; font-size: 1.4rem; letter-spacing: 0.05em; color: #aaa; }
-    #game { width: 640px; height: 480px; }
-  </style>
+  <title>kaillera-next</title>
+  <link rel="stylesheet" href="/static/lobby.css">
 </head>
 <body>
-  <h1>kaillera-next</h1>
-  <div id="game"></div>
-  <script>
-    EJS_player       = '#game';
-    EJS_core         = 'n64';
-    EJS_gameUrl      = '/static/rom/Super Smash Bros. (USA).z64';
-    EJS_pathtodata   = 'https://cdn.emulatorjs.org/stable/data/';
-  </script>
-  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
-  <!-- Netplay mode: ?mode= selects the prototype
-       lockstep-v4: true lockstep + direct memory input (default)
-       lockstep-v3: free-running input sync
-       streaming:   single-emulator video stream -->
-  <script>
-    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep-v4';
-    var _src = {
-      'lockstep-v4': '/static/netplay-lockstep-v4.js?v=1',
-      'lockstep-v3': '/static/netplay-lockstep-v3.js?v=1',
-      'lockstep-v2': '/static/netplay-lockstep-v2.js?v=1',
-      'lockstep':    '/static/netplay-lockstep.js?v=2',
-      'streaming':   '/static/netplay-streaming.js?v=9',
-    }[_mode] || '/static/netplay-lockstep-v4.js?v=1';
-    document.write('<script src="' + _src + '"><\/script>');
-  </script>
+  <div class="lobby-card">
+    <h1>kaillera-next</h1>
+    <input id="player-name" placeholder="Your name" autocomplete="off">
+    <button id="create-btn">Create Room</button>
+    <div class="divider">or join a game</div>
+    <div class="join-row">
+      <input id="room-code" placeholder="Room code or invite link" autocomplete="off">
+      <button id="join-btn">Join</button>
+      <button id="watch-btn">Watch</button>
+    </div>
+  </div>
+  <script src="/static/lobby.js"></script>
 </body>
 </html>

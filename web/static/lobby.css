@@ -1,0 +1,84 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #111;
+  color: #eee;
+  font-family: sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.lobby-card {
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 12px;
+  padding: 2rem;
+  max-width: 400px;
+  width: 90vw;
+  text-align: center;
+}
+
+h1 {
+  font-size: 1.5rem;
+  letter-spacing: 0.1em;
+  color: #6af;
+  margin-bottom: 1.5rem;
+}
+
+input {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #0d0d1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #eee;
+  font-size: 14px;
+}
+
+input:focus {
+  outline: none;
+  border-color: #4a6fa5;
+}
+
+button {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 6px;
+  background: #3a5a8a;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+button:hover {
+  background: #4a6fa5;
+}
+
+#create-btn {
+  width: 100%;
+  font-size: 16px;
+  padding: 14px;
+}
+
+.divider {
+  color: #555;
+  font-size: 12px;
+  margin: 1.5rem 0;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.join-row {
+  display: flex;
+  gap: 8px;
+}
+
+.join-row input {
+  flex: 1;
+  margin-bottom: 0;
+}
