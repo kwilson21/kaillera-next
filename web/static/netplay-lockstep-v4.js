@@ -112,10 +112,11 @@
   let _stallStart        = 0;       // timestamp when current stall began
   let _tickInterval      = null;    // setInterval handle for tick loop
 
-  // State sync — host pushes authoritative state via Worker + DataChannel
-  let _syncEnabled       = true;    // on by default, toggled via play.js
+  // State sync — host checks game state hash and pushes only when desynced
+  let _syncEnabled       = true;    // on by default (experimental), toggled via play.js
   let _syncWorker        = null;    // Web Worker for compress/decompress
-  let _syncPushInterval  = 60;     // push state every N frames (~1s at 60fps)
+  let _syncCheckInterval = 300;    // check hash every N frames (~5s at 60fps)
+  let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
   let _resyncCount       = 0;
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
@@ -363,7 +364,22 @@
           _lockstepReadyPeers[remoteSid] = true;
           checkAllLockstepReady();
         }
-        // State sync: chunked binary transfer header
+        // State sync: hash check from host
+        if (e.data.substring(0, 10) === 'sync-hash:') {
+          var parts = e.data.split(':');
+          var syncFrame = parseInt(parts[1], 10);
+          var hostHash = parseInt(parts[2], 10);
+          var localHash = hashGameState();
+          if (localHash !== hostHash) {
+            console.log('[lockstep-v4] DESYNC at frame', syncFrame,
+              'local:', localHash, 'host:', hostHash, '-- requesting state');
+            peer.dc.send('sync-request');
+          }
+        }
+        // State sync: host received request, or chunked binary transfer header
+        if (e.data === 'sync-request' && _playerSlot === 0) {
+          pushSyncState();
+        }
         if (e.data.substring(0, 11) === 'sync-start:') {
           var parts = e.data.split(':');
           _syncFrame = parseInt(parts[1], 10);
@@ -1016,10 +1032,17 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
-    // -- Periodic state push: host sends authoritative state via Worker + DC --
+    // -- Periodic desync check: host hashes game state (first 64KB), broadcasts hash.
+    // Only pushes full state if guest reports mismatch. Audio buffers (deep in the
+    // 16MB save state) always differ but game state stays in sync naturally.
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
-        _frameNum % _syncPushInterval === 0) {
-      pushSyncState();
+        _frameNum % _syncCheckInterval === 0) {
+      var hostHash = hashGameState();
+      var syncMsg = 'sync-hash:' + _frameNum + ':' + hostHash;
+      var ap = getActivePeers();
+      for (var s = 0; s < ap.length; s++) {
+        try { ap[s].dc.send(syncMsg); } catch (_) {}
+      }
     }
 
     // Debug overlay -- update every 15 frames (~4x per second)
@@ -1212,6 +1235,25 @@
       setTimeout(attempt, 200);
     };
     attempt();
+  }
+
+  function hashGameState() {
+    // Hash first _syncHashBytes of save state (game state only, excludes audio buffers).
+    // getState() costs ~3ms; hashing 64KB is negligible. Called every ~5s.
+    try {
+      var gm = window.EJS_emulator.gameManager;
+      var state = gm.getState();
+      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
+      var hash = 0x811c9dc5;
+      var len = Math.min(bytes.length, _syncHashBytes);
+      for (var i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return hash | 0;
+    } catch (e) {
+      return 0;
+    }
   }
 
   // -- Worker-based state sync -----------------------------------------------
@@ -1416,7 +1458,7 @@
     stop: stop,
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
-    setSyncInterval: function (frames) { _syncPushInterval = Math.max(1, frames); },
+    setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
   };
 
 })();

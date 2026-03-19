@@ -446,8 +446,8 @@
       if (engine && engine.setSyncEnabled) {
         var nowOn = !engine.isSyncEnabled();
         engine.setSyncEnabled(nowOn);
-        syncBtn.textContent = 'Sync: ' + (nowOn ? 'On' : 'Off');
-        showToast('Desync detection ' + (nowOn ? 'enabled' : 'disabled'));
+        syncBtn.textContent = 'Rollback: ' + (nowOn ? 'On' : 'Off');
+        showToast('Rollback ' + (nowOn ? 'enabled' : 'disabled') + ' (experimental)');
       }
     });
 
