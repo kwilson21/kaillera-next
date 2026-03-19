@@ -956,8 +956,8 @@
         const dbg = document.getElementById('np-debug');
         if (dbg) {
           dbg.style.display = '';
-          const peerCount = Object.keys(_peers).length;
-          dbg.textContent = 'F:' + _frameNum + ' delay:' + _delayN + ' peers:' + peerCount +
+          const playerCount = Object.keys(_peers).length + (_isSpectator ? 0 : 1);
+          dbg.textContent = 'F:' + _frameNum + ' delay:' + _delayN + ' players:' + playerCount +
             (_stallCount > 0 ? ' STALL:' + _stallCount : '');
         }
       }
