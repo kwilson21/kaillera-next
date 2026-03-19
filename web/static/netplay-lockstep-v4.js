@@ -32,8 +32,10 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Desync detection: check every N frames (~5 seconds at 60fps)
-  const SYNC_CHECK_INTERVAL = 300;
+  // Desync detection: check every N frames (~2 seconds at 60fps).
+  // The emulator is non-deterministic (audio/timing reads performance.now()),
+  // so desyncs are inherent. Frequent resyncs keep games visually in sync.
+  const SYNC_CHECK_INTERVAL = 120;
 
   // Standard online cheats (same as other prototypes)
   const SSB64_ONLINE_CHEATS = [
@@ -507,7 +509,12 @@
         return;
       }
 
-      console.log('[lockstep-v4] emulator booted (' + frames + ' frames)');
+      // CRITICAL: Pause immediately to prevent free frames during state exchange.
+      // Without this, each side runs different numbers of free frames between
+      // boot and lockstep start, causing internal state divergence that
+      // loadState() can't fully overwrite.
+      mod.pauseMainLoop();
+      console.log('[lockstep-v4] emulator booted (' + frames + ' frames) — paused');
       _selfEmuReady = true;
 
       // Notify all connected peers
