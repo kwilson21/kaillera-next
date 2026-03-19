@@ -114,6 +114,7 @@
   let _syncEnabled       = true;    // on by default, toggled via play.js
   let _pendingSyncCheck  = null;    // {frame, hash} from host, waiting to verify
   let _resyncCount       = 0;      // number of resyncs performed
+  let _resyncPaused      = false;   // host pauses tick loop during resync
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -362,11 +363,21 @@
           var parts = e.data.split(':');
           _pendingSyncCheck = { frame: parseInt(parts[1], 10), hash: parseInt(parts[2], 10) };
         }
-        if (e.data === 'desync-detected' && _playerSlot === 0) {
-          console.log('[lockstep-v4] desync confirmed by', remoteSid, '-- restarting game');
-          setStatus('Desync detected -- restarting...');
-          // Tell server to end the game — play.js handles game-ended event
-          if (socket) socket.emit('end-game', {});
+        if (e.data === 'resync-request' && _playerSlot === 0) {
+          console.log('[lockstep-v4] resync requested by', remoteSid);
+          _resyncPaused = true;
+          setStatus('Resyncing...');
+          sendResyncState();
+        }
+        if (e.data === 'resync-ack' && _playerSlot === 0) {
+          _resyncPaused = false;
+          _localInputs = {};
+          _remoteInputs = {};
+          _lastRemoteFrame = _frameNum;
+          _lastRemoteFramePerSlot = {};
+          _resyncCount++;
+          console.log('[lockstep-v4] resync #' + _resyncCount + ' complete, resuming at frame', _frameNum);
+          setStatus('Connected -- game on!');
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -651,6 +662,40 @@
 
   function handleLateJoinState(msg) {
     if (_isSpectator) return;
+
+    // Mid-game resync: host sent state while paused, load it and ack
+    if (_running && msg.resync) {
+      console.log('[lockstep-v4] RESYNC: loading state from frame', msg.frame);
+      setStatus('Resyncing...');
+      var compressed = base64ToUint8(msg.data);
+      decompressState(compressed).then(function (bytes) {
+        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+        if (!gm) return;
+        gm.loadState(bytes);
+        _frameNum = msg.frame;
+        window._frameNum = _frameNum;
+        _localInputs = {};
+        _remoteInputs = {};
+        _lastRemoteFrame = _frameNum;
+        _lastRemoteFramePerSlot = {};
+        _resyncCount++;
+        console.log('[lockstep-v4] RESYNC #' + _resyncCount + ' loaded, acking at frame', _frameNum);
+        // Tell host we're ready — host will unpause
+        var hostPeer = null;
+        var peerKeys = Object.keys(_peers);
+        for (var h = 0; h < peerKeys.length; h++) {
+          if (_peers[peerKeys[h]].slot === 0) { hostPeer = _peers[peerKeys[h]]; break; }
+        }
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          hostPeer.dc.send('resync-ack');
+        }
+        setStatus('Connected -- game on!');
+      }).catch(function (err) {
+        console.log('[lockstep-v4] resync load failed:', err);
+      });
+      return;
+    }
+
     if (_running) return;  // already running, ignore duplicate late-join
 
     console.log('[lockstep-v4] received late-join state for frame', msg.frame);
@@ -917,6 +962,7 @@
 
   function tick() {
     if (!_running) return;
+    if (_resyncPaused) return;  // host pauses during resync
 
     var activePeers = getActivePeers();
 
@@ -1032,14 +1078,14 @@
         'local:', localHash, 'host:', _pendingSyncCheck.hash,
         inSync ? 'IN SYNC' : 'DESYNC');
       if (!inSync) {
-        // Notify host to restart the game — mid-game state loading breaks lockstep
+        setStatus('Desync detected -- resyncing...');
         var hostPeer = null;
         var peerKeys = Object.keys(_peers);
         for (var h = 0; h < peerKeys.length; h++) {
           if (_peers[peerKeys[h]].slot === 0) { hostPeer = _peers[peerKeys[h]]; break; }
         }
         if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
-          hostPeer.dc.send('desync-detected');
+          hostPeer.dc.send('resync-request');
         }
       }
       _pendingSyncCheck = null;
@@ -1318,6 +1364,29 @@
   }
 
 
+  async function sendResyncState() {
+    if (_playerSlot !== 0) return;
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep-v4] sending resync state at frame', _frameNum,
+        '(' + Math.round(compressed.length / 1024) + 'KB)');
+      socket.emit('data-message', {
+        type: 'late-join-state',
+        frame: _frameNum,
+        data: b64,
+        resync: true,
+      });
+    } catch (err) {
+      console.log('[lockstep-v4] resync send failed:', err);
+      _resyncPaused = false;  // unblock on failure
+    }
+  }
+
   // -- Init / Stop API -------------------------------------------------------
 
   var _config = null;
@@ -1374,6 +1443,7 @@
     _lastRemoteFramePerSlot = {};
     _pendingSyncCheck = null;
     _resyncCount = 0;
+    _resyncPaused = false;
     _syncProbed = false;
     _syncRegionStart = 0;
     _syncRegionSize = 0;
