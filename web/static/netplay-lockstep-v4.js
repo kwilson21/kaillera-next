@@ -32,8 +32,9 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Desync detection: check every N frames (~5 seconds at 60fps)
-  const SYNC_CHECK_INTERVAL = 300;
+  // Desync detection: check every N frames (~15 seconds at 60fps)
+  // Off by default — toggled via toolbar button
+  const SYNC_CHECK_INTERVAL = 900;
 
   // Standard online cheats (same as other prototypes)
   const SSB64_ONLINE_CHEATS = [
@@ -111,6 +112,7 @@
   let _tickInterval      = null;    // setInterval handle for tick loop
 
   // Desync detection state
+  let _syncEnabled       = false;   // off by default, toggled via play.js
   let _pendingSyncCheck  = null;    // {frame, hash} from host, waiting to verify
   let _resyncCount       = 0;      // number of resyncs performed
 
@@ -1024,35 +1026,34 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
-    // -- Desync detection --
-    if (_frameNum > 0 && _frameNum % SYNC_CHECK_INTERVAL === 0) {
-      if (_playerSlot === 0) {
-        // Host: broadcast state hash to all peers
-        var hostHash = quickStateHash();
-        var syncMsg = 'sync:' + _frameNum + ':' + hostHash;
-        for (var s = 0; s < activePeers.length; s++) {
-          try { activePeers[s].dc.send(syncMsg); } catch (_) {}
+    // -- Desync detection (only when enabled) --
+    if (_syncEnabled) {
+      if (_frameNum > 0 && _frameNum % SYNC_CHECK_INTERVAL === 0) {
+        if (_playerSlot === 0) {
+          var hostHash = quickStateHash();
+          var syncMsg = 'sync:' + _frameNum + ':' + hostHash;
+          for (var s = 0; s < activePeers.length; s++) {
+            try { activePeers[s].dc.send(syncMsg); } catch (_) {}
+          }
         }
       }
-    }
-    // Guest: check pending sync hash
-    if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
-      var localHash = quickStateHash();
-      if (localHash !== _pendingSyncCheck.hash) {
-        console.log('[lockstep-v4] DESYNC at frame', _pendingSyncCheck.frame,
-          'local:', localHash, 'host:', _pendingSyncCheck.hash);
-        setStatus('Desync detected -- requesting resync...');
-        // Request resync from host
-        var hostPeer = null;
-        var peerKeys = Object.keys(_peers);
-        for (var h = 0; h < peerKeys.length; h++) {
-          if (_peers[peerKeys[h]].slot === 0) { hostPeer = _peers[peerKeys[h]]; break; }
+      if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
+        var localHash = quickStateHash();
+        if (localHash !== _pendingSyncCheck.hash) {
+          console.log('[lockstep-v4] DESYNC at frame', _pendingSyncCheck.frame,
+            'local:', localHash, 'host:', _pendingSyncCheck.hash);
+          setStatus('Desync detected -- requesting resync...');
+          var hostPeer = null;
+          var peerKeys = Object.keys(_peers);
+          for (var h = 0; h < peerKeys.length; h++) {
+            if (_peers[peerKeys[h]].slot === 0) { hostPeer = _peers[peerKeys[h]]; break; }
+          }
+          if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+            hostPeer.dc.send('resync-request');
+          }
         }
-        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
-          hostPeer.dc.send('resync-request');
-        }
+        _pendingSyncCheck = null;
       }
-      _pendingSyncCheck = null;
     }
 
     // Debug overlay -- update every 15 frames (~4x per second)
@@ -1250,16 +1251,18 @@
   // -- Desync detection helpers -----------------------------------------------
 
   function quickStateHash() {
+    // Read directly from HEAPU8 — no serialization, no allocation.
+    // Sample 256 bytes from 4 spread-out regions of emulator memory.
     try {
-      var gm = window.EJS_emulator.gameManager;
-      var state = gm.getState();
-      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
-      // FNV-1a hash over first 2KB of save state (CPU + early RAM)
+      var buf = window.EJS_emulator.gameManager.Module.HEAPU8;
       var hash = 0x811c9dc5;
-      var len = Math.min(bytes.length, 2048);
-      for (var i = 0; i < len; i++) {
-        hash ^= bytes[i];
-        hash = Math.imul(hash, 0x01000193);
+      var offsets = [0x10000, 0x50000, 0xA0000, 0x100000];
+      for (var o = 0; o < offsets.length; o++) {
+        var start = offsets[o];
+        for (var i = start; i < start + 256 && i < buf.length; i++) {
+          hash ^= buf[i];
+          hash = Math.imul(hash, 0x01000193);
+        }
       }
       return hash | 0;
     } catch (e) {
@@ -1366,6 +1369,11 @@
     _config = null;
   }
 
-  window.NetplayLockstepV4 = { init: init, stop: stop };
+  window.NetplayLockstepV4 = {
+    init: init,
+    stop: stop,
+    setSyncEnabled: function (on) { _syncEnabled = !!on; },
+    isSyncEnabled: function () { return _syncEnabled; },
+  };
 
 })();

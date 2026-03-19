@@ -213,6 +213,8 @@ button:hover { background: #4a6fa5; }
   min-height: 36px;
 }
 
+#toolbar-sync { background: #444; }
+#toolbar-sync:hover { background: #555; }
 #toolbar-end { background: #8a3a3a; }
 #toolbar-end:hover { background: #a44a4a; }
 

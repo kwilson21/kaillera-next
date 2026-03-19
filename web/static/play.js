@@ -433,6 +433,16 @@
     var copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
+    var syncBtn = document.getElementById('toolbar-sync');
+    if (syncBtn) syncBtn.addEventListener('click', function () {
+      if (engine && engine.setSyncEnabled) {
+        var nowOn = !engine.isSyncEnabled();
+        engine.setSyncEnabled(nowOn);
+        syncBtn.textContent = 'Sync: ' + (nowOn ? 'On' : 'Off');
+        showToast('Desync detection ' + (nowOn ? 'enabled' : 'disabled'));
+      }
+    });
+
     connect();
     startGamepadPolling();
   });
