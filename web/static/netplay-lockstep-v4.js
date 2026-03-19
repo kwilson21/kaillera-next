@@ -588,6 +588,21 @@
     // Enter manual mode RIGHT BEFORE starting lockstep -- no async gap
     enterManualMode();
 
+    // Warmup: step 300 frames with zero input in a tight loop.
+    // This burns through the CP0 Count register difference caused by
+    // different boot frame counts. Both sides load the same state but
+    // may have slightly different internal counters. After 300 zero-input
+    // frames, the game state converges and both sides are truly identical.
+    var WARMUP_FRAMES = 300;
+    for (var w = 0; w < WARMUP_FRAMES; w++) {
+      writeInputToMemory(0, 0);
+      writeInputToMemory(1, 0);
+      writeInputToMemory(2, 0);
+      writeInputToMemory(3, 0);
+      stepOneFrame();
+    }
+    console.log('[lockstep-v4] warmup complete (' + WARMUP_FRAMES + ' frames)');
+
     // Both sides reset and start true lockstep sync
     _frameNum = 0;
     startLockstep();
@@ -705,6 +720,8 @@
       console.log('[lockstep-v4] failed to handle state:', err);
     });
   }
+
+  // -- Guest audio muting + host audio streaming ----------------------------
 
   // -- Spectator canvas streaming --------------------------------------------
 
