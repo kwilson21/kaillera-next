@@ -26,7 +26,11 @@ log = logging.getLogger(__name__)
 
 # ── Socket.IO server instance ─────────────────────────────────────────────────
 
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+sio = socketio.AsyncServer(
+    async_mode="asgi",
+    cors_allowed_origins="*",
+    max_http_buffer_size=16 * 1024 * 1024,  # 16MB — save states are ~3-5MB gzipped+b64
+)
 
 
 # ── Room state ────────────────────────────────────────────────────────────────
