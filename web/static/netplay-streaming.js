@@ -303,13 +303,64 @@
           _guestVideo.autoplay = true;
           _guestVideo.playsInline = true;
           _guestVideo.muted = false;
+
+          // Minimize video decode/display latency:
+          // - disableRemotePlayback: don't add cast overlay
+          // - no buffering: play ASAP
+          _guestVideo.disableRemotePlayback = true;
+          _guestVideo.setAttribute('playsinline', '');
+
           const gameDiv = document.getElementById('game');
-          // Hide EJS UI, show video
           gameDiv.innerHTML = '';
           gameDiv.appendChild(_guestVideo);
         }
         _guestVideo.srcObject = event.streams[0];
+
+        // Minimize jitter buffer: set minimum playout delay on the receiver.
+        // The default jitter buffer adds 50-150ms of latency for smooth
+        // playback on unreliable networks. For gaming we want minimum delay.
+        try {
+          const receivers = peer.pc.getReceivers();
+          for (const recv of receivers) {
+            if (recv.track && recv.track.kind === 'video') {
+              // playoutDelayHint: target playout delay in seconds
+              // 0 = minimum possible (decode and display ASAP)
+              if ('playoutDelayHint' in recv) {
+                recv.playoutDelayHint = 0;
+                console.log('[netplay] set playoutDelayHint = 0 (minimum jitter buffer)');
+              }
+              // jitterBufferTarget: alternative API (Chrome 114+)
+              if ('jitterBufferTarget' in recv) {
+                recv.jitterBufferTarget = 0;
+                console.log('[netplay] set jitterBufferTarget = 0');
+              }
+            }
+          }
+        } catch (e) {
+          console.log('[netplay] jitter buffer config failed:', e);
+        }
+
         setStatus('🟢 Connected — streaming!');
+
+        // Measure actual display latency via requestVideoFrameCallback
+        if (_guestVideo.requestVideoFrameCallback) {
+          function measureLatency(now, metadata) {
+            // metadata.receiveTime = when the frame was received from network
+            // metadata.expectedDisplayTime = when browser plans to show it
+            // The difference is the decode + display pipeline delay
+            if (metadata.receiveTime && metadata.expectedDisplayTime) {
+              const pipelineDelay = metadata.expectedDisplayTime - metadata.receiveTime;
+              window._videoPipelineDelay = pipelineDelay.toFixed(1);
+            }
+            // metadata.captureTime is when the frame was captured (host side)
+            if (metadata.captureTime) {
+              const e2eDelay = now - metadata.captureTime;
+              window._videoE2EDelay = e2eDelay.toFixed(1);
+            }
+            _guestVideo.requestVideoFrameCallback(measureLatency);
+          }
+          _guestVideo.requestVideoFrameCallback(measureLatency);
+        }
       };
     }
 
@@ -699,10 +750,12 @@
         line2 = 'rtt:' + rtt + ' encode:' + encodeTime + ' bw:' + bitrateSend
           + ' | players:' + playerCount;
       } else {
-        // Guest: show jitter, packet loss, frames dropped
+        // Guest: show jitter, packet loss, pipeline delay, e2e delay
         const lossRate = pktRecv > 0 ? (pktLost / pktRecv * 100).toFixed(1) + '%' : '0%';
-        line2 = 'rtt:' + rtt + ' jitter:' + jitter + ' loss:' + lossRate
-          + ' dropped:' + dropped + ' | players:' + playerCount;
+        const pipeline = window._videoPipelineDelay ? window._videoPipelineDelay + 'ms' : '?';
+        const e2e = window._videoE2EDelay ? window._videoE2EDelay + 'ms' : '?';
+        line2 = 'rtt:' + rtt + ' jitter:' + jitter + ' pipeline:' + pipeline
+          + ' e2e:' + e2e + ' loss:' + lossRate + ' dropped:' + dropped;
       }
       dbg.textContent = line1 + '\n' + line2;
       dbg.style.whiteSpace = 'pre';
