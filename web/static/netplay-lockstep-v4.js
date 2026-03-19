@@ -558,10 +558,21 @@
 
   // -- Helper: get active player peers ---------------------------------------
 
+  // All connected player peers (for sending input to)
   function getActivePeers() {
     return Object.values(_peers).filter(function (p) {
       return p.slot !== null && p.slot !== undefined
         && p.dc && p.dc.readyState === 'open';
+    });
+  }
+
+  // Peers we should wait for input from (have sent at least 1 input).
+  // Late joiners who haven't sent input yet won't stall existing players.
+  function getInputPeers() {
+    return Object.values(_peers).filter(function (p) {
+      return p.slot !== null && p.slot !== undefined
+        && p.dc && p.dc.readyState === 'open'
+        && _remoteInputs[p.slot];
     });
   }
 
@@ -779,11 +790,18 @@
         return;
       }
 
-      // Enter manual mode, load state, set frame, start tick loop
+      // Enter manual mode, load state
       enterManualMode();
       gm.loadState(bytes);
-      _frameNum = msg.frame;
-      console.log('[lockstep-v4] late-join state loaded at frame', _frameNum);
+
+      // Start at the HIGHEST remote frame we've seen (not the capture frame).
+      // Existing players have advanced beyond msg.frame during the async
+      // compress/send/decompress pipeline. Starting at their current frame
+      // avoids stalling on frames they've already passed.
+      var startFrame = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
+      _frameNum = startFrame;
+      console.log('[lockstep-v4] late-join state loaded, starting at frame',
+        _frameNum, '(state captured at', msg.frame, ')');
 
       startLockstep();
     }).catch(function (err) {
@@ -1046,12 +1064,15 @@
       try { activePeers[i].dc.send(buf); } catch (_) {}
     }
 
-    // Check if ALL active player peers have input for the apply frame
+    // Check if all INPUT peers (peers who have sent at least 1 input)
+    // have input for the apply frame. Late joiners who haven't started
+    // sending yet won't stall existing players.
+    var inputPeers = getInputPeers();
     var applyFrame = _frameNum - DELAY_FRAMES;
     if (applyFrame >= 0) {
       var allArrived = true;
-      for (var j = 0; j < activePeers.length; j++) {
-        var pSlot = activePeers[j].slot;
+      for (var j = 0; j < inputPeers.length; j++) {
+        var pSlot = inputPeers[j].slot;
         if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
           allArrived = false;
           break;
@@ -1067,8 +1088,8 @@
           // Timeout -- inject zero input for missing peers to unstick
           console.log('[lockstep-v4] stall timeout at frame', applyFrame,
             '(' + MAX_STALL_MS + 'ms)');
-          for (var k = 0; k < activePeers.length; k++) {
-            var s = activePeers[k].slot;
+          for (var k = 0; k < inputPeers.length; k++) {
+            var s = inputPeers[k].slot;
             if (!_remoteInputs[s]) _remoteInputs[s] = {};
             if (_remoteInputs[s][applyFrame] === undefined) {
               _remoteInputs[s][applyFrame] = 0;
@@ -1091,10 +1112,11 @@
         _stallStart = 0;
       }
 
-      // Write ALL inputs to Wasm memory
+      // Write ALL inputs to Wasm memory — use inputPeers for peers
+      // we're synced with, activePeers for all connected
       writeInputToMemory(_playerSlot, _localInputs[applyFrame] || 0);
-      for (var m = 0; m < activePeers.length; m++) {
-        var peerSlot = activePeers[m].slot;
+      for (var m = 0; m < inputPeers.length; m++) {
+        var peerSlot = inputPeers[m].slot;
         var remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
         writeInputToMemory(peerSlot, remoteMask);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
