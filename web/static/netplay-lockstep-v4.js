@@ -523,6 +523,9 @@
         _remoteInputs[peer.slot][arr[0]] = arr[1];
         _remoteReceived++;
         if (arr[0] > _lastRemoteFrame) _lastRemoteFrame = arr[0];
+        if (!_lastRemoteFramePerSlot[peer.slot] || arr[0] > _lastRemoteFramePerSlot[peer.slot]) {
+          _lastRemoteFramePerSlot[peer.slot] = arr[0];
+        }
       }
     };
   }
@@ -566,13 +569,20 @@
     });
   }
 
-  // Peers we should wait for input from (have sent at least 1 input).
-  // Late joiners who haven't sent input yet won't stall existing players.
+  // Peers we should wait for input from. A peer must:
+  //   1. Be a player (have a slot) with an open DC
+  //   2. Have sent at least 1 input (_remoteInputs[slot] exists)
+  //   3. Be "caught up" — their last sent frame is within DELAY_FRAMES+2
+  //      of our current frame. Late joiners who are still behind won't
+  //      stall existing players.
   function getInputPeers() {
     return Object.values(_peers).filter(function (p) {
-      return p.slot !== null && p.slot !== undefined
-        && p.dc && p.dc.readyState === 'open'
-        && _remoteInputs[p.slot];
+      if (p.slot === null || p.slot === undefined) return false;
+      if (!p.dc || p.dc.readyState !== 'open') return false;
+      if (!_remoteInputs[p.slot]) return false;
+      // Check if peer is caught up
+      var peerLastFrame = _lastRemoteFramePerSlot[p.slot] || -1;
+      return peerLastFrame >= _frameNum - DELAY_FRAMES - 10;
     });
   }
 
@@ -997,6 +1007,7 @@
   var _remoteMissed    = 0;
   var _remoteApplied   = 0;
   var _lastRemoteFrame = -1;
+  var _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
   var _stallRetryPending = false;
 
   function startLockstep() {
@@ -1014,6 +1025,7 @@
     _remoteMissed = 0;
     _remoteApplied = 0;
     _lastRemoteFrame = -1;
+    _lastRemoteFramePerSlot = {};
     _stallStart = 0;
     window._netplayFrameLog = [];
 
