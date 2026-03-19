@@ -21,18 +21,17 @@
     EJS_pathtodata   = 'https://cdn.emulatorjs.org/stable/data/';
   </script>
   <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
-  <!-- Netplay mode: ?mode=lockstep (default) or ?mode=streaming
-       Prototype A (dual-emulator): /static/netplay-dual.js — broken
-       Prototype B (streaming):     /static/netplay-streaming.js
-       Prototype C (lockstep):      /static/netplay-lockstep.js -->
+  <!-- Netplay mode: ?mode= selects the prototype
+       lockstep-v2: pause/resume approach (default)
+       lockstep:    rAF interception approach (v1)
+       streaming:   single-emulator video stream -->
   <script>
-    // document.write during parse — script loads synchronously so
-    // DOMContentLoaded in the netplay script fires correctly.
-    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep';
+    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep-v2';
     var _src = {
-      lockstep:  '/static/netplay-lockstep.js?v=2',
-      streaming: '/static/netplay-streaming.js?v=9',
-    }[_mode] || '/static/netplay-lockstep.js?v=2';
+      'lockstep-v2': '/static/netplay-lockstep-v2.js?v=1',
+      'lockstep':    '/static/netplay-lockstep.js?v=2',
+      'streaming':   '/static/netplay-streaming.js?v=9',
+    }[_mode] || '/static/netplay-lockstep-v2.js?v=1';
     document.write('<script src="' + _src + '"><\/script>');
   </script>
 </body>
