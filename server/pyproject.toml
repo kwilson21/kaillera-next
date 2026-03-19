@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
+    "python-socketio>=5.11.0",
+    "uvloop>=0.19.0",
 ]
 
 [project.scripts]

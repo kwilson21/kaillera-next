@@ -2,12 +2,12 @@
 
 ## What this project is
 
-A modern, cross-platform reimagining of Kaillera netplay. The goal is to let players
-play retro games (initially SSB64 via Mupen64Plus) online together, with a clean
-protocol that allows anyone to build their own frontend.
+A website where anyone can visit a URL, log in, and play retro games (initially SSB64)
+online with friends — no emulator installation required. The browser runs EmulatorJS;
+players connect via WebRTC. The server handles rooms and WebRTC signaling only.
 
-The original Kaillera is abandoned and Windows-only. This project modernizes it while
-staying compatible enough to matter.
+The long-term goal is a clean protocol that desktop clients (Mupen64Plus, future Kaillera
+compat) can also speak — but v1 ships the website first.
 
 ## Guiding principles
 
@@ -15,129 +15,94 @@ staying compatible enough to matter.
   completeness. Cut features, not corners on what ships.
 - **Python everywhere possible.** The developer's primary language is Python. Minimize
   the surface area of non-Python code.
-- **Protocol-first in v2.** For v1, build the whole stack and extract the spec from
-  what ships. The frontend↔server WebSocket protocol gets formally documented in v2.
-- **Don't split the community without a plan.** We target Mupen64Plus native netplay
-  for v1 (cross-platform, modern), then add Kaillera protocol compatibility in v2.
+- **Web-first in v1.** Browser + EmulatorJS + WebRTC. No installation for players.
+- **Desktop clients in v2.** Mupen64Plus native netplay, Kaillera compat — after the
+  website works.
 
 ## Architecture
 
 ```
-Layer 1 — Emulator ↔ Server
-  [Mupen64Plus]  ── Mupen64Plus native netplay (TCP+UDP) ──┐
-  [legacy clients]── Kaillera protocol (UDP) ─────────── (v2)─┤
-                                                              [Matchmaking Server]
+V1 — Browser-based
 
-Layer 2 — Server (Python / FastAPI + asyncio)
-  - Speaks Mupen64Plus netplay protocol (TCP port 45000, UDP port 45000)
-  - Manages rooms, relay, KREC recording
-  - Exposes the Frontend WebSocket protocol (HTTP/WS port 8000)
+  [Browser: EmulatorJS + ROM]        [Browser: EmulatorJS + ROM]
+          │   Socket.IO (signaling)          │
+          └──────────────┬───────────────────┘
+                         ▼
+              [kaillera-next server]
+              Python FastAPI + Socket.IO
+              - Room management (create/join/leave)
+              - WebRTC offer/answer/ICE relay
+              HTTP/WS :8000
 
-Layer 3 — Frontend ↔ Server  (the public protocol)
-  [Desktop Launcher]──┐
-  [Discord Bot]       ├── Frontend WebSocket protocol ── [Server]
-  [Any client]    ────┘
+  Once WebRTC is established → game data flows P2P, server is idle.
+
+V2 — Desktop clients (after v1 ships)
+
+  [Mupen64Plus] ── binary TCP+UDP :45000 ── [server]
+  [Kaillera clients] ── Kaillera UDP ────── [server]
 ```
 
 ## Monorepo structure
 
 ```
 kaillera-next/
-├── server/       # Python matchmaking + relay server
+├── server/          # Python signaling + matchmaking server
 │   ├── pyproject.toml
 │   └── src/
-│       ├── main.py          # entry point — starts TCP, UDP, and HTTP servers
-│       ├── session.py       # SessionManager — shared state across all servers
-│       ├── netplay/
-│       │   ├── protocol.py  # packet definitions (struct pack/unpack)
-│       │   ├── tcp.py       # TCP handler (registration, settings, saves)
-│       │   └── udp.py       # UDP handler (per-frame input relay)
+│       ├── main.py          # entry point (FastAPI + Socket.IO + uvloop)
+│       ├── session.py       # RoomManager — shared state
 │       └── api/
-│           └── app.py       # FastAPI app — frontend WebSocket + REST (later)
-├── launcher/     # Desktop launcher — Python + pywebview (later)
-└── protocol/     # Frontend WebSocket protocol spec (v2)
+│           ├── app.py       # FastAPI app (REST + static file serving)
+│           └── signaling.py # Socket.IO namespace — room + WebRTC relay
+├── web/             # Static frontend
+│   ├── index.html   # lobby: create/join rooms
+│   ├── play.html    # game page: EmulatorJS embed + signaling client
+│   └── static/      # EmulatorJS assets
+└── netplay/         # V2: Mupen64Plus binary protocol (existing protocol.py etc.)
 ```
 
 ## V1 scope
 
 | Feature | Status |
 |---|---|
-| Mupen64Plus native netplay relay server | in progress |
-| Matchmaking / lobby API (FastAPI) | pending |
-| KREC recording | pending |
-| Desktop launcher (Python + pywebview) | pending |
-| 4 players + spectators | pending |
+| Socket.IO signaling server (rooms + WebRTC relay) | next |
+| Web lobby (create/join room) | next |
+| EmulatorJS embed + in-browser play | next |
+| 2-player WebRTC netplay | next |
+| User auth / persistent rooms | later |
+| 4 players + spectators | v2 |
+| Mupen64Plus desktop client | v2 |
 | Kaillera protocol compat | v2 |
-| P2P / STUN | v2 |
-| KREC playback | v2 |
-| Protocol spec published | v2 |
+| KREC recording/playback | v2 |
 
-## Mupen64Plus netplay protocol — quick reference
+## Socket.IO signaling — event reference
 
-All multi-byte integers are **big-endian** (network byte order).
-TCP and UDP share the same port (45000).
+All events go through the `signaling` Socket.IO namespace (`/signaling`).
 
-### TCP packets (after the type byte is read)
-
-| Type | Direction | Remaining bytes | Description |
+| Event | Direction | Payload | Description |
 |---|---|---|---|
-| 0x01 | P1→server | variable | Send save file |
-| 0x02 | client→server | variable | Request save file |
-| 0x03 | P1→server | 24 | Send emulator settings |
-| 0x04 | client→server | 0 (server replies 24B) | Request settings |
-| 0x05 | client→server | 7 | Register player |
-| 0x06 | client→server | 0 (server replies 24B) | Get all registrations |
-| 0x07 | client→server | 4 | Disconnect notice |
-
-**Register (0x05) remaining 7 bytes:** `player:u8, plugin:u8, rawdata:u8, reg_id:u32be`
-**Response:** `assigned_slot:u8, buffer_target:u8`
-
-**Get registrations (0x06) response — 24 bytes (4 × 6):**
-Each player slot: `reg_id:u32be, plugin:u8, rawdata:u8`  (0 reg_id = empty slot)
-
-**Settings — 24 bytes (6 × u32/i32 big-endian):**
-`count_per_op, count_per_op_denom_pot, disable_extra_mem, si_dma_duration, emumode, no_compiled_jump`
-
-### UDP packets
-
-| Type | Direction | Size | Description |
-|---|---|---|---|
-| 0x00 | client→server | 11 | Send key input |
-| 0x01 | server→client | 5 + N×9 | Receive key input |
-| 0x02 | client→server | 12 | Request key input |
-| 0x03 | server→client | 5 + N×9 | Receive key input (gratuitous push) |
-| 0x04 | client→server | (CP0_REGS×4)+5 | Sync data (desync detection) |
-
-**Send key (0x00):** `type:u8, control_id:u8, netplay_count:u32be, keys:u32be, plugin:u8`
-
-**Request key (0x02):**
-`type:u8, control_id:u8, reg_id:u32be, netplay_count:u32be, spectator:u8, buffer_size:u8`
-
-**Receive key (0x01 / 0x03) header — 5 bytes:**
-`type:u8, player:u8, status:u8, player_lag:u8, event_count:u8`
-status bits: bit0=desync, bits1-4=player N disconnected
-Each event (9 bytes): `count:u32be, keys:u32be, plugin:u8`
-
-**Sync data (0x04):**
-`type:u8, vi_counter:u32be, cp0_registers[CP0_REGS_COUNT × u32be]`
-CP0_REGS_COUNT = 32. Sent every 600 VI interrupts for desync detection.
-
-### reg_id
-
-- Assigned by our matchmaking layer (not by the emulator)
-- Passed to Mupen64Plus by the launcher at startup
-- Used to attribute UDP traffic to the correct session/player
-- 0 is the null/sentinel value — server must assign non-zero IDs
+| `create_room` | client→server | `{username}` | Create room, server emits `room_created` |
+| `room_created` | server→client | `{room_id, username}` | Confirms creation |
+| `join_room` | client→server | `{room_id, username}` | Join existing room |
+| `room_joined` | server→client | `{room_id, username, peer_username}` | Confirms join, tells both peers |
+| `offer` | client→server | `{room_id, sdp}` | WebRTC offer (host→guest) |
+| `answer` | client→server | `{room_id, sdp}` | WebRTC answer (guest→host) |
+| `ice_candidate` | client→server | `{room_id, candidate}` | ICE candidate (either direction) |
+| `leave_room` | client→server | `{room_id}` | Leave/disconnect |
+| `peer_left` | server→client | `{username}` | Notifies remaining player |
+| `error` | server→client | `{message}` | Error feedback |
 
 ## Key decisions made
 
-- **Language split:** Python for server + launcher. Thin C bridge for the DLL (v2).
-- **Emulator:** Mupen64Plus for v1 — cross-platform, well-built, user-confirmed.
-- **Frontend:** Desktop app via Python + pywebview (HTML/CSS/JS UI in a native window).
-- **Relay-only for v1:** No P2P / STUN until v2. Server relays all UDP frames.
-- **KREC:** Record in v1, playback in v2. Reference implementation: n02 client (OSS).
-- **Buffer target default:** 2 frames.
-- **Ports:** TCP 45000 + UDP 45000 (matches Mupen64Plus default), HTTP/WS 8000.
+- **Stack:** Python FastAPI + python-socketio + uvloop. Server latency doesn't affect
+  game performance — WebRTC is P2P once the handshake completes.
+- **EmulatorJS netplay:** Browser-native WebRTC for game data. Server only relays
+  the ~10 signaling messages needed to establish the connection.
+- **ROM handling:** Served statically from the server for v1. Legal note: only serve
+  ROMs you own.
+- **Rooms are ephemeral:** No database for v1. Rooms exist in memory while players
+  are connected.
+- **2-player first:** EmulatorJS netplay is 1 host + 1 guest. 4-player is v2.
 
 ## Dev environment
 
@@ -147,9 +112,9 @@ CP0_REGS_COUNT = 32. Sent every 600 VI interrupts for desync detection.
 
 ## What to work on next
 
-1. Implement `server/src/netplay/protocol.py` — packet struct definitions
-2. Implement `server/src/session.py` — SessionManager
-3. Implement `server/src/netplay/tcp.py` — TCP handler
-4. Implement `server/src/netplay/udp.py` — UDP relay
-5. Implement `server/src/main.py` — entry point
-6. Smoke test: connect two Mupen64Plus instances and verify inputs relay
+1. Update `server/pyproject.toml` — add `python-socketio[asyncio_client]`, `uvloop`
+2. Implement `server/src/api/signaling.py` — Socket.IO room + WebRTC relay
+3. Update `server/src/main.py` — mount Socket.IO alongside FastAPI
+4. Build `web/play.html` — EmulatorJS embed + Socket.IO signaling client
+5. Build `web/index.html` — room lobby (create/join)
+6. Smoke test: two browser tabs, verify WebRTC handshake, load ROM, play

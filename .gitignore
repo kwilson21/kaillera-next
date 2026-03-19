@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# ROM files — copyrighted, not committed
+web/static/rom/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Playwright MCP logs
+.playwright-mcp/
+
+# MCP config (local)
+.mcp.json
+
+# Screenshots (dev artifacts)
+*.png
