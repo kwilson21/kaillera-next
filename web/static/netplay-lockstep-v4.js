@@ -1031,6 +1031,7 @@
       if (_frameNum > 0 && _frameNum % SYNC_CHECK_INTERVAL === 0) {
         if (_playerSlot === 0) {
           var hostHash = quickStateHash();
+          console.log('[lockstep-v4] sync check frame', _frameNum, 'hash:', hostHash);
           var syncMsg = 'sync:' + _frameNum + ':' + hostHash;
           for (var s = 0; s < activePeers.length; s++) {
             try { activePeers[s].dc.send(syncMsg); } catch (_) {}
@@ -1039,9 +1040,10 @@
       }
       if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
         var localHash = quickStateHash();
+        console.log('[lockstep-v4] sync verify frame', _pendingSyncCheck.frame,
+          'local:', localHash, 'host:', _pendingSyncCheck.hash,
+          localHash === _pendingSyncCheck.hash ? 'IN SYNC' : 'DESYNC');
         if (localHash !== _pendingSyncCheck.hash) {
-          console.log('[lockstep-v4] DESYNC at frame', _pendingSyncCheck.frame,
-            'local:', localHash, 'host:', _pendingSyncCheck.hash);
           setStatus('Desync detected -- requesting resync...');
           var hostPeer = null;
           var peerKeys = Object.keys(_peers);
@@ -1251,18 +1253,17 @@
   // -- Desync detection helpers -----------------------------------------------
 
   function quickStateHash() {
-    // Read directly from HEAPU8 — no serialization, no allocation.
-    // Sample 256 bytes from 4 spread-out regions of emulator memory.
+    // Use getState() to get actual game state, hash first 2KB.
+    // Called every ~15s so the serialization cost is acceptable.
     try {
-      var buf = window.EJS_emulator.gameManager.Module.HEAPU8;
+      var gm = window.EJS_emulator.gameManager;
+      var state = gm.getState();
+      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
       var hash = 0x811c9dc5;
-      var offsets = [0x10000, 0x50000, 0xA0000, 0x100000];
-      for (var o = 0; o < offsets.length; o++) {
-        var start = offsets[o];
-        for (var i = start; i < start + 256 && i < buf.length; i++) {
-          hash ^= buf[i];
-          hash = Math.imul(hash, 0x01000193);
-        }
+      var len = Math.min(bytes.length, 2048);
+      for (var i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 0x01000193);
       }
       return hash | 0;
     } catch (e) {
