@@ -113,7 +113,7 @@
   let _tickInterval      = null;    // setInterval handle for tick loop
 
   // State sync — host checks game state hash and pushes only when desynced
-  let _syncEnabled       = true;    // on by default (experimental), toggled via play.js
+  let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   let _syncWorker        = null;    // Web Worker for compress/decompress
   let _syncCheckInterval = 300;    // check hash every N frames (~5s at 60fps)
   let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
