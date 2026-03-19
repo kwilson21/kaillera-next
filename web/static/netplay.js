@@ -65,7 +65,8 @@
   let _lastHash          = 0;      // last computed state hash
   let _lastHashFrame     = -1;     // frame at which _lastHash was computed
   let _desynced          = false;  // true if desync detected
-  let _pendingResync     = null;   // {frame, data} if resync state received
+  let _lastResyncFrame   = -1;     // frame at which last resync was applied
+  const RESYNC_COOLDOWN  = 300;    // min frames between resyncs (~5s at 60fps)
 
   // Expose for Playwright verification
   window._playerSlot  = _playerSlot;
@@ -689,7 +690,7 @@
     if (localFrame < 0 || Math.abs(msg.frame - localFrame) > 5) return;
 
     if (msg.hash === localHash) {
-      // Hashes match — if we were resyncing, confirm resync succeeded
+      // Hashes match — we're in sync
       if (_desynced) {
         console.log('[netplay] hashes match post-resync at frame', msg.frame);
         _desynced = false;
@@ -699,21 +700,21 @@
       return;
     }
 
-    // Mismatch — only trigger resync if not already handling one
-    if (_desynced) return;
+    // Mismatch — trigger resync if cooldown has elapsed
+    const framesSinceResync = _frameNum - _lastResyncFrame;
+    if (_lastResyncFrame >= 0 && framesSinceResync < RESYNC_COOLDOWN) return;
+
     console.log('[netplay] DESYNC detected at frame', msg.frame,
       'local:', localHash, 'remote:', msg.hash, 'from:', senderSid);
     _desynced = true;
     window._desynced = true;
     setStatus('Desync detected — resyncing…');
-    // Non-host sends resync request to host
     if (_playerSlot !== 0) {
       const hostPeer = Object.values(_peers).find(p => p.slot === 0);
       if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
         hostPeer.dc.send(JSON.stringify({ type: 'resync-request' }));
       }
     } else {
-      // Host detected desync — send resync state to all
       sendResyncState();
     }
   }
@@ -781,10 +782,11 @@
     _prevSlotMasks   = {};
     _lastHash        = 0;
     _lastHashFrame   = -1;
+    _lastResyncFrame = frame;
     console.log('[netplay] resync applied at frame', frame);
-    setStatus('Resynced — waiting for hash confirmation…');
-    // _desynced stays true until the next hash exchange confirms hashes match
-    // (see handleStateHash). This prevents a detect→resync→detect loop.
+    setStatus('Resynced');
+    // _desynced stays true until the next hash exchange confirms hashes match.
+    // If hashes still mismatch after RESYNC_COOLDOWN frames, another resync fires.
   }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
