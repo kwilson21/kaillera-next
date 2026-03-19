@@ -31,7 +31,7 @@
     var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep';
     var _src = {
       lockstep:  '/static/netplay-lockstep.js?v=2',
-      streaming: '/static/netplay-streaming.js?v=7',
+      streaming: '/static/netplay-streaming.js?v=8',
     }[_mode] || '/static/netplay-lockstep.js?v=2';
     document.write('<script src="' + _src + '"><\/script>');
   </script>
