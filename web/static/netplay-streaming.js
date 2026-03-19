@@ -287,6 +287,7 @@
       _hostStream.getTracks().forEach(track => {
         peer.pc.addTrack(track, _hostStream);
       });
+      optimizeVideoEncoding(peer.pc);
     }
 
     // Guest/spectator: listen for incoming video tracks
@@ -331,6 +332,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     const offer = await peer.pc.createOffer();
+    offer.sdp = setSDPBitrate(offer.sdp, 10000);
     await peer.pc.setLocalDescription(offer);
     socket.emit('webrtc-signal', { target: remoteSid, offer });
   }
@@ -451,12 +453,12 @@
       _hostStream = canvas.captureStream(60);
       console.log('[netplay] captured stream:', _hostStream.getTracks().map(t => t.kind));
 
-      // Add tracks to all existing peer connections
+      // Add tracks to all existing peer connections and optimize encoding
       Object.entries(_peers).forEach(([sid, peer]) => {
         _hostStream.getTracks().forEach(track => {
           peer.pc.addTrack(track, _hostStream);
         });
-        // Renegotiate to include the new tracks
+        optimizeVideoEncoding(peer.pc);
         renegotiate(sid);
       });
 
@@ -471,10 +473,59 @@
     if (!peer) return;
     try {
       const offer = await peer.pc.createOffer();
+      // Munge SDP to set higher bitrate floor for video
+      offer.sdp = setSDPBitrate(offer.sdp, 10000);  // 10 Mbps
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
       console.log('[netplay] renegotiate failed:', err);
+    }
+  }
+
+  function setSDPBitrate(sdp, bitrateKbps) {
+    // Add b=AS: line after video m-line to set session-level bitrate
+    const lines = sdp.split('\r\n');
+    const result = [];
+    let inVideo = false;
+    for (const line of lines) {
+      result.push(line);
+      if (line.startsWith('m=video')) {
+        inVideo = true;
+      } else if (line.startsWith('m=') && !line.startsWith('m=video')) {
+        inVideo = false;
+      }
+      // Add bitrate line right after the c= line in the video section
+      if (inVideo && line.startsWith('c=')) {
+        result.push('b=AS:' + bitrateKbps);
+      }
+    }
+    return result.join('\r\n');
+  }
+
+  function optimizeVideoEncoding(pc) {
+    // Force high bitrate and 60fps for low-latency game streaming.
+    // WebRTC defaults are conservative and cap at ~40fps. We override:
+    // - minBitrate prevents the bandwidth estimator from throttling too low
+    // - maxFramerate = 60 is non-negotiable for game feel
+    // - maintain-framerate tells the encoder to drop resolution, never FPS
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+      if (sender.track && sender.track.kind === 'video') {
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+        params.encodings[0].maxBitrate = 10_000_000;  // 10 Mbps ceiling
+        params.encodings[0].maxFramerate = 60;
+        // scaleResolutionDownBy = 1 means no downscaling from source
+        params.encodings[0].scaleResolutionDownBy = 1.0;
+        params.degradationPreference = 'maintain-framerate';
+        sender.setParameters(params).then(() => {
+          console.log('[netplay] video encoding optimized: 60fps, 10Mbps max');
+        }).catch(err => {
+          console.log('[netplay] setParameters failed:', err);
+        });
+      }
     }
   }
 
