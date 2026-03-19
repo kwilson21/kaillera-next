@@ -1,0 +1,269 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #111;
+  color: #eee;
+  font-family: sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Game canvas */
+#game {
+  max-width: 100%;
+  width: 640px;
+  margin: 0 auto;
+}
+
+#game canvas, #game video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Pre-game overlay */
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+#overlay.hidden { display: none; }
+
+.overlay-card {
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 500px;
+  width: 90vw;
+}
+
+.overlay-card h2 {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+#room-display {
+  font-size: 2rem;
+  letter-spacing: 0.2em;
+  color: #6af;
+}
+
+#copy-link {
+  display: block;
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+/* Player list */
+.player-slot {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: #0d0d1a;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.player-slot .slot-num {
+  color: #555;
+  margin-right: 8px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.player-slot .name {
+  flex: 1;
+}
+
+.player-slot .name.empty {
+  color: #444;
+  font-style: italic;
+}
+
+.player-slot .gamepad {
+  font-size: 11px;
+  color: #555;
+}
+
+.gamepad-detected { color: #6f6 !important; }
+
+#spectator-list {
+  font-size: 12px;
+  color: #777;
+  margin-top: 8px;
+}
+
+/* Host controls */
+#host-controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 1rem;
+}
+
+#mode-select {
+  background: #0d0d1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #eee;
+  padding: 8px;
+  font-size: 14px;
+}
+
+#start-btn {
+  flex: 1;
+  font-size: 16px;
+  background: #2a7a2a;
+}
+
+#start-btn:hover:not(:disabled) { background: #3a9a3a; }
+#start-btn:disabled { background: #2a2a40; color: #555; cursor: default; }
+
+#guest-status {
+  text-align: center;
+  color: #777;
+  margin-top: 1rem;
+  font-size: 14px;
+}
+
+#gamepad-status {
+  text-align: center;
+  font-size: 12px;
+  color: #555;
+  margin-top: 12px;
+}
+
+#engine-status {
+  text-align: center;
+  font-size: 11px;
+  color: #666;
+  margin-top: 4px;
+  min-height: 14px;
+}
+
+/* Buttons */
+button {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 6px;
+  background: #3a5a8a;
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+button:hover { background: #4a6fa5; }
+
+#leave-btn {
+  display: block;
+  width: 100%;
+  margin-top: 1rem;
+  background: #5a3a3a;
+}
+
+#leave-btn:hover { background: #7a4a4a; }
+
+/* In-game toolbar */
+#toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 50;
+  align-items: center;
+}
+
+#toolbar.hidden { display: none; }
+
+#toolbar-room {
+  font-size: 12px;
+  color: #888;
+  letter-spacing: 0.1em;
+}
+
+.toolbar-spacer { flex: 1; }
+
+#toolbar button {
+  padding: 6px 12px;
+  font-size: 12px;
+  min-height: 36px;
+}
+
+#toolbar-end { background: #8a3a3a; }
+#toolbar-end:hover { background: #a44a4a; }
+
+/* Toast notifications */
+#toast-container {
+  position: fixed;
+  top: 50px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  background: rgba(0, 0, 0, 0.8);
+  color: #eee;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  animation: toastIn 0.3s ease;
+}
+
+.toast.fade-out {
+  animation: toastOut 0.3s ease forwards;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toastOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* Error overlay */
+#error-msg {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 300;
+}
+
+#error-msg.hidden { display: none; }
+
+.error-card {
+  background: #2a1a1a;
+  border: 1px solid #5a3a3a;
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  max-width: 400px;
+  width: 90vw;
+}
+
+.error-card h3 { margin-bottom: 1rem; color: #f88; }
+.error-card a { color: #6af; }

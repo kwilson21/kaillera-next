@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>kaillera-next</title>
+  <link rel="stylesheet" href="/static/play.css">
+</head>
+<body>
+  <!-- Pre-game overlay -->
+  <div id="overlay" class="hidden">
+    <div class="overlay-card">
+      <h2>Room: <span id="room-display"></span></h2>
+      <button id="copy-link">Copy Invite Link</button>
+
+      <div id="player-list">
+        <div class="player-slot" data-slot="0">
+          <span class="slot-num">P1</span>
+          <span class="name empty">Open</span>
+          <span class="gamepad"></span>
+        </div>
+        <div class="player-slot" data-slot="1">
+          <span class="slot-num">P2</span>
+          <span class="name empty">Open</span>
+          <span class="gamepad"></span>
+        </div>
+        <div class="player-slot" data-slot="2">
+          <span class="slot-num">P3</span>
+          <span class="name empty">Open</span>
+          <span class="gamepad"></span>
+        </div>
+        <div class="player-slot" data-slot="3">
+          <span class="slot-num">P4</span>
+          <span class="name empty">Open</span>
+          <span class="gamepad"></span>
+        </div>
+      </div>
+
+      <div id="spectator-list"></div>
+
+      <div id="host-controls" style="display:none">
+        <select id="mode-select">
+          <option value="lockstep-v4">Lockstep</option>
+          <option value="streaming">Streaming</option>
+        </select>
+        <button id="start-btn" disabled>Start Game (need 2+)</button>
+      </div>
+
+      <p id="guest-status" style="display:none">Waiting for host to start...</p>
+
+      <div id="gamepad-status">No controller detected</div>
+      <div id="engine-status"></div>
+
+      <button id="leave-btn">Leave</button>
+    </div>
+  </div>
+
+  <!-- In-game toolbar -->
+  <div id="toolbar" class="hidden">
+    <span id="toolbar-room"></span>
+    <div class="toolbar-spacer"></div>
+    <button id="toolbar-leave">Leave Game</button>
+    <button id="toolbar-end" style="display:none">End Game</button>
+  </div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container"></div>
+
+  <!-- Error overlay -->
+  <div id="error-msg" class="hidden">
+    <div class="error-card"></div>
+  </div>
+
+  <!-- EmulatorJS -->
+  <div id="game"></div>
+  <script>
+    var EJS_player     = '#game';
+    var EJS_core       = 'n64';
+    var EJS_gameUrl    = '/static/rom/Super Smash Bros. (USA).z64';
+    var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+  </script>
+  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
+
+  <!-- Socket.IO -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <!-- Netplay engine (selected by mode URL param) -->
+  <script>
+    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep-v4';
+    var _src = _mode === 'streaming'
+      ? '/static/netplay-streaming.js'
+      : '/static/netplay-lockstep-v4.js';
+    document.write('<script src="' + _src + '"><\/script>');
+  </script>
+
+  <!-- Play page controller -->
+  <script src="/static/play.js"></script>
+</body>
+</html>
