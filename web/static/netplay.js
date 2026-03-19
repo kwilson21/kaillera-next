@@ -66,6 +66,9 @@
   let _stallCount        = 0;      // consecutive stalled ticks (waiting for remote input)
   const MAX_STALL        = 10;     // max ticks to stall before applying zero input
 
+  // Phase 4/5: resync state
+  let _pendingResync     = null;   // {frame, bytes} queued for safe load in next tick
+
   // Phase 5: desync detection
   let _lastHash          = 0;      // last computed state hash
   let _lastHashFrame     = -1;     // frame at which _lastHash was computed
