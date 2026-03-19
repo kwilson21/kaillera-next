@@ -375,8 +375,7 @@
           _remoteInputs = {};
           _lastRemoteFrame = _frameNum;
           _lastRemoteFramePerSlot = {};
-          _resyncCount++;
-          console.log('[lockstep-v4] resync #' + _resyncCount + ' complete, resuming at frame', _frameNum);
+          console.log('[lockstep-v4] resync complete, resuming at frame', _frameNum);
           setStatus('Connected -- game on!');
         }
         // JSON messages
@@ -662,25 +661,38 @@
 
   function handleLateJoinState(msg) {
     if (_isSpectator) return;
+    if (_running) return;  // already running, ignore duplicate
 
-    // Mid-game resync: host sent state while paused, load it and ack
-    if (_running && msg.resync) {
-      console.log('[lockstep-v4] RESYNC: loading state from frame', msg.frame);
-      setStatus('Resyncing...');
-      var compressed = base64ToUint8(msg.data);
-      decompressState(compressed).then(function (bytes) {
-        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-        if (!gm) return;
-        gm.loadState(bytes);
+    var isResync = !!msg.resync;
+    console.log('[lockstep-v4] received', isResync ? 'resync' : 'late-join',
+      'state for frame', msg.frame);
+    setStatus(isResync ? 'Resyncing...' : 'Loading late-join state...');
+
+    var compressed = base64ToUint8(msg.data);
+    decompressState(compressed).then(function (bytes) {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      if (!gm) {
+        console.log('[lockstep-v4] gameManager not ready');
+        return;
+      }
+
+      // Re-enter manual mode (re-captures rAF runner after stopSync cleared it)
+      enterManualMode();
+      gm.loadState(bytes);
+
+      // For resync: use host's exact frame. For late join: use highest seen frame.
+      if (isResync) {
         _frameNum = msg.frame;
-        window._frameNum = _frameNum;
-        _localInputs = {};
-        _remoteInputs = {};
-        _lastRemoteFrame = _frameNum;
-        _lastRemoteFramePerSlot = {};
-        _resyncCount++;
-        console.log('[lockstep-v4] RESYNC #' + _resyncCount + ' loaded, acking at frame', _frameNum);
-        // Tell host we're ready — host will unpause
+      } else {
+        _frameNum = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
+      }
+      console.log('[lockstep-v4]', isResync ? 'resync' : 'late-join',
+        'state loaded, starting at frame', _frameNum);
+
+      startLockstep();
+
+      // Tell host we're back in sync
+      if (isResync) {
         var hostPeer = null;
         var peerKeys = Object.keys(_peers);
         for (var h = 0; h < peerKeys.length; h++) {
@@ -689,39 +701,9 @@
         if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
           hostPeer.dc.send('resync-ack');
         }
-        setStatus('Connected -- game on!');
-      }).catch(function (err) {
-        console.log('[lockstep-v4] resync load failed:', err);
-      });
-      return;
-    }
-
-    if (_running) return;  // already running, ignore duplicate late-join
-
-    console.log('[lockstep-v4] received late-join state for frame', msg.frame);
-    setStatus('Loading late-join state...');
-
-    var compressed = base64ToUint8(msg.data);
-    decompressState(compressed).then(function (bytes) {
-      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) {
-        console.log('[lockstep-v4] gameManager not ready for late join');
-        return;
       }
-
-      // Enter manual mode, load state
-      enterManualMode();
-      gm.loadState(bytes);
-
-      // Start at the HIGHEST remote frame we've seen (not the capture frame).
-      var startFrame = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
-      _frameNum = startFrame;
-      console.log('[lockstep-v4] late-join state loaded, starting at frame',
-        _frameNum, '(state captured at', msg.frame, ')');
-
-      startLockstep();
     }).catch(function (err) {
-      console.log('[lockstep-v4] failed to handle late-join state:', err);
+      console.log('[lockstep-v4] failed to handle state:', err);
     });
   }
 
@@ -1078,7 +1060,20 @@
         'local:', localHash, 'host:', _pendingSyncCheck.hash,
         inSync ? 'IN SYNC' : 'DESYNC');
       if (!inSync) {
+        _resyncCount++;
+        console.log('[lockstep-v4] DESYNC #' + _resyncCount + ' at frame', _pendingSyncCheck.frame);
         setStatus('Desync detected -- resyncing...');
+        // Stop tick loop but keep manual mode (emulator stays captured)
+        _running = false;
+        if (_tickInterval !== null) {
+          clearInterval(_tickInterval);
+          _tickInterval = null;
+        }
+        _localInputs = {};
+        _remoteInputs = {};
+        _lastRemoteFrame = -1;
+        _lastRemoteFramePerSlot = {};
+        // Request state from host — will arrive via handleLateJoinState
         var hostPeer = null;
         var peerKeys = Object.keys(_peers);
         for (var h = 0; h < peerKeys.length; h++) {
@@ -1281,6 +1276,29 @@
       setTimeout(attempt, 200);
     };
     attempt();
+  }
+
+  async function sendResyncState() {
+    if (_playerSlot !== 0) return;
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep-v4] sending resync state at frame', _frameNum,
+        '(' + Math.round(compressed.length / 1024) + 'KB)');
+      socket.emit('data-message', {
+        type: 'late-join-state',
+        frame: _frameNum,
+        data: b64,
+        resync: true,
+      });
+    } catch (err) {
+      console.log('[lockstep-v4] resync send failed:', err);
+      _resyncPaused = false;
+    }
   }
 
   // -- Desync detection helpers -----------------------------------------------
