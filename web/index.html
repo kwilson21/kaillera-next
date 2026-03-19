@@ -22,18 +22,18 @@
   </script>
   <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
   <!-- Netplay mode: ?mode= selects the prototype
-       lockstep-v3: free-running input sync (default)
-       lockstep-v2: pause/resume approach
-       lockstep:    rAF interception approach (v1)
+       lockstep-v4: true lockstep + direct memory input (default)
+       lockstep-v3: free-running input sync
        streaming:   single-emulator video stream -->
   <script>
-    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep-v3';
+    var _mode = new URLSearchParams(window.location.search).get('mode') || 'lockstep-v4';
     var _src = {
+      'lockstep-v4': '/static/netplay-lockstep-v4.js?v=1',
       'lockstep-v3': '/static/netplay-lockstep-v3.js?v=1',
       'lockstep-v2': '/static/netplay-lockstep-v2.js?v=1',
       'lockstep':    '/static/netplay-lockstep.js?v=2',
       'streaming':   '/static/netplay-streaming.js?v=9',
-    }[_mode] || '/static/netplay-lockstep-v3.js?v=1';
+    }[_mode] || '/static/netplay-lockstep-v4.js?v=1';
     document.write('<script src="' + _src + '"><\/script>');
   </script>
 </body>
