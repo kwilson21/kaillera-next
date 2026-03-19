@@ -102,6 +102,8 @@
           if (roomData.status === 'playing') {
             if (isSpectator) {
               // Spectator joining mid-game: skip overlay, init engine immediately
+              gameRunning = true;
+              showToolbar();
               initEngine();
               return;
             } else {
