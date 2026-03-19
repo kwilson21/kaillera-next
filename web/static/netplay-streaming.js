@@ -335,7 +335,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     const offer = await peer.pc.createOffer();
-    offer.sdp = preferH264(setSDPBitrate(offer.sdp, 10000));
+    offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
     await peer.pc.setLocalDescription(offer);
     socket.emit('webrtc-signal', { target: remoteSid, offer });
   }
@@ -480,7 +480,7 @@
     try {
       const offer = await peer.pc.createOffer();
       // Munge SDP to set higher bitrate floor for video
-      offer.sdp = preferH264(setSDPBitrate(offer.sdp, 10000));
+      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
@@ -507,28 +507,39 @@
     return result.join('\r\n');
   }
 
-  function preferH264(sdp) {
-    // Move H264 codec to top of video m-line payload types.
-    // H264 has hardware encoder support (VideoToolbox/NVENC) which is
-    // dramatically faster than software VP8, freeing CPU for emulation.
+  function preferCodecs(sdp) {
+    // Reorder video codecs in the SDP m-line for optimal encoding.
+    // Preference: VP9 (best compression, some HW support) → H264 (good HW
+    // support via VideoToolbox/NVENC) → VP8 (software fallback).
+    // The browser picks the first mutually supported codec.
     const lines = sdp.split('\r\n');
-    // Find H264 payload type from a=rtpmap lines
-    let h264pt = null;
-    for (const line of lines) {
-      const m = line.match(/^a=rtpmap:(\d+) H264\//i);
-      if (m) { h264pt = m[1]; break; }
-    }
-    if (!h264pt) return sdp;  // no H264 available
 
-    // Reorder the m=video line to put H264 first
+    // Collect all video codec payload types from a=rtpmap lines
+    const codecPts = {};  // codec name → payload type
+    for (const line of lines) {
+      const m = line.match(/^a=rtpmap:(\d+) (VP9|H264|VP8)\//i);
+      if (m) {
+        const name = m[2].toUpperCase();
+        if (!codecPts[name]) codecPts[name] = m[1];  // keep first match
+      }
+    }
+
+    // Build preferred order: VP9 first, then H264, then everything else
+    const preferred = [];
+    if (codecPts['VP9'])  preferred.push(codecPts['VP9']);
+    if (codecPts['H264']) preferred.push(codecPts['H264']);
+
+    if (preferred.length === 0) return sdp;  // no preferred codecs found
+
     return lines.map(line => {
       if (line.startsWith('m=video')) {
         const parts = line.split(' ');
-        // parts: ['m=video', port, proto, pt1, pt2, ...]
         const header = parts.slice(0, 3);
         const pts = parts.slice(3);
-        const reordered = [h264pt, ...pts.filter(p => p !== h264pt)];
-        return [...header, ...reordered].join(' ');
+        // Put preferred codecs first, then the rest in original order
+        const prefSet = new Set(preferred);
+        const rest = pts.filter(p => !prefSet.has(p));
+        return [...header, ...preferred, ...rest].join(' ');
       }
       return line;
     }).join('\r\n');
