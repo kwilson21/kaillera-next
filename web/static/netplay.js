@@ -21,7 +21,7 @@
 
   const GAME_ID     = 'ssb64';
   const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-  const INPUT_HZ    = 60;
+  // INPUT_HZ removed — now using requestAnimationFrame (synced to display refresh)
 
   // Standard online config applied automatically on all clients at game start.
   // Codes are N64 GameShark format ("XXXXXXXX YYYY") — sourced from the
@@ -648,11 +648,21 @@
   // ── Phase 5: Desync detection + auto-resync ────────────────────────────
 
   function stateHash() {
+    // Hash the RDRAM region of the emulator save state (not HEAPU8 offset 0,
+    // which is Wasm boilerplate that never changes between game states).
+    // N64 RDRAM lives at ~384KB-704KB in the mupen64plus-next save state blob.
+    // We sample 8KB from the hottest region (512KB offset) for a fast fingerprint.
     try {
-      const mem = window.EJS_emulator.gameManager.Module.HEAPU8;
-      if (!mem || mem.length === 0) return 0;
+      const gm = window.EJS_emulator.gameManager;
+      if (!gm) return 0;
+      const state = gm.getState();
+      if (!state || state.length < 530000) return 0;
       let h = 0;
-      for (let i = 0; i < 4096; i++) h = (h * 31 + mem[i]) >>> 0;
+      const off = 512 * 1024;  // RDRAM hotspot in save state
+      const len = 8192;
+      for (let i = off; i < off + len && i < state.length; i++) {
+        h = (h * 31 + state[i]) >>> 0;
+      }
       return h;
     } catch (_) {
       return 0;
@@ -871,9 +881,17 @@
     _remoteQueues    = {};
     _lastRemoteMasks = {};
     _prevSlotMasks   = {};
+    _stallCount      = 0;
     window._netplayFrameLog = [];
 
-    inputTimer = setInterval(() => {
+    // Use requestAnimationFrame instead of setInterval — rAF is synchronized
+    // with the browser's render cycle (same clock the emulator uses), which
+    // eliminates the timing jitter that caused both emulators to drift apart.
+    let _inputSent = false;  // track whether we've sent input for current _frameNum
+
+    function inputTick() {
+      inputTimer = requestAnimationFrame(inputTick);
+
       const openPeers = Object.values(_peers).filter(
         p => p.dc && p.dc.readyState === 'open'
       );
@@ -882,18 +900,18 @@
       // Retry key tracking setup if EJS wasn't ready at connect time
       if (!_p1KeyMap && !_isSpectator) setupP1KeyTracking();
 
-      // Record and broadcast local input (players only)
-      if (!_isSpectator) {
+      // Record and broadcast local input ONCE per frame
+      if (!_inputSent && !_isSpectator) {
         const localMask = readLocalInput();
         _localQueue[_frameNum] = localMask;
         const buf = new Int32Array([_frameNum, localMask]).buffer;
         openPeers.forEach(p => {
           try { p.dc.send(buf); } catch (_) {}
         });
+        _inputSent = true;
       }
 
       // Apply inputs from N frames ago — TRUE LOCKSTEP
-      // Both sides must have the same inputs for the same frame or we stall.
       const applyFrame = _frameNum - _delayN;
       if (applyFrame >= 0) {
         // Check if all remote peers' inputs have arrived for applyFrame
@@ -907,13 +925,10 @@
         });
 
         if (!allArrived && _stallCount < MAX_STALL) {
-          // STALL: don't advance frame, wait for remote input to arrive
           _stallCount++;
-          // Still record & send local input (peer needs it), but don't apply or advance
-          return;
+          return;  // STALL — don't advance, wait for remote input
         }
 
-        // Either all inputs arrived or we hit the stall limit — apply
         _stallCount = 0;
 
         // Apply own local input (players only)
@@ -927,10 +942,9 @@
         for (const peer of activePeers) {
           const slot = peer.slot;
           if (!_remoteQueues[slot]) _remoteQueues[slot] = {};
-
           const rm = (applyFrame in _remoteQueues[slot])
             ? _remoteQueues[slot][applyFrame]
-            : 0;  // only reached after MAX_STALL — apply zero (no buttons)
+            : 0;  // only reached after MAX_STALL — apply zero
           if (applyFrame in _remoteQueues[slot]) {
             _lastRemoteMasks[slot] = _remoteQueues[slot][applyFrame];
           }
@@ -938,7 +952,6 @@
           delete _remoteQueues[slot][applyFrame];
         }
 
-        // Debug log for Playwright verification (cap at 600 entries)
         if (window._netplayFrameLog && window._netplayFrameLog.length < 600) {
           window._netplayFrameLog.push({ frame: applyFrame });
         }
@@ -946,7 +959,7 @@
 
       window._frameNum = _frameNum;
 
-      // Phase 5: broadcast state hash every 60 frames for desync detection
+      // Phase 5: broadcast state hash every 60 frames
       if (!_isSpectator && _frameNum > 0 && _frameNum % 60 === 0) {
         broadcastHash(_frameNum);
       }
@@ -963,7 +976,10 @@
       }
 
       _frameNum++;
-    }, 1000 / INPUT_HZ);
+      _inputSent = false;  // allow recording input for next frame
+    }
+
+    inputTick();
   }
 
   function triggerEmulatorStart() {
@@ -981,7 +997,7 @@
   }
 
   function stopInputSync() {
-    if (inputTimer) { clearInterval(inputTimer); inputTimer = null; }
+    if (inputTimer) { cancelAnimationFrame(inputTimer); inputTimer = null; }
   }
 
   // ── Input read / apply ─────────────────────────────────────────────────
