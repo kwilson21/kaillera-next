@@ -970,11 +970,9 @@
     _pendingRunner = null;
   }
 
-  var _tickDebugCount = 0;
   function tick() {
     if (!_running) return;
     if (_resyncPaused) return;  // host pauses during resync
-    if (_tickDebugCount < 5) { console.log('[lockstep-v4] tick at frame', _frameNum, 'running:', _running); _tickDebugCount++; }
 
     var activePeers = getActivePeers();
 
@@ -1059,11 +1057,7 @@
     }
 
     // Step one frame
-    var stepped = stepOneFrame();
-    if (!stepped && _frameNum % 60 === 0) {
-      console.log('[lockstep-v4] stepOneFrame FAILED at frame', _frameNum,
-        'pendingRunner:', !!_pendingRunner, 'manualMode:', _manualMode);
-    }
+    stepOneFrame();
 
     _frameNum++;
     window._frameNum = _frameNum;
