@@ -373,8 +373,20 @@
           _resyncPaused = false;
           _localInputs = {};
           _remoteInputs = {};
+          // Pre-fill zero input for DELAY_FRAMES gap so we don't stall
+          // waiting for frames the peer never sent
+          var pKeys = Object.keys(_peers);
+          for (var pk = 0; pk < pKeys.length; pk++) {
+            var pSlot = _peers[pKeys[pk]].slot;
+            if (pSlot !== null && pSlot !== undefined) {
+              _remoteInputs[pSlot] = {};
+              for (var gf = _frameNum - DELAY_FRAMES - 2; gf <= _frameNum; gf++) {
+                _remoteInputs[pSlot][gf] = 0;
+              }
+              _lastRemoteFramePerSlot[pSlot] = _frameNum;
+            }
+          }
           _lastRemoteFrame = _frameNum;
-          _lastRemoteFramePerSlot = {};
           console.log('[lockstep-v4] resync complete, resuming at frame', _frameNum);
           setStatus('Connected -- game on!');
         }
@@ -676,13 +688,29 @@
         return;
       }
 
-      // Re-enter manual mode (re-captures rAF runner after stopSync cleared it)
-      enterManualMode();
+      // loadState BEFORE enterManualMode — same order as initial sync in
+      // checkAllLockstepReady(). Reversing this breaks the rAF runner capture.
       gm.loadState(bytes);
+      enterManualMode();
 
       // For resync: use host's exact frame. For late join: use highest seen frame.
       if (isResync) {
         _frameNum = msg.frame;
+        // Pre-fill zero input for DELAY_FRAMES gap so we don't stall
+        _localInputs = {};
+        _remoteInputs = {};
+        var pKeys = Object.keys(_peers);
+        for (var pk = 0; pk < pKeys.length; pk++) {
+          var pSlot = _peers[pKeys[pk]].slot;
+          if (pSlot !== null && pSlot !== undefined) {
+            _remoteInputs[pSlot] = {};
+            for (var gf = _frameNum - DELAY_FRAMES - 2; gf <= _frameNum; gf++) {
+              _remoteInputs[pSlot][gf] = 0;
+            }
+            _lastRemoteFramePerSlot[pSlot] = _frameNum;
+          }
+        }
+        _lastRemoteFrame = _frameNum;
       } else {
         _frameNum = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
       }
@@ -942,9 +970,11 @@
     _pendingRunner = null;
   }
 
+  var _tickDebugCount = 0;
   function tick() {
     if (!_running) return;
     if (_resyncPaused) return;  // host pauses during resync
+    if (_tickDebugCount < 5) { console.log('[lockstep-v4] tick at frame', _frameNum, 'running:', _running); _tickDebugCount++; }
 
     var activePeers = getActivePeers();
 
@@ -1029,7 +1059,11 @@
     }
 
     // Step one frame
-    stepOneFrame();
+    var stepped = stepOneFrame();
+    if (!stepped && _frameNum % 60 === 0) {
+      console.log('[lockstep-v4] stepOneFrame FAILED at frame', _frameNum,
+        'pendingRunner:', !!_pendingRunner, 'manualMode:', _manualMode);
+    }
 
     _frameNum++;
     window._frameNum = _frameNum;
@@ -1063,12 +1097,8 @@
         _resyncCount++;
         console.log('[lockstep-v4] DESYNC #' + _resyncCount + ' at frame', _pendingSyncCheck.frame);
         setStatus('Desync detected -- resyncing...');
-        // Stop tick loop but keep manual mode (emulator stays captured)
-        _running = false;
-        if (_tickInterval !== null) {
-          clearInterval(_tickInterval);
-          _tickInterval = null;
-        }
+        // Full stop — resets _manualMode so enterManualMode() re-captures rAF runner
+        stopSync();
         _localInputs = {};
         _remoteInputs = {};
         _lastRemoteFrame = -1;
