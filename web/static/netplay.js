@@ -64,7 +64,6 @@
   let _lastHashFrame     = -1;     // frame at which _lastHash was computed
   let _desynced          = false;  // true if desync detected
   let _pendingResync     = null;   // {frame, data} if resync state received
-  let _resyncTimeout     = null;   // timer for resync UI
 
   // Expose for Playwright verification
   window._playerSlot  = _playerSlot;
@@ -672,27 +671,38 @@
   }
 
   function handleStateHash(msg, senderSid) {
-    if (_desynced) return;  // already handling a desync
     const localHash = _lastHash;
     const localFrame = _lastHashFrame;
     // Only compare if we have a hash for the same frame (or close enough)
     if (localFrame < 0 || Math.abs(msg.frame - localFrame) > 5) return;
-    if (msg.hash !== localHash) {
-      console.log('[netplay] DESYNC detected at frame', msg.frame,
-        'local:', localHash, 'remote:', msg.hash, 'from:', senderSid);
-      _desynced = true;
-      window._desynced = true;
-      setStatus('Desync detected — resyncing…');
-      // Non-host sends resync request to host
-      if (_playerSlot !== 0) {
-        const hostPeer = Object.values(_peers).find(p => p.slot === 0);
-        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
-          hostPeer.dc.send(JSON.stringify({ type: 'resync-request' }));
-        }
-      } else {
-        // Host detected desync — send resync state to all
-        sendResyncState();
+
+    if (msg.hash === localHash) {
+      // Hashes match — if we were resyncing, confirm resync succeeded
+      if (_desynced) {
+        console.log('[netplay] hashes match post-resync at frame', msg.frame);
+        _desynced = false;
+        window._desynced = false;
+        setStatus('🟢 Connected — game on!');
       }
+      return;
+    }
+
+    // Mismatch — only trigger resync if not already handling one
+    if (_desynced) return;
+    console.log('[netplay] DESYNC detected at frame', msg.frame,
+      'local:', localHash, 'remote:', msg.hash, 'from:', senderSid);
+    _desynced = true;
+    window._desynced = true;
+    setStatus('Desync detected — resyncing…');
+    // Non-host sends resync request to host
+    if (_playerSlot !== 0) {
+      const hostPeer = Object.values(_peers).find(p => p.slot === 0);
+      if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+        hostPeer.dc.send(JSON.stringify({ type: 'resync-request' }));
+      }
+    } else {
+      // Host detected desync — send resync state to all
+      sendResyncState();
     }
   }
 
@@ -760,14 +770,9 @@
     _lastHash        = 0;
     _lastHashFrame   = -1;
     console.log('[netplay] resync applied at frame', frame);
-    setStatus('Resynced — game on!');
-    // Clear desync flag after a brief delay
-    if (_resyncTimeout) clearTimeout(_resyncTimeout);
-    _resyncTimeout = setTimeout(() => {
-      _desynced = false;
-      window._desynced = false;
-      setStatus('🟢 Connected — game on!');
-    }, 2000);
+    setStatus('Resynced — waiting for hash confirmation…');
+    // _desynced stays true until the next hash exchange confirms hashes match
+    // (see handleStateHash). This prevents a detect→resync→detect loop.
   }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
