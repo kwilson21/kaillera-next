@@ -39,9 +39,10 @@
       <div id="spectator-list"></div>
 
       <div id="host-controls" style="display:none">
-        <select id="mode-select">
-          <option value="lockstep-v4">Lockstep</option>
-          <option value="streaming">Streaming</option>
+        <label for="mode-select" class="mode-label">Mode:</label>
+        <select id="mode-select" title="Lockstep: all players run the emulator in sync. Streaming: host runs the emulator, guests watch a video stream.">
+          <option value="lockstep-v4" title="All players run the emulator in perfect sync — best quality, requires good connection">Lockstep</option>
+          <option value="streaming" title="Host runs the emulator and streams video to guests — zero desync, works on weaker devices">Streaming</option>
         </select>
         <button id="start-btn" disabled>Start Game (need 2+)</button>
       </div>

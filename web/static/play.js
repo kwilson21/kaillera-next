@@ -41,7 +41,12 @@
 
     socket.on('connect', onConnect);
     socket.on('connect_error', function (e) {
-      showError('Connection error: ' + e.message);
+      if (!gameRunning) {
+        showError('Connection error: ' + e.message);
+      } else {
+        showToast('Connection lost — returning to lobby...');
+        setTimeout(function () { window.location.href = '/'; }, 2000);
+      }
     });
     socket.on('users-updated', onUsersUpdated);
     socket.on('game-started', onGameStarted);
@@ -356,20 +361,16 @@
     if (!el) return;
     el.classList.remove('hidden');
     var card = el.querySelector('.error-card');
-    if (card) card.innerHTML = '<h3>Error</h3><p>' + msg + '</p>';
+    if (card) card.innerHTML = '<h3>Error</h3><p>' + msg + '</p><a href="/" class="error-back">Back to Lobby</a>';
   }
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
   function copyLink() {
     var url = window.location.origin + '/play.html?room=' + roomCode;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(function () {
-        showToast('Link copied!');
-      });
-    } else {
-      prompt('Copy this link:', url);
-    }
+    navigator.clipboard.writeText(url).then(function () {
+      showToast('Link copied!');
+    });
   }
 
   // ── Gamepad Detection ─────────────────────────────────────────────────

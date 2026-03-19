@@ -8,18 +8,22 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
 }
 
-/* Game canvas */
+/* Game canvas — 4:3 aspect ratio, centered */
 #game {
   max-width: 100%;
   width: 640px;
+  aspect-ratio: 4 / 3;
   margin: 0 auto;
 }
 
 #game canvas, #game video {
   max-width: 100%;
-  height: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
 }
 
@@ -108,6 +112,13 @@ body {
   margin-top: 1rem;
 }
 
+.mode-label {
+  font-size: 13px;
+  color: #888;
+  white-space: nowrap;
+  align-self: center;
+}
+
 #mode-select {
   background: #0d0d1a;
   border: 1px solid #333;
@@ -171,17 +182,17 @@ button:hover { background: #4a6fa5; }
 
 #leave-btn:hover { background: #7a4a4a; }
 
-/* In-game toolbar */
+/* In-game toolbar — static bar, doesn't overlap game */
 #toolbar {
   position: fixed;
-  top: 0;
+  bottom: 0;
   left: 0;
   right: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(17, 17, 17, 0.95);
   z-index: 50;
   align-items: center;
 }
@@ -267,3 +278,14 @@ button:hover { background: #4a6fa5; }
 
 .error-card h3 { margin-bottom: 1rem; color: #f88; }
 .error-card a { color: #6af; }
+.error-back {
+  display: inline-block;
+  margin-top: 1rem;
+  padding: 10px 24px;
+  background: #3a5a8a;
+  color: #fff;
+  text-decoration: none;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.error-back:hover { background: #4a6fa5; }
