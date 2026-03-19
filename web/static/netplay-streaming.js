@@ -449,18 +449,13 @@
       if (!gm) { setTimeout(waitForEmu, 100); return; }
       console.log('[netplay] emulator running — capturing stream');
 
-      // Find the canvas and optimize its resolution for streaming.
-      // N64 renders at 320x240 internally. The CSS-sized canvas (1280x960)
-      // wastes encoder cycles upscaling pixels that don't exist. Capture at
-      // 640x480 (2x native) for a good quality/performance balance.
+      // Capture the canvas as-is — don't resize it (breaks EJS rendering).
+      // Instead, use scaleResolutionDownBy on the WebRTC encoder to reduce
+      // encoding load without affecting the emulator's display.
       const canvas = document.querySelector('#game canvas');
       if (!canvas) { console.log('[netplay] canvas not found, retrying…'); setTimeout(waitForEmu, 200); return; }
 
-      const origW = canvas.width, origH = canvas.height;
-      canvas.width = 640;
-      canvas.height = 480;
-      console.log('[netplay] canvas resized for streaming:', origW + 'x' + origH, '→ 640x480');
-
+      console.log('[netplay] canvas size:', canvas.width + 'x' + canvas.height);
       _hostStream = canvas.captureStream(60);
       console.log('[netplay] captured stream:', _hostStream.getTracks().map(t => t.kind));
 
@@ -554,11 +549,13 @@
         }
         params.encodings[0].maxBitrate = 10_000_000;  // 10 Mbps ceiling
         params.encodings[0].maxFramerate = 60;
-        // scaleResolutionDownBy = 1 means no downscaling from source
-        params.encodings[0].scaleResolutionDownBy = 1.0;
+        // Downscale 2x at encoder level (not canvas) — reduces encoding
+        // load while keeping the host's emulator display at full resolution.
+        // 1280x960 → 640x480 encoded, which is 2x N64's native 320x240.
+        params.encodings[0].scaleResolutionDownBy = 2.0;
         params.degradationPreference = 'maintain-framerate';
         sender.setParameters(params).then(() => {
-          console.log('[netplay] video encoding optimized: 60fps, 10Mbps max');
+          console.log('[netplay] video encoding optimized: 60fps, 10Mbps max, 2x downscale');
         }).catch(err => {
           console.log('[netplay] setParameters failed:', err);
         });
