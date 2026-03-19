@@ -204,6 +204,9 @@
     }
     hideToolbar();
     showOverlay();
+    // Clear stale engine status
+    var statusEl = document.getElementById('engine-status');
+    if (statusEl) statusEl.textContent = '';
   }
 
   function initEngine() {
