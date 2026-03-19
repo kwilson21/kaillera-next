@@ -910,6 +910,9 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
+    // Probe HEAPU8 for dynamic regions (for sync hash)
+    if (!_syncProbed) probeMemory();
+
     var activePeers = getActivePeers();
     var peerSlots = activePeers.map(function (p) { return p.slot; });
     console.log('[lockstep-v4] lockstep started -- slot:', _playerSlot,
@@ -1252,17 +1255,71 @@
 
   // -- Desync detection helpers -----------------------------------------------
 
-  function quickStateHash() {
-    // Use getState() to get actual game state, hash first 2KB.
-    // Called every ~15s so the serialization cost is acceptable.
+  // Dynamic HEAPU8 region for sync hashing — found by probeMemory()
+  var _syncRegionStart = 0;
+  var _syncRegionSize  = 0;
+  var _syncProbed      = false;
+
+  function probeMemory() {
+    // Scan HEAPU8 in 4KB blocks, snapshot twice 100ms apart,
+    // find regions that changed (= live game state, not static code).
     try {
-      var gm = window.EJS_emulator.gameManager;
-      var state = gm.getState();
-      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
+      var buf = window.EJS_emulator.gameManager.Module.HEAPU8;
+      var blockSize = 4096;
+      var maxOffset = Math.min(buf.length, 8 * 1024 * 1024); // scan up to 8MB
+      var snapshot = {};
+
+      // Take first snapshot — hash each 4KB block
+      for (var off = 0; off < maxOffset; off += blockSize) {
+        var h = 0x811c9dc5;
+        for (var i = off; i < off + blockSize; i++) {
+          h ^= buf[i];
+          h = Math.imul(h, 0x01000193);
+        }
+        snapshot[off] = h | 0;
+      }
+
+      // Wait a few frames then compare
+      setTimeout(function () {
+        var dynamicRegions = [];
+        for (var off = 0; off < maxOffset; off += blockSize) {
+          var h = 0x811c9dc5;
+          for (var i = off; i < off + blockSize; i++) {
+            h ^= buf[i];
+            h = Math.imul(h, 0x01000193);
+          }
+          if ((h | 0) !== snapshot[off]) {
+            dynamicRegions.push(off);
+          }
+        }
+
+        if (dynamicRegions.length > 0) {
+          // Pick a region in the middle of the dynamic range (most likely RDRAM)
+          var mid = dynamicRegions[Math.floor(dynamicRegions.length / 2)];
+          _syncRegionStart = mid;
+          _syncRegionSize = Math.min(4096, buf.length - mid);
+          console.log('[lockstep-v4] probe found', dynamicRegions.length,
+            'dynamic 4KB blocks. Using offset', '0x' + mid.toString(16),
+            'for sync hash. Range: 0x' + dynamicRegions[0].toString(16),
+            '- 0x' + dynamicRegions[dynamicRegions.length - 1].toString(16));
+        } else {
+          console.log('[lockstep-v4] probe found no dynamic regions, sync hash disabled');
+        }
+        _syncProbed = true;
+      }, 200);
+    } catch (e) {
+      console.log('[lockstep-v4] probe failed:', e);
+      _syncProbed = true;
+    }
+  }
+
+  function quickStateHash() {
+    if (!_syncProbed || _syncRegionSize === 0) return 0;
+    try {
+      var buf = window.EJS_emulator.gameManager.Module.HEAPU8;
       var hash = 0x811c9dc5;
-      var len = Math.min(bytes.length, 2048);
-      for (var i = 0; i < len; i++) {
-        hash ^= bytes[i];
+      for (var i = _syncRegionStart; i < _syncRegionStart + _syncRegionSize; i++) {
+        hash ^= buf[i];
         hash = Math.imul(hash, 0x01000193);
       }
       return hash | 0;
@@ -1348,6 +1405,9 @@
     _lastRemoteFramePerSlot = {};
     _pendingSyncCheck = null;
     _resyncCount = 0;
+    _syncProbed = false;
+    _syncRegionStart = 0;
+    _syncRegionSize = 0;
 
     // Clean up spectator stream
     if (_hostStream) {
