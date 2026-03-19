@@ -585,26 +585,16 @@
   // ── Phase 4: Late join / leave ──────────────────────────────────────────
 
   async function handleSaveState(msg) {
-    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-    if (!gm) return;
     console.log('[netplay] received save state, decompressing…');
     setStatus('Loading save state…');
     try {
       const compressed = base64ToUint8(msg.data);
       const bytes = await decompressState(compressed);
-      gm.loadState(bytes);
-      if (msg.frame !== undefined) {
-        _frameNum = msg.frame;
-        window._frameNum = _frameNum;
-      }
-      _localQueue      = {};
-      _remoteQueues    = {};
-      _lastRemoteMasks = {};
-      _prevSlotMasks   = {};
-      console.log('[netplay] save state loaded, synced at frame', _frameNum);
-      setStatus('🟢 Connected — game on!');
+      // Queue for safe application during the next input tick
+      _pendingResync = { frame: msg.frame, bytes: bytes };
+      console.log('[netplay] save state queued (' + bytes.length + ' bytes)');
     } catch (err) {
-      console.log('[netplay] failed to load save state:', err);
+      console.log('[netplay] failed to decompress save state:', err);
     }
   }
 
@@ -764,9 +754,12 @@
     try {
       const compressed = base64ToUint8(msg.data);
       const bytes = await decompressState(compressed);
-      applyResync(msg.frame, bytes);
+      // Don't call loadState from async context — queue it for the next input tick
+      // where timing is safe relative to the emulator's frame loop.
+      _pendingResync = { frame: msg.frame, bytes: bytes };
+      console.log('[netplay] resync state queued (' + bytes.length + ' bytes)');
     } catch (err) {
-      console.log('[netplay] failed to apply resync state:', err);
+      console.log('[netplay] failed to decompress resync state:', err);
       _desynced = false;
       window._desynced = false;
     }
@@ -777,7 +770,12 @@
     if (!gm) return;
     try {
       gm.loadState(stateBytes);
-    } catch (_) {}
+    } catch (err) {
+      console.log('[netplay] loadState failed:', err);
+      _desynced = false;
+      window._desynced = false;
+      return;
+    }
     // Reset frame counters and queues
     _frameNum = frame;
     window._frameNum = _frameNum;
@@ -788,10 +786,9 @@
     _lastHash        = 0;
     _lastHashFrame   = -1;
     _lastResyncFrame = frame;
+    _pendingResync   = null;
     console.log('[netplay] resync applied at frame', frame);
     setStatus('Resynced');
-    // _desynced stays true until the next hash exchange confirms hashes match.
-    // If hashes still mismatch after RESYNC_COOLDOWN frames, another resync fires.
   }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
@@ -898,6 +895,13 @@
 
     function inputTick() {
       inputTimer = requestAnimationFrame(inputTick);
+
+      // Apply any pending resync at the START of the tick (safe timing)
+      if (_pendingResync) {
+        const pr = _pendingResync;
+        _pendingResync = null;
+        applyResync(pr.frame, pr.bytes);
+      }
 
       const openPeers = Object.values(_peers).filter(
         p => p.dc && p.dc.readyState === 'open'
