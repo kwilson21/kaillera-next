@@ -116,6 +116,9 @@
     panel.id = 'np';
     panel.innerHTML = `
       <h3>Netplay (Streaming)</h3>
+      <div style="font-size:10px; margin-bottom:8px; color:#555;">
+        <a href="?mode=lockstep" style="color:#6af; text-decoration:none;">Switch to Lockstep mode</a>
+      </div>
       <input id="np-name" placeholder="Your name" value="Player">
       <button id="np-create">Create Room</button>
       <div id="np-code-display" style="display:none"></div>
@@ -332,7 +335,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     const offer = await peer.pc.createOffer();
-    offer.sdp = setSDPBitrate(offer.sdp, 10000);
+    offer.sdp = preferH264(setSDPBitrate(offer.sdp, 10000));
     await peer.pc.setLocalDescription(offer);
     socket.emit('webrtc-signal', { target: remoteSid, offer });
   }
@@ -446,9 +449,17 @@
       if (!gm) { setTimeout(waitForEmu, 100); return; }
       console.log('[netplay] emulator running — capturing stream');
 
-      // Find the canvas
+      // Find the canvas and optimize its resolution for streaming.
+      // N64 renders at 320x240 internally. The CSS-sized canvas (1280x960)
+      // wastes encoder cycles upscaling pixels that don't exist. Capture at
+      // 640x480 (2x native) for a good quality/performance balance.
       const canvas = document.querySelector('#game canvas');
       if (!canvas) { console.log('[netplay] canvas not found, retrying…'); setTimeout(waitForEmu, 200); return; }
+
+      const origW = canvas.width, origH = canvas.height;
+      canvas.width = 640;
+      canvas.height = 480;
+      console.log('[netplay] canvas resized for streaming:', origW + 'x' + origH, '→ 640x480');
 
       _hostStream = canvas.captureStream(60);
       console.log('[netplay] captured stream:', _hostStream.getTracks().map(t => t.kind));
@@ -474,7 +485,7 @@
     try {
       const offer = await peer.pc.createOffer();
       // Munge SDP to set higher bitrate floor for video
-      offer.sdp = setSDPBitrate(offer.sdp, 10000);  // 10 Mbps
+      offer.sdp = preferH264(setSDPBitrate(offer.sdp, 10000));
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
@@ -494,12 +505,38 @@
       } else if (line.startsWith('m=') && !line.startsWith('m=video')) {
         inVideo = false;
       }
-      // Add bitrate line right after the c= line in the video section
       if (inVideo && line.startsWith('c=')) {
         result.push('b=AS:' + bitrateKbps);
       }
     }
     return result.join('\r\n');
+  }
+
+  function preferH264(sdp) {
+    // Move H264 codec to top of video m-line payload types.
+    // H264 has hardware encoder support (VideoToolbox/NVENC) which is
+    // dramatically faster than software VP8, freeing CPU for emulation.
+    const lines = sdp.split('\r\n');
+    // Find H264 payload type from a=rtpmap lines
+    let h264pt = null;
+    for (const line of lines) {
+      const m = line.match(/^a=rtpmap:(\d+) H264\//i);
+      if (m) { h264pt = m[1]; break; }
+    }
+    if (!h264pt) return sdp;  // no H264 available
+
+    // Reorder the m=video line to put H264 first
+    return lines.map(line => {
+      if (line.startsWith('m=video')) {
+        const parts = line.split(' ');
+        // parts: ['m=video', port, proto, pt1, pt2, ...]
+        const header = parts.slice(0, 3);
+        const pts = parts.slice(3);
+        const reordered = [h264pt, ...pts.filter(p => p !== h264pt)];
+        return [...header, ...reordered].join(' ');
+      }
+      return line;
+    }).join('\r\n');
   }
 
   function optimizeVideoEncoding(pc) {
@@ -555,15 +592,19 @@
     if (_guestLoopStarted) return;
     _guestLoopStarted = true;
 
+    let _lastSentMask = -1;
     function tick() {
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
 
-      // Send to host via data channel
-      const hostPeer = Object.values(_peers).find(p => p.slot === 0);
-      if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
-        try { hostPeer.dc.send(new Int32Array([mask]).buffer); } catch (_) {}
+      // Only send when input changes — reduces DC overhead
+      if (mask !== _lastSentMask) {
+        const hostPeer = Object.values(_peers).find(p => p.slot === 0);
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          try { hostPeer.dc.send(new Int32Array([mask]).buffer); } catch (_) {}
+          _lastSentMask = mask;
+        }
       }
 
       // Debug overlay
@@ -657,6 +698,7 @@
     const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
     const prevMask = _prevSlotMasks[slot] || 0;
+    if (inputMask === prevMask) return;  // skip if unchanged — saves simulateInput calls
     for (let i = 0; i < 16; i++) {
       const wasPressed = (prevMask >> i) & 1;
       const isPressed  = (inputMask >> i) & 1;
