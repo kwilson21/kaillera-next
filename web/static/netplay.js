@@ -160,6 +160,16 @@
     socket.on('connect_error', (e) => setStatus('Server error: ' + e.message));
     socket.on('users-updated', onUsersUpdated);
     socket.on('webrtc-signal', onWebRTCSignal);
+    socket.on('data-message',  onDataMessage);
+  }
+
+  function onDataMessage(msg) {
+    // Large messages (save state, resync state) route through Socket.IO
+    // instead of data channels to avoid DC size limits
+    if (!msg || !msg.type) return;
+    if (msg.type === 'save-state')      handleSaveState(msg);
+    if (msg.type === 'resync-request')  handleResyncRequest();
+    if (msg.type === 'resync-state')    handleResyncState(msg);
   }
 
   // ── Room management ────────────────────────────────────────────────────
@@ -410,7 +420,7 @@
 
       // Phase 4: if game is already running, host sends save state to late joiner
       if (_gameStarted && _selfEmuReady && _playerSlot === 0) {
-        setTimeout(() => sendSaveState(remoteSid), 500);
+        setTimeout(() => sendSaveState(), 500);
       }
 
       checkAllReady();
@@ -434,7 +444,7 @@
           try {
             const msg = JSON.parse(e.data);
             if (msg.type === 'save-state')      handleSaveState(msg);
-            if (msg.type === 'request-state')   handleStateRequest(remoteSid);
+            if (msg.type === 'request-state')   handleStateRequest();
             if (msg.type === 'state-hash')      handleStateHash(msg, remoteSid);
             if (msg.type === 'resync-request')  handleResyncRequest();
             if (msg.type === 'resync-state')    handleResyncState(msg);
@@ -510,20 +520,72 @@
     }
   }
 
+  // ── Compression helpers (gzip via CompressionStream API) ────────────────
+
+  async function compressState(bytes) {
+    const cs = new CompressionStream('gzip');
+    const writer = cs.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const reader = cs.readable.getReader();
+    const chunks = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value) chunks.push(value);
+      if (done) break;
+    }
+    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+    let offset = 0;
+    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    return out;
+  }
+
+  async function decompressState(bytes) {
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const reader = ds.readable.getReader();
+    const chunks = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value) chunks.push(value);
+      if (done) break;
+    }
+    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
+    let offset = 0;
+    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    return out;
+  }
+
+  function uint8ToBase64(bytes) {
+    const chunkSize = 32768;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+  }
+
+  function base64ToUint8(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
   // ── Phase 4: Late join / leave ──────────────────────────────────────────
 
-  function handleSaveState(msg) {
-    // Received save state from host — load it to sync game state
+  async function handleSaveState(msg) {
     const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
-    console.log('[netplay] received save state, loading…');
+    console.log('[netplay] received save state, decompressing…');
     setStatus('Loading save state…');
     try {
-      const binary = atob(msg.data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const compressed = base64ToUint8(msg.data);
+      const bytes = await decompressState(compressed);
       gm.loadState(bytes);
-      // Sync frame counter to host's frame
       if (msg.frame !== undefined) {
         _frameNum = msg.frame;
         window._frameNum = _frameNum;
@@ -539,39 +601,36 @@
     }
   }
 
-  function handleStateRequest(requesterSid) {
-    // Only host (slot 0) responds to state requests
+  function handleStateRequest() {
     if (_playerSlot !== 0) return;
-    sendSaveState(requesterSid);
+    sendSaveState();
   }
 
-  function sendSaveState(targetSid) {
+  async function sendSaveState() {
     const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
-    const peer = _peers[targetSid];
-    if (!peer || !peer.dc || peer.dc.readyState !== 'open') return;
-    console.log('[netplay] sending save state to', targetSid);
     try {
-      const blob = gm.saveState();
-      // Convert Uint8Array to base64
-      let binary = '';
-      const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const b64 = btoa(binary);
-      peer.dc.send(JSON.stringify({
+      const raw = gm.getState();
+      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      const compressed = await compressState(bytes);
+      const b64 = uint8ToBase64(compressed);
+      console.log('[netplay] sending save state via Socket.IO (' +
+        Math.round(bytes.length / 1024) + 'KB raw → ' +
+        Math.round(compressed.length / 1024) + 'KB gzip)');
+      socket.emit('data-message', {
         type: 'save-state',
         frame: _frameNum,
         data: b64,
-      }));
+      });
     } catch (err) {
       console.log('[netplay] failed to send save state:', err);
     }
   }
 
   function sendSaveStateToAll() {
-    // Host sends save state to all connected peers
+    // Host sends save state to all connected peers (via Socket.IO broadcast)
     if (_playerSlot !== 0) return;
-    Object.keys(_peers).forEach(sid => sendSaveState(sid));
+    sendSaveState();
   }
 
   function claimSlot(slot) {
@@ -647,24 +706,21 @@
     sendResyncState();
   }
 
-  function sendResyncState() {
+  async function sendResyncState() {
     const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
     try {
-      const blob = gm.saveState();
-      const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
-      let binary = '';
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      const b64 = btoa(binary);
-      const msg = JSON.stringify({
+      const raw = gm.getState();
+      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      const compressed = await compressState(bytes);
+      const b64 = uint8ToBase64(compressed);
+      console.log('[netplay] sending resync state via Socket.IO (' +
+        Math.round(bytes.length / 1024) + 'KB raw → ' +
+        Math.round(compressed.length / 1024) + 'KB gzip)');
+      socket.emit('data-message', {
         type: 'resync-state',
         frame: _frameNum,
         data: b64,
-      });
-      Object.values(_peers).forEach(p => {
-        if (p.dc && p.dc.readyState === 'open') {
-          try { p.dc.send(msg); } catch (_) {}
-        }
       });
       // Host also loads its own state to re-anchor at the same point
       applyResync(_frameNum, bytes);
@@ -675,12 +731,11 @@
     }
   }
 
-  function handleResyncState(msg) {
+  async function handleResyncState(msg) {
     console.log('[netplay] received resync state for frame', msg.frame);
     try {
-      const binary = atob(msg.data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const compressed = base64ToUint8(msg.data);
+      const bytes = await decompressState(compressed);
       applyResync(msg.frame, bytes);
     } catch (err) {
       console.log('[netplay] failed to apply resync state:', err);
