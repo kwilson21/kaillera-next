@@ -518,12 +518,14 @@
     // No async gap = no stale rAF callbacks can corrupt the runner.
     enterManualMode();
 
-    // Guest: load the save state while emulator is frozen
+    // Load the save state on BOTH sides while emulator is frozen.
+    // Host also loads its own captured state — this resets the GL context
+    // so the canvas renders correctly after pause/resume stepping.
     if (_guestStateBytes) {
       const gm = window.EJS_emulator.gameManager;
       gm.loadState(_guestStateBytes);
       _guestStateBytes = null;
-      console.log('[lockstep-v2] guest loaded initial state');
+      console.log('[lockstep-v2] loaded initial state (slot ' + _playerSlot + ')');
     }
 
     _frameNum = 0;
@@ -535,6 +537,8 @@
     try {
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // Store for host to also load (resets GL context for proper rendering)
+      _guestStateBytes = bytes;
       const compressed = await compressState(bytes);
       const b64 = uint8ToBase64(compressed);
       console.log('[lockstep-v2] sending initial state (' +

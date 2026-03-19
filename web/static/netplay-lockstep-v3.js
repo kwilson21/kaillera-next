@@ -695,12 +695,19 @@
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       const compressed = await compressState(bytes);
       const b64 = uint8ToBase64(compressed);
+      const resyncFrame = _frameNum;
       socket.emit('data-message', {
         type: 'resync',
-        frame: _frameNum,
+        frame: resyncFrame,
         data: b64,
       });
-      console.log('[lockstep-v3] resync sent at F:' + _frameNum +
+      // Host also resets to resync frame — both sides restart from
+      // the same logical frame so input frame numbers stay aligned.
+      _frameNum = resyncFrame;
+      _localInputs = {};
+      _remoteInputs = {};
+      _lastRemoteMask = 0;
+      console.log('[lockstep-v3] resync sent at F:' + resyncFrame +
         ' (' + Math.round(compressed.length / 1024) + 'KB)');
     } catch (e) {
       console.log('[lockstep-v3] resync send failed:', e);
@@ -715,8 +722,11 @@
       decompressState(compressed).then(function(bytes) {
         const gm = window.EJS_emulator.gameManager;
         gm.loadState(bytes);
-        // Snap our frame counter to match
+        // Reset frame counter and input buffers to match host
         _frameNum = msg.frame;
+        _localInputs = {};
+        _remoteInputs = {};
+        _lastRemoteMask = 0;
         window._frameNum = _frameNum;
         console.log('[lockstep-v3] resync loaded at F:' + msg.frame);
       });
