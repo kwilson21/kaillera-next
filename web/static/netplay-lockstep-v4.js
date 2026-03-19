@@ -1,15 +1,20 @@
 /**
- * kaillera-next — Prototype C v4: True Lockstep via Direct Memory Input + rAF Interception
+ * kaillera-next -- Lockstep v4: 4-Player Mesh + Spectators + Drop/Late Join
  *
- * Both emulators boot, sync via save state, then enter "manual mode" where we
- * control frame advance. Each tick:
- *   1. Read local input -> send to peer via DC
- *   2. Wait for remote input (block/stall until it arrives -- like Kaillera)
- *   3. Write BOTH players' inputs directly to Wasm memory (not simulateInput)
- *   4. Call the captured Emscripten MainLoop_runner ONCE -> exactly 1 frame advance
- *   5. Schedule a real rAF (no-op callback using saved _origRAF) to trigger GL composite
+ * Upgrades the 2-player lockstep to full mesh networking:
+ *   - Up to 4 players in a lockstep mesh (6 bidirectional connections)
+ *   - Spectators receive canvas video stream from host, no lockstep participation
+ *   - Graceful drop handling: remaining players continue without crashing
+ *   - Late join: host sends save state + frame counter to new peers
  *
- * Topology: mesh. Host (slot 0) + guest (slot 1). 2-player only.
+ * Core lockstep mechanism is preserved from v3/v4:
+ *   1. rAF interception captures the Emscripten main loop runner
+ *   2. setInterval(16) tick loop for background-tab-safe ~60fps
+ *   3. Each tick: read input -> send to all peers -> wait for all -> write to Wasm -> step
+ *   4. Direct memory input via DataView writes to HEAPU8 (no simulateInput)
+ *
+ * Mesh initiation: lower slot creates data channel + sends offer.
+ * Spectators never initiate -- players initiate connections TO spectators.
  */
 
 (function () {
@@ -60,7 +65,7 @@
     68: 19,   // D -> Analog Right
   };
 
-  // ── Direct memory input layout (discovered via Playwright) ──────────
+  // -- Direct memory input layout (discovered via Playwright) ----------------
   //
   // Base address: 715364 in Module.HEAPU8
   // Layout: int32[20][4] -- 20 buttons x 4 players
@@ -72,120 +77,129 @@
   const BUTTON_STRIDE  = 20;
   const PLAYER_STRIDE  = 4;
 
-  // ── State ─────────────────────────────────────────────────────────────
+  // -- State -----------------------------------------------------------------
 
   let socket             = null;
   let sessionId          = null;
-  let _playerSlot        = -1;     // 0 = host, 1 = guest
-  let _peers             = {};     // remoteSid -> PeerState
-  let _knownPlayers      = {};
+  let _playerSlot        = -1;      // 0-3 for players, null for spectators
+  let _isSpectator       = false;
+  let _peers             = {};      // remoteSid -> PeerState
+  let _knownPlayers      = {};      // socketId -> {slot, playerName}
+  let _expectedPeerCount = 0;       // other players in room (excludes spectators)
   let _gameStarted       = false;
   let _selfEmuReady      = false;
   let _p1KeyMap          = null;
   let _heldKeys          = new Set();
 
   // Lockstep state
-  let _peerLockstepReady = false;  // true when peer signals lockstep-ready
-  let _selfLockstepReady = false;
-  let _guestStateBytes   = null;   // guest stores decompressed state here
-  let _frameNum          = 0;      // current logical frame number
-  let _localInputs       = {};     // frame -> inputMask
-  let _remoteInputs      = {};     // frame -> inputMask
-  let _peerSlot          = -1;     // the other player's slot
-  let _running           = false;  // tick loop active
+  let _lockstepReadyPeers = {};     // remoteSid -> true when peer signals lockstep-ready
+  let _selfLockstepReady  = false;
+  let _guestStateBytes    = null;   // decompressed state bytes to load
+  let _frameNum           = 0;      // current logical frame number
+  let _localInputs        = {};     // frame -> inputMask
+  let _remoteInputs       = {};     // slot -> {frame -> mask} (nested for multi-peer)
+  let _running            = false;  // tick loop active
 
   // Manual mode / rAF interception state
-  let _origRAF           = null;   // saved window.requestAnimationFrame
-  let _pendingRunner     = null;   // captured Emscripten MainLoop_runner
-  let _manualMode        = false;  // true once enterManualMode() called
-  let _stallStart        = 0;      // timestamp when current stall began
-  let _tickInterval      = null;   // setInterval handle for tick loop
+  let _origRAF           = null;    // saved window.requestAnimationFrame
+  let _pendingRunner     = null;    // captured Emscripten MainLoop_runner
+  let _manualMode        = false;   // true once enterManualMode() called
+  let _stallStart        = 0;       // timestamp when current stall began
+  let _tickInterval      = null;    // setInterval handle for tick loop
+
+  // Spectator streaming state
+  let _hostStream        = null;    // MediaStream for spectator canvas streaming
+  let _guestVideo        = null;    // <video> element (spectator only)
 
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
+  window._isSpectator = _isSpectator;
   window._peers       = _peers;
   window._frameNum    = 0;
 
-  // ── UI ─────────────────────────────────────────────────────────────────
+  // -- UI --------------------------------------------------------------------
 
   function buildUI() {
-    const style = document.createElement('style');
-    style.textContent = `
-      #np { position:fixed; top:12px; right:12px; z-index:9999;
-            background:#151520; border:1px solid #2a2a40; border-radius:8px;
-            padding:12px 14px; min-width:210px; font:13px/1.5 sans-serif;
-            color:#ccc; box-shadow:0 4px 16px rgba(0,0,0,.5); }
-      #np h3 { margin:0 0 10px; font-size:12px; letter-spacing:.08em;
-               text-transform:uppercase; color:#666; }
-      #np input { display:block; width:100%; padding:5px 8px; margin-bottom:6px;
-                  background:#0d0d1a; border:1px solid #333; border-radius:4px;
-                  color:#eee; font-size:12px; box-sizing:border-box; }
-      #np input:focus { outline:none; border-color:#4a6fa5; }
-      #np .row { display:flex; gap:6px; margin-bottom:6px; }
-      #np .row input { margin:0; flex:1; }
-      #np button { padding:5px 10px; border:none; border-radius:4px;
-                   background:#3a5a8a; color:#fff; font-size:12px;
-                   cursor:pointer; white-space:nowrap; }
-      #np button:hover { background:#4a6fa5; }
-      #np button:disabled { background:#2a2a40; color:#555; cursor:default; }
-      #np-status { font-size:11px; color:#777; margin-top:6px; min-height:14px; }
-      #np-debug { font-size:10px; color:#555; font-family:monospace; margin-top:4px; }
-      #np-code-display { font-size:16px; font-weight:bold; letter-spacing:.15em;
-                         color:#6af; text-align:center; padding:4px 0 2px; }
-    `;
+    var style = document.createElement('style');
+    style.textContent = [
+      '#np { position:fixed; top:12px; right:12px; z-index:9999;',
+      '      background:#151520; border:1px solid #2a2a40; border-radius:8px;',
+      '      padding:12px 14px; min-width:210px; font:13px/1.5 sans-serif;',
+      '      color:#ccc; box-shadow:0 4px 16px rgba(0,0,0,.5); }',
+      '#np h3 { margin:0 0 10px; font-size:12px; letter-spacing:.08em;',
+      '         text-transform:uppercase; color:#666; }',
+      '#np input { display:block; width:100%; padding:5px 8px; margin-bottom:6px;',
+      '            background:#0d0d1a; border:1px solid #333; border-radius:4px;',
+      '            color:#eee; font-size:12px; box-sizing:border-box; }',
+      '#np input:focus { outline:none; border-color:#4a6fa5; }',
+      '#np .row { display:flex; gap:6px; margin-bottom:6px; }',
+      '#np .row input { margin:0; flex:1; }',
+      '#np button { padding:5px 10px; border:none; border-radius:4px;',
+      '             background:#3a5a8a; color:#fff; font-size:12px;',
+      '             cursor:pointer; white-space:nowrap; }',
+      '#np button:hover { background:#4a6fa5; }',
+      '#np button:disabled { background:#2a2a40; color:#555; cursor:default; }',
+      '#np-status { font-size:11px; color:#777; margin-top:6px; min-height:14px; }',
+      '#np-debug { font-size:10px; color:#555; font-family:monospace; margin-top:4px; }',
+      '#np-code-display { font-size:16px; font-weight:bold; letter-spacing:.15em;',
+      '                   color:#6af; text-align:center; padding:4px 0 2px; }',
+      '#guest-video { width:640px; height:480px; background:#000; display:block; }',
+    ].join('\n');
     document.head.appendChild(style);
 
-    const panel = document.createElement('div');
+    var panel = document.createElement('div');
     panel.id = 'np';
-    panel.innerHTML = `
-      <h3>Netplay (Lockstep v4)</h3>
-      <div style="font-size:10px; margin-bottom:8px; color:#555;">
-        <a href="?mode=streaming" style="color:#6af; text-decoration:none;">Streaming</a> |
-        <a href="?mode=lockstep-v3" style="color:#6af; text-decoration:none;">Lockstep v3</a> |
-        <a href="?mode=lockstep" style="color:#6af; text-decoration:none;">Lockstep v1</a>
-      </div>
-      <input id="np-name" placeholder="Your name" value="Player">
-      <button id="np-create">Create Room</button>
-      <div id="np-code-display" style="display:none"></div>
-      <div class="row" style="margin-top:6px">
-        <input id="np-join-code" placeholder="Room code">
-        <button id="np-join">Join</button>
-      </div>
-      <div id="np-status">Connecting to server...</div>
-      <div id="np-debug" style="display:none"></div>
-    `;
+    panel.innerHTML = [
+      '<h3>Netplay (Lockstep v4)</h3>',
+      '<div style="font-size:10px; margin-bottom:8px; color:#555;">',
+      '  <a href="?mode=streaming" style="color:#6af; text-decoration:none;">Streaming</a> |',
+      '  <a href="?mode=lockstep-v3" style="color:#6af; text-decoration:none;">Lockstep v3</a> |',
+      '  <a href="?mode=lockstep" style="color:#6af; text-decoration:none;">Lockstep v1</a>',
+      '</div>',
+      '<input id="np-name" placeholder="Your name" value="Player">',
+      '<button id="np-create">Create Room</button>',
+      '<div id="np-code-display" style="display:none"></div>',
+      '<div class="row" style="margin-top:6px">',
+      '  <input id="np-join-code" placeholder="Room code">',
+      '  <button id="np-join">Join</button>',
+      '  <button id="np-spectate">Watch</button>',
+      '</div>',
+      '<div id="np-status">Connecting to server...</div>',
+      '<div id="np-debug" style="display:none"></div>',
+    ].join('\n');
     document.body.appendChild(panel);
 
-    document.getElementById('np-create').onclick = createRoom;
-    document.getElementById('np-join').onclick   = joinRoom;
+    document.getElementById('np-create').onclick  = createRoom;
+    document.getElementById('np-join').onclick     = joinRoom;
+    document.getElementById('np-spectate').onclick = spectateRoom;
   }
 
   function setStatus(msg) {
-    const el = document.getElementById('np-status');
+    var el = document.getElementById('np-status');
     if (el) el.textContent = msg;
     console.log('[lockstep-v4]', msg);
   }
 
   function setCode(code) {
-    const el = document.getElementById('np-code-display');
+    var el = document.getElementById('np-code-display');
     if (!el) return;
     el.textContent = code;
     el.style.display = code ? '' : 'none';
-    const input = document.getElementById('np-join-code');
+    var input = document.getElementById('np-join-code');
     if (input) input.value = code;
   }
 
   function disableButtons() {
-    ['np-create', 'np-join'].forEach(id => {
-      const el = document.getElementById(id);
+    ['np-create', 'np-join', 'np-spectate'].forEach(function (id) {
+      var el = document.getElementById(id);
       if (el) el.disabled = true;
     });
   }
 
-  // ── Socket.IO ──────────────────────────────────────────────────────────
+  // -- Socket.IO -------------------------------------------------------------
 
   function loadSocketIO(cb) {
-    const s = document.createElement('script');
+    var s = document.createElement('script');
     s.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
     s.onload = cb;
     document.head.appendChild(s);
@@ -193,8 +207,8 @@
 
   function connectSocket() {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
-    socket.on('connect',       () => { if (!_gameStarted) setStatus('Ready'); });
-    socket.on('connect_error', (e) => setStatus('Server error: ' + e.message));
+    socket.on('connect',       function () { if (!_gameStarted) setStatus('Ready'); });
+    socket.on('connect_error', function (e) { setStatus('Server error: ' + e.message); });
     socket.on('users-updated', onUsersUpdated);
     socket.on('webrtc-signal', onWebRTCSignal);
     socket.on('data-message',  onDataMessage);
@@ -202,13 +216,14 @@
 
   function onDataMessage(msg) {
     if (!msg || !msg.type) return;
-    if (msg.type === 'save-state') handleSaveStateMsg(msg);
+    if (msg.type === 'save-state')     handleSaveStateMsg(msg);
+    if (msg.type === 'late-join-state') handleLateJoinState(msg);
   }
 
-  // ── Room management ────────────────────────────────────────────────────
+  // -- Room management -------------------------------------------------------
 
   function createRoom() {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
+    var name = document.getElementById('np-name').value.trim() || 'Player';
     sessionId   = randomCode();
     _playerSlot = 0;
     window._playerSlot = 0;
@@ -220,64 +235,128 @@
         player_name: name, room_password: null,
         domain: window.location.hostname,
       },
-      maxPlayers: 2, password: null,
-    }, (err) => {
+      maxPlayers: 4, password: null,
+    }, function (err) {
       if (err) { setStatus('Error: ' + err); return; }
       disableButtons();
       setCode(sessionId);
-      setStatus('Waiting for player 2...');
+      setStatus('Waiting for players...');
     });
   }
 
   function joinRoom() {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
-    const code = document.getElementById('np-join-code').value.trim().toUpperCase();
+    _joinOrSpectate(false);
+  }
+
+  function spectateRoom() {
+    _joinOrSpectate(true);
+  }
+
+  function _joinOrSpectate(spectate) {
+    var name = document.getElementById('np-name').value.trim() || 'Player';
+    var code = document.getElementById('np-join-code').value.trim().toUpperCase();
     if (!code) { setStatus('Enter a room code'); return; }
 
-    sessionId = code;
+    sessionId    = code;
+    _isSpectator = spectate;
+    window._isSpectator = spectate;
 
     socket.emit('join-room', {
-      extra: { sessionid: sessionId, userid: socket.id, player_name: name, spectate: false },
+      extra: {
+        sessionid: sessionId, userid: socket.id,
+        player_name: name, spectate: spectate,
+      },
       password: null,
-    }, (err, data) => {
+    }, function (err, data) {
       if (err) { setStatus('Error: ' + err); return; }
       disableButtons();
-      if (data && data.players) {
-        const myEntry = Object.values(data.players).find(p => p.socketId === socket.id);
-        if (myEntry) { _playerSlot = myEntry.slot; window._playerSlot = _playerSlot; }
+
+      if (!spectate && data && data.players) {
+        var myEntry = Object.values(data.players).find(function (p) {
+          return p.socketId === socket.id;
+        });
+        if (myEntry) {
+          _playerSlot = myEntry.slot;
+          window._playerSlot = _playerSlot;
+        }
+      } else if (spectate) {
+        _playerSlot = null;
+        window._playerSlot = null;
       }
-      setStatus('Joined -- connecting...');
+
+      setStatus(spectate ? 'Spectating...' : 'Joined -- connecting...');
     });
   }
 
-  // ── users-updated ──────────────────────────────────────────────────────
+  // -- users-updated ---------------------------------------------------------
 
   function onUsersUpdated(data) {
-    const players = data.players || {};
+    var players    = data.players    || {};
+    var spectators = data.spectators || {};
 
+    // Rebuild known players map
     _knownPlayers = {};
-    Object.values(players).forEach(p => {
+    Object.values(players).forEach(function (p) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     });
 
-    const myEntry = Object.values(players).find(p => p.socketId === socket.id);
-    if (myEntry) { _playerSlot = myEntry.slot; window._playerSlot = _playerSlot; }
+    // Update my slot from server (handles spectator -> player transition)
+    var myPlayerEntry = Object.values(players).find(function (p) {
+      return p.socketId === socket.id;
+    });
+    if (myPlayerEntry) {
+      if (_isSpectator) {
+        console.log('[lockstep-v4] transitioned from spectator to player, slot:', myPlayerEntry.slot);
+        _isSpectator = false;
+        window._isSpectator = false;
+      }
+      _playerSlot = myPlayerEntry.slot;
+      window._playerSlot = _playerSlot;
+    }
 
-    // Connect to the other player
-    const others = Object.values(players).filter(p => p.socketId !== socket.id);
-    for (const p of others) {
-      if (_peers[p.socketId]) { _peers[p.socketId].slot = p.slot; continue; }
-      _peerSlot = p.slot;
-      const shouldInitiate = _playerSlot < p.slot;
+    // Count expected peers (other players, excludes spectators)
+    var otherPlayers = Object.values(players).filter(function (p) {
+      return p.socketId !== socket.id;
+    });
+    _expectedPeerCount = otherPlayers.length;
+
+    // Establish mesh connections to other players
+    // Lower slot initiates (creates data channel + sends offer)
+    for (var i = 0; i < otherPlayers.length; i++) {
+      var p = otherPlayers[i];
+      if (_peers[p.socketId]) {
+        _peers[p.socketId].slot = p.slot;
+        continue;
+      }
+
+      var shouldInitiate;
+      if (_isSpectator) {
+        shouldInitiate = false;  // spectators never initiate
+      } else {
+        shouldInitiate = _playerSlot < p.slot;
+      }
+
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
     }
+
+    // Players initiate connections to spectators
+    if (!_isSpectator) {
+      var specList = Object.values(spectators);
+      for (var j = 0; j < specList.length; j++) {
+        var s = specList[j];
+        if (s.socketId === socket.id) continue;
+        if (_peers[s.socketId]) continue;
+        createPeer(s.socketId, null, true);
+        sendOffer(s.socketId);
+      }
+    }
   }
 
-  // ── WebRTC ─────────────────────────────────────────────────────────────
+  // -- WebRTC multi-peer mesh ------------------------------------------------
 
   function createPeer(remoteSid, remoteSlot, isInitiator) {
-    const peer = {
+    var peer = {
       pc: new RTCPeerConnection({ iceServers: ICE_SERVERS }),
       dc: null,
       slot: remoteSlot,
@@ -287,31 +366,39 @@
       emuReady: false,
     };
 
-    peer.pc.onicecandidate = (e) => {
+    peer.pc.onicecandidate = function (e) {
       if (e.candidate) {
         socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
       }
     };
 
-    peer.pc.onconnectionstatechange = () => {
-      const s = peer.pc.connectionState;
+    peer.pc.onconnectionstatechange = function () {
+      var s = peer.pc.connectionState;
       if (s === 'failed' || s === 'disconnected') {
         console.log('[lockstep-v4] peer', remoteSid, 'connection', s);
         handlePeerDisconnect(remoteSid);
       }
     };
 
+    // Spectators: listen for incoming video tracks from host
+    if (_isSpectator || (remoteSlot === 0 && _playerSlot === null)) {
+      peer.pc.ontrack = function (event) {
+        console.log('[lockstep-v4] received track:', event.track.kind);
+        showSpectatorVideo(event, peer);
+      };
+    }
+
     _peers[remoteSid] = peer;
     window._peers = _peers;
 
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('lockstep', {
-        ordered: true,  // ordered -- input order matters
+        ordered: true,
         maxRetransmits: 2,
       });
       setupDataChannel(remoteSid, peer.dc);
     } else {
-      peer.pc.ondatachannel = (e) => {
+      peer.pc.ondatachannel = function (e) {
         peer.dc = e.channel;
         setupDataChannel(remoteSid, peer.dc);
       };
@@ -320,35 +407,38 @@
   }
 
   async function sendOffer(remoteSid) {
-    const peer = _peers[remoteSid];
+    var peer = _peers[remoteSid];
     if (!peer) return;
-    const offer = await peer.pc.createOffer();
+    var offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer });
+    socket.emit('webrtc-signal', { target: remoteSid, offer: offer });
   }
 
   async function onWebRTCSignal(data) {
     if (!data) return;
-    const senderSid = data.sender;
+    var senderSid = data.sender;
     if (!senderSid) return;
 
+    // Create peer on demand if offer arrives before users-updated
     if (data.offer && !_peers[senderSid]) {
-      const known = _knownPlayers[senderSid];
-      createPeer(senderSid, known ? known.slot : 1, false);
+      var known = _knownPlayers[senderSid];
+      createPeer(senderSid, known ? known.slot : null, false);
     }
 
-    const peer = _peers[senderSid];
+    var peer = _peers[senderSid];
     if (!peer) return;
 
     if (data.offer) {
       await peer.pc.setRemoteDescription(data.offer);
       await drainCandidates(peer);
-      const answer = await peer.pc.createAnswer();
+      var answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
-      socket.emit('webrtc-signal', { target: senderSid, answer });
+      socket.emit('webrtc-signal', { target: senderSid, answer: answer });
+
     } else if (data.answer) {
       await peer.pc.setRemoteDescription(data.answer);
       await drainCandidates(peer);
+
     } else if (data.candidate) {
       if (peer.remoteDescSet) {
         try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
@@ -360,19 +450,19 @@
 
   async function drainCandidates(peer) {
     peer.remoteDescSet = true;
-    for (const c of peer.pendingCandidates) {
-      try { await peer.pc.addIceCandidate(c); } catch (_) {}
+    for (var i = 0; i < peer.pendingCandidates.length; i++) {
+      try { await peer.pc.addIceCandidate(peer.pendingCandidates[i]); } catch (_) {}
     }
     peer.pendingCandidates = [];
   }
 
-  // ── Data channel ───────────────────────────────────────────────────────
+  // -- Data channel ----------------------------------------------------------
 
   function setupDataChannel(remoteSid, ch) {
     ch.binaryType = 'arraybuffer';
 
-    ch.onopen = () => {
-      const peer = _peers[remoteSid];
+    ch.onopen = function () {
+      var peer = _peers[remoteSid];
       if (!peer) return;
       console.log('[lockstep-v4] DC open with', remoteSid, 'slot:', peer.slot);
       peer.ready = true;
@@ -380,70 +470,115 @@
 
       if (_selfEmuReady) ch.send('emu-ready');
 
+      // Late join: if game is already running, host sends state to new player
+      if (_running && _playerSlot === 0 && peer.slot !== null && peer.slot !== undefined) {
+        setTimeout(function () { sendLateJoinState(remoteSid); }, 500);
+      }
+
+      // Late join: if game is running, host starts spectator stream for new spectator
+      if (_running && _playerSlot === 0 && peer.slot === null) {
+        startSpectatorStreamForPeer(remoteSid);
+      }
+
       if (!_gameStarted) startGameSequence();
     };
 
-    ch.onclose = () => {
+    ch.onclose = function () {
       console.log('[lockstep-v4] DC closed with', remoteSid);
       handlePeerDisconnect(remoteSid);
     };
 
-    ch.onerror = (e) => console.log('[lockstep-v4] DC error:', remoteSid, e);
+    ch.onerror = function (e) {
+      console.log('[lockstep-v4] DC error:', remoteSid, e);
+    };
 
-    ch.onmessage = (e) => {
-      const peer = _peers[remoteSid];
+    ch.onmessage = function (e) {
+      var peer = _peers[remoteSid];
       if (!peer) return;
 
+      // String messages
       if (typeof e.data === 'string') {
-        if (e.data === 'ready')          { peer.ready = true; }
-        if (e.data === 'emu-ready')      { peer.emuReady = true; checkBothEmuReady(); }
-        if (e.data === 'lockstep-ready') { _peerLockstepReady = true; checkBothLockstepReady(); }
-        // JSON messages (save-state sent via DC)
+        if (e.data === 'ready')     { peer.ready = true; }
+        if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        if (e.data === 'lockstep-ready') {
+          _lockstepReadyPeers[remoteSid] = true;
+          checkAllLockstepReady();
+        }
+        // JSON messages
         if (e.data.charAt(0) === '{') {
           try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'save-state') handleSaveStateMsg(msg);
+            var msg = JSON.parse(e.data);
+            if (msg.type === 'save-state')      handleSaveStateMsg(msg);
+            if (msg.type === 'late-join-state')  handleLateJoinState(msg);
           } catch (_) {}
         }
         return;
       }
 
-      // Binary: Int32Array [frame, inputMask]
+      // Binary: Int32Array [frame, inputMask] -- 8 bytes per input
       if (e.data instanceof ArrayBuffer && e.data.byteLength === 8) {
-        const arr = new Int32Array(e.data);
-        _remoteInputs[arr[0]] = arr[1];
+        if (peer.slot === null || peer.slot === undefined) return;  // spectators don't send input
+        var arr = new Int32Array(e.data);
+        if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
+        _remoteInputs[peer.slot][arr[0]] = arr[1];
         _remoteReceived++;
         if (arr[0] > _lastRemoteFrame) _lastRemoteFrame = arr[0];
       }
     };
   }
 
+  // -- Peer disconnect (drop handling) ---------------------------------------
+
   function handlePeerDisconnect(remoteSid) {
-    const peer = _peers[remoteSid];
+    var peer = _peers[remoteSid];
     if (!peer) return;
+
+    // If the peer was a player, zero their input in Wasm memory
+    if (peer.slot !== null && peer.slot !== undefined) {
+      try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+      delete _remoteInputs[peer.slot];
+    }
+
     delete _peers[remoteSid];
+    delete _lockstepReadyPeers[remoteSid];
     window._peers = _peers;
-    console.log('[lockstep-v4] peer disconnected:', remoteSid);
-    if (_running) {
-      setStatus('Peer disconnected');
-      stopSync();
+    console.log('[lockstep-v4] peer disconnected:', remoteSid, 'slot:', peer.slot);
+
+    // Check if any active player peers remain
+    var remaining = getActivePeers();
+    if (remaining.length === 0 && _running) {
+      setStatus('All peers disconnected -- running solo');
+      // Keep running: single-player mode. The tick loop handles zero active peers
+      // gracefully by just stepping frames with local input only.
+    } else if (_running) {
+      var count = remaining.length + 1;  // +1 for self
+      setStatus('Peer left -- ' + count + ' player' + (count > 1 ? 's' : '') + ' remaining');
     }
   }
 
-  function getPeer() {
-    return Object.values(_peers)[0] || null;
+  // -- Helper: get active player peers ---------------------------------------
+
+  function getActivePeers() {
+    return Object.values(_peers).filter(function (p) {
+      return p.slot !== null && p.slot !== undefined
+        && p.dc && p.dc.readyState === 'open';
+    });
   }
 
-  // ── Game start sequence ────────────────────────────────────────────────
+  // -- Game start sequence ---------------------------------------------------
 
   // Minimum frames the emulator must run before we consider it ready.
-  // The N64 BIOS + game boot takes many frames; we need the main loop
-  // fully established and running before we sync state.
-  const MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
+  var MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
 
   function startGameSequence() {
     if (_gameStarted) return;
     _gameStarted = true;
+
+    // Spectators: don't start emulator, don't enter manual mode
+    if (_isSpectator) {
+      setStatus('Spectating...');
+      return;
+    }
 
     setStatus('Starting emulator...');
     triggerEmulatorStart();
@@ -452,12 +587,12 @@
     disableEJSKeyboard();
 
     // Wait for gameManager AND for the emulator to run enough frames
-    const waitForEmu = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var waitForEmu = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(waitForEmu, 100); return; }
 
-      const mod = gm.Module;
-      const frames = mod && mod._get_current_frame_count
+      var mod = gm.Module;
+      var frames = mod && mod._get_current_frame_count
         ? mod._get_current_frame_count() : 0;
 
       if (frames < MIN_BOOT_FRAMES) {
@@ -468,50 +603,68 @@
       console.log('[lockstep-v4] emulator booted (' + frames + ' frames)');
       _selfEmuReady = true;
 
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('emu-ready');
-      }
+      // Notify all connected peers
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send('emu-ready'); } catch (_) {}
+        }
+      });
 
-      checkBothEmuReady();
+      checkAllEmuReady();
     };
     waitForEmu();
   }
 
-  function checkBothEmuReady() {
+  function checkAllEmuReady() {
     if (!_selfEmuReady) return;
-    const peer = getPeer();
-    if (!peer || !peer.emuReady) return;
+    if (_isSpectator) return;
     if (_running) return;
 
-    console.log('[lockstep-v4] both emulators ready -- syncing initial state');
+    // Wait for at least 1 player peer to be emu-ready
+    var playerPeers = Object.values(_peers).filter(function (p) {
+      return p.slot !== null && p.slot !== undefined;
+    });
+    var emuReadyCount = playerPeers.filter(function (p) { return p.emuReady; }).length;
+    if (emuReadyCount === 0) return;
+
+    console.log('[lockstep-v4] ' + (emuReadyCount + 1) + ' emulators ready -- syncing initial state');
     setStatus('Syncing...');
 
     if (_playerSlot === 0) {
       // Host: capture and send save state
       sendInitialState();
     }
-    // Guest: waits for save state via handleSaveState
+    // Guests: wait for save state via handleSaveStateMsg
   }
 
-  function checkBothLockstepReady() {
-    if (!_selfLockstepReady || !_peerLockstepReady) return;
+  function checkAllLockstepReady() {
+    if (!_selfLockstepReady) return;
     if (_running) return;
-    console.log('[lockstep-v4] both sides lockstep-ready -- GO');
 
-    // Load the save state on BOTH sides. The host also loads its own
-    // captured state -- this resets the WebGL context so the canvas
-    // renders correctly instead of showing stale boot-screen content.
-    const gm = window.EJS_emulator.gameManager;
+    // Check that at least 1 player peer is lockstep-ready
+    var playerPeerSids = Object.keys(_peers).filter(function (sid) {
+      var p = _peers[sid];
+      return p.slot !== null && p.slot !== undefined;
+    });
+    var readyCount = playerPeerSids.filter(function (sid) {
+      return _lockstepReadyPeers[sid];
+    }).length;
+
+    if (readyCount === 0) return;
+
+    console.log('[lockstep-v4] ' + (readyCount + 1) + ' players lockstep-ready -- GO');
+
+    // Load the save state. Host also loads its own captured state to reset
+    // the WebGL context so the canvas renders correctly.
+    var gm = window.EJS_emulator.gameManager;
     if (_guestStateBytes) {
       gm.loadState(_guestStateBytes);
       _guestStateBytes = null;
       console.log('[lockstep-v4] loaded initial state (slot ' + _playerSlot + ')');
     } else {
-      // Fallback: if state bytes not available, force a state round-trip
-      // to reset the GL context
+      // Fallback: self-reset to fix GL context
       console.log('[lockstep-v4] WARNING: no state bytes, doing self-reset');
-      const selfState = gm.getState();
+      var selfState = gm.getState();
       gm.loadState(selfState);
     }
 
@@ -521,89 +674,262 @@
     // Both sides reset and start true lockstep sync
     _frameNum = 0;
     startLockstep();
+
+    // Host: start spectator streaming after lockstep begins
+    if (_playerSlot === 0) {
+      setTimeout(startSpectatorStream, 1000);
+    }
   }
 
   async function sendInitialState() {
-    const gm = window.EJS_emulator.gameManager;
+    var gm = window.EJS_emulator.gameManager;
     try {
-      const raw = gm.getState();
-      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       // Store for host to also load (resets GL context for proper rendering)
       _guestStateBytes = bytes;
-      const compressed = await compressState(bytes);
-      const b64 = uint8ToBase64(compressed);
-      console.log('[lockstep-v4] sending initial state via DC (' +
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep-v4] sending initial state via Socket.IO (' +
         Math.round(bytes.length / 1024) + 'KB raw -> ' +
         Math.round(compressed.length / 1024) + 'KB gzip)');
 
-      // Send via Socket.IO -- the save state is ~1.5MB which crashes WebRTC
-      // data channels (SCTP can't handle messages that large with maxRetransmits).
-      // Server needs max_http_buffer_size=16MB (configured in signaling.py).
+      // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
+      // data channels (SCTP limit with maxRetransmits).
       socket.emit('data-message', { type: 'save-state', frame: 0, data: b64 });
 
-      // Host is ready -- signal via DC (small message, fine for DC)
+      // Host is ready
       _selfLockstepReady = true;
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('lockstep-ready');
-      }
-      checkBothLockstepReady();
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
+          try { p.dc.send('lockstep-ready'); } catch (_) {}
+        }
+      });
+      checkAllLockstepReady();
     } catch (err) {
       console.log('[lockstep-v4] failed to send initial state:', err);
     }
   }
 
   function handleSaveStateMsg(msg) {
-    // Handle save state from either DC JSON or Socket.IO data-message
+    if (_isSpectator) return;
     console.log('[lockstep-v4] received initial state');
     setStatus('Loading initial state...');
 
     var compressed = base64ToUint8(msg.data);
-    decompressState(compressed).then(function(bytes) {
+    decompressState(compressed).then(function (bytes) {
       _guestStateBytes = bytes;
       console.log('[lockstep-v4] initial state decompressed (' + bytes.length + ' bytes)');
 
       _selfLockstepReady = true;
-      var peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('lockstep-ready');
-      }
-      checkBothLockstepReady();
-    }).catch(function(err) {
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
+          try { p.dc.send('lockstep-ready'); } catch (_) {}
+        }
+      });
+      checkAllLockstepReady();
+    }).catch(function (err) {
       console.log('[lockstep-v4] failed to decompress initial state:', err);
     });
   }
 
-  // ── Direct memory input ────────────────────────────────────────────────
+  // -- Late join -------------------------------------------------------------
+
+  async function sendLateJoinState(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer) return;
+    if (peer.slot === null || peer.slot === undefined) return;
+
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+
+    try {
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep-v4] sending late-join state to', remoteSid,
+        '(' + Math.round(bytes.length / 1024) + 'KB raw -> ' +
+        Math.round(compressed.length / 1024) + 'KB gzip)',
+        'frame:', _frameNum);
+
+      // Send via Socket.IO since save states are too large for DC
+      socket.emit('data-message', {
+        type: 'late-join-state',
+        frame: _frameNum,
+        data: b64,
+      });
+    } catch (err) {
+      console.log('[lockstep-v4] failed to send late-join state:', err);
+    }
+  }
+
+  function handleLateJoinState(msg) {
+    if (_isSpectator) return;
+    if (_running) return;  // already running, ignore duplicate
+
+    console.log('[lockstep-v4] received late-join state for frame', msg.frame);
+    setStatus('Loading late-join state...');
+
+    var compressed = base64ToUint8(msg.data);
+    decompressState(compressed).then(function (bytes) {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      if (!gm) {
+        console.log('[lockstep-v4] gameManager not ready for late join');
+        return;
+      }
+
+      // Enter manual mode, load state, set frame, start tick loop
+      enterManualMode();
+      gm.loadState(bytes);
+      _frameNum = msg.frame;
+      console.log('[lockstep-v4] late-join state loaded at frame', _frameNum);
+
+      startLockstep();
+    }).catch(function (err) {
+      console.log('[lockstep-v4] failed to handle late-join state:', err);
+    });
+  }
+
+  // -- Spectator canvas streaming --------------------------------------------
+
+  function startSpectatorStream() {
+    if (_playerSlot !== 0) return;
+
+    var canvas = document.querySelector('#game canvas');
+    if (!canvas) {
+      console.log('[lockstep-v4] canvas not found for spectator stream');
+      return;
+    }
+
+    // Create a smaller capture canvas for efficiency (same as streaming prototype)
+    var captureCanvas = document.createElement('canvas');
+    captureCanvas.width = 640;
+    captureCanvas.height = 480;
+    var ctx = captureCanvas.getContext('2d');
+
+    _hostStream = captureCanvas.captureStream(0);  // manual frame control
+    var captureTrack = _hostStream.getVideoTracks()[0];
+
+    // Blit loop: copy emulator canvas to capture canvas every frame
+    function blitFrame() {
+      _origRAF.call(window, blitFrame);
+      ctx.drawImage(canvas, 0, 0, 640, 480);
+      if (captureTrack.requestFrame) captureTrack.requestFrame();
+    }
+    blitFrame();
+
+    console.log('[lockstep-v4] spectator capture stream started (640x480)');
+
+    // Add tracks to all existing spectator peer connections
+    Object.entries(_peers).forEach(function (entry) {
+      var sid = entry[0];
+      var peer = entry[1];
+      if (peer.slot === null) {
+        addStreamToPeer(sid);
+      }
+    });
+  }
+
+  function startSpectatorStreamForPeer(remoteSid) {
+    if (!_hostStream) {
+      // Stream not started yet -- it will be started after lockstep begins
+      // and will pick up this peer then
+      return;
+    }
+    addStreamToPeer(remoteSid);
+  }
+
+  function addStreamToPeer(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer || !_hostStream) return;
+
+    _hostStream.getTracks().forEach(function (track) {
+      peer.pc.addTrack(track, _hostStream);
+    });
+    renegotiate(remoteSid);
+  }
+
+  async function renegotiate(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer) return;
+    try {
+      var offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      socket.emit('webrtc-signal', { target: remoteSid, offer: offer });
+    } catch (err) {
+      console.log('[lockstep-v4] renegotiate failed:', err);
+    }
+  }
+
+  function showSpectatorVideo(event, peer) {
+    if (!_guestVideo) {
+      _guestVideo = document.createElement('video');
+      _guestVideo.id = 'guest-video';
+      _guestVideo.autoplay = true;
+      _guestVideo.playsInline = true;
+      _guestVideo.muted = false;
+      _guestVideo.disableRemotePlayback = true;
+      _guestVideo.setAttribute('playsinline', '');
+
+      var gameDiv = document.getElementById('game');
+      if (gameDiv) {
+        gameDiv.innerHTML = '';
+        gameDiv.appendChild(_guestVideo);
+      } else {
+        document.body.appendChild(_guestVideo);
+      }
+    }
+    _guestVideo.srcObject = event.streams[0];
+
+    // Minimize jitter buffer for low latency
+    try {
+      var receivers = peer.pc.getReceivers();
+      for (var i = 0; i < receivers.length; i++) {
+        var recv = receivers[i];
+        if (recv.track && recv.track.kind === 'video') {
+          if ('playoutDelayHint' in recv) recv.playoutDelayHint = 0;
+          if ('jitterBufferTarget' in recv) recv.jitterBufferTarget = 0;
+        }
+      }
+    } catch (_) {}
+
+    setStatus('Spectating...');
+  }
+
+  // -- Direct memory input ---------------------------------------------------
 
   function writeInputToMemory(player, inputMask) {
-    const buf = window.EJS_emulator.gameManager.Module.HEAPU8.buffer;
-    const dv = new DataView(buf);
+    var buf = window.EJS_emulator.gameManager.Module.HEAPU8.buffer;
+    var dv = new DataView(buf);
 
     // Digital buttons (0-15): write 0 or 1 as int32
-    for (let btn = 0; btn < 16; btn++) {
-      const addr = INPUT_BASE + (btn * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+    for (var btn = 0; btn < 16; btn++) {
+      var addr = INPUT_BASE + (btn * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
       dv.setInt32(addr, (inputMask >> btn) & 1, true);
     }
 
     // Analog axes (16+): buttons come in +/- pairs (16/17, 18/19, ...)
     // Each pair maps to an axis. If + is pressed, value = 32767.
     // If - is pressed, value = -32767. Both or neither = 0.
-    for (let base = 16; base < 20; base += 2) {
-      const posPressed = (inputMask >> base) & 1;
-      const negPressed = (inputMask >> (base + 1)) & 1;
-      const axisVal = (posPressed - negPressed) * 32767;
-      const addrPos = INPUT_BASE + (base * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
-      const addrNeg = INPUT_BASE + ((base + 1) * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+    for (var base = 16; base < 20; base += 2) {
+      var posPressed = (inputMask >> base) & 1;
+      var negPressed = (inputMask >> (base + 1)) & 1;
+      var axisVal = (posPressed - negPressed) * 32767;
+      var addrPos = INPUT_BASE + (base * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+      var addrNeg = INPUT_BASE + ((base + 1) * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
       dv.setInt32(addrPos, axisVal, true);
-      dv.setInt32(addrNeg, 0, true);  // negative axis slot unused when writing combined
+      dv.setInt32(addrNeg, 0, true);
     }
   }
 
-  // ── Frame stepping (rAF interception) ──────────────────────────────────
+  // -- Frame stepping (rAF interception) -------------------------------------
 
   function enterManualMode() {
-    const mod = window.EJS_emulator.gameManager.Module;
+    if (_manualMode) return;
+    if (_isSpectator) return;  // spectators never enter manual mode
+
+    var mod = window.EJS_emulator.gameManager.Module;
 
     // Save the real requestAnimationFrame
     _origRAF = window.requestAnimationFrame;
@@ -612,7 +938,7 @@
     mod.pauseMainLoop();
 
     // Replace rAF with interceptor that captures the runner
-    window.requestAnimationFrame = function(cb) {
+    window.requestAnimationFrame = function (cb) {
       _pendingRunner = cb;
       return -999;
     };
@@ -626,41 +952,43 @@
 
   function stepOneFrame() {
     if (!_pendingRunner) return false;
-    const runner = _pendingRunner;
+    var runner = _pendingRunner;
     _pendingRunner = null;
     runner(performance.now());
     // Force GL composite via real rAF no-op
-    _origRAF.call(window, function(){});
+    _origRAF.call(window, function () {});
     return true;
   }
 
-  // ── True lockstep tick loop ────────────────────────────────────────────
+  // -- True lockstep tick loop -----------------------------------------------
   //
   // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
   // game loop (background tabs would throttle it). Each tick:
-  //   1. Send local input for current frame
-  //   2. Check if remote input is available for the apply frame
-  //   3. If not, stall (return early, next interval fires in ~16ms or
-  //      use setTimeout(tick,1) for tighter retry)
-  //   4. Write both inputs to Wasm memory
+  //   1. Send local input for current frame to ALL peers
+  //   2. Check if ALL active player peers have input for the apply frame
+  //   3. If not, stall (return early, retry via setTimeout(1))
+  //   4. Write ALL players' inputs to Wasm memory
   //   5. Step exactly one frame
   //   6. Increment frame counter
 
   // FPS + debug tracking
-  let _fpsLastTime    = 0;
-  let _fpsFrameCount  = 0;
-  let _fpsCurrent     = 0;
-  let _remoteReceived = 0;  // total remote inputs received
-  let _remoteMissed   = 0;  // times we had to stall
-  let _remoteApplied  = 0;  // times we applied real remote input
-  let _lastRemoteFrame = -1; // highest remote frame number seen
+  var _fpsLastTime     = 0;
+  var _fpsFrameCount   = 0;
+  var _fpsCurrent      = 0;
+  var _remoteReceived  = 0;
+  var _remoteMissed    = 0;
+  var _remoteApplied   = 0;
+  var _lastRemoteFrame = -1;
+  var _stallRetryPending = false;
 
   function startLockstep() {
     if (_running) return;
     _running = true;
-    _frameNum = 0;
-    _localInputs = {};
-    _remoteInputs = {};
+    // Only reset frame counter if not a late join (late join sets _frameNum before calling)
+    if (_frameNum === 0) {
+      _localInputs = {};
+      _remoteInputs = {};
+    }
     _fpsLastTime = performance.now();
     _fpsFrameCount = 0;
     _fpsCurrent = 0;
@@ -671,8 +999,10 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
+    var activePeers = getActivePeers();
+    var peerSlots = activePeers.map(function (p) { return p.slot; });
     console.log('[lockstep-v4] lockstep started -- slot:', _playerSlot,
-      'peerSlot:', _peerSlot, 'delay:', DELAY_FRAMES);
+      'peerSlots:', peerSlots.join(','), 'delay:', DELAY_FRAMES);
     setStatus('Connected -- game on!');
 
     // Use setInterval so background tabs are not throttled
@@ -697,68 +1027,82 @@
   function tick() {
     if (!_running) return;
 
-    const peer = getPeer();
-    if (!peer || !peer.dc || peer.dc.readyState !== 'open') {
-      setStatus('Peer disconnected');
-      stopSync();
-      return;
-    }
+    var activePeers = getActivePeers();
 
     // FPS counter
     _fpsFrameCount++;
-    const now = performance.now();
+    var now = performance.now();
     if (now - _fpsLastTime >= 1000) {
       _fpsCurrent = _fpsFrameCount;
       _fpsFrameCount = 0;
       _fpsLastTime = now;
     }
 
-    // Send local input for current frame
-    const mask = readLocalInput();
+    // Send local input for current frame to ALL open peer DCs
+    var mask = readLocalInput();
     _localInputs[_frameNum] = mask;
-    const buf = new Int32Array([_frameNum, mask]).buffer;
-    try { peer.dc.send(buf); } catch (_) {}
-
-    // Check if remote input is ready for the apply frame
-    const applyFrame = _frameNum - DELAY_FRAMES;
-    if (applyFrame >= 0 && !(_remoteInputs.hasOwnProperty(applyFrame))) {
-      // STALL -- remote input not here yet
-      if (_stallStart === 0) {
-        _stallStart = now;
-      }
-      if (now - _stallStart >= MAX_STALL_MS) {
-        // Timeout -- peer is gone
-        console.log('[lockstep-v4] stall timeout at frame', applyFrame,
-          '(' + MAX_STALL_MS + 'ms)');
-        _remoteInputs[applyFrame] = 0;  // inject zero input to unstick
-        _stallStart = 0;
-      } else {
-        _remoteMissed++;
-        // Return early -- next setInterval tick will retry
-        // For tighter retry, schedule a 1ms callback
-        if (!_stallRetryPending) {
-          _stallRetryPending = true;
-          setTimeout(function() {
-            _stallRetryPending = false;
-            tick();
-          }, 1);
-        }
-        return;
-      }
-    } else {
-      // Input arrived (or no apply frame yet) -- reset stall timer
-      _stallStart = 0;
+    var buf = new Int32Array([_frameNum, mask]).buffer;
+    for (var i = 0; i < activePeers.length; i++) {
+      try { activePeers[i].dc.send(buf); } catch (_) {}
     }
 
-    // Write inputs to Wasm memory
+    // Check if ALL active player peers have input for the apply frame
+    var applyFrame = _frameNum - DELAY_FRAMES;
     if (applyFrame >= 0) {
+      var allArrived = true;
+      for (var j = 0; j < activePeers.length; j++) {
+        var pSlot = activePeers[j].slot;
+        if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
+          allArrived = false;
+          break;
+        }
+      }
+
+      if (!allArrived) {
+        // STALL -- remote input not here yet
+        if (_stallStart === 0) {
+          _stallStart = now;
+        }
+        if (now - _stallStart >= MAX_STALL_MS) {
+          // Timeout -- inject zero input for missing peers to unstick
+          console.log('[lockstep-v4] stall timeout at frame', applyFrame,
+            '(' + MAX_STALL_MS + 'ms)');
+          for (var k = 0; k < activePeers.length; k++) {
+            var s = activePeers[k].slot;
+            if (!_remoteInputs[s]) _remoteInputs[s] = {};
+            if (_remoteInputs[s][applyFrame] === undefined) {
+              _remoteInputs[s][applyFrame] = 0;
+            }
+          }
+          _stallStart = 0;
+        } else {
+          _remoteMissed++;
+          // Retry quickly via setTimeout(1) to avoid 16ms wait
+          if (!_stallRetryPending) {
+            _stallRetryPending = true;
+            setTimeout(function () {
+              _stallRetryPending = false;
+              tick();
+            }, 1);
+          }
+          return;
+        }
+      } else {
+        _stallStart = 0;
+      }
+
+      // Write ALL inputs to Wasm memory
       writeInputToMemory(_playerSlot, _localInputs[applyFrame] || 0);
-      writeInputToMemory(_peerSlot, _remoteInputs[applyFrame] || 0);
+      for (var m = 0; m < activePeers.length; m++) {
+        var peerSlot = activePeers[m].slot;
+        var remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
+        writeInputToMemory(peerSlot, remoteMask);
+        if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+      }
       _remoteApplied++;
 
-      // Cleanup old entries
+      // Cleanup old local entry
       delete _localInputs[applyFrame];
-      delete _remoteInputs[applyFrame];
     }
 
     // Step one frame
@@ -769,17 +1113,25 @@
 
     // Debug overlay -- update every 15 frames (~4x per second)
     if (_frameNum % 15 === 0) {
-      const dbg = document.getElementById('np-debug');
+      var dbg = document.getElementById('np-debug');
       if (dbg) {
         dbg.style.display = '';
-        const remoteKeys = Object.keys(_remoteInputs).length;
+        var playerCount = activePeers.length + 1;  // +1 for self
+        var spectatorCount = Object.values(_peers).filter(function (p) {
+          return p.slot === null;
+        }).length;
+        var remoteBufTotal = 0;
+        Object.keys(_remoteInputs).forEach(function (slot) {
+          remoteBufTotal += Object.keys(_remoteInputs[slot] || {}).length;
+        });
         dbg.textContent =
           'F:' + _frameNum +
           ' fps:' + _fpsCurrent +
           ' slot:' + _playerSlot +
-          ' peer:' + _peerSlot +
+          ' players:' + playerCount +
+          (spectatorCount > 0 ? ' spec:' + spectatorCount : '') +
           ' delay:' + DELAY_FRAMES +
-          ' rBuf:' + remoteKeys +
+          ' rBuf:' + remoteBufTotal +
           ' rcv:' + _remoteReceived +
           ' hit:' + _remoteApplied +
           ' miss:' + _remoteMissed +
@@ -788,26 +1140,23 @@
     }
   }
 
-  // Stall retry flag -- prevents stacking multiple setTimeout(tick, 1) calls
-  let _stallRetryPending = false;
-
-  // ── Input read ─────────────────────────────────────────────────────────
+  // -- Input read ------------------------------------------------------------
 
   function readLocalInput() {
-    let mask = 0;
+    var mask = 0;
 
     // Gamepad
-    const gp = navigator.getGamepads()[0];
+    var gp = navigator.getGamepads()[0];
     if (gp) {
-      for (let i = 0; i < Math.min(gp.buttons.length, 32); i++) {
+      for (var i = 0; i < Math.min(gp.buttons.length, 32); i++) {
         if (gp.buttons[i].pressed) mask |= (1 << i);
       }
     }
 
     // Keyboard
     if (_p1KeyMap) {
-      _heldKeys.forEach(kc => {
-        const btnIdx = _p1KeyMap[kc];
+      _heldKeys.forEach(function (kc) {
+        var btnIdx = _p1KeyMap[kc];
         if (btnIdx !== undefined) mask |= (1 << btnIdx);
       });
     }
@@ -815,87 +1164,99 @@
     return mask;
   }
 
-  // ── Compression helpers ────────────────────────────────────────────────
+  // -- Compression helpers ---------------------------------------------------
 
   async function compressState(bytes) {
-    const cs = new CompressionStream('gzip');
-    const writer = cs.writable.getWriter();
+    var cs = new CompressionStream('gzip');
+    var writer = cs.writable.getWriter();
     writer.write(bytes);
     writer.close();
-    const reader = cs.readable.getReader();
-    const chunks = [];
+    var reader = cs.readable.getReader();
+    var chunks = [];
     while (true) {
-      const { value, done } = await reader.read();
-      if (value) chunks.push(value);
-      if (done) break;
+      var result = await reader.read();
+      if (result.value) chunks.push(result.value);
+      if (result.done) break;
     }
-    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-    let offset = 0;
-    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+    var offset = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], offset);
+      offset += chunks[i].length;
+    }
     return out;
   }
 
   async function decompressState(bytes) {
-    const ds = new DecompressionStream('gzip');
-    const writer = ds.writable.getWriter();
+    var ds = new DecompressionStream('gzip');
+    var writer = ds.writable.getWriter();
     writer.write(bytes);
     writer.close();
-    const reader = ds.readable.getReader();
-    const chunks = [];
+    var reader = ds.readable.getReader();
+    var chunks = [];
     while (true) {
-      const { value, done } = await reader.read();
-      if (value) chunks.push(value);
-      if (done) break;
+      var result = await reader.read();
+      if (result.value) chunks.push(result.value);
+      if (result.done) break;
     }
-    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-    let offset = 0;
-    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+    var offset = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], offset);
+      offset += chunks[i].length;
+    }
     return out;
   }
 
   function uint8ToBase64(bytes) {
-    const chunkSize = 32768;
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    var chunkSize = 32768;
+    var binary = '';
+    for (var i = 0; i < bytes.length; i += chunkSize) {
+      var chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
       binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
   }
 
   function base64ToUint8(b64) {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    var binary = atob(b64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
   }
 
-  // ── Cheats ─────────────────────────────────────────────────────────────
+  // -- Cheats ----------------------------------------------------------------
 
   function applyStandardCheats() {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var attempt = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(attempt, 500); return; }
       try {
-        SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code));
+        SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
         console.log('[lockstep-v4] applied', SSB64_ONLINE_CHEATS.length, 'standard cheats');
       } catch (_) { setTimeout(attempt, 500); return; }
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 2000);
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 5000);
+      setTimeout(function () {
+        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
+      }, 2000);
+      setTimeout(function () {
+        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
+      }, 5000);
     };
     attempt();
   }
 
-  // ── Keyboard / input setup ────────────────────────────────────────────
+  // -- Keyboard / input setup ------------------------------------------------
 
   function setupKeyTracking() {
     if (_p1KeyMap) return;
 
-    const ejs = window.EJS_emulator;
+    var ejs = window.EJS_emulator;
     if (ejs && ejs.controls && ejs.controls[0]) {
       _p1KeyMap = {};
-      Object.entries(ejs.controls[0]).forEach(([btnIdx, binding]) => {
-        const kc = binding && binding.value;
+      Object.entries(ejs.controls[0]).forEach(function (entry) {
+        var btnIdx = entry[0];
+        var binding = entry[1];
+        var kc = binding && binding.value;
         if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
       });
     }
@@ -905,21 +1266,21 @@
     }
 
     if (!setupKeyTracking._listenersAdded) {
-      document.addEventListener('keydown', (e) => { _heldKeys.add(e['keyCode']); }, true);
-      document.addEventListener('keyup',   (e) => { _heldKeys.delete(e['keyCode']); }, true);
+      document.addEventListener('keydown', function (e) { _heldKeys.add(e['keyCode']); }, true);
+      document.addEventListener('keyup',   function (e) { _heldKeys.delete(e['keyCode']); }, true);
       setupKeyTracking._listenersAdded = true;
     }
   }
 
   function disableEJSKeyboard() {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var attempt = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(attempt, 200); return; }
       gm.setKeyboardEnabled(false);
-      const ejs = window.EJS_emulator;
-      const parent = ejs.elements && ejs.elements.parent;
+      var ejs = window.EJS_emulator;
+      var parent = ejs.elements && ejs.elements.parent;
       if (parent) {
-        const block = e => e.stopImmediatePropagation();
+        var block = function (e) { e.stopImmediatePropagation(); };
         parent.addEventListener('keydown', block, true);
         parent.addEventListener('keyup',   block, true);
       }
@@ -927,13 +1288,13 @@
     attempt();
   }
 
-  // ── Emulator start ─────────────────────────────────────────────────────
+  // -- Emulator start --------------------------------------------------------
 
   function triggerEmulatorStart() {
-    const attempt = () => {
-      const btn = document.querySelector('.ejs_start_button');
+    var attempt = function () {
+      var btn = document.querySelector('.ejs_start_button');
       if (btn) { btn.click(); return; }
-      const ejs = window.EJS_emulator;
+      var ejs = window.EJS_emulator;
       if (ejs && typeof ejs.startButtonClicked === 'function') {
         ejs.startButtonClicked(); return;
       }
@@ -942,13 +1303,13 @@
     attempt();
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────
+  // -- Helpers ---------------------------------------------------------------
 
   function randomCode() {
     return Math.random().toString(36).slice(2, 7).toUpperCase();
   }
 
-  window.addEventListener('DOMContentLoaded', () => {
+  window.addEventListener('DOMContentLoaded', function () {
     buildUI();
     loadSocketIO(connectSocket);
   });
