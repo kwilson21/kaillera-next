@@ -58,6 +58,8 @@
   let _remoteQueues      = {};     // slot → {frame → mask}
   let _lastRemoteMasks   = {};     // slot → last known mask (repeat on missing)
   let _delayN            = 2;      // frames of input delay
+  let _stallCount        = 0;      // consecutive stalled ticks (waiting for remote input)
+  const MAX_STALL        = 10;     // max ticks to stall before applying zero input
 
   // Phase 5: desync detection
   let _lastHash          = 0;      // last computed state hash
@@ -890,9 +892,30 @@
         });
       }
 
-      // Apply inputs from N frames ago
+      // Apply inputs from N frames ago — TRUE LOCKSTEP
+      // Both sides must have the same inputs for the same frame or we stall.
       const applyFrame = _frameNum - _delayN;
       if (applyFrame >= 0) {
+        // Check if all remote peers' inputs have arrived for applyFrame
+        const activePeers = Object.values(_peers).filter(
+          p => p.slot !== null && p.slot !== undefined && p.slot !== _playerSlot
+              && p.dc && p.dc.readyState === 'open'
+        );
+        const allArrived = activePeers.every(p => {
+          if (!_remoteQueues[p.slot]) return false;
+          return applyFrame in _remoteQueues[p.slot];
+        });
+
+        if (!allArrived && _stallCount < MAX_STALL) {
+          // STALL: don't advance frame, wait for remote input to arrive
+          _stallCount++;
+          // Still record & send local input (peer needs it), but don't apply or advance
+          return;
+        }
+
+        // Either all inputs arrived or we hit the stall limit — apply
+        _stallCount = 0;
+
         // Apply own local input (players only)
         if (!_isSpectator && _playerSlot !== null) {
           const lm = _localQueue[applyFrame] || 0;
@@ -901,15 +924,13 @@
         }
 
         // Apply remote inputs from each connected peer
-        for (const peer of Object.values(_peers)) {
-          if (peer.slot === null || peer.slot === undefined) continue;
-          if (peer.slot === _playerSlot) continue;  // skip own slot
+        for (const peer of activePeers) {
           const slot = peer.slot;
           if (!_remoteQueues[slot]) _remoteQueues[slot] = {};
 
           const rm = (applyFrame in _remoteQueues[slot])
             ? _remoteQueues[slot][applyFrame]
-            : (_lastRemoteMasks[slot] || 0);
+            : 0;  // only reached after MAX_STALL — apply zero (no buttons)
           if (applyFrame in _remoteQueues[slot]) {
             _lastRemoteMasks[slot] = _remoteQueues[slot][applyFrame];
           }
@@ -936,7 +957,8 @@
         if (dbg) {
           dbg.style.display = '';
           const peerCount = Object.keys(_peers).length;
-          dbg.textContent = 'F:' + _frameNum + ' delay:' + _delayN + ' peers:' + peerCount;
+          dbg.textContent = 'F:' + _frameNum + ' delay:' + _delayN + ' peers:' + peerCount +
+            (_stallCount > 0 ? ' STALL:' + _stallCount : '');
         }
       }
 
