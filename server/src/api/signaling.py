@@ -49,6 +49,8 @@ class Room:
     # slots: slot_index (0-3) -> playerId
     spectators: dict[str, dict] = field(default_factory=dict)
     # spectators: playerId -> {"socketId": sid, "playerName": ...}
+    status: str = "lobby"       # "lobby" or "playing"
+    mode: str | None = None     # "lockstep-v4" or "streaming", set on start-game
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -253,6 +255,44 @@ async def claim_slot(sid: str, data: dict) -> str | None:
 
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     log.info("SIO %s claimed slot %d in room %s", sid, slot, session_id)
+    return None
+
+
+@sio.on("start-game")
+async def start_game(sid: str, data: dict) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+    if room.owner != sid:
+        return "Only the host can start the game"
+
+    room.status = "playing"
+    room.mode = data.get("mode", "lockstep-v4")
+    await sio.emit("game-started", {"mode": room.mode}, room=session_id)
+    log.info("Game started in room %s (mode=%s)", session_id, room.mode)
+    return None
+
+
+@sio.on("end-game")
+async def end_game(sid: str, data: dict) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+    if room.owner != sid:
+        return "Only the host can end the game"
+
+    room.status = "lobby"
+    # mode persists for rematch convenience
+    await sio.emit("game-ended", {}, room=session_id)
+    log.info("Game ended in room %s", session_id)
     return None
 
 

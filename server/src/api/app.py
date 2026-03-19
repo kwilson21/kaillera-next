@@ -54,6 +54,25 @@ def create_app(session_mgr: SessionManager) -> FastAPI:
     def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/room/{room_id}")
+    def get_room(room_id: str) -> dict:
+        room = rooms.get(room_id)
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+        pid_to_slot = {pid: slot for slot, pid in room.slots.items()}
+        return {
+            "status": room.status,
+            "mode": room.mode,
+            "players": {
+                pid: {"playerName": info["playerName"], "slot": pid_to_slot.get(pid)}
+                for pid, info in room.players.items()
+            },
+            "spectators": {
+                pid: {"playerName": info["playerName"]}
+                for pid, info in room.spectators.items()
+            },
+        }
+
     @app.get("/list")
     def list_rooms(game_id: str | None = None) -> dict:
         result = {}
