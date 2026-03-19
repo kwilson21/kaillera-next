@@ -1,5 +1,5 @@
 /**
- * kaillera-next netplay client — Phase 4: Join/Leave Running Games
+ * kaillera-next netplay client — Phase 5: Desync Detection + Auto-Resync
  *
  * Full mesh WebRTC: each player connects to every other player.
  * With 4 players there are 6 bidirectional connections (each client manages 3).
@@ -59,10 +59,18 @@
   let _lastRemoteMasks   = {};     // slot → last known mask (repeat on missing)
   let _delayN            = 2;      // frames of input delay
 
+  // Phase 5: desync detection
+  let _lastHash          = 0;      // last computed state hash
+  let _lastHashFrame     = -1;     // frame at which _lastHash was computed
+  let _desynced          = false;  // true if desync detected
+  let _pendingResync     = null;   // {frame, data} if resync state received
+  let _resyncTimeout     = null;   // timer for resync UI
+
   // Expose for Playwright verification
   window._playerSlot  = _playerSlot;
   window._isSpectator = _isSpectator;
   window._peers       = _peers;
+  window._desynced    = false;
 
   // ── UI ─────────────────────────────────────────────────────────────────
 
@@ -421,12 +429,15 @@
       if (typeof e.data === 'string') {
         if (e.data === 'ready')     { peer.ready = true;    checkAllReady(); }
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
-        // Phase 4: late-join save state transfer via JSON string messages
+        // JSON string messages (Phase 4 + 5)
         if (e.data.charAt(0) === '{') {
           try {
             const msg = JSON.parse(e.data);
-            if (msg.type === 'save-state')    handleSaveState(msg);
-            if (msg.type === 'request-state') handleStateRequest(remoteSid);
+            if (msg.type === 'save-state')      handleSaveState(msg);
+            if (msg.type === 'request-state')   handleStateRequest(remoteSid);
+            if (msg.type === 'state-hash')      handleStateHash(msg, remoteSid);
+            if (msg.type === 'resync-request')  handleResyncRequest();
+            if (msg.type === 'resync-state')    handleResyncState(msg);
           } catch (_) {}
         }
         return;
@@ -573,6 +584,136 @@
   }
   // Expose for Playwright
   window.claimSlot = claimSlot;
+
+  // ── Phase 5: Desync detection + auto-resync ────────────────────────────
+
+  function stateHash() {
+    try {
+      const mem = window.EJS_emulator.gameManager.Module.HEAPU8;
+      if (!mem || mem.length === 0) return 0;
+      let h = 0;
+      for (let i = 0; i < 4096; i++) h = (h * 31 + mem[i]) >>> 0;
+      return h;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function broadcastHash(frame) {
+    const hash = stateHash();
+    if (hash === 0) return;  // emulator not ready
+    _lastHash = hash;
+    _lastHashFrame = frame;
+    const msg = JSON.stringify({ type: 'state-hash', frame: frame, hash: hash });
+    Object.values(_peers).forEach(p => {
+      if (p.dc && p.dc.readyState === 'open') {
+        try { p.dc.send(msg); } catch (_) {}
+      }
+    });
+  }
+
+  function handleStateHash(msg, senderSid) {
+    if (_desynced) return;  // already handling a desync
+    const localHash = _lastHash;
+    const localFrame = _lastHashFrame;
+    // Only compare if we have a hash for the same frame (or close enough)
+    if (localFrame < 0 || Math.abs(msg.frame - localFrame) > 5) return;
+    if (msg.hash !== localHash) {
+      console.log('[netplay] DESYNC detected at frame', msg.frame,
+        'local:', localHash, 'remote:', msg.hash, 'from:', senderSid);
+      _desynced = true;
+      window._desynced = true;
+      setStatus('Desync detected — resyncing…');
+      // Non-host sends resync request to host
+      if (_playerSlot !== 0) {
+        const hostPeer = Object.values(_peers).find(p => p.slot === 0);
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          hostPeer.dc.send(JSON.stringify({ type: 'resync-request' }));
+        }
+      } else {
+        // Host detected desync — send resync state to all
+        sendResyncState();
+      }
+    }
+  }
+
+  function handleResyncRequest() {
+    // Only host handles resync requests
+    if (_playerSlot !== 0) return;
+    console.log('[netplay] received resync request, sending state to all');
+    _desynced = true;
+    window._desynced = true;
+    setStatus('Desync detected — resyncing…');
+    sendResyncState();
+  }
+
+  function sendResyncState() {
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      const blob = gm.saveState();
+      const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      const msg = JSON.stringify({
+        type: 'resync-state',
+        frame: _frameNum,
+        data: b64,
+      });
+      Object.values(_peers).forEach(p => {
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send(msg); } catch (_) {}
+        }
+      });
+      // Host also loads its own state to re-anchor at the same point
+      applyResync(_frameNum, bytes);
+    } catch (err) {
+      console.log('[netplay] failed to send resync state:', err);
+      _desynced = false;
+      window._desynced = false;
+    }
+  }
+
+  function handleResyncState(msg) {
+    console.log('[netplay] received resync state for frame', msg.frame);
+    try {
+      const binary = atob(msg.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      applyResync(msg.frame, bytes);
+    } catch (err) {
+      console.log('[netplay] failed to apply resync state:', err);
+      _desynced = false;
+      window._desynced = false;
+    }
+  }
+
+  function applyResync(frame, stateBytes) {
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    try {
+      gm.loadState(stateBytes);
+    } catch (_) {}
+    // Reset frame counters and queues
+    _frameNum = frame;
+    window._frameNum = _frameNum;
+    _localQueue      = {};
+    _remoteQueues    = {};
+    _lastRemoteMasks = {};
+    _prevSlotMasks   = {};
+    _lastHash        = 0;
+    _lastHashFrame   = -1;
+    console.log('[netplay] resync applied at frame', frame);
+    setStatus('Resynced — game on!');
+    // Clear desync flag after a brief delay
+    if (_resyncTimeout) clearTimeout(_resyncTimeout);
+    _resyncTimeout = setTimeout(() => {
+      _desynced = false;
+      window._desynced = false;
+      setStatus('🟢 Connected — game on!');
+    }, 2000);
+  }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
 
@@ -723,6 +864,11 @@
       }
 
       window._frameNum = _frameNum;
+
+      // Phase 5: broadcast state hash every 60 frames for desync detection
+      if (!_isSpectator && _frameNum > 0 && _frameNum % 60 === 0) {
+        broadcastHash(_frameNum);
+      }
 
       // Update debug overlay twice per second
       if (_frameNum % 30 === 0) {
