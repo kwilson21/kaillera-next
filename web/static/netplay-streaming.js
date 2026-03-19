@@ -575,19 +575,15 @@
   }
 
   function startHostInputLoop() {
+    let _debugFrame = 0;
     function tick() {
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
-      applyInputForSlot(0, mask);  // host is always slot 0
+      applyInputForSlot(0, mask);
 
-      // Debug overlay
-      const dbg = document.getElementById('np-debug');
-      if (dbg) {
-        dbg.style.display = '';
-        const playerCount = Object.keys(_peers).length + 1;
-        dbg.textContent = 'Host | players:' + playerCount;
-      }
+      // Update debug overlay every 30 frames (~0.5s)
+      if (++_debugFrame % 30 === 0) updateDebugOverlay();
     }
     tick();
   }
@@ -601,6 +597,7 @@
     _guestLoopStarted = true;
 
     let _lastSentMask = -1;
+    let _debugFrame = 0;
     function tick() {
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
@@ -615,14 +612,61 @@
         }
       }
 
-      // Debug overlay
-      const dbg = document.getElementById('np-debug');
-      if (dbg) {
-        dbg.style.display = '';
-        dbg.textContent = 'Guest (slot ' + _playerSlot + ') | streaming';
-      }
+      // Update debug overlay every 30 frames (~0.5s)
+      if (++_debugFrame % 30 === 0) updateDebugOverlay();
     }
     tick();
+  }
+
+  // ── Debug overlay ────────────────────────────────────────────────────────
+
+  async function updateDebugOverlay() {
+    const dbg = document.getElementById('np-debug');
+    if (!dbg) return;
+    dbg.style.display = '';
+
+    const peers = _peers || {};
+    const pc = Object.values(peers)[0]?.pc;
+    const playerCount = Object.keys(peers).length + (_isSpectator ? 0 : 1);
+    const role = _playerSlot === 0 ? 'Host' : 'Guest (slot ' + _playerSlot + ')';
+
+    if (!pc) {
+      dbg.textContent = role + ' | players:' + playerCount;
+      return;
+    }
+
+    try {
+      const stats = await pc.getStats();
+      let fps = '?', codec = '?', res = '?', bitrate = '?', rtt = '?';
+
+      stats.forEach(s => {
+        // Host: outbound video stats
+        if (s.type === 'outbound-rtp' && s.kind === 'video') {
+          fps = s.framesPerSecond || '?';
+          res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
+        }
+        // Guest: inbound video stats
+        if (s.type === 'inbound-rtp' && s.kind === 'video') {
+          fps = s.framesPerSecond || '?';
+          res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
+        }
+        if (s.type === 'candidate-pair' && s.state === 'succeeded') {
+          rtt = s.currentRoundTripTime !== undefined
+            ? Math.round(s.currentRoundTripTime * 1000) + 'ms' : '?';
+          if (s.availableOutgoingBitrate) {
+            bitrate = Math.round(s.availableOutgoingBitrate / 1000) + 'kbps';
+          }
+        }
+        if (s.type === 'codec' && s.mimeType && s.mimeType.includes('video')) {
+          codec = s.mimeType.replace('video/', '');
+        }
+      });
+
+      dbg.textContent = role + ' | ' + codec + ' ' + res + ' ' + fps + 'fps | '
+        + 'rtt:' + rtt + ' | players:' + playerCount;
+    } catch (_) {
+      dbg.textContent = role + ' | players:' + playerCount;
+    }
   }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
