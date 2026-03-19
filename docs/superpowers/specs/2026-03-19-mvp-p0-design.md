@@ -79,12 +79,14 @@ URL params passed to play.html:
 
 **Phase 1 — Connect & Join:**
 1. Parse URL params (`room`, `host`, `name`, `mode`, `spectate`)
-2. Fetch `GET /room/{room_id}` to check room status
-3. Load Socket.IO, connect to server
-4. If `host=1`: emit `open-room`, show pre-game overlay
-5. If no `host`: emit `join-room` (with `spectate` flag if present)
-6. If room status is `"playing"` and user is spectator: skip overlay, init engine immediately
-7. If room status is `"playing"` and user is player: show overlay briefly, then init engine (late join)
+2. Connect Socket.IO to server
+3. If `host=1`: emit `open-room`, show pre-game overlay (no room exists yet — skip REST check)
+4. If not host: fetch `GET /room/{room_id}` to check room status, then emit `join-room` (with `spectate` flag if present)
+5. If room status is `"playing"` and user is spectator: skip overlay, init engine immediately
+6. If room status is `"playing"` and user is player: show overlay briefly, then init engine (late join)
+7. If room not found (404): show error "Room not found" with link back to lobby
+
+**WebRTC timing:** Peer connections are established during the pre-game phase. The engine's `onUsersUpdated` handler initiates WebRTC handshakes as peers join (same as current behavior). By the time the host clicks Start, WebRTC data channels are already open. The `game-started` signal triggers the lockstep/streaming game loop — it does not trigger WebRTC setup.
 
 **Phase 2 — Pre-Game Overlay:**
 - Room code displayed prominently
@@ -152,8 +154,8 @@ Emits these Socket.IO events:
 
 | Event | Payload | When |
 |---|---|---|
-| `open-room` | (existing format) | Host creates room |
-| `join-room` | (existing format) | Player/spectator joins |
+| `open-room` | `{extra: {sessionid, playerId: socket.id, player_name, room_name, game_id, domain}, maxPlayers: 4}` (see signaling.py `open_room`) | Host creates room |
+| `join-room` | `{extra: {sessionid, userid: socket.id, player_name, spectate: bool}}` (see signaling.py `join_room`) | Player/spectator joins |
 | `leave-room` | `{}` | User clicks Leave |
 | `start-game` | `{mode}` | Host clicks Start |
 | `end-game` | `{}` | Host clicks End Game |
@@ -207,7 +209,15 @@ window.NetplayLockstepV4 = {
 };
 ```
 
-`stop()` cleans up: clears the tick interval, closes peer connections, resets state. Enables the lobby → play → end → play again cycle without page reload.
+`stop()` cleans up for the play-again cycle without page reload. Must reset:
+- Clear `_tickInterval` (setInterval handle for lockstep tick loop)
+- Close all peer connections in `_peers` and clear the map
+- Clear `_remoteInputs`, `_localInputs` buffers
+- Reset `_frameNum` to 0
+- Reset `_running`, `_gameStarted`, `_selfEmuReady`, `_selfLockstepReady` flags
+- Reset `_manualMode` and restore `_origRAF` if captured
+- Clear `_lockstepReadyPeers`
+- For streaming: stop `_hostStream` tracks, remove `_guestVideo`
 
 ### Playwright Globals Preserved
 
@@ -244,21 +254,13 @@ async def start_game(sid, data):
 @sio.on("end-game")
 async def end_game(sid, data):
     # Validate: sid must be room.owner
-    # Set room.status = "lobby", room.mode = None
+    # Set room.status = "lobby" (mode persists for rematch convenience)
     # Broadcast "game-ended" {} to room
-```
-
-**`chat-message`** (client → server):
-```python
-@sio.on("chat-message")
-async def chat_message(sid, data):
-    # Look up sender name from room
-    # Broadcast {sender, message} to room (skip_sid=sid)
 ```
 
 ### New REST Endpoint
 
-**`GET /room/{room_id}`** in app.py:
+**`GET /room/{room_id}`** in app.py (inside `create_app()` factory, same as other routes):
 
 ```python
 @app.get("/room/{room_id}")
@@ -266,15 +268,18 @@ def get_room(room_id: str):
     room = rooms.get(room_id)
     if not room:
         raise HTTPException(404, "Room not found")
+    pid_to_slot = {pid: slot for slot, pid in room.slots.items()}
     return {
         "status": room.status,
         "mode": room.mode,
-        "players": {pid: {"playerName": info["playerName"], "slot": slot}
-                    for pid, info in room.players.items()
-                    for s, p in room.slots.items() if p == pid
-                    for slot in [s]},
-        "spectators": {pid: {"playerName": info["playerName"]}
-                       for pid, info in room.spectators.items()},
+        "players": {
+            pid: {"playerName": info["playerName"], "slot": pid_to_slot.get(pid)}
+            for pid, info in room.players.items()
+        },
+        "spectators": {
+            pid: {"playerName": info["playerName"]}
+            for pid, info in room.spectators.items()
+        },
     }
 ```
 
@@ -312,11 +317,32 @@ Applies to both lobby and play pages via their respective CSS files.
 
 ---
 
+## Mode Naming Convention
+
+Internal mode identifiers used in URL params and server state map to user-facing labels:
+
+| Internal ID | UI Label | Engine File |
+|---|---|---|
+| `lockstep-v4` | Lockstep | `netplay-lockstep-v4.js` |
+| `streaming` | Streaming | `netplay-streaming.js` |
+
+The mode selector dropdown shows the UI labels; the value stored/transmitted is the internal ID.
+
+---
+
+## Deliberate Omissions
+
+**`ready` event (from mvp-plan.md):** Deliberately cut. The host controls start — there's no per-player ready check in P0. Host sees the player count and decides when to start. Can be added in P1 if needed.
+
+**`chat-message` server event:** Deferred to P1.3 along with the chat UI. No P0 consumer exists.
+
+---
+
 ## What Is NOT In This Spec
 
 - Touch controls (P1.1)
 - Controller mapping UI (P1.2)
-- Chat UI (P1.3 — server event is wired, UI is not)
+- Chat — server event and UI (P1.3)
 - Connection status indicators beyond toasts (P1.4)
 - End game / rematch polish (P1.5)
 - Any P2 items
