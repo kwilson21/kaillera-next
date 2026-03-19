@@ -219,7 +219,7 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
 
 
 @sio.on("leave-room")
-async def leave_room(sid: str) -> None:
+async def leave_room(sid: str, data: dict | None = None) -> None:
     await _leave(sid)
 
 
