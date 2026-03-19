@@ -217,6 +217,41 @@ async def leave_room(sid: str) -> None:
     await _leave(sid)
 
 
+@sio.on("claim-slot")
+async def claim_slot(sid: str, data: dict) -> str | None:
+    """Spectator claims a vacated player slot."""
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id, player_id, is_spectator = entry
+    if not is_spectator:
+        return "Not a spectator"
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+
+    requested_slot = data.get("slot")
+    if requested_slot is not None:
+        if requested_slot in room.slots:
+            return "Slot already taken"
+        slot = requested_slot
+    else:
+        slot = room.next_slot()
+    if slot is None:
+        return "No slots available"
+
+    # Move from spectators to players
+    spec_info = room.spectators.pop(player_id, {})
+    player_name = spec_info.get("playerName", "Player")
+    room.players[player_id] = {"socketId": sid, "playerName": player_name}
+    room.slots[slot] = player_id
+    _sid_to_room[sid] = (session_id, player_id, False)
+
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    log.info("SIO %s claimed slot %d in room %s", sid, slot, session_id)
+    return None
+
+
 @sio.on("webrtc-signal")
 async def webrtc_signal(sid: str, data: dict) -> None:
     target: str | None = data.get("target")

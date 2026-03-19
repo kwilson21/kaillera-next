@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kaillera-next — Play SSB64 Online</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
+    h1 { margin-bottom: 1rem; font-size: 1.4rem; letter-spacing: 0.05em; color: #aaa; }
+    #game { width: 640px; height: 480px; }
+  </style>
+</head>
+<body>
+  <h1>kaillera-next</h1>
+  <div id="game"></div>
+  <script>
+    EJS_player       = '#game';
+    EJS_core         = 'n64';
+    EJS_gameUrl      = '/static/rom/Super Smash Bros. (USA).z64';
+    EJS_pathtodata   = 'https://cdn.emulatorjs.org/stable/data/';
+  </script>
+  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
+  <script src="/static/netplay.js?v=5"></script>
+</body>
+</html>

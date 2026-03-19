@@ -1,5 +1,5 @@
 /**
- * kaillera-next netplay client — Phase 3: 4-Player + Spectators
+ * kaillera-next netplay client — Phase 4: Join/Leave Running Games
  *
  * Full mesh WebRTC: each player connects to every other player.
  * With 4 players there are 6 bidirectional connections (each client manages 3).
@@ -240,9 +240,15 @@
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     });
 
-    // Update my slot from server
+    // Update my slot from server (handles spectator → player transition)
     const myPlayerEntry = Object.values(players).find(p => p.socketId === socket.id);
     if (myPlayerEntry) {
+      if (_isSpectator) {
+        // Spectator claimed a slot — transition to player
+        console.log('[netplay] transitioned from spectator to player, slot:', myPlayerEntry.slot);
+        _isSpectator = false;
+        window._isSpectator = false;
+      }
       _playerSlot = myPlayerEntry.slot;
       window._playerSlot = _playerSlot;
     }
@@ -387,6 +393,18 @@
       console.log('[netplay] data channel open with', remoteSid, 'slot:', peer.slot);
       ch.send('ready');
       _selfReady = true;
+
+      // Phase 4: if emulator is already running, send emu-ready immediately
+      // so late joiners can complete their handshake
+      if (_selfEmuReady) {
+        ch.send('emu-ready');
+      }
+
+      // Phase 4: if game is already running, host sends save state to late joiner
+      if (_gameStarted && _selfEmuReady && _playerSlot === 0) {
+        setTimeout(() => sendSaveState(remoteSid), 500);
+      }
+
       checkAllReady();
     };
 
@@ -403,6 +421,14 @@
       if (typeof e.data === 'string') {
         if (e.data === 'ready')     { peer.ready = true;    checkAllReady(); }
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        // Phase 4: late-join save state transfer via JSON string messages
+        if (e.data.charAt(0) === '{') {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'save-state')    handleSaveState(msg);
+            if (msg.type === 'request-state') handleStateRequest(remoteSid);
+          } catch (_) {}
+        }
         return;
       }
       if (e.data.byteLength === 8 && peer.slot !== null && peer.slot !== undefined) {
@@ -423,17 +449,33 @@
     const readyCount = playerPeers.filter(
       p => p.ready && p.dc && p.dc.readyState === 'open'
     ).length;
-    if (readyCount < _expectedPeerCount) return;
+    // Phase 4: allow starting with at least 1 ready peer (late join scenario)
+    // Previously required all peers, but late joiners connect to a running game
+    if (readyCount === 0) return;
+    if (readyCount < _expectedPeerCount) {
+      // Check if any peer already has the game running (late join detection)
+      // If not, wait for all peers
+      const anyEmuReady = playerPeers.some(p => p.emuReady);
+      if (!anyEmuReady) return;
+    }
     _gameStarted = true;
     startInputSync();
   }
 
   function checkAllEmuReady() {
     if (!_selfEmuReady) return;
+    if (inputTimer) return;  // input loop already running
     const playerPeers = Object.values(_peers).filter(
       p => p.slot !== null && p.slot !== undefined
     );
-    if (!playerPeers.every(p => p.emuReady)) return;
+    // Phase 4: for late joiners, start when at least 1 peer has emu ready
+    const emuReadyCount = playerPeers.filter(p => p.emuReady).length;
+    if (emuReadyCount === 0) return;
+    if (emuReadyCount < playerPeers.length) {
+      // Not all ready — but if any peer is already running (late join), proceed
+      const anyRunning = playerPeers.some(p => p.emuReady);
+      if (!anyRunning) return;
+    }
     startInputLoop();
   }
 
@@ -456,6 +498,81 @@
       stopInputSync();
     }
   }
+
+  // ── Phase 4: Late join / leave ──────────────────────────────────────────
+
+  function handleSaveState(msg) {
+    // Received save state from host — load it to sync game state
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    console.log('[netplay] received save state, loading…');
+    setStatus('Loading save state…');
+    try {
+      const binary = atob(msg.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      gm.loadState(bytes);
+      // Sync frame counter to host's frame
+      if (msg.frame !== undefined) {
+        _frameNum = msg.frame;
+        window._frameNum = _frameNum;
+      }
+      _localQueue      = {};
+      _remoteQueues    = {};
+      _lastRemoteMasks = {};
+      _prevSlotMasks   = {};
+      console.log('[netplay] save state loaded, synced at frame', _frameNum);
+      setStatus('🟢 Connected — game on!');
+    } catch (err) {
+      console.log('[netplay] failed to load save state:', err);
+    }
+  }
+
+  function handleStateRequest(requesterSid) {
+    // Only host (slot 0) responds to state requests
+    if (_playerSlot !== 0) return;
+    sendSaveState(requesterSid);
+  }
+
+  function sendSaveState(targetSid) {
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    const peer = _peers[targetSid];
+    if (!peer || !peer.dc || peer.dc.readyState !== 'open') return;
+    console.log('[netplay] sending save state to', targetSid);
+    try {
+      const blob = gm.saveState();
+      // Convert Uint8Array to base64
+      let binary = '';
+      const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      peer.dc.send(JSON.stringify({
+        type: 'save-state',
+        frame: _frameNum,
+        data: b64,
+      }));
+    } catch (err) {
+      console.log('[netplay] failed to send save state:', err);
+    }
+  }
+
+  function sendSaveStateToAll() {
+    // Host sends save state to all connected peers
+    if (_playerSlot !== 0) return;
+    Object.keys(_peers).forEach(sid => sendSaveState(sid));
+  }
+
+  function claimSlot(slot) {
+    if (!_isSpectator) return;
+    socket.emit('claim-slot', { slot: slot !== undefined ? slot : null }, (err) => {
+      if (err) { setStatus('Claim failed: ' + err); return; }
+      setStatus('Slot claimed — connecting…');
+      // Transition happens via users-updated
+    });
+  }
+  // Expose for Playwright
+  window.claimSlot = claimSlot;
 
   // ── Cheats ─────────────────────────────────────────────────────────────
 
