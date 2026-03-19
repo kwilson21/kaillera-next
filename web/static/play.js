@@ -328,6 +328,9 @@
 
     var endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
+
+    var syncBtn = document.getElementById('toolbar-sync');
+    if (syncBtn) syncBtn.style.display = isHost ? '' : 'none';
   }
 
   function hideToolbar() {
