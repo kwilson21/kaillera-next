@@ -178,6 +178,7 @@
   function onDataMessage(msg) {
     if (!msg || !msg.type) return;
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
+    if (msg.type === 'resync')    handleResyncMsg(msg);
   }
 
   // ── Room management ────────────────────────────────────────────────────
@@ -649,6 +650,13 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
+    // Periodic resync: host sends state every 600 frames (~10s) to
+    // correct drift from input timing differences. Guest loads it
+    // seamlessly (emulator runs freely, loadState just snaps the state).
+    if (_playerSlot === 0 && _frameNum > 0 && _frameNum % 600 === 0) {
+      sendPeriodicResync();
+    }
+
     // Debug overlay — update every 15 frames (~4x per second)
     if (_frameNum % 15 === 0) {
       const dbg = document.getElementById('np-debug');
@@ -666,11 +674,55 @@
           ' rcv:' + _remoteReceived +
           ' hit:' + _remoteApplied +
           ' miss:' + _remoteMissed +
-          ' lastR:' + _lastRemoteFrame;
+          ' lastR:' + _lastRemoteFrame +
+          (_resyncInProgress ? ' RESYNC' : '');
       }
     }
 
     requestAnimationFrame(tick);
+  }
+
+  // ── Periodic resync ──────────────────────────────────────────────────
+
+  let _resyncInProgress = false;
+
+  async function sendPeriodicResync() {
+    if (_resyncInProgress) return;
+    _resyncInProgress = true;
+    try {
+      const gm = window.EJS_emulator.gameManager;
+      const raw = gm.getState();
+      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      const compressed = await compressState(bytes);
+      const b64 = uint8ToBase64(compressed);
+      socket.emit('data-message', {
+        type: 'resync',
+        frame: _frameNum,
+        data: b64,
+      });
+      console.log('[lockstep-v3] resync sent at F:' + _frameNum +
+        ' (' + Math.round(compressed.length / 1024) + 'KB)');
+    } catch (e) {
+      console.log('[lockstep-v3] resync send failed:', e);
+    }
+    _resyncInProgress = false;
+  }
+
+  function handleResyncMsg(msg) {
+    if (_playerSlot === 0) return;  // only guest loads resyncs
+    try {
+      const compressed = base64ToUint8(msg.data);
+      decompressState(compressed).then(function(bytes) {
+        const gm = window.EJS_emulator.gameManager;
+        gm.loadState(bytes);
+        // Snap our frame counter to match
+        _frameNum = msg.frame;
+        window._frameNum = _frameNum;
+        console.log('[lockstep-v3] resync loaded at F:' + msg.frame);
+      });
+    } catch (e) {
+      console.log('[lockstep-v3] resync load failed:', e);
+    }
   }
 
   // ── Input read / apply ─────────────────────────────────────────────────
