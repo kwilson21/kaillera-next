@@ -254,6 +254,11 @@
     var savedRom = localStorage.getItem('kaillera-rom-name');
     var statusEl = document.getElementById('rom-status');
 
+    // Prevent browser from navigating to dropped files anywhere on the page
+    document.body.addEventListener('dragover', function (e) { e.preventDefault(); });
+    document.body.addEventListener('drop', function (e) { e.preventDefault(); });
+
+    // File input fallback (click to browse)
     var fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = '.z64,.n64,.v64,.zip';
@@ -261,7 +266,7 @@
     drop.appendChild(fileInput);
 
     drop.addEventListener('click', function () {
-      if (!_romBlobUrl) fileInput.click();
+      fileInput.click();
     });
 
     fileInput.addEventListener('change', function () {
@@ -270,6 +275,7 @@
 
     drop.addEventListener('dragover', function (e) {
       e.preventDefault();
+      e.stopPropagation();
       drop.classList.add('dragover');
     });
 
@@ -279,6 +285,7 @@
 
     drop.addEventListener('drop', function (e) {
       e.preventDefault();
+      e.stopPropagation();
       drop.classList.remove('dragover');
       if (e.dataTransfer.files.length > 0) handleRomFile(e.dataTransfer.files[0]);
     });
