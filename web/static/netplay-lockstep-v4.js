@@ -164,11 +164,12 @@
     }
 
     try {
-      // Reuse OpenAL's AudioContext (already created during emulator boot,
-      // identically on both peers). Avoids creating a second audio thread.
-      var alCtx = mod.AL && mod.AL.contexts && mod.AL.contexts[1];
-      _audioCtx = (alCtx && alCtx.audioCtx) || new AudioContext({ sampleRate: _audioRate });
-      if (_audioCtx.state === 'suspended') _audioCtx.resume();
+      // Create a SEPARATE AudioContext for our playback.
+      // Do NOT reuse OpenAL's — resuming it activates OpenAL's async
+      // callbacks (ScriptProcessorNode, scheduleContextAudio) which
+      // cause desyncs even with frozen _emscripten_get_now.
+      // OpenAL's AudioContext must stay suspended.
+      _audioCtx = new AudioContext({ sampleRate: _audioRate });
       await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
       _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
         numberOfInputs: 0,
@@ -185,6 +186,18 @@
 
       _audioWorklet.connect(_audioCtx.destination);
       _audioReady = true;
+
+      // Resume on next user interaction (autoplay policy)
+      if (_audioCtx.state === 'suspended') {
+        var resumeAudio = function () {
+          if (_audioCtx) _audioCtx.resume();
+          document.removeEventListener('click', resumeAudio);
+          document.removeEventListener('keydown', resumeAudio);
+        };
+        document.addEventListener('click', resumeAudio);
+        document.addEventListener('keydown', resumeAudio);
+      }
+
       console.log('[lockstep-v4] audio playback initialized (rate: ' + _audioRate + ')');
     } catch (err) {
       console.log('[lockstep-v4] AudioWorklet init failed:', err);
