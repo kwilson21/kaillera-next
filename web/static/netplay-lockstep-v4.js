@@ -993,10 +993,9 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // _kn_inStep always ON: _emscripten_get_now returns N64 CPU cycle
-    // counter (deterministic) instead of performance.now(). Audio still
-    // works because cycle time advances with each CPU instruction.
-    window._kn_inStep = true;
+    // Audio OFF (default): _kn_inStep=true, frozen time, zero desyncs
+    // Audio ON: _kn_inStep=false, real time, audio works, may desync
+    window._kn_inStep = !_audioEnabled;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
