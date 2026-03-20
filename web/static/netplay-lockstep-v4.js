@@ -609,14 +609,17 @@
       _guestStateBytes = gm.getState();
     }
 
-    // Enter manual mode FIRST — captures rAF, stops free frames
+    // First loadState: fully restores CPU + RAM (needs main loop active)
+    gm.loadState(_guestStateBytes);
+
+    // Enter manual mode — captures rAF, stops free frames
     enterManualMode();
 
-    // THEN load state — no free frames can run after this since
-    // the main loop is captured. Both emulators get identical state.
+    // Second loadState: fixes any free-frame drift between first load
+    // and enterManualMode. Both sides now have identical state.
     gm.loadState(_guestStateBytes);
     _guestStateBytes = null;
-    console.log('[lockstep-v4] loaded state after manual mode capture');
+    console.log('[lockstep-v4] double-loaded state (CPU + free-frame fix)');
 
     // Both sides reset and start true lockstep sync
     // (Warmup removed — deterministic timing patch makes it unnecessary)
