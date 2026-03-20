@@ -586,22 +586,8 @@
     // Enter manual mode RIGHT BEFORE starting lockstep -- no async gap
     enterManualMode();
 
-    // Warmup: step 300 frames with zero input in a tight loop.
-    // This burns through the CP0 Count register difference caused by
-    // different boot frame counts. Both sides load the same state but
-    // may have slightly different internal counters. After 300 zero-input
-    // frames, the game state converges and both sides are truly identical.
-    var WARMUP_FRAMES = 300;
-    for (var w = 0; w < WARMUP_FRAMES; w++) {
-      writeInputToMemory(0, 0);
-      writeInputToMemory(1, 0);
-      writeInputToMemory(2, 0);
-      writeInputToMemory(3, 0);
-      stepOneFrame();
-    }
-    console.log('[lockstep-v4] warmup complete (' + WARMUP_FRAMES + ' frames)');
-
     // Both sides reset and start true lockstep sync
+    // (Warmup removed — deterministic timing patch makes it unnecessary)
     _frameNum = 0;
     startLockstep();
 
@@ -884,7 +870,12 @@
     if (!_pendingRunner) return false;
     var runner = _pendingRunner;
     _pendingRunner = null;
+    // Set _inStep so the patched _emscripten_get_now returns deterministic
+    // time during frame execution (audio timing) but real time otherwise
+    // (main loop scheduler). See deterministic-timer.js + patched core.
+    window._inStep = true;
     runner(performance.now());
+    window._inStep = false;
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
     return true;
@@ -937,12 +928,17 @@
       'peerSlots:', peerSlots.join(','), 'delay:', DELAY_FRAMES);
     setStatus('Connected -- game on!');
 
+    // Signal patched emscripten_get_now to use deterministic frame time
+    window._lockstepTimeBase = performance.now();
+    window._lockstepActive = true;
+
     // Use setInterval so background tabs are not throttled
     _tickInterval = setInterval(tick, 16);
   }
 
   function stopSync() {
     _running = false;
+    window._lockstepActive = false;
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
       _tickInterval = null;
@@ -961,9 +957,9 @@
 
     var activePeers = getActivePeers();
 
-    // FPS counter
+    // FPS counter (use real time, not deterministic override)
     _fpsFrameCount++;
-    var now = performance.now();
+    var now = (window._realPerfNow || performance.now)();
     if (now - _fpsLastTime >= 1000) {
       _fpsCurrent = _fpsFrameCount;
       _fpsFrameCount = 0;
