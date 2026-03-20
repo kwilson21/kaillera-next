@@ -70,15 +70,17 @@
     68: 19,   // D -> Analog Right
   };
 
-  // -- Direct memory input layout (discovered via Playwright) ----------------
+  // -- Direct memory input layout -----------------------------------------------
   //
-  // Base address: 715364 in Module.HEAPU8
   // Layout: int32[20][4] -- 20 buttons x 4 players
-  // Button stride: 20 bytes
-  // Player stride: 4 bytes
-  // P0 button 0 = HEAPU8[715364], P1 button 0 = HEAPU8[715368], etc.
+  // Button stride: 20 bytes (gap between button N and button N+1 for same player)
+  // Player stride: 4 bytes (gap between player 0 and player 1 for same button)
+  //
+  // The base address changes with each WASM compilation, so we auto-discover it
+  // at startup by calling _simulate_input and detecting which byte changed.
+  // Fallback: 715364 (CDN core address).
 
-  const INPUT_BASE     = 715364;
+  var INPUT_BASE       = 715364;  // auto-discovered at startup
   const BUTTON_STRIDE  = 20;
   const PLAYER_STRIDE  = 4;
 
@@ -521,6 +523,27 @@
         return;
       }
 
+      // Auto-discover INPUT_BASE by calling _simulate_input and detecting the change
+      if (mod._simulate_input) {
+        try {
+          // Reset button 0 for player 0
+          mod._simulate_input(0, 0, 0);
+          var scanEnd = Math.min(mod.HEAPU8.length, 4 * 1024 * 1024);
+          var snap = new Uint8Array(mod.HEAPU8.buffer.slice(0, scanEnd));
+          mod._simulate_input(0, 0, 1);
+          for (var si = 0; si < scanEnd; si++) {
+            if (mod.HEAPU8[si] !== snap[si]) {
+              INPUT_BASE = si;
+              break;
+            }
+          }
+          mod._simulate_input(0, 0, 0);
+          console.log('[lockstep-v4] INPUT_BASE auto-discovered: ' + INPUT_BASE);
+        } catch (e) {
+          console.log('[lockstep-v4] INPUT_BASE auto-discovery failed, using default: ' + INPUT_BASE);
+        }
+      }
+
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
       console.log('[lockstep-v4] emulator ready (' + frames + ' frames) — paused' +
@@ -886,22 +909,22 @@
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
 
+    // Always set JS-level timing (patches _emscripten_get_now in JS glue)
+    window._kn_inStep = true;
+    window._kn_frameTime = frameTimeMs;
+
+    // Also set C-level timing if forked core is available
+    // (patches features_cpu.c timing functions inside the WASM)
     if (_hasForkedCore && mod && mod._kn_set_deterministic) {
-      // Forked core: C-level deterministic timing (compiled into WASM)
       mod._kn_set_deterministic(1);
       mod._kn_set_frame_time(frameTimeMs);
-    } else {
-      // Stock core fallback: JS-level patch via window globals
-      window._kn_inStep = true;
-      window._kn_frameTime = frameTimeMs;
     }
 
     runner(frameTimeMs);
 
+    window._kn_inStep = false;
     if (_hasForkedCore && mod && mod._kn_set_deterministic) {
       mod._kn_set_deterministic(0);
-    } else {
-      window._kn_inStep = false;
     }
 
     // Force GL composite via real rAF no-op
