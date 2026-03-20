@@ -602,21 +602,25 @@
 
     console.log('[lockstep-v4] ' + (readyCount + 1) + ' players lockstep-ready -- GO');
 
-    // Load the save state. Host also loads its own captured state to reset
-    // the WebGL context so the canvas renders correctly.
     var gm = window.EJS_emulator.gameManager;
+
+    // Freeze time BEFORE loadState. Free frames may run between loadState
+    // and enterManualMode, but with frozen time they're harmless (both
+    // emulators produce identical results for these throwaway frames).
+    window._kn_inStep = true;
+    window._kn_frameTime = 0;
+
     if (_guestStateBytes) {
       gm.loadState(_guestStateBytes);
       _guestStateBytes = null;
       console.log('[lockstep-v4] loaded initial state (slot ' + _playerSlot + ')');
     } else {
-      // Fallback: self-reset to fix GL context
       console.log('[lockstep-v4] WARNING: no state bytes, doing self-reset');
       var selfState = gm.getState();
       gm.loadState(selfState);
     }
 
-    // Enter manual mode RIGHT BEFORE starting lockstep -- no async gap
+    // Enter manual mode (intercept rAF, prevent further free frames)
     enterManualMode();
 
     // Both sides reset and start true lockstep sync
