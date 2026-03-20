@@ -12,6 +12,47 @@ index a626706..547aafe 100644
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
+diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
+index be6c1f6..2bbe104 100644
+--- a/audio/drivers/openal.c
++++ b/audio/drivers/openal.c
+@@ -232,6 +232,18 @@ static bool al_unqueue_buffers(al_t *al)
+ 
+ static bool al_get_buffer(al_t *al, ALuint *buffer)
+ {
++#ifdef __EMSCRIPTEN__
++   /* kaillera-next: In deterministic mode, skip the blocking wait loop
++    * that calls al_unqueue_buffers (reads real time) and retro_sleep. */
++   {
++      extern int kn_deterministic_mode;
++      if (kn_deterministic_mode && al->res_ptr == 0)
++      {
++         /* Force-recycle all buffers — don't wait for playback */
++         al->res_ptr = al->num_buffers;
++      }
++   }
++#endif
+    while (al->res_ptr == 0)
+    {
+       if (al_unqueue_buffers(al))
+@@ -309,6 +321,17 @@ static bool al_start(void *data, bool is_shutdown)
+ static size_t al_write_avail(void *data)
+ {
+    al_t *al = (al_t*)data;
++#ifdef __EMSCRIPTEN__
++   /* kaillera-next: In deterministic mode, always report full buffer space.
++    * This prevents al_unqueue_buffers → alGetSourcei(AL_BUFFERS_PROCESSED)
++    * from reading real time, which would cause non-determinism. Audio samples
++    * are still written to OpenAL but we never block waiting for playback. */
++   {
++      extern int kn_deterministic_mode;
++      if (kn_deterministic_mode)
++         return al->num_buffers * OPENAL_BUFSIZE;
++   }
++#endif
+    al_unqueue_buffers(al);
+    return al->res_ptr * OPENAL_BUFSIZE;
+ }
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
 index c9ceed1..b8660e8 100644
 --- a/frontend/drivers/platform_emulatorjs.c
