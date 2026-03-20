@@ -90,7 +90,13 @@
   let sessionId          = null;
   let _playerSlot        = -1;      // 0-3 for players, null for spectators
   let _isSpectator       = false;
-  let _audioEnabled      = true;     // true = real time (audio), false = frozen (no desync)
+  // -- Audio bypass state --
+  var _audioCtx = null;           // AudioContext for local playback
+  var _audioWorklet = null;       // AudioWorkletNode
+  var _audioDestNode = null;      // MediaStreamAudioDestinationNode (host only, for spectators)
+  var _audioPtr = 0;              // WASM pointer to kn_audio_buffer
+  var _audioRate = 0;             // sample rate from kn_get_audio_rate()
+  var _audioReady = false;        // true once AudioWorklet is initialized
   let _peers             = {};      // remoteSid -> PeerState
   let _knownPlayers      = {};      // socketId -> {slot, playerName}
   let _expectedPeerCount = 0;       // other players in room (excludes spectators)
@@ -135,6 +141,70 @@
   window._isSpectator = _isSpectator;
   window._peers       = _peers;
   window._frameNum    = 0;
+
+  // -- Audio bypass: init + per-frame feed --------------------------------
+
+  async function initAudioPlayback() {
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return;
+
+    // Check for audio capture exports
+    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples ||
+        !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
+      console.log('[lockstep-v4] audio capture exports not found — audio disabled');
+      return;
+    }
+
+    _audioPtr = mod._kn_get_audio_ptr();
+    _audioRate = mod._kn_get_audio_rate();
+    if (!_audioRate || _audioRate <= 0) {
+      console.log('[lockstep-v4] audio rate not set yet, defaulting to 33600');
+      _audioRate = 33600;
+    }
+
+    try {
+      _audioCtx = new AudioContext({ sampleRate: _audioRate });
+      // Resume immediately — Start Game button click is the user gesture
+      if (_audioCtx.state === 'suspended') _audioCtx.resume();
+      await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+      _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+        processorOptions: { sampleRate: _audioRate },
+      });
+
+      // Host: also route audio to spectator stream
+      if (_playerSlot === 0) {
+        _audioDestNode = _audioCtx.createMediaStreamDestination();
+        _audioWorklet.connect(_audioDestNode);
+      }
+
+      _audioWorklet.connect(_audioCtx.destination);
+      _audioReady = true;
+      console.log('[lockstep-v4] audio playback initialized (rate: ' + _audioRate + ')');
+    } catch (err) {
+      console.log('[lockstep-v4] AudioWorklet init failed:', err);
+      _audioReady = false;
+    }
+  }
+
+  function feedAudio() {
+    if (!_audioReady) return;
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return;
+
+    var n = mod._kn_get_audio_samples();
+    if (n <= 0) return;
+
+    // Create int16 view of WASM heap at audio buffer pointer
+    var pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
+    // Copy before posting (buffer may be detached by WASM memory growth)
+    var copy = new Int16Array(pcm);
+    _audioWorklet.port.postMessage(copy, [copy.buffer]);
+  }
 
   function setStatus(msg) {
     if (_config && _config.onStatus) _config.onStatus(msg);
@@ -760,6 +830,16 @@
     var ctx = captureCanvas.getContext('2d');
 
     _hostStream = captureCanvas.captureStream(0);  // manual frame control
+
+    // Add audio track from bypass playback (if available)
+    if (_audioDestNode && _audioDestNode.stream) {
+      var audioTracks = _audioDestNode.stream.getAudioTracks();
+      for (var at = 0; at < audioTracks.length; at++) {
+        _hostStream.addTrack(audioTracks[at]);
+      }
+      console.log('[lockstep-v4] added audio track to spectator stream');
+    }
+
     var captureTrack = _hostStream.getVideoTracks()[0];
 
     // Blit loop: copy emulator canvas to capture canvas every frame
@@ -993,9 +1073,8 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Audio OFF (default): _kn_inStep=true, frozen time, zero desyncs
-    // Audio ON: _kn_inStep=false, real time, audio works, may desync
-    window._kn_inStep = !_audioEnabled;
+    // Always frozen time — audio plays via bypass, not OpenAL
+    window._kn_inStep = true;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
@@ -1005,6 +1084,9 @@
         console.log('[lockstep-v4] C-level deterministic timing enabled (session-wide)');
       }
     }
+
+    // Initialize audio bypass playback (async — sets _audioReady when done)
+    initAudioPlayback();
 
     var activePeers = getActivePeers();
     var peerSlots = activePeers.map(function (p) { return p.slot; });
@@ -1129,8 +1211,12 @@
       delete _localInputs[applyFrame];
     }
 
-    // Step one frame
+    // Step one frame with audio capture
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
     stepOneFrame();
+    feedAudio();
 
     _frameNum++;
     window._frameNum = _frameNum;
@@ -1508,7 +1594,6 @@
     _isSpectator = config.isSpectator;
 
     // Apply pre-game options
-    _audioEnabled = config.audioEnabled !== false;  // default: true
     _syncEnabled = !!config.rollbackEnabled;        // default: false
 
     window._playerSlot = _playerSlot;
@@ -1559,6 +1644,23 @@
     _syncExpected = 0;
     if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
 
+    // Clean up audio bypass
+    if (_audioWorklet) {
+      _audioWorklet.disconnect();
+      _audioWorklet = null;
+    }
+    if (_audioDestNode) {
+      _audioDestNode.disconnect();
+      _audioDestNode = null;
+    }
+    if (_audioCtx) {
+      _audioCtx.close();
+      _audioCtx = null;
+    }
+    _audioReady = false;
+    _audioPtr = 0;
+    _audioRate = 0;
+
     // Clean up spectator stream
     if (_hostStream) {
       _hostStream.getTracks().forEach(function (t) { t.stop(); });
@@ -1586,7 +1688,6 @@
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
     setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
-    isAudioEnabled: function () { return _audioEnabled; },
   };
 
 })();
