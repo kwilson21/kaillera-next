@@ -602,22 +602,21 @@
 
     console.log('[lockstep-v4] ' + (readyCount + 1) + ' players lockstep-ready -- GO');
 
-    // Load the save state. Host also loads its own captured state to reset
-    // the WebGL context so the canvas renders correctly.
     var gm = window.EJS_emulator.gameManager;
-    if (_guestStateBytes) {
-      gm.loadState(_guestStateBytes);
-      _guestStateBytes = null;
-      console.log('[lockstep-v4] loaded initial state (slot ' + _playerSlot + ')');
-    } else {
-      // Fallback: self-reset to fix GL context
-      console.log('[lockstep-v4] WARNING: no state bytes, doing self-reset');
-      var selfState = gm.getState();
-      gm.loadState(selfState);
+
+    // If no state bytes (host fallback), capture current state
+    if (!_guestStateBytes) {
+      _guestStateBytes = gm.getState();
     }
 
-    // Enter manual mode RIGHT BEFORE starting lockstep -- no async gap
+    // Enter manual mode FIRST — captures rAF, stops free frames
     enterManualMode();
+
+    // THEN load state — no free frames can run after this since
+    // the main loop is captured. Both emulators get identical state.
+    gm.loadState(_guestStateBytes);
+    _guestStateBytes = null;
+    console.log('[lockstep-v4] loaded state after manual mode capture');
 
     // Both sides reset and start true lockstep sync
     // (Warmup removed — deterministic timing patch makes it unnecessary)
