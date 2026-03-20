@@ -1,0 +1,10 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+docs/
+tests/
+*.cht
+web/static/rom/
+web/static/ejs/cores/*.backup
+web/static/ejs/cores/*.forked
