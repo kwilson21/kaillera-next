@@ -25,7 +25,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "default-src 'self'; "
             "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline' blob:; "
             "style-src 'self' 'unsafe-inline' https://cdn.emulatorjs.org; "
-            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org blob:; "
+            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org https://cdn.socket.io blob:; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
             "worker-src 'self' blob: https://cdn.emulatorjs.org; "
