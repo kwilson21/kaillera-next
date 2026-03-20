@@ -3,7 +3,7 @@ kaillera-next server entry point — V1 (browser-based EmulatorJS netplay).
 
 Starts a single HTTP server on :8000 that handles:
   - Socket.IO signaling  (/socket.io/)
-  - REST API             (/health, /list, /sessions)
+  - REST API             (/health, /list, /room)
   - Static web frontend  (/ → web/index.html, /static/rom/ssb64.z64)
 
 V2 will re-add TCP :45000 + UDP :45000 for Mupen64Plus native netplay.
@@ -22,8 +22,7 @@ import uvicorn
 import uvloop
 
 from src.api.app import create_app
-from src.api.signaling import _cleanup_empty_rooms, sio
-from src.session import SessionManager
+from src.api.signaling import _cleanup_empty_rooms, configure_cors, sio
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +37,11 @@ def run() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
-    session_mgr = SessionManager()
-    app = create_app(session_mgr)
+    allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
+    log.info("CORS allowed origin: %s", allowed_origin)
+    configure_cors(allowed_origin)
+
+    app = create_app()
 
     # Serve web/ as static files — must be mounted BEFORE Socket.IO wraps the app
     from fastapi.staticfiles import StaticFiles
