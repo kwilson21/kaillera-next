@@ -164,9 +164,10 @@
     }
 
     try {
-      // Use pre-created AudioContext from user gesture (Start Game click),
-      // or create one (may be suspended without gesture).
-      _audioCtx = (_config && _config.audioCtx) || new AudioContext({ sampleRate: _audioRate });
+      // Reuse OpenAL's AudioContext (already created during emulator boot,
+      // identically on both peers). Avoids creating a second audio thread.
+      var alCtx = mod.AL && mod.AL.contexts && mod.AL.contexts[1];
+      _audioCtx = (alCtx && alCtx.audioCtx) || new AudioContext({ sampleRate: _audioRate });
       if (_audioCtx.state === 'suspended') _audioCtx.resume();
       await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
       _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
@@ -1654,10 +1655,8 @@
       _audioDestNode.disconnect();
       _audioDestNode = null;
     }
-    if (_audioCtx) {
-      _audioCtx.close();
-      _audioCtx = null;
-    }
+    // Don't close _audioCtx — it may be OpenAL's shared context
+    _audioCtx = null;
     _audioReady = false;
     _audioPtr = 0;
     _audioRate = 0;
