@@ -237,9 +237,12 @@
       src.buffer = buf;
       src.connect(_audioCtx.destination);
       var now = _audioCtx.currentTime;
-      var startTime = Math.max(now, window._kn_audioNextTime || 0);
-      src.start(startTime);
-      window._kn_audioNextTime = startTime + buf.duration;
+      // Snap to now if fallen behind — prevents accumulating latency
+      if (!window._kn_audioNextTime || window._kn_audioNextTime < now) {
+        window._kn_audioNextTime = now;
+      }
+      src.start(window._kn_audioNextTime);
+      window._kn_audioNextTime += buf.duration;
     }
   }
 
