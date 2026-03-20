@@ -980,9 +980,9 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Audio enabled: _kn_inStep = false (real time, audio plays, possible minor desyncs)
-    // Audio disabled: _kn_inStep = true (frozen time, no audio, perfect sync)
-    // Set once at start — not toggled during gameplay.
+    // With EMSCRIPTEN_AUDIO_FAKE_BLOCK, audio uses main loop timing
+    // (synchronous with frame steps) so it doesn't need real time.
+    // _kn_inStep controls JS-level determinism. Audio option controls it.
     window._kn_inStep = !_audioEnabled;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
