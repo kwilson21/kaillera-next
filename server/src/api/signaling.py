@@ -272,7 +272,11 @@ async def start_game(sid: str, data: dict) -> str | None:
 
     room.status = "playing"
     room.mode = data.get("mode", "lockstep-v4")
-    await sio.emit("game-started", {"mode": room.mode}, room=session_id)
+    await sio.emit("game-started", {
+        "mode": room.mode,
+        "audioEnabled": data.get("audioEnabled", True),
+        "rollbackEnabled": data.get("rollbackEnabled", False),
+    }, room=session_id)
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
     return None
 

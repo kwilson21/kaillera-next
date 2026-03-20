@@ -19,6 +19,8 @@
   var lastUsersData = null;
   var engine = null;
   var gameRunning = false;
+  var _gameAudioEnabled = true;
+  var _gameRollbackEnabled = false;
   var gamepadInterval = null;
   var previousPlayers = {};
   var previousSpectators = {};
@@ -190,6 +192,9 @@
 
   function onGameStarted(data) {
     mode = data.mode || mode;
+    // Host's audio/rollback settings apply to all players
+    _gameAudioEnabled = data.audioEnabled !== false;
+    _gameRollbackEnabled = !!data.rollbackEnabled;
     gameRunning = true;
     hideOverlay();
     showToolbar();
@@ -219,11 +224,9 @@
       return;
     }
 
-    // Read pre-game options
-    var optAudio = document.getElementById('opt-audio');
-    var optRollback = document.getElementById('opt-rollback');
-    var audioEnabled = optAudio ? optAudio.checked : true;
-    var rollbackEnabled = optRollback ? optRollback.checked : false;
+    // Use host's settings (broadcast via game-started event)
+    var audioEnabled = _gameAudioEnabled;
+    var rollbackEnabled = _gameRollbackEnabled;
 
     engine = Engine;
     engine.init({
@@ -249,7 +252,13 @@
   function startGame() {
     var sel = document.getElementById('mode-select');
     var selectedMode = sel ? sel.value : mode;
-    socket.emit('start-game', { mode: selectedMode });
+    var optAudio = document.getElementById('opt-audio');
+    var optRollback = document.getElementById('opt-rollback');
+    socket.emit('start-game', {
+      mode: selectedMode,
+      audioEnabled: optAudio ? optAudio.checked : true,
+      rollbackEnabled: optRollback ? optRollback.checked : false,
+    });
   }
 
   function endGame() {
