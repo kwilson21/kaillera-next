@@ -1,18 +1,19 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..0a75498 100644
+index a626706..960ab74 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
-@@ -126,7 +126,8 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+@@ -126,7 +126,9 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
                       _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
 -                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
 +                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data, \
-+                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms
++                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms, \
++                     _kn_get_audio_ptr,_kn_get_audio_samples,_kn_reset_audio,_kn_get_audio_rate
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +223,9 @@ endif
+@@ -222,6 +224,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
@@ -23,24 +24,81 @@ index a626706..0a75498 100644
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
 diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
-index be6c1f6..2e25a43 100644
+index be6c1f6..9aa24b1 100644
 --- a/audio/drivers/openal.c
 +++ b/audio/drivers/openal.c
-@@ -309,6 +309,20 @@ static bool al_start(void *data, bool is_shutdown)
- static size_t al_write_avail(void *data)
- {
-    al_t *al = (al_t*)data;
+@@ -14,6 +14,7 @@
+  *  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+@@ -178,6 +179,18 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
+    al->rate  = rate;
+    *new_rate = rate;
+ 
 +#ifdef __EMSCRIPTEN__
-+   /* kaillera-next: In deterministic mode, still unqueue buffers (so audio
-+    * plays) but always report the same available space to the emulator.
-+    * This makes the emulator generate audio at a consistent rate regardless
-+    * of real-time playback progress. */
++   {
++      extern int kn_audio_rate;
++      kn_audio_rate = rate;
++   }
++#endif
++
++#ifdef __EMSCRIPTEN__
++   /* kaillera-next: always use int16 for deterministic audio capture */
++   al->format      = AL_FORMAT_STEREO16;
++   _latency        = latency * rate * 2 * sizeof(int16_t);
++#else
+    if (alIsExtensionPresent("AL_EXT_FLOAT32"))
+    {
+       al->format      = alGetEnumValue("AL_FORMAT_STEREO_FLOAT32");
+@@ -189,6 +202,7 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
+       al->format      = AL_FORMAT_STEREO16;
+       _latency        = latency * rate * 2 * sizeof(int16_t);
+    }
++#endif
+ 
+    al->num_buffers = _latency / (1000 * OPENAL_BUFSIZE);
+    if (al->num_buffers < 2)
+@@ -254,6 +268,25 @@ static ssize_t al_write(void *data, const void *s, size_t len)
+    const uint8_t *buf = (const uint8_t*)s;
+    size_t        _len = 0;
+ 
++#ifdef __EMSCRIPTEN__
 +   {
 +      extern int kn_deterministic_mode;
 +      if (kn_deterministic_mode)
 +      {
-+         al_unqueue_buffers(al);  /* let OpenAL play normally */
-+         return OPENAL_BUFSIZE * 4;  /* fixed: always report 4 buffers free */
++         extern int16_t kn_audio_buffer[];
++         extern int kn_audio_sample_count;
++         int frames = len / (2 * sizeof(int16_t));
++         int space = 48000 - kn_audio_sample_count;  /* must match KN_AUDIO_BUF_SAMPLES */
++         if (frames > space) frames = space;
++         if (frames > 0)
++            memcpy(&kn_audio_buffer[kn_audio_sample_count * 2],
++                   buf, frames * 2 * sizeof(int16_t));
++         kn_audio_sample_count += frames;
++         return len;
++      }
++   }
++#endif
++
+    while (len)
+    {
+       ALint val;
+@@ -309,6 +342,16 @@ static bool al_start(void *data, bool is_shutdown)
+ static size_t al_write_avail(void *data)
+ {
+    al_t *al = (al_t*)data;
++#ifdef __EMSCRIPTEN__
++   {
++      extern int kn_deterministic_mode;
++      if (kn_deterministic_mode)
++      {
++         /* No buffers were queued (al_write bypasses OpenAL) — skip unqueue */
++         return OPENAL_BUFSIZE * 4;
 +      }
 +   }
 +#endif
@@ -48,10 +106,18 @@ index be6c1f6..2e25a43 100644
     return al->res_ptr * OPENAL_BUFSIZE;
  }
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
-index c9ceed1..a5836b3 100644
+index c9ceed1..d66e86b 100644
 --- a/frontend/drivers/platform_emulatorjs.c
 +++ b/frontend/drivers/platform_emulatorjs.c
-@@ -115,6 +115,28 @@ typedef struct
+@@ -18,6 +18,7 @@
+ #include <emscripten/emscripten.h>
+ #include <emscripten/html5.h>
+ #include <emscripten/threading.h>
++#include <stdint.h>
+ #include <string.h>
+ #include <malloc.h>
+ #include <stdio.h>
+@@ -115,6 +116,41 @@ typedef struct
  
  static emscripten_platform_data_t *emscripten_platform_data = NULL;
  
@@ -66,6 +132,19 @@ index c9ceed1..a5836b3 100644
 + * timing was derived from CPU cycles, not wall clock. */
 +int kn_deterministic_mode = 0;
 +double kn_frame_time_ms = 0.0;
++
++/* kaillera-next: Audio capture buffer for deterministic audio bypass.
++ * When kn_deterministic_mode is on, al_write() copies PCM samples here
++ * instead of sending to OpenAL. JS reads after each frame step. */
++#define KN_AUDIO_BUF_SAMPLES 48000
++int16_t kn_audio_buffer[KN_AUDIO_BUF_SAMPLES * 2]; /* stereo interleaved int16 */
++int kn_audio_sample_count = 0;
++int kn_audio_rate = 0;  /* set by al_init() */
++
++EMSCRIPTEN_KEEPALIVE void* kn_get_audio_ptr(void)    { return kn_audio_buffer; }
++EMSCRIPTEN_KEEPALIVE int   kn_get_audio_samples(void) { return kn_audio_sample_count; }
++EMSCRIPTEN_KEEPALIVE void  kn_reset_audio(void)       { kn_audio_sample_count = 0; }
++EMSCRIPTEN_KEEPALIVE int   kn_get_audio_rate(void)    { return kn_audio_rate; }
 +
 +EMSCRIPTEN_KEEPALIVE void kn_set_frame_time(double time_ms)
 +{
