@@ -1,5 +1,5 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..3b9ce75 100644
+index a626706..0a75498 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
 @@ -126,7 +126,8 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
@@ -8,7 +8,7 @@ index a626706..3b9ce75 100644
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
 -                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
 +                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data, \
-+                     _kn_set_frame_time,_kn_set_deterministic
++                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
@@ -48,18 +48,22 @@ index be6c1f6..2e25a43 100644
     return al->res_ptr * OPENAL_BUFSIZE;
  }
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
-index c9ceed1..b8660e8 100644
+index c9ceed1..a5836b3 100644
 --- a/frontend/drivers/platform_emulatorjs.c
 +++ b/frontend/drivers/platform_emulatorjs.c
-@@ -115,6 +115,24 @@ typedef struct
+@@ -115,6 +115,28 @@ typedef struct
  
  static emscripten_platform_data_t *emscripten_platform_data = NULL;
  
 +/* kaillera-next: Deterministic timing for lockstep netplay.
 + * When kn_deterministic_mode is non-zero, all timing functions return
-+ * kn_frame_time_ms instead of real wall-clock time. The JS lockstep
-+ * engine sets these via exported kn_set_frame_time/kn_set_deterministic
-+ * before each frame step. */
++ * values derived from the N64 CPU cycle counter (CP0 Count register)
++ * instead of real wall-clock time. This is deterministic because both
++ * emulators execute the same instructions and have the same cycle count.
++ *
++ * kn_get_cycle_time_ms() reads the CP0 Count register and converts it
++ * to milliseconds. This is what Project64k/Kaillera effectively did —
++ * timing was derived from CPU cycles, not wall clock. */
 +int kn_deterministic_mode = 0;
 +double kn_frame_time_ms = 0.0;
 +

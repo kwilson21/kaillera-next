@@ -33,6 +33,31 @@ index 80fe2c1..fe2b1c1 100644
  #elif defined(PS2)
     return ps2_clock() / PS2_CLOCKS_PER_MSEC * 1000;
  #elif defined(VITA) || defined(PSP)
+diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
+index 3ef61a2..f97572b 100644
+--- a/mupen64plus-core/src/main/main.c
++++ b/mupen64plus-core/src/main/main.c
+@@ -129,6 +129,20 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+ 
+ struct device g_dev;
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include "../device/r4300/cp0.h"
++/* kaillera-next: Export the N64 CPU cycle count as a deterministic time source.
++ * CP0_COUNT_REG (index 9) increments with each CPU cycle. Both emulators
++ * execute the same instructions → same cycle count → deterministic timing.
++ * N64 CPU runs at 93.75 MHz, so cycles / 93750.0 = milliseconds. */
++EMSCRIPTEN_KEEPALIVE double kn_get_cycle_time_ms(void)
++{
++    uint32_t cycles = g_dev.r4300.cp0.regs[CP0_COUNT_REG];
++    return (double)cycles / 93750.0;
++}
++#endif
++
+ m64p_media_loader g_media_loader;
+ 
+ int g_gs_vi_counter = 0;
 diff --git a/mupen64plus-core/src/main/profile.c b/mupen64plus-core/src/main/profile.c
 index fe710c3..78ec9e6 100644
 --- a/mupen64plus-core/src/main/profile.c
