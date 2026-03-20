@@ -84,7 +84,7 @@
   <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
   <script src="/static/core-redirector.js"></script>
 
-  <!-- EmulatorJS — ROM supplied by user drag-and-drop -->
+  <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
   <div id="game"></div>
   <script>
     var EJS_player     = '#game';
@@ -92,7 +92,6 @@
     // EJS_gameUrl set by play.js when user drops a ROM file
     var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
   </script>
-  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
 
   <!-- Socket.IO -->
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
