@@ -1110,9 +1110,10 @@
             }
           });
         }
-        // Suspend the AudioContext
-        if (ctx.audioCtx && ctx.audioCtx.suspend) {
-          ctx.audioCtx.suspend();
+        // Close the AudioContext permanently — suspend() is not enough
+        // because browser auto-resumes all suspended contexts on user gesture
+        if (ctx.audioCtx && ctx.audioCtx.close) {
+          ctx.audioCtx.close();
         }
         console.log('[lockstep-v4] killed OpenAL audio system (context ' + id + ')');
       });
