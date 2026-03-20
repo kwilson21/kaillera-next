@@ -24,7 +24,7 @@ index a626706..960ab74 100644
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
 diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
-index be6c1f6..9aa24b1 100644
+index be6c1f6..a6d0bd6 100644
 --- a/audio/drivers/openal.c
 +++ b/audio/drivers/openal.c
 @@ -14,6 +14,7 @@
@@ -62,7 +62,7 @@ index be6c1f6..9aa24b1 100644
  
     al->num_buffers = _latency / (1000 * OPENAL_BUFSIZE);
     if (al->num_buffers < 2)
-@@ -254,6 +268,25 @@ static ssize_t al_write(void *data, const void *s, size_t len)
+@@ -254,6 +268,28 @@ static ssize_t al_write(void *data, const void *s, size_t len)
     const uint8_t *buf = (const uint8_t*)s;
     size_t        _len = 0;
  
@@ -71,6 +71,9 @@ index be6c1f6..9aa24b1 100644
 +      extern int kn_deterministic_mode;
 +      if (kn_deterministic_mode)
 +      {
++         /* Capture audio samples for JS playback, then fall through
++          * to normal OpenAL processing. Do NOT return early — OpenAL
++          * must keep its internal state consistent for determinism. */
 +         extern int16_t kn_audio_buffer[];
 +         extern int kn_audio_sample_count;
 +         int frames = len / (2 * sizeof(int16_t));
@@ -80,7 +83,7 @@ index be6c1f6..9aa24b1 100644
 +            memcpy(&kn_audio_buffer[kn_audio_sample_count * 2],
 +                   buf, frames * 2 * sizeof(int16_t));
 +         kn_audio_sample_count += frames;
-+         return len;
++         /* Fall through to normal al_write — keeps OpenAL state identical */
 +      }
 +   }
 +#endif
@@ -88,17 +91,21 @@ index be6c1f6..9aa24b1 100644
     while (len)
     {
        ALint val;
-@@ -309,6 +342,16 @@ static bool al_start(void *data, bool is_shutdown)
+@@ -309,6 +345,20 @@ static bool al_start(void *data, bool is_shutdown)
  static size_t al_write_avail(void *data)
  {
     al_t *al = (al_t*)data;
 +#ifdef __EMSCRIPTEN__
++   /* kaillera-next: In deterministic mode, still unqueue buffers (so OpenAL
++    * state stays consistent) but always report the same available space to
++    * the emulator. This makes audio generation rate consistent regardless
++    * of real-time playback progress. */
 +   {
 +      extern int kn_deterministic_mode;
 +      if (kn_deterministic_mode)
 +      {
-+         /* No buffers were queued (al_write bypasses OpenAL) — skip unqueue */
-+         return OPENAL_BUFSIZE * 4;
++         al_unqueue_buffers(al);  /* keep OpenAL state consistent */
++         return OPENAL_BUFSIZE * 4;  /* fixed: always report 4 buffers free */
 +      }
 +   }
 +#endif

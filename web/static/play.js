@@ -232,6 +232,7 @@
       playerName: playerName,
       gameElement: document.getElementById('game'),
       rollbackEnabled: rollbackEnabled,
+      audioCtx: _preAudioCtx,  // pre-created during user gesture
       onStatus: function (msg) {
         var el = document.getElementById('engine-status');
         if (el) el.textContent = msg;
@@ -243,7 +244,17 @@
     });
   }
 
+  // Pre-created AudioContext — must be created/resumed during a user gesture
+  // (the Start Game button click) so the browser doesn't suspend it.
+  var _preAudioCtx = null;
+
   function startGame() {
+    // Create and resume AudioContext NOW, during the click gesture
+    try {
+      _preAudioCtx = new AudioContext();
+      _preAudioCtx.resume();
+    } catch (_) {}
+
     var sel = document.getElementById('mode-select');
     var selectedMode = sel ? sel.value : mode;
     var optRollback = document.getElementById('opt-rollback');

@@ -164,8 +164,9 @@
     }
 
     try {
-      _audioCtx = new AudioContext({ sampleRate: _audioRate });
-      // Resume immediately — Start Game button click is the user gesture
+      // Use pre-created AudioContext from user gesture (Start Game click),
+      // or create one (may be suspended without gesture).
+      _audioCtx = (_config && _config.audioCtx) || new AudioContext({ sampleRate: _audioRate });
       if (_audioCtx.state === 'suspended') _audioCtx.resume();
       await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
       _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
