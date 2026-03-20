@@ -236,14 +236,21 @@
 
   function bootEmulator() {
     // Re-initialize EmulatorJS if it was destroyed
-    if (window.EJS_emulator) return;  // already running
+    if (window.EJS_emulator) {
+      console.log('[play] bootEmulator: EJS already exists, skipping');
+      return;
+    }
     if (!_romBlobUrl) {
+      console.log('[play] bootEmulator: no ROM loaded');
       showToast('Please load a ROM file first');
       return;
     }
+    console.log('[play] bootEmulator: injecting loader.js, gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
     var script = document.createElement('script');
     script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+    script.onload = function () { console.log('[play] loader.js loaded'); };
+    script.onerror = function () { console.log('[play] loader.js FAILED to load'); };
     document.body.appendChild(script);
   }
 
