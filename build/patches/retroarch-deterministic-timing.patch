@@ -1,5 +1,5 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..a11fad7 100644
+index a626706..3b9ce75 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
 @@ -126,7 +126,8 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
@@ -12,13 +12,10 @@ index a626706..a11fad7 100644
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +223,12 @@ endif
+@@ -222,6 +223,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
-+   # kaillera-next: Force FAKE_BLOCK even with ASYNC=1.
-+   # This makes audio use main loop timing (synchronous with frame steps)
-+   # instead of real-time callbacks, preventing audio-induced non-determinism.
 +   DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
 +   DEFINES += -DEMSCRIPTEN_AUDIO_FAKE_BLOCK
 +   DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_WRITE_BLOCK
