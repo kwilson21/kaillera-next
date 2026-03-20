@@ -907,8 +907,10 @@
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
 
-    // Update frame time (both JS and C level flags stay ON session-wide)
-    window._kn_frameTime = frameTimeMs;
+    // C-level only: update deterministic frame time (flag stays ON session-wide).
+    // JS-level _kn_inStep is NOT used — _emscripten_get_now returns real time
+    // so audio can schedule buffers. Determinism comes from the C-level flag
+    // which patches features_cpu.c timing functions inside the WASM binary.
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
@@ -976,10 +978,10 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Deterministic timing ON for entire lockstep session (both levels).
-    // Never toggled per-frame — eliminates Asyncify race condition.
+    // C-level deterministic timing ON for entire session.
+    // JS-level _kn_inStep stays OFF so audio gets real time.
     window._kn_frameTime = 0;
-    window._kn_inStep = true;
+    window._kn_inStep = false;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
