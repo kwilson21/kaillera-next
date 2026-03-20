@@ -25,6 +25,12 @@
   var previousSpectators = {};
   var _lateJoin = false;
 
+  function escapeHtml(s) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(s));
+    return div.innerHTML;
+  }
+
   // ── URL Params ─────────────────────────────────────────────────────────
 
   function parseParams() {
@@ -65,7 +71,6 @@
           player_name: playerName,
           room_name: playerName + "'s room",
           game_id: 'ssb64',
-          domain: window.location.hostname,
         },
         maxPlayers: 4,
       }, function (err) {
@@ -79,7 +84,7 @@
       xhr.open('GET', '/room/' + encodeURIComponent(roomCode));
       xhr.onload = function () {
         if (xhr.status !== 200) {
-          showError('Room not found. <a href="/">Back to lobby</a>');
+          showError('Room not found');
           return;
         }
         var roomData = JSON.parse(xhr.responseText);
@@ -122,7 +127,7 @@
         });
       };
       xhr.onerror = function () {
-        showError('Room not found. <a href="/">Back to lobby</a>');
+        showError('Room not found');
       };
       xhr.send();
     }
@@ -164,22 +169,22 @@
     var pid;
     for (pid in players) {
       if (!previousPlayers[pid] && !previousSpectators[pid]) {
-        showToast(players[pid].playerName + ' joined');
+        showToast(escapeHtml(players[pid].playerName) + ' joined');
       }
     }
     for (pid in previousPlayers) {
       if (!players[pid] && !spectators[pid]) {
-        showToast(previousPlayers[pid].playerName + ' left');
+        showToast(escapeHtml(previousPlayers[pid].playerName) + ' left');
       }
     }
     for (pid in spectators) {
       if (!previousSpectators[pid] && !previousPlayers[pid]) {
-        showToast(spectators[pid].playerName + ' is watching');
+        showToast(escapeHtml(spectators[pid].playerName) + ' is watching');
       }
     }
     for (pid in previousSpectators) {
       if (!spectators[pid] && !players[pid]) {
-        showToast(previousSpectators[pid].playerName + ' left');
+        showToast(escapeHtml(previousSpectators[pid].playerName) + ' left');
       }
     }
   }
@@ -411,7 +416,19 @@
     if (!el) return;
     el.classList.remove('hidden');
     var card = el.querySelector('.error-card');
-    if (card) card.innerHTML = '<h3>Error</h3><p>' + msg + '</p><a href="/" class="error-back">Back to Lobby</a>';
+    if (!card) return;
+    card.innerHTML = '';
+    var h3 = document.createElement('h3');
+    h3.textContent = 'Error';
+    var p = document.createElement('p');
+    p.textContent = msg;
+    var a = document.createElement('a');
+    a.href = '/';
+    a.className = 'error-back';
+    a.textContent = 'Back to Lobby';
+    card.appendChild(h3);
+    card.appendChild(p);
+    card.appendChild(a);
   }
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
