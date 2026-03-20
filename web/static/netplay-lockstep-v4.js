@@ -982,11 +982,9 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // With forked core (RWEBAUDIO + FAKE_BLOCK), audio runs synchronously
-    // in the main loop — no async callbacks. C-level kn_deterministic_mode
-    // handles all timing. _kn_inStep OFF = _emscripten_get_now returns real
-    // time for any remaining JS-side needs. No async race possible.
-    window._kn_inStep = false;
+    // Audio enabled: _kn_inStep OFF (real perf.now — may desync)
+    // Audio disabled: _kn_inStep ON (frozen time — deterministic)
+    window._kn_inStep = !_audioEnabled;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
