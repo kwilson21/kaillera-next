@@ -330,7 +330,9 @@
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('lockstep', {
         ordered: true,
-        maxRetransmits: 2,
+        // Reliable delivery — no maxRetransmits limit.
+        // Lockstep requires every input to arrive. A retransmit delay
+        // is far better than a dropped input causing permanent desync.
       });
       setupDataChannel(remoteSid, peer.dc);
     } else {
