@@ -1077,6 +1077,23 @@
       }
     }
 
+    // Kill OpenAL's AudioContext — if the browser auto-resumes it (audio
+    // permission remembered from a previous session), its async callbacks
+    // (ScriptProcessorNode, scheduleContextAudio) will fire between frame
+    // steps and cause desyncs. We bypass al_write() but that doesn't stop
+    // the callbacks from running. Suspending the context silences them.
+    var mod2 = window.EJS_emulator && window.EJS_emulator.gameManager &&
+               window.EJS_emulator.gameManager.Module;
+    if (mod2 && mod2.AL && mod2.AL.contexts) {
+      Object.keys(mod2.AL.contexts).forEach(function (id) {
+        var ctx = mod2.AL.contexts[id];
+        if (ctx && ctx.audioCtx && ctx.audioCtx.suspend) {
+          ctx.audioCtx.suspend();
+          console.log('[lockstep-v4] suspended OpenAL AudioContext', id);
+        }
+      });
+    }
+
     initAudioPlayback();
 
     var activePeers = getActivePeers();
