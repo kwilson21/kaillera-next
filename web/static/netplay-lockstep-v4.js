@@ -911,12 +911,21 @@
     _pendingRunner = null;
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
-
-    // Update deterministic frame time and reset call counter.
-    // _emscripten_get_now returns frameTime + (callCount * 0.01ms).
-    // Both emulators execute the same WASM, so callCount matches.
     window._kn_frameTime = frameTimeMs;
-    window._kn_callCount = 0;
+
+    // On first lockstep frame, switch from flat time to relative cycle counter.
+    // Captures current cycle count as baseline — subtracts transition divergence.
+    if (_hasForkedCore && !window._kn_useRelativeCycles && _frameNum === 0) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_get_cycle_time_ms) {
+        window._kn_cycleStart = mod._kn_get_cycle_time_ms();
+        window._kn_cycleBase = frameTimeMs;
+        window._kn_useRelativeCycles = true;
+        console.log('[lockstep-v4] switched to relative cycle counter at',
+          window._kn_cycleStart.toFixed(1) + 'ms');
+      }
+    }
 
     // C-level: always update frame time (kn_deterministic_mode stays ON)
     if (_hasForkedCore) {
