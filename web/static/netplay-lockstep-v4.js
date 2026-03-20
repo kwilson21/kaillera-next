@@ -90,6 +90,7 @@
   let sessionId          = null;
   let _playerSlot        = -1;      // 0-3 for players, null for spectators
   let _isSpectator       = false;
+  let _audioEnabled      = true;     // true = real time (audio), false = frozen (no desync)
   let _peers             = {};      // remoteSid -> PeerState
   let _knownPlayers      = {};      // socketId -> {slot, playerName}
   let _expectedPeerCount = 0;       // other players in room (excludes spectators)
@@ -979,10 +980,10 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Audio ON by default: _kn_inStep = false (real time for audio).
-    // C-level kn_deterministic_mode handles features_cpu.c timing.
-    // User can toggle audio off via toolbar for perfect determinism.
-    window._kn_inStep = false;
+    // Audio enabled: _kn_inStep = false (real time, audio plays, possible minor desyncs)
+    // Audio disabled: _kn_inStep = true (frozen time, no audio, perfect sync)
+    // Set once at start — not toggled during gameplay.
+    window._kn_inStep = !_audioEnabled;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
@@ -1494,6 +1495,10 @@
     _playerSlot = config.playerSlot;
     _isSpectator = config.isSpectator;
 
+    // Apply pre-game options
+    _audioEnabled = config.audioEnabled !== false;  // default: true
+    _syncEnabled = !!config.rollbackEnabled;        // default: false
+
     window._playerSlot = _playerSlot;
     window._isSpectator = _isSpectator;
 
@@ -1569,13 +1574,7 @@
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
     setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
-    setAudioEnabled: function (on) {
-      // Audio ON = _kn_inStep OFF (real time, audio works, possible minor desyncs)
-      // Audio OFF = _kn_inStep ON (deterministic, no audio, perfect sync)
-      window._kn_inStep = !on;
-      console.log('[lockstep-v4] audio ' + (on ? 'enabled (real time)' : 'disabled (deterministic)'));
-    },
-    isAudioEnabled: function () { return !window._kn_inStep; },
+    isAudioEnabled: function () { return _audioEnabled; },
   };
 
 })();

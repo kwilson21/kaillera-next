@@ -219,6 +219,12 @@
       return;
     }
 
+    // Read pre-game options
+    var optAudio = document.getElementById('opt-audio');
+    var optRollback = document.getElementById('opt-rollback');
+    var audioEnabled = optAudio ? optAudio.checked : true;
+    var rollbackEnabled = optRollback ? optRollback.checked : false;
+
     engine = Engine;
     engine.init({
       socket: socket,
@@ -227,6 +233,8 @@
       isSpectator: isSpectator,
       playerName: playerName,
       gameElement: document.getElementById('game'),
+      audioEnabled: audioEnabled,
+      rollbackEnabled: rollbackEnabled,
       onStatus: function (msg) {
         var el = document.getElementById('engine-status');
         if (el) el.textContent = msg;
@@ -444,26 +452,16 @@
     var copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
-    var audioBtn = document.getElementById('toolbar-audio');
-    if (audioBtn) audioBtn.addEventListener('click', function () {
-      if (engine && engine.setAudioEnabled) {
-        var nowOn = !engine.isAudioEnabled();
-        engine.setAudioEnabled(nowOn);
-        audioBtn.textContent = 'Audio: ' + (nowOn ? 'On' : 'Off');
-        showToast('Audio ' + (nowOn ? 'enabled' : 'disabled') +
-          (nowOn ? '' : ' (perfect sync)'));
-      }
-    });
-
-    var syncBtn = document.getElementById('toolbar-sync');
-    if (syncBtn) syncBtn.addEventListener('click', function () {
-      if (engine && engine.setSyncEnabled) {
-        var nowOn = !engine.isSyncEnabled();
-        engine.setSyncEnabled(nowOn);
-        syncBtn.textContent = 'Rollback: ' + (nowOn ? 'On' : 'Off');
-        showToast('Rollback ' + (nowOn ? 'enabled' : 'disabled') + ' (experimental)');
-      }
-    });
+    // Show/hide lockstep options based on mode selector
+    var modeSelect = document.getElementById('mode-select');
+    var lockstepOpts = document.getElementById('lockstep-options');
+    if (modeSelect && lockstepOpts) {
+      var updateOpts = function () {
+        lockstepOpts.style.display = modeSelect.value === 'lockstep-v4' ? '' : 'none';
+      };
+      modeSelect.addEventListener('change', updateOpts);
+      updateOpts();
+    }
 
     connect();
     startGamepadPolling();

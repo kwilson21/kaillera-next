@@ -128,6 +128,27 @@ body {
   font-size: 14px;
 }
 
+#lockstep-options {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  color: #ccc;
+  padding: 4px 0;
+}
+#lockstep-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+#lockstep-options input[type="checkbox"] {
+  accent-color: #7c5cff;
+}
+.opt-hint {
+  color: #666;
+  font-size: 11px;
+}
+
 #start-btn {
   flex: 1;
   font-size: 16px;

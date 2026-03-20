@@ -44,6 +44,10 @@
           <option value="lockstep-v4" title="All players run the emulator in perfect sync — best quality, requires good connection">Lockstep</option>
           <option value="streaming" title="Host runs the emulator and streams video to guests — zero desync, works on weaker devices">Streaming</option>
         </select>
+        <div id="lockstep-options">
+          <label><input type="checkbox" id="opt-audio" checked> Audio <span class="opt-hint">(may cause minor desyncs)</span></label>
+          <label><input type="checkbox" id="opt-rollback"> Rollback <span class="opt-hint">(experimental resync)</span></label>
+        </div>
         <button id="start-btn" disabled>Start Game (need 2+)</button>
       </div>
 
@@ -60,8 +64,6 @@
   <div id="toolbar" class="hidden">
     <span id="toolbar-room"></span>
     <div class="toolbar-spacer"></div>
-    <button id="toolbar-audio" title="Audio on may cause minor desyncs. Turn off for perfect sync.">Audio: On</button>
-    <button id="toolbar-sync" title="Experimental: detects game state desync and corrects by rolling back to host state">Rollback: Off</button>
     <button id="toolbar-leave">Leave Game</button>
     <button id="toolbar-end" style="display:none">End Game</button>
   </div>
