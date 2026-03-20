@@ -104,6 +104,7 @@
   let _selfEmuReady      = false;
   let _p1KeyMap          = null;
   let _heldKeys          = new Set();
+  var _ejsInputState     = new Int32Array(20); // captured from EJS simulateInput for player 0
 
   // Lockstep state
   let _lockstepReadyPeers = {};     // remoteSid -> true when peer signals lockstep-ready
@@ -1402,11 +1403,23 @@
   function readLocalInput() {
     var mask = 0;
 
-    // Gamepad
-    var gp = navigator.getGamepads()[0];
-    if (gp) {
-      for (var i = 0; i < Math.min(gp.buttons.length, 32); i++) {
-        if (gp.buttons[i].pressed) mask |= (1 << i);
+    // Gamepad (uses saved original since we override getGamepads for EJS)
+    if (document.hasFocus()) {
+      var gp = navigator.getGamepads()[0];
+      if (gp) {
+        for (var i = 0; i < Math.min(gp.buttons.length, 16); i++) {
+          if (gp.buttons[i].pressed) mask |= (1 << i);
+        }
+        // Xbox Start (btn 9) -> N64 Start (bit 3)
+        if (gp.buttons.length > 9 && gp.buttons[9].pressed) mask |= (1 << 3);
+        var DEADZONE = 0.3;
+        if (gp.axes.length >= 2) {
+          var ax = gp.axes[0], ay = gp.axes[1];
+          if (ay < -DEADZONE) mask |= (1 << 16);
+          if (ay >  DEADZONE) mask |= (1 << 17);
+          if (ax < -DEADZONE) mask |= (1 << 18);
+          if (ax >  DEADZONE) mask |= (1 << 19);
+        }
       }
     }
 
@@ -1548,12 +1561,15 @@
   // -- Emulator start --------------------------------------------------------
 
   function triggerEmulatorStart() {
+    // Poll for EmulatorJS start button in the DOM. Only this element
+    // indicates the core is fully loaded and ready — calling the API
+    // method (startButtonClicked) too early fails silently.
     var attempt = function () {
       var btn = document.querySelector('.ejs_start_button');
-      if (btn) { btn.click(); return; }
-      var ejs = window.EJS_emulator;
-      if (ejs && typeof ejs.startButtonClicked === 'function') {
-        ejs.startButtonClicked(); return;
+      if (btn) {
+        console.log('[lockstep] clicking EJS start button');
+        btn.click();
+        return;
       }
       setTimeout(attempt, 200);
     };
