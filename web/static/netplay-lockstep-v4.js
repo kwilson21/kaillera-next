@@ -907,8 +907,11 @@
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
 
-    // Update frame time (both JS and C level flags stay ON session-wide)
+    // JS-level: toggle per-frame so audio gets real time between frames
+    window._kn_inStep = true;
     window._kn_frameTime = frameTimeMs;
+
+    // C-level: just update time (flag stays ON session-wide, no race)
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
@@ -918,6 +921,9 @@
     }
 
     runner(frameTimeMs);
+
+    // JS-level: allow real time again (audio needs it for buffer scheduling)
+    window._kn_inStep = false;
 
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
@@ -976,10 +982,11 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Deterministic timing ON for entire lockstep session (both levels).
-    // Never toggled per-frame — eliminates Asyncify race condition.
+    // C-level: ON for entire session (no Asyncify race in WASM memory).
+    // JS-level: toggled per-frame in stepOneFrame() so audio gets real
+    // time between frames for buffer scheduling.
     window._kn_frameTime = 0;
-    window._kn_inStep = true;
+    window._kn_inStep = false;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
