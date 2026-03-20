@@ -23,7 +23,14 @@
   }
 
   function randomCode() {
-    return Math.random().toString(36).slice(2, 7).toUpperCase();
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    var arr = new Uint8Array(8);
+    crypto.getRandomValues(arr);
+    var code = '';
+    for (var i = 0; i < 8; i++) {
+      code += chars[arr[i] % chars.length];
+    }
+    return code;
   }
 
   function saveName() {
