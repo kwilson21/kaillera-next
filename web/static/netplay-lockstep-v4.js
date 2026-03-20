@@ -460,21 +460,12 @@
     });
   }
 
-  // Peers we should wait for input from. A peer must:
-  //   1. Be a player (have a slot) with an open DC
-  //   2. Have sent at least 1 input (_remoteInputs[slot] exists)
-  //   3. Be "caught up" — their last sent frame is within DELAY_FRAMES+2
-  //      of our current frame. Late joiners who are still behind won't
-  //      stall existing players.
+  // Strict input blocking (Kaillera-style): wait for ALL active player
+  // peers, not just those who have started sending. The emulator CANNOT
+  // advance without every peer's input for the apply frame. This forces
+  // network-paced stepping — both sides step at identical rate.
   function getInputPeers() {
-    return Object.values(_peers).filter(function (p) {
-      if (p.slot === null || p.slot === undefined) return false;
-      if (!p.dc || p.dc.readyState !== 'open') return false;
-      if (!_remoteInputs[p.slot]) return false;
-      // Check if peer is caught up
-      var peerLastFrame = _lastRemoteFramePerSlot[p.slot] || -1;
-      return peerLastFrame >= _frameNum - DELAY_FRAMES - 10;
-    });
+    return getActivePeers();
   }
 
   // -- Game start sequence ---------------------------------------------------
