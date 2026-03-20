@@ -4,7 +4,10 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
-build/
+
+# EmulatorJS core build artifacts (source repos + compiled output)
+build/src/
+build/output/
 
 # ROM files — copyrighted, not committed
 web/static/rom/

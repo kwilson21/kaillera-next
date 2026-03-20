@@ -121,6 +121,7 @@
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
+  let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -365,16 +366,24 @@
           checkAllLockstepReady();
         }
         // State sync: hash check from host
+        // IMPORTANT: only compare when we're at the SAME frame as the host.
+        // Comparing at different frames always shows a diff (not a real desync).
         if (e.data.substring(0, 10) === 'sync-hash:') {
           var parts = e.data.split(':');
           var syncFrame = parseInt(parts[1], 10);
           var hostHash = parseInt(parts[2], 10);
-          var localHash = hashGameState();
-          if (localHash !== hostHash) {
-            console.log('[lockstep-v4] DESYNC at frame', syncFrame,
-              'local:', localHash, 'host:', hostHash, '-- requesting state');
-            peer.dc.send('sync-request');
+          if (_frameNum === syncFrame) {
+            var localHash = hashGameState();
+            if (localHash !== hostHash) {
+              console.log('[lockstep-v4] DESYNC at frame', syncFrame,
+                'local:', localHash, 'host:', hostHash, '-- requesting state');
+              peer.dc.send('sync-request');
+            }
+          } else if (_frameNum < syncFrame) {
+            // We're behind — store for deferred check when we reach that frame
+            _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: sid };
           }
+          // If _frameNum > syncFrame, skip — frame already passed
         }
         // State sync: host received request, or chunked binary transfer header
         if (e.data === 'sync-request' && _playerSlot === 0) {
@@ -866,11 +875,35 @@
     console.log('[lockstep-v4] entered manual mode');
   }
 
+  var _hasForkedCore = false;  // true if Module exports kn_set_deterministic
+
   function stepOneFrame() {
     if (!_pendingRunner) return false;
     var runner = _pendingRunner;
     _pendingRunner = null;
-    runner(performance.now());
+
+    var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+
+    if (_hasForkedCore && mod && mod._kn_set_deterministic) {
+      // Forked core: C-level deterministic timing (compiled into WASM)
+      mod._kn_set_deterministic(1);
+      mod._kn_set_frame_time(frameTimeMs);
+    } else {
+      // Stock core fallback: JS-level patch via window globals
+      window._kn_inStep = true;
+      window._kn_frameTime = frameTimeMs;
+    }
+
+    runner(frameTimeMs);
+
+    if (_hasForkedCore && mod && mod._kn_set_deterministic) {
+      mod._kn_set_deterministic(0);
+    } else {
+      window._kn_inStep = false;
+    }
+
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
     return true;
@@ -901,6 +934,17 @@
   function startLockstep() {
     if (_running) return;
     _running = true;
+
+    // Detect forked core with C-level deterministic timing exports
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    _hasForkedCore = !!(mod && mod._kn_set_deterministic && mod._kn_set_frame_time);
+    if (_hasForkedCore) {
+      console.log('[lockstep-v4] forked core detected — C-level deterministic timing');
+    } else {
+      console.log('[lockstep-v4] stock core — JS-level timing patch (fallback)');
+    }
+
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
     if (_frameNum === 0) {
       _localInputs = {};
@@ -916,6 +960,8 @@
     _lastRemoteFramePerSlot = {};
     _stallStart = 0;
     window._netplayFrameLog = [];
+    window._kn_frameTime = 0;
+    window._kn_inStep = false;
 
     var activePeers = getActivePeers();
     var peerSlots = activePeers.map(function (p) { return p.slot; });
@@ -932,6 +978,7 @@
   function stopSync() {
     _running = false;
     window._lockstepActive = false;
+    window._kn_inStep = false;
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
       _tickInterval = null;
@@ -943,6 +990,7 @@
     }
     _manualMode = false;
     _pendingRunner = null;
+    _pendingSyncCheck = null;
   }
 
   function tick() {
@@ -1036,9 +1084,25 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
+    // Deferred sync check: guest was behind when sync-hash arrived, now caught up
+    if (_pendingSyncCheck && _frameNum === _pendingSyncCheck.frame) {
+      var localHash = hashGameState();
+      if (localHash !== _pendingSyncCheck.hash) {
+        console.log('[lockstep-v4] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
+        var syncPeer = _peers[_pendingSyncCheck.peerSid];
+        if (syncPeer && syncPeer.dc) {
+          try { syncPeer.dc.send('sync-request'); } catch (_) {}
+        }
+      }
+      _pendingSyncCheck = null;
+    } else if (_pendingSyncCheck && _frameNum > _pendingSyncCheck.frame) {
+      // Passed the frame — discard stale check
+      _pendingSyncCheck = null;
+    }
+
     // -- Periodic desync check: host hashes game state (first 64KB), broadcasts hash.
-    // Only pushes full state if guest reports mismatch. Audio buffers (deep in the
-    // 16MB save state) always differ but game state stays in sync naturally.
+    // With the forked core's deterministic timing, desyncs should not occur.
+    // This serves as a safety net for edge cases or fallback to stock core.
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
         _frameNum % _syncCheckInterval === 0) {
       var hostHash = hashGameState();
@@ -1046,6 +1110,10 @@
       var ap = getActivePeers();
       for (var s = 0; s < ap.length; s++) {
         try { ap[s].dc.send(syncMsg); } catch (_) {}
+      }
+      // Log every 10th check (~50 seconds)
+      if (_frameNum % (_syncCheckInterval * 10) === 0) {
+        console.log('[lockstep-v4] sync check at frame', _frameNum, 'hash:', hostHash);
       }
     }
 

@@ -1,0 +1,80 @@
+diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
+index a626706..547aafe 100644
+--- a/Makefile.emulatorjs
++++ b/Makefile.emulatorjs
+@@ -126,7 +126,8 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+                      _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
+                      _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
+                      _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
+-                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
++                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data, \
++                     _kn_set_frame_time,_kn_set_deterministic
+ 
+ EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
+ 
+diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
+index c9ceed1..b8660e8 100644
+--- a/frontend/drivers/platform_emulatorjs.c
++++ b/frontend/drivers/platform_emulatorjs.c
+@@ -115,6 +115,24 @@ typedef struct
+ 
+ static emscripten_platform_data_t *emscripten_platform_data = NULL;
+ 
++/* kaillera-next: Deterministic timing for lockstep netplay.
++ * When kn_deterministic_mode is non-zero, all timing functions return
++ * kn_frame_time_ms instead of real wall-clock time. The JS lockstep
++ * engine sets these via exported kn_set_frame_time/kn_set_deterministic
++ * before each frame step. */
++int kn_deterministic_mode = 0;
++double kn_frame_time_ms = 0.0;
++
++EMSCRIPTEN_KEEPALIVE void kn_set_frame_time(double time_ms)
++{
++   kn_frame_time_ms = time_ms;
++}
++
++EMSCRIPTEN_KEEPALIVE void kn_set_deterministic(int enable)
++{
++   kn_deterministic_mode = enable;
++}
++
+ /* defined here since implementation is frontend dependent */
+ 
+ void retro_sleep(unsigned msec)
+diff --git a/libretro-common/features/features_cpu.c b/libretro-common/features/features_cpu.c
+index a4f92f2..328c952 100644
+--- a/libretro-common/features/features_cpu.c
++++ b/libretro-common/features/features_cpu.c
+@@ -211,7 +211,15 @@ retro_perf_tick_t cpu_features_get_perf_counter(void)
+ #elif defined(HAVE_LIBNX)
+    time_ticks = armGetSystemTick();
+ #elif defined(EMSCRIPTEN)
+-   time_ticks = emscripten_get_now() * 1000;
++   {
++      /* kaillera-next: use deterministic frame time in lockstep mode */
++      extern int kn_deterministic_mode;
++      extern double kn_frame_time_ms;
++      if (kn_deterministic_mode)
++         time_ticks = (retro_perf_tick_t)(kn_frame_time_ms * 1000);
++      else
++         time_ticks = emscripten_get_now() * 1000;
++   }
+ #endif
+ 
+    return time_ticks;
+@@ -248,7 +256,14 @@ retro_time_t cpu_features_get_time_usec(void)
+       return 0;
+    return tv.tv_sec * INT64_C(1000000) + (tv.tv_nsec + 500) / 1000;
+ #elif defined(EMSCRIPTEN)
+-   return emscripten_get_now() * 1000;
++   {
++      /* kaillera-next: use deterministic frame time in lockstep mode */
++      extern int kn_deterministic_mode;
++      extern double kn_frame_time_ms;
++      if (kn_deterministic_mode)
++         return (retro_time_t)(kn_frame_time_ms * 1000);
++      return emscripten_get_now() * 1000;
++   }
+ #elif defined(PS2)
+    return ps2_clock() / PS2_CLOCKS_PER_MSEC * 1000;
+ #elif defined(VITA) || defined(PSP)

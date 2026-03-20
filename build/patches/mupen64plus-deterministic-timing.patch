@@ -1,0 +1,53 @@
+diff --git a/libretro-common/features/features_cpu.c b/libretro-common/features/features_cpu.c
+index 80fe2c1..fe2b1c1 100644
+--- a/libretro-common/features/features_cpu.c
++++ b/libretro-common/features/features_cpu.c
+@@ -212,7 +212,14 @@ retro_perf_tick_t cpu_features_get_perf_counter(void)
+ #elif defined(HAVE_LIBNX)
+    time_ticks = armGetSystemTick();
+ #elif defined(EMSCRIPTEN)
+-   time_ticks = emscripten_get_now() * 1000;
++   {
++      extern int kn_deterministic_mode;
++      extern double kn_frame_time_ms;
++      if (kn_deterministic_mode)
++         time_ticks = (retro_perf_tick_t)(kn_frame_time_ms * 1000);
++      else
++         time_ticks = emscripten_get_now() * 1000;
++   }
+ #endif
+ 
+    return time_ticks;
+@@ -256,7 +263,13 @@ retro_time_t cpu_features_get_time_usec(void)
+       return 0;
+    return tv.tv_sec * INT64_C(1000000) + (tv.tv_nsec + 500) / 1000;
+ #elif defined(EMSCRIPTEN)
+-   return emscripten_get_now() * 1000;
++   {
++      extern int kn_deterministic_mode;
++      extern double kn_frame_time_ms;
++      if (kn_deterministic_mode)
++         return (retro_time_t)(kn_frame_time_ms * 1000);
++      return emscripten_get_now() * 1000;
++   }
+ #elif defined(PS2)
+    return ps2_clock() / PS2_CLOCKS_PER_MSEC * 1000;
+ #elif defined(VITA) || defined(PSP)
+diff --git a/mupen64plus-core/src/main/profile.c b/mupen64plus-core/src/main/profile.c
+index fe710c3..78ec9e6 100644
+--- a/mupen64plus-core/src/main/profile.c
++++ b/mupen64plus-core/src/main/profile.c
+@@ -53,6 +53,13 @@ static long long int last_start[NUM_TIMED_SECTIONS];
+ 
+   static long long int get_time(void)
+   {
++#ifdef __EMSCRIPTEN__
++     /* kaillera-next: deterministic timing for lockstep netplay */
++     extern int kn_deterministic_mode;
++     extern double kn_frame_time_ms;
++     if (kn_deterministic_mode)
++        return (long long int)(kn_frame_time_ms * 1000000.0);
++#endif
+      struct timespec ts;
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      return (long long int)ts.tv_sec * 1000000000 + ts.tv_nsec;
