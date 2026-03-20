@@ -907,10 +907,14 @@
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
 
-    // C-level only: update deterministic frame time (flag stays ON session-wide).
-    // JS-level _kn_inStep is NOT used — _emscripten_get_now returns real time
-    // so audio can schedule buffers. Determinism comes from the C-level flag
-    // which patches features_cpu.c timing functions inside the WASM binary.
+    // Deterministic timing: set frame base time + real-time anchor.
+    // _emscripten_get_now returns: _kn_frameTime + (perf.now - _kn_frameRealStart)
+    // This gives deterministic BASE time (same on both machines) plus a small
+    // real-time offset so audio sees advancing time for buffer scheduling.
+    window._kn_frameRealStart = performance.now();
+    window._kn_frameTime = frameTimeMs;
+
+    // C-level: update time (flag stays ON session-wide)
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
@@ -978,10 +982,11 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // C-level deterministic timing ON for entire session.
-    // JS-level _kn_inStep stays OFF so audio gets real time.
+    // Both JS and C-level deterministic timing ON for entire session.
+    // Audio still works because _emscripten_get_now returns frameTime + realOffset.
     window._kn_frameTime = 0;
-    window._kn_inStep = false;
+    window._kn_frameRealStart = performance.now();
+    window._kn_inStep = true;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
