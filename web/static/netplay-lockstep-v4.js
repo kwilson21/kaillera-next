@@ -178,6 +178,21 @@
 
       _audioWorklet.connect(_audioCtx.destination);
       _audioReady = true;
+
+      // Resume AudioContext on first user interaction (autoplay policy).
+      // initAudioPlayback runs after save state transfer — the Start Game
+      // gesture is expired, so the context starts suspended.
+      if (_audioCtx.state === 'suspended') {
+        var resumeAudio = function () {
+          if (_audioCtx) _audioCtx.resume();
+          document.removeEventListener('click', resumeAudio);
+          document.removeEventListener('keydown', resumeAudio);
+        };
+        document.addEventListener('click', resumeAudio);
+        document.addEventListener('keydown', resumeAudio);
+        console.log('[lockstep-v4] audio suspended — click or press a key to enable');
+      }
+
       console.log('[lockstep-v4] audio playback initialized (rate: ' + _audioRate + ')');
     } catch (err) {
       console.log('[lockstep-v4] AudioWorklet init failed:', err);
