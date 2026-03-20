@@ -24,6 +24,7 @@
   var previousPlayers = {};
   var previousSpectators = {};
   var _lateJoin = false;
+  var _romBlobUrl = null;
 
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -236,9 +237,66 @@
   function bootEmulator() {
     // Re-initialize EmulatorJS if it was destroyed
     if (window.EJS_emulator) return;  // already running
+    if (!_romBlobUrl) {
+      showToast('Please load a ROM file first');
+      return;
+    }
+    window.EJS_gameUrl = _romBlobUrl;
     var script = document.createElement('script');
     script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
     document.body.appendChild(script);
+  }
+
+  function setupRomDrop() {
+    var drop = document.getElementById('rom-drop');
+    if (!drop) return;
+
+    var savedRom = localStorage.getItem('kaillera-rom-name');
+    var statusEl = document.getElementById('rom-status');
+
+    var fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.z64,.n64,.v64,.zip';
+    fileInput.style.display = 'none';
+    drop.appendChild(fileInput);
+
+    drop.addEventListener('click', function () {
+      if (!_romBlobUrl) fileInput.click();
+    });
+
+    fileInput.addEventListener('change', function () {
+      if (fileInput.files.length > 0) handleRomFile(fileInput.files[0]);
+    });
+
+    drop.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      drop.classList.add('dragover');
+    });
+
+    drop.addEventListener('dragleave', function () {
+      drop.classList.remove('dragover');
+    });
+
+    drop.addEventListener('drop', function (e) {
+      e.preventDefault();
+      drop.classList.remove('dragover');
+      if (e.dataTransfer.files.length > 0) handleRomFile(e.dataTransfer.files[0]);
+    });
+
+    if (savedRom && statusEl) {
+      statusEl.textContent = 'Last used: ' + savedRom + ' (drop new file to change)';
+    }
+  }
+
+  function handleRomFile(file) {
+    _romBlobUrl = URL.createObjectURL(file);
+    window.EJS_gameUrl = _romBlobUrl;
+    localStorage.setItem('kaillera-rom-name', file.name);
+
+    var drop = document.getElementById('rom-drop');
+    if (drop) drop.classList.add('loaded');
+    var statusEl = document.getElementById('rom-status');
+    if (statusEl) statusEl.textContent = 'Loaded: ' + file.name;
   }
 
   function initEngine() {
@@ -279,6 +337,10 @@
   }
 
   function startGame() {
+    if (!_romBlobUrl) {
+      showToast('Load a ROM file before starting');
+      return;
+    }
     var sel = document.getElementById('mode-select');
     var selectedMode = sel ? sel.value : mode;
     var optRollback = document.getElementById('opt-rollback');
@@ -513,5 +575,6 @@
 
     connect();
     startGamepadPolling();
+    setupRomDrop();
   });
 })();

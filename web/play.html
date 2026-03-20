@@ -38,6 +38,12 @@
 
       <div id="spectator-list"></div>
 
+      <div id="rom-drop" class="rom-drop">
+        <p>Drop your ROM file here</p>
+        <p class="rom-hint">.z64 / .n64 / .v64</p>
+        <p id="rom-status" class="rom-status"></p>
+      </div>
+
       <div id="host-controls" style="display:none">
         <label for="mode-select" class="mode-label">Mode:</label>
         <select id="mode-select" title="Lockstep: all players run the emulator in sync. Streaming: host runs the emulator, guests watch a video stream.">
@@ -78,12 +84,12 @@
   <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
   <script src="/static/core-redirector.js"></script>
 
-  <!-- EmulatorJS -->
+  <!-- EmulatorJS — ROM supplied by user drag-and-drop -->
   <div id="game"></div>
   <script>
     var EJS_player     = '#game';
     var EJS_core       = 'n64';
-    var EJS_gameUrl    = '/static/rom/Super Smash Bros. (USA).z64';
+    // EJS_gameUrl set by play.js when user drops a ROM file
     var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
   </script>
   <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
