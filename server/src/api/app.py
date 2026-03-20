@@ -23,9 +23,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org; "
+            "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline' blob:; "
+            "style-src 'self' 'unsafe-inline' https://cdn.emulatorjs.org; "
+            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org blob:; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
             "worker-src 'self' blob: https://cdn.emulatorjs.org; "
