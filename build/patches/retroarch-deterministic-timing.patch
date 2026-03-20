@@ -24,7 +24,7 @@ index a626706..960ab74 100644
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
 diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
-index be6c1f6..a942079 100644
+index be6c1f6..72f263e 100644
 --- a/audio/drivers/openal.c
 +++ b/audio/drivers/openal.c
 @@ -14,6 +14,7 @@
@@ -35,7 +35,7 @@ index be6c1f6..a942079 100644
  #include <stdlib.h>
  #include <string.h>
  #include <time.h>
-@@ -178,6 +179,18 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
+@@ -178,6 +179,13 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
     al->rate  = rate;
     *new_rate = rate;
  
@@ -46,23 +46,10 @@ index be6c1f6..a942079 100644
 +   }
 +#endif
 +
-+#ifdef __EMSCRIPTEN__
-+   /* kaillera-next: always use int16 for deterministic audio capture */
-+   al->format      = AL_FORMAT_STEREO16;
-+   _latency        = latency * rate * 2 * sizeof(int16_t);
-+#else
     if (alIsExtensionPresent("AL_EXT_FLOAT32"))
     {
        al->format      = alGetEnumValue("AL_FORMAT_STEREO_FLOAT32");
-@@ -189,6 +202,7 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
-       al->format      = AL_FORMAT_STEREO16;
-       _latency        = latency * rate * 2 * sizeof(int16_t);
-    }
-+#endif
- 
-    al->num_buffers = _latency / (1000 * OPENAL_BUFSIZE);
-    if (al->num_buffers < 2)
-@@ -254,6 +268,26 @@ static ssize_t al_write(void *data, const void *s, size_t len)
+@@ -254,6 +262,47 @@ static ssize_t al_write(void *data, const void *s, size_t len)
     const uint8_t *buf = (const uint8_t*)s;
     size_t        _len = 0;
  
@@ -71,15 +58,36 @@ index be6c1f6..a942079 100644
 +      extern int kn_deterministic_mode;
 +      if (kn_deterministic_mode)
 +      {
-+         /* Bypass OpenAL entirely — capture audio to buffer for JS playback */
++         /* Bypass OpenAL — capture audio to int16 buffer for JS playback.
++          * Data may be float32 or int16 depending on al->format. */
 +         extern int16_t kn_audio_buffer[];
 +         extern int kn_audio_sample_count;
-+         int frames = len / (2 * sizeof(int16_t));
++         int sample_size = (al->format == AL_FORMAT_STEREO16)
++                           ? (int)sizeof(int16_t) : (int)sizeof(float);
++         int frames = len / (2 * sample_size);
 +         int space = 48000 - kn_audio_sample_count;
 +         if (frames > space) frames = space;
 +         if (frames > 0)
-+            memcpy(&kn_audio_buffer[kn_audio_sample_count * 2],
-+                   buf, frames * 2 * sizeof(int16_t));
++         {
++            if (al->format == AL_FORMAT_STEREO16)
++            {
++               memcpy(&kn_audio_buffer[kn_audio_sample_count * 2],
++                      buf, frames * 2 * sizeof(int16_t));
++            }
++            else
++            {
++               /* float32 stereo -> int16 stereo */
++               const float *fbuf = (const float *)buf;
++               int i;
++               for (i = 0; i < frames * 2; i++)
++               {
++                  float s = fbuf[i];
++                  if (s > 1.0f) s = 1.0f;
++                  if (s < -1.0f) s = -1.0f;
++                  kn_audio_buffer[kn_audio_sample_count * 2 + i] = (int16_t)(s * 32767.0f);
++               }
++            }
++         }
 +         kn_audio_sample_count += frames;
 +         return len;
 +      }
@@ -89,7 +97,7 @@ index be6c1f6..a942079 100644
     while (len)
     {
        ALint val;
-@@ -309,6 +343,18 @@ static bool al_start(void *data, bool is_shutdown)
+@@ -309,6 +358,18 @@ static bool al_start(void *data, bool is_shutdown)
  static size_t al_write_avail(void *data)
  {
     al_t *al = (al_t*)data;
