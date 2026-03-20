@@ -498,7 +498,10 @@
     setupKeyTracking();
     disableEJSKeyboard();
 
-    // Wait for gameManager AND for the emulator to run enough frames
+    // Wait for gameManager AND for the emulator to be ready.
+    // Host: waits for MIN_BOOT_FRAMES (needs a fully booted emulator to capture state).
+    // Guest: only waits for Module to exist (will load host's state, no independent boot).
+    // This prevents boot frame count differences that cause desync.
     var waitForEmu = function () {
       var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(waitForEmu, 100); return; }
@@ -507,17 +510,21 @@
       var frames = mod && mod._get_current_frame_count
         ? mod._get_current_frame_count() : 0;
 
-      if (frames < MIN_BOOT_FRAMES) {
+      if (_playerSlot === 0 && frames < MIN_BOOT_FRAMES) {
+        // Host: needs full boot to capture a valid state
+        setTimeout(waitForEmu, 100);
+        return;
+      }
+      if (_playerSlot !== 0 && frames < 10) {
+        // Guest: just needs Module initialized (minimal frames)
         setTimeout(waitForEmu, 100);
         return;
       }
 
-      // CRITICAL: Pause immediately to prevent free frames during state exchange.
-      // Without this, each side runs different numbers of free frames between
-      // boot and lockstep start, causing internal state divergence that
-      // loadState() can't fully overwrite.
+      // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
-      console.log('[lockstep-v4] emulator booted (' + frames + ' frames) — paused');
+      console.log('[lockstep-v4] emulator ready (' + frames + ' frames) — paused' +
+        (_playerSlot === 0 ? ' (host, full boot)' : ' (guest, minimal boot)'));
       _selfEmuReady = true;
 
       // Notify all connected peers
