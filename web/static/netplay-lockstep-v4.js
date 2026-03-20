@@ -907,10 +907,11 @@
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
 
-    // Both JS + C level deterministic timing, always ON.
-    // This is the only config that produces zero visible desyncs.
-    // Audio is handled separately via host streaming.
+    // Update deterministic frame time (used when _kn_inStep is true).
+    // _kn_inStep is controlled by the Audio toggle — not set here.
     window._kn_frameTime = frameTimeMs;
+
+    // C-level: always update frame time (kn_deterministic_mode stays ON)
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
@@ -978,9 +979,10 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Both JS + C level deterministic timing ON for entire session.
-    // Only config that produces zero visible desyncs.
-    window._kn_inStep = true;
+    // Audio ON by default: _kn_inStep = false (real time for audio).
+    // C-level kn_deterministic_mode handles features_cpu.c timing.
+    // User can toggle audio off via toolbar for perfect determinism.
+    window._kn_inStep = false;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
@@ -1567,6 +1569,13 @@
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
     setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
+    setAudioEnabled: function (on) {
+      // Audio ON = _kn_inStep OFF (real time, audio works, possible minor desyncs)
+      // Audio OFF = _kn_inStep ON (deterministic, no audio, perfect sync)
+      window._kn_inStep = !on;
+      console.log('[lockstep-v4] audio ' + (on ? 'enabled (real time)' : 'disabled (deterministic)'));
+    },
+    isAudioEnabled: function () { return !window._kn_inStep; },
   };
 
 })();

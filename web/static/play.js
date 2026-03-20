@@ -444,6 +444,17 @@
     var copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
+    var audioBtn = document.getElementById('toolbar-audio');
+    if (audioBtn) audioBtn.addEventListener('click', function () {
+      if (engine && engine.setAudioEnabled) {
+        var nowOn = !engine.isAudioEnabled();
+        engine.setAudioEnabled(nowOn);
+        audioBtn.textContent = 'Audio: ' + (nowOn ? 'On' : 'Off');
+        showToast('Audio ' + (nowOn ? 'enabled' : 'disabled') +
+          (nowOn ? '' : ' (perfect sync)'));
+      }
+    });
+
     var syncBtn = document.getElementById('toolbar-sync');
     if (syncBtn) syncBtn.addEventListener('click', function () {
       if (engine && engine.setSyncEnabled) {
