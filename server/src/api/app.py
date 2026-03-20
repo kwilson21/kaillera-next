@@ -10,8 +10,31 @@ V1 endpoints:
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from src.api.signaling import rooms
+
+
+# ── Security headers middleware ───────────────────────────────────────────────
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[override]
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob:; "
+            "worker-src 'self' blob: https://cdn.emulatorjs.org; "
+            "font-src 'self' https://cdn.emulatorjs.org data:"
+        )
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -19,6 +42,7 @@ from src.api.signaling import rooms
 def create_app() -> FastAPI:
     """Create and return the FastAPI app."""
     app = FastAPI(title="kaillera-next")
+    app.add_middleware(SecurityHeadersMiddleware)
 
     @app.get("/health")
     def health() -> dict:
