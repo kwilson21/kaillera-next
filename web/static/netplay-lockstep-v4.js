@@ -906,26 +906,18 @@
     _pendingRunner = null;
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
-    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-              window.EJS_emulator.gameManager.Module;
 
-    // Always set JS-level timing (patches _emscripten_get_now in JS glue)
-    window._kn_inStep = true;
+    // Update frame time (both JS and C level flags stay ON session-wide)
     window._kn_frameTime = frameTimeMs;
-
-    // Also set C-level timing if forked core is available
-    // (patches features_cpu.c timing functions inside the WASM)
-    if (_hasForkedCore && mod && mod._kn_set_deterministic) {
-      mod._kn_set_deterministic(1);
-      mod._kn_set_frame_time(frameTimeMs);
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_frame_time) {
+        mod._kn_set_frame_time(frameTimeMs);
+      }
     }
 
     runner(frameTimeMs);
-
-    window._kn_inStep = false;
-    if (_hasForkedCore && mod && mod._kn_set_deterministic) {
-      mod._kn_set_deterministic(0);
-    }
 
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
@@ -983,8 +975,19 @@
     _lastRemoteFramePerSlot = {};
     _stallStart = 0;
     window._netplayFrameLog = [];
+
+    // Deterministic timing ON for entire lockstep session (both levels).
+    // Never toggled per-frame — eliminates Asyncify race condition.
     window._kn_frameTime = 0;
-    window._kn_inStep = false;
+    window._kn_inStep = true;
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_deterministic) {
+        mod._kn_set_deterministic(1);
+        console.log('[lockstep-v4] C-level deterministic timing enabled (session-wide)');
+      }
+    }
 
     var activePeers = getActivePeers();
     var peerSlots = activePeers.map(function (p) { return p.slot; });
@@ -1001,7 +1004,15 @@
   function stopSync() {
     _running = false;
     window._lockstepActive = false;
+
+    // Disable all deterministic timing
     window._kn_inStep = false;
+    window._kn_frameTime = 0;
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_deterministic) mod._kn_set_deterministic(0);
+    }
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
       _tickInterval = null;
