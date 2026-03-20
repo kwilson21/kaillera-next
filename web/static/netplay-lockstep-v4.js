@@ -959,7 +959,7 @@
 
     // FPS counter (use real time, not deterministic override)
     _fpsFrameCount++;
-    var now = (window._realPerfNow || performance.now)();
+    var now = window._realPerfNow ? window._realPerfNow() : performance.now.call(performance);
     if (now - _fpsLastTime >= 1000) {
       _fpsCurrent = _fpsFrameCount;
       _fpsFrameCount = 0;
