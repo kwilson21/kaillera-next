@@ -162,26 +162,35 @@
 
     try {
       _audioCtx = new AudioContext({ sampleRate: _audioRate });
-      if (_audioCtx.state === 'suspended') _audioCtx.resume();
-      await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
-      _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        processorOptions: { sampleRate: _audioRate },
-      });
 
-      if (_playerSlot === 0) {
-        _audioDestNode = _audioCtx.createMediaStreamDestination();
-        _audioWorklet.connect(_audioDestNode);
+      // Try AudioWorklet first (requires secure context), fall back to
+      // AudioBufferSourceNode scheduling (works everywhere).
+      if (_audioCtx.audioWorklet) {
+        await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+        _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          processorOptions: { sampleRate: _audioRate },
+        });
+
+        if (_playerSlot === 0) {
+          _audioDestNode = _audioCtx.createMediaStreamDestination();
+          _audioWorklet.connect(_audioDestNode);
+        }
+
+        _audioWorklet.connect(_audioCtx.destination);
+        console.log('[lockstep-v4] audio using AudioWorklet');
+      } else {
+        // Fallback: schedule AudioBufferSourceNodes per frame.
+        // No async callbacks — fire-and-forget, browser handles playback.
+        window._kn_audioNextTime = 0;
+        console.log('[lockstep-v4] audio using AudioBufferSourceNode fallback');
       }
 
-      _audioWorklet.connect(_audioCtx.destination);
       _audioReady = true;
 
       // Resume AudioContext on first user interaction (autoplay policy).
-      // initAudioPlayback runs after save state transfer — the Start Game
-      // gesture is expired, so the context starts suspended.
       if (_audioCtx.state === 'suspended') {
         var resumeAudio = function () {
           if (_audioCtx) _audioCtx.resume();
@@ -201,7 +210,7 @@
   }
 
   function feedAudio() {
-    if (!_audioReady) return;
+    if (!_audioReady || !_audioCtx) return;
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (!mod) return;
@@ -210,8 +219,28 @@
     if (n <= 0) return;
 
     var pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
-    var copy = new Int16Array(pcm);
-    _audioWorklet.port.postMessage(copy, [copy.buffer]);
+
+    if (_audioWorklet) {
+      // AudioWorklet path
+      var copy = new Int16Array(pcm);
+      _audioWorklet.port.postMessage(copy, [copy.buffer]);
+    } else {
+      // AudioBufferSourceNode fallback — schedule a buffer per frame
+      var buf = _audioCtx.createBuffer(2, n, _audioRate);
+      var chL = buf.getChannelData(0);
+      var chR = buf.getChannelData(1);
+      for (var i = 0; i < n; i++) {
+        chL[i] = pcm[i * 2] / 32768.0;
+        chR[i] = pcm[i * 2 + 1] / 32768.0;
+      }
+      var src = _audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(_audioCtx.destination);
+      var now = _audioCtx.currentTime;
+      var startTime = Math.max(now, window._kn_audioNextTime || 0);
+      src.start(startTime);
+      window._kn_audioNextTime = startTime + buf.duration;
+    }
   }
 
   function setStatus(msg) {
