@@ -982,10 +982,11 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // Always-on deterministic timing with call-counting.
-    // _emscripten_get_now returns frameTime + (callCount * 0.01ms).
-    // Audio sees advancing time, both emulators stay deterministic.
-    window._kn_inStep = true;
+    // With forked core (RWEBAUDIO + FAKE_BLOCK), audio runs synchronously
+    // in the main loop — no async callbacks. C-level kn_deterministic_mode
+    // handles all timing. _kn_inStep OFF = _emscripten_get_now returns real
+    // time for any remaining JS-side needs. No async race possible.
+    window._kn_inStep = false;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
