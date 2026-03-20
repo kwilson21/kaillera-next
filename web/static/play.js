@@ -14,7 +14,7 @@
   var playerName = null;
   var isHost = false;
   var isSpectator = false;
-  var mode = 'lockstep-v4';
+  var mode = 'lockstep';
   var mySlot = null;
   var lastUsersData = null;
   var engine = null;
@@ -23,6 +23,7 @@
   var gamepadInterval = null;
   var previousPlayers = {};
   var previousSpectators = {};
+  var _lateJoin = false;
 
   // ── URL Params ─────────────────────────────────────────────────────────
 
@@ -31,7 +32,7 @@
     roomCode = params.get('room');
     isHost = params.get('host') === '1';
     playerName = params.get('name') || localStorage.getItem('kaillera-name') || 'Player';
-    mode = params.get('mode') || 'lockstep-v4';
+    mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
   }
 
@@ -52,6 +53,7 @@
     socket.on('users-updated', onUsersUpdated);
     socket.on('game-started', onGameStarted);
     socket.on('game-ended', onGameEnded);
+    socket.on('room-closed', onRoomClosed);
   }
 
   function onConnect() {
@@ -106,19 +108,14 @@
 
           // Mid-game join handling
           if (roomData.status === 'playing') {
-            if (isSpectator) {
-              // Spectator joining mid-game: skip overlay, init engine immediately
-              gameRunning = true;
-              showToolbar();
-              initEngine();
-              return;
-            } else {
-              // Player joining mid-game (late join): init engine, it handles state transfer
-              gameRunning = true;
-              showToolbar();
-              initEngine();
-              return;
-            }
+            gameRunning = true;
+            _lateJoin = !isSpectator;
+            // Use joinData directly — the users-updated socket event may not
+            // have arrived yet (ack returns before broadcast is delivered)
+            if (joinData) lastUsersData = joinData;
+            showToolbar();
+            initEngine();
+            return;
           }
 
           showOverlay();
@@ -204,6 +201,7 @@
       engine.stop();
       engine = null;
     }
+    destroyEmulator();
     hideToolbar();
     showOverlay();
     // Clear stale engine status
@@ -211,10 +209,40 @@
     if (statusEl) statusEl.textContent = '';
   }
 
+  function onRoomClosed(data) {
+    gameRunning = false;
+    if (engine) {
+      engine.stop();
+      engine = null;
+    }
+    var reason = (data && data.reason) || 'closed';
+    var msg = reason === 'host-left' ? 'Host left — returning to lobby...' : 'Room closed';
+    showToast(msg);
+    setTimeout(function () { window.location.href = '/'; }, 2000);
+  }
+
+  function destroyEmulator() {
+    // Wipe EmulatorJS from the DOM entirely — clean slate for next game
+    var gameEl = document.getElementById('game');
+    if (gameEl) gameEl.innerHTML = '';
+    window.EJS_emulator = undefined;
+  }
+
+  function bootEmulator() {
+    // Re-initialize EmulatorJS if it was destroyed
+    if (window.EJS_emulator) return;  // already running
+    var script = document.createElement('script');
+    script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+    document.body.appendChild(script);
+  }
+
   function initEngine() {
+    // Re-create EmulatorJS if it was destroyed (restart after end-game)
+    bootEmulator();
+
     var Engine = mode === 'streaming'
       ? window.NetplayStreaming
-      : window.NetplayLockstepV4;
+      : window.NetplayLockstep;
 
     if (!Engine) {
       showError('Netplay engine not loaded');
@@ -240,7 +268,9 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       initialPlayers: lastUsersData,
+      lateJoin: _lateJoin,
     });
+    _lateJoin = false;
   }
 
   function startGame() {
@@ -458,7 +488,7 @@
     var lockstepOpts = document.getElementById('lockstep-options');
     if (modeSelect && lockstepOpts) {
       var updateOpts = function () {
-        lockstepOpts.style.display = modeSelect.value === 'lockstep-v4' ? '' : 'none';
+        lockstepOpts.style.display = modeSelect.value === 'lockstep' ? '' : 'none';
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();

@@ -35,7 +35,7 @@
     var code = randomCode();
     window.location.href = '/play.html?room=' + code +
       '&host=1&name=' + encodeURIComponent(getName()) +
-      '&mode=lockstep-v4';
+      '&mode=lockstep';
   });
 
   document.getElementById('join-btn').addEventListener('click', function () {

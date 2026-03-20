@@ -1,25 +1,20 @@
 /**
- * kaillera-next — Prototype C: retro_run Hook Lockstep
+ * kaillera-next -- Lockstep Netplay Engine
  *
- * True Kaillera-style dual-emulator lockstep. Both peers run their own
- * EmulatorJS instance but stay perfectly in sync by:
+ * 4-player mesh networking with spectators, drop handling, and late join:
+ *   - Up to 4 players in a lockstep mesh (6 bidirectional connections)
+ *   - Spectators receive canvas video stream from host, no lockstep participation
+ *   - Graceful drop handling: remaining players continue without crashing
+ *   - Late join: joiner requests save state from host when emulator is ready
  *
- *   1. Intercepting requestAnimationFrame to take manual control of the
- *      Emscripten main loop (which calls retro_run internally).
- *   2. Each "tick": read local input → send to peer → wait for peer input
- *      → apply both inputs via simulateInput → step exactly one frame.
+ * Core mechanism:
+ *   1. rAF interception captures the Emscripten main loop runner
+ *   2. setInterval(16) tick loop for background-tab-safe ~60fps
+ *   3. Each tick: read input -> send to all peers -> wait for all -> write to Wasm -> step
+ *   4. Direct memory input via DataView writes to HEAPU8 (no simulateInput)
  *
- * This gives frame-perfect deterministic sync — both emulators process
- * exactly the same inputs at exactly the same frame.
- *
- * Topology: mesh (same as Prototype A / netplay-dual.js).
- * Host (slot 0) creates room; guest (slot 1) joins.
- * 2-player only for now. Spectators not implemented.
- *
- * Key difference from Prototype A: instead of calling simulateInput()
- * while the emulator runs freely (async, can't block frame advance),
- * we OWN the frame loop. The emulator literally cannot advance until
- * we call the captured MainLoop_runner.
+ * Mesh initiation: lower slot creates data channel + sends offer.
+ * Spectators never initiate -- players initiate connections TO spectators.
  */
 
 (function () {
@@ -28,26 +23,19 @@
   const GAME_ID     = 'ssb64';
   const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
-  // Input delay in frames — both peers buffer this many frames of input
+  // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
   const DELAY_FRAMES = 2;
 
-  // Max time to wait for remote input before applying zero.
-  // Classic Kaillera blocks forever — we use a very long timeout (30s)
-  // to handle disconnects, but never drop inputs during normal play.
-  // The peer disconnect handler (onconnectionstatechange) handles the
-  // actual disconnect case much faster than this timeout.
+  // Maximum time (ms) to stall waiting for remote input before treating
+  // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Desync detection via hashing is disabled — two Wasm N64 instances
-  // aren't perfectly deterministic (FP/RNG differences).
-  const HASH_INTERVAL = 0;
-
-  // Periodic state resync: host sends save state to guest every N frames
-  // to correct drift from non-deterministic emulation. Trades a brief
-  // visual hitch for keeping both emulators closely in sync.
-  const RESYNC_INTERVAL = 0;  // disabled — causes freezes due to large state transfer
+  // Desync detection: check every N frames (~2 seconds at 60fps).
+  // The emulator is non-deterministic (audio/timing reads performance.now()),
+  // so desyncs are inherent. Frequent resyncs keep games visually in sync.
+  const SYNC_CHECK_INTERVAL = 120;
 
   // Standard online cheats (same as other prototypes)
   const SSB64_ONLINE_CHEATS = [
@@ -60,239 +48,306 @@
     { desc: 'No Wind',               code: '810BA9F1 0000+800BA9F3 0000' },
   ];
 
-  // Default N64 keymap (EJS defaults) — fallback when EJS controls unavailable
+  // Default N64 keymap (EJS defaults) -- fallback when EJS controls unavailable
   const DEFAULT_N64_KEYMAP = {
-    88: 0,    // X → B
-    67: 8,    // C → A
-    86: 3,    // V → Start
-    38: 4,    // Up → D-Up
-    40: 5,    // Down → D-Down
-    37: 6,    // Left → D-Left
-    39: 7,    // Right → D-Right
-    90: 9,    // Z → Z-trigger
-    84: 10,   // T → L-shoulder
-    89: 11,   // Y → R-shoulder
-    73: 12,   // I → C-Up
-    75: 13,   // K → C-Down
-    74: 14,   // J → C-Left
-    76: 15,   // L → C-Right
-    87: 16,   // W → Analog Up
-    83: 17,   // S → Analog Down
-    65: 18,   // A → Analog Left
-    68: 19,   // D → Analog Right
+    88: 0,    // X -> B
+    67: 8,    // C -> A
+    86: 3,    // V -> Start
+    38: 4,    // Up -> D-Up
+    40: 5,    // Down -> D-Down
+    37: 6,    // Left -> D-Left
+    39: 7,    // Right -> D-Right
+    90: 9,    // Z -> Z-trigger
+    84: 10,   // T -> L-shoulder
+    89: 11,   // Y -> R-shoulder
+    73: 12,   // I -> C-Up
+    75: 13,   // K -> C-Down
+    74: 14,   // J -> C-Left
+    76: 15,   // L -> C-Right
+    87: 16,   // W -> Analog Up
+    83: 17,   // S -> Analog Down
+    65: 18,   // A -> Analog Left
+    68: 19,   // D -> Analog Right
   };
 
-  // ── State ─────────────────────────────────────────────────────────────────
+  // -- Direct memory input layout -----------------------------------------------
+  //
+  // Layout: int32[20][4] -- 20 buttons x 4 players
+  // Button stride: 20 bytes (gap between button N and button N+1 for same player)
+  // Player stride: 4 bytes (gap between player 0 and player 1 for same button)
+  //
+  // The base address changes with each WASM compilation, so we auto-discover it
+  // at startup by calling _simulate_input and detecting which byte changed.
+  // Fallback: 715364 (CDN core address).
+
+  var INPUT_BASE       = 715364;  // auto-discovered at startup
+  const BUTTON_STRIDE  = 20;
+  const PLAYER_STRIDE  = 4;
+
+  // -- State -----------------------------------------------------------------
 
   let socket             = null;
   let sessionId          = null;
-  let _playerSlot        = -1;     // 0 = host, 1 = guest
-  let _peers             = {};     // remoteSid → PeerState
-  let _knownPlayers      = {};
+  let _playerSlot        = -1;      // 0-3 for players, null for spectators
+  let _isSpectator       = false;
+  // -- Audio bypass state --
+  var _audioCtx = null;
+  var _audioWorklet = null;
+  var _audioDestNode = null;
+  var _audioPtr = 0;
+  var _audioRate = 0;
+  var _audioReady = false;
+  let _peers             = {};      // remoteSid -> PeerState
+  let _knownPlayers      = {};      // socketId -> {slot, playerName}
+  let _expectedPeerCount = 0;       // other players in room (excludes spectators)
   let _gameStarted       = false;
   let _selfEmuReady      = false;
   let _p1KeyMap          = null;
   let _heldKeys          = new Set();
-  let _prevSlotMasks     = {};     // slot → previous mask (for change detection)
-
-  // Manual frame stepping state
-  let _origRAF           = null;   // saved requestAnimationFrame
-  let _pendingRunner     = null;   // captured Emscripten MainLoop_runner
-  let _manualMode        = false;  // true when we own the frame loop
-  let _tickTimer         = null;   // setTimeout ID for the tick loop
-  let _peerLockstepReady = false;  // true when peer signals lockstep-ready
 
   // Lockstep state
-  let _frameNum          = 0;      // current logical frame number
-  let _localInputs       = {};     // frame → inputMask
-  let _remoteInputs      = {};     // frame → inputMask
-  let _peerSlot          = -1;     // the other player's slot
-  let _stallStart        = 0;      // timestamp when we started waiting for input
-  let _running           = false;  // tick loop active
+  let _lockstepReadyPeers = {};     // remoteSid -> true when peer signals lockstep-ready
+  let _selfLockstepReady  = false;
+  let _guestStateBytes    = null;   // decompressed state bytes to load
+  let _frameNum           = 0;      // current logical frame number
+  let _localInputs        = {};     // frame -> inputMask
+  let _remoteInputs       = {};     // slot -> {frame -> mask} (nested for multi-peer)
+  let _running            = false;  // tick loop active
+  let _lateJoin           = false;  // true when joining a game already in progress
 
-  // Desync detection
-  let _lastHash          = 0;
-  let _lastHashFrame     = -1;
-  let _desynced          = false;
+  // Manual mode / rAF interception state
+  let _origRAF           = null;    // saved window.requestAnimationFrame
+  let _pendingRunner     = null;    // captured Emscripten MainLoop_runner
+  let _manualMode        = false;   // true once enterManualMode() called
+  let _stallStart        = 0;       // timestamp when current stall began
+  let _tickInterval      = null;    // setInterval handle for tick loop
+
+  // State sync — host checks game state hash and pushes only when desynced
+  let _syncEnabled       = false;   // off by default — opt-in via toolbar button
+  let _syncWorker        = null;    // Web Worker for compress/decompress
+  let _syncCheckInterval = 300;    // check hash every N frames (~5s at 60fps)
+  let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
+  let _resyncCount       = 0;
+  let _syncChunks        = [];     // incoming chunks from host DC
+  let _syncExpected      = 0;      // expected chunk count
+  let _syncFrame         = 0;      // frame number of incoming sync
+  let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
+
+  // Spectator streaming state
+  let _hostStream        = null;    // MediaStream for spectator canvas streaming
+  let _guestVideo        = null;    // <video> element (spectator only)
 
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
+  window._isSpectator = _isSpectator;
   window._peers       = _peers;
-  window._desynced    = false;
   window._frameNum    = 0;
 
-  // ── UI ─────────────────────────────────────────────────────────────────
+  async function initAudioPlayback() {
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return;
 
-  function buildUI() {
-    const style = document.createElement('style');
-    style.textContent = `
-      #np { position:fixed; top:12px; right:12px; z-index:9999;
-            background:#151520; border:1px solid #2a2a40; border-radius:8px;
-            padding:12px 14px; min-width:210px; font:13px/1.5 sans-serif;
-            color:#ccc; box-shadow:0 4px 16px rgba(0,0,0,.5); }
-      #np h3 { margin:0 0 10px; font-size:12px; letter-spacing:.08em;
-               text-transform:uppercase; color:#666; }
-      #np input { display:block; width:100%; padding:5px 8px; margin-bottom:6px;
-                  background:#0d0d1a; border:1px solid #333; border-radius:4px;
-                  color:#eee; font-size:12px; box-sizing:border-box; }
-      #np input:focus { outline:none; border-color:#4a6fa5; }
-      #np .row { display:flex; gap:6px; margin-bottom:6px; }
-      #np .row input { margin:0; flex:1; }
-      #np button { padding:5px 10px; border:none; border-radius:4px;
-                   background:#3a5a8a; color:#fff; font-size:12px;
-                   cursor:pointer; white-space:nowrap; }
-      #np button:hover { background:#4a6fa5; }
-      #np button:disabled { background:#2a2a40; color:#555; cursor:default; }
-      #np-status { font-size:11px; color:#777; margin-top:6px; min-height:14px; }
-      #np-debug { font-size:10px; color:#555; font-family:monospace; margin-top:4px; }
-      #np-code-display { font-size:16px; font-weight:bold; letter-spacing:.15em;
-                         color:#6af; text-align:center; padding:4px 0 2px; }
-    `;
-    document.head.appendChild(style);
+    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples ||
+        !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
+      console.log('[lockstep] audio capture exports not found — audio disabled');
+      return;
+    }
 
-    const panel = document.createElement('div');
-    panel.id = 'np';
-    panel.innerHTML = `
-      <h3>Netplay (Lockstep)</h3>
-      <div style="font-size:10px; margin-bottom:8px; color:#555;">
-        <a href="?mode=streaming" style="color:#6af; text-decoration:none;">Switch to Streaming mode</a>
-      </div>
-      <input id="np-name" placeholder="Your name" value="Player">
-      <button id="np-create">Create Room</button>
-      <div id="np-code-display" style="display:none"></div>
-      <div class="row" style="margin-top:6px">
-        <input id="np-join-code" placeholder="Room code">
-        <button id="np-join">Join</button>
-      </div>
-      <div id="np-status">Connecting to server…</div>
-      <div id="np-debug" style="display:none"></div>
-    `;
-    document.body.appendChild(panel);
+    _audioPtr = mod._kn_get_audio_ptr();
+    _audioRate = mod._kn_get_audio_rate();
+    if (!_audioRate || _audioRate <= 0) {
+      console.log('[lockstep] audio rate not set yet, defaulting to 33600');
+      _audioRate = 33600;
+    }
 
-    document.getElementById('np-create').onclick = createRoom;
-    document.getElementById('np-join').onclick   = joinRoom;
+    try {
+      _audioCtx = new AudioContext({ sampleRate: _audioRate });
+
+      // Try AudioWorklet first (requires secure context), fall back to
+      // AudioBufferSourceNode scheduling (works everywhere).
+      if (_audioCtx.audioWorklet) {
+        await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+        _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          processorOptions: { sampleRate: _audioRate },
+        });
+
+        if (_playerSlot === 0) {
+          _audioDestNode = _audioCtx.createMediaStreamDestination();
+          _audioWorklet.connect(_audioDestNode);
+        }
+
+        _audioWorklet.connect(_audioCtx.destination);
+        console.log('[lockstep] audio using AudioWorklet');
+      } else {
+        // Fallback: schedule AudioBufferSourceNodes per frame.
+        // No async callbacks — fire-and-forget, browser handles playback.
+        window._kn_audioNextTime = 0;
+        console.log('[lockstep] audio using AudioBufferSourceNode fallback');
+      }
+
+      _audioReady = true;
+
+      // Resume AudioContext on first user interaction (autoplay policy).
+      if (_audioCtx.state === 'suspended') {
+        var resumeAudio = function () {
+          if (_audioCtx) _audioCtx.resume();
+          document.removeEventListener('click', resumeAudio);
+          document.removeEventListener('keydown', resumeAudio);
+        };
+        document.addEventListener('click', resumeAudio);
+        document.addEventListener('keydown', resumeAudio);
+        console.log('[lockstep] audio suspended — click or press a key to enable');
+      }
+
+      console.log('[lockstep] audio playback initialized (rate: ' + _audioRate + ')');
+    } catch (err) {
+      console.log('[lockstep] AudioWorklet init failed:', err);
+      _audioReady = false;
+    }
+  }
+
+  function feedAudio() {
+    if (!_audioReady || !_audioCtx) return;
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return;
+
+    var n = mod._kn_get_audio_samples();
+    if (n <= 0) return;
+
+    var pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
+
+    if (_audioWorklet) {
+      // AudioWorklet path
+      var copy = new Int16Array(pcm);
+      _audioWorklet.port.postMessage(copy, [copy.buffer]);
+    } else {
+      // AudioBufferSourceNode fallback — schedule a buffer per frame
+      var buf = _audioCtx.createBuffer(2, n, _audioRate);
+      var chL = buf.getChannelData(0);
+      var chR = buf.getChannelData(1);
+      for (var i = 0; i < n; i++) {
+        chL[i] = pcm[i * 2] / 32768.0;
+        chR[i] = pcm[i * 2 + 1] / 32768.0;
+      }
+      var src = _audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(_audioCtx.destination);
+      var now = _audioCtx.currentTime;
+      // Snap to now if fallen behind — prevents accumulating latency
+      if (!window._kn_audioNextTime || window._kn_audioNextTime < now) {
+        window._kn_audioNextTime = now;
+      }
+      src.start(window._kn_audioNextTime);
+      window._kn_audioNextTime += buf.duration;
+    }
   }
 
   function setStatus(msg) {
-    const el = document.getElementById('np-status');
-    if (el) el.textContent = msg;
+    if (_config && _config.onStatus) _config.onStatus(msg);
     console.log('[lockstep]', msg);
-  }
-
-  function setCode(code) {
-    const el = document.getElementById('np-code-display');
-    if (!el) return;
-    el.textContent = code;
-    el.style.display = code ? '' : 'none';
-    const input = document.getElementById('np-join-code');
-    if (input) input.value = code;
-  }
-
-  function disableButtons() {
-    ['np-create', 'np-join'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = true;
-    });
-  }
-
-  // ── Socket.IO ──────────────────────────────────────────────────────────
-
-  function loadSocketIO(cb) {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
-    s.onload = cb;
-    document.head.appendChild(s);
-  }
-
-  function connectSocket() {
-    socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
-    socket.on('connect',       () => { if (!_gameStarted) setStatus('Ready'); });
-    socket.on('connect_error', (e) => setStatus('Server error: ' + e.message));
-    socket.on('users-updated', onUsersUpdated);
-    socket.on('webrtc-signal', onWebRTCSignal);
-    socket.on('data-message',  onDataMessage);
   }
 
   function onDataMessage(msg) {
     if (!msg || !msg.type) return;
-    if (msg.type === 'save-state')     handleSaveState(msg);
-    if (msg.type === 'resync-state')   handleResyncState(msg);
-    if (msg.type === 'resync-request') handleResyncRequest();
+    if (msg.type === 'save-state')          handleSaveStateMsg(msg);
+    if (msg.type === 'late-join-state')     handleLateJoinState(msg);
+    if (msg.type === 'request-late-join')   handleLateJoinRequest(msg);
   }
 
-  // ── Room management ────────────────────────────────────────────────────
-
-  function createRoom() {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
-    sessionId   = randomCode();
-    _playerSlot = 0;
-    window._playerSlot = 0;
-
-    socket.emit('open-room', {
-      extra: {
-        sessionid: sessionId, userid: socket.id, playerId: socket.id,
-        room_name: name + "'s room", game_id: GAME_ID,
-        player_name: name, room_password: null,
-        domain: window.location.hostname,
-      },
-      maxPlayers: 2, password: null,
-    }, (err) => {
-      if (err) { setStatus('Error: ' + err); return; }
-      disableButtons();
-      setCode(sessionId);
-      setStatus('Waiting for player 2…');
-    });
+  function handleLateJoinRequest(msg) {
+    // Only host responds to late-join requests
+    if (_playerSlot !== 0 || !_running) return;
+    var requesterSid = msg.requesterSid;
+    if (!requesterSid) return;
+    console.log('[lockstep] received late-join request from', requesterSid);
+    sendLateJoinState(requesterSid);
   }
 
-  function joinRoom() {
-    const name = document.getElementById('np-name').value.trim() || 'Player';
-    const code = document.getElementById('np-join-code').value.trim().toUpperCase();
-    if (!code) { setStatus('Enter a room code'); return; }
-
-    sessionId = code;
-
-    socket.emit('join-room', {
-      extra: { sessionid: sessionId, userid: socket.id, player_name: name, spectate: false },
-      password: null,
-    }, (err, data) => {
-      if (err) { setStatus('Error: ' + err); return; }
-      disableButtons();
-      if (data && data.players) {
-        const myEntry = Object.values(data.players).find(p => p.socketId === socket.id);
-        if (myEntry) { _playerSlot = myEntry.slot; window._playerSlot = _playerSlot; }
-      }
-      setStatus('Joined — connecting…');
-    });
-  }
-
-  // ── users-updated ──────────────────────────────────────────────────────
+  // -- users-updated ---------------------------------------------------------
 
   function onUsersUpdated(data) {
-    const players = data.players || {};
+    var players    = data.players    || {};
+    var spectators = data.spectators || {};
 
+    // Rebuild known players map
     _knownPlayers = {};
-    Object.values(players).forEach(p => {
+    Object.values(players).forEach(function (p) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     });
 
-    const myEntry = Object.values(players).find(p => p.socketId === socket.id);
-    if (myEntry) { _playerSlot = myEntry.slot; window._playerSlot = _playerSlot; }
+    // Update my slot from server (handles spectator -> player transition)
+    var myPlayerEntry = Object.values(players).find(function (p) {
+      return p.socketId === socket.id;
+    });
+    if (myPlayerEntry) {
+      if (_isSpectator) {
+        console.log('[lockstep] transitioned from spectator to player, slot:', myPlayerEntry.slot);
+        _isSpectator = false;
+        window._isSpectator = false;
+      }
+      _playerSlot = myPlayerEntry.slot;
+      window._playerSlot = _playerSlot;
+    }
 
-    // Connect to the other player
-    const others = Object.values(players).filter(p => p.socketId !== socket.id);
-    for (const p of others) {
-      if (_peers[p.socketId]) { _peers[p.socketId].slot = p.slot; continue; }
-      _peerSlot = p.slot;
-      const shouldInitiate = _playerSlot < p.slot;
+    // Count expected peers (other players, excludes spectators)
+    var otherPlayers = Object.values(players).filter(function (p) {
+      return p.socketId !== socket.id;
+    });
+    _expectedPeerCount = otherPlayers.length;
+
+    // Establish mesh connections to other players
+    // Normal: lower slot initiates (creates data channel + sends offer)
+    // Late-join: joiner always initiates (host's offer would arrive before listener is ready)
+    // Running host: DON'T initiate to new players — let them initiate after their init()
+    for (var i = 0; i < otherPlayers.length; i++) {
+      var p = otherPlayers[i];
+      if (_peers[p.socketId]) {
+        _peers[p.socketId].slot = p.slot;
+        continue;
+      }
+
+      var shouldInitiate;
+      if (_lateJoin && !_isSpectator) {
+        shouldInitiate = true;   // late-joiner always initiates
+      } else if (_running) {
+        shouldInitiate = false;  // running host waits for late-joiner's offer
+      } else if (_isSpectator) {
+        shouldInitiate = false;  // spectators never initiate
+      } else {
+        shouldInitiate = _playerSlot < p.slot;
+      }
+
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
     }
+
+    // Players initiate connections to spectators
+    if (!_isSpectator) {
+      var specList = Object.values(spectators);
+      for (var j = 0; j < specList.length; j++) {
+        var s = specList[j];
+        if (s.socketId === socket.id) continue;
+        if (_peers[s.socketId]) continue;
+        createPeer(s.socketId, null, true);
+        sendOffer(s.socketId);
+      }
+    }
+
+    // Notify controller
+    if (_config && _config.onPlayersChanged) {
+      _config.onPlayersChanged(data);
+    }
   }
 
-  // ── WebRTC ─────────────────────────────────────────────────────────────
+  // -- WebRTC multi-peer mesh ------------------------------------------------
 
   function createPeer(remoteSid, remoteSlot, isInitiator) {
-    const peer = {
+    var peer = {
       pc: new RTCPeerConnection({ iceServers: ICE_SERVERS }),
       dc: null,
       slot: remoteSlot,
@@ -302,31 +357,38 @@
       emuReady: false,
     };
 
-    peer.pc.onicecandidate = (e) => {
+    peer.pc.onicecandidate = function (e) {
       if (e.candidate) {
         socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
       }
     };
 
-    peer.pc.onconnectionstatechange = () => {
-      const s = peer.pc.connectionState;
+    peer.pc.onconnectionstatechange = function () {
+      var s = peer.pc.connectionState;
       if (s === 'failed' || s === 'disconnected') {
         console.log('[lockstep] peer', remoteSid, 'connection', s);
         handlePeerDisconnect(remoteSid);
       }
     };
 
+    // Spectators: listen for incoming video tracks from host
+    if (_isSpectator || (remoteSlot === 0 && _playerSlot === null)) {
+      peer.pc.ontrack = function (event) {
+        console.log('[lockstep] received track:', event.track.kind);
+        showSpectatorVideo(event, peer);
+      };
+    }
+
     _peers[remoteSid] = peer;
     window._peers = _peers;
 
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('lockstep', {
-        ordered: true,  // ordered for lockstep — input order matters
-        maxRetransmits: 2,
+        ordered: true,
       });
       setupDataChannel(remoteSid, peer.dc);
     } else {
-      peer.pc.ondatachannel = (e) => {
+      peer.pc.ondatachannel = function (e) {
         peer.dc = e.channel;
         setupDataChannel(remoteSid, peer.dc);
       };
@@ -335,35 +397,38 @@
   }
 
   async function sendOffer(remoteSid) {
-    const peer = _peers[remoteSid];
+    var peer = _peers[remoteSid];
     if (!peer) return;
-    const offer = await peer.pc.createOffer();
+    var offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer });
+    socket.emit('webrtc-signal', { target: remoteSid, offer: offer });
   }
 
   async function onWebRTCSignal(data) {
     if (!data) return;
-    const senderSid = data.sender;
+    var senderSid = data.sender;
     if (!senderSid) return;
 
+    // Create peer on demand if offer arrives before users-updated
     if (data.offer && !_peers[senderSid]) {
-      const known = _knownPlayers[senderSid];
-      createPeer(senderSid, known ? known.slot : 1, false);
+      var known = _knownPlayers[senderSid];
+      createPeer(senderSid, known ? known.slot : null, false);
     }
 
-    const peer = _peers[senderSid];
+    var peer = _peers[senderSid];
     if (!peer) return;
 
     if (data.offer) {
       await peer.pc.setRemoteDescription(data.offer);
       await drainCandidates(peer);
-      const answer = await peer.pc.createAnswer();
+      var answer = await peer.pc.createAnswer();
       await peer.pc.setLocalDescription(answer);
-      socket.emit('webrtc-signal', { target: senderSid, answer });
+      socket.emit('webrtc-signal', { target: senderSid, answer: answer });
+
     } else if (data.answer) {
       await peer.pc.setRemoteDescription(data.answer);
       await drainCandidates(peer);
+
     } else if (data.candidate) {
       if (peer.remoteDescSet) {
         try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
@@ -375,19 +440,19 @@
 
   async function drainCandidates(peer) {
     peer.remoteDescSet = true;
-    for (const c of peer.pendingCandidates) {
-      try { await peer.pc.addIceCandidate(c); } catch (_) {}
+    for (var i = 0; i < peer.pendingCandidates.length; i++) {
+      try { await peer.pc.addIceCandidate(peer.pendingCandidates[i]); } catch (_) {}
     }
     peer.pendingCandidates = [];
   }
 
-  // ── Data channel ───────────────────────────────────────────────────────
+  // -- Data channel ----------------------------------------------------------
 
   function setupDataChannel(remoteSid, ch) {
     ch.binaryType = 'arraybuffer';
 
-    ch.onopen = () => {
-      const peer = _peers[remoteSid];
+    ch.onopen = function () {
+      var peer = _peers[remoteSid];
       if (!peer) return;
       console.log('[lockstep] DC open with', remoteSid, 'slot:', peer.slot);
       peer.ready = true;
@@ -395,413 +460,960 @@
 
       if (_selfEmuReady) ch.send('emu-ready');
 
+      // Late join: if game is running, host starts spectator stream for new spectator
+      if (_running && _playerSlot === 0 && peer.slot === null) {
+        startSpectatorStreamForPeer(remoteSid);
+      }
+
       if (!_gameStarted) startGameSequence();
     };
 
-    ch.onclose = () => {
+    ch.onclose = function () {
       console.log('[lockstep] DC closed with', remoteSid);
       handlePeerDisconnect(remoteSid);
     };
 
-    ch.onerror = (e) => console.log('[lockstep] DC error:', remoteSid, e);
+    ch.onerror = function (e) {
+      console.log('[lockstep] DC error:', remoteSid, e);
+    };
 
-    ch.onmessage = (e) => {
-      const peer = _peers[remoteSid];
+    ch.onmessage = function (e) {
+      var peer = _peers[remoteSid];
       if (!peer) return;
 
+      // String messages
       if (typeof e.data === 'string') {
-        if (e.data === 'ready')          { peer.ready = true; }
-        if (e.data === 'emu-ready')      { peer.emuReady = true; checkBothEmuReady(); }
-        if (e.data === 'lockstep-ready') { _peerLockstepReady = true; checkBothLockstepReady(); }
+        if (e.data === 'ready')     { peer.ready = true; }
+        if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        if (e.data === 'lockstep-ready') {
+          _lockstepReadyPeers[remoteSid] = true;
+          checkAllLockstepReady();
+        }
+        // State sync: hash check from host
+        // IMPORTANT: only compare when we're at the SAME frame as the host.
+        // Comparing at different frames always shows a diff (not a real desync).
+        if (e.data.substring(0, 10) === 'sync-hash:') {
+          var parts = e.data.split(':');
+          var syncFrame = parseInt(parts[1], 10);
+          var hostHash = parseInt(parts[2], 10);
+          if (_frameNum === syncFrame) {
+            var localHash = hashGameState();
+            if (localHash !== hostHash) {
+              console.log('[lockstep] DESYNC at frame', syncFrame,
+                'local:', localHash, 'host:', hostHash, '-- requesting state');
+              peer.dc.send('sync-request');
+            }
+          } else if (_frameNum < syncFrame) {
+            // We're behind — store for deferred check when we reach that frame
+            _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: sid };
+          }
+          // If _frameNum > syncFrame, skip — frame already passed
+        }
+        // State sync: host received request, or chunked binary transfer header
+        if (e.data === 'sync-request' && _playerSlot === 0) {
+          pushSyncState();
+        }
+        if (e.data.substring(0, 11) === 'sync-start:') {
+          var parts = e.data.split(':');
+          _syncFrame = parseInt(parts[1], 10);
+          _syncExpected = parseInt(parts[2], 10);
+          _syncChunks = [];
+        }
+        // JSON messages
         if (e.data.charAt(0) === '{') {
           try {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'state-hash')     handleStateHash(msg);
-            if (msg.type === 'resync-request') handleResyncRequest();
-            if (msg.type === 'resync-state')   handleResyncState(msg);
+            var msg = JSON.parse(e.data);
+            if (msg.type === 'save-state')      handleSaveStateMsg(msg);
+            if (msg.type === 'late-join-state')  handleLateJoinState(msg);
           } catch (_) {}
         }
         return;
       }
 
-      // Binary: Int32Array [frame, inputMask]
+      // Binary: sync state chunk (large) or input (8 bytes)
+      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8) {
+        // Sync chunk from host
+        _syncChunks.push(new Uint8Array(e.data));
+        if (_syncChunks.length >= _syncExpected && _syncExpected > 0) {
+          handleSyncChunksComplete();
+        }
+        return;
+      }
+      // Binary: Int32Array [frame, inputMask] -- 8 bytes per input
       if (e.data instanceof ArrayBuffer && e.data.byteLength === 8) {
-        const arr = new Int32Array(e.data);
-        _remoteInputs[arr[0]] = arr[1];
+        if (peer.slot === null || peer.slot === undefined) return;  // spectators don't send input
+        var arr = new Int32Array(e.data);
+        if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
+        _remoteInputs[peer.slot][arr[0]] = arr[1];
+        _remoteReceived++;
+        if (arr[0] > _lastRemoteFrame) _lastRemoteFrame = arr[0];
+        if (!_lastRemoteFramePerSlot[peer.slot] || arr[0] > _lastRemoteFramePerSlot[peer.slot]) {
+          _lastRemoteFramePerSlot[peer.slot] = arr[0];
+        }
       }
     };
   }
 
+  // -- Peer disconnect (drop handling) ---------------------------------------
+
   function handlePeerDisconnect(remoteSid) {
-    const peer = _peers[remoteSid];
+    var peer = _peers[remoteSid];
     if (!peer) return;
+
+    // If the peer was a player, zero their input in Wasm memory
+    if (peer.slot !== null && peer.slot !== undefined) {
+      try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+      delete _remoteInputs[peer.slot];
+    }
+
     delete _peers[remoteSid];
+    delete _lockstepReadyPeers[remoteSid];
     window._peers = _peers;
-    console.log('[lockstep] peer disconnected:', remoteSid);
-    if (_running) {
-      setStatus('Peer disconnected');
-      stopLockstep();
+    console.log('[lockstep] peer disconnected:', remoteSid, 'slot:', peer.slot);
+
+    // Check if any active player peers remain
+    var remaining = getActivePeers();
+    if (remaining.length === 0 && _running) {
+      setStatus('All peers disconnected -- running solo');
+      // Keep running: single-player mode. The tick loop handles zero active peers
+      // gracefully by just stepping frames with local input only.
+    } else if (_running) {
+      var count = remaining.length + 1;  // +1 for self
+      setStatus('Peer left -- ' + count + ' player' + (count > 1 ? 's' : '') + ' remaining');
     }
   }
 
-  function getPeer() {
-    return Object.values(_peers)[0] || null;
+  // -- Helper: get active player peers ---------------------------------------
+
+  // All connected player peers (for sending input to)
+  function getActivePeers() {
+    return Object.values(_peers).filter(function (p) {
+      return p.slot !== null && p.slot !== undefined
+        && p.dc && p.dc.readyState === 'open';
+    });
   }
 
-  // ── Game start sequence ────────────────────────────────────────────────
+  // Wait for all active peers that have started sending input.
+  // Peers with open data channels who haven't sent any input yet (e.g.
+  // late-joiners still booting) are excluded so they don't stall the game.
+  // Once a peer sends their first input, they're included and the game
+  // waits for them on every frame (Kaillera-style strict lockstep).
+  function getInputPeers() {
+    return getActivePeers().filter(function (p) {
+      return _remoteInputs[p.slot] && Object.keys(_remoteInputs[p.slot]).length > 0;
+    });
+  }
 
-  // Minimum frames the emulator must run before we take manual control.
-  // The N64 BIOS + game boot takes many frames; we need the main loop
-  // fully established and running before we can intercept it.
-  const MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
+  // -- Game start sequence ---------------------------------------------------
+
+  // Minimum frames the emulator must run before we consider it ready.
+  var MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
 
   function startGameSequence() {
     if (_gameStarted) return;
     _gameStarted = true;
 
-    setStatus('Starting emulator…');
+    // Spectators: don't start emulator, don't enter manual mode
+    if (_isSpectator) {
+      setStatus('Spectating...');
+      return;
+    }
+
+    setStatus('Starting emulator...');
     triggerEmulatorStart();
     applyStandardCheats();
-    setupKeyTracking();
     disableEJSKeyboard();
 
-    // Wait for gameManager AND for the emulator to run enough frames
-    // so the Emscripten main loop is fully established.
-    const waitForEmu = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    // Wait for gameManager AND for the emulator to be ready.
+    // Host: waits for MIN_BOOT_FRAMES (needs a fully booted emulator to capture state).
+    // Guest: only waits for Module to exist (will load host's state, no independent boot).
+    // This prevents boot frame count differences that cause desync.
+    var waitForEmu = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(waitForEmu, 100); return; }
 
-      const mod = gm.Module;
-      const frames = mod && mod._get_current_frame_count
+      var mod = gm.Module;
+      var frames = mod && mod._get_current_frame_count
         ? mod._get_current_frame_count() : 0;
 
-      if (frames < MIN_BOOT_FRAMES) {
+      if (_playerSlot === 0 && frames < MIN_BOOT_FRAMES) {
+        // Host: needs full boot to capture a valid state
+        setTimeout(waitForEmu, 100);
+        return;
+      }
+      if (_playerSlot !== 0 && frames < 10) {
+        // Guest: just needs Module initialized (minimal frames)
         setTimeout(waitForEmu, 100);
         return;
       }
 
-      console.log('[lockstep] emulator booted (' + frames + ' frames)');
-      _selfEmuReady = true;
-
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('emu-ready');
+      // Auto-discover INPUT_BASE by calling _simulate_input and detecting the change
+      if (mod._simulate_input) {
+        try {
+          // Reset button 0 for player 0
+          mod._simulate_input(0, 0, 0);
+          var scanEnd = Math.min(mod.HEAPU8.length, 4 * 1024 * 1024);
+          var snap = new Uint8Array(mod.HEAPU8.buffer.slice(0, scanEnd));
+          mod._simulate_input(0, 0, 1);
+          for (var si = 0; si < scanEnd; si++) {
+            if (mod.HEAPU8[si] !== snap[si]) {
+              INPUT_BASE = si;
+              break;
+            }
+          }
+          mod._simulate_input(0, 0, 0);
+          console.log('[lockstep] INPUT_BASE auto-discovered: ' + INPUT_BASE);
+        } catch (e) {
+          console.log('[lockstep] INPUT_BASE auto-discovery failed, using default: ' + INPUT_BASE);
+        }
       }
 
-      checkBothEmuReady();
+      // Pause immediately to prevent any more free frames
+      mod.pauseMainLoop();
+      console.log('[lockstep] emulator ready (' + frames + ' frames) — paused' +
+        (_playerSlot === 0 ? ' (host, full boot)' : ' (guest, minimal boot)'));
+
+      // Set up key tracking now that ejs.controls is available
+      _p1KeyMap = null;  // force re-read from EJS controls
+      setupKeyTracking();
+
+      _selfEmuReady = true;
+
+      // Late join: request state from host instead of normal sync flow
+      if (_lateJoin && _playerSlot !== 0) {
+        setStatus('Requesting game state...');
+        socket.emit('data-message', {
+          type: 'request-late-join',
+          requesterSid: socket.id,
+        });
+        return;  // handleLateJoinState() will resume from here
+      }
+
+      // Notify all connected peers
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send('emu-ready'); } catch (_) {}
+        }
+      });
+
+      checkAllEmuReady();
     };
     waitForEmu();
   }
 
-  function checkBothEmuReady() {
+  function checkAllEmuReady() {
     if (!_selfEmuReady) return;
-    const peer = getPeer();
-    if (!peer || !peer.emuReady) return;
+    if (_isSpectator) return;
     if (_running) return;
 
-    console.log('[lockstep] both emulators ready — syncing initial state');
-    setStatus('Syncing…');
+    // Wait for at least 1 player peer to be emu-ready
+    var playerPeers = Object.values(_peers).filter(function (p) {
+      return p.slot !== null && p.slot !== undefined;
+    });
+    var emuReadyCount = playerPeers.filter(function (p) { return p.emuReady; }).length;
+    if (emuReadyCount === 0) return;
+
+    console.log('[lockstep] ' + (emuReadyCount + 1) + ' emulators ready -- syncing initial state');
+    setStatus('Syncing...');
 
     if (_playerSlot === 0) {
-      // Host: send save state (emulator keeps running freely until
-      // both sides are lockstep-ready — then we freeze + start).
+      // Host: capture and send save state
       sendInitialState();
     }
-    // Guest: waits for save state via handleSaveState
+    // Guests: wait for save state via handleSaveStateMsg
   }
 
-  // Called when peer sends 'lockstep-ready' AND we're ready too
-  let _selfLockstepReady = false;
-  let _guestStateBytes = null;  // guest stores decompressed state here
-
-  function checkBothLockstepReady() {
-    if (!_selfLockstepReady || !_peerLockstepReady) return;
+  function checkAllLockstepReady() {
+    if (!_selfLockstepReady) return;
     if (_running) return;
-    console.log('[lockstep] both sides lockstep-ready — GO');
 
-    // Enter manual mode NOW — right before starting the tick loop.
-    // No async gap = no stale rAF callbacks can corrupt the runner.
-    enterManualMode();
+    // Check that at least 1 player peer is lockstep-ready
+    var playerPeerSids = Object.keys(_peers).filter(function (sid) {
+      var p = _peers[sid];
+      return p.slot !== null && p.slot !== undefined;
+    });
+    var readyCount = playerPeerSids.filter(function (sid) {
+      return _lockstepReadyPeers[sid];
+    }).length;
 
-    // Guest: load the save state while emulator is frozen
-    if (_guestStateBytes) {
-      const gm = window.EJS_emulator.gameManager;
-      gm.loadState(_guestStateBytes);
-      _guestStateBytes = null;
-      console.log('[lockstep] guest loaded initial state');
+    if (readyCount === 0) return;
+
+    console.log('[lockstep] ' + (readyCount + 1) + ' players lockstep-ready -- GO');
+
+    var gm = window.EJS_emulator.gameManager;
+
+    // If no state bytes (host fallback), capture current state
+    if (!_guestStateBytes) {
+      _guestStateBytes = gm.getState();
     }
 
+    // First loadState: fully restores CPU + RAM (needs main loop active)
+    gm.loadState(_guestStateBytes);
+
+    // Enter manual mode — captures rAF, stops free frames
+    enterManualMode();
+
+    // Second loadState: fixes any free-frame drift between first load
+    // and enterManualMode. Both sides now have identical state.
+    gm.loadState(_guestStateBytes);
+    _guestStateBytes = null;
+    console.log('[lockstep] double-loaded state (CPU + free-frame fix)');
+
+    // Both sides reset and start true lockstep sync
+    // (Warmup removed — deterministic timing patch makes it unnecessary)
     _frameNum = 0;
     startLockstep();
+
+    // Host: start spectator streaming after lockstep begins
+    if (_playerSlot === 0) {
+      setTimeout(startSpectatorStream, 1000);
+    }
   }
 
   async function sendInitialState() {
-    const gm = window.EJS_emulator.gameManager;
+    var gm = window.EJS_emulator.gameManager;
     try {
-      const raw = gm.getState();
-      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      const compressed = await compressState(bytes);
-      const b64 = uint8ToBase64(compressed);
-      console.log('[lockstep] sending initial state (' +
-        Math.round(bytes.length / 1024) + 'KB raw → ' +
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // Store for host to also load (resets GL context for proper rendering)
+      _guestStateBytes = bytes;
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep] sending initial state via Socket.IO (' +
+        Math.round(bytes.length / 1024) + 'KB raw -> ' +
         Math.round(compressed.length / 1024) + 'KB gzip)');
-      socket.emit('data-message', {
-        type: 'save-state',
-        frame: 0,
-        data: b64,
-      });
-      // Host is ready — signal and wait for guest
+
+      // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
+      // data channels (SCTP limit with maxRetransmits).
+      socket.emit('data-message', { type: 'save-state', frame: 0, data: b64 });
+
+      // Host is ready
       _selfLockstepReady = true;
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('lockstep-ready');
-      }
-      checkBothLockstepReady();
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
+          try { p.dc.send('lockstep-ready'); } catch (_) {}
+        }
+      });
+      checkAllLockstepReady();
     } catch (err) {
       console.log('[lockstep] failed to send initial state:', err);
     }
   }
 
-  async function handleSaveState(msg) {
+  function handleSaveStateMsg(msg) {
+    if (_isSpectator) return;
     console.log('[lockstep] received initial state');
-    setStatus('Loading initial state…');
-    try {
-      const compressed = base64ToUint8(msg.data);
-      const bytes = await decompressState(compressed);
+    setStatus('Loading initial state...');
 
-      // Store the state — it will be loaded in checkBothLockstepReady
-      // right after enterManualMode, with no async gap.
+    var compressed = base64ToUint8(msg.data);
+    decompressState(compressed).then(function (bytes) {
       _guestStateBytes = bytes;
       console.log('[lockstep] initial state decompressed (' + bytes.length + ' bytes)');
 
-      // Signal host that we're ready to run lockstep
       _selfLockstepReady = true;
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send('lockstep-ready');
-      }
-      checkBothLockstepReady();
-    } catch (err) {
+      Object.values(_peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
+          try { p.dc.send('lockstep-ready'); } catch (_) {}
+        }
+      });
+      checkAllLockstepReady();
+    }).catch(function (err) {
       console.log('[lockstep] failed to decompress initial state:', err);
+    });
+  }
+
+  // -- Late join -------------------------------------------------------------
+
+  async function sendLateJoinState(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer) return;
+    if (peer.slot === null || peer.slot === undefined) return;
+
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+
+    try {
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var compressed = await compressState(bytes);
+      var b64 = uint8ToBase64(compressed);
+      console.log('[lockstep] sending late-join state to', remoteSid,
+        '(' + Math.round(bytes.length / 1024) + 'KB raw -> ' +
+        Math.round(compressed.length / 1024) + 'KB gzip)',
+        'frame:', _frameNum);
+
+      // Send via Socket.IO since save states are too large for DC
+      socket.emit('data-message', {
+        type: 'late-join-state',
+        frame: _frameNum,
+        data: b64,
+      });
+    } catch (err) {
+      console.log('[lockstep] failed to send late-join state:', err);
     }
   }
 
-  // ── Manual frame stepping ─────────────────────────────────────────────
-  //
-  // Strategy: intercept requestAnimationFrame to capture the Emscripten
-  // MainLoop_runner, then call it directly from our tick loop. The runner
-  // may throw OOB errors (audio subsystem) when called outside a real rAF
-  // context — we catch and ignore these since they're non-fatal (audio
-  // glitches but emulation continues).
+  function handleLateJoinState(msg) {
+    if (_isSpectator) return;
+    if (_running) return;  // already running, ignore duplicate
+
+    console.log('[lockstep] received late-join state for frame', msg.frame);
+    setStatus('Loading late-join state...');
+
+    var compressed = base64ToUint8(msg.data);
+    decompressState(compressed).then(function (bytes) {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      if (!gm) {
+        console.log('[lockstep] gameManager not ready');
+        return;
+      }
+
+      gm.loadState(bytes);
+      enterManualMode();
+
+      // Sync to the host's current frame. The host sent the state at msg.frame,
+      // but has advanced since then. _lastRemoteFrame tracks the highest frame
+      // received via data channel from any peer — use that to catch up.
+      // Then pre-fill the delay gap so the tick loop doesn't stall waiting
+      // for historical input that was sent before we started lockstep.
+      var startFrame = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
+      _frameNum = startFrame;
+
+      for (var f = Math.max(0, startFrame - DELAY_FRAMES); f <= startFrame + DELAY_FRAMES; f++) {
+        if (!_localInputs[f]) _localInputs[f] = 0;
+        Object.values(_peers).forEach(function (p) {
+          if (p.slot !== null && p.slot !== undefined) {
+            if (!_remoteInputs[p.slot]) _remoteInputs[p.slot] = {};
+            if (!_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = 0;
+          }
+        });
+      }
+
+      console.log('[lockstep] late-join state loaded at frame', msg.frame,
+        'synced to frame', _frameNum, '(lastRemote:', _lastRemoteFrame + ')');
+      startLockstep();
+    }).catch(function (err) {
+      console.log('[lockstep] failed to handle state:', err);
+    });
+  }
+
+  // -- Guest audio muting + host audio streaming ----------------------------
+
+  // -- Spectator canvas streaming --------------------------------------------
+
+  function startSpectatorStream() {
+    if (_playerSlot !== 0) return;
+
+    var canvas = document.querySelector('#game canvas');
+    if (!canvas) {
+      console.log('[lockstep] canvas not found for spectator stream');
+      return;
+    }
+
+    // Create a smaller capture canvas for efficiency (same as streaming prototype)
+    var captureCanvas = document.createElement('canvas');
+    captureCanvas.width = 640;
+    captureCanvas.height = 480;
+    var ctx = captureCanvas.getContext('2d');
+
+    _hostStream = captureCanvas.captureStream(0);  // manual frame control
+
+    // Add audio track from bypass playback (if available)
+    if (_audioDestNode && _audioDestNode.stream) {
+      var audioTracks = _audioDestNode.stream.getAudioTracks();
+      for (var at = 0; at < audioTracks.length; at++) {
+        _hostStream.addTrack(audioTracks[at]);
+      }
+      console.log('[lockstep] added audio track to spectator stream');
+    }
+
+    var captureTrack = _hostStream.getVideoTracks()[0];
+
+    // Blit loop: copy emulator canvas to capture canvas every frame
+    function blitFrame() {
+      _origRAF.call(window, blitFrame);
+      ctx.drawImage(canvas, 0, 0, 640, 480);
+      if (captureTrack.requestFrame) captureTrack.requestFrame();
+    }
+    blitFrame();
+
+    console.log('[lockstep] spectator capture stream started (640x480)');
+
+    // Add tracks to all existing spectator peer connections
+    Object.entries(_peers).forEach(function (entry) {
+      var sid = entry[0];
+      var peer = entry[1];
+      if (peer.slot === null) {
+        addStreamToPeer(sid);
+      }
+    });
+  }
+
+  function startSpectatorStreamForPeer(remoteSid) {
+    if (!_hostStream) {
+      // Stream not started yet -- it will be started after lockstep begins
+      // and will pick up this peer then
+      return;
+    }
+    addStreamToPeer(remoteSid);
+  }
+
+  function addStreamToPeer(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer || !_hostStream) return;
+
+    _hostStream.getTracks().forEach(function (track) {
+      peer.pc.addTrack(track, _hostStream);
+    });
+    renegotiate(remoteSid);
+  }
+
+  async function renegotiate(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer) return;
+    try {
+      var offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      socket.emit('webrtc-signal', { target: remoteSid, offer: offer });
+    } catch (err) {
+      console.log('[lockstep] renegotiate failed:', err);
+    }
+  }
+
+  function showSpectatorVideo(event, peer) {
+    if (!_guestVideo) {
+      _guestVideo = document.createElement('video');
+      _guestVideo.id = 'guest-video';
+      _guestVideo.autoplay = true;
+      _guestVideo.playsInline = true;
+      _guestVideo.muted = false;
+      _guestVideo.disableRemotePlayback = true;
+      _guestVideo.setAttribute('playsinline', '');
+
+      var gameDiv = (_config && _config.gameElement) || document.getElementById('game');
+      if (gameDiv) {
+        gameDiv.innerHTML = '';
+        gameDiv.appendChild(_guestVideo);
+      } else {
+        document.body.appendChild(_guestVideo);
+      }
+    }
+    _guestVideo.srcObject = event.streams[0];
+
+    // Minimize jitter buffer for low latency
+    try {
+      var receivers = peer.pc.getReceivers();
+      for (var i = 0; i < receivers.length; i++) {
+        var recv = receivers[i];
+        if (recv.track && recv.track.kind === 'video') {
+          if ('playoutDelayHint' in recv) recv.playoutDelayHint = 0;
+          if ('jitterBufferTarget' in recv) recv.jitterBufferTarget = 0;
+        }
+      }
+    } catch (_) {}
+
+    setStatus('Spectating...');
+  }
+
+  // -- Direct memory input ---------------------------------------------------
+
+  function writeInputToMemory(player, inputMask) {
+    var buf = window.EJS_emulator.gameManager.Module.HEAPU8.buffer;
+    var dv = new DataView(buf);
+
+    // Digital buttons (0-15): write 0 or 1 as int32
+    for (var btn = 0; btn < 16; btn++) {
+      var addr = INPUT_BASE + (btn * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+      dv.setInt32(addr, (inputMask >> btn) & 1, true);
+    }
+
+    // Analog axes (16+): buttons come in +/- pairs (16/17, 18/19, ...)
+    // Each pair maps to an axis. If + is pressed, value = 32767.
+    // If - is pressed, value = -32767. Both or neither = 0.
+    for (var base = 16; base < 20; base += 2) {
+      var posPressed = (inputMask >> base) & 1;
+      var negPressed = (inputMask >> (base + 1)) & 1;
+      var axisVal = (posPressed - negPressed) * 32767;
+      var addrPos = INPUT_BASE + (base * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+      var addrNeg = INPUT_BASE + ((base + 1) * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
+      dv.setInt32(addrPos, axisVal, true);
+      dv.setInt32(addrNeg, 0, true);
+    }
+  }
+
+  // -- Frame stepping (rAF interception) -------------------------------------
 
   function enterManualMode() {
     if (_manualMode) return;
-    const mod = window.EJS_emulator.gameManager.Module;
+    if (_isSpectator) return;  // spectators never enter manual mode
 
-    if (!_origRAF) _origRAF = window.requestAnimationFrame;
+    var mod = window.EJS_emulator.gameManager.Module;
 
-    // FIRST: pause the main loop. This increments the generation counter,
-    // which invalidates ALL existing scheduled rAF callbacks. Any runner
-    // that fires after this will see checkIsRunning()=false and bail.
+    // Save the real requestAnimationFrame
+    _origRAF = window.requestAnimationFrame;
+
+    // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
-    // THEN: replace rAF. Use a capture gate — only accept the runner
-    // registered by resumeMainLoop (next line), not stale callbacks
-    // from the old main loop that might fire during this tick.
-    let _captureGate = false;
-    window.requestAnimationFrame = function(cb) {
-      if (_captureGate) _pendingRunner = cb;
-      return -999;
-    };
-
-    _manualMode = true;
-
-    // FINALLY: resume to create a fresh runner with the new generation.
-    // Open the gate so only THIS registration is captured.
-    _captureGate = true;
-    mod.resumeMainLoop();
-    _captureGate = false;
-
-    // Now set the permanent interceptor that captures re-registrations
-    // from the runner after each frame step.
-    window.requestAnimationFrame = function(cb) {
+    // Replace rAF with interceptor that captures the runner
+    window.requestAnimationFrame = function (cb) {
       _pendingRunner = cb;
       return -999;
     };
 
-    if (_pendingRunner) {
-      console.log('[lockstep] manual mode active — captured runner');
-    } else {
-      console.log('[lockstep] WARNING: failed to capture runner');
-    }
+    // Resume to capture fresh runner
+    mod.resumeMainLoop();
+
+    _manualMode = true;
+    console.log('[lockstep] entered manual mode');
   }
+
+  var _hasForkedCore = false;  // true if Module exports kn_set_deterministic
 
   function stepOneFrame() {
     if (!_pendingRunner) return false;
-    const runner = _pendingRunner;
+    var runner = _pendingRunner;
     _pendingRunner = null;
-    try {
-      runner(performance.now());
-    } catch (e) {
-      // Audio OOB errors are non-fatal — emulation continues, audio glitches
-      // Re-capture the runner since the error may have interrupted re-registration
-      const mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-                  window.EJS_emulator.gameManager.Module;
-      if (mod && !_pendingRunner) {
-        mod.pauseMainLoop();
-        mod.resumeMainLoop();
+
+    var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+    window._kn_frameTime = frameTimeMs;
+
+    // On first lockstep frame, switch from flat time to relative cycle counter.
+    // Captures current cycle count as baseline — subtracts transition divergence.
+    if (_hasForkedCore && !window._kn_useRelativeCycles && _frameNum === 0) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_get_cycle_time_ms) {
+        window._kn_cycleStart = mod._kn_get_cycle_time_ms();
+        window._kn_cycleBase = frameTimeMs;
+        window._kn_useRelativeCycles = true;
+        console.log('[lockstep] switched to relative cycle counter at',
+          window._kn_cycleStart.toFixed(1) + 'ms');
       }
     }
+
+    // C-level: always update frame time (kn_deterministic_mode stays ON)
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_frame_time) {
+        mod._kn_set_frame_time(frameTimeMs);
+      }
+    }
+
+    runner(frameTimeMs);
+
+    // Force GL composite via real rAF no-op
+    _origRAF.call(window, function () {});
     return true;
   }
 
-  function exitManualMode() {
-    if (!_manualMode) return;
-    _manualMode = false;
-    if (_origRAF) {
-      window.requestAnimationFrame = _origRAF;
-      _origRAF = null;
-    }
-    const mod = window.EJS_emulator.gameManager.Module;
-    mod.pauseMainLoop();
-    mod.resumeMainLoop();
-    console.log('[lockstep] manual mode exited — normal playback');
-  }
+  // -- True lockstep tick loop -----------------------------------------------
+  //
+  // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
+  // game loop (background tabs would throttle it). Each tick:
+  //   1. Send local input for current frame to ALL peers
+  //   2. Check if ALL active player peers have input for the apply frame
+  //   3. If not, stall (return early, retry via setTimeout(1))
+  //   4. Write ALL players' inputs to Wasm memory
+  //   5. Step exactly one frame
+  //   6. Increment frame counter
 
-  // ── Lockstep tick loop ────────────────────────────────────────────────
+  // FPS + debug tracking
+  var _fpsLastTime     = 0;
+  var _fpsFrameCount   = 0;
+  var _fpsCurrent      = 0;
+  var _remoteReceived  = 0;
+  var _remoteMissed    = 0;
+  var _remoteApplied   = 0;
+  var _lastRemoteFrame = -1;
+  var _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
+  var _stallRetryPending = false;
 
   function startLockstep() {
     if (_running) return;
     _running = true;
-    _frameNum = 0;
-    _localInputs = {};
-    _remoteInputs = {};
-    _prevSlotMasks = {};
+
+    // Detect forked core with C-level deterministic timing exports
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    _hasForkedCore = !!(mod && mod._kn_set_deterministic && mod._kn_set_frame_time);
+    if (_hasForkedCore) {
+      console.log('[lockstep] forked core detected — C-level deterministic timing');
+    } else {
+      console.log('[lockstep] stock core — JS-level timing patch (fallback)');
+    }
+
+    // Only reset frame counter if not a late join (late join sets _frameNum before calling)
+    if (_frameNum === 0) {
+      _localInputs = {};
+      _remoteInputs = {};
+    }
+    _fpsLastTime = performance.now();
+    _fpsFrameCount = 0;
+    _fpsCurrent = 0;
+    _remoteReceived = 0;
+    _remoteMissed = 0;
+    _remoteApplied = 0;
+    _lastRemoteFrame = -1;
+    _lastRemoteFramePerSlot = {};
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    console.log('[lockstep] lockstep started — slot:', _playerSlot);
-    setStatus('Connected — game on!');
+    // Always frozen time — audio plays via bypass, not OpenAL
+    window._kn_inStep = true;
+    window._kn_frameTime = 0;
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_deterministic) {
+        mod._kn_set_deterministic(1);
+        console.log('[lockstep] C-level deterministic timing enabled (session-wide)');
+      }
+    }
 
-    tick();
+    // Kill OpenAL's audio system. An active AudioContext + AL_PLAYING source
+    // causes desyncs even with frozen _emscripten_get_now. Stop all sources
+    // and suspend the AudioContext to eliminate all async audio activity.
+    var mod2 = window.EJS_emulator && window.EJS_emulator.gameManager &&
+               window.EJS_emulator.gameManager.Module;
+    if (mod2 && mod2.AL && mod2.AL.contexts) {
+      Object.keys(mod2.AL.contexts).forEach(function (id) {
+        var ctx = mod2.AL.contexts[id];
+        if (!ctx) return;
+        // Stop all sources (AL_PLAYING 0x1012 -> AL_STOPPED 0x1014)
+        if (ctx.sources) {
+          Object.keys(ctx.sources).forEach(function (sid) {
+            var src = ctx.sources[sid];
+            if (src && src.state === 0x1012) {
+              mod2.AL.setSourceState(src, 0x1014);
+            }
+          });
+        }
+        // Suspend the AudioContext and prevent browser from auto-resuming
+        // it on user gestures by overriding resume() to be a no-op.
+        if (ctx.audioCtx) {
+          ctx.audioCtx.suspend();
+          ctx.audioCtx.resume = function () { return Promise.resolve(); };
+        }
+        console.log('[lockstep] killed OpenAL audio system (context ' + id + ')');
+      });
+    }
+
+    initAudioPlayback();
+
+    var activePeers = getActivePeers();
+    var peerSlots = activePeers.map(function (p) { return p.slot; });
+    console.log('[lockstep] lockstep started -- slot:', _playerSlot,
+      'peerSlots:', peerSlots.join(','), 'delay:', DELAY_FRAMES);
+    setStatus('Connected -- game on!');
+
+    window._lockstepActive = true;
+
+    // Use setInterval so background tabs are not throttled
+    _tickInterval = setInterval(tick, 16);
   }
 
-  function stopLockstep() {
+  function stopSync() {
     _running = false;
-    if (_tickTimer) { clearTimeout(_tickTimer); _tickTimer = null; }
-    exitManualMode();
+    window._lockstepActive = false;
+
+    // Disable all deterministic timing
+    window._kn_inStep = false;
+    window._kn_frameTime = 0;
+    if (_hasForkedCore) {
+      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+      if (mod && mod._kn_set_deterministic) mod._kn_set_deterministic(0);
+    }
+    if (_tickInterval !== null) {
+      clearInterval(_tickInterval);
+      _tickInterval = null;
+    }
+    // Restore original rAF if we intercepted it
+    if (_origRAF) {
+      window.requestAnimationFrame = _origRAF;
+      _origRAF = null;
+    }
+    _manualMode = false;
+    _pendingRunner = null;
+    _pendingSyncCheck = null;
   }
 
   function tick() {
     if (!_running) return;
 
-    const peer = getPeer();
-    if (!peer || !peer.dc || peer.dc.readyState !== 'open') {
-      setStatus('Peer disconnected');
-      stopLockstep();
-      return;
+    var activePeers = getActivePeers();
+
+    // FPS counter
+    _fpsFrameCount++;
+    var now = performance.now();
+    if (now - _fpsLastTime >= 1000) {
+      _fpsCurrent = _fpsFrameCount;
+      _fpsFrameCount = 0;
+      _fpsLastTime = now;
     }
 
-    // Step 1: Read and send local input for the current frame
-    if (!(_frameNum in _localInputs)) {
-      const mask = readLocalInput();
-      _localInputs[_frameNum] = mask;
-      const buf = new Int32Array([_frameNum, mask]).buffer;
-      try { peer.dc.send(buf); } catch (_) {}
+    // Send local input for current frame to ALL open peer DCs
+    var mask = readLocalInput();
+    _localInputs[_frameNum] = mask;
+    var buf = new Int32Array([_frameNum, mask]).buffer;
+    for (var i = 0; i < activePeers.length; i++) {
+      try { activePeers[i].dc.send(buf); } catch (_) {}
     }
 
-    // Step 2: Determine which frame to apply inputs for
-    const applyFrame = _frameNum - DELAY_FRAMES;
-
+    // Check if all INPUT peers (peers who have sent at least 1 input)
+    // have input for the apply frame. Late joiners who haven't started
+    // sending yet won't stall existing players.
+    var inputPeers = getInputPeers();
+    var applyFrame = _frameNum - DELAY_FRAMES;
     if (applyFrame >= 0) {
-      // Check if remote input has arrived for applyFrame
-      if (!(applyFrame in _remoteInputs)) {
-        // STALL: wait for remote input
-        if (_stallStart === 0) _stallStart = performance.now();
-        const waited = performance.now() - _stallStart;
+      var allArrived = true;
+      for (var j = 0; j < inputPeers.length; j++) {
+        var pSlot = inputPeers[j].slot;
+        if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
+          allArrived = false;
+          break;
+        }
+      }
 
-        if (waited < MAX_STALL_MS) {
-          // Keep waiting via real rAF
-          _tickTimer = _origRAF.call(window, tick);
+      if (!allArrived) {
+        // STALL -- remote input not here yet
+        if (_stallStart === 0) {
+          _stallStart = now;
+        }
+        if (now - _stallStart >= MAX_STALL_MS) {
+          // Timeout -- inject zero input for missing peers to unstick
+          console.log('[lockstep] stall timeout at frame', applyFrame,
+            '(' + MAX_STALL_MS + 'ms)');
+          for (var k = 0; k < inputPeers.length; k++) {
+            var s = inputPeers[k].slot;
+            if (!_remoteInputs[s]) _remoteInputs[s] = {};
+            if (_remoteInputs[s][applyFrame] === undefined) {
+              _remoteInputs[s][applyFrame] = 0;
+            }
+          }
+          _stallStart = 0;
+        } else {
+          _remoteMissed++;
+          // Retry quickly via setTimeout(1) to avoid 16ms wait
+          if (!_stallRetryPending) {
+            _stallRetryPending = true;
+            setTimeout(function () {
+              _stallRetryPending = false;
+              tick();
+            }, 1);
+          }
           return;
         }
-
-        // Stall timeout — apply zero input for remote to prevent freeze
-        console.log('[lockstep] stall timeout at frame', applyFrame, '(' + Math.round(waited) + 'ms)');
-        _remoteInputs[applyFrame] = 0;
+      } else {
+        _stallStart = 0;
       }
 
-      _stallStart = 0;
+      // Write ALL inputs to Wasm memory — use inputPeers for peers
+      // we're synced with, activePeers for all connected
+      writeInputToMemory(_playerSlot, _localInputs[applyFrame] || 0);
+      for (var m = 0; m < inputPeers.length; m++) {
+        var peerSlot = inputPeers[m].slot;
+        var remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
+        writeInputToMemory(peerSlot, remoteMask);
+        if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+      }
+      _remoteApplied++;
 
-      // Step 3: Apply inputs for both players
-      const localMask  = _localInputs[applyFrame] || 0;
-      const remoteMask = _remoteInputs[applyFrame] || 0;
-
-      applyInputForSlot(_playerSlot, localMask);
-      applyInputForSlot(_peerSlot, remoteMask);
-
-      // Clean up old input buffers
+      // Cleanup old local entry
       delete _localInputs[applyFrame];
-      delete _remoteInputs[applyFrame];
     }
 
-    // Step 4: Advance the emulator by exactly one frame.
-    // Calls the captured Emscripten runner directly. OOB errors from
-    // audio are caught and ignored (non-fatal).
+    // Step one frame with audio capture
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
     stepOneFrame();
+    feedAudio();
 
-    // Step 5: Desync detection — hash every HASH_INTERVAL frames
-    if (HASH_INTERVAL > 0 && _frameNum > 0 && _frameNum % HASH_INTERVAL === 0) {
-      broadcastHash(_frameNum);
+    _frameNum++;
+    window._frameNum = _frameNum;
+
+    // Deferred sync check: guest was behind when sync-hash arrived, now caught up
+    if (_pendingSyncCheck && _frameNum === _pendingSyncCheck.frame) {
+      var localHash = hashGameState();
+      if (localHash !== _pendingSyncCheck.hash) {
+        console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
+        var syncPeer = _peers[_pendingSyncCheck.peerSid];
+        if (syncPeer && syncPeer.dc) {
+          try { syncPeer.dc.send('sync-request'); } catch (_) {}
+        }
+      }
+      _pendingSyncCheck = null;
+    } else if (_pendingSyncCheck && _frameNum > _pendingSyncCheck.frame) {
+      // Passed the frame — discard stale check
+      _pendingSyncCheck = null;
     }
 
-    // Step 5b: Periodic resync — host sends state to correct drift
-    if (RESYNC_INTERVAL > 0 && _playerSlot === 0 &&
-        _frameNum > 0 && _frameNum % RESYNC_INTERVAL === 0) {
-      sendResyncState();
+    // -- Periodic desync check: host hashes game state (first 64KB), broadcasts hash.
+    // With the forked core's deterministic timing, desyncs should not occur.
+    // This serves as a safety net for edge cases or fallback to stock core.
+    if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
+        _frameNum % _syncCheckInterval === 0) {
+      var hostHash = hashGameState();
+      var syncMsg = 'sync-hash:' + _frameNum + ':' + hostHash;
+      var ap = getActivePeers();
+      for (var s = 0; s < ap.length; s++) {
+        try { ap[s].dc.send(syncMsg); } catch (_) {}
+      }
+      // Log every 10th check (~50 seconds)
+      if (_frameNum % (_syncCheckInterval * 10) === 0) {
+        console.log('[lockstep] sync check at frame', _frameNum, 'hash:', hostHash);
+      }
     }
 
-    // Step 6: Debug overlay
-    if (_frameNum % 30 === 0) {
-      const dbg = document.getElementById('np-debug');
+    // Debug overlay -- update every 15 frames (~4x per second)
+    if (_frameNum % 15 === 0) {
+      var dbg = document.getElementById('np-debug');
       if (dbg) {
         dbg.style.display = '';
-        dbg.textContent = 'F:' + _frameNum + ' delay:' + DELAY_FRAMES +
+        var playerCount = activePeers.length + 1;  // +1 for self
+        var spectatorCount = Object.values(_peers).filter(function (p) {
+          return p.slot === null;
+        }).length;
+        var remoteBufTotal = 0;
+        Object.keys(_remoteInputs).forEach(function (slot) {
+          remoteBufTotal += Object.keys(_remoteInputs[slot] || {}).length;
+        });
+        dbg.textContent =
+          'F:' + _frameNum +
+          ' fps:' + _fpsCurrent +
           ' slot:' + _playerSlot +
-          (_desynced ? ' DESYNC' : '');
+          ' players:' + playerCount +
+          (spectatorCount > 0 ? ' spec:' + spectatorCount : '') +
+          ' delay:' + DELAY_FRAMES +
+          ' rBuf:' + remoteBufTotal +
+          ' rcv:' + _remoteReceived +
+          ' hit:' + _remoteApplied +
+          ' miss:' + _remoteMissed +
+          ' lastR:' + _lastRemoteFrame;
       }
     }
-
-    if (window._netplayFrameLog && window._netplayFrameLog.length < 600) {
-      window._netplayFrameLog.push({ frame: _frameNum });
-    }
-
-    window._frameNum = _frameNum;
-    _frameNum++;
-
-    // Schedule next tick via the real rAF. The runner must execute
-    // inside a real rAF callback for the browser to composite the
-    // WebGL framebuffer to the screen.
-    _tickTimer = _origRAF.call(window, tick);
   }
 
-  // ── Input read / apply ─────────────────────────────────────────────────
+  // -- Input read ------------------------------------------------------------
 
   function readLocalInput() {
-    let mask = 0;
+    var mask = 0;
 
     // Gamepad
-    const gp = navigator.getGamepads()[0];
+    var gp = navigator.getGamepads()[0];
     if (gp) {
-      for (let i = 0; i < Math.min(gp.buttons.length, 32); i++) {
+      for (var i = 0; i < Math.min(gp.buttons.length, 32); i++) {
         if (gp.buttons[i].pressed) mask |= (1 << i);
       }
     }
 
     // Keyboard
     if (_p1KeyMap) {
-      _heldKeys.forEach(kc => {
-        const btnIdx = _p1KeyMap[kc];
+      _heldKeys.forEach(function (kc) {
+        var btnIdx = _p1KeyMap[kc];
         if (btnIdx !== undefined) mask |= (1 << btnIdx);
       });
     }
@@ -809,242 +1421,99 @@
     return mask;
   }
 
-  function applyInputForSlot(slot, inputMask) {
-    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-    if (!gm) return;
-
-    const prevMask = _prevSlotMasks[slot] || 0;
-
-    // Digital buttons (indices 0-15)
-    for (let i = 0; i < 16; i++) {
-      const wasPressed = (prevMask >> i) & 1;
-      const isPressed  = (inputMask >> i) & 1;
-      if (wasPressed !== isPressed) gm.simulateInput(slot, i, isPressed);
-    }
-
-    // Analog axes (indices 16+): buttons come in +/- pairs (16/17, 18/19, …)
-    for (let base = 16; base <= 22; base += 2) {
-      const posNow  = (inputMask >> base)       & 1;
-      const negNow  = (inputMask >> (base + 1)) & 1;
-      const posPrev = (prevMask >> base)         & 1;
-      const negPrev = (prevMask >> (base + 1))   & 1;
-      if (posNow !== posPrev || negNow !== negPrev) {
-        gm.simulateInput(slot, base, (posNow - negNow) * 32767);
-      }
-    }
-
-    _prevSlotMasks[slot] = inputMask;
-  }
-
-  // ── Desync detection ──────────────────────────────────────────────────
-
-  function stateHash() {
-    try {
-      const gm = window.EJS_emulator.gameManager;
-      const state = gm.getState();
-      if (!state || state.length < 530000) return 0;
-      let h = 0;
-      const off = 512 * 1024;
-      const len = 8192;
-      for (let i = off; i < off + len && i < state.length; i++) {
-        h = (h * 31 + state[i]) >>> 0;
-      }
-      return h;
-    } catch (_) {
-      return 0;
-    }
-  }
-
-  function broadcastHash(frame) {
-    const hash = stateHash();
-    if (hash === 0) return;
-    _lastHash = hash;
-    _lastHashFrame = frame;
-    const peer = getPeer();
-    if (peer && peer.dc && peer.dc.readyState === 'open') {
-      try {
-        peer.dc.send(JSON.stringify({ type: 'state-hash', frame: frame, hash: hash }));
-      } catch (_) {}
-    }
-  }
-
-  function handleStateHash(msg) {
-    if (_lastHashFrame < 0 || Math.abs(msg.frame - _lastHashFrame) > 5) return;
-
-    if (msg.hash === _lastHash) {
-      if (_desynced) {
-        console.log('[lockstep] hashes match post-resync at frame', msg.frame);
-        _desynced = false;
-        window._desynced = false;
-        setStatus('Connected — game on!');
-      }
-      return;
-    }
-
-    console.log('[lockstep] DESYNC at frame', msg.frame,
-      'local:', _lastHash, 'remote:', msg.hash);
-    _desynced = true;
-    window._desynced = true;
-    setStatus('Desync detected — resyncing…');
-
-    if (_playerSlot !== 0) {
-      // Guest requests resync from host
-      const peer = getPeer();
-      if (peer && peer.dc && peer.dc.readyState === 'open') {
-        peer.dc.send(JSON.stringify({ type: 'resync-request' }));
-      }
-    } else {
-      sendResyncState();
-    }
-  }
-
-  function handleResyncRequest() {
-    if (_playerSlot !== 0) return;
-    console.log('[lockstep] received resync request');
-    _desynced = true;
-    window._desynced = true;
-    sendResyncState();
-  }
-
-  async function sendResyncState() {
-    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-    if (!gm) return;
-    try {
-      const raw = gm.getState();
-      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      const compressed = await compressState(bytes);
-      const b64 = uint8ToBase64(compressed);
-      console.log('[lockstep] sending resync state');
-      socket.emit('data-message', {
-        type: 'resync-state',
-        frame: _frameNum,
-        data: b64,
-      });
-      applyResync(_frameNum, bytes);
-    } catch (err) {
-      console.log('[lockstep] resync send failed:', err);
-      _desynced = false;
-      window._desynced = false;
-    }
-  }
-
-  async function handleResyncState(msg) {
-    console.log('[lockstep] received resync state for frame', msg.frame);
-    try {
-      const compressed = base64ToUint8(msg.data);
-      const bytes = await decompressState(compressed);
-      applyResync(msg.frame, bytes);
-    } catch (err) {
-      console.log('[lockstep] resync load failed:', err);
-      _desynced = false;
-      window._desynced = false;
-    }
-  }
-
-  function applyResync(frame, stateBytes) {
-    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-    if (!gm) return;
-    try {
-      gm.loadState(stateBytes);
-    } catch (err) {
-      console.log('[lockstep] loadState failed:', err);
-      _desynced = false;
-      window._desynced = false;
-      return;
-    }
-    _frameNum = frame;
-    window._frameNum = _frameNum;
-    _localInputs   = {};
-    _remoteInputs  = {};
-    _prevSlotMasks = {};
-    _lastHash      = 0;
-    _lastHashFrame = -1;
-    _stallStart    = 0;
-    console.log('[lockstep] resync applied at frame', frame);
-    setStatus('Resynced');
-  }
-
-  // ── Compression helpers ────────────────────────────────────────────────
+  // -- Compression helpers ---------------------------------------------------
 
   async function compressState(bytes) {
-    const cs = new CompressionStream('gzip');
-    const writer = cs.writable.getWriter();
+    var cs = new CompressionStream('gzip');
+    var writer = cs.writable.getWriter();
     writer.write(bytes);
     writer.close();
-    const reader = cs.readable.getReader();
-    const chunks = [];
+    var reader = cs.readable.getReader();
+    var chunks = [];
     while (true) {
-      const { value, done } = await reader.read();
-      if (value) chunks.push(value);
-      if (done) break;
+      var result = await reader.read();
+      if (result.value) chunks.push(result.value);
+      if (result.done) break;
     }
-    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-    let offset = 0;
-    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+    var offset = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], offset);
+      offset += chunks[i].length;
+    }
     return out;
   }
 
   async function decompressState(bytes) {
-    const ds = new DecompressionStream('gzip');
-    const writer = ds.writable.getWriter();
+    var ds = new DecompressionStream('gzip');
+    var writer = ds.writable.getWriter();
     writer.write(bytes);
     writer.close();
-    const reader = ds.readable.getReader();
-    const chunks = [];
+    var reader = ds.readable.getReader();
+    var chunks = [];
     while (true) {
-      const { value, done } = await reader.read();
-      if (value) chunks.push(value);
-      if (done) break;
+      var result = await reader.read();
+      if (result.value) chunks.push(result.value);
+      if (result.done) break;
     }
-    const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
-    let offset = 0;
-    for (const c of chunks) { out.set(c, offset); offset += c.length; }
+    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+    var offset = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], offset);
+      offset += chunks[i].length;
+    }
     return out;
   }
 
   function uint8ToBase64(bytes) {
-    const chunkSize = 32768;
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    var chunkSize = 32768;
+    var binary = '';
+    for (var i = 0; i < bytes.length; i += chunkSize) {
+      var chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
       binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
   }
 
   function base64ToUint8(b64) {
-    const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    var binary = atob(b64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
   }
 
-  // ── Cheats ─────────────────────────────────────────────────────────────
+  // -- Cheats ----------------------------------------------------------------
 
   function applyStandardCheats() {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var attempt = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(attempt, 500); return; }
       try {
-        SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code));
+        SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
         console.log('[lockstep] applied', SSB64_ONLINE_CHEATS.length, 'standard cheats');
       } catch (_) { setTimeout(attempt, 500); return; }
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 2000);
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 5000);
+      setTimeout(function () {
+        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
+      }, 2000);
+      setTimeout(function () {
+        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
+      }, 5000);
     };
     attempt();
   }
 
-  // ── Keyboard / input setup ────────────────────────────────────────────
+  // -- Keyboard / input setup ------------------------------------------------
 
   function setupKeyTracking() {
     if (_p1KeyMap) return;
 
-    const ejs = window.EJS_emulator;
+    var ejs = window.EJS_emulator;
     if (ejs && ejs.controls && ejs.controls[0]) {
       _p1KeyMap = {};
-      Object.entries(ejs.controls[0]).forEach(([btnIdx, binding]) => {
-        const kc = binding && binding.value;
+      Object.entries(ejs.controls[0]).forEach(function (entry) {
+        var btnIdx = entry[0];
+        var binding = entry[1];
+        var kc = binding && binding.value;
         if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
       });
     }
@@ -1054,21 +1523,21 @@
     }
 
     if (!setupKeyTracking._listenersAdded) {
-      document.addEventListener('keydown', (e) => { _heldKeys.add(e['keyCode']); }, true);
-      document.addEventListener('keyup',   (e) => { _heldKeys.delete(e['keyCode']); }, true);
+      document.addEventListener('keydown', function (e) { _heldKeys.add(e['keyCode']); }, true);
+      document.addEventListener('keyup',   function (e) { _heldKeys.delete(e['keyCode']); }, true);
       setupKeyTracking._listenersAdded = true;
     }
   }
 
   function disableEJSKeyboard() {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var attempt = function () {
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) { setTimeout(attempt, 200); return; }
       gm.setKeyboardEnabled(false);
-      const ejs = window.EJS_emulator;
-      const parent = ejs.elements && ejs.elements.parent;
+      var ejs = window.EJS_emulator;
+      var parent = ejs.elements && ejs.elements.parent;
       if (parent) {
-        const block = e => e.stopImmediatePropagation();
+        var block = function (e) { e.stopImmediatePropagation(); };
         parent.addEventListener('keydown', block, true);
         parent.addEventListener('keyup',   block, true);
       }
@@ -1076,13 +1545,13 @@
     attempt();
   }
 
-  // ── Emulator start ─────────────────────────────────────────────────────
+  // -- Emulator start --------------------------------------------------------
 
   function triggerEmulatorStart() {
-    const attempt = () => {
-      const btn = document.querySelector('.ejs_start_button');
+    var attempt = function () {
+      var btn = document.querySelector('.ejs_start_button');
       if (btn) { btn.click(); return; }
-      const ejs = window.EJS_emulator;
+      var ejs = window.EJS_emulator;
       if (ejs && typeof ejs.startButtonClicked === 'function') {
         ejs.startButtonClicked(); return;
       }
@@ -1091,15 +1560,258 @@
     attempt();
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────
-
-  function randomCode() {
-    return Math.random().toString(36).slice(2, 7).toUpperCase();
+  function hashGameState() {
+    // Hash first _syncHashBytes of save state (game state only, excludes audio buffers).
+    // getState() costs ~3ms; hashing 64KB is negligible. Called every ~5s.
+    try {
+      var gm = window.EJS_emulator.gameManager;
+      var state = gm.getState();
+      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
+      var hash = 0x811c9dc5;
+      var len = Math.min(bytes.length, _syncHashBytes);
+      for (var i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash = Math.imul(hash, 0x01000193);
+      }
+      return hash | 0;
+    } catch (e) {
+      return 0;
+    }
   }
 
-  window.addEventListener('DOMContentLoaded', () => {
-    buildUI();
-    loadSocketIO(connectSocket);
-  });
+  // -- Worker-based state sync -----------------------------------------------
+
+  function initSyncWorker() {
+    if (_syncWorker) return;
+    _syncWorker = new Worker('/static/sync-worker.js');
+    _syncWorker.onmessage = function (e) {
+      var msg = e.data;
+      if (msg.type === 'compressed') {
+        // Host: compressed state ready, send via DC in chunks
+        sendSyncChunks(msg.data, msg.frame);
+      }
+      if (msg.type === 'decompressed') {
+        // Guest: decompressed state ready, load it
+        applySyncState(msg.data, msg.frame);
+      }
+    };
+  }
+
+  function pushSyncState() {
+    // Host: capture state and send to Worker for compression (3ms main thread)
+    if (_playerSlot !== 0 || !_syncEnabled) return;
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+    var raw = gm.getState();
+    var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    initSyncWorker();
+    _syncWorker.postMessage({ type: 'compress', data: bytes, frame: _frameNum }, [bytes.buffer]);
+  }
+
+  function sendSyncChunks(compressed, frame) {
+    // Host: send compressed state via DC to all player peers in 64KB chunks
+    var CHUNK_SIZE = 64000;
+    var numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
+    var activePeers = getActivePeers();
+
+    for (var p = 0; p < activePeers.length; p++) {
+      var dc = activePeers[p].dc;
+      if (!dc || dc.readyState !== 'open') continue;
+      try {
+        dc.send('sync-start:' + frame + ':' + numChunks);
+        for (var i = 0; i < numChunks; i++) {
+          var start = i * CHUNK_SIZE;
+          var end = Math.min(start + CHUNK_SIZE, compressed.length);
+          // .slice() creates an independent copy — .subarray().buffer would
+          // send the entire underlying ArrayBuffer
+          dc.send(compressed.slice(start, end));
+        }
+      } catch (err) {
+        console.log('[lockstep] sync send failed:', err);
+      }
+    }
+    console.log('[lockstep] pushed state frame', frame,
+      '(' + Math.round(compressed.length / 1024) + 'KB,', numChunks, 'chunks)');
+  }
+
+  function handleSyncChunksComplete() {
+    // Guest: reassemble chunks and send to Worker for decompression
+    var total = _syncChunks.reduce(function (a, c) { return a + c.length; }, 0);
+    var assembled = new Uint8Array(total);
+    var offset = 0;
+    for (var i = 0; i < _syncChunks.length; i++) {
+      assembled.set(_syncChunks[i], offset);
+      offset += _syncChunks[i].length;
+    }
+    _syncChunks = [];
+    _syncExpected = 0;
+    initSyncWorker();
+    _syncWorker.postMessage(
+      { type: 'decompress', data: assembled, frame: _syncFrame },
+      [assembled.buffer]
+    );
+  }
+
+  function applySyncState(bytes, frame) {
+    // Guest: hot-swap state without stopping the tick loop.
+    // The tick loop keeps running — we just replace the emulator state underneath it.
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm) return;
+
+    gm.loadState(bytes);
+
+    // Re-capture rAF runner (loadState may invalidate _pendingRunner)
+    var mod = gm.Module;
+    mod.pauseMainLoop();
+    mod.resumeMainLoop();
+
+    _frameNum = frame;
+    window._frameNum = _frameNum;
+
+    // Fill any gaps in input buffers around the new frame so we don't stall.
+    // Don't clear the whole buffer — keep existing inputs that are still valid.
+    var pKeys = Object.keys(_peers);
+    for (var pk = 0; pk < pKeys.length; pk++) {
+      var pSlot = _peers[pKeys[pk]].slot;
+      if (pSlot !== null && pSlot !== undefined) {
+        if (!_remoteInputs[pSlot]) _remoteInputs[pSlot] = {};
+        for (var gf = frame - DELAY_FRAMES - 5; gf <= frame + 5; gf++) {
+          if (_remoteInputs[pSlot][gf] === undefined) _remoteInputs[pSlot][gf] = 0;
+        }
+        _lastRemoteFramePerSlot[pSlot] = Math.max(
+          _lastRemoteFramePerSlot[pSlot] || 0, frame
+        );
+      }
+    }
+    for (var lf = frame - DELAY_FRAMES - 5; lf <= frame + 5; lf++) {
+      if (_localInputs[lf] === undefined) _localInputs[lf] = 0;
+    }
+
+    _resyncCount++;
+    if (_resyncCount <= 3 || _resyncCount % 10 === 0) {
+      console.log('[lockstep] sync #' + _resyncCount + ' applied at frame', frame);
+    }
+  }
+
+  // -- (old desync detection helpers removed — replaced by Worker-based sync) --
+
+
+  // -- Init / Stop API -------------------------------------------------------
+
+  var _config = null;
+
+  function init(config) {
+    _config = config;
+    socket = config.socket;
+    sessionId = config.sessionId;
+    _playerSlot = config.playerSlot;
+    _isSpectator = config.isSpectator;
+
+    // Apply pre-game options
+    _syncEnabled = !!config.rollbackEnabled;        // default: false
+    _lateJoin = !!config.lateJoin;
+
+    window._playerSlot = _playerSlot;
+    window._isSpectator = _isSpectator;
+
+    // Register socket listeners
+    socket.on('users-updated', onUsersUpdated);
+    socket.on('webrtc-signal', onWebRTCSignal);
+    socket.on('data-message', onDataMessage);
+
+    // Process current peers immediately
+    if (config.initialPlayers) {
+      onUsersUpdated(config.initialPlayers);
+    }
+    // startGameSequence() is triggered from ch.onopen (same as before)
+  }
+
+  function stop() {
+    // Stop lockstep tick loop
+    stopSync();
+
+    // Close all peer connections
+    Object.keys(_peers).forEach(function (sid) {
+      var p = _peers[sid];
+      if (p.dc) try { p.dc.close(); } catch (_) {}
+      if (p.pc) try { p.pc.close(); } catch (_) {}
+    });
+    _peers = {};
+    window._peers = _peers;
+
+    // Restore rAF — emulator DOM is destroyed by play.js, so just clean up
+    if (_manualMode && _origRAF) {
+      window.requestAnimationFrame = _origRAF;
+    }
+    _manualMode = false;
+    _origRAF = null;
+    _pendingRunner = null;
+
+    // Reset lockstep state
+    _remoteInputs = {};
+    _localInputs = {};
+    _frameNum = 0;
+    window._frameNum = 0;
+    _running = false;
+    _lateJoin = false;
+    _gameStarted = false;
+    _selfEmuReady = false;
+    _selfLockstepReady = false;
+    _lockstepReadyPeers = {};
+    _guestStateBytes = null;
+    _knownPlayers = {};
+    _expectedPeerCount = 0;
+    _lastRemoteFrame = -1;
+    _lastRemoteFramePerSlot = {};
+    _resyncCount = 0;
+    _syncChunks = [];
+    _syncExpected = 0;
+    if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
+
+    // Clean up audio bypass
+    if (_audioWorklet) {
+      _audioWorklet.disconnect();
+      _audioWorklet = null;
+    }
+    if (_audioDestNode) {
+      _audioDestNode.disconnect();
+      _audioDestNode = null;
+    }
+    if (_audioCtx) {
+      _audioCtx.close();
+      _audioCtx = null;
+    }
+    _audioReady = false;
+    _audioPtr = 0;
+    _audioRate = 0;
+
+    // Clean up spectator stream
+    if (_hostStream) {
+      _hostStream.getTracks().forEach(function (t) { t.stop(); });
+      _hostStream = null;
+    }
+    if (_guestVideo) {
+      _guestVideo.srcObject = null;
+      if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
+      _guestVideo = null;
+    }
+
+    // Remove socket listeners
+    if (socket) {
+      socket.off('users-updated', onUsersUpdated);
+      socket.off('webrtc-signal', onWebRTCSignal);
+      socket.off('data-message', onDataMessage);
+    }
+
+    _config = null;
+  }
+
+  window.NetplayLockstep = {
+    init: init,
+    stop: stop,
+    setSyncEnabled: function (on) { _syncEnabled = !!on; },
+    isSyncEnabled: function () { return _syncEnabled; },
+    setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
+  };
 
 })();

@@ -50,7 +50,7 @@ class Room:
     spectators: dict[str, dict] = field(default_factory=dict)
     # spectators: playerId -> {"socketId": sid, "playerName": ...}
     status: str = "lobby"       # "lobby" or "playing"
-    mode: str | None = None     # "lockstep-v4" or "streaming", set on start-game
+    mode: str | None = None     # "lockstep" or "streaming", set on start-game
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -116,7 +116,19 @@ async def _leave(sid: str) -> None:
         log.info("Room %s deleted (empty)", session_id)
         return
 
-    # Transfer ownership if the owner left
+    # Host left mid-game: close the room for everyone
+    if room.owner == sid and room.status == "playing":
+        await sio.emit("room-closed", {"reason": "host-left"}, room=session_id)
+        # Clean up all remaining members
+        for remaining_sid, (rsess, _, _) in list(_sid_to_room.items()):
+            if rsess == session_id:
+                del _sid_to_room[remaining_sid]
+                await sio.leave_room(remaining_sid, session_id)
+        del rooms[session_id]
+        log.info("Room %s closed (host left mid-game)", session_id)
+        return
+
+    # Transfer ownership if the owner left (lobby only)
     if room.owner == sid and room.players:
         new_owner_info = next(iter(room.players.values()))
         new_owner_sid = new_owner_info["socketId"]
@@ -271,7 +283,7 @@ async def start_game(sid: str, data: dict) -> str | None:
         return "Only the host can start the game"
 
     room.status = "playing"
-    room.mode = data.get("mode", "lockstep-v4")
+    room.mode = data.get("mode", "lockstep")
     await sio.emit("game-started", {
         "mode": room.mode,
         "rollbackEnabled": data.get("rollbackEnabled", False),

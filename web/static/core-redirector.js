@@ -9,9 +9,9 @@
   'use strict';
 
   var params = new URLSearchParams(window.location.search);
-  var mode = params.get('mode') || 'lockstep-v4';
+  var mode = params.get('mode') || 'lockstep';
 
-  if (mode !== 'lockstep-v4') return;
+  if (mode !== 'lockstep') return;
 
   window._kn_usePatchedCore = true;
   console.log('[core-redirector] Lockstep mode: loading patched core');
@@ -19,9 +19,13 @@
   var CORE_FILENAME = 'mupen64plus_next-wasm.data';
   var LOCAL_CORE_URL = '/static/ejs/cores/' + CORE_FILENAME;
 
-  // Clear EmulatorJS IDB cache so it re-downloads from our intercepted URL
+  // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL.
+  // We only do this once (tracked via localStorage) because deleteDatabase()
+  // blocks while other tabs have open connections — deadlocking EmulatorJS
+  // in multi-tab netplay scenarios.
+  var CORE_VERSION = '1';
   try {
-    if (indexedDB.databases) {
+    if (localStorage.getItem('kn-core-version') !== CORE_VERSION && indexedDB.databases) {
       indexedDB.databases().then(function(databases) {
         databases.forEach(function(db) {
           if (db.name && (db.name.indexOf('emulator') !== -1 ||
@@ -30,6 +34,7 @@
             indexedDB.deleteDatabase(db.name);
           }
         });
+        localStorage.setItem('kn-core-version', CORE_VERSION);
       });
     }
   } catch(_) {}
