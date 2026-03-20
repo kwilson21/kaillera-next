@@ -283,20 +283,69 @@
       if (e.dataTransfer.files.length > 0) handleRomFile(e.dataTransfer.files[0]);
     });
 
-    if (savedRom && statusEl) {
-      statusEl.textContent = 'Last used: ' + savedRom + ' (drop new file to change)';
-    }
+    // Auto-load cached ROM from IndexedDB
+    loadCachedRom(function (cachedName) {
+      if (cachedName) {
+        drop.classList.add('loaded');
+        if (statusEl) statusEl.textContent = 'Loaded: ' + cachedName + ' (drop to change)';
+      } else if (savedRom && statusEl) {
+        statusEl.textContent = 'Last used: ' + savedRom + ' (file not cached — drop again)';
+      }
+    });
   }
 
   function handleRomFile(file) {
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
     localStorage.setItem('kaillera-rom-name', file.name);
+    cacheRom(file);
 
     var drop = document.getElementById('rom-drop');
     if (drop) drop.classList.add('loaded');
     var statusEl = document.getElementById('rom-status');
     if (statusEl) statusEl.textContent = 'Loaded: ' + file.name;
+  }
+
+  // ── ROM IDB Cache ──────────────────────────────────────────────────────
+
+  var _ROM_DB = 'kaillera-rom-cache';
+  var _ROM_STORE = 'roms';
+
+  function openRomDB(cb) {
+    var req = indexedDB.open(_ROM_DB, 1);
+    req.onupgradeneeded = function () { req.result.createObjectStore(_ROM_STORE); };
+    req.onsuccess = function () { cb(req.result); };
+    req.onerror = function () { cb(null); };
+  }
+
+  function cacheRom(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      openRomDB(function (db) {
+        if (!db) return;
+        var tx = db.transaction(_ROM_STORE, 'readwrite');
+        tx.objectStore(_ROM_STORE).put(reader.result, 'current');
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function loadCachedRom(cb) {
+    var name = localStorage.getItem('kaillera-rom-name');
+    if (!name) { cb(null); return; }
+    openRomDB(function (db) {
+      if (!db) { cb(null); return; }
+      var tx = db.transaction(_ROM_STORE, 'readonly');
+      var req = tx.objectStore(_ROM_STORE).get('current');
+      req.onsuccess = function () {
+        if (!req.result) { cb(null); return; }
+        var blob = new Blob([req.result]);
+        _romBlobUrl = URL.createObjectURL(blob);
+        window.EJS_gameUrl = _romBlobUrl;
+        cb(name);
+      };
+      req.onerror = function () { cb(null); };
+    });
   }
 
   function initEngine() {
