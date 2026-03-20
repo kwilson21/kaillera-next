@@ -91,12 +91,12 @@
   let _playerSlot        = -1;      // 0-3 for players, null for spectators
   let _isSpectator       = false;
   // -- Audio bypass state --
-  var _audioCtx = null;           // AudioContext for local playback
-  var _audioWorklet = null;       // AudioWorkletNode
-  var _audioDestNode = null;      // MediaStreamAudioDestinationNode (host only, for spectators)
-  var _audioPtr = 0;              // WASM pointer to kn_audio_buffer
-  var _audioRate = 0;             // sample rate from kn_get_audio_rate()
-  var _audioReady = false;        // true once AudioWorklet is initialized
+  var _audioCtx = null;
+  var _audioWorklet = null;
+  var _audioDestNode = null;
+  var _audioPtr = 0;
+  var _audioRate = 0;
+  var _audioReady = false;
   let _peers             = {};      // remoteSid -> PeerState
   let _knownPlayers      = {};      // socketId -> {slot, playerName}
   let _expectedPeerCount = 0;       // other players in room (excludes spectators)
@@ -142,14 +142,11 @@
   window._peers       = _peers;
   window._frameNum    = 0;
 
-  // -- Audio bypass: init + per-frame feed --------------------------------
-
   async function initAudioPlayback() {
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (!mod) return;
 
-    // Check for audio capture exports
     if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples ||
         !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
       console.log('[lockstep-v4] audio capture exports not found — audio disabled');
@@ -164,12 +161,8 @@
     }
 
     try {
-      // Create a SEPARATE AudioContext for our playback.
-      // Do NOT reuse OpenAL's — resuming it activates OpenAL's async
-      // callbacks (ScriptProcessorNode, scheduleContextAudio) which
-      // cause desyncs even with frozen _emscripten_get_now.
-      // OpenAL's AudioContext must stay suspended.
       _audioCtx = new AudioContext({ sampleRate: _audioRate });
+      if (_audioCtx.state === 'suspended') _audioCtx.resume();
       await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
       _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
         numberOfInputs: 0,
@@ -178,7 +171,6 @@
         processorOptions: { sampleRate: _audioRate },
       });
 
-      // Host: also route audio to spectator stream
       if (_playerSlot === 0) {
         _audioDestNode = _audioCtx.createMediaStreamDestination();
         _audioWorklet.connect(_audioDestNode);
@@ -186,18 +178,6 @@
 
       _audioWorklet.connect(_audioCtx.destination);
       _audioReady = true;
-
-      // Resume on next user interaction (autoplay policy)
-      if (_audioCtx.state === 'suspended') {
-        var resumeAudio = function () {
-          if (_audioCtx) _audioCtx.resume();
-          document.removeEventListener('click', resumeAudio);
-          document.removeEventListener('keydown', resumeAudio);
-        };
-        document.addEventListener('click', resumeAudio);
-        document.addEventListener('keydown', resumeAudio);
-      }
-
       console.log('[lockstep-v4] audio playback initialized (rate: ' + _audioRate + ')');
     } catch (err) {
       console.log('[lockstep-v4] AudioWorklet init failed:', err);
@@ -214,9 +194,7 @@
     var n = mod._kn_get_audio_samples();
     if (n <= 0) return;
 
-    // Create int16 view of WASM heap at audio buffer pointer
     var pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
-    // Copy before posting (buffer may be detached by WASM memory growth)
     var copy = new Int16Array(pcm);
     _audioWorklet.port.postMessage(copy, [copy.buffer]);
   }
@@ -343,9 +321,6 @@
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('lockstep', {
         ordered: true,
-        // Reliable delivery — no maxRetransmits limit.
-        // Lockstep requires every input to arrive. A retransmit delay
-        // is far better than a dropped input causing permanent desync.
       });
       setupDataChannel(remoteSid, peer.dc);
     } else {
@@ -1102,7 +1077,6 @@
       }
     }
 
-    // Initialize audio bypass playback (async — sets _audioReady when done)
     initAudioPlayback();
 
     var activePeers = getActivePeers();
@@ -1670,8 +1644,10 @@
       _audioDestNode.disconnect();
       _audioDestNode = null;
     }
-    // Don't close _audioCtx — it may be OpenAL's shared context
-    _audioCtx = null;
+    if (_audioCtx) {
+      _audioCtx.close();
+      _audioCtx = null;
+    }
     _audioReady = false;
     _audioPtr = 0;
     _audioRate = 0;
