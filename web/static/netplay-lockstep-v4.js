@@ -870,12 +870,7 @@
     if (!_pendingRunner) return false;
     var runner = _pendingRunner;
     _pendingRunner = null;
-    // Set _inStep so the patched _emscripten_get_now returns deterministic
-    // time during frame execution (audio timing) but real time otherwise
-    // (main loop scheduler). See deterministic-timer.js + patched core.
-    window._inStep = true;
     runner(performance.now());
-    window._inStep = false;
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
     return true;
@@ -928,8 +923,6 @@
       'peerSlots:', peerSlots.join(','), 'delay:', DELAY_FRAMES);
     setStatus('Connected -- game on!');
 
-    // Signal patched emscripten_get_now to use deterministic frame time
-    window._lockstepTimeBase = performance.now();
     window._lockstepActive = true;
 
     // Use setInterval so background tabs are not throttled
@@ -957,9 +950,9 @@
 
     var activePeers = getActivePeers();
 
-    // FPS counter (use real time, not deterministic override)
+    // FPS counter
     _fpsFrameCount++;
-    var now = window._realPerfNow ? window._realPerfNow() : performance.now.call(performance);
+    var now = performance.now();
     if (now - _fpsLastTime >= 1000) {
       _fpsCurrent = _fpsFrameCount;
       _fpsFrameCount = 0;
