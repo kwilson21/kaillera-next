@@ -908,9 +908,11 @@
 
     var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
 
-    // Update deterministic frame time (used when _kn_inStep is true).
-    // _kn_inStep is controlled by the Audio toggle — not set here.
+    // Update deterministic frame time and reset call counter.
+    // _emscripten_get_now returns frameTime + (callCount * 0.01ms).
+    // Both emulators execute the same WASM, so callCount matches.
     window._kn_frameTime = frameTimeMs;
+    window._kn_callCount = 0;
 
     // C-level: always update frame time (kn_deterministic_mode stays ON)
     if (_hasForkedCore) {
@@ -980,10 +982,10 @@
     _stallStart = 0;
     window._netplayFrameLog = [];
 
-    // With EMSCRIPTEN_AUDIO_FAKE_BLOCK, audio uses main loop timing
-    // (synchronous with frame steps) so it doesn't need real time.
-    // _kn_inStep controls JS-level determinism. Audio option controls it.
-    window._kn_inStep = !_audioEnabled;
+    // Always-on deterministic timing with call-counting.
+    // _emscripten_get_now returns frameTime + (callCount * 0.01ms).
+    // Audio sees advancing time, both emulators stay deterministic.
+    window._kn_inStep = true;
     window._kn_frameTime = 0;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
