@@ -688,11 +688,8 @@
 
   function readLocalInput() {
     let mask = 0;
-    const gp = navigator.getGamepads()[0];
-    if (gp) {
-      for (let i = 0; i < Math.min(gp.buttons.length, 32); i++) {
-        if (gp.buttons[i].pressed) mask |= (1 << i);
-      }
+    if (window.GamepadManager) {
+      mask |= GamepadManager.readGamepad(_playerSlot);
     }
     if (_p1KeyMap) {
       _heldKeys.forEach(kc => {
