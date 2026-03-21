@@ -1172,7 +1172,14 @@
       }
     }
 
+    // Block EJS's built-in gamepad polling during the emulator step.
+    // EJS maps physical buttons → RetroArch indices using its own mapping,
+    // which conflicts with our custom profile. Without this, EJS overwrites
+    // our _simulate_input values for buttons 8+ (A, Z, L, R, C-buttons).
+    var _realGetGamepads = navigator.getGamepads;
+    navigator.getGamepads = function () { return []; };
     runner(frameTimeMs);
+    navigator.getGamepads = _realGetGamepads;
 
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
