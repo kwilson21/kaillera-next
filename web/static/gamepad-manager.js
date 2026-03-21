@@ -92,10 +92,22 @@
   // ── Profile Resolution ───────────────────────────────────────────────
 
   function resolveProfile(id) {
+    // Check localStorage for custom profile
+    try {
+      var saved = localStorage.getItem('gamepad-profile:' + id);
+      if (saved) {
+        var profile = JSON.parse(saved);
+        profile.name = 'Custom';
+        profile.match = function () { return true; };
+        return profile;
+      }
+    } catch (_) {}
+
+    // Fall through to built-in profiles
     for (var i = 0; i < PROFILES.length; i++) {
       if (PROFILES[i].match(id)) return PROFILES[i];
     }
-    return PROFILES[PROFILES.length - 1]; // Standard fallback
+    return PROFILES[PROFILES.length - 1];
   }
 
   // ── Polling / Scanning ───────────────────────────────────────────────
@@ -261,6 +273,48 @@
         });
       }
       return result;
+    },
+
+    saveGamepadProfile: function (gamepadId, profile) {
+      try {
+        localStorage.setItem('gamepad-profile:' + gamepadId, JSON.stringify(profile));
+      } catch (_) {}
+      // Re-resolve profile for this gamepad
+      for (var idx in _detected) {
+        if (_detected[idx].id === gamepadId) {
+          var resolved = resolveProfile(gamepadId);
+          _detected[idx].profile = resolved;
+          _detected[idx].profileName = resolved.name;
+        }
+      }
+      if (_onUpdate) _onUpdate();
+    },
+
+    clearGamepadProfile: function (gamepadId) {
+      try {
+        localStorage.removeItem('gamepad-profile:' + gamepadId);
+      } catch (_) {}
+      for (var idx in _detected) {
+        if (_detected[idx].id === gamepadId) {
+          var resolved = resolveProfile(gamepadId);
+          _detected[idx].profile = resolved;
+          _detected[idx].profileName = resolved.name;
+        }
+      }
+      if (_onUpdate) _onUpdate();
+    },
+
+    getDefaultProfile: function (gamepadId) {
+      for (var i = 0; i < PROFILES.length; i++) {
+        if (PROFILES[i].match(gamepadId)) return PROFILES[i];
+      }
+      return PROFILES[PROFILES.length - 1];
+    },
+
+    hasCustomProfile: function (gamepadId) {
+      try {
+        return localStorage.getItem('gamepad-profile:' + gamepadId) !== null;
+      } catch (_) { return false; }
     },
   };
 })();
