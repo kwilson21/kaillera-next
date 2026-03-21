@@ -599,11 +599,11 @@
   }
 
   function updateGamepadUI() {
-    var detected = GamepadManager.getDetected();
-    var assignments = GamepadManager.getAssignments();
+    var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+    var assignments = window.GamepadManager ? GamepadManager.getAssignments() : {};
     var statusEl = document.getElementById('gamepad-status');
 
-    if (statusEl) {
+    if (statusEl && !_wizardActive) {
       if (detected.length > 0) {
         var primary = detected[0];
         statusEl.textContent = primary.id.substring(0, 40) + ' (' + primary.profileName + ')';
@@ -627,6 +627,297 @@
         span.title = '';
       }
     }
+  }
+
+  // ── Remap Wizard ──────────────────────────────────────────────────────
+
+  var WIZARD_STEPS = [
+    { prompt: 'Press: A',         type: 'button', bit: 8 },
+    { prompt: 'Press: B',         type: 'button', bit: 0 },
+    { prompt: 'Press: Start',     type: 'button', bit: 3 },
+    { prompt: 'Press: Z',         type: 'button', bit: 9 },
+    { prompt: 'Press: L',         type: 'button', bit: 10 },
+    { prompt: 'Press: R',         type: 'button', bit: 11 },
+    { prompt: 'Press: D-Up',      type: 'button', bit: 4 },
+    { prompt: 'Press: D-Down',    type: 'button', bit: 5 },
+    { prompt: 'Press: D-Left',    type: 'button', bit: 6 },
+    { prompt: 'Press: D-Right',   type: 'button', bit: 7 },
+    { prompt: 'Push stick UP',    type: 'axis', bit: 16, axisGroup: 'stickY' },
+    { prompt: 'Push stick DOWN',  type: 'axis', bit: 17, axisGroup: 'stickY' },
+    { prompt: 'Push stick LEFT',  type: 'axis', bit: 18, axisGroup: 'stickX' },
+    { prompt: 'Push stick RIGHT', type: 'axis', bit: 19, axisGroup: 'stickX' },
+    { prompt: 'Press: C-Up',      type: 'cbutton', bit: 12 },
+    { prompt: 'Press: C-Down',    type: 'cbutton', bit: 13 },
+    { prompt: 'Press: C-Left',    type: 'cbutton', bit: 14 },
+    { prompt: 'Press: C-Right',   type: 'cbutton', bit: 15 },
+  ];
+
+  var _wizardActive = false;
+  var _wizardStep = 0;
+  var _wizardDebounce = 0;
+  var _wizardRafId = null;
+  var _wizardKeyHandler = null;
+  var _wizardGamepadProfile = null;
+  var _wizardKeyMap = null;
+  var _wizardBaselineButtons = null;
+  var _wizardAxisCaptures = {};
+
+  function startWizard() {
+    var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+    var gamepadId = detected.length > 0 ? detected[0].id : null;
+
+    // Initialize gamepad profile from current (default or saved)
+    if (gamepadId && window.GamepadManager) {
+      var current = GamepadManager.hasCustomProfile(gamepadId)
+        ? JSON.parse(localStorage.getItem('gamepad-profile:' + gamepadId))
+        : GamepadManager.getDefaultProfile(gamepadId);
+      _wizardGamepadProfile = {
+        name: 'Custom',
+        buttons: Object.assign({}, current.buttons),
+        axes: JSON.parse(JSON.stringify(current.axes)),
+        axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
+        deadzone: current.deadzone || 0.3,
+      };
+    } else {
+      _wizardGamepadProfile = null;
+    }
+
+    // Initialize keyboard map from current (saved or DEFAULT_N64_KEYMAP)
+    var savedKb = null;
+    try { savedKb = JSON.parse(localStorage.getItem('keyboard-mapping')); } catch (_) {}
+    if (savedKb && Object.keys(savedKb).length > 0) {
+      _wizardKeyMap = Object.assign({}, savedKb);
+    } else {
+      _wizardKeyMap = {
+        88: 0, 67: 8, 86: 3, 38: 4, 40: 5, 37: 6, 39: 7,
+        90: 9, 84: 10, 89: 11, 73: 12, 75: 13, 74: 14, 76: 15,
+        87: 16, 83: 17, 65: 18, 68: 19
+      };
+    }
+
+    _wizardAxisCaptures = {};
+    _wizardStep = 0;
+    _wizardActive = true;
+    _wizardDebounce = 0;
+
+    // Show wizard UI, hide normal controls
+    var wizardEl = document.getElementById('remap-wizard');
+    var controlsEl = document.getElementById('gamepad-controls');
+    var statusEl = document.getElementById('gamepad-status');
+    if (wizardEl) wizardEl.style.display = '';
+    if (controlsEl) controlsEl.style.display = 'none';
+    if (statusEl) statusEl.style.display = 'none';
+
+    // Capture baseline gamepad buttons (ignore already-pressed)
+    _wizardBaselineButtons = {};
+    if (gamepadId) {
+      var gps = navigator.getGamepads();
+      for (var gi = 0; gi < gps.length; gi++) {
+        if (gps[gi]) {
+          for (var bi = 0; bi < gps[gi].buttons.length; bi++) {
+            if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[gi + ':' + bi] = true;
+          }
+        }
+      }
+    }
+
+    // Keyboard listener
+    _wizardKeyHandler = function (e) {
+      if (!_wizardActive) return;
+      if (e.keyCode === 27) { cancelWizard(); return; } // Escape
+      e.preventDefault();
+      if (Date.now() < _wizardDebounce) return;
+      captureKeyboard(e.keyCode);
+    };
+    document.addEventListener('keydown', _wizardKeyHandler, true);
+
+    // Start polling loop
+    updateWizardPrompt();
+    wizardPoll();
+  }
+
+  function cancelWizard() {
+    _wizardActive = false;
+    if (_wizardRafId) { cancelAnimationFrame(_wizardRafId); _wizardRafId = null; }
+    if (_wizardKeyHandler) {
+      document.removeEventListener('keydown', _wizardKeyHandler, true);
+      _wizardKeyHandler = null;
+    }
+
+    var wizardEl = document.getElementById('remap-wizard');
+    var controlsEl = document.getElementById('gamepad-controls');
+    var statusEl = document.getElementById('gamepad-status');
+    if (wizardEl) wizardEl.style.display = 'none';
+    if (controlsEl) controlsEl.style.display = '';
+    if (statusEl) statusEl.style.display = '';
+  }
+
+  function saveWizard() {
+    // Save gamepad profile
+    var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+    if (detected.length > 0 && _wizardGamepadProfile) {
+      // Assemble axis captures into profile
+      for (var groupName in _wizardAxisCaptures) {
+        var cap = _wizardAxisCaptures[groupName];
+        if (cap.index !== undefined && cap.posBit !== undefined && cap.negBit !== undefined) {
+          _wizardGamepadProfile.axes[groupName] = {
+            index: cap.index,
+            bits: [cap.posBit, cap.negBit],
+          };
+        }
+      }
+      GamepadManager.saveGamepadProfile(detected[0].id, _wizardGamepadProfile);
+    }
+
+    // Save keyboard mapping
+    try {
+      localStorage.setItem('keyboard-mapping', JSON.stringify(_wizardKeyMap));
+    } catch (_) {}
+
+    cancelWizard();
+  }
+
+  function resetMappings() {
+    var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+    if (detected.length > 0 && window.GamepadManager) {
+      GamepadManager.clearGamepadProfile(detected[0].id);
+    }
+    try { localStorage.removeItem('keyboard-mapping'); } catch (_) {}
+    updateGamepadUI();
+  }
+
+  function updateWizardPrompt() {
+    var promptEl = document.getElementById('remap-prompt');
+    var progressEl = document.getElementById('remap-progress');
+    if (promptEl) promptEl.textContent = WIZARD_STEPS[_wizardStep].prompt + ' (gamepad or key)';
+    if (progressEl) progressEl.textContent = '(' + (_wizardStep + 1) + '/' + WIZARD_STEPS.length + ')';
+  }
+
+  function wizardAdvance() {
+    _wizardDebounce = Date.now() + 150;
+    _wizardStep++;
+    if (_wizardStep >= WIZARD_STEPS.length) {
+      saveWizard();
+      return;
+    }
+    // Reset baseline for new step
+    _wizardBaselineButtons = {};
+    var gps = navigator.getGamepads();
+    for (var gi = 0; gi < gps.length; gi++) {
+      if (gps[gi]) {
+        for (var bi = 0; bi < gps[gi].buttons.length; bi++) {
+          if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[gi + ':' + bi] = true;
+        }
+      }
+    }
+    updateWizardPrompt();
+  }
+
+  function wizardSkip() {
+    if (!_wizardActive) return;
+    wizardAdvance();
+  }
+
+  function wizardPoll() {
+    if (!_wizardActive) return;
+    _wizardRafId = requestAnimationFrame(wizardPoll);
+
+    if (Date.now() < _wizardDebounce) return;
+
+    var gps = navigator.getGamepads();
+    var step = WIZARD_STEPS[_wizardStep];
+
+    for (var gi = 0; gi < gps.length; gi++) {
+      var gp = gps[gi];
+      if (!gp) continue;
+
+      // Check buttons (for button and cbutton steps)
+      if (step.type === 'button' || step.type === 'cbutton') {
+        for (var bi = 0; bi < gp.buttons.length; bi++) {
+          if (gp.buttons[bi].pressed && !_wizardBaselineButtons[gi + ':' + bi]) {
+            captureGamepadButton(bi, step);
+            return;
+          }
+        }
+      }
+
+      // Check axes (for axis and cbutton steps)
+      if (step.type === 'axis' || step.type === 'cbutton') {
+        var dz = 0.3;
+        for (var ai = 0; ai < gp.axes.length; ai++) {
+          var val = gp.axes[ai];
+          if (Math.abs(val) > dz) {
+            captureGamepadAxis(ai, val > 0, step);
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  function captureGamepadButton(buttonIndex, step) {
+    if (!_wizardGamepadProfile) return;
+    _wizardGamepadProfile.buttons[buttonIndex] = (1 << step.bit);
+    wizardAdvance();
+  }
+
+  function captureGamepadAxis(axisIndex, isPositive, step) {
+    if (!_wizardGamepadProfile) return;
+
+    if (step.type === 'axis') {
+      var group = step.axisGroup;
+
+      if (!_wizardAxisCaptures[group]) {
+        _wizardAxisCaptures[group] = {};
+      }
+      var cap = _wizardAxisCaptures[group];
+
+      // Check if partner direction was already captured on a different axis
+      if (cap.index !== undefined && cap.index !== axisIndex) {
+        var promptEl = document.getElementById('remap-prompt');
+        if (promptEl) {
+          var pairName = group === 'stickY' ? 'UP' : 'LEFT';
+          promptEl.textContent = 'Must use same stick as ' + pairName + ' — try again';
+          setTimeout(function () { updateWizardPrompt(); }, 1000);
+        }
+        return;
+      }
+
+      cap.index = axisIndex;
+      if (isPositive) {
+        cap.posBit = step.bit;
+      } else {
+        cap.negBit = step.bit;
+      }
+
+      wizardAdvance();
+    } else if (step.type === 'cbutton') {
+      if (!_wizardGamepadProfile.axisButtons) _wizardGamepadProfile.axisButtons = {};
+      if (!_wizardGamepadProfile.axisButtons[axisIndex]) {
+        _wizardGamepadProfile.axisButtons[axisIndex] = { pos: 0, neg: 0 };
+      }
+      if (isPositive) {
+        _wizardGamepadProfile.axisButtons[axisIndex].pos |= (1 << step.bit);
+      } else {
+        _wizardGamepadProfile.axisButtons[axisIndex].neg |= (1 << step.bit);
+      }
+      wizardAdvance();
+    }
+  }
+
+  function captureKeyboard(keyCode) {
+    var step = WIZARD_STEPS[_wizardStep];
+
+    // Remove old entry for this keyCode (key can only map to one function)
+    for (var k in _wizardKeyMap) {
+      if (parseInt(k, 10) === keyCode) {
+        delete _wizardKeyMap[k];
+      }
+    }
+
+    // Add new entry
+    _wizardKeyMap[keyCode] = step.bit;
+    wizardAdvance();
   }
 
   // ── Init ───────────────────────────────────────────────────────────────
@@ -668,6 +959,19 @@
     connect();
     startGamepadManager();
     setupRomDrop();
+
+    // Remap wizard buttons
+    var remapBtn = document.getElementById('remap-btn');
+    if (remapBtn) remapBtn.addEventListener('click', startWizard);
+
+    var resetBtn = document.getElementById('reset-mapping-btn');
+    if (resetBtn) resetBtn.addEventListener('click', resetMappings);
+
+    var skipBtn = document.getElementById('remap-skip');
+    if (skipBtn) skipBtn.addEventListener('click', wizardSkip);
+
+    var cancelBtn = document.getElementById('remap-cancel');
+    if (cancelBtn) cancelBtn.addEventListener('click', cancelWizard);
 
     // Click .gamepad span to cycle through detected gamepads
     var gamepadSpans = document.querySelectorAll('.player-slot .gamepad');
