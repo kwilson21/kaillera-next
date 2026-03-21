@@ -58,7 +58,19 @@
 
       <p id="guest-status" style="display:none">Waiting for host to start...</p>
 
-      <div id="gamepad-status">No controller detected</div>
+      <div id="gamepad-area">
+        <div id="gamepad-status">No controller detected</div>
+        <div id="gamepad-controls">
+          <button id="remap-btn" class="small-btn">Remap Controls</button>
+          <button id="reset-mapping-btn" class="small-btn">Reset</button>
+        </div>
+        <div id="remap-wizard" style="display:none">
+          <span id="remap-prompt"></span>
+          <span id="remap-progress"></span>
+          <button id="remap-skip" class="small-btn">Skip</button>
+          <button id="remap-cancel" class="small-btn">Cancel</button>
+        </div>
+      </div>
       <div id="engine-status"></div>
 
       <button id="leave-btn">Leave</button>
