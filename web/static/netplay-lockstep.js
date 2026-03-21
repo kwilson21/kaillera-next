@@ -1493,8 +1493,20 @@
       });
     }
 
+    // Debug: call window.debugInput() to log input for 3 seconds
+    if (window._debugInputUntil && performance.now() < window._debugInputUntil && mask !== 0) {
+      var bits = [];
+      for (var b = 0; b < 20; b++) { if ((mask >> b) & 1) bits.push(b); }
+      console.log('[input-debug] mask=' + mask + ' bits=[' + bits.join(',') + ']');
+    }
+
     return mask;
   }
+
+  window.debugInput = function () {
+    window._debugInputUntil = performance.now() + 3000;
+    console.log('[input-debug] Logging input for 3 seconds — press buttons now');
+  };
 
   // -- Compression helpers ---------------------------------------------------
 
