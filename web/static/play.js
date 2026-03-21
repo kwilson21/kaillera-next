@@ -920,6 +920,48 @@
     wizardAdvance();
   }
 
+  // ── Delay Preference ────────────────────────────────────────────────
+
+  window._delayAutoValue = 2;
+
+  function getDelayPreference() {
+    var autoEl = document.getElementById('delay-auto');
+    var selectEl = document.getElementById('delay-select');
+    if (autoEl && autoEl.checked) {
+      return window._delayAutoValue;
+    }
+    if (selectEl) {
+      var v = parseInt(selectEl.value, 10);
+      return v > 0 ? v : 2;
+    }
+    return 2;
+  }
+
+  window.getDelayPreference = getDelayPreference;
+
+  function setAutoDelay(value) {
+    window._delayAutoValue = value;
+    var selectEl = document.getElementById('delay-select');
+    var autoEl = document.getElementById('delay-auto');
+    if (selectEl && autoEl && autoEl.checked) {
+      selectEl.value = String(value);
+    }
+  }
+
+  window.setAutoDelay = setAutoDelay;
+
+  function showEffectiveDelay(own, room) {
+    var el = document.getElementById('delay-effective');
+    if (!el) return;
+    if (room > own) {
+      el.textContent = '(room: ' + room + ')';
+    } else {
+      el.textContent = '';
+    }
+  }
+
+  window.showEffectiveDelay = showEffectiveDelay;
+
   // ── Init ───────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -954,6 +996,15 @@
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();
+    }
+
+    // Delay picker
+    var delayAuto = document.getElementById('delay-auto');
+    var delaySelect = document.getElementById('delay-select');
+    if (delayAuto && delaySelect) {
+      delayAuto.addEventListener('change', function () {
+        delaySelect.disabled = delayAuto.checked;
+      });
     }
 
     connect();
