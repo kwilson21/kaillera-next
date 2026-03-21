@@ -20,7 +20,6 @@
   var engine = null;
   var gameRunning = false;
   var _gameRollbackEnabled = false;
-  var gamepadInterval = null;
   var previousPlayers = {};
   var previousSpectators = {};
   var _lateJoin = false;
@@ -159,6 +158,7 @@
     if (!gameRunning) {
       updatePlayerList(players, spectators);
       updateStartButton(players);
+      updateGamepadSlot();
     }
   }
 
@@ -580,24 +580,53 @@
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
 
-  function startGamepadPolling() {
-    gamepadInterval = setInterval(function () {
-      var gamepads = navigator.getGamepads();
-      var detected = null;
-      for (var i = 0; i < gamepads.length; i++) {
-        if (gamepads[i]) { detected = gamepads[i]; break; }
+  function startGamepadManager() {
+    if (!window.GamepadManager) return;
+    GamepadManager.start({
+      playerSlot: mySlot || 0,
+      onUpdate: updateGamepadUI,
+    });
+  }
+
+  function updateGamepadSlot() {
+    // Re-start with correct slot when mySlot changes (after join/connect)
+    if (window.GamepadManager && mySlot !== null) {
+      GamepadManager.start({
+        playerSlot: mySlot,
+        onUpdate: updateGamepadUI,
+      });
+    }
+  }
+
+  function updateGamepadUI() {
+    var detected = GamepadManager.getDetected();
+    var assignments = GamepadManager.getAssignments();
+    var statusEl = document.getElementById('gamepad-status');
+
+    if (statusEl) {
+      if (detected.length > 0) {
+        var primary = detected[0];
+        statusEl.textContent = primary.id.substring(0, 40) + ' (' + primary.profileName + ')';
+        statusEl.className = 'gamepad-detected';
+      } else {
+        statusEl.textContent = 'No controller detected';
+        statusEl.className = '';
       }
-      var el = document.getElementById('gamepad-status');
-      if (el) {
-        if (detected) {
-          el.textContent = 'Controller detected: ' + detected.id;
-          el.className = 'gamepad-detected';
-        } else {
-          el.textContent = 'No controller detected';
-          el.className = '';
-        }
+    }
+
+    // Update .gamepad spans in player slots
+    for (var i = 0; i < 4; i++) {
+      var span = document.querySelector('.player-slot[data-slot="' + i + '"] .gamepad');
+      if (!span) continue;
+      var assignment = assignments[i];
+      if (assignment) {
+        span.textContent = '\uD83C\uDFAE'; // gamepad emoji
+        span.title = assignment.gamepadId + ' (' + assignment.profileName + ')';
+      } else {
+        span.textContent = '';
+        span.title = '';
       }
-    }, 1000);
+    }
   }
 
   // ── Init ───────────────────────────────────────────────────────────────
@@ -637,7 +666,39 @@
     }
 
     connect();
-    startGamepadPolling();
+    startGamepadManager();
     setupRomDrop();
+
+    // Click .gamepad span to cycle through detected gamepads
+    var gamepadSpans = document.querySelectorAll('.player-slot .gamepad');
+    for (var gi = 0; gi < gamepadSpans.length; gi++) {
+      (function (span) {
+        span.style.cursor = 'pointer';
+        span.addEventListener('click', function () {
+          if (!window.GamepadManager) return;
+          var slotEl = span.closest('.player-slot');
+          if (!slotEl) return;
+          var slot = parseInt(slotEl.getAttribute('data-slot'), 10);
+          if (slot !== mySlot) return; // only reassign own slot
+
+          var detected = GamepadManager.getDetected();
+          if (detected.length <= 1) return; // nothing to cycle
+
+          var assignments = GamepadManager.getAssignments();
+          var currentIdx = assignments[slot] ? assignments[slot].gamepadIndex : -1;
+          // Find next gamepad in detected list
+          var nextIdx = detected[0].index;
+          for (var d = 0; d < detected.length; d++) {
+            if (detected[d].index === currentIdx && d + 1 < detected.length) {
+              nextIdx = detected[d + 1].index;
+              break;
+            }
+          }
+          // Wrap around
+          if (nextIdx === currentIdx) nextIdx = detected[0].index;
+          GamepadManager.reassignSlot(slot, nextIdx);
+        });
+      })(gamepadSpans[gi]);
+    }
   });
 })();
