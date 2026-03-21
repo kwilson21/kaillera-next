@@ -1176,10 +1176,11 @@
     // EJS maps physical buttons → RetroArch indices using its own mapping,
     // which conflicts with our custom profile. Without this, EJS overwrites
     // our _simulate_input values for buttons 8+ (A, Z, L, R, C-buttons).
-    var _realGetGamepads = navigator.getGamepads;
-    navigator.getGamepads = function () { return []; };
+    // Override on prototype — EJS may cache the instance method reference.
+    var _origProtoGG = Navigator.prototype.getGamepads;
+    Navigator.prototype.getGamepads = function () { return []; };
     runner(frameTimeMs);
-    navigator.getGamepads = _realGetGamepads;
+    Navigator.prototype.getGamepads = _origProtoGG;
 
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
