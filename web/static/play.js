@@ -23,6 +23,7 @@
   var previousPlayers = {};
   var previousSpectators = {};
   var _lateJoin = false;
+  var _romBlob = null;           // raw ROM Blob for re-creating blob URLs
   var _romBlobUrl = null;
   var _romHash = null;           // SHA-256 hex of loaded ROM
   var _hostRomHash = null;       // host's ROM hash for late-join verification
@@ -126,7 +127,7 @@
             _hostRomHash = roomData.rom_hash || null;
 
             // If no ROM cached, show overlay with ROM drop zone so user can load one
-            if (!_romBlobUrl) {
+            if (!_romBlob && !_romBlobUrl) {
               _pendingLateJoin = true;
               showLateJoinRomPrompt();
               return;
@@ -291,6 +292,18 @@
     var gameEl = document.getElementById('game');
     if (gameEl) gameEl.innerHTML = '';
     window.EJS_emulator = undefined;
+
+    // Remove injected loader.js scripts so re-injection creates a clean load
+    var scripts = document.querySelectorAll('script[src*="loader.js"]');
+    for (var i = 0; i < scripts.length; i++) {
+      scripts[i].parentNode.removeChild(scripts[i]);
+    }
+
+    // Revoke the consumed blob URL — bootEmulator() will create a fresh one
+    if (_romBlobUrl) {
+      URL.revokeObjectURL(_romBlobUrl);
+      _romBlobUrl = null;
+    }
   }
 
   function bootEmulator() {
@@ -299,10 +312,16 @@
       console.log('[play] bootEmulator: EJS already exists, skipping');
       return;
     }
-    if (!_romBlobUrl) {
+    if (!_romBlob && !_romBlobUrl) {
       console.log('[play] bootEmulator: no ROM loaded');
       showToast('Please load a ROM file first');
       return;
+    }
+    // Create a fresh blob URL — the previous one may have been revoked by
+    // EmulatorJS internally or by destroyEmulator() cleanup
+    if (_romBlob) {
+      if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+      _romBlobUrl = URL.createObjectURL(_romBlob);
     }
     console.log('[play] bootEmulator: injecting loader.js, gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
@@ -399,6 +418,8 @@
   }
 
   function loadRomData(file, displayName) {
+    _romBlob = file;
+    if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
     localStorage.setItem('kaillera-rom-name', displayName);
@@ -550,6 +571,8 @@
       req.onsuccess = function () {
         if (!req.result) { cb(null); return; }
         var blob = new Blob([req.result]);
+        _romBlob = blob;
+        if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
         // Compute hash from cached data
@@ -604,7 +627,7 @@
   }
 
   function startGame() {
-    if (!_romBlobUrl) {
+    if (!_romBlob && !_romBlobUrl) {
       showToast('Load a ROM file before starting');
       return;
     }
