@@ -725,6 +725,25 @@
           }
           mod._simulate_input(0, 0, 0);
           console.log('[lockstep] INPUT_BASE auto-discovered: ' + INPUT_BASE);
+
+          // Discover address for ALL buttons to verify _simulate_input works
+          var btnAddrs = {};
+          for (var bi = 0; bi < 20; bi++) {
+            mod._simulate_input(0, bi, 0);
+            var snap2 = new Uint8Array(mod.HEAPU8.buffer.slice(INPUT_BASE, INPUT_BASE + 1000));
+            mod._simulate_input(0, bi, 1);
+            var found = false;
+            for (var si2 = 0; si2 < 1000; si2++) {
+              if (mod.HEAPU8[INPUT_BASE + si2] !== snap2[si2]) {
+                btnAddrs[bi] = INPUT_BASE + si2;
+                found = true;
+                break;
+              }
+            }
+            if (!found) btnAddrs[bi] = 'NO CHANGE';
+            mod._simulate_input(0, bi, 0);
+          }
+          console.log('[lockstep] button addresses:', JSON.stringify(btnAddrs));
         } catch (e) {
           console.log('[lockstep] INPUT_BASE auto-discovery failed, using default: ' + INPUT_BASE);
         }
