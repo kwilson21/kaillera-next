@@ -1505,15 +1505,30 @@
   function setupKeyTracking() {
     if (_p1KeyMap) return;
 
-    var ejs = window.EJS_emulator;
-    if (ejs && ejs.controls && ejs.controls[0]) {
-      _p1KeyMap = {};
-      Object.entries(ejs.controls[0]).forEach(function (entry) {
-        var btnIdx = entry[0];
-        var binding = entry[1];
-        var kc = binding && binding.value;
-        if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
-      });
+    // Check localStorage for custom keyboard mapping first
+    try {
+      var saved = localStorage.getItem('keyboard-mapping');
+      if (saved) {
+        var parsed = JSON.parse(saved);
+        if (parsed && Object.keys(parsed).length > 0) {
+          _p1KeyMap = {};
+          for (var k in parsed) _p1KeyMap[parseInt(k, 10)] = parsed[k];
+        }
+      }
+    } catch (_) {}
+
+    // Try EJS controls if no custom mapping
+    if (!_p1KeyMap) {
+      var ejs = window.EJS_emulator;
+      if (ejs && ejs.controls && ejs.controls[0]) {
+        _p1KeyMap = {};
+        Object.entries(ejs.controls[0]).forEach(function (entry) {
+          var btnIdx = entry[0];
+          var binding = entry[1];
+          var kc = binding && binding.value;
+          if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
+        });
+      }
     }
 
     if (!_p1KeyMap || Object.keys(_p1KeyMap).length === 0) {

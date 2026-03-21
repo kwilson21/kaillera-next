@@ -645,19 +645,32 @@
   // ── Keyboard / input ───────────────────────────────────────────────────
 
   function setupKeyTracking() {
-    if (_p1KeyMap) return;  // already set up
+    if (_p1KeyMap) return;
 
-    // Try EJS controls first
-    const ejs = window.EJS_emulator;
-    if (ejs && ejs.controls && ejs.controls[0]) {
-      _p1KeyMap = {};
-      Object.entries(ejs.controls[0]).forEach(([btnIdx, binding]) => {
-        const kc = binding && binding.value;
-        if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
-      });
+    // Check localStorage for custom keyboard mapping first
+    try {
+      const saved = localStorage.getItem('keyboard-mapping');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Object.keys(parsed).length > 0) {
+          _p1KeyMap = {};
+          for (const k in parsed) _p1KeyMap[parseInt(k, 10)] = parsed[k];
+        }
+      }
+    } catch (_) {}
+
+    // Try EJS controls if no custom mapping
+    if (!_p1KeyMap) {
+      const ejs = window.EJS_emulator;
+      if (ejs && ejs.controls && ejs.controls[0]) {
+        _p1KeyMap = {};
+        Object.entries(ejs.controls[0]).forEach(([btnIdx, binding]) => {
+          const kc = binding && binding.value;
+          if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
+        });
+      }
     }
 
-    // Fallback to hardcoded defaults
     if (!_p1KeyMap || Object.keys(_p1KeyMap).length === 0) {
       _p1KeyMap = Object.assign({}, DEFAULT_N64_KEYMAP);
     }
