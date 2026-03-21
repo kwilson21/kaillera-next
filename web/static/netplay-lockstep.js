@@ -103,24 +103,24 @@
 
   // Default N64 keymap (EJS defaults) -- fallback when EJS controls unavailable
   const DEFAULT_N64_KEYMAP = {
-    88: 0,    // X -> B
-    67: 8,    // C -> A
+    67: 0,    // C -> A (JOYPAD_B)
+    88: 1,    // X -> B (JOYPAD_Y)
     86: 3,    // V -> Start
     38: 4,    // Up -> D-Up
     40: 5,    // Down -> D-Down
     37: 6,    // Left -> D-Left
     39: 7,    // Right -> D-Right
-    90: 9,    // Z -> Z-trigger
-    84: 10,   // T -> L-shoulder
-    89: 11,   // Y -> R-shoulder
-    73: 12,   // I -> C-Up
-    75: 13,   // K -> C-Down
-    74: 14,   // J -> C-Left
-    76: 15,   // L -> C-Right
-    87: 16,   // W -> Analog Up
-    83: 17,   // S -> Analog Down
-    65: 18,   // A -> Analog Left
-    68: 19,   // D -> Analog Right
+    84: 10,   // T -> L (JOYPAD_L)
+    89: 11,   // Y -> R (JOYPAD_R)
+    90: 12,   // Z -> Z trigger (JOYPAD_L2)
+    68: 16,   // D -> Analog Right (L STICK RIGHT)
+    65: 17,   // A -> Analog Left (L STICK LEFT)
+    83: 18,   // S -> Analog Down (L STICK DOWN)
+    87: 19,   // W -> Analog Up (L STICK UP)
+    74: 20,   // J -> C-Left (R STICK RIGHT -> CSTICK_LEFT)
+    76: 21,   // L -> C-Right (R STICK LEFT -> CSTICK_RIGHT)
+    75: 22,   // K -> C-Down (R STICK DOWN -> CSTICK_DOWN)
+    73: 23,   // I -> C-Up (R STICK UP -> CSTICK_UP)
   };
 
   // -- Direct memory input layout -----------------------------------------------
@@ -1121,8 +1121,9 @@
       mod._simulate_input(player, btn, (inputMask >> btn) & 1);
     }
 
-    // Analog axes (16-19): bit pairs → ±32767 axis values
-    for (var base = 16; base < 20; base += 2) {
+    // Analog axes (16-23): bit pairs → ±32767 axis values
+    // 16-19: left stick (N64 analog), 20-23: right stick (N64 C-buttons)
+    for (var base = 16; base < 24; base += 2) {
       var posPressed = (inputMask >> base) & 1;
       var negPressed = (inputMask >> (base + 1)) & 1;
       var axisVal = (posPressed - negPressed) * 32767;

@@ -632,24 +632,24 @@
   // ── Remap Wizard ──────────────────────────────────────────────────────
 
   var WIZARD_STEPS = [
-    { prompt: 'Press: A',         type: 'button', bit: 8 },
-    { prompt: 'Press: B',         type: 'button', bit: 0 },
+    { prompt: 'Press: A',         type: 'button', bit: 0 },
+    { prompt: 'Press: B',         type: 'button', bit: 1 },
     { prompt: 'Press: Start',     type: 'button', bit: 3 },
-    { prompt: 'Press: Z',         type: 'button', bit: 9 },
+    { prompt: 'Press: Z',         type: 'button', bit: 12 },
     { prompt: 'Press: L',         type: 'button', bit: 10 },
     { prompt: 'Press: R',         type: 'button', bit: 11 },
     { prompt: 'Press: D-Up',      type: 'button', bit: 4 },
     { prompt: 'Press: D-Down',    type: 'button', bit: 5 },
     { prompt: 'Press: D-Left',    type: 'button', bit: 6 },
     { prompt: 'Press: D-Right',   type: 'button', bit: 7 },
-    { prompt: 'Push stick UP',    type: 'axis', bit: 16, axisGroup: 'stickY' },
-    { prompt: 'Push stick DOWN',  type: 'axis', bit: 17, axisGroup: 'stickY' },
-    { prompt: 'Push stick LEFT',  type: 'axis', bit: 18, axisGroup: 'stickX' },
-    { prompt: 'Push stick RIGHT', type: 'axis', bit: 19, axisGroup: 'stickX' },
-    { prompt: 'Press: C-Up',      type: 'cbutton', bit: 12 },
-    { prompt: 'Press: C-Down',    type: 'cbutton', bit: 13 },
-    { prompt: 'Press: C-Left',    type: 'cbutton', bit: 14 },
-    { prompt: 'Press: C-Right',   type: 'cbutton', bit: 15 },
+    { prompt: 'Push stick UP',    type: 'axis', bit: 19, axisGroup: 'stickY' },
+    { prompt: 'Push stick DOWN',  type: 'axis', bit: 18, axisGroup: 'stickY' },
+    { prompt: 'Push stick LEFT',  type: 'axis', bit: 17, axisGroup: 'stickX' },
+    { prompt: 'Push stick RIGHT', type: 'axis', bit: 16, axisGroup: 'stickX' },
+    { prompt: 'Press: C-Up',      type: 'cbutton', bit: 23 },
+    { prompt: 'Press: C-Down',    type: 'cbutton', bit: 22 },
+    { prompt: 'Press: C-Left',    type: 'cbutton', bit: 20 },
+    { prompt: 'Press: C-Right',   type: 'cbutton', bit: 21 },
   ];
 
   var _wizardActive = false;
@@ -689,9 +689,10 @@
       _wizardKeyMap = Object.assign({}, savedKb);
     } else {
       _wizardKeyMap = {
-        88: 0, 67: 8, 86: 3, 38: 4, 40: 5, 37: 6, 39: 7,
-        90: 9, 84: 10, 89: 11, 73: 12, 75: 13, 74: 14, 76: 15,
-        87: 16, 83: 17, 65: 18, 68: 19
+        67: 0, 88: 1, 86: 3, 38: 4, 40: 5, 37: 6, 39: 7,
+        84: 10, 89: 11, 90: 12,
+        68: 16, 65: 17, 83: 18, 87: 19,
+        74: 20, 76: 21, 75: 22, 73: 23
       };
     }
 
