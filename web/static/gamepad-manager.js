@@ -15,6 +15,11 @@
 (function () {
   'use strict';
 
+  // Save the real getGamepads before anything can override it.
+  // We use this internally so EJS's override (if any) doesn't affect us,
+  // and we can override the browser's version to block EJS from reading gamepads.
+  var _realGetGamepads = navigator.getGamepads.bind(navigator);
+
   // ── Profile Registry ─────────────────────────────────────────────────
   // Ordered array. First match wins. Raphnet before Standard (fallback).
 
@@ -39,11 +44,11 @@
       },
       axes: {
         stickX: { index: 0, bits: [19, 18] },
-        stickY: { index: 1, bits: [16, 17] },
+        stickY: { index: 1, bits: [17, 16] },
       },
       axisButtons: {
         2: { pos: (1 << 15), neg: (1 << 14) },
-        3: { pos: (1 << 12), neg: (1 << 13) },
+        3: { pos: (1 << 13), neg: (1 << 12) },
       },
       deadzone: 0.3,
     },
@@ -64,11 +69,11 @@
       },
       axes: {
         stickX: { index: 0, bits: [19, 18] },
-        stickY: { index: 1, bits: [16, 17] },
+        stickY: { index: 1, bits: [17, 16] },
       },
       axisButtons: {
         2: { pos: (1 << 15), neg: (1 << 14) },
-        3: { pos: (1 << 12), neg: (1 << 13) },
+        3: { pos: (1 << 13), neg: (1 << 12) },
       },
       deadzone: 0.3,
     },
@@ -101,7 +106,7 @@
   // ── Polling / Scanning ───────────────────────────────────────────────
 
   function poll() {
-    var gamepads = navigator.getGamepads();
+    var gamepads = _realGetGamepads();
     var changed = false;
     var currentIds = {};
 
@@ -151,7 +156,7 @@
     var gpIndex = _assignments[slot];
     if (gpIndex === undefined) return 0;
 
-    var gp = navigator.getGamepads()[gpIndex];
+    var gp = _realGetGamepads()[gpIndex];
     if (!gp) return 0;
 
     var entry = _detected[gpIndex];
@@ -199,11 +204,33 @@
 
   // ── Public API ───────────────────────────────────────────────────────
 
+  // ── EJS Gamepad Blocking ────────────────────────────────────────────
+  // Override navigator.getGamepads so EJS's built-in gamepad handler
+  // sees no controllers. We use _realGetGamepads internally.
+
+  var _ejsBlocked = false;
+  var _emptyGamepads = [];
+
+  function blockEjsGamepad() {
+    if (_ejsBlocked) return;
+    _ejsBlocked = true;
+    navigator.getGamepads = function () { return _emptyGamepads; };
+  }
+
+  function unblockEjsGamepad() {
+    if (!_ejsBlocked) return;
+    _ejsBlocked = false;
+    navigator.getGamepads = _realGetGamepads;
+  }
+
   window.GamepadManager = {
     start: function (opts) {
       opts = opts || {};
       _playerSlot = opts.playerSlot || 0;
       _onUpdate = opts.onUpdate || null;
+
+      // Block EJS from reading gamepads — we handle input ourselves
+      blockEjsGamepad();
 
       // Immediate first poll
       poll();
@@ -224,6 +251,7 @@
       }
       window.removeEventListener('gamepadconnected', poll);
       window.removeEventListener('gamepaddisconnected', poll);
+      unblockEjsGamepad();
     },
 
     readGamepad: readGamepad,
