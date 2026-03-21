@@ -514,12 +514,8 @@
 
       if (_selfEmuReady) ch.send('emu-ready');
 
-      // Host initiates RTT measurement for auto delay
-      if (_playerSlot === 0) {
-        startRttMeasurement(ch);
-      } else {
-        _rttComplete = true;
-      }
+      // Both sides measure RTT for auto delay
+      startRttMeasurement(ch);
 
       // Late join: if game is running, host starts spectator stream for new spectator
       if (_running && _playerSlot === 0 && peer.slot === null) {
