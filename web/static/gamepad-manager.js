@@ -39,11 +39,11 @@
       },
       axes: {
         stickX: { index: 0, bits: [19, 18] },
-        stickY: { index: 1, bits: [17, 16] },
+        stickY: { index: 1, bits: [16, 17] },
       },
       axisButtons: {
         2: { pos: (1 << 15), neg: (1 << 14) },
-        3: { pos: (1 << 13), neg: (1 << 12) },
+        3: { pos: (1 << 12), neg: (1 << 13) },
       },
       deadzone: 0.3,
     },
@@ -64,11 +64,11 @@
       },
       axes: {
         stickX: { index: 0, bits: [19, 18] },
-        stickY: { index: 1, bits: [17, 16] },
+        stickY: { index: 1, bits: [16, 17] },
       },
       axisButtons: {
         2: { pos: (1 << 15), neg: (1 << 14) },
-        3: { pos: (1 << 13), neg: (1 << 12) },
+        3: { pos: (1 << 12), neg: (1 << 13) },
       },
       deadzone: 0.3,
     },
