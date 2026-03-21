@@ -843,7 +843,7 @@
 
       // Check axes (for axis and cbutton steps)
       if (step.type === 'axis' || step.type === 'cbutton') {
-        var dz = 0.3;
+        var dz = 0.5;  // higher than gameplay deadzone to avoid accidental captures
         for (var ai = 0; ai < gp.axes.length; ai++) {
           var val = gp.axes[ai];
           if (Math.abs(val) > dz) {

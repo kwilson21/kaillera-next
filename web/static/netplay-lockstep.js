@@ -133,9 +133,7 @@
   // at startup by calling _simulate_input and detecting which byte changed.
   // Fallback: 715364 (CDN core address).
 
-  var INPUT_BASE       = 715364;  // auto-discovered at startup
-  const BUTTON_STRIDE  = 20;
-  const PLAYER_STRIDE  = 4;
+  var INPUT_BASE       = 715364;  // auto-discovered at startup (kept for hashGameState)
 
   // -- State -----------------------------------------------------------------
 
@@ -1094,26 +1092,23 @@
   // -- Direct memory input ---------------------------------------------------
 
   function writeInputToMemory(player, inputMask) {
-    var buf = window.EJS_emulator.gameManager.Module.HEAPU8.buffer;
-    var dv = new DataView(buf);
+    var mod = window.EJS_emulator.gameManager.Module;
+    if (!mod || !mod._simulate_input) return;
 
-    // Digital buttons (0-15): write 0 or 1 as int32
+    // Digital buttons (0-15): use _simulate_input for correct address calc
+    // (BUTTON_STRIDE assumption only validated for button 0 — higher indices
+    // may have different offsets in the WASM core's input_state array)
     for (var btn = 0; btn < 16; btn++) {
-      var addr = INPUT_BASE + (btn * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
-      dv.setInt32(addr, (inputMask >> btn) & 1, true);
+      mod._simulate_input(player, btn, (inputMask >> btn) & 1);
     }
 
-    // Analog axes (16+): buttons come in +/- pairs (16/17, 18/19, ...)
-    // Each pair maps to an axis. If + is pressed, value = 32767.
-    // If - is pressed, value = -32767. Both or neither = 0.
+    // Analog axes (16-19): bit pairs → ±32767 axis values
     for (var base = 16; base < 20; base += 2) {
       var posPressed = (inputMask >> base) & 1;
       var negPressed = (inputMask >> (base + 1)) & 1;
       var axisVal = (posPressed - negPressed) * 32767;
-      var addrPos = INPUT_BASE + (base * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
-      var addrNeg = INPUT_BASE + ((base + 1) * BUTTON_STRIDE) + (player * PLAYER_STRIDE);
-      dv.setInt32(addrPos, axisVal, true);
-      dv.setInt32(addrNeg, 0, true);
+      mod._simulate_input(player, base, axisVal);
+      mod._simulate_input(player, base + 1, 0);
     }
   }
 
