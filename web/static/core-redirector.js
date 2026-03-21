@@ -23,7 +23,7 @@
   // We only do this once (tracked via localStorage) because deleteDatabase()
   // blocks while other tabs have open connections — deadlocking EmulatorJS
   // in multi-tab netplay scenarios.
-  var CORE_VERSION = '1';
+  var CORE_VERSION = '2';
   try {
     if (localStorage.getItem('kn-core-version') !== CORE_VERSION && indexedDB.databases) {
       indexedDB.databases().then(function(databases) {

@@ -17,19 +17,37 @@ Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import re
+import sys
 from dataclasses import dataclass, field
 
 import socketio
 
 log = logging.getLogger(__name__)
 
+_ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
+_ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
+_VALID_MODES = {"lockstep", "streaming"}
+_MAX_RELAY_SIZE = 2 * 1024 * 1024  # 2MB
+
+
+def _sanitize_str(value: str, max_len: int) -> str:
+    """Strip angle brackets and truncate."""
+    return re.sub(r"[<>]", "", str(value))[:max_len]
+
+
+def configure_cors(origin: str) -> None:
+    sio.cors_allowed_origins = origin if origin != "*" else "*"
+
+
 # ── Socket.IO server instance ─────────────────────────────────────────────────
 
 sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins="*",
-    max_http_buffer_size=16 * 1024 * 1024,  # 16MB — save states are ~3-5MB gzipped+b64
+    max_http_buffer_size=4 * 1024 * 1024,  # 4MB
 )
 
 
@@ -40,7 +58,6 @@ class Room:
     owner: str                        # sid of creator
     room_name: str
     game_id: str
-    domain: str
     password: str | None
     max_players: int
     players: dict[str, dict] = field(default_factory=dict)
@@ -143,7 +160,15 @@ async def _leave(sid: str) -> None:
 
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
-    log.info("SIO connect %s", sid)
+    from src.ratelimit import register_sid, connection_allowed, check_ip
+    forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else environ.get("REMOTE_ADDR", "unknown")
+    if not connection_allowed(ip):
+        raise socketio.exceptions.ConnectionRefusedError("Too many connections")
+    if not check_ip(ip, "connect"):
+        raise socketio.exceptions.ConnectionRefusedError("Rate limited")
+    register_sid(sid, ip)
+    log.info("SIO connect %s (ip=%s)", sid, ip)
 
 
 @sio.on("startup")  # internal — called once at server start via create_task
@@ -158,32 +183,44 @@ async def _cleanup_empty_rooms() -> None:
         for sid in empty:
             del rooms[sid]
             log.debug("Cleanup: deleted empty room %s", sid)
+        from src.ratelimit import cleanup
+        cleanup()
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
 
 @sio.on("open-room")
 async def open_room(sid: str, data: dict) -> str | None:
+    from src.ratelimit import check
+    if not check(sid, "open-room"):
+        return "Rate limited"
+
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
     player_id: str = extra.get("playerId", sid)
     player_name: str = extra.get("player_name", "Player")
     room_name: str = extra.get("room_name", "Room")
     game_id: str = extra.get("game_id", "")
-    domain: str = extra.get("domain", "")
     password: str | None = data.get("password") or extra.get("room_password") or None
     max_players: int = int(data.get("maxPlayers", 4))
 
     if not session_id:
         return "Missing sessionid"
+    if not _ALNUM_RE.match(session_id) or not (3 <= len(session_id) <= 16):
+        return "Invalid room code"
     if session_id in rooms:
         return "Room already exists"
+
+    player_name = _sanitize_str(player_name, 32)
+    room_name = _sanitize_str(room_name, 64)
+    if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
+        game_id = "unknown"
+    max_players = max(1, min(4, max_players))
 
     room = Room(
         owner=sid,
         room_name=room_name,
         game_id=game_id,
-        domain=domain,
         password=password,
         max_players=max_players,
     )
@@ -200,6 +237,10 @@ async def open_room(sid: str, data: dict) -> str | None:
 
 @sio.on("join-room")
 async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
+    from src.ratelimit import check
+    if not check(sid, "join-room"):
+        return ("Rate limited", None)
+
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
     player_id: str = extra.get("userid", sid)
@@ -207,10 +248,12 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
     password: str | None = data.get("password") or None
     spectate: bool = extra.get("spectate", False)
 
+    player_name = _sanitize_str(player_name, 32)
+
     room = rooms.get(session_id)
     if room is None:
         return ("Room not found", None)
-    if room.password and room.password != password:
+    if room.password and not hmac.compare_digest(room.password, password or ""):
         return ("Wrong password", None)
 
     if spectate:
@@ -250,6 +293,8 @@ async def claim_slot(sid: str, data: dict) -> str | None:
 
     requested_slot = data.get("slot")
     if requested_slot is not None:
+        if not isinstance(requested_slot, int) or requested_slot < 0 or requested_slot > 3:
+            return "Invalid slot"
         if requested_slot in room.slots:
             return "Slot already taken"
         slot = requested_slot
@@ -283,7 +328,10 @@ async def start_game(sid: str, data: dict) -> str | None:
         return "Only the host can start the game"
 
     room.status = "playing"
-    room.mode = data.get("mode", "lockstep")
+    mode = data.get("mode", "lockstep")
+    if mode not in _VALID_MODES:
+        mode = "lockstep"
+    room.mode = mode
     await sio.emit("game-started", {
         "mode": room.mode,
         "rollbackEnabled": data.get("rollbackEnabled", False),
@@ -316,13 +364,24 @@ async def webrtc_signal(sid: str, data: dict) -> None:
     target: str | None = data.get("target")
     if not target:
         return
+    sender_entry = _sid_to_room.get(sid)
+    target_entry = _sid_to_room.get(target)
+    if not sender_entry or not target_entry:
+        return
+    if sender_entry[0] != target_entry[0]:
+        return
     await sio.emit("webrtc-signal", {"sender": sid, **data}, to=target)
 
 
 @sio.on("data-message")
 async def data_message(sid: str, data: dict) -> None:
+    from src.ratelimit import check
+    if not check(sid, "data-message"):
+        return
     entry = _sid_to_room.get(sid)
     if entry is None:
+        return
+    if sys.getsizeof(str(data)) > _MAX_RELAY_SIZE:
         return
     session_id = entry[0]
     await sio.emit("data-message", data, room=session_id, skip_sid=sid)
@@ -330,8 +389,13 @@ async def data_message(sid: str, data: dict) -> None:
 
 @sio.on("snapshot")
 async def snapshot(sid: str, data: dict) -> None:
+    from src.ratelimit import check
+    if not check(sid, "snapshot"):
+        return
     entry = _sid_to_room.get(sid)
     if entry is None:
+        return
+    if sys.getsizeof(str(data)) > _MAX_RELAY_SIZE:
         return
     session_id = entry[0]
     await sio.emit("snapshot", data, room=session_id, skip_sid=sid)
@@ -348,5 +412,7 @@ async def game_input(sid: str, data: dict) -> None:
 
 @sio.event
 async def disconnect(sid: str) -> None:
+    from src.ratelimit import unregister_sid
     log.info("SIO disconnect %s", sid)
+    unregister_sid(sid)
     await _leave(sid)
