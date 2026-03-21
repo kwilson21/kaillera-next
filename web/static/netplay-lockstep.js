@@ -1658,13 +1658,18 @@
         parent.addEventListener('keyup',   block, true);
       }
 
-      // Disable EJS gamepad handling — stop the 10ms polling loop
-      // and prevent restart. We handle all gamepad input ourselves
-      // via GamepadManager + custom profile mapping.
+      // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
       if (ejs.gamepad) {
         if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
         ejs.gamepad.loop = function () {};
       }
+
+      // Block navigator.getGamepads globally so the WASM core's internal
+      // Emscripten SDL gamepad layer also gets no gamepads. The core has
+      // its own RetroArch button mapping that conflicts with our profiles.
+      // GamepadManager uses a saved reference (_nativeGetGamepads) so it
+      // still works.
+      navigator.getGamepads = function () { return []; };
     };
     attempt();
   }

@@ -15,6 +15,10 @@
 (function () {
   'use strict';
 
+  // Save real getGamepads — the global may be overridden to block
+  // the WASM core's internal Emscripten SDL gamepad polling.
+  var _nativeGetGamepads = navigator.getGamepads.bind(navigator);
+
   // ── Profile Registry ─────────────────────────────────────────────────
   // Ordered array. First match wins. Raphnet before Standard (fallback).
 
@@ -113,7 +117,7 @@
   // ── Polling / Scanning ───────────────────────────────────────────────
 
   function poll() {
-    var gamepads = navigator.getGamepads();
+    var gamepads = _nativeGetGamepads();
     var changed = false;
     var currentIds = {};
 
@@ -163,7 +167,7 @@
     var gpIndex = _assignments[slot];
     if (gpIndex === undefined) return 0;
 
-    var gp = navigator.getGamepads()[gpIndex];
+    var gp = _nativeGetGamepads()[gpIndex];
     if (!gp) return 0;
 
     var entry = _detected[gpIndex];
