@@ -24,6 +24,9 @@
   var previousSpectators = {};
   var _lateJoin = false;
   var _romBlobUrl = null;
+  var _romHash = null;           // SHA-256 hex of loaded ROM
+  var _hostRomHash = null;       // host's ROM hash for late-join verification
+  var _pendingLateJoin = false;  // waiting for ROM before late-join init
 
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -118,6 +121,23 @@
             // Use joinData directly — the users-updated socket event may not
             // have arrived yet (ack returns before broadcast is delivered)
             if (joinData) lastUsersData = joinData;
+
+            // Store host's ROM hash for verification
+            _hostRomHash = roomData.rom_hash || null;
+
+            // If no ROM cached, show overlay with ROM drop zone so user can load one
+            if (!_romBlobUrl) {
+              _pendingLateJoin = true;
+              showLateJoinRomPrompt();
+              return;
+            }
+
+            // Verify ROM hash if available
+            if (_hostRomHash && _romHash && _hostRomHash !== _romHash) {
+              showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
+              return;
+            }
+
             showToolbar();
             initEngine();
             return;
@@ -139,6 +159,7 @@
     lastUsersData = data;
     var players = data.players || {};
     var spectators = data.spectators || {};
+    var ownerSid = data.owner || null;
 
     // Update my slot
     var entries = Object.values(players);
@@ -149,6 +170,15 @@
       }
     }
 
+    // Check if we became the host (ownership transfer)
+    var wasHost = isHost;
+    if (ownerSid) {
+      isHost = (ownerSid === socket.id);
+    }
+    if (!wasHost && isHost) {
+      showToast('You are now the host');
+    }
+
     // Diff for toasts
     diffForToasts(players, spectators);
     previousPlayers = JSON.parse(JSON.stringify(players));
@@ -156,9 +186,19 @@
 
     // Update overlay UI if in pre-game
     if (!gameRunning) {
-      updatePlayerList(players, spectators);
+      updatePlayerList(players, spectators, ownerSid);
       updateStartButton(players);
       updateGamepadSlot();
+      // Show/hide host controls after ownership transfer
+      var hostControls = document.getElementById('host-controls');
+      var guestStatus = document.getElementById('guest-status');
+      if (isHost) {
+        if (hostControls) hostControls.style.display = '';
+        if (guestStatus) guestStatus.style.display = 'none';
+      } else {
+        if (hostControls) hostControls.style.display = 'none';
+        if (guestStatus) guestStatus.style.display = '';
+      }
     }
   }
 
@@ -195,6 +235,13 @@
   function onGameStarted(data) {
     mode = data.mode || mode;
     _gameRollbackEnabled = !!data.rollbackEnabled;
+
+    // Verify ROM hash matches host's
+    if (data.romHash && _romHash && data.romHash !== _romHash) {
+      showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
+      return;
+    }
+
     gameRunning = true;
     hideOverlay();
     showToolbar();
@@ -228,6 +275,18 @@
   }
 
   function destroyEmulator() {
+    var emu = window.EJS_emulator;
+    if (emu) {
+      // Close the emulator's own AudioContext to stop lingering audio.
+      // The netplay engine's stop() handles its custom audio pipeline;
+      // this catches the EJS/SDL2 AudioContext that runs independently.
+      try {
+        var gm = emu.gameManager;
+        if (gm && gm.Module && gm.Module.SDL2 && gm.Module.SDL2.audioContext) {
+          gm.Module.SDL2.audioContext.close();
+        }
+      } catch (_) {}
+    }
     // Wipe EmulatorJS from the DOM entirely — clean slate for next game
     var gameEl = document.getElementById('game');
     if (gameEl) gameEl.innerHTML = '';
@@ -302,6 +361,10 @@
       if (cachedName) {
         drop.classList.add('loaded');
         if (statusEl) statusEl.textContent = 'Loaded: ' + cachedName + ' (drop to change)';
+        // If we were waiting for a ROM to late-join, proceed now
+        if (_pendingLateJoin) {
+          dismissLateJoinPrompt();
+        }
       } else if (savedRom && statusEl) {
         statusEl.textContent = 'Last used: ' + savedRom + ' (file not cached — drop again)';
       }
@@ -309,15 +372,148 @@
   }
 
   function handleRomFile(file) {
+    var statusEl = document.getElementById('rom-status');
+    var isZip = file.name.toLowerCase().endsWith('.zip');
+
+    if (isZip) {
+      if (statusEl) statusEl.textContent = 'Extracting ROM from zip…';
+      var reader = new FileReader();
+      reader.onload = function () {
+        extractRomFromZip(reader.result).then(function (result) {
+          if (!result) {
+            if (statusEl) statusEl.textContent = 'No ROM found in zip (.z64/.n64/.v64)';
+            return;
+          }
+          var romBlob = new Blob([result.data]);
+          var romFile = new File([romBlob], result.name);
+          loadRomData(romFile, result.name);
+        }).catch(function (err) {
+          console.log('[play] zip extraction failed:', err);
+          if (statusEl) statusEl.textContent = 'Failed to extract ROM from zip';
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      loadRomData(file, file.name);
+    }
+  }
+
+  function loadRomData(file, displayName) {
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
-    localStorage.setItem('kaillera-rom-name', file.name);
+    localStorage.setItem('kaillera-rom-name', displayName);
     cacheRom(file);
 
     var drop = document.getElementById('rom-drop');
     if (drop) drop.classList.add('loaded');
     var statusEl = document.getElementById('rom-status');
-    if (statusEl) statusEl.textContent = 'Loaded: ' + file.name;
+    if (statusEl) statusEl.textContent = 'Loaded: ' + displayName;
+
+    // Compute ROM hash and proceed with any pending late-join
+    var reader = new FileReader();
+    reader.onload = function () {
+      hashArrayBuffer(reader.result).then(function (hash) {
+        _romHash = hash;
+        localStorage.setItem('kaillera-rom-hash', hash);
+        console.log('[play] ROM hash:', hash.substring(0, 16) + '…');
+      }).catch(function (err) {
+        console.log('[play] hash failed:', err);
+      }).then(function () {
+        // Always proceed with late-join, even if hash computation failed
+        if (_pendingLateJoin) {
+          dismissLateJoinPrompt();
+        }
+      });
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // ── ZIP extraction ────────────────────────────────────────────────────
+
+  var _ROM_EXTS = ['.z64', '.n64', '.v64', '.ndd'];
+
+  function extractRomFromZip(arrayBuffer) {
+    // Minimal ZIP parser: find the first ROM file and extract it.
+    // Supports STORED (0) and DEFLATE (8) compression methods.
+    var view = new DataView(arrayBuffer);
+    var bytes = new Uint8Array(arrayBuffer);
+    var offset = 0;
+
+    while (offset + 30 <= bytes.length) {
+      // Local file header signature = PK\x03\x04
+      if (view.getUint32(offset, true) !== 0x04034b50) break;
+
+      var method = view.getUint16(offset + 8, true);
+      var compSize = view.getUint32(offset + 18, true);
+      var uncompSize = view.getUint32(offset + 22, true);
+      var nameLen = view.getUint16(offset + 26, true);
+      var extraLen = view.getUint16(offset + 28, true);
+      var nameBytes = bytes.subarray(offset + 30, offset + 30 + nameLen);
+      var fileName = '';
+      for (var i = 0; i < nameBytes.length; i++) fileName += String.fromCharCode(nameBytes[i]);
+      var dataStart = offset + 30 + nameLen + extraLen;
+
+      // Check if this file is a ROM
+      var lower = fileName.toLowerCase();
+      var isRom = false;
+      for (var j = 0; j < _ROM_EXTS.length; j++) {
+        if (lower.endsWith(_ROM_EXTS[j])) { isRom = true; break; }
+      }
+
+      if (isRom && compSize > 0) {
+        var compData = bytes.subarray(dataStart, dataStart + compSize);
+        var baseName = fileName.split('/').pop();
+
+        if (method === 0) {
+          // STORED — no compression
+          return Promise.resolve({ name: baseName, data: compData.slice() });
+        } else if (method === 8) {
+          // DEFLATE — use DecompressionStream
+          var blob = new Blob([compData]);
+          var ds = new DecompressionStream('deflate-raw');
+          var decompressed = blob.stream().pipeThrough(ds);
+          return new Response(decompressed).arrayBuffer().then(function (buf) {
+            return { name: baseName, data: new Uint8Array(buf) };
+          });
+        }
+      }
+
+      offset = dataStart + compSize;
+    }
+
+    return Promise.resolve(null);
+  }
+
+  function hashArrayBuffer(buf) {
+    // crypto.subtle requires a secure context (HTTPS or localhost).
+    // On LAN IPs over HTTP, fall back to a simple FNV-1a hash.
+    if (window.crypto && window.crypto.subtle) {
+      return crypto.subtle.digest('SHA-256', buf).then(function (digest) {
+        var arr = new Uint8Array(digest);
+        var hex = '';
+        for (var i = 0; i < arr.length; i++) {
+          hex += ('0' + arr[i].toString(16)).slice(-2);
+        }
+        return hex;
+      });
+    }
+    // Fallback: FNV-1a 64-bit (good enough for mismatch detection)
+    var bytes = new Uint8Array(buf);
+    var h1 = 0x811c9dc5 >>> 0;
+    var h2 = 0x811c9dc5 >>> 0;
+    for (var i = 0; i < bytes.length; i++) {
+      if (i & 1) {
+        h1 = (h1 ^ bytes[i]) >>> 0;
+        h1 = Math.imul(h1, 0x01000193) >>> 0;
+      } else {
+        h2 = (h2 ^ bytes[i]) >>> 0;
+        h2 = Math.imul(h2, 0x01000193) >>> 0;
+      }
+    }
+    var hex = ('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8);
+    // Pad to 64 chars to match SHA-256 length for server validation
+    while (hex.length < 64) hex += '0';
+    return Promise.resolve(hex);
   }
 
   // ── ROM IDB Cache ──────────────────────────────────────────────────────
@@ -356,7 +552,12 @@
         var blob = new Blob([req.result]);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
-        cb(name);
+        // Compute hash from cached data
+        hashArrayBuffer(req.result).then(function (hash) {
+          _romHash = hash;
+          localStorage.setItem('kaillera-rom-hash', hash);
+          cb(name);
+        });
       };
       req.onerror = function () { cb(null); };
     });
@@ -387,8 +588,11 @@
       gameElement: document.getElementById('game'),
       rollbackEnabled: rollbackEnabled,
       onStatus: function (msg) {
-        var el = document.getElementById('engine-status');
-        if (el) el.textContent = msg;
+        // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
+        var toolbarEl = document.getElementById('toolbar-status');
+        if (toolbarEl) toolbarEl.textContent = msg;
+        var overlayEl = document.getElementById('engine-status');
+        if (overlayEl) overlayEl.textContent = msg;
       },
       onPlayersChanged: function () {
         // Engine forwards users-updated — supplementary to our direct listener
@@ -410,6 +614,7 @@
     socket.emit('start-game', {
       mode: selectedMode,
       rollbackEnabled: optRollback ? optRollback.checked : false,
+      romHash: _romHash || null,
     });
   }
 
@@ -426,6 +631,62 @@
     socket.emit('leave-room', {});
     if (engine) { engine.stop(); engine = null; }
     window.location.href = '/';
+  }
+
+  // ── Late-Join ROM Prompt ─────────────────────────────────────────────
+
+  function showLateJoinRomPrompt() {
+    // Show the overlay with only the ROM drop zone visible
+    var overlay = document.getElementById('overlay');
+    if (overlay) overlay.classList.remove('hidden');
+
+    // Hide everything except the ROM section
+    var sections = overlay.querySelectorAll('.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status');
+    for (var i = 0; i < sections.length; i++) {
+      sections[i].style.display = 'none';
+    }
+
+    // Show only the ROM drop section
+    var romDrop = document.getElementById('rom-drop');
+    if (romDrop && romDrop.parentNode) romDrop.parentNode.style.display = '';
+
+    // Add a heading message
+    var card = overlay.querySelector('.overlay-card');
+    if (card) {
+      var msg = document.createElement('p');
+      msg.id = 'late-join-msg';
+      msg.style.cssText = 'text-align:center;color:#6af;margin-bottom:12px;font-size:14px;';
+      msg.textContent = 'Game in progress — load a ROM to join';
+      card.insertBefore(msg, card.firstChild);
+    }
+  }
+
+  function dismissLateJoinPrompt() {
+    _pendingLateJoin = false;
+
+    // Verify ROM hash before joining
+    if (_hostRomHash && _romHash && _hostRomHash !== _romHash) {
+      showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
+      return;
+    }
+
+    // Remove the late-join message
+    var msg = document.getElementById('late-join-msg');
+    if (msg) msg.parentNode.removeChild(msg);
+
+    // Restore all sections visibility
+    var overlay = document.getElementById('overlay');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      var sections = overlay.querySelectorAll('.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status');
+      for (var i = 0; i < sections.length; i++) {
+        sections[i].style.display = '';
+      }
+    }
+
+    // Now proceed with late join
+    showToolbar();
+    initEngine();
   }
 
   // ── UI: Overlay ────────────────────────────────────────────────────────
@@ -457,7 +718,7 @@
     if (overlay) overlay.classList.add('hidden');
   }
 
-  function updatePlayerList(players, spectators) {
+  function updatePlayerList(players, spectators, ownerSid) {
     for (var i = 0; i < 4; i++) {
       var slotEl = document.querySelector('.player-slot[data-slot="' + i + '"]');
       if (!slotEl) continue;
@@ -471,7 +732,8 @@
       }
 
       if (playerInSlot) {
-        nameEl.textContent = playerInSlot.playerName;
+        var isOwner = ownerSid && playerInSlot.socketId === ownerSid;
+        nameEl.textContent = playerInSlot.playerName + (isOwner ? ' (host)' : '');
         nameEl.classList.remove('empty');
       } else {
         nameEl.textContent = 'Open';
@@ -513,6 +775,56 @@
   function hideToolbar() {
     var toolbar = document.getElementById('toolbar');
     if (toolbar) toolbar.classList.add('hidden');
+    hideInfoOverlay();
+  }
+
+  // ── UI: Info Overlay ──────────────────────────────────────────────────
+
+  var _infoVisible = false;
+  var _infoInterval = null;
+
+  function toggleInfoOverlay() {
+    _infoVisible = !_infoVisible;
+    var el = document.getElementById('info-overlay');
+    var btn = document.getElementById('toolbar-info');
+    if (_infoVisible) {
+      if (el) el.classList.remove('hidden');
+      if (btn) btn.classList.add('active');
+      if (!_infoInterval) _infoInterval = setInterval(updateInfoOverlay, 500);
+      updateInfoOverlay();
+    } else {
+      hideInfoOverlay();
+    }
+  }
+
+  function hideInfoOverlay() {
+    _infoVisible = false;
+    var el = document.getElementById('info-overlay');
+    var btn = document.getElementById('toolbar-info');
+    if (el) el.classList.add('hidden');
+    if (btn) btn.classList.remove('active');
+    if (_infoInterval) { clearInterval(_infoInterval); _infoInterval = null; }
+  }
+
+  function updateInfoOverlay() {
+    var info = engine && engine.getInfo ? engine.getInfo() : null;
+
+    var fpsEl = document.getElementById('info-fps');
+    var pingEl = document.getElementById('info-ping');
+    var delayEl = document.getElementById('info-delay');
+    var playersEl = document.getElementById('info-players');
+
+    if (info) {
+      if (fpsEl) fpsEl.textContent = 'FPS: ' + (info.fps || 0);
+      if (pingEl) pingEl.textContent = info.ping !== null ? 'Ping: ' + Math.round(info.ping) + 'ms' : 'Ping: --';
+      if (delayEl) delayEl.textContent = 'Delay: ' + info.frameDelay + 'f';
+      if (playersEl) playersEl.textContent = 'Players: ' + info.playerCount;
+    } else {
+      if (fpsEl) fpsEl.textContent = 'FPS: --';
+      if (pingEl) pingEl.textContent = 'Ping: --';
+      if (delayEl) delayEl.textContent = '';
+      if (playersEl) playersEl.textContent = '';
+    }
   }
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
@@ -609,7 +921,7 @@
         statusEl.textContent = primary.id.substring(0, 40) + ' (' + primary.profileName + ')';
         statusEl.className = 'gamepad-detected';
       } else {
-        statusEl.textContent = 'No controller detected';
+        statusEl.textContent = 'No controller — press any button to detect';
         statusEl.className = '';
       }
     }
@@ -661,6 +973,9 @@
   var _wizardKeyMap = null;
   var _wizardBaselineButtons = null;
   var _wizardAxisCaptures = {};
+  var _wizardSnapshots = [];  // state snapshots for go-back
+  var _wizardHadGamepad = false;
+  var _wizardHotPlugCheck = 0;
 
   function startWizard() {
     var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
@@ -697,6 +1012,7 @@
     }
 
     _wizardAxisCaptures = {};
+    _wizardSnapshots = [];
     _wizardStep = 0;
     _wizardActive = true;
     _wizardDebounce = 0;
@@ -731,6 +1047,14 @@
       captureKeyboard(e.keyCode);
     };
     document.addEventListener('keydown', _wizardKeyHandler, true);
+
+    // Track initial gamepad presence for hot-plug notifications
+    var initGps = navigator.getGamepads();
+    _wizardHadGamepad = false;
+    for (var gi2 = 0; gi2 < initGps.length; gi2++) {
+      if (initGps[gi2]) { _wizardHadGamepad = true; break; }
+    }
+    _wizardHotPlugCheck = 0;
 
     // Start polling loop
     updateWizardPrompt();
@@ -790,8 +1114,18 @@
   function updateWizardPrompt() {
     var promptEl = document.getElementById('remap-prompt');
     var progressEl = document.getElementById('remap-progress');
+    var backBtn = document.getElementById('remap-back');
     if (promptEl) promptEl.textContent = WIZARD_STEPS[_wizardStep].prompt + ' (gamepad or key)';
     if (progressEl) progressEl.textContent = '(' + (_wizardStep + 1) + '/' + WIZARD_STEPS.length + ')';
+    if (backBtn) backBtn.disabled = (_wizardStep === 0);
+  }
+
+  function wizardSaveSnapshot() {
+    _wizardSnapshots.push({
+      gamepadProfile: _wizardGamepadProfile ? JSON.parse(JSON.stringify(_wizardGamepadProfile)) : null,
+      keyMap: _wizardKeyMap ? Object.assign({}, _wizardKeyMap) : null,
+      axisCaptures: JSON.parse(JSON.stringify(_wizardAxisCaptures)),
+    });
   }
 
   function wizardAdvance() {
@@ -814,8 +1148,20 @@
     updateWizardPrompt();
   }
 
+  function wizardBack() {
+    if (!_wizardActive || _wizardStep === 0 || _wizardSnapshots.length === 0) return;
+    var snap = _wizardSnapshots.pop();
+    _wizardStep--;
+    _wizardGamepadProfile = snap.gamepadProfile;
+    _wizardKeyMap = snap.keyMap;
+    _wizardAxisCaptures = snap.axisCaptures;
+    _wizardDebounce = Date.now() + 150;
+    updateWizardPrompt();
+  }
+
   function wizardSkip() {
     if (!_wizardActive) return;
+    wizardSaveSnapshot();
     wizardAdvance();
   }
 
@@ -826,6 +1172,23 @@
     if (Date.now() < _wizardDebounce) return;
 
     var gps = navigator.getGamepads();
+
+    // Hot-plug detection (check every ~30 frames / 500ms)
+    _wizardHotPlugCheck++;
+    if (_wizardHotPlugCheck % 30 === 0) {
+      var hasNow = false;
+      for (var hi = 0; hi < gps.length; hi++) {
+        if (gps[hi]) { hasNow = true; break; }
+      }
+      if (hasNow && !_wizardHadGamepad) {
+        showToast('Controller connected');
+        _wizardHadGamepad = true;
+      } else if (!hasNow && _wizardHadGamepad) {
+        showToast('Controller disconnected');
+        _wizardHadGamepad = false;
+      }
+    }
+
     var step = WIZARD_STEPS[_wizardStep];
 
     for (var gi = 0; gi < gps.length; gi++) {
@@ -858,12 +1221,14 @@
 
   function captureGamepadButton(buttonIndex, step) {
     if (!_wizardGamepadProfile) return;
+    wizardSaveSnapshot();
     _wizardGamepadProfile.buttons[buttonIndex] = (1 << step.bit);
     wizardAdvance();
   }
 
   function captureGamepadAxis(axisIndex, isPositive, step) {
     if (!_wizardGamepadProfile) return;
+    wizardSaveSnapshot();
 
     if (step.type === 'axis') {
       var group = step.axisGroup;
@@ -908,6 +1273,7 @@
 
   function captureKeyboard(keyCode) {
     var step = WIZARD_STEPS[_wizardStep];
+    wizardSaveSnapshot();
 
     // Remove old entry for this keyCode (key can only map to one function)
     for (var k in _wizardKeyMap) {
@@ -985,6 +1351,9 @@
     var toolbarEnd = document.getElementById('toolbar-end');
     if (toolbarEnd) toolbarEnd.addEventListener('click', endGame);
 
+    var toolbarInfo = document.getElementById('toolbar-info');
+    if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
+
     var copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
@@ -1018,6 +1387,9 @@
 
     var resetBtn = document.getElementById('reset-mapping-btn');
     if (resetBtn) resetBtn.addEventListener('click', resetMappings);
+
+    var backBtn = document.getElementById('remap-back');
+    if (backBtn) backBtn.addEventListener('click', wizardBack);
 
     var skipBtn = document.getElementById('remap-skip');
     if (skipBtn) skipBtn.addEventListener('click', wizardSkip);

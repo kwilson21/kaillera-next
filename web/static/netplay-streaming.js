@@ -1,32 +1,76 @@
 /**
- * kaillera-next — Prototype B: Single-Emulator Streaming
+ * kaillera-next — Streaming Netplay Engine
  *
- * Architecture: host runs the emulator and streams canvas video to guests.
- * Guests display a <video> element and send keyboard/gamepad input back
- * to the host via WebRTC data channel. Zero desync by design.
+ * Single-emulator streaming mode: the host (slot 0) runs the emulator and
+ * streams the canvas video to all guests and spectators via WebRTC. Guests
+ * send their controller input back to the host over a DataChannel. Zero
+ * desync by design — only one emulator instance exists.
  *
- * Topology: star (all guests connect to host only, not to each other).
+ * ── Network Topology ──────────────────────────────────────────────────────
  *
- * Host (slot 0):
- *   - Runs EmulatorJS, applies cheats
- *   - Captures canvas via captureStream(60)
- *   - Adds video track to peer connections
- *   - Receives guest input via data channel, applies via simulateInput()
- *   - Reads own input locally, applies via simulateInput()
+ *   Star topology centered on the host. The host initiates all WebRTC
+ *   connections — guests and spectators wait for incoming offers. This
+ *   is the opposite of lockstep mode (where lower slot initiates).
  *
- * Guest (slot 1-3):
- *   - Does NOT start the emulator
- *   - Receives video stream, displays in <video> element
- *   - Captures keyboard/gamepad input, sends to host via data channel
+ *   Host (slot 0):
+ *     - Runs EmulatorJS, applies game cheats
+ *     - Captures the emulator's WebGL canvas by blitting it onto a
+ *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
+ *       canvas is captured via captureStream(0) with manual frame
+ *       control (requestFrame()). This avoids expensive GPU readback
+ *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
+ *     - Adds the MediaStream video track to each peer's RTCPeerConnection
+ *     - Reads its own input locally and applies via simulateInput()
+ *     - Receives guest input via DataChannel and applies via simulateInput()
  *
- * Spectator (slot null):
- *   - Receives video stream only, no input sent
+ *   Guest (slot 1-3):
+ *     - Does NOT start the emulator — no WASM core loaded
+ *     - Receives the host's video stream and displays it in a <video>
+ *       element inserted into the game container
+ *     - Reads keyboard/gamepad input and sends Int32Array([inputMask])
+ *       (4 bytes) to the host over the DataChannel
+ *     - Only sends when input changes (delta encoding) to minimize
+ *       DataChannel overhead
+ *
+ *   Spectator (slot null):
+ *     - Same as guest but sends no input
+ *
+ * ── Video Encoding Optimization ───────────────────────────────────────────
+ *
+ *   SDP is munged before offer/answer to optimize for low-latency gaming:
+ *     - Codec preference: VP9 → H264 → VP8 (reorders m-line payload types)
+ *     - Bitrate floor: b=AS:10000 added after video c= line
+ *     - RTCRtpSender parameters: maxBitrate=5Mbps, maxFramerate=60,
+ *       degradationPreference='maintain-framerate' (drop resolution, not FPS)
+ *
+ *   On the receiving side, jitter buffer is minimized:
+ *     - playoutDelayHint = 0 (decode and display ASAP)
+ *     - jitterBufferTarget = 0 (Chrome 114+)
+ *
+ * ── Input Path ────────────────────────────────────────────────────────────
+ *
+ *   Host reads input via rAF-driven tick loop using the same readLocalInput()
+ *   as lockstep (keyboard keyCode tracking + GamepadManager profiles). Guest
+ *   input is applied via simulateInput() which is the EmulatorJS API for
+ *   setting button/axis state per player slot. Only changed bits are written
+ *   (diff against previous mask per slot).
+ *
+ *   DataChannel config: { ordered: false, maxRetransmits: 0 } — unreliable
+ *   delivery is acceptable for input since each message contains the full
+ *   current state, not a delta. Dropped packets just mean one frame of stale
+ *   input, which the next packet corrects.
+ *
+ * ── Debug Overlay ─────────────────────────────────────────────────────────
+ *
+ *   Updated every 30 frames (~0.5s) via RTCPeerConnection.getStats().
+ *   Host sees: codec, resolution, FPS, encode time, RTT, bandwidth.
+ *   Guest sees: codec, resolution, FPS, RTT, jitter, pipeline delay,
+ *   end-to-end delay (via requestVideoFrameCallback), packet loss, drops.
  */
 
 (function () {
   'use strict';
 
-  const GAME_ID     = 'ssb64';
   const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
   // Standard online cheats — applied on host only
@@ -65,7 +109,6 @@
   // ── State ─────────────────────────────────────────────────────────────────
 
   let socket             = null;
-  let sessionId          = null;
   let _playerSlot        = -1;
   let _isSpectator       = false;
   let _peers             = {};     // remoteSid → {pc, dc, slot}
@@ -134,7 +177,7 @@
     };
 
     peer.pc.onicecandidate = (e) => {
-      if (e.candidate) {
+      if (e.candidate && _peers[remoteSid] === peer) {
         socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
       }
     };
@@ -142,6 +185,7 @@
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
       if (s === 'failed' || s === 'disconnected') {
+        if (_peers[remoteSid] !== peer) return;
         console.log('[netplay] peer', remoteSid, 'connection', s);
         handlePeerDisconnect(remoteSid);
       }
@@ -314,6 +358,8 @@
     };
 
     ch.onclose = () => {
+      const current = _peers[remoteSid];
+      if (!current || current.dc !== ch) return;
       console.log('[netplay] DC closed with', remoteSid);
       handlePeerDisconnect(remoteSid);
     };
@@ -382,6 +428,7 @@
       const captureTrack = _hostStream.getVideoTracks()[0];
 
       function blitFrame() {
+        if (!_gameRunning) return;  // stop loop when game ends
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         captureTrack.requestFrame();  // signal new frame to captureStream
@@ -567,15 +614,13 @@
       const stats = await pc.getStats();
       let fps = '?', codec = '?', res = '?', rtt = '?';
       let jitter = '?', pktLost = 0, pktRecv = 0, dropped = 0;
-      let bitrateSend = '?', bitrateRecv = '?';
+      let bitrateSend = '?';
       let encodeTime = '?', qualLimit = '';
-      let totalBytesSent = 0, totalBytesRecv = 0;
 
       stats.forEach(s => {
         if (s.type === 'outbound-rtp' && s.kind === 'video') {
           fps = s.framesPerSecond || '?';
           res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
-          totalBytesSent = s.bytesSent || 0;
           if (s.totalEncodeTime && s.framesEncoded && s.framesEncoded > 0) {
             encodeTime = (s.totalEncodeTime / s.framesEncoded * 1000).toFixed(1) + 'ms';
           }
@@ -590,7 +635,6 @@
           pktLost = s.packetsLost || 0;
           pktRecv = s.packetsReceived || 0;
           dropped = s.framesDropped || 0;
-          totalBytesRecv = s.bytesReceived || 0;
         }
         if (s.type === 'candidate-pair' && s.state === 'succeeded') {
           rtt = s.currentRoundTripTime !== undefined
@@ -757,7 +801,6 @@
   function init(config) {
     _config = config;
     socket = config.socket;
-    sessionId = config.sessionId;
     _playerSlot = config.playerSlot;
     _isSpectator = config.isSpectator;
 

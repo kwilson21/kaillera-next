@@ -16,10 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 
 import socketio
 import uvicorn
-import uvloop
 
 from src.api.app import create_app
 from src.api.signaling import _cleanup_empty_rooms, configure_cors, sio
@@ -38,10 +38,16 @@ def run() -> None:
     )
 
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
+    if allowed_origin == "*":
+        log.warning("CORS allowed origin is '*' — set ALLOWED_ORIGIN for production")
     log.info("CORS allowed origin: %s", allowed_origin)
     configure_cors(allowed_origin)
 
     app = create_app()
+
+    @app.on_event("startup")
+    async def startup() -> None:
+        asyncio.create_task(_cleanup_empty_rooms())
 
     # Serve web/ as static files — must be mounted BEFORE Socket.IO wraps the app
     from fastapi.staticfiles import StaticFiles
@@ -56,11 +62,13 @@ def run() -> None:
     # Wrap FastAPI with Socket.IO ASGI middleware
     socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    # Use uvloop if available (not on all platforms)
+    loop_setting = "auto"
+    try:
+        import uvloop  # noqa: F401
+        loop_setting = "uvloop"
+    except ImportError:
+        pass
 
-    @app.on_event("startup")
-    async def startup() -> None:
-        asyncio.create_task(_cleanup_empty_rooms())
-
-    log.info("HTTP + Socket.IO listening on :8000")
-    uvicorn.run(socket_app, host="0.0.0.0", port=8000, log_level="info")
+    log.info("HTTP + Socket.IO listening on :8000 (loop=%s)", loop_setting)
+    uvicorn.run(socket_app, host="0.0.0.0", port=8000, log_level="info", loop=loop_setting)

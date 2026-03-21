@@ -1,31 +1,82 @@
 # kaillera-next
 
-A modern, cross-platform reimagining of Kaillera netplay. Play retro games online
-with friends — starting with SSB64 on Mupen64Plus — through a clean relay server and
-a desktop launcher that anyone can build a frontend against.
+Play retro games online with friends — no downloads, no emulator setup. Visit the URL, drop your ROM, and play.
 
-## Goals
+kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://emulatorjs.org). Players connect through WebRTC for low-latency peer-to-peer gameplay, with the server handling only room management and signaling.
 
-- Cross-platform (macOS, Linux, Windows)
-- Works with Mupen64Plus out of the box
-- Self-hostable relay servers
-- Open frontend protocol — build your own client
-- 4 players + spectators, KREC replay recording
+## How it works
 
-## Structure
+1. One player creates a room and shares the invite link
+2. Others join by pasting the link or room code
+3. Everyone drops their ROM file (drag-and-drop, cached locally)
+4. Host picks a mode and starts the game
+
+### Netplay modes
+
+**Lockstep** — All players run the emulator in perfect sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing for frame-accurate synchronization.
+
+**Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator exists.
+
+Both modes support spectators (receive video stream, no input) and late join (mid-game state sync).
+
+## Quick start
+
+```bash
+# Clone and install
+git clone https://github.com/user/kaillera-next.git
+cd kaillera-next
+pip install server/
+
+# Run
+cd server && python -c "from src.main import run; run()"
+# → http://localhost:8000
+```
+
+### Docker
+
+```bash
+docker build -t kaillera-next .
+docker run -p 8000:8000 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next
+```
+
+## Architecture
 
 ```
-kaillera-next/
-├── server/       # Python matchmaking + relay server (FastAPI + asyncio)
-├── launcher/     # Desktop launcher (Python + pywebview)
-└── protocol/     # Frontend WebSocket protocol spec (v2)
+┌──────────────────┐         ┌──────────────────┐
+│ Browser A        │         │ Browser B        │
+│ EmulatorJS +     │◄──P2P──►│ EmulatorJS +     │
+│ WebRTC mesh      │  WebRTC │ WebRTC mesh      │
+└────────┬─────────┘         └────────┬─────────┘
+         │  Socket.IO                 │
+         └────────────┬───────────────┘
+                      ▼
+           ┌─────────────────────┐
+           │ kaillera-next       │
+           │ FastAPI + Socket.IO │
+           │ :8000               │
+           └─────────────────────┘
 ```
 
-See [CLAUDE.md](CLAUDE.md) for architecture details and development notes.
+The server handles room creation, player coordination, and WebRTC signaling (~10 messages per connection). Once peers are connected, game data flows directly between browsers. The server is idle during gameplay (lockstep) or relays initial save states (late join).
 
-## Status
+## Project structure
 
-Early development — v1 targets a working two-player SSB64 session via relay.
+```
+server/        Python signaling server (FastAPI + Socket.IO)
+web/           Static frontend (HTML + JS)
+build/         WASM core build system (Docker + C patches)
+tests/         E2E tests (pytest + Playwright)
+```
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `ALLOWED_ORIGIN` | `*` | CORS origin — set to your domain in production |
+
+## Current status
+
+V1 is feature-complete: lobby, 4-player lockstep, streaming mode, spectators, gamepad support, late join, desync detection, and Docker deployment.
 
 ## License
 

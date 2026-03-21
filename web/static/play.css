@@ -44,43 +44,65 @@ body {
   background: #1a1a2e;
   border: 1px solid #2a2a40;
   border-radius: 12px;
-  padding: 1.5rem;
-  max-width: 500px;
+  padding: 1.25rem;
+  max-width: 460px;
   width: 90vw;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
 }
 
 .overlay-card h2 {
-  text-align: center;
-  margin-bottom: 1rem;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
 }
 
 #room-display {
-  font-size: 2rem;
-  letter-spacing: 0.2em;
+  font-size: 1.4rem;
+  letter-spacing: 0.15em;
   color: #6af;
 }
 
-#copy-link {
-  display: block;
-  width: 100%;
-  margin-bottom: 1rem;
+.copy-btn {
+  padding: 6px 14px !important;
+  font-size: 12px !important;
+  min-height: 32px !important;
+  background: #2a2a40 !important;
+  white-space: nowrap;
+}
+.copy-btn:hover { background: #3a3a55 !important; }
+
+.card-section {
+  background: #13132a;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
 }
 
 /* Player list */
 .player-slot {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: #0d0d1a;
-  border-radius: 6px;
-  margin-bottom: 4px;
+  border-radius: 5px;
+  margin-bottom: 3px;
+  font-size: 14px;
 }
 
 .player-slot .slot-num {
   color: #555;
   margin-right: 8px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: bold;
+  min-width: 20px;
 }
 
 .player-slot .name {
@@ -88,8 +110,9 @@ body {
 }
 
 .player-slot .name.empty {
-  color: #444;
+  color: #3a3a50;
   font-style: italic;
+  font-size: 13px;
 }
 
 .player-slot .gamepad {
@@ -100,40 +123,47 @@ body {
 .gamepad-detected { color: #6f6 !important; }
 
 #spectator-list {
-  font-size: 12px;
-  color: #777;
-  margin-top: 8px;
+  font-size: 11px;
+  color: #666;
+  margin-top: 6px;
+  padding: 0 2px;
 }
 
 /* Host controls */
 #host-controls {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.host-options-row {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  margin-top: 1rem;
+  font-size: 13px;
+  color: #ccc;
 }
 
 .mode-label {
   font-size: 13px;
   color: #888;
   white-space: nowrap;
-  align-self: center;
 }
 
 #mode-select {
   background: #0d0d1a;
   border: 1px solid #333;
-  border-radius: 6px;
+  border-radius: 5px;
   color: #eee;
-  padding: 8px;
-  font-size: 14px;
+  padding: 6px 8px;
+  font-size: 13px;
+  flex: 1;
 }
 
 #lockstep-options {
   display: flex;
-  gap: 12px;
-  font-size: 13px;
-  color: #ccc;
-  padding: 4px 0;
+  flex-direction: column;
+  gap: 4px;
 }
 #lockstep-options label {
   display: flex;
@@ -145,37 +175,49 @@ body {
   accent-color: #7c5cff;
 }
 .opt-hint {
-  color: #666;
+  color: #555;
   font-size: 11px;
 }
 
 #start-btn {
-  flex: 1;
-  font-size: 16px;
+  width: 100%;
+  font-size: 15px;
   background: #2a7a2a;
+  margin-top: 4px;
 }
 
 #start-btn:hover:not(:disabled) { background: #3a9a3a; }
-#start-btn:disabled { background: #2a2a40; color: #555; cursor: default; }
+#start-btn:disabled { background: #1a1a30; color: #444; cursor: default; }
 
 #guest-status {
   text-align: center;
-  color: #777;
-  margin-top: 1rem;
-  font-size: 14px;
+  color: #666;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+#gamepad-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 #gamepad-status {
-  text-align: center;
   font-size: 12px;
   color: #555;
-  margin-top: 12px;
+  flex: 1;
+}
+
+#gamepad-controls {
+  display: flex;
+  gap: 4px;
 }
 
 #engine-status {
   text-align: center;
   font-size: 11px;
-  color: #666;
+  color: #555;
   margin-top: 4px;
   min-height: 14px;
 }
@@ -194,14 +236,36 @@ button {
 
 button:hover { background: #4a6fa5; }
 
+.small-btn {
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  min-height: 28px !important;
+  background: #2a2a40 !important;
+}
+.small-btn:hover { background: #3a3a55 !important; }
+
+#remap-wizard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+  font-size: 13px;
+}
+#remap-prompt { color: #6af; flex: 1; }
+#remap-progress { color: #555; font-size: 11px; }
+
 #leave-btn {
   display: block;
   width: 100%;
-  margin-top: 1rem;
-  background: #5a3a3a;
+  margin-top: 8px;
+  background: #3a2a2a;
+  font-size: 13px;
+  padding: 10px;
+  min-height: 38px;
 }
 
-#leave-btn:hover { background: #7a4a4a; }
+#leave-btn:hover { background: #5a3a3a; }
 
 /* In-game toolbar — static bar, doesn't overlap game */
 #toolbar {
@@ -226,6 +290,12 @@ button:hover { background: #4a6fa5; }
   letter-spacing: 0.1em;
 }
 
+#toolbar-status {
+  font-size: 12px;
+  color: #6af;
+  margin-left: 8px;
+}
+
 .toolbar-spacer { flex: 1; }
 
 #toolbar button {
@@ -236,8 +306,30 @@ button:hover { background: #4a6fa5; }
 
 #toolbar-sync { background: #444; }
 #toolbar-sync:hover { background: #555; }
+.toolbar-toggle { background: #333; font-size: 11px !important; padding: 4px 10px !important; min-height: 28px !important; }
+.toolbar-toggle.active { background: #4a6; }
 #toolbar-end { background: #8a3a3a; }
 #toolbar-end:hover { background: #a44a4a; }
+
+/* In-game info overlay */
+#info-overlay {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.6);
+  padding: 6px 10px;
+  border-radius: 6px;
+  pointer-events: none;
+  line-height: 1.4;
+}
+#info-overlay.hidden { display: none; }
 
 /* Toast notifications */
 #toast-container {
@@ -315,11 +407,10 @@ button:hover { background: #4a6fa5; }
 
 /* ROM drop zone */
 .rom-drop {
-  border: 2px dashed #333;
-  border-radius: 8px;
-  padding: 1.5rem;
+  border: 2px dashed #2a2a40;
+  border-radius: 6px;
+  padding: 1rem;
   text-align: center;
-  margin-bottom: 1rem;
   cursor: pointer;
   transition: border-color 0.2s, background 0.2s;
 }

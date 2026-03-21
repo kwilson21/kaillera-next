@@ -34,6 +34,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return response
 
 
@@ -41,7 +42,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     """Create and return the FastAPI app."""
-    app = FastAPI(title="kaillera-next")
+    app = FastAPI(
+        title="kaillera-next",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.add_middleware(SecurityHeadersMiddleware)
 
     @app.get("/health")
@@ -65,6 +71,7 @@ def create_app() -> FastAPI:
             "player_count": len(room.players),
             "max_players": room.max_players,
             "has_password": room.password is not None,
+            "rom_hash": room.rom_hash,
         }
 
     @app.get("/list")

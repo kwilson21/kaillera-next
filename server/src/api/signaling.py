@@ -46,7 +46,7 @@ def configure_cors(origin: str) -> None:
 
 sio = socketio.AsyncServer(
     async_mode="asgi",
-    cors_allowed_origins="*",
+    cors_allowed_origins=[],  # Set by configure_cors() at startup
     max_http_buffer_size=4 * 1024 * 1024,  # 4MB
 )
 
@@ -68,6 +68,7 @@ class Room:
     # spectators: playerId -> {"socketId": sid, "playerName": ...}
     status: str = "lobby"       # "lobby" or "playing"
     mode: str | None = None     # "lockstep" or "streaming", set on start-game
+    rom_hash: str | None = None # SHA-256 of ROM, set on start-game
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -98,6 +99,7 @@ def _players_payload(room: Room) -> dict:
             pid: info
             for pid, info in room.spectators.items()
         },
+        "owner": room.owner,
     }
 
 
@@ -149,8 +151,24 @@ async def _leave(sid: str) -> None:
     if room.owner == sid and room.players:
         new_owner_info = next(iter(room.players.values()))
         new_owner_sid = new_owner_info["socketId"]
+        new_owner_pid = None
+        for pid, info in room.players.items():
+            if info["socketId"] == new_owner_sid:
+                new_owner_pid = pid
+                break
         room.owner = new_owner_sid
-        log.info("Room %s ownership transferred to %s", session_id, new_owner_sid)
+        # Move new owner to slot 0 (P1) if they're not already there
+        if new_owner_pid and room.slots.get(0) != new_owner_pid:
+            # Remove their old slot
+            old_slot = None
+            for s, pid in room.slots.items():
+                if pid == new_owner_pid:
+                    old_slot = s
+                    break
+            if old_slot is not None:
+                del room.slots[old_slot]
+            room.slots[0] = new_owner_pid
+        log.info("Room %s ownership transferred to %s (slot 0)", session_id, new_owner_sid)
         await sio.emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
 
     await sio.emit("users-updated", _players_payload(room), room=session_id)
@@ -169,11 +187,6 @@ async def connect(sid: str, environ: dict) -> None:
         raise socketio.exceptions.ConnectionRefusedError("Rate limited")
     register_sid(sid, ip)
     log.info("SIO connect %s (ip=%s)", sid, ip)
-
-
-@sio.on("startup")  # internal — called once at server start via create_task
-async def _noop(*_) -> None:
-    pass
 
 
 async def _cleanup_empty_rooms() -> None:
@@ -332,9 +345,13 @@ async def start_game(sid: str, data: dict) -> str | None:
     if mode not in _VALID_MODES:
         mode = "lockstep"
     room.mode = mode
+    rom_hash = data.get("romHash")
+    if rom_hash and isinstance(rom_hash, str) and len(rom_hash) == 64:
+        room.rom_hash = rom_hash
     await sio.emit("game-started", {
         "mode": room.mode,
         "rollbackEnabled": data.get("rollbackEnabled", False),
+        "romHash": room.rom_hash,
     }, room=session_id)
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
     return None

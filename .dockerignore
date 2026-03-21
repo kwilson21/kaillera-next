@@ -1,10 +1,39 @@
 .git
+.github
 .pytest_cache
+.claude
+.mcp.json
+.playwright-mcp
 __pycache__
 *.pyc
+*.pyo
+*.egg-info
+.venv
+dist
+
+# Build artifacts (WASM core compilation — very large)
+build/
+
+# V2 code not needed for Docker
+netplay/
+
+# Documentation and tests
 docs/
 tests/
-*.cht
+*.md
+
+# ROM files
 web/static/rom/
+web/static/roms/
+
+# Dev artifacts
+*.png
+*.cht
 web/static/ejs/cores/*.backup
 web/static/ejs/cores/*.forked
+
+# Environment and OS
+.env
+.DS_Store
+Dockerfile
+.dockerignore

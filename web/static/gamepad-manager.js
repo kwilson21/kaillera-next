@@ -46,7 +46,7 @@
         stickY: { index: 1, bits: [18, 19] },  // Y+→down(18), Y-→up(19)
       },
       axisButtons: {
-        2: { pos: (1 << 20), neg: (1 << 21) },  // R stick X: pos→CLeft(20), neg→CRight(21)
+        2: { pos: (1 << 21), neg: (1 << 20) },  // R stick X: pos(right)→CRight(21), neg(left)→CLeft(20) — core inverts X
         3: { pos: (1 << 22), neg: (1 << 23) },  // R stick Y: pos→CDown(22), neg→CUp(23)
       },
       deadzone: 0.3,
@@ -71,7 +71,7 @@
         stickY: { index: 1, bits: [18, 19] },  // Y+→down(18), Y-→up(19)
       },
       axisButtons: {
-        2: { pos: (1 << 20), neg: (1 << 21) },  // R stick X: pos→CLeft(20), neg→CRight(21)
+        2: { pos: (1 << 21), neg: (1 << 20) },  // R stick X: pos(right)→CRight(21), neg(left)→CLeft(20) — core inverts X
         3: { pos: (1 << 22), neg: (1 << 23) },  // R stick Y: pos→CDown(22), neg→CUp(23)
       },
       deadzone: 0.3,
@@ -228,9 +228,9 @@
       window.addEventListener('gamepadconnected', poll);
       window.addEventListener('gamepaddisconnected', poll);
 
-      // Polling loop as source of truth (1 second)
+      // Polling loop as source of truth (500ms for faster detection)
       if (_pollInterval) clearInterval(_pollInterval);
-      _pollInterval = setInterval(poll, 1000);
+      _pollInterval = setInterval(poll, 500);
     },
 
     stop: function () {

@@ -1,26 +1,141 @@
 /**
- * kaillera-next -- Lockstep Netplay Engine
+ * kaillera-next — Lockstep Netplay Engine
  *
- * 4-player mesh networking with spectators, drop handling, and late join:
- *   - Up to 4 players in a lockstep mesh (6 bidirectional connections)
- *   - Spectators receive canvas video stream from host, no lockstep participation
- *   - Graceful drop handling: remaining players continue without crashing
- *   - Late join: joiner requests save state from host when emulator is ready
+ * Deterministic lockstep netplay for up to 4 players running EmulatorJS
+ * (mupen64plus-next WASM core) in perfect sync. All players run their own
+ * emulator instance and exchange inputs each frame — no single host.
  *
- * Core mechanism:
- *   1. rAF interception captures the Emscripten main loop runner
- *   2. setInterval(16) tick loop for background-tab-safe ~60fps
- *   3. Each tick: read input -> send to all peers -> wait for all -> write to Wasm -> step
- *   4. Direct memory input via DataView writes to HEAPU8 (no simulateInput)
+ * ── Network Topology ──────────────────────────────────────────────────────
  *
- * Mesh initiation: lower slot creates data channel + sends offer.
- * Spectators never initiate -- players initiate connections TO spectators.
+ *   Players form a full mesh: up to 6 bidirectional WebRTC DataChannel
+ *   connections for 4 players (N*(N-1)/2). Each player sends their input
+ *   to every other player each frame. Spectators receive a canvas video
+ *   stream from the host (slot 0) but do not participate in lockstep.
+ *
+ *   Connection initiation rules:
+ *     - Normal join: lower slot number creates the DataChannel and sends
+ *       the WebRTC offer. Higher slot waits for incoming offer.
+ *     - Late join: the joining player always initiates (avoids race where
+ *       host's offer arrives before the joiner has registered listeners).
+ *     - Spectators: never initiate — players create connections TO them.
+ *
+ * ── Startup Sequence ──────────────────────────────────────────────────────
+ *
+ *   1. All players boot EmulatorJS independently and wait for the WASM
+ *      core to be ready (host waits 120+ frames, guests wait ~10 frames).
+ *   2. INPUT_BASE auto-discovery: calls _simulate_input(0, 0, 1) and scans
+ *      the first 4MB of HEAPU8 for the changed byte. This locates the core's
+ *      internal input_state array, which varies per WASM compilation.
+ *   3. Host captures a save state, gzip-compresses it, base64-encodes it,
+ *      and sends it to all guests via Socket.IO (save states are ~1.5MB,
+ *      too large for WebRTC DataChannels which have SCTP buffering limits).
+ *   4. RTT measurement: 3 ping-pong rounds over each DataChannel. The
+ *      median RTT determines auto frame delay: ceil(median_ms / 16.67),
+ *      clamped to [1, 9]. Both sides exchange their delay preference and
+ *      the maximum across all players becomes the effective DELAY_FRAMES.
+ *   5. All players load the same save state (double-load: first restores
+ *      CPU+RAM, then enterManualMode() captures rAF, second load fixes
+ *      any free-frame drift between the loads). Frame counter resets to 0.
+ *   6. Lockstep tick loop starts via setInterval(16).
+ *
+ * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
+ *
+ *   Emscripten's main loop is driven by requestAnimationFrame. To control
+ *   frame timing, we intercept rAF:
+ *     - Save the real requestAnimationFrame as _origRAF
+ *     - Replace window.requestAnimationFrame with an interceptor that
+ *       captures the callback (_pendingRunner) instead of scheduling it
+ *     - Call Module.resumeMainLoop() so Emscripten registers its runner
+ *       through our interceptor, giving us the callback
+ *     - stepOneFrame() calls _pendingRunner(frameTimeMs), advancing the
+ *       emulator by exactly one frame, then schedules a real rAF no-op
+ *       to force GL compositing
+ *
+ *   The tick loop uses setInterval(16) instead of rAF because rAF is
+ *   throttled to ~1fps in background tabs, which would stall the game.
+ *
+ * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
+ *
+ *   Each tick at frame N:
+ *     1. Read local input (keyboard via keyCode tracking + gamepad via
+ *        GamepadManager) → 24-bit mask (16 digital buttons + 4 analog
+ *        axis pairs encoded as bit pairs)
+ *     2. Send Int32Array([frameN, inputMask]) (8 bytes) to all peer DCs
+ *     3. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
+ *        inputs are ready to apply)
+ *     4. Check if all "input peers" have sent input for applyFrame.
+ *        Input peers = peers who have sent at least one input (excludes
+ *        late-joiners still booting). If missing:
+ *          - Stall: return early, retry via setTimeout(1) for sub-16ms
+ *            retry. After MAX_STALL_MS (30s), inject zero input to unstick.
+ *     5. Write all players' inputs to WASM memory via _simulate_input()
+ *        (iterates 16 digital buttons + 4 analog axis pairs per player)
+ *     6. Reset audio buffer, step one frame, feed audio samples to
+ *        AudioWorklet (or AudioBufferSourceNode fallback)
+ *     7. Increment frame counter. Periodically update debug overlay.
+ *
+ * ── Input Encoding ────────────────────────────────────────────────────────
+ *
+ *   24-bit mask packed into an Int32:
+ *     Bits  0-15: digital buttons (A, B, Start, D-pad, L, R, Z, etc.)
+ *     Bits 16-17: left stick X (bit 16 = right, bit 17 = left)
+ *     Bits 18-19: left stick Y (bit 18 = down, bit 19 = up)
+ *     Bits 20-21: C-stick X (right/left)
+ *     Bits 22-23: C-stick Y (down/up)
+ *   Analog axes are reconstructed as ±32767 from the bit pairs.
+ *
+ * ── Audio ─────────────────────────────────────────────────────────────────
+ *
+ *   OpenAL (Emscripten's default audio) is killed at lockstep start:
+ *   all AL sources stopped, AudioContext suspended, resume() overridden
+ *   to prevent browser auto-resume on user gestures. Instead, audio is
+ *   captured per-frame from WASM memory via custom core exports
+ *   (_kn_get_audio_ptr, _kn_get_audio_samples, _kn_reset_audio) and
+ *   fed to an AudioWorklet ring buffer. This ensures audio is frame-
+ *   locked to the lockstep tick and identical across all players.
+ *   Host also routes audio to a MediaStreamDestination for spectators.
+ *
+ * ── Deterministic Timing ──────────────────────────────────────────────────
+ *
+ *   With the patched (forked) WASM core, _kn_set_deterministic(1) is
+ *   called at lockstep start. This makes _emscripten_get_now() return a
+ *   monotonically increasing value based on frame count (set each frame
+ *   via _kn_set_frame_time). The stock (CDN) core falls back to a JS-
+ *   level performance.now() shim via window._kn_frameTime.
+ *
+ * ── Desync Detection & Resync ─────────────────────────────────────────────
+ *
+ *   Opt-in (rollbackEnabled flag). When enabled, the host hashes the
+ *   first 64KB of save state every _syncCheckInterval frames (~5s) using
+ *   FNV-1a and broadcasts "sync-hash:frame:hash" to all peers. If a
+ *   guest's hash differs, it sends "sync-request" and the host captures
+ *   + compresses + sends the full state via DataChannel in 64KB chunks.
+ *   The guest hot-swaps the state without stopping the tick loop.
+ *
+ * ── Late Join ─────────────────────────────────────────────────────────────
+ *
+ *   When a player joins a game already in progress:
+ *     1. Joiner boots emulator minimally, enters manual mode
+ *     2. Sends "request-late-join" via Socket.IO data-message
+ *     3. Host captures + compresses state, sends "late-join-state" with
+ *        the current frame number and effective delay
+ *     4. Joiner loads state, syncs frame counter to max(hostFrame,
+ *        lastRemoteFrame), pre-fills delay gap with zero input, starts
+ *        lockstep tick loop
+ *
+ * ── Drop Handling ─────────────────────────────────────────────────────────
+ *
+ *   When a peer's DataChannel closes or ICE connection fails:
+ *     - Their input in WASM memory is zeroed (neutral stick, no buttons)
+ *     - They're removed from the peer map and input tracking
+ *     - Remaining players continue — the tick loop handles zero active
+ *       peers gracefully (single-player mode)
+ *     - No reconnect attempt; the dropped player can re-join as late join
  */
 
 (function () {
   'use strict';
 
-  const GAME_ID     = 'ssb64';
   const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
   // Input delay in frames -- both peers buffer this many frames of input
@@ -29,7 +144,6 @@
   var DELAY_FRAMES = 2;
 
   var _rttSamples = [];
-  var _rttPingPending = false;
   var _rttComplete = false;
   var _rttPingCount = 0;
 
@@ -50,7 +164,6 @@
       console.log('[lockstep] RTT median: ' + median.toFixed(1) + 'ms -> auto delay: ' + delay);
       return;
     }
-    _rttPingPending = true;
     try {
       dc.send(JSON.stringify({ type: 'delay-ping', ts: performance.now() }));
     } catch (_) {
@@ -62,7 +175,6 @@
     var rtt = performance.now() - ts;
     _rttSamples.push(rtt);
     _rttPingCount++;
-    _rttPingPending = false;
     sendNextPing(dc);
     if (_rttComplete && _selfLockstepReady) {
       broadcastLockstepReady();
@@ -85,12 +197,7 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Desync detection: check every N frames (~2 seconds at 60fps).
-  // The emulator is non-deterministic (audio/timing reads performance.now()),
-  // so desyncs are inherent. Frequent resyncs keep games visually in sync.
-  const SYNC_CHECK_INTERVAL = 120;
-
-  // Standard online cheats (same as other prototypes)
+  // Standard online cheats
   const SSB64_ONLINE_CHEATS = [
     { desc: 'Have All Characters',   code: '810A4938 0FF0' },
     { desc: 'Have Mushroom Kingdom', code: '800A4937 00FF' },
@@ -138,7 +245,6 @@
   // -- State -----------------------------------------------------------------
 
   let socket             = null;
-  let sessionId          = null;
   let _playerSlot        = -1;      // 0-3 for players, null for spectators
   let _isSpectator       = false;
   // -- Audio bypass state --
@@ -150,12 +256,10 @@
   var _audioReady = false;
   let _peers             = {};      // remoteSid -> PeerState
   let _knownPlayers      = {};      // socketId -> {slot, playerName}
-  let _expectedPeerCount = 0;       // other players in room (excludes spectators)
   let _gameStarted       = false;
   let _selfEmuReady      = false;
   let _p1KeyMap          = null;
   let _heldKeys          = new Set();
-  var _ejsInputState     = new Int32Array(20); // captured from EJS simulateInput for player 0
 
   // Lockstep state
   let _lockstepReadyPeers = {};     // remoteSid -> true when peer signals lockstep-ready
@@ -214,7 +318,7 @@
     }
 
     try {
-      _audioCtx = new AudioContext({ sampleRate: _audioRate });
+      _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
 
       // Try AudioWorklet first (requires secure context), fall back to
       // AudioBufferSourceNode scheduling (works everywhere).
@@ -346,11 +450,9 @@
       window._playerSlot = _playerSlot;
     }
 
-    // Count expected peers (other players, excludes spectators)
     var otherPlayers = Object.values(players).filter(function (p) {
       return p.socketId !== socket.id;
     });
-    _expectedPeerCount = otherPlayers.length;
 
     // Establish mesh connections to other players
     // Normal: lower slot initiates (creates data channel + sends offer)
@@ -410,7 +512,7 @@
     };
 
     peer.pc.onicecandidate = function (e) {
-      if (e.candidate) {
+      if (e.candidate && _peers[remoteSid] === peer) {
         socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
       }
     };
@@ -418,6 +520,9 @@
     peer.pc.onconnectionstatechange = function () {
       var s = peer.pc.connectionState;
       if (s === 'failed' || s === 'disconnected') {
+        // Guard: only handle if this peer is still the current one for this SID.
+        // After stop()+init(), old connections fire stale events for replaced peers.
+        if (_peers[remoteSid] !== peer) return;
         console.log('[lockstep] peer', remoteSid, 'connection', s);
         handlePeerDisconnect(remoteSid);
       }
@@ -506,7 +611,10 @@
     ch.onopen = function () {
       var peer = _peers[remoteSid];
       if (!peer) return;
-      console.log('[lockstep] DC open with', remoteSid, 'slot:', peer.slot);
+      var known = _knownPlayers[remoteSid];
+      var peerName = known ? known.playerName : 'P' + ((peer.slot || 0) + 1);
+      console.log('[lockstep] DC open with', remoteSid, 'slot:', peer.slot, peerName);
+      setStatus('Connected to ' + peerName);
       peer.ready = true;
       ch.send('ready');
 
@@ -524,6 +632,9 @@
     };
 
     ch.onclose = function () {
+      // Guard: ignore stale close events from replaced peers after restart
+      var current = _peers[remoteSid];
+      if (!current || current.dc !== ch) return;
       console.log('[lockstep] DC closed with', remoteSid);
       handlePeerDisconnect(remoteSid);
     };
@@ -690,9 +801,15 @@
     // Host: waits for MIN_BOOT_FRAMES (needs a fully booted emulator to capture state).
     // Guest: only waits for Module to exist (will load host's state, no independent boot).
     // This prevents boot frame count differences that cause desync.
+    var _bootStatusCount = 0;
     var waitForEmu = function () {
       var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(waitForEmu, 100); return; }
+      if (!gm) {
+        _bootStatusCount++;
+        if (_bootStatusCount % 10 === 0) setStatus('Loading emulator...');
+        setTimeout(waitForEmu, 100);
+        return;
+      }
 
       var mod = gm.Module;
       var frames = mod && mod._get_current_frame_count
@@ -700,11 +817,13 @@
 
       if (_playerSlot === 0 && frames < MIN_BOOT_FRAMES) {
         // Host: needs full boot to capture a valid state
+        if (_bootStatusCount++ % 5 === 0) setStatus('Booting emulator... (' + frames + '/' + MIN_BOOT_FRAMES + ')');
         setTimeout(waitForEmu, 100);
         return;
       }
       if (_playerSlot !== 0 && frames < 10) {
         // Guest: just needs Module initialized (minimal frames)
+        if (_bootStatusCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
       }
@@ -787,14 +906,28 @@
     if (_isSpectator) return;
     if (_running) return;
 
-    // Wait for at least 1 player peer to be emu-ready
+    // Wait for ALL player peers to be emu-ready (not just 1)
     var playerPeers = Object.values(_peers).filter(function (p) {
       return p.slot !== null && p.slot !== undefined;
     });
-    var emuReadyCount = playerPeers.filter(function (p) { return p.emuReady; }).length;
-    if (emuReadyCount === 0) return;
+    if (playerPeers.length === 0) return;
 
-    console.log('[lockstep] ' + (emuReadyCount + 1) + ' emulators ready -- syncing initial state');
+    var readyPeers = playerPeers.filter(function (p) { return p.emuReady; });
+    var notReady = playerPeers.filter(function (p) { return !p.emuReady; });
+
+    if (notReady.length > 0) {
+      // Show who we're waiting for
+      var waiting = notReady.map(function (p) {
+        var known = _knownPlayers[Object.keys(_peers).find(function (sid) {
+          return _peers[sid] === p;
+        })];
+        return known ? known.playerName : 'P' + (p.slot + 1);
+      });
+      setStatus('Waiting for ' + waiting.join(', ') + ' to load... (' + readyPeers.length + '/' + playerPeers.length + ')');
+      return;
+    }
+
+    console.log('[lockstep] ' + (readyPeers.length + 1) + ' emulators ready -- syncing initial state');
     setStatus('Syncing...');
 
     if (_playerSlot === 0) {
@@ -817,7 +950,7 @@
       return _lockstepReadyPeers[sid];
     }).length;
 
-    if (readyCount === 0) return;
+    if (readyCount < playerPeerSids.length) return;
 
     // Negotiate delay: ceiling of all players
     var ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
@@ -1826,9 +1959,6 @@
     }
   }
 
-  // -- (old desync detection helpers removed — replaced by Worker-based sync) --
-
-
   // -- Init / Stop API -------------------------------------------------------
 
   var _config = null;
@@ -1836,7 +1966,6 @@
   function init(config) {
     _config = config;
     socket = config.socket;
-    sessionId = config.sessionId;
     _playerSlot = config.playerSlot;
     _isSpectator = config.isSpectator;
 
@@ -1862,7 +1991,6 @@
   function stop() {
     DELAY_FRAMES = 2;
     _rttSamples = [];
-    _rttPingPending = false;
     _rttComplete = false;
     _rttPingCount = 0;
 
@@ -1899,7 +2027,6 @@
     _lockstepReadyPeers = {};
     _guestStateBytes = null;
     _knownPlayers = {};
-    _expectedPeerCount = 0;
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
     _resyncCount = 0;
@@ -1951,6 +2078,20 @@
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
     setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
+    getInfo: function () {
+      var peers = getActivePeers();
+      var rtt = _rttSamples.length > 0
+        ? _rttSamples[Math.floor(_rttSamples.length / 2)]
+        : null;
+      return {
+        fps: _fpsCurrent,
+        frameDelay: DELAY_FRAMES,
+        ping: rtt,
+        playerCount: peers.length + 1,
+        frame: _frameNum,
+        running: _running,
+      };
+    },
   };
 
 })();
