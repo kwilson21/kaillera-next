@@ -26,7 +26,60 @@
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
-  const DELAY_FRAMES = 2;
+  var DELAY_FRAMES = 2;
+
+  var _rttSamples = [];
+  var _rttPingPending = false;
+  var _rttComplete = false;
+  var _rttPingCount = 0;
+
+  function startRttMeasurement(dc) {
+    _rttSamples = [];
+    _rttPingCount = 0;
+    _rttComplete = false;
+    sendNextPing(dc);
+  }
+
+  function sendNextPing(dc) {
+    if (_rttPingCount >= 3) {
+      _rttSamples.sort(function (a, b) { return a - b; });
+      var median = _rttSamples[Math.floor(_rttSamples.length / 2)];
+      var delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
+      _rttComplete = true;
+      if (window.setAutoDelay) window.setAutoDelay(delay);
+      console.log('[lockstep] RTT median: ' + median.toFixed(1) + 'ms -> auto delay: ' + delay);
+      return;
+    }
+    _rttPingPending = true;
+    try {
+      dc.send(JSON.stringify({ type: 'delay-ping', ts: performance.now() }));
+    } catch (_) {
+      _rttComplete = true;
+    }
+  }
+
+  function handleDelayPong(ts, dc) {
+    var rtt = performance.now() - ts;
+    _rttSamples.push(rtt);
+    _rttPingCount++;
+    _rttPingPending = false;
+    sendNextPing(dc);
+    if (_rttComplete && _selfLockstepReady) {
+      broadcastLockstepReady();
+      checkAllLockstepReady();
+    }
+  }
+
+  function broadcastLockstepReady() {
+    var dl = window.getDelayPreference ? window.getDelayPreference() : 2;
+    Object.values(_peers).forEach(function (p) {
+      if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
+        try {
+          p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl }));
+        } catch (_) {}
+      }
+    });
+  }
 
   // Maximum time (ms) to stall waiting for remote input before treating
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
@@ -461,6 +514,13 @@
 
       if (_selfEmuReady) ch.send('emu-ready');
 
+      // Host initiates RTT measurement for auto delay
+      if (_playerSlot === 0) {
+        startRttMeasurement(ch);
+      } else {
+        _rttComplete = true;
+      }
+
       // Late join: if game is running, host starts spectator stream for new spectator
       if (_running && _playerSlot === 0 && peer.slot === null) {
         startSpectatorStreamForPeer(remoteSid);
@@ -486,10 +546,6 @@
       if (typeof e.data === 'string') {
         if (e.data === 'ready')     { peer.ready = true; }
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
-        if (e.data === 'lockstep-ready') {
-          _lockstepReadyPeers[remoteSid] = true;
-          checkAllLockstepReady();
-        }
         // State sync: hash check from host
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
@@ -526,6 +582,17 @@
             var msg = JSON.parse(e.data);
             if (msg.type === 'save-state')      handleSaveStateMsg(msg);
             if (msg.type === 'late-join-state')  handleLateJoinState(msg);
+            if (msg.type === 'delay-ping') {
+              peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
+            }
+            if (msg.type === 'delay-pong') {
+              handleDelayPong(msg.ts, peer.dc);
+            }
+            if (msg.type === 'lockstep-ready') {
+              peer.delayValue = msg.delay || 2;
+              _lockstepReadyPeers[remoteSid] = true;
+              checkAllLockstepReady();
+            }
           } catch (_) {}
         }
         return;
@@ -739,6 +806,16 @@
 
     if (readyCount === 0) return;
 
+    // Negotiate delay: ceiling of all players
+    var ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
+    var maxDelay = ownDelay;
+    Object.values(_peers).forEach(function (p) {
+      if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
+    });
+    DELAY_FRAMES = maxDelay;
+    if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
+    console.log('[lockstep] delay negotiated: own=' + ownDelay + ' effective=' + maxDelay);
+
     console.log('[lockstep] ' + (readyCount + 1) + ' players lockstep-ready -- GO');
 
     var gm = window.EJS_emulator.gameManager;
@@ -790,11 +867,9 @@
 
       // Host is ready
       _selfLockstepReady = true;
-      Object.values(_peers).forEach(function (p) {
-        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
-          try { p.dc.send('lockstep-ready'); } catch (_) {}
-        }
-      });
+      if (_rttComplete) {
+        broadcastLockstepReady();
+      }
       checkAllLockstepReady();
     } catch (err) {
       console.log('[lockstep] failed to send initial state:', err);
@@ -812,11 +887,9 @@
       console.log('[lockstep] initial state decompressed (' + bytes.length + ' bytes)');
 
       _selfLockstepReady = true;
-      Object.values(_peers).forEach(function (p) {
-        if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
-          try { p.dc.send('lockstep-ready'); } catch (_) {}
-        }
-      });
+      if (_rttComplete) {
+        broadcastLockstepReady();
+      }
       checkAllLockstepReady();
     }).catch(function (err) {
       console.log('[lockstep] failed to decompress initial state:', err);
@@ -848,6 +921,7 @@
         type: 'late-join-state',
         frame: _frameNum,
         data: b64,
+        effectiveDelay: DELAY_FRAMES,
       });
     } catch (err) {
       console.log('[lockstep] failed to send late-join state:', err);
@@ -867,6 +941,11 @@
       if (!gm) {
         console.log('[lockstep] gameManager not ready');
         return;
+      }
+
+      if (msg.effectiveDelay) {
+        DELAY_FRAMES = msg.effectiveDelay;
+        console.log('[lockstep] late-join: using room delay ' + DELAY_FRAMES);
       }
 
       gm.loadState(bytes);
@@ -1743,6 +1822,12 @@
   }
 
   function stop() {
+    DELAY_FRAMES = 2;
+    _rttSamples = [];
+    _rttPingPending = false;
+    _rttComplete = false;
+    _rttPingCount = 0;
+
     // Stop lockstep tick loop
     stopSync();
 
