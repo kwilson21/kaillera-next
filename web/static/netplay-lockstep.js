@@ -684,7 +684,7 @@
     setStatus('Starting emulator...');
     triggerEmulatorStart();
     applyStandardCheats();
-    disableEJSKeyboard();
+    disableEJSInput();
 
     // Wait for gameManager AND for the emulator to be ready.
     // Host: waits for MIN_BOOT_FRAMES (needs a fully booted emulator to capture state).
@@ -1172,15 +1172,7 @@
       }
     }
 
-    // Block EJS's built-in gamepad polling during the emulator step.
-    // EJS maps physical buttons → RetroArch indices using its own mapping,
-    // which conflicts with our custom profile. Without this, EJS overwrites
-    // our _simulate_input values for buttons 8+ (A, Z, L, R, C-buttons).
-    // Override on prototype — EJS may cache the instance method reference.
-    var _origProtoGG = Navigator.prototype.getGamepads;
-    Navigator.prototype.getGamepads = function () { return []; };
     runner(frameTimeMs);
-    Navigator.prototype.getGamepads = _origProtoGG;
 
     // Force GL composite via real rAF no-op
     _origRAF.call(window, function () {});
@@ -1632,17 +1624,27 @@
     }
   }
 
-  function disableEJSKeyboard() {
+  function disableEJSInput() {
     var attempt = function () {
-      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(attempt, 200); return; }
-      gm.setKeyboardEnabled(false);
       var ejs = window.EJS_emulator;
+      var gm = ejs && ejs.gameManager;
+      if (!gm) { setTimeout(attempt, 200); return; }
+
+      // Disable EJS keyboard handling
+      gm.setKeyboardEnabled(false);
       var parent = ejs.elements && ejs.elements.parent;
       if (parent) {
         var block = function (e) { e.stopImmediatePropagation(); };
         parent.addEventListener('keydown', block, true);
         parent.addEventListener('keyup',   block, true);
+      }
+
+      // Disable EJS gamepad handling — stop the 10ms polling loop
+      // and prevent restart. We handle all gamepad input ourselves
+      // via GamepadManager + custom profile mapping.
+      if (ejs.gamepad) {
+        if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
+        ejs.gamepad.loop = function () {};
       }
     };
     attempt();
