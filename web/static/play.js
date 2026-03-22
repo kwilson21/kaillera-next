@@ -28,6 +28,16 @@
   var _romHash = null;           // SHA-256 hex of loaded ROM
   var _hostRomHash = null;       // host's ROM hash for late-join verification
   var _pendingLateJoin = false;  // waiting for ROM before late-join init
+  var _romSharingEnabled = false;   // room-level: host has sharing toggled on
+  var _romSharingDecision = null;   // 'accepted', 'declined', or null (page-lifetime)
+  var _romTransferInProgress = false;
+  var _romTransferChunks = [];
+  var _romTransferHeader = null;
+  var _romTransferDC = null;        // active rom-transfer DataChannel (receiver side)
+  var _romTransferDCs = {};         // active rom-transfer DataChannels (sender side, keyed by sid)
+  var _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
+  var ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
+  var ROM_CHUNK_SIZE = 64 * 1024;        // 64KB
 
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -64,6 +74,8 @@
     socket.on('game-started', onGameStarted);
     socket.on('game-ended', onGameEnded);
     socket.on('room-closed', onRoomClosed);
+    socket.on('rom-sharing-updated', onRomSharingUpdated);
+    socket.on('data-message', onDataMessageForRomSharing);
   }
 
   function onConnect() {
@@ -126,8 +138,16 @@
             // Store host's ROM hash for verification
             _hostRomHash = roomData.rom_hash || null;
 
-            // If no ROM cached, show overlay with ROM drop zone so user can load one
+            // If no ROM cached, check if host is sharing
             if (!_romBlob && !_romBlobUrl) {
+              if (roomData.rom_sharing) {
+                // Show accept/decline prompt instead of ROM drop
+                _romSharingEnabled = true;
+                _pendingLateJoin = true;
+                showLateJoinRomPrompt();
+                updateRomSharingUI();
+                return;
+              }
               _pendingLateJoin = true;
               showLateJoinRomPrompt();
               return;
@@ -162,12 +182,26 @@
     var spectators = data.spectators || {};
     var ownerSid = data.owner || null;
 
+    // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
+    if (data.romSharing !== undefined) {
+      _romSharingEnabled = !!data.romSharing;
+    }
+
     // Update my slot
     var entries = Object.values(players);
     for (var i = 0; i < entries.length; i++) {
       if (entries[i].socketId === socket.id) {
         mySlot = entries[i].slot;
         break;
+      }
+    }
+
+    // Detect spectator → player transition (via claim-slot)
+    var nowPlayer = mySlot !== null && mySlot !== undefined;
+    if (isSpectator && nowPlayer) {
+      isSpectator = false;
+      if (_romSharingEnabled && _romSharingDecision === null) {
+        updateRomSharingUI();
       }
     }
 
@@ -261,6 +295,22 @@
     // Clear stale engine status
     var statusEl = document.getElementById('engine-status');
     if (statusEl) statusEl.textContent = '';
+    // Clean up ROM transfer state (decision persists for page lifetime)
+    _romTransferInProgress = false;
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    if (_romTransferDC) {
+      try { _romTransferDC.close(); } catch (_) {}
+      _romTransferDC = null;
+    }
+    Object.keys(_romTransferDCs).forEach(function (sid) {
+      try { _romTransferDCs[sid].close(); } catch (_) {}
+    });
+    _romTransferDCs = {};
+    if (_romAcceptPollInterval) {
+      clearInterval(_romAcceptPollInterval);
+      _romAcceptPollInterval = null;
+    }
   }
 
   function onRoomClosed(data) {
@@ -273,6 +323,373 @@
     var msg = reason === 'host-left' ? 'Host left — returning to lobby...' : 'Room closed';
     showToast(msg);
     setTimeout(function () { window.location.href = '/'; }, 2000);
+  }
+
+  // ── ROM Sharing ──────────────────────────────────────────────────────
+
+  function onRomSharingUpdated(data) {
+    var wasEnabled = _romSharingEnabled;
+    _romSharingEnabled = !!data.romSharing;
+
+    // If sharing was just disabled and we're mid-transfer, cancel
+    if (wasEnabled && !_romSharingEnabled && _romTransferInProgress) {
+      _romTransferInProgress = false;
+      _romTransferChunks = [];
+      _romTransferHeader = null;
+      if (_romTransferDC) {
+        try { _romTransferDC.close(); } catch (_) {}
+        _romTransferDC = null;
+      }
+      showToast('ROM sharing disabled by host');
+    }
+
+    updateRomSharingUI();
+  }
+
+  function onDataMessageForRomSharing(data) {
+    // Socket.IO fallback for rom-accepted (broadcast to all peers; only host acts)
+    if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
+      console.log('[play] peer', data.sender, 'accepted ROM sharing (via socket)');
+      startRomTransferTo(data.sender);
+    }
+  }
+
+  function toggleRomSharing() {
+    var cb = document.getElementById('opt-rom-sharing');
+    if (!cb) return;
+    var enabled = cb.checked;
+    if (enabled && !_romBlob) {
+      cb.checked = false;
+      showToast('Load a ROM file before sharing');
+      return;
+    }
+    socket.emit('rom-sharing-toggle', { enabled: enabled });
+    // If disabling, close any active rom-transfer DataChannels
+    if (!enabled) {
+      Object.keys(_romTransferDCs).forEach(function (sid) {
+        try { _romTransferDCs[sid].close(); } catch (_) {}
+      });
+      _romTransferDCs = {};
+    }
+  }
+
+  function updateRomSharingUI() {
+    var romDrop = document.getElementById('rom-drop');
+    var prompt = document.getElementById('rom-sharing-prompt');
+    var progress = document.getElementById('rom-transfer-progress');
+
+    // Host never sees the prompt/progress
+    if (isHost) return;
+    // Spectators don't need ROMs
+    if (isSpectator) return;
+
+    if (_romSharingEnabled && _romSharingDecision === null) {
+      // Show accept/decline prompt, hide drop zone
+      if (romDrop) romDrop.style.display = 'none';
+      if (prompt) prompt.style.display = '';
+      if (progress) progress.style.display = 'none';
+    } else if (_romSharingEnabled && _romSharingDecision === 'accepted' && _romTransferInProgress) {
+      // Transfer in progress — show progress bar
+      if (romDrop) romDrop.style.display = 'none';
+      if (prompt) prompt.style.display = 'none';
+      if (progress) progress.style.display = '';
+    } else if (_romSharingEnabled && _romSharingDecision === 'accepted' && !_romTransferInProgress && _romBlob) {
+      // Transfer complete — show loaded state in drop zone
+      if (romDrop) { romDrop.style.display = ''; romDrop.classList.add('loaded'); }
+      if (prompt) prompt.style.display = 'none';
+      if (progress) progress.style.display = 'none';
+    } else {
+      // Default: show normal drop zone
+      if (romDrop) romDrop.style.display = '';
+      if (prompt) prompt.style.display = 'none';
+      if (progress) progress.style.display = 'none';
+    }
+  }
+
+  function findHostSid() {
+    if (!lastUsersData || !lastUsersData.players) return null;
+    var players = lastUsersData.players;
+    for (var pid in players) {
+      if (players[pid].slot === 0) return players[pid].socketId;
+    }
+    return null;
+  }
+
+  function acceptRomSharing() {
+    _romSharingDecision = 'accepted';
+    _romTransferInProgress = true;
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    updateRomSharingUI();
+
+    // Mid-game join: start engine in connect-only mode to get WebRTC
+    if (!engine && gameRunning) {
+      initEngine();
+      // Poll for host DC to open, then send rom-accepted signal
+      if (_romAcceptPollInterval) clearInterval(_romAcceptPollInterval);
+      _romAcceptPollInterval = setInterval(function () {
+        var hostSid = findHostSid();
+        if (!hostSid) return;
+        var peers = window._peers || {};
+        var hostPeer = peers[hostSid];
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          clearInterval(_romAcceptPollInterval);
+          _romAcceptPollInterval = null;
+          hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
+        }
+      }, 200);
+      setTimeout(function () {
+        if (_romAcceptPollInterval) {
+          clearInterval(_romAcceptPollInterval);
+          _romAcceptPollInterval = null;
+        }
+      }, 15000);
+      return;
+    }
+
+    // Signal host: send over DataChannel if engine is connected, else Socket.IO
+    if (engine && engine.getPeerConnection) {
+      var hostSid = findHostSid();
+      if (hostSid) {
+        var peers = window._peers || {};
+        var hostPeer = peers[hostSid];
+        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+          hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
+          return;
+        }
+      }
+    }
+    // Fallback: Socket.IO data-message
+    socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
+  }
+
+  function declineRomSharing() {
+    _romSharingDecision = 'declined';
+    updateRomSharingUI();
+  }
+
+  function cancelRomTransfer() {
+    _romTransferInProgress = false;
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    if (_romTransferDC) {
+      try { _romTransferDC.close(); } catch (_) {}
+      _romTransferDC = null;
+    }
+    if (_romAcceptPollInterval) {
+      clearInterval(_romAcceptPollInterval);
+      _romAcceptPollInterval = null;
+    }
+    updateRomSharingUI();
+    showToast('ROM transfer cancelled');
+  }
+
+  // ── ROM Transfer: Host sending ──────────────────────────────────────
+
+  function startRomTransferTo(peerSid) {
+    if (!_romBlob || !isHost) return;
+    if (_romBlob.size > ROM_MAX_SIZE) {
+      console.log('[play] ROM too large to share:', _romBlob.size);
+      return;
+    }
+    var pc = engine && engine.getPeerConnection ? engine.getPeerConnection(peerSid) : null;
+    if (!pc) {
+      console.log('[play] no peer connection for', peerSid);
+      return;
+    }
+
+    var dc = pc.createDataChannel('rom-transfer', { ordered: true });
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+    _romTransferDCs[peerSid] = dc;
+
+    dc.onopen = function () {
+      console.log('[play] rom-transfer DC open to', peerSid);
+      sendRomOverChannel(dc, peerSid);
+    };
+    dc.onclose = function () {
+      delete _romTransferDCs[peerSid];
+    };
+    dc.onerror = function (e) {
+      console.log('[play] rom-transfer DC error:', peerSid, e);
+      delete _romTransferDCs[peerSid];
+    };
+  }
+
+  function sendRomOverChannel(dc, peerSid) {
+    var romName = localStorage.getItem('kaillera-rom-name') || 'rom.z64';
+    var header = { type: 'rom-header', name: romName, size: _romBlob.size };
+    if (_romHash) header.hash = _romHash;
+    dc.send(JSON.stringify(header));
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var buffer = reader.result;
+      var offset = 0;
+
+      function sendNextChunk() {
+        if (dc.readyState !== 'open') return;
+        while (offset < buffer.byteLength) {
+          if (dc.bufferedAmount > 1024 * 1024) {
+            dc.onbufferedamountlow = function () {
+              dc.onbufferedamountlow = null;
+              sendNextChunk();
+            };
+            return;
+          }
+          var end = Math.min(offset + ROM_CHUNK_SIZE, buffer.byteLength);
+          dc.send(buffer.slice(offset, end));
+          offset = end;
+        }
+        // All chunks sent
+        dc.send(JSON.stringify({ type: 'rom-complete' }));
+        console.log('[play] ROM transfer complete to', peerSid);
+      }
+
+      sendNextChunk();
+    };
+    reader.readAsArrayBuffer(_romBlob);
+  }
+
+  // ── ROM Transfer: Joiner receiving ──────────────────────────────────
+
+  function onExtraDataChannel(remoteSid, channel) {
+    if (channel.label !== 'rom-transfer') return;
+    if (_romSharingDecision !== 'accepted') {
+      channel.close();
+      return;
+    }
+
+    console.log('[play] received rom-transfer DataChannel from', remoteSid);
+    _romTransferDC = channel;
+    channel.binaryType = 'arraybuffer';
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    _romTransferInProgress = true;
+    var bytesReceived = 0;
+
+    channel.onmessage = function (e) {
+      if (typeof e.data === 'string') {
+        try {
+          var msg = JSON.parse(e.data);
+          if (msg.type === 'rom-header') {
+            if (msg.size > ROM_MAX_SIZE) {
+              showToast('ROM too large — loading manually');
+              channel.close();
+              cancelRomTransfer();
+              return;
+            }
+            _romTransferHeader = msg;
+            bytesReceived = 0;
+            updateRomProgress(0, msg.size);
+          } else if (msg.type === 'rom-complete') {
+            finishRomTransfer();
+          }
+        } catch (_) {}
+      } else if (e.data instanceof ArrayBuffer) {
+        _romTransferChunks.push(new Uint8Array(e.data));
+        bytesReceived += e.data.byteLength;
+        if (_romTransferHeader) {
+          updateRomProgress(bytesReceived, _romTransferHeader.size);
+        }
+      }
+    };
+
+    channel.onclose = function () {
+      if (_romTransferInProgress && !_romBlob) {
+        showToast('ROM transfer interrupted');
+        _romTransferInProgress = false;
+        _romTransferDC = null;
+        updateRomSharingUI();
+      }
+    };
+
+    updateRomSharingUI();
+  }
+
+  function updateRomProgress(received, total) {
+    var bar = document.getElementById('rom-progress-bar');
+    var text = document.getElementById('rom-progress-text');
+    var pct = total > 0 ? Math.round((received / total) * 100) : 0;
+    if (bar) bar.style.width = pct + '%';
+    if (text) {
+      var recMB = (received / (1024 * 1024)).toFixed(1);
+      var totMB = (total / (1024 * 1024)).toFixed(1);
+      text.textContent = 'Receiving ROM... ' + pct + '% (' + recMB + ' / ' + totMB + ' MB)';
+    }
+  }
+
+  function finishRomTransfer() {
+    var totalSize = 0;
+    for (var i = 0; i < _romTransferChunks.length; i++) {
+      totalSize += _romTransferChunks[i].byteLength;
+    }
+
+    if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
+      showToast('ROM transfer size mismatch — load manually');
+      _romTransferInProgress = false;
+      _romTransferChunks = [];
+      updateRomSharingUI();
+      return;
+    }
+
+    var blob = new Blob(_romTransferChunks);
+    var displayName = (_romTransferHeader && _romTransferHeader.name) || 'rom.z64';
+    var expectedHash = _romTransferHeader ? _romTransferHeader.hash : null;
+
+    // Set ROM data (ephemeral — do NOT cache to IndexedDB)
+    _romBlob = blob;
+    if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+    _romBlobUrl = URL.createObjectURL(blob);
+    window.EJS_gameUrl = _romBlobUrl;
+
+    _romTransferInProgress = false;
+    _romTransferChunks = [];
+    _romTransferDC = null;
+
+    // Verify hash if provided
+    var reader = new FileReader();
+    reader.onload = function () {
+      hashArrayBuffer(reader.result).then(function (hash) {
+        _romHash = hash;
+        if (expectedHash && hash !== expectedHash) {
+          showToast('ROM hash mismatch — may cause desync');
+        }
+        afterRomTransferComplete(displayName);
+      }).catch(function () {
+        afterRomTransferComplete(displayName);
+      });
+    };
+    reader.readAsArrayBuffer(blob);
+  }
+
+  function afterRomTransferComplete(displayName) {
+    console.log('[play] ROM transfer complete:', displayName);
+
+    // Update drop zone to show loaded state
+    var romDrop = document.getElementById('rom-drop');
+    var statusEl = document.getElementById('rom-status');
+    if (romDrop) romDrop.classList.add('loaded');
+    if (statusEl) statusEl.textContent = 'Loaded: ' + displayName + ' (from host)';
+
+    updateRomSharingUI();
+
+    // If we were waiting for ROM before booting (late join or connect-only mode),
+    // boot the emulator now
+    if (gameRunning && !window.EJS_emulator) {
+      bootEmulator();
+    }
+    // If we were in a pending late-join, dismiss the prompt
+    if (_pendingLateJoin) {
+      dismissLateJoinPrompt();
+    }
+  }
+
+  function onUnhandledEngineMessage(remoteSid, msg) {
+    if (msg.type === 'rom-accepted' && isHost && _romSharingEnabled) {
+      console.log('[play] peer', remoteSid, 'accepted ROM sharing');
+      startRomTransferTo(remoteSid);
+    }
   }
 
   function destroyEmulator() {
@@ -429,6 +846,10 @@
     if (drop) drop.classList.add('loaded');
     var statusEl = document.getElementById('rom-status');
     if (statusEl) statusEl.textContent = 'Loaded: ' + displayName;
+
+    // Enable ROM sharing checkbox if host
+    var romShareCb = document.getElementById('opt-rom-sharing');
+    if (romShareCb && isHost) romShareCb.disabled = false;
 
     // Compute ROM hash and proceed with any pending late-join
     var reader = new FileReader();
@@ -601,7 +1022,12 @@
 
   function initEngine() {
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
-    bootEmulator();
+    // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
+    if (_romBlob || _romBlobUrl) {
+      bootEmulator();
+    } else {
+      console.log('[play] initEngine: connect-only mode (no ROM yet)');
+    }
 
     var Engine = mode === 'streaming'
       ? window.NetplayStreaming
@@ -637,6 +1063,18 @@
       lateJoin: _lateJoin,
     });
     _lateJoin = false;
+
+    // Register ROM sharing delegation hooks
+    if (engine.onExtraDataChannel) {
+      engine.onExtraDataChannel(function (remoteSid, channel) {
+        onExtraDataChannel(remoteSid, channel);
+      });
+    }
+    if (engine.onUnhandledMessage) {
+      engine.onUnhandledMessage(function (remoteSid, msg) {
+        onUnhandledEngineMessage(remoteSid, msg);
+      });
+    }
   }
 
   function startGame() {
@@ -1408,11 +1846,49 @@
     var lockstepOpts = document.getElementById('lockstep-options');
     if (modeSelect && lockstepOpts) {
       var updateOpts = function () {
-        lockstepOpts.style.display = modeSelect.value === 'lockstep' ? '' : 'none';
+        var isLockstep = modeSelect.value === 'lockstep';
+        lockstepOpts.style.display = isLockstep ? '' : 'none';
+        // Hide ROM sharing options in streaming mode
+        var romSharingRow = document.getElementById('rom-sharing-options');
+        var romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
+        if (romSharingRow) romSharingRow.style.display = isLockstep ? '' : 'none';
+        if (!isLockstep && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
+        // Auto-disable sharing when switching to streaming
+        if (!isLockstep) {
+          var cb = document.getElementById('opt-rom-sharing');
+          if (cb && cb.checked) {
+            cb.checked = false;
+            socket.emit('rom-sharing-toggle', { enabled: false });
+          }
+        }
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();
     }
+
+    // ROM sharing toggle
+    var romShareCb = document.getElementById('opt-rom-sharing');
+    if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
+
+    // Show/hide disclaimer based on checkbox
+    var romDisclaimer = document.getElementById('rom-sharing-disclaimer');
+    if (romShareCb && romDisclaimer) {
+      var updateDisclaimer = function () {
+        romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
+      };
+      romShareCb.addEventListener('change', updateDisclaimer);
+      updateDisclaimer();
+    }
+
+    // ROM sharing accept/decline/cancel buttons
+    var romAcceptBtn = document.getElementById('rom-accept-btn');
+    if (romAcceptBtn) romAcceptBtn.addEventListener('click', acceptRomSharing);
+
+    var romDeclineBtn = document.getElementById('rom-decline-btn');
+    if (romDeclineBtn) romDeclineBtn.addEventListener('click', declineRomSharing);
+
+    var romCancelBtn = document.getElementById('rom-transfer-cancel');
+    if (romCancelBtn) romCancelBtn.addEventListener('click', cancelRomTransfer);
 
     // Delay picker
     var delayAuto = document.getElementById('delay-auto');
