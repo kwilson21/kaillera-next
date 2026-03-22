@@ -60,6 +60,7 @@
 
   function connect() {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
+    window._socket = socket;  // expose for E2E tests
 
     socket.on('connect', onConnect);
     socket.on('connect_error', function (e) {
