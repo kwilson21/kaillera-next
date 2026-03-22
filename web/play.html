@@ -169,6 +169,16 @@
       <span id="game-loading-text">Loading...</span>
     </div>
   </div>
+
+  <!-- Reconnect overlay -->
+  <div id="reconnect-overlay" class="hidden">
+    <div class="game-loading-content">
+      <div class="game-loading-spinner"></div>
+      <span id="reconnect-text">Connection lost — reconnecting...</span>
+      <button id="reconnect-rejoin" class="hidden" style="margin-top:12px;padding:8px 16px;cursor:pointer;">Rejoin</button>
+    </div>
+  </div>
+
   <script>
     var EJS_player       = '#game';
     var EJS_core         = 'n64';

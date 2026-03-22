@@ -1192,6 +1192,38 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
+      onReconnecting: function (sid, isReconnecting) {
+        var overlay = document.getElementById('reconnect-overlay');
+        var text = document.getElementById('reconnect-text');
+        var rejoinBtn = document.getElementById('reconnect-rejoin');
+        if (!overlay) return;
+        if (isReconnecting) {
+          overlay.classList.remove('hidden');
+          if (text) text.textContent = 'Connection lost — reconnecting...';
+          if (rejoinBtn) rejoinBtn.classList.add('hidden');
+        } else {
+          overlay.classList.add('hidden');
+          // Check if we need to show rejoin (all peers gone)
+          var info = engine && engine.getInfo ? engine.getInfo() : null;
+          if (info && info.playerCount <= 1 && info.running) {
+            overlay.classList.remove('hidden');
+            if (text) text.textContent = 'Reconnection failed';
+            if (rejoinBtn) {
+              rejoinBtn.classList.remove('hidden');
+              rejoinBtn.onclick = function () {
+                overlay.classList.add('hidden');
+                window.location.reload();
+              };
+            }
+          }
+        }
+      },
+      onPeerReconnected: function (sid) {
+        // Resume ROM transfer if waiting
+        if (_romTransferWaitingResume && engine && engine.getPeerConnection) {
+          startRomTransferTo(sid);
+        }
+      },
       initialPlayers: lastUsersData,
       lateJoin: _lateJoin,
     });
@@ -1237,6 +1269,14 @@
   }
 
   function leaveGame() {
+    // Notify peers this is intentional (prevents reconnect attempt)
+    if (engine && window._peers) {
+      Object.values(window._peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send('leaving'); } catch (_) {}
+        }
+      });
+    }
     socket.emit('leave-room', {});
     if (engine) { engine.stop(); engine = null; }
     window.location.href = '/';
