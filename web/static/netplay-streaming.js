@@ -310,22 +310,26 @@
     const peer = _peers[senderSid];
     if (!peer) return;
 
-    if (data.offer) {
-      await peer.pc.setRemoteDescription(data.offer);
-      await drainCandidates(peer);
-      const answer = await peer.pc.createAnswer();
-      await peer.pc.setLocalDescription(answer);
-      socket.emit('webrtc-signal', { target: senderSid, answer });
-    } else if (data.answer) {
-      await peer.pc.setRemoteDescription(data.answer);
-      await drainCandidates(peer);
-    } else if (data.candidate) {
-      if (peer.remoteDescSet) {
-        try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
-      } else {
-        if (!peer.pendingCandidates) peer.pendingCandidates = [];
-        peer.pendingCandidates.push(data.candidate);
+    try {
+      if (data.offer) {
+        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        await drainCandidates(peer);
+        const answer = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(answer);
+        socket.emit('webrtc-signal', { target: senderSid, answer });
+      } else if (data.answer) {
+        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await drainCandidates(peer);
+      } else if (data.candidate) {
+        if (peer.remoteDescSet) {
+          try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
+        } else {
+          if (!peer.pendingCandidates) peer.pendingCandidates = [];
+          peer.pendingCandidates.push(data.candidate);
+        }
       }
+    } catch (err) {
+      console.log('[netplay] WebRTC signal error:', err.message || err);
     }
   }
 
@@ -782,16 +786,32 @@
   // ── Emulator start ─────────────────────────────────────────────────────
 
   function triggerEmulatorStart() {
+    let attempts = 0;
     const attempt = () => {
-      const btn = document.querySelector('.ejs_start_button');
-      if (btn) { btn.click(); return; }
-      const ejs = window.EJS_emulator;
-      if (ejs && typeof ejs.startButtonClicked === 'function') {
-        ejs.startButtonClicked(); return;
+      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      if (gm && gm.Module) {
+        console.log('[netplay] emulator already running (auto-start)');
+        enableMobileTouch();
+        return;
       }
-      setTimeout(attempt, 200);
+      const btn = document.querySelector('.ejs_start_button');
+      if (btn) {
+        if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
+        btn.click();
+        return;
+      }
+      if (++attempts < 150) setTimeout(attempt, 200);
     };
     attempt();
+  }
+
+  function enableMobileTouch() {
+    if (!('ontouchstart' in window)) return;
+    const ejs = window.EJS_emulator;
+    if (!ejs || ejs.touch) return;
+    ejs.touch = true;
+    if (ejs.virtualGamepad) ejs.virtualGamepad.style.display = '';
+    console.log('[netplay] enabled mobile touch controls');
   }
 
   // -- Init / Stop API -------------------------------------------------------

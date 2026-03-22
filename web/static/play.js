@@ -454,27 +454,38 @@
   var _ROM_EXTS = ['.z64', '.n64', '.v64', '.ndd'];
 
   function extractRomFromZip(arrayBuffer) {
-    // Minimal ZIP parser: find the first ROM file and extract it.
+    // Minimal ZIP parser using the central directory (reliable sizes).
     // Supports STORED (0) and DEFLATE (8) compression methods.
     var view = new DataView(arrayBuffer);
     var bytes = new Uint8Array(arrayBuffer);
-    var offset = 0;
+    var len = bytes.length;
 
-    while (offset + 30 <= bytes.length) {
-      // Local file header signature = PK\x03\x04
-      if (view.getUint32(offset, true) !== 0x04034b50) break;
+    // Find End of Central Directory record (last 22+ bytes of file)
+    var eocdOffset = -1;
+    for (var i = len - 22; i >= Math.max(0, len - 65557); i--) {
+      if (view.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
+    }
+    if (eocdOffset === -1) return Promise.resolve(null);
 
-      var method = view.getUint16(offset + 8, true);
-      var compSize = view.getUint32(offset + 18, true);
-      var uncompSize = view.getUint32(offset + 22, true);
-      var nameLen = view.getUint16(offset + 26, true);
-      var extraLen = view.getUint16(offset + 28, true);
-      var nameBytes = bytes.subarray(offset + 30, offset + 30 + nameLen);
+    var cdOffset = view.getUint32(eocdOffset + 16, true);
+    var cdEntries = view.getUint16(eocdOffset + 10, true);
+
+    // Walk central directory entries
+    var pos = cdOffset;
+    for (var e = 0; e < cdEntries && pos + 46 <= len; e++) {
+      if (view.getUint32(pos, true) !== 0x02014b50) break;
+
+      var method = view.getUint16(pos + 10, true);
+      var compSize = view.getUint32(pos + 20, true);
+      var nameLen = view.getUint16(pos + 28, true);
+      var extraLen = view.getUint16(pos + 30, true);
+      var commentLen = view.getUint16(pos + 32, true);
+      var localHeaderOffset = view.getUint32(pos + 42, true);
+
+      var nameBytes = bytes.subarray(pos + 46, pos + 46 + nameLen);
       var fileName = '';
-      for (var i = 0; i < nameBytes.length; i++) fileName += String.fromCharCode(nameBytes[i]);
-      var dataStart = offset + 30 + nameLen + extraLen;
+      for (var ci = 0; ci < nameBytes.length; ci++) fileName += String.fromCharCode(nameBytes[ci]);
 
-      // Check if this file is a ROM
       var lower = fileName.toLowerCase();
       var isRom = false;
       for (var j = 0; j < _ROM_EXTS.length; j++) {
@@ -482,14 +493,16 @@
       }
 
       if (isRom && compSize > 0) {
+        // Read local file header to find data start
+        var lNameLen = view.getUint16(localHeaderOffset + 26, true);
+        var lExtraLen = view.getUint16(localHeaderOffset + 28, true);
+        var dataStart = localHeaderOffset + 30 + lNameLen + lExtraLen;
         var compData = bytes.subarray(dataStart, dataStart + compSize);
         var baseName = fileName.split('/').pop();
 
         if (method === 0) {
-          // STORED — no compression
           return Promise.resolve({ name: baseName, data: compData.slice() });
         } else if (method === 8) {
-          // DEFLATE — use DecompressionStream
           var blob = new Blob([compData]);
           var ds = new DecompressionStream('deflate-raw');
           var decompressed = blob.stream().pipeThrough(ds);
@@ -499,7 +512,7 @@
         }
       }
 
-      offset = dataStart + compSize;
+      pos += 46 + nameLen + extraLen + commentLen;
     }
 
     return Promise.resolve(null);
@@ -946,6 +959,16 @@
       } else {
         statusEl.textContent = 'No controller — press any button to detect';
         statusEl.className = '';
+      }
+    }
+
+    // Hide EJS virtual gamepad when a real gamepad is connected (and vice versa)
+    var ejs = window.EJS_emulator;
+    if (ejs && ejs.virtualGamepad) {
+      if (detected.length > 0) {
+        ejs.virtualGamepad.style.display = 'none';
+      } else if (ejs.touch) {
+        ejs.virtualGamepad.style.display = '';
       }
     }
 

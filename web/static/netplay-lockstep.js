@@ -280,7 +280,7 @@
 
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
-  let _syncWorker        = null;    // Web Worker for compress/decompress
+  // (sync compression uses CompressionStream/DecompressionStream directly)
   let _syncCheckInterval = 300;    // check hash every N frames (~5s at 60fps)
   let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
   let _resyncCount       = 0;
@@ -519,11 +519,13 @@
 
     peer.pc.onconnectionstatechange = function () {
       var s = peer.pc.connectionState;
+      console.log('[lockstep] peer', remoteSid, 'connection-state:', s);
+      if (s === 'connecting') setStatus('Connecting...');
       if (s === 'failed' || s === 'disconnected') {
         // Guard: only handle if this peer is still the current one for this SID.
         // After stop()+init(), old connections fire stale events for replaced peers.
         if (_peers[remoteSid] !== peer) return;
-        console.log('[lockstep] peer', remoteSid, 'connection', s);
+        setStatus('Peer connection ' + s);
         handlePeerDisconnect(remoteSid);
       }
     };
@@ -575,23 +577,28 @@
     var peer = _peers[senderSid];
     if (!peer) return;
 
-    if (data.offer) {
-      await peer.pc.setRemoteDescription(data.offer);
-      await drainCandidates(peer);
-      var answer = await peer.pc.createAnswer();
-      await peer.pc.setLocalDescription(answer);
-      socket.emit('webrtc-signal', { target: senderSid, answer: answer });
+    try {
+      if (data.offer) {
+        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        await drainCandidates(peer);
+        var answer = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(answer);
+        socket.emit('webrtc-signal', { target: senderSid, answer: answer });
 
-    } else if (data.answer) {
-      await peer.pc.setRemoteDescription(data.answer);
-      await drainCandidates(peer);
+      } else if (data.answer) {
+        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await drainCandidates(peer);
 
-    } else if (data.candidate) {
-      if (peer.remoteDescSet) {
-        try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
-      } else {
-        peer.pendingCandidates.push(data.candidate);
+      } else if (data.candidate) {
+        if (peer.remoteDescSet) {
+          try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
+        } else {
+          peer.pendingCandidates.push(data.candidate);
+        }
       }
+    } catch (err) {
+      console.log('[lockstep] WebRTC signal error:', err.message || err);
+      setStatus('WebRTC error: ' + (err.message || err));
     }
   }
 
@@ -667,7 +674,7 @@
             }
           } else if (_frameNum < syncFrame) {
             // We're behind — store for deferred check when we reach that frame
-            _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: sid };
+            _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
           }
           // If _frameNum > syncFrame, skip — frame already passed
         }
@@ -821,8 +828,10 @@
         setTimeout(waitForEmu, 100);
         return;
       }
-      if (_playerSlot !== 0 && frames < 10) {
-        // Guest: just needs Module initialized (minimal frames)
+      if (_playerSlot !== 0 && !mod._simulate_input) {
+        // Guest: just needs Module initialized (will load host's state).
+        // Don't wait for frame count — _get_current_frame_count may not
+        // exist if the CDN core loaded instead of our patched core.
         if (_bootStatusCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -878,6 +887,7 @@
       setupKeyTracking();
 
       _selfEmuReady = true;
+      hookVirtualGamepad();
 
       // Late join: request state from host instead of normal sync flow
       if (_lateJoin && _playerSlot !== 0) {
@@ -1623,6 +1633,27 @@
 
   // -- Input read ------------------------------------------------------------
 
+  // ── Virtual gamepad (EJS touch controls) capture ──────────────────────
+  // EJS calls simulateInput(player, button, value) directly into WASM.
+  // We intercept it to track which buttons are held, so readLocalInput()
+  // can include touch inputs in the netplay bitmask.
+  var _touchInputState = {};  // { buttonIndex: value }
+
+  function hookVirtualGamepad() {
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    if (!gm || gm._kn_hooked) return;
+    gm.simulateInput = function (player, index, value) {
+      // Only capture player 0 (local player's touch input)
+      if (player === 0) {
+        _touchInputState[index] = value;
+      }
+      // Don't call original — our writeInputToMemory handles input delivery.
+      // Letting EJS also write would double-apply and bypass lockstep.
+    };
+    gm._kn_hooked = true;
+    console.log('[lockstep] hooked EJS simulateInput for touch capture');
+  }
+
   function readLocalInput() {
     var mask = 0;
 
@@ -1637,6 +1668,24 @@
         var btnIdx = _p1KeyMap[kc];
         if (btnIdx !== undefined) mask |= (1 << btnIdx);
       });
+    }
+
+    // Virtual gamepad (mobile touch controls)
+    // EJS simulateInput uses indices 0-15 for digital buttons (value 0 or 1)
+    // and 16-23 for analog axes (value ±32767). Our bitmask uses one bit per
+    // direction: even index = positive, odd = negative.
+    for (var ti in _touchInputState) {
+      var idx = parseInt(ti, 10);
+      var val = _touchInputState[idx];
+      if (!val) continue;
+      if (idx < 16) {
+        mask |= (1 << idx);
+      } else if (idx >= 16 && idx <= 23) {
+        // Analog: EJS sends the value on the axis index (e.g. index 16 = +32767).
+        // Our bitmask: even index bit = positive, next odd bit = negative.
+        // EJS zeroes the partner axis, so only one of the pair has a value.
+        if (val > 0) mask |= (1 << idx);
+      }
     }
 
     // Debug: call window.debugInput() to log input for 3 seconds
@@ -1811,19 +1860,49 @@
   // -- Emulator start --------------------------------------------------------
 
   function triggerEmulatorStart() {
-    // Poll for EmulatorJS start button in the DOM. Only this element
-    // indicates the core is fully loaded and ready — calling the API
-    // method (startButtonClicked) too early fails silently.
+    // With EJS_startOnLoaded=true, the emulator auto-starts without a button.
+    // Fall back to polling for the start button in case auto-start isn't set.
+    var attempts = 0;
     var attempt = function () {
+      // Check if emulator already started (EJS_startOnLoaded or mobile auto-start)
+      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      if (gm && gm.Module) {
+        console.log('[lockstep] emulator already running (auto-start)');
+        enableMobileTouch();
+        return;
+      }
       var btn = document.querySelector('.ejs_start_button');
       if (btn) {
         console.log('[lockstep] clicking EJS start button');
+        // On mobile, dispatch a touchstart first so EJS sets touch=true
+        if ('ontouchstart' in window) {
+          btn.dispatchEvent(new Event('touchstart'));
+        }
         btn.click();
         return;
       }
-      setTimeout(attempt, 200);
+      attempts++;
+      if (attempts < 150) { // 30 seconds max
+        setTimeout(attempt, 200);
+      } else {
+        console.log('[lockstep] start button not found after 30s');
+        setStatus('Emulator failed to start');
+      }
     };
     attempt();
+  }
+
+  function enableMobileTouch() {
+    // EJS_startOnLoaded bypasses the start button, so EJS never detects touch.
+    // Force touch mode on mobile so the virtual gamepad appears.
+    if (!('ontouchstart' in window)) return;
+    var ejs = window.EJS_emulator;
+    if (!ejs || ejs.touch) return;
+    ejs.touch = true;
+    if (ejs.virtualGamepad) {
+      ejs.virtualGamepad.style.display = '';
+    }
+    console.log('[lockstep] enabled mobile touch controls');
   }
 
   function hashGameState() {
@@ -1845,33 +1924,21 @@
     }
   }
 
-  // -- Worker-based state sync -----------------------------------------------
-
-  function initSyncWorker() {
-    if (_syncWorker) return;
-    _syncWorker = new Worker('/static/sync-worker.js');
-    _syncWorker.onmessage = function (e) {
-      var msg = e.data;
-      if (msg.type === 'compressed') {
-        // Host: compressed state ready, send via DC in chunks
-        sendSyncChunks(msg.data, msg.frame);
-      }
-      if (msg.type === 'decompressed') {
-        // Guest: decompressed state ready, load it
-        applySyncState(msg.data, msg.frame);
-      }
-    };
-  }
+  // -- Async state sync (compress/decompress on main thread via streams) -----
 
   function pushSyncState() {
-    // Host: capture state and send to Worker for compression (3ms main thread)
+    // Host: capture state, compress, and send via DC in chunks
     if (_playerSlot !== 0 || !_syncEnabled) return;
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
     var raw = gm.getState();
     var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-    initSyncWorker();
-    _syncWorker.postMessage({ type: 'compress', data: bytes, frame: _frameNum }, [bytes.buffer]);
+    var frame = _frameNum;
+    compressState(bytes).then(function (compressed) {
+      sendSyncChunks(compressed, frame);
+    }).catch(function (err) {
+      console.log('[lockstep] sync compress failed:', err);
+    });
   }
 
   function sendSyncChunks(compressed, frame) {
@@ -1901,7 +1968,7 @@
   }
 
   function handleSyncChunksComplete() {
-    // Guest: reassemble chunks and send to Worker for decompression
+    // Guest: reassemble chunks and decompress via streams
     var total = _syncChunks.reduce(function (a, c) { return a + c.length; }, 0);
     var assembled = new Uint8Array(total);
     var offset = 0;
@@ -1911,11 +1978,12 @@
     }
     _syncChunks = [];
     _syncExpected = 0;
-    initSyncWorker();
-    _syncWorker.postMessage(
-      { type: 'decompress', data: assembled, frame: _syncFrame },
-      [assembled.buffer]
-    );
+    var frame = _syncFrame;
+    decompressState(assembled).then(function (bytes) {
+      applySyncState(bytes, frame);
+    }).catch(function (err) {
+      console.log('[lockstep] sync decompress failed:', err);
+    });
   }
 
   function applySyncState(bytes, frame) {
@@ -1985,6 +2053,19 @@
     if (config.initialPlayers) {
       onUsersUpdated(config.initialPlayers);
     }
+
+    // Connection timeout warning
+    setTimeout(function () {
+      if (!_gameStarted && _config) {
+        var peerCount = Object.keys(_peers).length;
+        if (peerCount === 0) {
+          setStatus('No peer connection — check network');
+        } else {
+          var anyOpen = Object.values(_peers).some(function (p) { return p.ready; });
+          if (!anyOpen) setStatus('Peer found but data channel not open');
+        }
+      }
+    }, 15000);
     // startGameSequence() is triggered from ch.onopen (same as before)
   }
 

@@ -132,8 +132,9 @@
   <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
   <div id="game"></div>
   <script>
-    var EJS_player     = '#game';
-    var EJS_core       = 'n64';
+    var EJS_player       = '#game';
+    var EJS_core         = 'n64';
+    var EJS_startOnLoaded = true;  // auto-start: skip "press start" overlay (critical for mobile)
     // EJS_gameUrl set by play.js when user drops a ROM file
     var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
   </script>
