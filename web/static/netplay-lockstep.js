@@ -154,6 +154,9 @@
   var _onExtraDataChannel = null;
   var _onUnhandledMessage = null;
 
+  var _paused = false;
+  var _pausedAtFrame = 0;
+
   var _rttSamples = [];
   var _rttComplete = false;
   var _rttPeersComplete = 0;
@@ -1627,6 +1630,7 @@
 
   function tick() {
     if (!_running) return;
+    if (_paused) return;
 
     // Async resync: apply buffered state at clean frame boundary
     if (_pendingResyncState) {
