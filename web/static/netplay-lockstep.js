@@ -282,8 +282,10 @@
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
   let _syncCheckInterval = 60;     // check hash every N frames (~1s at 60fps)
+  let _syncBaseInterval  = 60;     // base interval before adaptive backoff
   let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
   let _resyncCount       = 0;
+  let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
@@ -686,6 +688,10 @@
               console.log('[lockstep] DESYNC at frame', syncFrame,
                 'local:', localHash, 'host:', hostHash, '-- requesting state');
               peer.dc.send('sync-request');
+            } else if (localHash !== null) {
+              // Clean check — reset backoff
+              _consecutiveResyncs = 0;
+              _syncCheckInterval = _syncBaseInterval;
             }
           } else if (_frameNum < syncFrame) {
             // We're behind — store for deferred check when we reach that frame
@@ -1598,6 +1604,9 @@
           if (syncPeer && syncPeer.dc) {
             try { syncPeer.dc.send('sync-request'); } catch (_) {}
           }
+        } else if (localHash !== null) {
+          _consecutiveResyncs = 0;
+          _syncCheckInterval = _syncBaseInterval;
         }
       }
       _pendingSyncCheck = null;
@@ -2031,11 +2040,16 @@
   }
 
   function applySyncState(bytes, frame) {
-    // Guest: hot-swap state without stopping the tick loop.
-    // The tick loop keeps running — we just replace the emulator state underneath it.
-    // The frame counter rewinds to the sync frame so the tick loop replays from the
-    // correct state with real inputs (no fast-forward — that would use wrong inputs
-    // and immediately re-desync).
+    // Guest: hot-swap emulator state without rewinding the frame counter.
+    //
+    // KEY INSIGHT: The frame counter is only used for input synchronization
+    // (which frame's input to send/apply). The emulator doesn't use it — it
+    // just processes whatever input we write and steps. By keeping _frameNum
+    // where it is, the input buffers stay valid and neither side stalls.
+    //
+    // The game visually jumps to the host's state (from a moment ago) then
+    // continues smoothly with current inputs. If the underlying desync source
+    // persists, the next check will catch it — but no stall ever occurs.
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
 
@@ -2046,30 +2060,27 @@
     mod.pauseMainLoop();
     mod.resumeMainLoop();
 
-    _frameNum = frame;
-    window._frameNum = _frameNum;
-
-    // Fill input buffer gaps around the new frame so we don't stall.
-    var pKeys = Object.keys(_peers);
-    for (var pk = 0; pk < pKeys.length; pk++) {
-      var pSlot = _peers[pKeys[pk]].slot;
-      if (pSlot !== null && pSlot !== undefined) {
-        if (!_remoteInputs[pSlot]) _remoteInputs[pSlot] = {};
-        for (var gf = frame - DELAY_FRAMES - 5; gf <= frame + 5; gf++) {
-          if (_remoteInputs[pSlot][gf] === undefined) _remoteInputs[pSlot][gf] = 0;
-        }
-        _lastRemoteFramePerSlot[pSlot] = Math.max(
-          _lastRemoteFramePerSlot[pSlot] || 0, frame
-        );
-      }
-    }
-    for (var lf = frame - DELAY_FRAMES - 5; lf <= frame + 5; lf++) {
-      if (_localInputs[lf] === undefined) _localInputs[lf] = 0;
-    }
+    // Do NOT rewind _frameNum — that would create a gap where both sides
+    // stall waiting for inputs the other isn't sending yet.
 
     _resyncCount++;
+    _consecutiveResyncs++;
+
+    // Adaptive backoff: if resyncing every check (cores differ fundamentally),
+    // widen the interval to reduce the cost of getState()+loadState() churn.
+    // Each consecutive resync doubles the interval up to ~30s. A clean check
+    // resets back to base.
+    if (_consecutiveResyncs >= 3) {
+      _syncCheckInterval = Math.min(
+        _syncBaseInterval * Math.pow(2, _consecutiveResyncs - 2),
+        1800  // cap at ~30s
+      );
+    }
+
     if (_resyncCount <= 3 || _resyncCount % 10 === 0) {
-      console.log('[lockstep] sync #' + _resyncCount + ' applied at frame', frame);
+      console.log('[lockstep] sync #' + _resyncCount + ' applied (state from frame ' +
+        frame + ', continuing at ' + _frameNum +
+        ', next check in ' + _syncCheckInterval + ' frames)');
     }
   }
 
@@ -2157,6 +2168,8 @@
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
     _resyncCount = 0;
+    _consecutiveResyncs = 0;
+    _syncCheckInterval = _syncBaseInterval;
     _syncChunks = [];
     _syncExpected = 0;
     _pushingSyncState = false;
@@ -2205,7 +2218,7 @@
     stop: stop,
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
-    setSyncInterval: function (frames) { _syncCheckInterval = Math.max(30, frames); },
+    setSyncInterval: function (frames) { _syncBaseInterval = _syncCheckInterval = Math.max(30, frames); },
     getInfo: function () {
       var peers = getActivePeers();
       var rtt = _rttSamples.length > 0
