@@ -372,6 +372,11 @@
     }
 
     updateRomSharingUI();
+
+    // Refresh start button — sharing state affects ROM readiness gating
+    if (isHost && lastUsersData) {
+      updateStartButton(lastUsersData.players || {});
+    }
   }
 
   function onDataMessageForRomSharing(data) {
