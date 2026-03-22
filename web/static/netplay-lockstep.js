@@ -148,37 +148,49 @@
 
   var _rttSamples = [];
   var _rttComplete = false;
-  var _rttPingCount = 0;
+  var _rttPeersComplete = 0;
+  var _rttPeersTotal = 0;
 
-  function startRttMeasurement(dc) {
-    _rttSamples = [];
-    _rttPingCount = 0;
-    _rttComplete = false;
-    sendNextPing(dc);
+  function startRttMeasurement(peer) {
+    peer._rttSamples = [];
+    peer._rttPingCount = 0;
+    peer._rttComplete = false;
+    _rttPeersTotal++;
+    sendNextPing(peer);
   }
 
-  function sendNextPing(dc) {
-    if (_rttPingCount >= 3) {
-      _rttSamples.sort(function (a, b) { return a - b; });
-      var median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-      var delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
-      _rttComplete = true;
-      if (window.setAutoDelay) window.setAutoDelay(delay);
-      console.log('[lockstep] RTT median: ' + median.toFixed(1) + 'ms -> auto delay: ' + delay);
+  function sendNextPing(peer) {
+    if (peer._rttPingCount >= 3) {
+      peer._rttComplete = true;
+      // Copy per-peer samples into peer.rttSamples for getInfo()
+      peer.rttSamples = peer._rttSamples.slice().sort(function (a, b) { return a - b; });
+      // Accumulate into global _rttSamples
+      peer._rttSamples.forEach(function (s) { _rttSamples.push(s); });
+      _rttPeersComplete++;
+      // When all peers are done, compute auto delay from max median across peers
+      if (_rttPeersComplete >= _rttPeersTotal) {
+        _rttSamples.sort(function (a, b) { return a - b; });
+        var median = _rttSamples[Math.floor(_rttSamples.length / 2)];
+        var delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
+        _rttComplete = true;
+        if (window.setAutoDelay) window.setAutoDelay(delay);
+        console.log('[lockstep] RTT median: ' + median.toFixed(1) + 'ms -> auto delay: ' + delay);
+      }
       return;
     }
     try {
-      dc.send(JSON.stringify({ type: 'delay-ping', ts: performance.now() }));
+      peer.dc.send(JSON.stringify({ type: 'delay-ping', ts: performance.now() }));
     } catch (_) {
-      _rttComplete = true;
+      peer._rttComplete = true;
+      _rttPeersComplete++;
     }
   }
 
-  function handleDelayPong(ts, dc) {
+  function handleDelayPong(ts, peer) {
     var rtt = performance.now() - ts;
-    _rttSamples.push(rtt);
-    _rttPingCount++;
-    sendNextPing(dc);
+    peer._rttSamples.push(rtt);
+    peer._rttPingCount++;
+    sendNextPing(peer);
     if (_rttComplete && _selfLockstepReady) {
       broadcastLockstepReady();
       checkAllLockstepReady();
@@ -280,6 +292,10 @@
   let _manualMode        = false;   // true once enterManualMode() called
   let _stallStart        = 0;       // timestamp when current stall began
   let _tickInterval      = null;    // setInterval handle for tick loop
+
+  // Saved originals of WASM speed-control functions — neutralized during lockstep
+  let _origToggleFF      = null;    // Module._toggle_fastforward
+  let _origToggleSM      = null;    // Module._toggle_slow_motion
 
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
@@ -529,6 +545,7 @@
       remoteDescSet: false,
       ready: false,
       emuReady: false,
+      rttSamples: [],
     };
 
     peer.pc.onicecandidate = function (e) {
@@ -661,7 +678,7 @@
       if (_selfEmuReady) ch.send('emu-ready');
 
       // Both sides measure RTT for auto delay
-      startRttMeasurement(ch);
+      startRttMeasurement(peer);
 
       // Late join: if game is running, host starts spectator stream for new spectator
       if (_running && _playerSlot === 0 && peer.slot === null) {
@@ -742,7 +759,7 @@
               peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
             }
             else if (msg.type === 'delay-pong') {
-              handleDelayPong(msg.ts, peer.dc);
+              handleDelayPong(msg.ts, peer);
             }
             else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
@@ -1058,15 +1075,14 @@
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       // Store for host to also load (resets GL context for proper rendering)
       _guestStateBytes = bytes;
-      var compressed = await compressState(bytes);
-      var b64 = uint8ToBase64(compressed);
+      var encoded = await compressAndEncode(bytes);
       console.log('[lockstep] sending initial state via Socket.IO (' +
-        Math.round(bytes.length / 1024) + 'KB raw -> ' +
-        Math.round(compressed.length / 1024) + 'KB gzip)');
+        Math.round(encoded.rawSize / 1024) + 'KB raw -> ' +
+        Math.round(encoded.compressedSize / 1024) + 'KB gzip)');
 
       // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
       // data channels (SCTP limit with maxRetransmits).
-      socket.emit('data-message', { type: 'save-state', frame: 0, data: b64 });
+      socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
 
       // Host is ready
       _selfLockstepReady = true;
@@ -1084,8 +1100,7 @@
     console.log('[lockstep] received initial state');
     setStatus('Loading initial state...');
 
-    var compressed = base64ToUint8(msg.data);
-    decompressState(compressed).then(function (bytes) {
+    decodeAndDecompress(msg.data).then(function (bytes) {
       _guestStateBytes = bytes;
       console.log('[lockstep] initial state decompressed (' + bytes.length + ' bytes)');
 
@@ -1112,18 +1127,17 @@
     try {
       var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      var compressed = await compressState(bytes);
-      var b64 = uint8ToBase64(compressed);
+      var encoded = await compressAndEncode(bytes);
       console.log('[lockstep] sending late-join state to', remoteSid,
-        '(' + Math.round(bytes.length / 1024) + 'KB raw -> ' +
-        Math.round(compressed.length / 1024) + 'KB gzip)',
+        '(' + Math.round(encoded.rawSize / 1024) + 'KB raw -> ' +
+        Math.round(encoded.compressedSize / 1024) + 'KB gzip)',
         'frame:', _frameNum);
 
       // Send via Socket.IO since save states are too large for DC
       socket.emit('data-message', {
         type: 'late-join-state',
         frame: _frameNum,
-        data: b64,
+        data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
       });
     } catch (err) {
@@ -1138,8 +1152,7 @@
     console.log('[lockstep] received late-join state for frame', msg.frame);
     setStatus('Loading late-join state...');
 
-    var compressed = base64ToUint8(msg.data);
-    decompressState(compressed).then(function (bytes) {
+    decodeAndDecompress(msg.data).then(function (bytes) {
       var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) {
         console.log('[lockstep] gameManager not ready');
@@ -1454,6 +1467,22 @@
       }
     }
 
+    // Neutralize fast-forward / slow-motion WASM functions.
+    // EmulatorJS mobile virtual gamepad has "slow" and "fast" buttons that call
+    // _toggle_fastforward / _toggle_slow_motion directly. These set RetroArch
+    // runloop flags (RUNLOOP_FLAG_FASTMOTION / RUNLOOP_FLAG_SLOWMOTION) which
+    // alter internal frame timing and cause desyncs between players.
+    if (mod && mod._toggle_fastforward && !_origToggleFF) {
+      _origToggleFF = mod._toggle_fastforward;
+      _origToggleSM = mod._toggle_slow_motion;
+      // Force both off in case a player already toggled them before lockstep
+      mod._toggle_fastforward(0);
+      mod._toggle_slow_motion(0);
+      mod._toggle_fastforward = function () {};
+      mod._toggle_slow_motion = function () {};
+      console.log('[lockstep] neutralized fast-forward/slow-motion controls');
+    }
+
     // Kill OpenAL's audio system. An active AudioContext + AL_PLAYING source
     // causes desyncs even with frozen _emscripten_get_now. Stop all sources
     // and suspend the AudioContext to eliminate all async audio activity.
@@ -1507,6 +1536,17 @@
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
       if (mod && mod._kn_set_deterministic) mod._kn_set_deterministic(0);
+    }
+    // Restore speed-control functions
+    if (_origToggleFF) {
+      var mod2 = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                 window.EJS_emulator.gameManager.Module;
+      if (mod2) {
+        mod2._toggle_fastforward = _origToggleFF;
+        mod2._toggle_slow_motion = _origToggleSM;
+      }
+      _origToggleFF = null;
+      _origToggleSM = null;
     }
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
@@ -1824,6 +1864,18 @@
       '    } else if (msg.type === "decompress") {',
       '      var d = await decompress(msg.data);',
       '      postMessage({id:id, data:d}, [d.buffer]);',
+      '    } else if (msg.type === "compress-and-encode") {',
+      '      var c2 = await compress(msg.data);',
+      '      var chunkSize = 32768, binary = "";',
+      '      for (var j = 0; j < c2.length; j += chunkSize) {',
+      '        binary += String.fromCharCode.apply(null, c2.subarray(j, Math.min(j + chunkSize, c2.length)));',
+      '      }',
+      '      postMessage({id:id, data:btoa(binary), rawSize:msg.data.length, compressedSize:c2.length});',
+      '    } else if (msg.type === "decode-and-decompress") {',
+      '      var bin = atob(msg.data), arr = new Uint8Array(bin.length);',
+      '      for (var k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);',
+      '      var d2 = await decompress(arr);',
+      '      postMessage({id:id, data:d2}, [d2.buffer]);',
       '    }',
       '  } catch(err) { postMessage({id:id, error: err.message}); }',
       '};',
@@ -1926,6 +1978,34 @@
     var bytes = new Uint8Array(binary.length);
     for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
+  }
+
+  // -- Combined compress+encode / decode+decompress (worker-offloaded) -------
+
+  async function compressAndEncode(bytes) {
+    try {
+      var result = await workerPost({ type: 'compress-and-encode', data: bytes });
+      return result;
+    } catch (e) {
+      // Fallback: main thread
+      var compressed = await compressStateFallback(bytes);
+      return {
+        data: uint8ToBase64(compressed),
+        rawSize: bytes.length,
+        compressedSize: compressed.length,
+      };
+    }
+  }
+
+  async function decodeAndDecompress(b64) {
+    try {
+      var result = await workerPost({ type: 'decode-and-decompress', data: b64 });
+      return result.data;
+    } catch (e) {
+      // Fallback: main thread
+      var compressed = base64ToUint8(b64);
+      return decompressState(compressed);
+    }
   }
 
   // -- Cheats ----------------------------------------------------------------
@@ -2239,7 +2319,8 @@
     DELAY_FRAMES = 2;
     _rttSamples = [];
     _rttComplete = false;
-    _rttPingCount = 0;
+    _rttPeersComplete = 0;
+    _rttPeersTotal = 0;
 
     // Stop lockstep tick loop
     stopSync();
@@ -2344,6 +2425,15 @@
       var rtt = _rttSamples.length > 0
         ? _rttSamples[Math.floor(_rttSamples.length / 2)]
         : null;
+      var peerInfo = peers.map(function (peer) {
+        return {
+          slot: peer.slot,
+          rtt: peer.rttSamples && peer.rttSamples.length > 0
+            ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)]
+            : null,
+          delayValue: peer.delayValue || null,
+        };
+      });
       return {
         fps: _fpsCurrent,
         frameDelay: DELAY_FRAMES,
@@ -2351,6 +2441,10 @@
         playerCount: peers.length + 1,
         frame: _frameNum,
         running: _running,
+        mode: 'lockstep',
+        syncEnabled: _syncEnabled,
+        resyncCount: _resyncCount,
+        peers: peerInfo,
       };
     },
   };

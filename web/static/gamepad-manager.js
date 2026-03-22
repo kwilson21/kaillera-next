@@ -244,6 +244,11 @@
 
     readGamepad: readGamepad,
 
+    hasGamepad: function (slot) {
+      var gpIndex = _assignments[slot];
+      return gpIndex !== undefined && !!_detected[gpIndex];
+    },
+
     getAssignments: function () {
       var result = {};
       for (var slot in _assignments) {

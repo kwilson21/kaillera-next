@@ -119,6 +119,7 @@
   let _heldKeys          = new Set();
   let _prevSlotMasks     = {};
   let _gameRunning       = false;
+  let _cachedInfo        = null;
 
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
@@ -599,52 +600,59 @@
 
   // ── Debug overlay ────────────────────────────────────────────────────────
 
-  async function updateDebugOverlay() {
-    const dbg = document.getElementById('np-debug');
-    if (!dbg) return;
-    dbg.style.display = '';
-
+  async function gatherStats() {
     const peers = _peers || {};
     const pc = Object.values(peers)[0]?.pc;
     const playerCount = Object.keys(peers).length + (_isSpectator ? 0 : 1);
-    const role = _playerSlot === 0 ? 'Host' : 'Guest (P' + _playerSlot + ')';
 
     if (!pc) {
-      dbg.textContent = role + ' | players:' + playerCount;
-      return;
+      return {
+        mode: 'streaming',
+        fps: 0,
+        ping: null,
+        playerCount: playerCount,
+        codec: null,
+        resolution: null,
+        encodeTime: null,
+        bitrate: null,
+        jitter: null,
+        lossRate: null,
+        dropped: null,
+        qualLimit: null,
+      };
     }
 
     try {
       const stats = await pc.getStats();
-      let fps = '?', codec = '?', res = '?', rtt = '?';
-      let jitter = '?', pktLost = 0, pktRecv = 0, dropped = 0;
-      let bitrateSend = '?';
-      let encodeTime = '?', qualLimit = '';
+      let fps = 0, codec = null, res = null, ping = null;
+      let jitterVal = null, pktLost = 0, pktRecv = 0, dropped = null;
+      let bitrate = null;
+      let encodeTime = null, qualLimit = null;
 
-      stats.forEach(s => {
+      stats.forEach(function (s) {
         if (s.type === 'outbound-rtp' && s.kind === 'video') {
-          fps = s.framesPerSecond || '?';
+          fps = s.framesPerSecond || 0;
           res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
           if (s.totalEncodeTime && s.framesEncoded && s.framesEncoded > 0) {
-            encodeTime = (s.totalEncodeTime / s.framesEncoded * 1000).toFixed(1) + 'ms';
+            encodeTime = parseFloat((s.totalEncodeTime / s.framesEncoded * 1000).toFixed(1));
           }
           if (s.qualityLimitationReason && s.qualityLimitationReason !== 'none') {
-            qualLimit = ' [' + s.qualityLimitationReason + ']';
+            qualLimit = s.qualityLimitationReason;
           }
         }
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
-          fps = s.framesPerSecond || '?';
+          fps = s.framesPerSecond || 0;
           res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
-          jitter = s.jitter !== undefined ? (s.jitter * 1000).toFixed(1) + 'ms' : '?';
+          jitterVal = s.jitter !== undefined ? parseFloat((s.jitter * 1000).toFixed(1)) : null;
           pktLost = s.packetsLost || 0;
           pktRecv = s.packetsReceived || 0;
           dropped = s.framesDropped || 0;
         }
         if (s.type === 'candidate-pair' && s.state === 'succeeded') {
-          rtt = s.currentRoundTripTime !== undefined
-            ? Math.round(s.currentRoundTripTime * 1000) + 'ms' : '?';
+          ping = s.currentRoundTripTime !== undefined
+            ? Math.round(s.currentRoundTripTime * 1000) : null;
           if (s.availableOutgoingBitrate) {
-            bitrateSend = (s.availableOutgoingBitrate / 1_000_000).toFixed(1) + 'Mbps';
+            bitrate = parseFloat((s.availableOutgoingBitrate / 1_000_000).toFixed(1));
           }
         }
         if (s.type === 'codec' && s.mimeType && s.mimeType.includes('video')) {
@@ -652,26 +660,81 @@
         }
       });
 
-      // Build display lines
-      const line1 = role + ' | ' + codec + ' ' + res + ' ' + fps + 'fps' + qualLimit;
-      let line2;
-      if (_playerSlot === 0) {
-        // Host: show encode time, send bitrate
-        line2 = 'rtt:' + rtt + ' encode:' + encodeTime + ' bw:' + bitrateSend
-          + ' | players:' + playerCount;
-      } else {
-        // Guest: show jitter, packet loss, pipeline delay, e2e delay
-        const lossRate = pktRecv > 0 ? (pktLost / pktRecv * 100).toFixed(1) + '%' : '0%';
-        const pipeline = window._videoPipelineDelay ? window._videoPipelineDelay + 'ms' : '?';
-        const e2e = window._videoE2EDelay ? window._videoE2EDelay + 'ms' : '?';
-        line2 = 'rtt:' + rtt + ' jitter:' + jitter + ' pipeline:' + pipeline
-          + ' e2e:' + e2e + ' loss:' + lossRate + ' dropped:' + dropped;
-      }
-      dbg.textContent = line1 + '\n' + line2;
-      dbg.style.whiteSpace = 'pre';
+      const lossRate = pktRecv > 0 ? parseFloat((pktLost / pktRecv * 100).toFixed(1)) : 0;
+
+      return {
+        mode: 'streaming',
+        fps: fps,
+        ping: ping,
+        playerCount: playerCount,
+        codec: codec,
+        resolution: res,
+        encodeTime: encodeTime,
+        bitrate: bitrate,
+        jitter: jitterVal,
+        lossRate: lossRate,
+        dropped: dropped,
+        qualLimit: qualLimit,
+      };
     } catch (_) {
-      dbg.textContent = role + ' | players:' + playerCount;
+      return {
+        mode: 'streaming',
+        fps: 0,
+        ping: null,
+        playerCount: playerCount,
+        codec: null,
+        resolution: null,
+        encodeTime: null,
+        bitrate: null,
+        jitter: null,
+        lossRate: null,
+        dropped: null,
+        qualLimit: null,
+      };
     }
+  }
+
+  async function updateDebugOverlay() {
+    const dbg = document.getElementById('np-debug');
+    if (!dbg) return;
+    dbg.style.display = '';
+
+    const info = await gatherStats();
+    _cachedInfo = info;
+
+    const role = _playerSlot === 0 ? 'Host' : 'Guest (P' + _playerSlot + ')';
+
+    if (!Object.values(_peers || {})[0]?.pc) {
+      dbg.textContent = role + ' | players:' + info.playerCount;
+      return;
+    }
+
+    // Build display strings from the gathered info
+    const fpsStr = info.fps || '?';
+    const codecStr = info.codec || '?';
+    const resStr = info.resolution || '?';
+    const rttStr = info.ping !== null ? info.ping + 'ms' : '?';
+    const qualLimitStr = info.qualLimit ? ' [' + info.qualLimit + ']' : '';
+
+    const line1 = role + ' | ' + codecStr + ' ' + resStr + ' ' + fpsStr + 'fps' + qualLimitStr;
+    let line2;
+    if (_playerSlot === 0) {
+      // Host: show encode time, send bitrate
+      const encStr = info.encodeTime !== null ? info.encodeTime + 'ms' : '?';
+      const bwStr = info.bitrate !== null ? info.bitrate + 'Mbps' : '?';
+      line2 = 'rtt:' + rttStr + ' encode:' + encStr + ' bw:' + bwStr
+        + ' | players:' + info.playerCount;
+    } else {
+      // Guest: show jitter, packet loss, pipeline delay, e2e delay
+      const jitterStr = info.jitter !== null ? info.jitter + 'ms' : '?';
+      const lossStr = info.lossRate !== null ? info.lossRate + '%' : '0%';
+      const pipeline = window._videoPipelineDelay ? window._videoPipelineDelay + 'ms' : '?';
+      const e2e = window._videoE2EDelay ? window._videoE2EDelay + 'ms' : '?';
+      line2 = 'rtt:' + rttStr + ' jitter:' + jitterStr + ' pipeline:' + pipeline
+        + ' e2e:' + e2e + ' loss:' + lossStr + ' dropped:' + (info.dropped !== null ? info.dropped : 0);
+    }
+    dbg.textContent = line1 + '\n' + line2;
+    dbg.style.whiteSpace = 'pre';
   }
 
   // ── Cheats ─────────────────────────────────────────────────────────────
@@ -846,6 +909,7 @@
   function stop() {
     _gameRunning = false;
     _guestLoopStarted = false;
+    _cachedInfo = null;
 
     // Close all peer connections
     Object.keys(_peers).forEach(function (sid) {
@@ -879,6 +943,6 @@
     _config = null;
   }
 
-  window.NetplayStreaming = { init: init, stop: stop };
+  window.NetplayStreaming = { init: init, stop: stop, getInfo: function () { return _cachedInfo; } };
 
 })();

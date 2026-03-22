@@ -1283,6 +1283,12 @@
       if (guestStatus) guestStatus.style.display = '';
     }
 
+    // Show player controls (delay picker) for all non-spectator players in lockstep mode
+    var playerControls = document.getElementById('player-controls');
+    if (playerControls) {
+      playerControls.style.display = (!isSpectator && mode === 'lockstep') ? '' : 'none';
+    }
+
     var modeSel = document.getElementById('mode-select');
     if (modeSel) modeSel.value = mode;
   }
@@ -1423,22 +1429,59 @@
   function updateInfoOverlay() {
     var info = engine && engine.getInfo ? engine.getInfo() : null;
 
-    var fpsEl = document.getElementById('info-fps');
-    var pingEl = document.getElementById('info-ping');
-    var delayEl = document.getElementById('info-delay');
-    var playersEl = document.getElementById('info-players');
+    var headerEl = document.getElementById('info-header');
+    var statsEl = document.getElementById('info-stats');
+    var peersEl = document.getElementById('info-peers');
 
-    if (info) {
-      if (fpsEl) fpsEl.textContent = 'FPS: ' + (info.fps || 0);
-      if (pingEl) pingEl.textContent = info.ping !== null ? 'Ping: ' + Math.round(info.ping) + 'ms' : 'Ping: --';
-      if (delayEl) delayEl.textContent = 'Delay: ' + info.frameDelay + 'f';
-      if (playersEl) playersEl.textContent = 'Players: ' + info.playerCount;
-    } else {
-      if (fpsEl) fpsEl.textContent = 'FPS: --';
-      if (pingEl) pingEl.textContent = 'Ping: --';
-      if (delayEl) delayEl.textContent = '';
-      if (playersEl) playersEl.textContent = '';
+    if (!info) {
+      if (headerEl) headerEl.textContent = '';
+      if (statsEl) statsEl.textContent = 'FPS: -- | Ping: --';
+      if (peersEl) peersEl.textContent = '';
+      return;
     }
+
+    // Header: mode + input type
+    var inputType = (window.GamepadManager && window.GamepadManager.hasGamepad && window.GamepadManager.hasGamepad(mySlot))
+      ? 'Gamepad' : 'Keyboard';
+    var modeLabel = info.mode === 'streaming' ? 'Streaming' : 'Lockstep';
+    if (headerEl) headerEl.textContent = modeLabel + ' | ' + inputType;
+
+    // Stats line
+    var parts = [];
+    parts.push('FPS: ' + (info.fps || 0));
+    var pingStr = info.ping !== null && info.ping !== undefined
+      ? Math.round(info.ping) + 'ms' : '--';
+    parts.push('Ping: ' + pingStr);
+
+    if (info.mode === 'lockstep') {
+      parts.push('Delay: ' + info.frameDelay + 'f');
+      parts.push('Players: ' + info.playerCount);
+      if (info.syncEnabled && info.resyncCount > 0) {
+        parts.push('Resyncs: ' + info.resyncCount);
+      }
+    } else {
+      // Streaming: codec + resolution
+      if (info.codec && info.codec !== '?') parts.push(info.codec);
+      if (info.resolution && info.resolution !== '?x?') parts.push(info.resolution);
+      parts.push('Players: ' + info.playerCount);
+    }
+    if (statsEl) statsEl.textContent = parts.join(' | ');
+
+    // Peers detail
+    var peerLines = [];
+    if (info.mode === 'lockstep' && info.peers) {
+      info.peers.forEach(function (p) {
+        var pRtt = p.rtt !== null ? Math.round(p.rtt) + 'ms' : '--';
+        peerLines.push('P' + (p.slot + 1) + ': ' + pRtt);
+      });
+    } else if (info.mode === 'streaming') {
+      // Streaming-specific detail (values are numeric from gatherStats)
+      if (info.encodeTime !== null) peerLines.push('Encode: ' + info.encodeTime + 'ms');
+      if (info.bitrate !== null) peerLines.push('BW: ' + info.bitrate + 'Mbps');
+      if (info.jitter !== null) peerLines.push('Jitter: ' + info.jitter + 'ms');
+      if (info.lossRate && info.lossRate > 0) peerLines.push('Loss: ' + info.lossRate + '%');
+    }
+    if (peersEl) peersEl.textContent = peerLines.join(' | ');
   }
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
@@ -2011,9 +2054,14 @@
     var modeSelect = document.getElementById('mode-select');
     var lockstepOpts = document.getElementById('lockstep-options');
     if (modeSelect && lockstepOpts) {
+      // Set mode-select from URL params before running updateOpts
+      modeSelect.value = mode;
       var updateOpts = function () {
         var isLockstep = modeSelect.value === 'lockstep';
         lockstepOpts.style.display = isLockstep ? '' : 'none';
+        // Toggle player controls (delay picker) for all players
+        var pc = document.getElementById('player-controls');
+        if (pc) pc.style.display = isLockstep ? '' : 'none';
         // Hide ROM sharing options in streaming mode
         var romSharingRow = document.getElementById('rom-sharing-options');
         var romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');

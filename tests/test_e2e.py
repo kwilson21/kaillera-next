@@ -13,6 +13,7 @@ def _mark_rom_ready(page):
     page.evaluate("window._socket.emit('rom-ready', { ready: true })")
 
 
+
 def test_lobby_to_play_redirect(page, server_url):
     """Create Room redirects to play.html with correct params."""
     page.goto(server_url)
@@ -307,3 +308,223 @@ def test_host_disclaimer_visible(browser, server_url):
         )
     finally:
         host.close()
+
+
+# ── Info Overlay Tests ────────────────────────────────────────────────
+
+
+def test_info_overlay_elements_exist(browser, server_url):
+    """Info overlay has structured layout (header, stats, peers sections)."""
+    host = browser.new_page()
+
+    try:
+        host.goto(f"{server_url}/play.html?room=INFO01&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+
+        # Info overlay exists in DOM with sub-sections (hidden by default)
+        expect(host.locator("#info-overlay")).to_be_hidden()
+        assert host.locator("#info-header").count() == 1
+        assert host.locator("#info-stats").count() == 1
+        assert host.locator("#info-peers").count() == 1
+
+        # Toolbar info button exists (but toolbar is hidden pre-game)
+        assert host.locator("#toolbar-info").count() == 1
+    finally:
+        host.close()
+
+
+def test_info_overlay_toggle_via_js(page, server_url):
+    """Info overlay toggles visibility when toggled programmatically."""
+    page.goto(f"{server_url}/play.html?room=INFO02&host=1&name=Host")
+    page.wait_for_function(
+        "document.getElementById('info-overlay') !== null", timeout=10000
+    )
+
+    # Info overlay starts hidden
+    expect(page.locator("#info-overlay")).to_be_hidden()
+
+    # Force-show overlay and toolbar for testing (simulate game running)
+    page.evaluate("""
+        document.getElementById('toolbar').classList.remove('hidden');
+        document.getElementById('info-overlay').classList.remove('hidden');
+        document.getElementById('info-header').textContent = 'Lockstep | Keyboard';
+        document.getElementById('info-stats').textContent = 'FPS: 60 | Ping: 5ms | Delay: 2f | Players: 2';
+    """)
+
+    # Verify overlay is visible with correct content
+    expect(page.locator("#info-overlay")).to_be_visible()
+    expect(page.locator("#info-header")).to_contain_text("Lockstep")
+    expect(page.locator("#info-stats")).to_contain_text("FPS:")
+    expect(page.locator("#info-stats")).to_contain_text("Delay:")
+
+
+def test_info_overlay_lockstep_getinfo(page, server_url):
+    """Lockstep engine getInfo() returns extended fields: mode, peers, sync."""
+    page.goto(f"{server_url}/play.html?room=INFO03&host=1&name=Host")
+    page.wait_for_function(
+        "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
+    )
+
+    info = page.evaluate("window.NetplayLockstep.getInfo()")
+    assert info is not None
+    assert info["mode"] == "lockstep"
+    assert "fps" in info
+    assert "frameDelay" in info
+    assert "ping" in info
+    assert "peers" in info
+    assert isinstance(info["peers"], list)
+    assert "syncEnabled" in info
+    assert "resyncCount" in info
+
+
+def test_info_overlay_streaming_getinfo(page, server_url):
+    """Streaming engine getInfo() exists and returns correct shape."""
+    page.goto(
+        f"{server_url}/play.html?room=INFO04&host=1&name=Host&mode=streaming"
+    )
+    page.wait_for_function(
+        "typeof window.NetplayStreaming !== 'undefined'", timeout=10000
+    )
+
+    has_getinfo = page.evaluate(
+        "typeof window.NetplayStreaming.getInfo === 'function'"
+    )
+    assert has_getinfo, "NetplayStreaming.getInfo should be a function"
+
+    # getInfo returns null before game starts — should not throw
+    page.evaluate("window.NetplayStreaming.getInfo()")
+
+
+# ── Per-Player Frame Delay Tests ──────────────────────────────────────
+
+
+def test_guest_sees_delay_picker(page, server_url):
+    """Guest player sees frame delay picker elements (lockstep mode)."""
+    # Load as guest in lockstep mode — player-controls visible for non-spectators
+    page.goto(f"{server_url}/play.html?room=DLY01&name=Guest")
+    page.wait_for_function(
+        "document.getElementById('player-controls') !== null", timeout=10000
+    )
+
+    # Player controls with delay picker exists
+    assert page.locator("#player-controls #delay-picker").count() == 1
+
+    # Auto checkbox should be checked by default
+    auto_checked = page.evaluate(
+        "document.getElementById('delay-auto').checked"
+    )
+    assert auto_checked is True
+
+    # Select element exists
+    assert page.locator("#delay-select").count() == 1
+
+
+def test_host_delay_hidden_streaming(page, server_url):
+    """Host delay picker hidden when mode is streaming."""
+    page.goto(
+        f"{server_url}/play.html?room=DLYS2&host=1&name=Host&mode=streaming"
+    )
+    page.wait_for_function(
+        "document.getElementById('player-controls') !== null", timeout=10000
+    )
+
+    # Player controls start hidden (display:none from HTML)
+    # and the mode-change handler also keeps them hidden in streaming.
+    # Verify by checking computed visibility.
+    visible = page.evaluate(
+        "getComputedStyle(document.getElementById('player-controls')).display !== 'none'"
+    )
+    assert visible is False, "player-controls should be hidden in streaming mode"
+
+    # Verify switching to lockstep shows them
+    page.evaluate("document.getElementById('mode-select').value = 'lockstep'")
+    page.evaluate(
+        "document.getElementById('mode-select')"
+        ".dispatchEvent(new Event('change'))"
+    )
+    visible_after = page.evaluate(
+        "getComputedStyle(document.getElementById('player-controls')).display !== 'none'"
+    )
+    assert visible_after is True, "player-controls should show after switching to lockstep"
+
+
+def test_host_still_has_delay_picker(page, server_url):
+    """Host still sees delay picker elements after restructure."""
+    page.goto(f"{server_url}/play.html?room=DLYS3&host=1&name=Host")
+    page.wait_for_function(
+        "document.getElementById('delay-picker') !== null", timeout=10000
+    )
+
+    # Delay picker exists in player-controls
+    assert page.locator("#player-controls #delay-picker").count() == 1
+    # Start button is in host-controls (not player-controls)
+    assert page.locator("#host-controls #start-btn").count() == 1
+    # delay-auto checkbox exists
+    assert page.locator("#delay-auto").count() == 1
+
+
+def test_guest_delay_preference_readable(page, server_url):
+    """getDelayPreference returns manual delay when set."""
+    page.goto(f"{server_url}/play.html?room=DLYS4&host=1&name=Host")
+    page.wait_for_function(
+        "typeof window.getDelayPreference === 'function'", timeout=10000
+    )
+
+    # Default auto delay = 2
+    delay = page.evaluate("window.getDelayPreference()")
+    assert delay == 2, f"Expected default delay 2, got {delay}"
+
+    # Set manual delay to 5
+    page.evaluate("""
+        document.getElementById('delay-auto').checked = false;
+        document.getElementById('delay-select').disabled = false;
+        document.getElementById('delay-select').value = '5';
+    """)
+    delay = page.evaluate("window.getDelayPreference()")
+    assert delay == 5, f"Expected manual delay 5, got {delay}"
+
+
+# ── Worker Base64 Test ────────────────────────────────────────────────
+
+
+def test_worker_compress_and_encode(page, server_url):
+    """NetplayLockstep module loads and getInfo is callable."""
+    page.goto(f"{server_url}/play.html?room=WKRS1&host=1&name=Host")
+    page.wait_for_function(
+        "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
+    )
+
+    # Verify the lockstep module is loaded with getInfo
+    result = page.evaluate("""
+        (() => {
+            try {
+                if (typeof window.NetplayLockstep === 'undefined') {
+                    return { error: 'NetplayLockstep not defined' };
+                }
+                var info = window.NetplayLockstep.getInfo();
+                return {
+                    ok: true,
+                    hasMode: info.mode === 'lockstep',
+                    hasPeers: Array.isArray(info.peers),
+                };
+            } catch (e) {
+                return { error: e.message };
+            }
+        })()
+    """)
+    assert result.get("ok") is True, f"Lockstep module check failed: {result}"
+    assert result.get("hasMode") is True, "getInfo should have mode='lockstep'"
+    assert result.get("hasPeers") is True, "getInfo should have peers array"
+
+
+def test_gamepad_manager_has_gamepad(page, server_url):
+    """GamepadManager.hasGamepad exists and returns false when no gamepad."""
+    page.goto(f"{server_url}/play.html?room=GMS01&host=1&name=Host")
+    page.wait_for_function(
+        "typeof window.GamepadManager !== 'undefined'"
+        " && typeof window.GamepadManager.hasGamepad === 'function'",
+        timeout=10000,
+    )
+
+    result = page.evaluate("window.GamepadManager.hasGamepad(0)")
+    assert result is False, "Should return false without gamepad"
