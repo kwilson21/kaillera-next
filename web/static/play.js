@@ -37,7 +37,9 @@
   var _romTransferDCs = {};         // active rom-transfer DataChannels (sender side, keyed by sid)
   var _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   var ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
-  var ROM_CHUNK_SIZE = 64 * 1024;        // 64KB
+  var _isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  var ROM_CHUNK_SIZE = _isMobile ? 16 * 1024 : 64 * 1024;
+  var ROM_BUFFER_THRESHOLD = _isMobile ? 256 * 1024 : 1024 * 1024;
   var _currentInputType = 'keyboard';    // 'keyboard' or 'gamepad' — last used
   var _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
@@ -614,34 +616,98 @@
     };
   }
 
-  function sendRomOverChannel(dc, peerSid) {
+  function sendRomOverChannel(dc, peerSid, startOffset) {
     var romName = localStorage.getItem('kaillera-rom-name') || 'rom.z64';
-    var header = { type: 'rom-header', name: romName, size: _romBlob.size };
-    if (_romHash) header.hash = _romHash;
-    dc.send(JSON.stringify(header));
+
+    if (!startOffset) {
+      // Fresh transfer: send header first
+      var header = { type: 'rom-header', name: romName, size: _romBlob.size };
+      if (_romHash) header.hash = _romHash;
+      dc.send(JSON.stringify(header));
+    }
 
     var reader = new FileReader();
     reader.onload = function () {
       var buffer = reader.result;
-      var offset = 0;
+      var offset = startOffset || 0;
+      var chunkIndex = Math.floor(offset / ROM_CHUNK_SIZE);
+      var backpressureRetries = 0;
+      var MAX_BACKPRESSURE_RETRIES = 3;
 
       function sendNextChunk() {
-        if (dc.readyState !== 'open') return;
+        if (dc.readyState !== 'open') {
+          console.log('[play] ROM send: DC closed at offset', offset);
+          return;
+        }
         while (offset < buffer.byteLength) {
-          if (dc.bufferedAmount > 1024 * 1024) {
-            dc.onbufferedamountlow = function () {
-              dc.onbufferedamountlow = null;
-              sendNextChunk();
-            };
+          if (dc.bufferedAmount > ROM_BUFFER_THRESHOLD) {
+            backpressureRetries = 0;
+            waitForDrain();
             return;
           }
           var end = Math.min(offset + ROM_CHUNK_SIZE, buffer.byteLength);
-          dc.send(buffer.slice(offset, end));
+          try {
+            dc.send(buffer.slice(offset, end));
+          } catch (err) {
+            console.log('[play] ROM send error at chunk', chunkIndex,
+              'offset', offset, 'buffered', dc.bufferedAmount,
+              'state', dc.readyState, err);
+            retryChunk(offset, end, 0);
+            return;
+          }
           offset = end;
+          chunkIndex++;
         }
         // All chunks sent
         dc.send(JSON.stringify({ type: 'rom-complete' }));
         console.log('[play] ROM transfer complete to', peerSid);
+      }
+
+      function waitForDrain() {
+        var drainTimeout = setTimeout(function () {
+          dc.onbufferedamountlow = null;
+          if (dc.readyState !== 'open') return;
+          if (dc.bufferedAmount <= ROM_BUFFER_THRESHOLD) {
+            sendNextChunk();
+          } else {
+            backpressureRetries++;
+            if (backpressureRetries >= MAX_BACKPRESSURE_RETRIES) {
+              console.log('[play] ROM send: backpressure timeout after',
+                MAX_BACKPRESSURE_RETRIES, 'retries at offset', offset);
+              showToast('ROM transfer failed — load ROM manually');
+              return;
+            }
+            console.log('[play] ROM send: backpressure retry', backpressureRetries);
+            waitForDrain();
+          }
+        }, 5000);
+
+        dc.onbufferedamountlow = function () {
+          clearTimeout(drainTimeout);
+          dc.onbufferedamountlow = null;
+          backpressureRetries = 0;
+          sendNextChunk();
+        };
+      }
+
+      function retryChunk(chunkStart, chunkEnd, attempt) {
+        if (attempt >= 3) {
+          console.log('[play] ROM send: chunk retry exhausted at offset', chunkStart);
+          showToast('ROM transfer failed — load ROM manually');
+          return;
+        }
+        setTimeout(function () {
+          if (dc.readyState !== 'open') return;
+          try {
+            dc.send(buffer.slice(chunkStart, chunkEnd));
+            offset = chunkEnd;
+            chunkIndex++;
+            sendNextChunk();
+          } catch (err) {
+            console.log('[play] ROM send: retry', attempt + 1, 'failed:', err);
+            retryChunk(chunkStart, chunkEnd, attempt + 1);
+          }
+        }, 500);
       }
 
       sendNextChunk();
