@@ -20,6 +20,7 @@ Three interrelated issues in lockstep netplay:
 - DC auto-reconnect for any DC death (background, network blip, mobile app switch)
 - Resumable ROM transfer with chunk caching
 - Robust ROM transfer send loop (mobile Safari fix)
+- Server-side reconnect support (preserve room slot during transient disconnects)
 - UX: toasts and overlays for disconnect/reconnect/transfer status
 
 **Deferred (v2):**
@@ -37,13 +38,14 @@ When a player's tab goes hidden, their local tick loop pauses immediately. This 
 - `visibilitychange` listener detects `document.hidden === true`
 - Set `_paused = true` — `tick()` returns early (no frame stepping, no input sending)
 - Broadcast `"peer-paused"` string message to all peers via DC
-- If DC is dead, send via Socket.IO `data-message` with `{ type: 'peer-paused', sender: socket.id }` as fallback
+- If DC is dead, send via Socket.IO `data-message` with `{ type: 'peer-paused', sender: socket.id }` as fallback. The server's existing `data-message` relay broadcasts to all room members — no new server event needed.
 - Record `_pausedAtFrame = _frameNum`
 
 #### Remote peer handling
 
-- On receiving `"peer-paused"`: set `peer.paused = true`, zero their input slot (same as disconnect behavior), show toast "Player X paused"
+- On receiving `"peer-paused"` (via DC string message or `data-message` Socket.IO relay): set `peer.paused = true`, zero their input slot (same as disconnect behavior), show toast "Player X paused"
 - Paused peers are excluded from `getInputPeers()` so the tick loop doesn't stall waiting for their frames — game continues for remaining players
+- The `onDataMessage` handler in the lockstep engine must be extended to handle `peer-paused` and `peer-resumed` message types (currently only handles `save-state`, `late-join-state`, `request-late-join`)
 
 #### Resuming (tab visible)
 
@@ -56,56 +58,88 @@ When a player's tab goes hidden, their local tick loop pauses immediately. This 
 
 - Host responds to `"sync-request"` with compressed state (existing resync mechanism)
 - Returning player loads state, syncs `_frameNum` to host's current frame, pre-fills delay buffer with zero input (same logic as late-join catch-up in `handleLateJoinState`)
+- After resync completes, purge stale `_remoteInputs[slot]` entries with frame numbers greater than the new synced `_frameNum` to prevent input misapplication
+
+#### Host pause/resume
+
+When the host (slot 0) is the one who pauses and returns:
+- The host is the sync authority. When it returns, it cannot request state from itself.
+- Instead, on resume the host captures its own state and broadcasts `sync-hash` immediately. If guests have drifted (they continued playing while host was paused), the guests detect the mismatch and send `sync-request`. The host responds with its state, re-syncing everyone to the host's timeline.
+- This works because the host's state is "correct by definition" in the star sync topology — guests always defer to host state.
 
 ### 2. DC Auto-Reconnect
 
 When a DataChannel dies, instead of permanently removing the peer, attempt automatic reconnection via the existing Socket.IO signaling path.
 
+#### Socket.IO disconnect and SID change
+
+When a mobile tab backgrounds or a network blip occurs, the Socket.IO WebSocket transport may die. This causes the server's `disconnect` handler to fire, which calls `_leave(sid)` and removes the player from the room entirely (frees their slot, emits `users-updated` without them). When Socket.IO auto-reconnects, the player gets a **new SID**.
+
+This is the central challenge: DC-level reconnect alone is insufficient because the server-side room state is gone. The solution requires server-side support to preserve the player's slot during transient disconnects.
+
+#### Server-side: rejoin with slot reservation
+
+Add a new `rejoin-room` Socket.IO event that allows a player to reclaim their slot after a transient disconnect:
+
+1. **On disconnect during `playing` status:** instead of immediately freeing the player's slot, mark it as `reserved` with a 30-second TTL. The player info stays in `room.players` but is flagged as `disconnected: true`. `users-updated` is emitted with the player marked as disconnected (not removed).
+2. **`rejoin-room` event:** the reconnecting client sends `{ sessionid, player_name, slot }` (it remembers its slot from before disconnect). The server checks if that slot is reserved, assigns the new SID to the existing player entry, clears the `disconnected` flag, and emits `users-updated` with the player restored.
+3. **Reservation expiry:** if the 30-second TTL expires without a rejoin, the slot is freed normally and `users-updated` is emitted with the player removed (hard disconnect).
+4. **SID mapping on remaining clients:** when remaining clients receive `users-updated` with a player whose slot matches a reconnecting peer but has a new `socketId`, they update `_peers` to map the new SID to the existing peer object. This is the key bridge between the old DC-level peer tracking and the new server-side SID.
+
+#### Intentional leave detection
+
+- Before a player emits `leave-room` (deliberate action via `leaveGame()` in play.js), they broadcast a `"leaving"` DC string message to all peers
+- Peers add the SID to `_intentionalLeaves` on receiving `"leaving"`
+- `handlePeerDisconnect` checks: if SID is in `_intentionalLeaves`, do hard disconnect (current behavior). Otherwise, attempt reconnect.
+- If DC is already dead when the player leaves (unusual edge case), the absence of the `"leaving"` message means it was unintentional — attempt reconnect (safe default)
+- Clean up `_intentionalLeaves` on game end to prevent unbounded growth
+
 #### Replacing hard disconnect
 
-Current `handlePeerDisconnect()` behavior: zeros input, deletes peer from `_peers`, game continues solo. No reconnection path.
+Current `handlePeerDisconnect()` behavior: zeros input, deletes peer from `_peers` (including `_remoteInputs[slot]` and `_peerInputStarted[slot]`), game continues solo. No reconnection path.
 
-New behavior: if the game is running and the disconnect wasn't intentional (no `leave-room` received from server), enter reconnect state instead of deleting the peer.
+New behavior: if the game is running and the disconnect wasn't intentional (no `"leaving"` message received), enter reconnect state instead of deleting the peer.
 
 #### Reconnect state
 
 - Set `peer.reconnecting = true`, `peer.reconnectStart = Date.now()`
-- Keep peer in `_peers` but it's naturally excluded from `getActivePeers()` (already filtered by `dc.readyState === 'open'`)
-- Zero their input slot (game continues without them)
+- Keep peer in `_peers` — it's naturally excluded from `getActivePeers()` (already filtered by `dc.readyState === 'open'`)
+- Zero their input slot but **preserve `_peerInputStarted[slot]`** — this ensures the peer is immediately re-included in `getInputPeers()` once their DC reopens and they send input, rather than being treated as a fresh late-joiner
+- Preserve `_remoteInputs[slot]` — stale entries above the synced frame will be purged after resync completes
+- Additionally, add `peer.reconnecting` check to `getInputPeers()`: exclude peers with `reconnecting === true` even if `_peerInputStarted` is set. This prevents the tick loop from stalling on a reconnecting peer whose new DC has opened but who hasn't completed resync yet. Clear `peer.reconnecting` only after resync completes (not just DC open).
 - Start 15-second reconnect timeout
+- **Exception:** if the peer is in `paused` state (`peer.paused === true`), suspend the reconnect timeout. The peer may return from background well after 15 seconds. Timeout only starts when the peer sends `"peer-resumed"` or when the visible side gives up waiting.
 
 #### Reconnect flow
 
-The side that detected DC death initiates reconnect:
-
-1. Close old `RTCPeerConnection`
-2. Create new `RTCPeerConnection` + new lockstep DataChannel
-3. Send fresh WebRTC offer via Socket.IO `webrtc-signal` with `reconnect: true` flag
-4. Receiving side: if `reconnect: true`, close old PC for that peer, accept new offer, create answer
-5. On DC open: send `"ready"` + `"emu-ready"`, clear `peer.reconnecting`, trigger immediate resync via `"sync-request"`
-6. Skip RTT measurement on reconnect (reuse existing `DELAY_FRAMES`)
+1. Detach all event handlers from old `RTCPeerConnection` (set `onconnectionstatechange`, `ondatachannel`, `onicecandidate` to null) to prevent stale close/error events
+2. Close old `RTCPeerConnection`
+3. Create new `RTCPeerConnection` with fresh handlers, update `peer.pc` reference
+4. Create new lockstep DataChannel on the new PC, update `peer.dc` reference, call `setupDataChannel()`
+5. Send fresh WebRTC offer via Socket.IO `webrtc-signal` with `reconnect: true` flag
+6. **Receiving side (`onWebRTCSignal` changes):** when `data.reconnect === true` and `_peers[senderSid]` already exists, do NOT call `peer.pc.setRemoteDescription` on the old PC. Instead: (a) detach old PC handlers, (b) close old PC, (c) create a new `RTCPeerConnection` with fresh handlers (similar to `createPeer` but reusing the peer object, preserving slot/input/reconnecting state), (d) set remote description on the new PC, (e) create answer and send back. If the sender has a new SID (due to Socket.IO reconnect), the receiving side maps the new SID to the existing peer using the slot number from `users-updated`.
+7. On DC open: send `"ready"` + `"emu-ready"`, trigger immediate resync via `"sync-request"`. Do NOT clear `peer.reconnecting` yet — wait for resync to complete.
+8. On resync complete: clear `peer.reconnecting`, re-include in `getInputPeers()`
+9. Skip RTT measurement on reconnect (reuse existing `DELAY_FRAMES` — network conditions may have changed, but re-measuring adds latency to the reconnect; acceptable tradeoff for v1)
 
 #### Who initiates
 
 - Both sides detect DC death. To avoid duplicate offers: **lower slot initiates** (same convention as initial connection)
-- Exception: if one side is paused (background tab), the visible side initiates regardless of slot order. The paused side accepts on tab return.
+- Exception: if one side is paused (background tab), the **visible side always initiates** regardless of slot order
+- To prevent a race when the paused player returns (they might also try to initiate): the returning player **defers for 2 seconds** after tab return. If an incoming offer arrives in that window, they accept it. If no offer arrives after 2 seconds, they initiate themselves. This avoids both sides sending offers simultaneously.
 
-#### Intentional leave detection
+#### Reconnect completion callback
 
-- Server already emits `users-updated` when a player leaves via `leave-room`
-- Track `_intentionalLeaves` set: when `users-updated` removes a player, add their SID
-- `handlePeerDisconnect` checks: if SID is in `_intentionalLeaves`, do hard disconnect (current behavior). Otherwise, attempt reconnect.
+The lockstep engine exposes an `onPeerReconnected(sid)` callback to play.js. This fires after a successful reconnect (DC open + ready handshake + resync complete). Play.js uses this to:
+- Resume ROM transfer if `_romTransferWaitingResume === true` (section 3)
+- Clear any reconnect overlay UI
 
 #### UX notifications
 
 - **Disconnected player:** spinner overlay on game canvas — "Connection lost — reconnecting..."
 - **Other players:** toast — "Player X disconnected — reconnecting..."
 - **On reconnect success:** overlay clears, toast — "Player X reconnected"
-- **On timeout (15s):** overlay changes to "Reconnection failed — rejoin as late-join?" with action button. Other players see toast "Player X dropped"
-
-#### Server-side
-
-No server changes needed. Reconnect reuses existing `webrtc-signal` event for offer/answer/ICE relay. The `reconnect: true` flag is client-side metadata only.
+- **On timeout (15s):** overlay changes to "Reconnection failed" with "Rejoin" button. Clicking it calls `stop()` on the lockstep engine, re-emits `join-room` with `lateJoin: true`, and re-initializes via the existing late-join flow. Other players see toast "Player X dropped"
 
 ### 3. Resumable ROM Transfer
 
@@ -116,22 +150,23 @@ When the rom-transfer DataChannel dies mid-transfer, keep received chunks in mem
 Current behavior on DC death: sets `_romTransferInProgress = false`, abandons chunks, shows "ROM transfer interrupted."
 
 New behavior:
-- Keep `_romTransferChunks`, `_romTransferHeader`, and `bytesReceived` intact
+- Keep `_romTransferChunks` and `_romTransferHeader` intact
+- Promote `bytesReceived` from a closure variable to module-level state: `_romTransferBytesReceived`. This must persist across DC deaths since the closure in `onExtraDataChannel` is destroyed when the old DC closes.
 - Set `_romTransferWaitingResume = true`
 - Show "ROM transfer interrupted — reconnecting..."
 
 #### Resume after DC reconnect
 
-1. After the lockstep DC reconnects (section 2), host opens a new `rom-transfer` DataChannel
-2. Joiner receives channel in `onExtraDataChannel`, detects `_romTransferWaitingResume === true`
-3. Joiner sends JSON `{ type: 'rom-resume', offset: bytesReceived }` over the new channel
+1. Lockstep engine's `onPeerReconnected(sid)` callback fires (section 2)
+2. Play.js checks `_romTransferWaitingResume === true` — if so, host opens a new `rom-transfer` DataChannel via `engine.getPeerConnection(sid)`
+3. Joiner receives channel in `onExtraDataChannel`. When `_romTransferWaitingResume === true`, skip the normal reset (`_romTransferChunks = []`, etc.) and instead send JSON `{ type: 'rom-resume', offset: _romTransferBytesReceived }` over the new channel
 4. Host receives `rom-resume`, seeks to that byte offset in the ROM `ArrayBuffer`, sends remaining chunks via `sendRomOverChannel` starting from offset
 5. Progress bar continues from where it left off
 
 #### Host side (sender)
 
 - `sendRomOverChannel` gains an optional `startOffset` parameter
-- On receiving `rom-resume`, host calls `sendRomOverChannel(dc, peerSid, msg.offset)` to resume from the specified byte
+- On receiving `rom-resume` on a rom-transfer DC, host calls `sendRomOverChannel(dc, peerSid, msg.offset)` to resume from the specified byte
 - On receiving `rom-header` (no resume), host sends from offset 0 as before
 
 #### Retry policy for resume
@@ -178,24 +213,33 @@ The current send loop at `play.js:628-645` relies on `onbufferedamountlow` for b
 
 #### Receiver-side staleness detection
 
-- Joiner tracks `_lastChunkReceivedAt = Date.now()` on each received chunk
-- A `setInterval(3000)` watchdog checks: if `_romTransferInProgress && Date.now() - _lastChunkReceivedAt > 10000`:
+- Joiner tracks `_lastChunkReceivedAt = Date.now()` on each received chunk (stored in module-level `_romTransferLastChunkAt`)
+- A `setInterval(3000)` watchdog checks: if `_romTransferInProgress && !_romTransferWaitingResume && Date.now() - _romTransferLastChunkAt > 10000`:
   - Show toast "ROM transfer stalled — retrying..."
   - Trigger resume flow: close current rom-transfer DC, reconnect, resume from byte offset
   - This counts toward the 3-attempt resume limit (section 3)
+- The `!_romTransferWaitingResume` guard prevents re-triggering the resume flow while a reconnect is already in progress
+- Watchdog is cleared when transfer completes or is cancelled
 
 ## Files Modified
 
 | File | Changes |
 |------|---------|
-| `web/static/netplay-lockstep.js` | Pause/resume protocol, DC reconnect state machine, reconnect signaling, `getInputPeers` exclusion for paused peers, UX overlay/toast hooks |
-| `web/static/play.js` | Resumable ROM transfer (chunk caching, resume handshake, retry logic), robust send loop (timeout fallback, adaptive chunks, error handling, staleness watchdog), reconnect overlay UI |
+| `server/src/api/signaling.py` | `rejoin-room` event, slot reservation with 30s TTL on disconnect during `playing` status, `users-updated` with `disconnected` flag |
+| `web/static/netplay-lockstep.js` | Pause/resume protocol, DC reconnect state machine (with PC handler lifecycle, `reconnecting` flag in `getInputPeers`, stale input purge after resync), reconnect signaling (`onWebRTCSignal` new-PC-on-existing-peer path), SID remapping on `users-updated`, `onPeerReconnected` callback, `onDataMessage` extension for pause/resume/leaving types, host-pause resync path |
+| `web/static/play.js` | Resumable ROM transfer (module-level `_romTransferBytesReceived`, resume handshake, retry logic), robust send loop (timeout fallback, adaptive chunks, error handling, staleness watchdog with re-trigger guard), reconnect overlay UI, `onPeerReconnected` handler for ROM resume, `rejoin-room` emit on Socket.IO reconnect |
 | `web/static/play.html` | Reconnect spinner overlay markup |
 
 ## Testing
 
 - Desktop: alt-tab during game, verify pause → resume → resync
+- Desktop: alt-tab as host (slot 0), verify host-side resume + guest resync
 - Mobile Safari: late-join with ROM sharing, verify transfer completes (or resumes after stall)
+- Mobile Safari: background app during game, verify Socket.IO reconnect → rejoin-room → DC reconnect → resync
 - Network blip simulation: disconnect WiFi briefly, verify DC reconnect + resync
-- ROM transfer interruption: kill DC mid-transfer, verify resume from offset
+- ROM transfer interruption: kill DC mid-transfer, verify resume from offset with progress continuity
+- Reconnect race: both sides alt-tab and return, verify 2-second defer window prevents duplicate offers
 - Multi-player: verify other players see correct toasts for disconnect/reconnect/pause/resume
+- Reconnect timeout: verify 15s timeout → "Reconnection failed" overlay → rejoin-as-late-join button works
+- SID change: verify that after Socket.IO reconnect with new SID, remaining clients correctly map new SID to existing peer slot
+- Slot reservation expiry: verify that 30s TTL on server frees slot if player never rejoins
