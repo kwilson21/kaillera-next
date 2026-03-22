@@ -103,14 +103,22 @@
  *   via _kn_set_frame_time). The stock (CDN) core falls back to a JS-
  *   level performance.now() shim via window._kn_frameTime.
  *
- * ── Desync Detection & Resync ─────────────────────────────────────────────
+ * ── Desync Detection & Resync (Star Topology) ────────────────────────────
  *
- *   Opt-in (rollbackEnabled flag). When enabled, the host hashes the
- *   first 64KB of save state every _syncCheckInterval frames (~5s) using
- *   FNV-1a and broadcasts "sync-hash:frame:hash" to all peers. If a
- *   guest's hash differs, it sends "sync-request" and the host captures
- *   + compresses + sends the full state via DataChannel in 64KB chunks.
- *   The guest hot-swaps the state without stopping the tick loop.
+ *   Opt-in (rollbackEnabled flag). Star topology: only the host (slot 0)
+ *   is the sync authority. The host hashes 64KB of RDRAM (direct HEAPU8
+ *   access when available, falling back to getState()) every
+ *   _syncCheckInterval frames using FNV-1a and broadcasts
+ *   "sync-hash:frame:hash" to all peers. Guests hash the same HEAPU8
+ *   region — no expensive getState() serialization needed.
+ *
+ *   If a guest's hash differs, it sends "sync-request" and the host
+ *   captures + compresses the full state and sends it via DataChannel
+ *   in 64KB chunks to the requesting peer only.
+ *
+ *   The guest decompresses the state and buffers it for async application
+ *   at the next clean frame boundary (start of tick loop) — no mid-frame
+ *   stall.
  *
  * ── Late Join ─────────────────────────────────────────────────────────────
  *
@@ -310,6 +318,8 @@
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
   let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
+  let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
+  let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -744,15 +754,18 @@
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
         if (e.data.substring(0, 10) === 'sync-hash:') {
+          // Star topology: only accept sync-hash from host (slot 0)
+          if (peer.slot !== 0) return;
+          // Don't compare while a resync is already pending (prevents delta base drift)
+          if (_pendingResyncState) return;
           var parts = e.data.split(':');
           var syncFrame = parseInt(parts[1], 10);
           var hostHash = parseInt(parts[2], 10);
           if (_frameNum === syncFrame || (_frameNum > syncFrame && _frameNum - syncFrame <= 2)) {
-            // Offload hash to worker — main thread continues immediately
+            // Hash directly from HEAPU8 (RDRAM) — avoids expensive getState()
             try {
-              var gm3 = window.EJS_emulator.gameManager;
-              var guestRaw = gm3.getState();  // ~3ms unavoidable
-              var guestBytes = guestRaw instanceof Uint8Array ? guestRaw : new Uint8Array(guestRaw);
+              var guestBytes = getHashBytes();
+              if (!guestBytes) return;
               var peerRef = peer;
               workerPost({ type: 'hash', data: guestBytes }).then(function (res) {
                 if (res.hash !== hostHash) {
@@ -773,7 +786,7 @@
         }
         // State sync: host received request, or chunked binary transfer header
         if (e.data === 'sync-request' && _playerSlot === 0) {
-          pushSyncState();
+          pushSyncState(remoteSid);
         }
         if (e.data.substring(0, 11) === 'sync-start:') {
           var parts = e.data.split(':');
@@ -1560,6 +1573,16 @@
 
     window._lockstepActive = true;
 
+    // Force resync when tab regains focus (alt-tab causes frame drift
+    // because setInterval is throttled to 1fps in background tabs)
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && _running && _syncEnabled) {
+        _consecutiveResyncs = 0;
+        _syncCheckInterval = _syncBaseInterval;
+        console.log('[lockstep] tab visible — reset sync interval for quick resync');
+      }
+    });
+
     // Use setInterval so background tabs are not throttled
     _tickInterval = setInterval(tick, 16);
   }
@@ -1604,6 +1627,13 @@
 
   function tick() {
     if (!_running) return;
+
+    // Async resync: apply buffered state at clean frame boundary
+    if (_pendingResyncState) {
+      var pending = _pendingResyncState;
+      _pendingResyncState = null;
+      applySyncState(pending.bytes, pending.frame);
+    }
 
     var activePeers = getActivePeers();
 
@@ -1711,52 +1741,45 @@
     if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
       // Only compare if we haven't overshot too far (state changes rapidly)
       if (_frameNum - _pendingSyncCheck.frame <= 2) {
-        // Offload hash to worker
+        // Hash directly from HEAPU8 (RDRAM) — avoids expensive getState()
         try {
-          var gm4 = window.EJS_emulator.gameManager;
-          var deferRaw = gm4.getState();
-          var deferBytes = deferRaw instanceof Uint8Array ? deferRaw : new Uint8Array(deferRaw);
-          var deferCheck = _pendingSyncCheck;  // capture before nulling
-          workerPost({ type: 'hash', data: deferBytes }).then(function (res) {
-            if (res.hash !== deferCheck.hash) {
-              console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
-              var sp = _peers[deferCheck.peerSid];
-              if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
-            } else {
-              _consecutiveResyncs = 0;
-              _syncCheckInterval = _syncBaseInterval;
-            }
-          }).catch(function () {});
+          var deferBytes = getHashBytes();
+          if (deferBytes) {
+            var deferCheck = _pendingSyncCheck;  // capture before nulling
+            workerPost({ type: 'hash', data: deferBytes }).then(function (res) {
+              if (res.hash !== deferCheck.hash) {
+                console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
+                var sp = _peers[deferCheck.peerSid];
+                if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+              } else {
+                _consecutiveResyncs = 0;
+                _syncCheckInterval = _syncBaseInterval;
+              }
+            }).catch(function () {});
+          }
         } catch (_) {}
       }
       _pendingSyncCheck = null;
     }
 
-    // -- Periodic desync check: host captures state (unavoidable ~3ms), then
-    // offloads hash + compress to a Web Worker so the tick loop continues
-    // immediately. The worker posts back {hash, compressed} when done.
+    // -- Periodic desync check (star topology: host-only) -----
+    // Hash directly from HEAPU8 (RDRAM) when available — avoids the ~3ms
+    // getState() serialization AND the pre-compression that used to run every
+    // check interval.  State is only captured/compressed on actual resync.
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
         _frameNum % _syncCheckInterval === 0) {
-      try {
-        var gm2 = window.EJS_emulator.gameManager;
-        var raw = gm2.getState();  // ~3ms — only unavoidable main-thread cost
-        var stateBytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      } catch (e) { /* getState failed, skip */ stateBytes = null; }
-      if (stateBytes) {
+      var hashBytes = getHashBytes();
+      if (hashBytes) {
         var checkFrame = _frameNum;
         var peers = getActivePeers();
-        // Post to worker: hash + compress in one shot, off main thread
-        workerPost({ type: 'hash-and-compress', data: stateBytes }).then(function (res) {
-          // Worker done — send hash to peers and cache compressed state
+        workerPost({ type: 'hash', data: hashBytes }).then(function (res) {
           var syncMsg = 'sync-hash:' + checkFrame + ':' + res.hash;
           for (var s = 0; s < peers.length; s++) {
             try { peers[s].dc.send(syncMsg); } catch (_) {}
           }
-          _cachedSyncState = { frame: checkFrame, data: res.compressed };
         }).catch(function () {});
-        // Log every 10th check
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
-          console.log('[lockstep] sync check queued at frame', _frameNum);
+          console.log('[lockstep] sync check at frame', _frameNum);
         }
       }
     }
@@ -2220,33 +2243,84 @@
     console.log('[lockstep] enabled mobile touch controls');
   }
 
+  // -- Direct memory hashing (avoids expensive getState() serialization) ------
+
+  function getHashBytes() {
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return null;
+
+    // Lazy RDRAM discovery — runs once, during first hash check (not boot).
+    // RetroArch's EmulatorJS build exports _get_memory_data(key) which takes
+    // a string key and returns "size|pointer" as a string.
+    if (_hashRegion === null) {
+      if (mod.cwrap) {
+        try {
+          var getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
+          var result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
+          if (result) {
+            var parts = result.split('|');
+            var rdramSize = parseInt(parts[0], 10);
+            var rdramPtr = parseInt(parts[1], 10);
+            if (rdramPtr > 0 && rdramSize > 0) {
+              _hashRegion = { ptr: rdramPtr, size: rdramSize };
+              console.log('[lockstep] hash: RDRAM direct at HEAPU8[' + rdramPtr + '], size=' + rdramSize);
+            } else {
+              _hashRegion = false;
+              console.log('[lockstep] hash: RDRAM unavailable (ptr=' + rdramPtr + ' size=' + rdramSize + ')');
+            }
+          } else {
+            _hashRegion = false;
+            console.log('[lockstep] hash: get_memory_data returned null');
+          }
+        } catch (e) {
+          _hashRegion = false;
+          console.log('[lockstep] hash: RDRAM discovery failed:', e.message);
+        }
+      } else {
+        _hashRegion = false;
+        console.log('[lockstep] hash: cwrap not available');
+      }
+    }
+
+    if (_hashRegion && _hashRegion.ptr) {
+      // Direct RDRAM access — ~0.1ms copy vs ~3ms getState() serialization
+      var len = Math.min(_hashRegion.size, 65536);
+      return mod.HEAPU8.slice(_hashRegion.ptr, _hashRegion.ptr + len);
+    }
+    // Fallback: getState() — skip first 1024 bytes (save state header/metadata
+    // contains timestamps and core version info that differs between instances
+    // even when gameplay is identical, causing false positive desyncs)
+    try {
+      var raw = window.EJS_emulator.gameManager.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      var SKIP = 1024;  // skip metadata header
+      var len = Math.min(bytes.length - SKIP, 65536);
+      if (len <= 0) return bytes.slice(0, Math.min(bytes.length, 65536));
+      return bytes.slice(SKIP, SKIP + len);
+    } catch (_) { return null; }
+  }
+
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   var _pushingSyncState = false;  // debounce concurrent sync-request handling
-  var _cachedSyncState = null;    // {frame, data} pre-compressed state from last hash check
 
-  function pushSyncState() {
-    // Host: send pre-compressed state if cached, otherwise capture fresh.
-    // The periodic hash check pre-compresses state in the background,
-    // so this is usually an instant send with no async work.
+  function pushSyncState(targetSid) {
+    // Host: capture state, compute delta, compress, and send to requesting peer.
+    // Star topology: only the host produces sync state; targetSid specifies
+    // the peer that requested it (avoids broadcasting to already-synced peers).
     if (_playerSlot !== 0 || !_syncEnabled) return;
     if (_pushingSyncState) return;
 
-    // Use cached pre-compressed state if available and recent (within 2 check intervals)
-    if (_cachedSyncState && (_frameNum - _cachedSyncState.frame) < _syncCheckInterval * 2) {
-      sendSyncChunks(_cachedSyncState.data, _cachedSyncState.frame);
-      return;
-    }
-
-    // Fallback: compress fresh (shouldn't normally happen)
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
     _pushingSyncState = true;
     var raw = gm.getState();
     var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     var frame = _frameNum;
+
     compressState(bytes).then(function (compressed) {
-      sendSyncChunks(compressed, frame);
+      sendSyncChunks(compressed, frame, true, targetSid);
     }).catch(function (err) {
       console.log('[lockstep] sync compress failed:', err);
     }).finally(function () {
@@ -2254,34 +2328,39 @@
     });
   }
 
-  function sendSyncChunks(compressed, frame) {
-    // Host: send compressed state via DC to all player peers in 64KB chunks
+  function sendSyncChunks(compressed, frame, isFull, targetSid) {
+    // Host: send compressed state/delta via DC in 64KB chunks.
+    // If targetSid is set, send only to that peer (star topology).
     var CHUNK_SIZE = 64000;
     var numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
-    var activePeers = getActivePeers();
+    var targets = [];
+    if (targetSid && _peers[targetSid]) {
+      targets = [_peers[targetSid]];
+    } else {
+      targets = getActivePeers();
+    }
 
-    for (var p = 0; p < activePeers.length; p++) {
-      var dc = activePeers[p].dc;
+    var header = 'sync-start:' + frame + ':' + numChunks + ':' + (isFull ? '1' : '0');
+    for (var p = 0; p < targets.length; p++) {
+      var dc = targets[p].dc;
       if (!dc || dc.readyState !== 'open') continue;
       try {
-        dc.send('sync-start:' + frame + ':' + numChunks);
+        dc.send(header);
         for (var i = 0; i < numChunks; i++) {
           var start = i * CHUNK_SIZE;
           var end = Math.min(start + CHUNK_SIZE, compressed.length);
-          // .slice() creates an independent copy — .subarray().buffer would
-          // send the entire underlying ArrayBuffer
           dc.send(compressed.slice(start, end));
         }
       } catch (err) {
         console.log('[lockstep] sync send failed:', err);
       }
     }
-    console.log('[lockstep] pushed state frame', frame,
+    console.log('[lockstep] pushed', (isFull ? 'full' : 'delta'), 'state frame', frame,
       '(' + Math.round(compressed.length / 1024) + 'KB,', numChunks, 'chunks)');
   }
 
   function handleSyncChunksComplete() {
-    // Guest: reassemble chunks and decompress via streams
+    // Guest: reassemble chunks, decompress, apply delta, buffer for async apply
     var total = _syncChunks.reduce(function (a, c) { return a + c.length; }, 0);
     var assembled = new Uint8Array(total);
     var offset = 0;
@@ -2292,24 +2371,21 @@
     _syncChunks = [];
     _syncExpected = 0;
     var frame = _syncFrame;
-    decompressState(assembled).then(function (bytes) {
-      applySyncState(bytes, frame);
+    decompressState(assembled).then(function (decompressed) {
+      // Async resync: buffer for application at next clean frame boundary
+      _pendingResyncState = { bytes: decompressed, frame: frame };
     }).catch(function (err) {
       console.log('[lockstep] sync decompress failed:', err);
     });
   }
 
   function applySyncState(bytes, frame) {
-    // Guest: hot-swap emulator state without rewinding the frame counter.
+    // Guest: hot-swap emulator state at a clean frame boundary.
+    // Called from tick() when _pendingResyncState is set — ensures loadState()
+    // never fires mid-tick or mid-input-processing.
     //
-    // KEY INSIGHT: The frame counter is only used for input synchronization
-    // (which frame's input to send/apply). The emulator doesn't use it — it
-    // just processes whatever input we write and steps. By keeping _frameNum
-    // where it is, the input buffers stay valid and neither side stalls.
-    //
-    // The game visually jumps to the host's state (from a moment ago) then
-    // continues smoothly with current inputs. If the underlying desync source
-    // persists, the next check will catch it — but no stall ever occurs.
+    // KEY INSIGHT: The frame counter is only used for input synchronization.
+    // By keeping _frameNum where it is, input buffers stay valid and no stall.
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
 
@@ -2319,9 +2395,6 @@
     var mod = gm.Module;
     mod.pauseMainLoop();
     mod.resumeMainLoop();
-
-    // Do NOT rewind _frameNum — that would create a gap where both sides
-    // stall waiting for inputs the other isn't sending yet.
 
     _resyncCount++;
     _consecutiveResyncs++;
@@ -2333,7 +2406,7 @@
     if (_consecutiveResyncs >= 3) {
       _syncCheckInterval = Math.min(
         _syncBaseInterval * Math.pow(2, _consecutiveResyncs - 2),
-        1800  // cap at ~30s
+        360   // cap at ~6s
       );
     }
 
@@ -2435,7 +2508,8 @@
     _syncChunks = [];
     _syncExpected = 0;
     _pushingSyncState = false;
-    _cachedSyncState = null;
+    _pendingResyncState = null;
+    _hashRegion = null;
     if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
     _syncWorkerCallbacks = {};
 

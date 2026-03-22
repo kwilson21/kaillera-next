@@ -171,6 +171,16 @@
             // Store host's ROM hash for verification
             _hostRomHash = roomData.rom_hash || null;
 
+            // Spectators don't need a ROM — they receive a video stream
+            // from the host. Skip ROM checks and go straight to engine init.
+            if (isSpectator) {
+              hideOverlay();
+              showToolbar();
+              showGameLoading();
+              initEngine();
+              return;
+            }
+
             // If no ROM cached, check if host is sharing
             if (!_romBlob && !_romBlobUrl) {
               if (roomData.rom_sharing) {
