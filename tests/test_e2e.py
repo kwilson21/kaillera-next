@@ -517,6 +517,82 @@ def test_worker_compress_and_encode(page, server_url):
     assert result.get("hasPeers") is True, "getInfo should have peers array"
 
 
+def test_share_dropdown_copies_links(browser, server_url):
+    """In-game share button shows dropdown with play and watch links."""
+    host = browser.new_page()
+    guest = browser.new_page()
+
+    try:
+        host.goto(f"{server_url}/play.html?room=SHR01&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+
+        guest.goto(f"{server_url}/play.html?room=SHR01&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+
+        _mark_rom_ready(host)
+        _mark_rom_ready(guest)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
+
+        # Share button exists
+        expect(host.locator("#toolbar-share")).to_be_visible()
+
+        # Dropdown initially hidden
+        expect(host.locator("#share-dropdown")).to_be_hidden()
+
+        # Click opens dropdown
+        host.click("#toolbar-share")
+        expect(host.locator("#share-dropdown")).to_be_visible(timeout=2000)
+        expect(host.locator("#share-play")).to_be_visible()
+        expect(host.locator("#share-watch")).to_be_visible()
+
+        # Click share-play copies and closes dropdown
+        host.click("#share-play")
+        expect(host.locator("#share-dropdown")).to_be_hidden(timeout=2000)
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_auto_spectate_when_room_full(browser, server_url):
+    """Joining a full room auto-spectates with a banner."""
+    host = browser.new_page()
+    p2 = browser.new_page()
+    p3 = browser.new_page()
+    p4 = browser.new_page()
+    joiner = browser.new_page()
+
+    try:
+        # Fill room to 4 players
+        host.goto(f"{server_url}/play.html?room=FULL01&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+
+        p2.goto(f"{server_url}/play.html?room=FULL01&name=P2")
+        expect(p2.locator("#overlay")).to_be_visible(timeout=10000)
+
+        p3.goto(f"{server_url}/play.html?room=FULL01&name=P3")
+        expect(p3.locator("#overlay")).to_be_visible(timeout=10000)
+
+        p4.goto(f"{server_url}/play.html?room=FULL01&name=P4")
+        expect(p4.locator("#overlay")).to_be_visible(timeout=10000)
+
+        # 5th player joins via play link (no spectate param)
+        joiner.goto(f"{server_url}/play.html?room=FULL01&name=Late")
+        # Should auto-spectate — overlay visible, banner appears
+        expect(joiner.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(joiner.locator(".room-full-banner")).to_be_visible(timeout=5000)
+
+        # Banner auto-dismisses
+        expect(joiner.locator(".room-full-banner")).to_be_hidden(timeout=7000)
+    finally:
+        host.close()
+        p2.close()
+        p3.close()
+        p4.close()
+        joiner.close()
+
+
 def test_gamepad_manager_has_gamepad(page, server_url):
     """GamepadManager.hasGamepad exists and returns false when no gamepad."""
     page.goto(f"{server_url}/play.html?room=GMS01&host=1&name=Host")

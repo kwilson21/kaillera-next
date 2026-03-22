@@ -283,6 +283,7 @@
   let _frameNum           = 0;      // current logical frame number
   let _localInputs        = {};     // frame -> inputMask
   let _remoteInputs       = {};     // slot -> {frame -> mask} (nested for multi-peer)
+  let _peerInputStarted   = {};     // slot -> true once first input received (survives buffer drain)
   let _running            = false;  // tick loop active
   let _lateJoin           = false;  // true when joining a game already in progress
 
@@ -558,12 +559,43 @@
       var s = peer.pc.connectionState;
       console.log('[lockstep] peer', remoteSid, 'connection-state:', s);
       if (s === 'connecting') setStatus('Connecting...');
-      if (s === 'failed' || s === 'disconnected') {
-        // Guard: only handle if this peer is still the current one for this SID.
-        // After stop()+init(), old connections fire stale events for replaced peers.
+      if (s === 'connected') {
+        // Clear any pending disconnect grace timer — connection recovered
+        if (peer._disconnectTimer) {
+          clearTimeout(peer._disconnectTimer);
+          peer._disconnectTimer = null;
+          console.log('[lockstep] peer', remoteSid, 'reconnected (ICE recovery)');
+          setStatus('Connected -- game on!');
+          // Reset sync backoff so next desync check happens within ~1s
+          // (connection hiccup likely caused a desync — don't wait 30s)
+          _consecutiveResyncs = 0;
+          _syncCheckInterval = _syncBaseInterval;
+        }
+      }
+      if (s === 'failed') {
+        // Failed is terminal — disconnect immediately
+        if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
         if (_peers[remoteSid] !== peer) return;
-        setStatus('Peer connection ' + s);
+        setStatus('Peer connection failed');
         handlePeerDisconnect(remoteSid);
+      }
+      if (s === 'disconnected') {
+        // Disconnected is recoverable — give ICE time to reconnect (mobile-friendly)
+        if (_peers[remoteSid] !== peer) return;
+        if (!peer._disconnectTimer) {
+          setStatus('Peer connection unstable...');
+          peer._disconnectTimer = setTimeout(function () {
+            peer._disconnectTimer = null;
+            // Still disconnected or failed after grace period — give up
+            var currentState = peer.pc.connectionState;
+            if (currentState === 'disconnected' || currentState === 'failed') {
+              console.log('[lockstep] peer', remoteSid, 'disconnect grace expired (was', currentState, ')');
+              if (_peers[remoteSid] !== peer) return;
+              setStatus('Peer connection lost');
+              handlePeerDisconnect(remoteSid);
+            }
+          }, 7000);
+        }
       }
     };
 
@@ -789,6 +821,7 @@
         var arr = new Int32Array(e.data);
         if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
         _remoteInputs[peer.slot][arr[0]] = arr[1];
+        if (!_peerInputStarted[peer.slot]) _peerInputStarted[peer.slot] = true;
         _remoteReceived++;
         if (arr[0] > _lastRemoteFrame) _lastRemoteFrame = arr[0];
         if (!_lastRemoteFramePerSlot[peer.slot] || arr[0] > _lastRemoteFramePerSlot[peer.slot]) {
@@ -803,11 +836,13 @@
   function handlePeerDisconnect(remoteSid) {
     var peer = _peers[remoteSid];
     if (!peer) return;
+    if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
 
     // If the peer was a player, zero their input in Wasm memory
     if (peer.slot !== null && peer.slot !== undefined) {
       try { writeInputToMemory(peer.slot, 0); } catch (_) {}
       delete _remoteInputs[peer.slot];
+      delete _peerInputStarted[peer.slot];
     }
 
     delete _peers[remoteSid];
@@ -842,9 +877,12 @@
   // late-joiners still booting) are excluded so they don't stall the game.
   // Once a peer sends their first input, they're included and the game
   // waits for them on every frame (Kaillera-style strict lockstep).
+  // Uses _peerInputStarted (persistent flag) instead of checking buffer
+  // length — prevents peers from dropping out when their buffer is
+  // momentarily empty between frames (causes 3+ player desync).
   function getInputPeers() {
     return getActivePeers().filter(function (p) {
-      return _remoteInputs[p.slot] && Object.keys(_remoteInputs[p.slot]).length > 0;
+      return _peerInputStarted[p.slot];
     });
   }
 
@@ -1443,6 +1481,7 @@
     if (_frameNum === 0) {
       _localInputs = {};
       _remoteInputs = {};
+      _peerInputStarted = {};
     }
     _fpsLastTime = performance.now();
     _fpsFrameCount = 0;
@@ -1532,6 +1571,7 @@
     // Disable all deterministic timing
     window._kn_inStep = false;
     window._kn_frameTime = 0;
+    window._kn_useRelativeCycles = false;
     if (_hasForkedCore) {
       var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
@@ -1640,6 +1680,15 @@
         var remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
         writeInputToMemory(peerSlot, remoteMask);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+      }
+      // Zero disconnected player slots so loadState() can't restore stale input
+      for (var zs = 0; zs < 4; zs++) {
+        if (zs === _playerSlot) continue;
+        var hasInputPeer = false;
+        for (var zi = 0; zi < inputPeers.length; zi++) {
+          if (inputPeers[zi].slot === zs) { hasInputPeer = true; break; }
+        }
+        if (!hasInputPeer) writeInputToMemory(zs, 0);
       }
       _remoteApplied++;
 
@@ -1755,6 +1804,18 @@
     gm.simulateInput = function (player, index, value) {
       // Only capture player 0 (local player's touch input)
       if (player === 0) {
+        // Suppress input while EJS menus/popups are open.  The virtual
+        // gamepad touch handlers in EmulatorJS don't check for menus
+        // (unlike the keyboard/gamepad handlers), so tapping the screen
+        // while the settings bar or a popup is visible sends spurious
+        // inputs that desync mobile players.
+        var ejs = window.EJS_emulator;
+        if (ejs) {
+          if (ejs.settingsMenuOpen) return;
+          if (ejs.isPopupOpen && ejs.isPopupOpen()) return;
+          if (ejs.elements && ejs.elements.menu &&
+              !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')) return;
+        }
         _touchInputState[index] = value;
       }
       // Don't call original — our writeInputToMemory handles input delivery.
@@ -1784,6 +1845,16 @@
     // EJS simulateInput uses indices 0-15 for digital buttons (value 0 or 1)
     // and 16-23 for analog axes (value ±32767). Our bitmask uses one bit per
     // direction: even index = positive, odd = negative.
+    // Skip entirely if an EJS menu/popup is visible — stale touch state from
+    // before the menu opened would otherwise keep sending non-zero input.
+    var ejs = window.EJS_emulator;
+    var ejsMenuOpen = ejs && (
+      ejs.settingsMenuOpen ||
+      (ejs.isPopupOpen && ejs.isPopupOpen()) ||
+      (ejs.elements && ejs.elements.menu &&
+       !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden'))
+    );
+    if (ejsMenuOpen) _touchInputState = {};
     for (var ti in _touchInputState) {
       var idx = parseInt(ti, 10);
       var val = _touchInputState[idx];
@@ -2344,6 +2415,7 @@
 
     // Reset lockstep state
     _remoteInputs = {};
+    _peerInputStarted = {};
     _localInputs = {};
     _frameNum = 0;
     window._frameNum = 0;

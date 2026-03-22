@@ -39,6 +39,7 @@
   var ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
   var ROM_CHUNK_SIZE = 64 * 1024;        // 64KB
   var _currentInputType = 'keyboard';    // 'keyboard' or 'gamepad' — last used
+  var _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -107,6 +108,12 @@
         }
         var roomData = JSON.parse(xhr.responseText);
 
+        // Room full: auto-join as spectator with banner
+        if (!isSpectator && roomData.player_count >= roomData.max_players) {
+          isSpectator = true;
+          _autoSpectated = true;
+        }
+
         socket.emit('join-room', {
           extra: {
             sessionid: roomCode,
@@ -115,7 +122,30 @@
             spectate: isSpectator,
           },
         }, function (err, joinData) {
-          if (err) { showError('Failed to join: ' + err); return; }
+          if (err) {
+            // Room filled between REST check and join — auto-spectate
+            if (err === 'Room is full') {
+              isSpectator = true;
+              _autoSpectated = true;
+              socket.emit('join-room', {
+                extra: {
+                  sessionid: roomCode,
+                  userid: socket.id,
+                  player_name: playerName,
+                  spectate: true,
+                },
+              }, function (err2, joinData2) {
+                if (err2) { showError('Failed to join: ' + err2); return; }
+                mySlot = null;
+                if (joinData2) lastUsersData = joinData2;
+                showRoomFullBanner();
+                showOverlay();
+              });
+              return;
+            }
+            showError('Failed to join: ' + err);
+            return;
+          }
 
           if (!isSpectator && joinData && joinData.players) {
             var entries = Object.values(joinData.players);
@@ -127,6 +157,7 @@
             }
           } else if (isSpectator) {
             mySlot = null;
+            if (_autoSpectated) showRoomFullBanner();
           }
 
           // Mid-game join handling
@@ -303,6 +334,11 @@
     hideOverlay();
     showToolbar();
     showGameLoading();
+    // Clear stale status text from previous game
+    var toolbarEl = document.getElementById('toolbar-status');
+    if (toolbarEl) toolbarEl.textContent = '';
+    var loadingText = document.getElementById('game-loading-text');
+    if (loadingText) loadingText.textContent = 'Loading...';
     initEngine();
   }
 
@@ -773,18 +809,7 @@
     if (gameEl) gameEl.innerHTML = '';
     window.EJS_emulator = undefined;
 
-    // Remove injected EJS scripts so re-injection creates a clean load.
-    // Also remove emulator.min.js to avoid const re-declaration errors.
-    var scripts = document.querySelectorAll(
-      'script[src*="loader.js"], script[src*="emulator.min.js"], script[src*="emulatorjs"]'
-    );
-    for (var i = 0; i < scripts.length; i++) {
-      scripts[i].parentNode.removeChild(scripts[i]);
-    }
-    // Clean up EJS globals so loader.js can re-inject cleanly
     try { delete window.EJS_emulator; } catch (_) {}
-    try { delete window.EJS_main; } catch (_) {}
-    try { delete window.EJS_GameManager; } catch (_) {}
 
     // Revoke the consumed blob URL — bootEmulator() will create a fresh one
     if (_romBlobUrl) {
@@ -817,16 +842,15 @@
     // directly to avoid const re-declaration errors from re-injecting scripts
     if (typeof EmulatorJS === 'function') {
       console.log('[play] bootEmulator: reusing existing EmulatorJS class');
-      var config = {
-        gameUrl: _romBlobUrl,
-        system: window.EJS_core || 'n64',
-        startOnLoaded: true,
-        pathtodata: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
-        shaders: window.EJS_SHADERS || {},
-      };
+      window.EJS_gameUrl = _romBlobUrl;
       window.EJS_emulator = new EmulatorJS(
-        document.querySelector(window.EJS_player || '#game'),
-        config
+        window.EJS_player || '#game',
+        {
+          gameUrl: _romBlobUrl,
+          dataPath: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
+          system: window.EJS_core || 'n64',
+          startOnLoad: true,
+        }
       );
       return;
     }
@@ -1525,6 +1549,19 @@
     card.appendChild(a);
   }
 
+  function showRoomFullBanner() {
+    var banner = document.createElement('div');
+    banner.className = 'room-full-banner';
+    banner.innerHTML = '<span>Game is full \u2014 you\u2019ve joined as a spectator</span>';
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'banner-close';
+    closeBtn.textContent = '\u2715';
+    closeBtn.onclick = function () { banner.remove(); };
+    banner.appendChild(closeBtn);
+    document.body.appendChild(banner);
+    setTimeout(function () { if (banner.parentNode) banner.remove(); }, 5000);
+  }
+
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
   function copyLink() {
@@ -1545,6 +1582,47 @@
       document.body.removeChild(ta);
       showToast('Link copied!');
     }
+  }
+
+  // ── UI: In-Game Share Dropdown ──────────────────────────────────────
+
+  function copyToClipboard(text, label) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast(label + ' copied!');
+      });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      showToast(label + ' copied!');
+    }
+  }
+
+  function toggleShareDropdown() {
+    var dd = document.getElementById('share-dropdown');
+    var btn = document.getElementById('toolbar-share');
+    if (!dd) return;
+    var isOpen = !dd.classList.contains('hidden');
+    if (isOpen) {
+      dd.classList.add('hidden');
+      if (btn) btn.classList.remove('active');
+    } else {
+      dd.classList.remove('hidden');
+      if (btn) btn.classList.add('active');
+    }
+  }
+
+  function closeShareDropdown() {
+    var dd = document.getElementById('share-dropdown');
+    var btn = document.getElementById('toolbar-share');
+    if (dd) dd.classList.add('hidden');
+    if (btn) btn.classList.remove('active');
   }
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
@@ -2046,6 +2124,32 @@
 
     var toolbarInfo = document.getElementById('toolbar-info');
     if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
+
+    var toolbarShare = document.getElementById('toolbar-share');
+    if (toolbarShare) toolbarShare.addEventListener('click', toggleShareDropdown);
+
+    var sharePlay = document.getElementById('share-play');
+    if (sharePlay) sharePlay.addEventListener('click', function () {
+      var url = window.location.origin + '/play.html?room=' + roomCode;
+      copyToClipboard(url, 'Play link');
+      closeShareDropdown();
+    });
+
+    var shareWatch = document.getElementById('share-watch');
+    if (shareWatch) shareWatch.addEventListener('click', function () {
+      var url = window.location.origin + '/play.html?room=' + roomCode + '&spectate=1';
+      copyToClipboard(url, 'Watch link');
+      closeShareDropdown();
+    });
+
+    // Close share dropdown on outside click or Escape
+    document.addEventListener('click', function (e) {
+      var wrapper = document.getElementById('share-wrapper');
+      if (wrapper && !wrapper.contains(e.target)) closeShareDropdown();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeShareDropdown();
+    });
 
     var copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
