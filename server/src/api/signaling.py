@@ -159,6 +159,7 @@ async def _leave(sid: str) -> None:
                 new_owner_pid = pid
                 break
         room.owner = new_owner_sid
+        room.rom_sharing = False
         # Move new owner to slot 0 (P1) if they're not already there
         if new_owner_pid and room.slots.get(0) != new_owner_pid:
             # Remove their old slot
@@ -375,6 +376,25 @@ async def end_game(sid: str, data: dict) -> str | None:
     # mode persists for rematch convenience
     await sio.emit("game-ended", {}, room=session_id)
     log.info("Game ended in room %s", session_id)
+    return None
+
+
+@sio.on("rom-sharing-toggle")
+async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+    if room.owner != sid:
+        return "Only the host can toggle ROM sharing"
+
+    enabled = bool(data.get("enabled", False))
+    room.rom_sharing = enabled
+    await sio.emit("rom-sharing-updated", {"romSharing": enabled}, room=session_id)
+    log.info("ROM sharing %s in room %s", "enabled" if enabled else "disabled", session_id)
     return None
 
 
