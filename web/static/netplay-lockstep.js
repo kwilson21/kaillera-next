@@ -240,7 +240,7 @@
   // at startup by calling _simulate_input and detecting which byte changed.
   // Fallback: 715364 (CDN core address).
 
-  var INPUT_BASE       = 715364;  // auto-discovered at startup (kept for hashGameState)
+  var INPUT_BASE       = 715364;  // auto-discovered at startup
 
   // -- State -----------------------------------------------------------------
 
@@ -283,7 +283,7 @@
   // (sync compression uses CompressionStream/DecompressionStream directly)
   let _syncCheckInterval = 60;     // check hash every N frames (~1s at 60fps)
   let _syncBaseInterval  = 60;     // base interval before adaptive backoff
-  let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
+  // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   let _syncChunks        = [];     // incoming chunks from host DC
@@ -682,17 +682,24 @@
           var parts = e.data.split(':');
           var syncFrame = parseInt(parts[1], 10);
           var hostHash = parseInt(parts[2], 10);
-          if (_frameNum === syncFrame) {
-            var localHash = hashGameState();
-            if (localHash !== null && localHash !== hostHash) {
-              console.log('[lockstep] DESYNC at frame', syncFrame,
-                'local:', localHash, 'host:', hostHash, '-- requesting state');
-              peer.dc.send('sync-request');
-            } else if (localHash !== null) {
-              // Clean check — reset backoff
-              _consecutiveResyncs = 0;
-              _syncCheckInterval = _syncBaseInterval;
-            }
+          if (_frameNum === syncFrame || (_frameNum > syncFrame && _frameNum - syncFrame <= 2)) {
+            // Offload hash to worker — main thread continues immediately
+            try {
+              var gm3 = window.EJS_emulator.gameManager;
+              var guestRaw = gm3.getState();  // ~3ms unavoidable
+              var guestBytes = guestRaw instanceof Uint8Array ? guestRaw : new Uint8Array(guestRaw);
+              var peerRef = peer;
+              workerPost({ type: 'hash', data: guestBytes }).then(function (res) {
+                if (res.hash !== hostHash) {
+                  console.log('[lockstep] DESYNC at frame', syncFrame,
+                    'local:', res.hash, 'host:', hostHash, '-- requesting state');
+                  try { peerRef.dc.send('sync-request'); } catch (_) {}
+                } else {
+                  _consecutiveResyncs = 0;
+                  _syncCheckInterval = _syncBaseInterval;
+                }
+              }).catch(function () {});
+            } catch (_) {}
           } else if (_frameNum < syncFrame) {
             // We're behind — store for deferred check when we reach that frame
             _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
@@ -1596,43 +1603,53 @@
     if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
       // Only compare if we haven't overshot too far (state changes rapidly)
       if (_frameNum - _pendingSyncCheck.frame <= 2) {
-        var localHash = hashGameState();
-        if (localHash !== null && localHash !== _pendingSyncCheck.hash) {
-          console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame,
-            '(checked at', _frameNum + ')');
-          var syncPeer = _peers[_pendingSyncCheck.peerSid];
-          if (syncPeer && syncPeer.dc) {
-            try { syncPeer.dc.send('sync-request'); } catch (_) {}
-          }
-        } else if (localHash !== null) {
-          _consecutiveResyncs = 0;
-          _syncCheckInterval = _syncBaseInterval;
-        }
+        // Offload hash to worker
+        try {
+          var gm4 = window.EJS_emulator.gameManager;
+          var deferRaw = gm4.getState();
+          var deferBytes = deferRaw instanceof Uint8Array ? deferRaw : new Uint8Array(deferRaw);
+          var deferCheck = _pendingSyncCheck;  // capture before nulling
+          workerPost({ type: 'hash', data: deferBytes }).then(function (res) {
+            if (res.hash !== deferCheck.hash) {
+              console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
+              var sp = _peers[deferCheck.peerSid];
+              if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+            } else {
+              _consecutiveResyncs = 0;
+              _syncCheckInterval = _syncBaseInterval;
+            }
+          }).catch(function () {});
+        } catch (_) {}
       }
       _pendingSyncCheck = null;
     }
 
-    // -- Periodic desync check: host hashes game state (first 64KB), broadcasts hash.
-    // Pre-compresses state so sync-request responses are instant (no re-capture).
+    // -- Periodic desync check: host captures state (unavoidable ~3ms), then
+    // offloads hash + compress to a Web Worker so the tick loop continues
+    // immediately. The worker posts back {hash, compressed} when done.
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
         _frameNum % _syncCheckInterval === 0) {
-      var result = hashGameState(true);  // keepBytes=true
-      if (result === null) return;  // hash failed, skip this check
-      var hostHash = result.hash;
-      var syncMsg = 'sync-hash:' + _frameNum + ':' + hostHash;
-      var ap = getActivePeers();
-      for (var s = 0; s < ap.length; s++) {
-        try { ap[s].dc.send(syncMsg); } catch (_) {}
-      }
-      // Pre-compress in background so it's ready when sync-request arrives.
-      // This eliminates getState()+compress from the critical resync path.
-      var cacheFrame = _frameNum;
-      compressState(result.bytes).then(function (compressed) {
-        _cachedSyncState = { frame: cacheFrame, data: compressed };
-      }).catch(function () {});
-      // Log every 10th check
-      if (_frameNum % (_syncCheckInterval * 10) === 0) {
-        console.log('[lockstep] sync check at frame', _frameNum, 'hash:', hostHash);
+      try {
+        var gm2 = window.EJS_emulator.gameManager;
+        var raw = gm2.getState();  // ~3ms — only unavoidable main-thread cost
+        var stateBytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      } catch (e) { /* getState failed, skip */ stateBytes = null; }
+      if (stateBytes) {
+        var checkFrame = _frameNum;
+        var peers = getActivePeers();
+        // Post to worker: hash + compress in one shot, off main thread
+        workerPost({ type: 'hash-and-compress', data: stateBytes }).then(function (res) {
+          // Worker done — send hash to peers and cache compressed state
+          var syncMsg = 'sync-hash:' + checkFrame + ':' + res.hash;
+          for (var s = 0; s < peers.length; s++) {
+            try { peers[s].dc.send(syncMsg); } catch (_) {}
+          }
+          _cachedSyncState = { frame: checkFrame, data: res.compressed };
+        }).catch(function () {});
+        // Log every 10th check
+        if (_frameNum % (_syncCheckInterval * 10) === 0) {
+          console.log('[lockstep] sync check queued at frame', _frameNum);
+        }
       }
     }
 
@@ -1737,9 +1754,97 @@
     console.log('[input-debug] Logging input for 3 seconds — press buttons now');
   };
 
-  // -- Compression helpers ---------------------------------------------------
+  // -- Inline Web Worker for hash + compress/decompress ----------------------
+  //
+  // Offloads CPU-intensive sync work (FNV-1a hash, gzip compress/decompress)
+  // to a dedicated thread so the main thread tick loop isn't blocked.
+
+  var _syncWorker = null;
+  var _syncWorkerCallbacks = {};  // id -> callback
+  var _syncWorkerNextId = 0;
+
+  function getSyncWorker() {
+    if (_syncWorker) return _syncWorker;
+    var code = [
+      'var hashBytes = 65536;',
+      'function fnv1a(bytes) {',
+      '  var h = 0x811c9dc5, len = Math.min(bytes.length, hashBytes);',
+      '  for (var i = 0; i < len; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }',
+      '  return h | 0;',
+      '}',
+      'async function compress(bytes) {',
+      '  var cs = new CompressionStream("gzip");',
+      '  var w = cs.writable.getWriter(); w.write(bytes); w.close();',
+      '  var r = cs.readable.getReader(), chunks = [];',
+      '  while (true) { var res = await r.read(); if (res.value) chunks.push(res.value); if (res.done) break; }',
+      '  var out = new Uint8Array(chunks.reduce(function(a,c){return a+c.length},0)), off=0;',
+      '  for (var i=0;i<chunks.length;i++){out.set(chunks[i],off);off+=chunks[i].length;}',
+      '  return out;',
+      '}',
+      'async function decompress(bytes) {',
+      '  var ds = new DecompressionStream("gzip");',
+      '  var w = ds.writable.getWriter(); w.write(bytes); w.close();',
+      '  var r = ds.readable.getReader(), chunks = [];',
+      '  while (true) { var res = await r.read(); if (res.value) chunks.push(res.value); if (res.done) break; }',
+      '  var out = new Uint8Array(chunks.reduce(function(a,c){return a+c.length},0)), off=0;',
+      '  for (var i=0;i<chunks.length;i++){out.set(chunks[i],off);off+=chunks[i].length;}',
+      '  return out;',
+      '}',
+      'onmessage = async function(e) {',
+      '  var msg = e.data, id = msg.id;',
+      '  try {',
+      '    if (msg.type === "hash") {',
+      '      postMessage({id:id, hash: fnv1a(msg.data)});',
+      '    } else if (msg.type === "hash-and-compress") {',
+      '      var hash = fnv1a(msg.data);',
+      '      var compressed = await compress(msg.data);',
+      '      postMessage({id:id, hash:hash, compressed:compressed}, [compressed.buffer]);',
+      '    } else if (msg.type === "compress") {',
+      '      var c = await compress(msg.data);',
+      '      postMessage({id:id, data:c}, [c.buffer]);',
+      '    } else if (msg.type === "decompress") {',
+      '      var d = await decompress(msg.data);',
+      '      postMessage({id:id, data:d}, [d.buffer]);',
+      '    }',
+      '  } catch(err) { postMessage({id:id, error: err.message}); }',
+      '};',
+    ].join('\n');
+    var blob = new Blob([code], { type: 'application/javascript' });
+    _syncWorker = new Worker(URL.createObjectURL(blob));
+    _syncWorker.onmessage = function (e) {
+      var cb = _syncWorkerCallbacks[e.data.id];
+      if (cb) { delete _syncWorkerCallbacks[e.data.id]; cb(e.data); }
+    };
+    return _syncWorker;
+  }
+
+  function workerPost(msg) {
+    return new Promise(function (resolve, reject) {
+      var id = _syncWorkerNextId++;
+      msg.id = id;
+      _syncWorkerCallbacks[id] = function (result) {
+        if (result.error) reject(new Error(result.error));
+        else resolve(result);
+      };
+      // Transfer ArrayBuffer if present (zero-copy to worker)
+      var transfer = msg.data && msg.data.buffer ? [msg.data.buffer] : [];
+      getSyncWorker().postMessage(msg, transfer);
+    });
+  }
+
+  // -- Compression helpers (delegate to worker when available) ---------------
 
   async function compressState(bytes) {
+    try {
+      var result = await workerPost({ type: 'compress', data: bytes });
+      return result.data;
+    } catch (e) {
+      // Worker fallback: compress on main thread
+      return compressStateFallback(bytes);
+    }
+  }
+
+  async function compressStateFallback(bytes) {
     var cs = new CompressionStream('gzip');
     var writer = cs.writable.getWriter();
     writer.write(bytes);
@@ -1761,24 +1866,30 @@
   }
 
   async function decompressState(bytes) {
-    var ds = new DecompressionStream('gzip');
-    var writer = ds.writable.getWriter();
-    writer.write(bytes);
-    writer.close();
-    var reader = ds.readable.getReader();
-    var chunks = [];
-    while (true) {
-      var result = await reader.read();
-      if (result.value) chunks.push(result.value);
-      if (result.done) break;
+    try {
+      var result = await workerPost({ type: 'decompress', data: bytes });
+      return result.data;
+    } catch (e) {
+      // Worker fallback: decompress on main thread
+      var ds = new DecompressionStream('gzip');
+      var writer = ds.writable.getWriter();
+      writer.write(bytes);
+      writer.close();
+      var reader = ds.readable.getReader();
+      var chunks = [];
+      while (true) {
+        var result2 = await reader.read();
+        if (result2.value) chunks.push(result2.value);
+        if (result2.done) break;
+      }
+      var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+      var offset = 0;
+      for (var i = 0; i < chunks.length; i++) {
+        out.set(chunks[i], offset);
+        offset += chunks[i].length;
+      }
+      return out;
     }
-    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
-    var offset = 0;
-    for (var i = 0; i < chunks.length; i++) {
-      out.set(chunks[i], offset);
-      offset += chunks[i].length;
-    }
-    return out;
   }
 
   function uint8ToBase64(bytes) {
@@ -1939,28 +2050,7 @@
     console.log('[lockstep] enabled mobile touch controls');
   }
 
-  function hashGameState(keepBytes) {
-    // Hash first _syncHashBytes of save state (game state only, excludes audio buffers).
-    // getState() costs ~3ms; hashing 64KB is negligible. Called every ~1s.
-    // If keepBytes is true, returns {hash, bytes} so caller can reuse the state.
-    try {
-      var gm = window.EJS_emulator.gameManager;
-      var state = gm.getState();
-      var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
-      var hash = 0x811c9dc5;
-      var len = Math.min(bytes.length, _syncHashBytes);
-      for (var i = 0; i < len; i++) {
-        hash ^= bytes[i];
-        hash = Math.imul(hash, 0x01000193);
-      }
-      hash = hash | 0;
-      return keepBytes ? { hash: hash, bytes: bytes } : hash;
-    } catch (e) {
-      return null;  // null = hash failed, skip this check
-    }
-  }
-
-  // -- Async state sync (compress/decompress on main thread via streams) -----
+  // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   var _pushingSyncState = false;  // debounce concurrent sync-request handling
   var _cachedSyncState = null;    // {frame, data} pre-compressed state from last hash check
@@ -2174,6 +2264,8 @@
     _syncExpected = 0;
     _pushingSyncState = false;
     _cachedSyncState = null;
+    if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
+    _syncWorkerCallbacks = {};
 
     // Clean up audio bypass
     if (_audioWorklet) {
