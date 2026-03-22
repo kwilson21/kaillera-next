@@ -1576,13 +1576,44 @@
 
     window._lockstepActive = true;
 
-    // Force resync when tab regains focus (alt-tab causes frame drift
-    // because setInterval is throttled to 1fps in background tabs)
+    // Pause/resume on tab visibility change (alt-tab)
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && _running && _syncEnabled) {
-        _consecutiveResyncs = 0;
-        _syncCheckInterval = _syncBaseInterval;
-        console.log('[lockstep] tab visible — reset sync interval for quick resync');
+      if (!_running) return;
+      if (document.hidden) {
+        // Pause: stop ticking, notify peers
+        _paused = true;
+        _pausedAtFrame = _frameNum;
+        console.log('[lockstep] tab hidden — paused at frame', _frameNum);
+        var activePeers = getActivePeers();
+        for (var i = 0; i < activePeers.length; i++) {
+          try { activePeers[i].dc.send('peer-paused'); } catch (_) {}
+        }
+        // Socket.IO fallback if no DC peers
+        if (activePeers.length === 0 && socket) {
+          socket.emit('data-message', { type: 'peer-paused', sender: socket.id });
+        }
+      } else {
+        // Resume: unpause, notify peers, request resync
+        _paused = false;
+        console.log('[lockstep] tab visible — resuming from frame', _pausedAtFrame);
+        var activePeers2 = getActivePeers();
+        for (var j = 0; j < activePeers2.length; j++) {
+          try { activePeers2[j].dc.send('peer-resumed'); } catch (_) {}
+        }
+        if (activePeers2.length === 0 && socket) {
+          socket.emit('data-message', { type: 'peer-resumed', sender: socket.id });
+        }
+        // Resync: if host, broadcast hash immediately. If guest, request state.
+        if (_playerSlot === 0 && _syncEnabled) {
+          _consecutiveResyncs = 0;
+          _syncCheckInterval = _syncBaseInterval;
+        } else {
+          // Send sync-request to host
+          var hostPeer = Object.values(_peers).find(function (p) { return p.slot === 0; });
+          if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+            try { hostPeer.dc.send('sync-request'); } catch (_) {}
+          }
+        }
       }
     });
 
