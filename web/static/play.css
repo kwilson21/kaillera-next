@@ -501,6 +501,7 @@ button:hover { background: #4a6fa5; }
   justify-content: center;
   z-index: 90;
   transition: opacity 0.4s;
+  pointer-events: none;
 }
 
 #game-loading.hidden { display: none; }

@@ -1148,8 +1148,8 @@
         // Update game loading overlay
         var loadingText = document.getElementById('game-loading-text');
         if (loadingText) loadingText.textContent = msg;
-        // Dismiss loading overlay when game actually starts
-        if (msg === 'Connected -- game on!') {
+        // Dismiss loading overlay when lockstep loop starts
+        if (msg.indexOf('game on') !== -1 || msg.indexOf('Spectating') !== -1) {
           dismissGameLoading();
         }
       },
