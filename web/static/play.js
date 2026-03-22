@@ -415,8 +415,8 @@
       ' decision=' + _romSharingDecision + ' transfer=' + _romTransferInProgress +
       ' hasRom=' + !!_romBlob);
 
-    if (_romSharingEnabled && _romSharingDecision === null) {
-      // Show accept/decline prompt, hide drop zone
+    if (_romSharingEnabled && _romSharingDecision === null && !_romBlob) {
+      // Show accept/decline prompt, hide drop zone (only if no ROM loaded)
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.style.display = '';
       if (progress) progress.style.display = 'none';
@@ -765,11 +765,18 @@
     if (gameEl) gameEl.innerHTML = '';
     window.EJS_emulator = undefined;
 
-    // Remove injected loader.js scripts so re-injection creates a clean load
-    var scripts = document.querySelectorAll('script[src*="loader.js"]');
+    // Remove injected EJS scripts so re-injection creates a clean load.
+    // Also remove emulator.min.js to avoid const re-declaration errors.
+    var scripts = document.querySelectorAll(
+      'script[src*="loader.js"], script[src*="emulator.min.js"], script[src*="emulatorjs"]'
+    );
     for (var i = 0; i < scripts.length; i++) {
       scripts[i].parentNode.removeChild(scripts[i]);
     }
+    // Clean up EJS globals so loader.js can re-inject cleanly
+    try { delete window.EJS_emulator; } catch (_) {}
+    try { delete window.EJS_main; } catch (_) {}
+    try { delete window.EJS_GameManager; } catch (_) {}
 
     // Revoke the consumed blob URL — bootEmulator() will create a fresh one
     if (_romBlobUrl) {
@@ -795,8 +802,27 @@
       if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = URL.createObjectURL(_romBlob);
     }
-    console.log('[play] bootEmulator: injecting loader.js, gameUrl:', _romBlobUrl.substring(0, 50));
+    console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
+
+    // If EmulatorJS class is already loaded (game restart), instantiate
+    // directly to avoid const re-declaration errors from re-injecting scripts
+    if (typeof EmulatorJS === 'function') {
+      console.log('[play] bootEmulator: reusing existing EmulatorJS class');
+      var config = {
+        gameUrl: _romBlobUrl,
+        system: window.EJS_core || 'n64',
+        startOnLoaded: true,
+        pathtodata: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
+        shaders: window.EJS_SHADERS || {},
+      };
+      window.EJS_emulator = new EmulatorJS(
+        document.querySelector(window.EJS_player || '#game'),
+        config
+      );
+      return;
+    }
+
     var script = document.createElement('script');
     script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
     script.onload = function () { console.log('[play] loader.js loaded'); };
