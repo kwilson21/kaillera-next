@@ -896,7 +896,47 @@
     if (!peer) return;
     if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
 
-    // If the peer was a player, zero their input in Wasm memory
+    // If game is running and not an intentional leave, attempt reconnect
+    if (_running && !peer._intentionalLeave) {
+      console.log('[lockstep] peer', remoteSid, 'DC died — attempting reconnect');
+
+      // Zero their input but keep peer in _peers
+      if (peer.slot !== null && peer.slot !== undefined) {
+        try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+      }
+      peer.reconnecting = true;
+      peer.reconnectStart = Date.now();
+
+      var known = _knownPlayers[remoteSid];
+      var name = known ? known.playerName : 'P' + ((peer.slot || 0) + 1);
+      setStatus(name + ' disconnected — reconnecting...');
+      if (_config && _config.onToast) _config.onToast(name + ' disconnected — reconnecting...');
+      if (_config && _config.onReconnecting) _config.onReconnecting(remoteSid, true);
+
+      // Lower slot initiates reconnect (unless paused — visible side initiates)
+      var shouldInitiate = (!peer.paused && _playerSlot < peer.slot) || (peer.paused);
+      if (shouldInitiate) {
+        attemptReconnect(remoteSid);
+      }
+
+      // 15-second timeout — give up and hard disconnect
+      peer._reconnectTimeout = setTimeout(function () {
+        if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+        console.log('[lockstep] reconnect timeout for', remoteSid);
+        hardDisconnectPeer(remoteSid);
+      }, 15000);
+
+      return;
+    }
+
+    hardDisconnectPeer(remoteSid);
+  }
+
+  function hardDisconnectPeer(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer) return;
+    if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
+
     if (peer.slot !== null && peer.slot !== undefined) {
       try { writeInputToMemory(peer.slot, 0); } catch (_) {}
       delete _remoteInputs[peer.slot];
@@ -906,18 +946,20 @@
     delete _peers[remoteSid];
     delete _lockstepReadyPeers[remoteSid];
     window._peers = _peers;
-    console.log('[lockstep] peer disconnected:', remoteSid, 'slot:', peer.slot);
+    console.log('[lockstep] peer hard-disconnected:', remoteSid, 'slot:', peer.slot);
 
-    // Check if any active player peers remain
+    var known = _knownPlayers[remoteSid];
+    var name = known ? known.playerName : 'P' + ((peer.slot || 0) + 1);
+
     var remaining = getActivePeers();
     if (remaining.length === 0 && _running) {
       setStatus('All peers disconnected -- running solo');
-      // Keep running: single-player mode. The tick loop handles zero active peers
-      // gracefully by just stepping frames with local input only.
     } else if (_running) {
-      var count = remaining.length + 1;  // +1 for self
-      setStatus('Peer left -- ' + count + ' player' + (count > 1 ? 's' : '') + ' remaining');
+      var count = remaining.length + 1;
+      setStatus(name + ' dropped -- ' + count + ' player' + (count > 1 ? 's' : '') + ' remaining');
     }
+    if (_config && _config.onToast) _config.onToast(name + ' dropped');
+    if (_config && _config.onReconnecting) _config.onReconnecting(remoteSid, false);
   }
 
   // -- Helper: get active player peers ---------------------------------------
@@ -940,7 +982,7 @@
   // momentarily empty between frames (causes 3+ player desync).
   function getInputPeers() {
     return getActivePeers().filter(function (p) {
-      return _peerInputStarted[p.slot] && !p.paused;
+      return _peerInputStarted[p.slot] && !p.paused && !p.reconnecting;
     });
   }
 
