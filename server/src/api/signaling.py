@@ -70,6 +70,7 @@ class Room:
     mode: str | None = None     # "lockstep" or "streaming", set on start-game
     rom_hash: str | None = None # SHA-256 of ROM, set on start-game
     rom_sharing: bool = False     # whether host is sharing ROM via P2P
+    rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -93,7 +94,11 @@ def _players_payload(room: Room) -> dict:
     pid_to_slot = {pid: slot for slot, pid in room.slots.items()}
     return {
         "players": {
-            pid: {**info, "slot": pid_to_slot.get(pid)}
+            pid: {
+                **info,
+                "slot": pid_to_slot.get(pid),
+                "romReady": info["socketId"] in room.rom_ready,
+            }
             for pid, info in room.players.items()
         },
         "spectators": {
@@ -343,6 +348,12 @@ async def start_game(sid: str, data: dict) -> str | None:
     if room.owner != sid:
         return "Only the host can start the game"
 
+    # Check all players have ROMs (or host is sharing)
+    if not room.rom_sharing:
+        for pid, info in room.players.items():
+            if info["socketId"] not in room.rom_ready:
+                return "Not all players have a ROM loaded"
+
     room.status = "playing"
     mode = data.get("mode", "lockstep")
     if mode not in _VALID_MODES:
@@ -395,6 +406,25 @@ async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
     room.rom_sharing = enabled
     await sio.emit("rom-sharing-updated", {"romSharing": enabled}, room=session_id)
     log.info("ROM sharing %s in room %s", "enabled" if enabled else "disabled", session_id)
+    return None
+
+
+@sio.on("rom-ready")
+async def rom_ready(sid: str, data: dict) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+
+    ready = bool(data.get("ready", True))
+    if ready:
+        room.rom_ready.add(sid)
+    else:
+        room.rom_ready.discard(sid)
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 

@@ -184,7 +184,13 @@
 
     // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
     if (data.romSharing !== undefined) {
+      var wasSharing = _romSharingEnabled;
       _romSharingEnabled = !!data.romSharing;
+      if (_romSharingEnabled !== wasSharing) {
+        console.log('[play] ROM sharing state from users-updated:', _romSharingEnabled);
+        if (_romSharingEnabled && !isHost) showToast('Host is sharing their ROM');
+        updateRomSharingUI();
+      }
     }
 
     // Update my slot
@@ -330,6 +336,13 @@
   function onRomSharingUpdated(data) {
     var wasEnabled = _romSharingEnabled;
     _romSharingEnabled = !!data.romSharing;
+    console.log('[play] rom-sharing-updated:', _romSharingEnabled);
+
+    // Notify joiners
+    if (!isHost) {
+      if (_romSharingEnabled && !wasEnabled) showToast('Host is sharing their ROM');
+      if (!_romSharingEnabled && wasEnabled) showToast('Host stopped sharing their ROM');
+    }
 
     // If sharing was just disabled and we're mid-transfer, cancel
     if (wasEnabled && !_romSharingEnabled && _romTransferInProgress) {
@@ -382,6 +395,10 @@
     if (isHost) return;
     // Spectators don't need ROMs
     if (isSpectator) return;
+
+    console.log('[play] updateRomSharingUI: enabled=' + _romSharingEnabled +
+      ' decision=' + _romSharingDecision + ' transfer=' + _romTransferInProgress +
+      ' hasRom=' + !!_romBlob);
 
     if (_romSharingEnabled && _romSharingDecision === null) {
       // Show accept/decline prompt, hide drop zone
@@ -665,6 +682,7 @@
 
   function afterRomTransferComplete(displayName) {
     console.log('[play] ROM transfer complete:', displayName);
+    notifyRomReady();
 
     // Update drop zone to show loaded state
     var romDrop = document.getElementById('rom-drop');
@@ -682,6 +700,12 @@
     // If we were in a pending late-join, dismiss the prompt
     if (_pendingLateJoin) {
       dismissLateJoinPrompt();
+    }
+  }
+
+  function notifyRomReady() {
+    if (socket && socket.connected) {
+      socket.emit('rom-ready', { ready: true });
     }
   }
 
@@ -861,6 +885,7 @@
       }).catch(function (err) {
         console.log('[play] hash failed:', err);
       }).then(function () {
+        notifyRomReady();
         // Always proceed with late-join, even if hash computation failed
         if (_pendingLateJoin) {
           dismissLateJoinPrompt();
@@ -1013,6 +1038,7 @@
         hashArrayBuffer(req.result).then(function (hash) {
           _romHash = hash;
           localStorage.setItem('kaillera-rom-hash', hash);
+          notifyRomReady();
           cb(name);
         });
       };
@@ -1089,6 +1115,8 @@
       mode: selectedMode,
       rollbackEnabled: optRollback ? optRollback.checked : false,
       romHash: _romHash || null,
+    }, function (err) {
+      if (err) showToast(err);
     });
   }
 
@@ -1207,7 +1235,9 @@
 
       if (playerInSlot) {
         var isOwner = ownerSid && playerInSlot.socketId === ownerSid;
-        nameEl.textContent = playerInSlot.playerName + (isOwner ? ' (host)' : '');
+        var suffix = isOwner ? ' (host)' : '';
+        if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
+        nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
       } else {
         nameEl.textContent = 'Open';
@@ -1226,8 +1256,20 @@
     var btn = document.getElementById('start-btn');
     if (!btn || !isHost) return;
     var playerCount = Object.keys(players).length;
-    btn.disabled = playerCount < 2;
-    btn.textContent = playerCount < 2 ? 'Start Game (need 2+)' : 'Start Game';
+    var entries = Object.values(players);
+    var allReady = entries.every(function (p) { return p.romReady; });
+
+    if (playerCount < 2) {
+      btn.disabled = true;
+      btn.textContent = 'Start Game (need 2+)';
+    } else if (!allReady && !_romSharingEnabled) {
+      btn.disabled = true;
+      var readyCount = entries.filter(function (p) { return p.romReady; }).length;
+      btn.textContent = 'Waiting for ROMs (' + readyCount + '/' + playerCount + ')';
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Start Game';
+    }
   }
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
