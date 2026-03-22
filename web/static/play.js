@@ -285,6 +285,20 @@
     }
 
     gameRunning = true;
+
+    // If we accepted ROM sharing but don't have a ROM yet, stay in overlay
+    // with progress UI while connecting WebRTC and receiving the ROM
+    if (_romSharingDecision === 'accepted' && !_romBlob && !_romBlobUrl) {
+      console.log('[play] game started — waiting for ROM transfer');
+      _romTransferInProgress = true;
+      updateRomSharingUI();
+      // Start engine in connect-only mode (WebRTC without emulator)
+      initEngine();
+      // Once DC opens to host, send rom-accepted signal
+      waitForDCAndSendRomAccepted();
+      return;
+    }
+
     hideOverlay();
     showToolbar();
     initEngine();
@@ -440,32 +454,22 @@
     _romTransferHeader = null;
     updateRomSharingUI();
 
-    // Mid-game join: start engine in connect-only mode to get WebRTC
-    if (!engine && gameRunning) {
-      initEngine();
-      // Poll for host DC to open, then send rom-accepted signal
-      if (_romAcceptPollInterval) clearInterval(_romAcceptPollInterval);
-      _romAcceptPollInterval = setInterval(function () {
-        var hostSid = findHostSid();
-        if (!hostSid) return;
-        var peers = window._peers || {};
-        var hostPeer = peers[hostSid];
-        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
-          clearInterval(_romAcceptPollInterval);
-          _romAcceptPollInterval = null;
-          hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
-        }
-      }, 200);
-      setTimeout(function () {
-        if (_romAcceptPollInterval) {
-          clearInterval(_romAcceptPollInterval);
-          _romAcceptPollInterval = null;
-        }
-      }, 15000);
+    // Pre-game: no WebRTC connections exist yet. Just store the decision.
+    // The rom-accepted signal will be sent when the game starts and
+    // WebRTC connects (see onGameStarted).
+    if (!gameRunning) {
+      console.log('[play] ROM sharing accepted pre-game — will transfer after game starts');
       return;
     }
 
-    // Signal host: send over DataChannel if engine is connected, else Socket.IO
+    // Mid-game join: start engine in connect-only mode to get WebRTC
+    if (!engine && gameRunning) {
+      initEngine();
+      waitForDCAndSendRomAccepted();
+      return;
+    }
+
+    // Engine exists with open DataChannel: signal immediately
     if (engine && engine.getPeerConnection) {
       var hostSid = findHostSid();
       if (hostSid) {
@@ -479,6 +483,28 @@
     }
     // Fallback: Socket.IO data-message
     socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
+  }
+
+  function waitForDCAndSendRomAccepted() {
+    if (_romAcceptPollInterval) clearInterval(_romAcceptPollInterval);
+    _romAcceptPollInterval = setInterval(function () {
+      var hostSid = findHostSid();
+      if (!hostSid) return;
+      var peers = window._peers || {};
+      var hostPeer = peers[hostSid];
+      if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+        clearInterval(_romAcceptPollInterval);
+        _romAcceptPollInterval = null;
+        console.log('[play] DC open to host — sending rom-accepted');
+        hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
+      }
+    }, 200);
+    setTimeout(function () {
+      if (_romAcceptPollInterval) {
+        clearInterval(_romAcceptPollInterval);
+        _romAcceptPollInterval = null;
+      }
+    }, 15000);
   }
 
   function declineRomSharing() {
@@ -693,15 +719,19 @@
 
     updateRomSharingUI();
 
-    // If we were waiting for ROM before booting (late join or connect-only mode),
-    // boot the emulator now
+    // If game is running and we were waiting for the ROM (connect-only mode),
+    // hide overlay, show toolbar, and boot the emulator
     if (gameRunning && !window.EJS_emulator) {
+      hideOverlay();
+      showToolbar();
       bootEmulator();
     }
     // If we were in a pending late-join, dismiss the prompt
     if (_pendingLateJoin) {
       dismissLateJoinPrompt();
     }
+
+    showToast('ROM loaded from host');
   }
 
   function notifyRomReady() {
