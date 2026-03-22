@@ -463,6 +463,29 @@
     if (msg.type === 'save-state')          handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state')     handleLateJoinState(msg);
     if (msg.type === 'request-late-join')   handleLateJoinRequest(msg);
+    if (msg.type === 'peer-paused' && msg.sender) {
+      var senderPeer = _peers[msg.sender];
+      if (senderPeer) {
+        senderPeer.paused = true;
+        if (senderPeer.slot !== null && senderPeer.slot !== undefined) {
+          try { writeInputToMemory(senderPeer.slot, 0); } catch (_) {}
+        }
+        var known = _knownPlayers[msg.sender];
+        var name = known ? known.playerName : 'Player';
+        setStatus(name + ' paused');
+        if (_config && _config.onToast) _config.onToast(name + ' paused');
+      }
+    }
+    if (msg.type === 'peer-resumed' && msg.sender) {
+      var senderPeer2 = _peers[msg.sender];
+      if (senderPeer2) {
+        senderPeer2.paused = false;
+        var known2 = _knownPlayers[msg.sender];
+        var name2 = known2 ? known2.playerName : 'Player';
+        setStatus(name2 + ' returned');
+        if (_config && _config.onToast) _config.onToast(name2 + ' returned');
+      }
+    }
   }
 
   function handleLateJoinRequest(msg) {
@@ -753,6 +776,25 @@
       if (typeof e.data === 'string') {
         if (e.data === 'ready')     { peer.ready = true; }
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        if (e.data === 'peer-paused') {
+          peer.paused = true;
+          if (peer.slot !== null && peer.slot !== undefined) {
+            try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+          }
+          var known = _knownPlayers[remoteSid];
+          var name = known ? known.playerName : 'P' + ((peer.slot || 0) + 1);
+          setStatus(name + ' paused');
+          if (_config && _config.onToast) _config.onToast(name + ' paused');
+          return;
+        }
+        if (e.data === 'peer-resumed') {
+          peer.paused = false;
+          var known2 = _knownPlayers[remoteSid];
+          var name2 = known2 ? known2.playerName : 'P' + ((peer.slot || 0) + 1);
+          setStatus(name2 + ' returned');
+          if (_config && _config.onToast) _config.onToast(name2 + ' returned');
+          return;
+        }
         // State sync: hash check from host
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
@@ -898,7 +940,7 @@
   // momentarily empty between frames (causes 3+ player desync).
   function getInputPeers() {
     return getActivePeers().filter(function (p) {
-      return _peerInputStarted[p.slot];
+      return _peerInputStarted[p.slot] && !p.paused;
     });
   }
 
@@ -2444,6 +2486,15 @@
         360   // cap at ~6s
       );
     }
+
+    // Purge stale remote inputs above the new frame
+    Object.keys(_remoteInputs).forEach(function (slot) {
+      var inputs = _remoteInputs[slot];
+      if (!inputs) return;
+      Object.keys(inputs).forEach(function (f) {
+        if (parseInt(f, 10) > _frameNum + DELAY_FRAMES) delete inputs[f];
+      });
+    });
 
     if (_resyncCount <= 3 || _resyncCount % 10 === 0) {
       console.log('[lockstep] sync #' + _resyncCount + ' applied (state from frame ' +

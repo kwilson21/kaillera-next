@@ -1191,6 +1191,7 @@
       onPlayersChanged: function () {
         // Engine forwards users-updated — supplementary to our direct listener
       },
+      onToast: showToast,
       initialPlayers: lastUsersData,
       lateJoin: _lateJoin,
     });
