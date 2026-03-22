@@ -40,6 +40,11 @@
   var _isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
   var ROM_CHUNK_SIZE = _isMobile ? 16 * 1024 : 64 * 1024;
   var ROM_BUFFER_THRESHOLD = _isMobile ? 256 * 1024 : 1024 * 1024;
+  var _romTransferBytesReceived = 0;
+  var _romTransferWaitingResume = false;
+  var _romTransferResumeAttempts = 0;
+  var _romTransferLastChunkAt = 0;
+  var _romTransferWatchdog = null;
   var _currentInputType = 'keyboard';    // 'keyboard' or 'gamepad' — last used
   var _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
@@ -607,6 +612,17 @@
       console.log('[play] rom-transfer DC open to', peerSid);
       sendRomOverChannel(dc, peerSid);
     };
+    dc.onmessage = function (e) {
+      if (typeof e.data === 'string') {
+        try {
+          var msg = JSON.parse(e.data);
+          if (msg.type === 'rom-resume' && msg.offset >= 0) {
+            console.log('[play] ROM resume requested from offset', msg.offset);
+            sendRomOverChannel(dc, peerSid, msg.offset);
+          }
+        } catch (_) {}
+      }
+    };
     dc.onclose = function () {
       delete _romTransferDCs[peerSid];
     };
@@ -727,10 +743,29 @@
     console.log('[play] received rom-transfer DataChannel from', remoteSid);
     _romTransferDC = channel;
     channel.binaryType = 'arraybuffer';
-    _romTransferChunks = [];
-    _romTransferHeader = null;
+
+    // Resume: keep existing chunks, send resume offset
+    if (_romTransferWaitingResume) {
+      _romTransferWaitingResume = false;
+      _romTransferInProgress = true;
+      console.log('[play] resuming ROM transfer from offset', _romTransferBytesReceived);
+      channel.onopen = function () {
+        channel.send(JSON.stringify({ type: 'rom-resume', offset: _romTransferBytesReceived }));
+      };
+      if (channel.readyState === 'open') {
+        channel.send(JSON.stringify({ type: 'rom-resume', offset: _romTransferBytesReceived }));
+      }
+    } else {
+      // Fresh transfer
+      _romTransferChunks = [];
+      _romTransferHeader = null;
+      _romTransferBytesReceived = 0;
+      _romTransferResumeAttempts = 0;
+    }
+
     _romTransferInProgress = true;
-    var bytesReceived = 0;
+    _romTransferLastChunkAt = Date.now();
+    startRomTransferWatchdog();
 
     channel.onmessage = function (e) {
       if (typeof e.data === 'string') {
@@ -744,31 +779,65 @@
               return;
             }
             _romTransferHeader = msg;
-            bytesReceived = 0;
+            _romTransferBytesReceived = 0;
             updateRomProgress(0, msg.size);
           } else if (msg.type === 'rom-complete') {
+            stopRomTransferWatchdog();
             finishRomTransfer();
           }
         } catch (_) {}
       } else if (e.data instanceof ArrayBuffer) {
         _romTransferChunks.push(new Uint8Array(e.data));
-        bytesReceived += e.data.byteLength;
+        _romTransferBytesReceived += e.data.byteLength;
+        _romTransferLastChunkAt = Date.now();
         if (_romTransferHeader) {
-          updateRomProgress(bytesReceived, _romTransferHeader.size);
+          updateRomProgress(_romTransferBytesReceived, _romTransferHeader.size);
         }
       }
     };
 
     channel.onclose = function () {
       if (_romTransferInProgress && !_romBlob) {
-        showToast('ROM transfer interrupted');
         _romTransferInProgress = false;
         _romTransferDC = null;
-        updateRomSharingUI();
+        stopRomTransferWatchdog();
+
+        if (_romTransferResumeAttempts < 3 && _romTransferBytesReceived > 0) {
+          _romTransferResumeAttempts++;
+          _romTransferWaitingResume = true;
+          showToast('ROM transfer interrupted — retry ' + _romTransferResumeAttempts + '/3');
+        } else {
+          showToast('ROM transfer failed — load ROM manually');
+          _romTransferChunks = [];
+          _romTransferWaitingResume = false;
+          updateRomSharingUI();
+        }
       }
     };
 
     updateRomSharingUI();
+  }
+
+  function startRomTransferWatchdog() {
+    stopRomTransferWatchdog();
+    _romTransferWatchdog = setInterval(function () {
+      if (!_romTransferInProgress || _romTransferWaitingResume) return;
+      if (Date.now() - _romTransferLastChunkAt > 10000) {
+        console.log('[play] ROM transfer stalled — triggering resume');
+        showToast('ROM transfer stalled — retrying...');
+        if (_romTransferDC) {
+          try { _romTransferDC.close(); } catch (_) {}
+        }
+        // onclose handler will set _romTransferWaitingResume
+      }
+    }, 3000);
+  }
+
+  function stopRomTransferWatchdog() {
+    if (_romTransferWatchdog) {
+      clearInterval(_romTransferWatchdog);
+      _romTransferWatchdog = null;
+    }
   }
 
   function updateRomProgress(received, total) {
