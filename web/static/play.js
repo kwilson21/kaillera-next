@@ -301,6 +301,7 @@
 
     hideOverlay();
     showToolbar();
+    showGameLoading();
     initEngine();
   }
 
@@ -311,6 +312,7 @@
       engine = null;
     }
     destroyEmulator();
+    dismissGameLoading();
     hideToolbar();
     showOverlay();
     // Clear stale engine status
@@ -1143,6 +1145,13 @@
         if (toolbarEl) toolbarEl.textContent = msg;
         var overlayEl = document.getElementById('engine-status');
         if (overlayEl) overlayEl.textContent = msg;
+        // Update game loading overlay
+        var loadingText = document.getElementById('game-loading-text');
+        if (loadingText) loadingText.textContent = msg;
+        // Dismiss loading overlay when game actually starts
+        if (msg === 'Connected -- game on!') {
+          dismissGameLoading();
+        }
       },
       onPlayersChanged: function () {
         // Engine forwards users-updated — supplementary to our direct listener
@@ -1335,6 +1344,23 @@
   }
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
+
+  function showGameLoading() {
+    var el = document.getElementById('game-loading');
+    if (el) {
+      el.classList.remove('hidden', 'fade-out');
+    }
+  }
+
+  function dismissGameLoading() {
+    var el = document.getElementById('game-loading');
+    if (!el || el.classList.contains('hidden')) return;
+    el.classList.add('fade-out');
+    setTimeout(function () {
+      el.classList.add('hidden');
+      el.classList.remove('fade-out');
+    }, 400);
+  }
 
   function showToolbar() {
     var toolbar = document.getElementById('toolbar');

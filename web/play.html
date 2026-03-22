@@ -152,6 +152,14 @@
 
   <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
   <div id="game"></div>
+
+  <!-- Loading overlay — covers game area during boot/sync -->
+  <div id="game-loading" class="hidden">
+    <div class="game-loading-content">
+      <div class="game-loading-spinner"></div>
+      <span id="game-loading-text">Loading...</span>
+    </div>
+  </div>
   <script>
     var EJS_player       = '#game';
     var EJS_core         = 'n64';
