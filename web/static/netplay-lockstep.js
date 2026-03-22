@@ -737,17 +737,20 @@
           try {
             var msg = JSON.parse(e.data);
             if (msg.type === 'save-state')      handleSaveStateMsg(msg);
-            if (msg.type === 'late-join-state')  handleLateJoinState(msg);
-            if (msg.type === 'delay-ping') {
+            else if (msg.type === 'late-join-state')  handleLateJoinState(msg);
+            else if (msg.type === 'delay-ping') {
               peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
             }
-            if (msg.type === 'delay-pong') {
+            else if (msg.type === 'delay-pong') {
               handleDelayPong(msg.ts, peer.dc);
             }
-            if (msg.type === 'lockstep-ready') {
+            else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
+            }
+            else if (_onUnhandledMessage) {
+              _onUnhandledMessage(remoteSid, msg);
             }
           } catch (_) {}
         }
