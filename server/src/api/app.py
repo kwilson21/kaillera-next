@@ -72,6 +72,7 @@ def create_app() -> FastAPI:
             "max_players": room.max_players,
             "has_password": room.password is not None,
             "rom_hash": room.rom_hash,
+            "rom_sharing": room.rom_sharing,
         }
 
     @app.get("/list")

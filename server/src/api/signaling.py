@@ -69,6 +69,7 @@ class Room:
     status: str = "lobby"       # "lobby" or "playing"
     mode: str | None = None     # "lockstep" or "streaming", set on start-game
     rom_hash: str | None = None # SHA-256 of ROM, set on start-game
+    rom_sharing: bool = False     # whether host is sharing ROM via P2P
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -100,6 +101,7 @@ def _players_payload(room: Room) -> dict:
             for pid, info in room.spectators.items()
         },
         "owner": room.owner,
+        "romSharing": room.rom_sharing,
     }
 
 
