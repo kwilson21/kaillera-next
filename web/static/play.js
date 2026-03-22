@@ -610,7 +610,11 @@
 
     dc.onopen = function () {
       console.log('[play] rom-transfer DC open to', peerSid);
-      sendRomOverChannel(dc, peerSid);
+      // Don't auto-send if this was triggered by onPeerReconnected —
+      // wait for receiver's rom-resume message with offset instead.
+      if (!dc._waitForResume) {
+        sendRomOverChannel(dc, peerSid);
+      }
     };
     dc.onmessage = function (e) {
       if (typeof e.data === 'string') {
@@ -1354,9 +1358,13 @@
         }
       },
       onPeerReconnected: function (sid) {
-        // Resume ROM transfer if waiting
+        // Resume ROM transfer if waiting — mark DC to wait for receiver's rom-resume
         if (_romTransferWaitingResume && engine && engine.getPeerConnection) {
           startRomTransferTo(sid);
+          // Mark the just-created DC as resume-aware so onopen doesn't auto-send
+          if (_romTransferDCs[sid]) {
+            _romTransferDCs[sid]._waitForResume = true;
+          }
         }
       },
       initialPlayers: lastUsersData,

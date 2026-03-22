@@ -2748,6 +2748,8 @@
     _frameNum = 0;
     window._frameNum = 0;
     _running = false;
+    _paused = false;
+    _pausedAtFrame = 0;
     _lateJoin = false;
     _gameStarted = false;
     _selfEmuReady = false;
