@@ -281,7 +281,7 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 300;    // check hash every N frames (~5s at 60fps)
+  let _syncCheckInterval = 60;     // check hash every N frames (~1s at 60fps)
   let _syncHashBytes     = 65536;  // hash first 64KB of state (game state, not audio)
   let _resyncCount       = 0;
   let _syncChunks        = [];     // incoming chunks from host DC
@@ -321,26 +321,35 @@
       _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
 
       // Try AudioWorklet first (requires secure context), fall back to
-      // AudioBufferSourceNode scheduling (works everywhere).
-      if (_audioCtx.audioWorklet) {
-        await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
-        _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
-          numberOfInputs: 0,
-          numberOfOutputs: 1,
-          outputChannelCount: [2],
-          processorOptions: { sampleRate: _audioRate },
-        });
+      // AudioBufferSourceNode scheduling (works everywhere including mobile HTTP).
+      var workletOk = false;
+      if (_audioCtx.audioWorklet && window.isSecureContext) {
+        try {
+          await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+          _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            processorOptions: { sampleRate: _audioRate },
+          });
 
-        if (_playerSlot === 0) {
-          _audioDestNode = _audioCtx.createMediaStreamDestination();
-          _audioWorklet.connect(_audioDestNode);
+          if (_playerSlot === 0) {
+            _audioDestNode = _audioCtx.createMediaStreamDestination();
+            _audioWorklet.connect(_audioDestNode);
+          }
+
+          _audioWorklet.connect(_audioCtx.destination);
+          workletOk = true;
+          console.log('[lockstep] audio using AudioWorklet');
+        } catch (wErr) {
+          console.log('[lockstep] AudioWorklet failed, using fallback:', wErr.message);
         }
+      }
 
-        _audioWorklet.connect(_audioCtx.destination);
-        console.log('[lockstep] audio using AudioWorklet');
-      } else {
+      if (!workletOk) {
         // Fallback: schedule AudioBufferSourceNodes per frame.
-        // No async callbacks — fire-and-forget, browser handles playback.
+        // Works on mobile HTTP where AudioWorklet requires secure context.
+        _audioWorklet = null;
         window._kn_audioNextTime = 0;
         console.log('[lockstep] audio using AudioBufferSourceNode fallback');
       }
@@ -353,15 +362,17 @@
           if (_audioCtx) _audioCtx.resume();
           document.removeEventListener('click', resumeAudio);
           document.removeEventListener('keydown', resumeAudio);
+          document.removeEventListener('touchstart', resumeAudio);
         };
         document.addEventListener('click', resumeAudio);
         document.addEventListener('keydown', resumeAudio);
-        console.log('[lockstep] audio suspended — click or press a key to enable');
+        document.addEventListener('touchstart', resumeAudio);
+        console.log('[lockstep] audio suspended — tap or press a key to enable');
       }
 
       console.log('[lockstep] audio playback initialized (rate: ' + _audioRate + ')');
     } catch (err) {
-      console.log('[lockstep] AudioWorklet init failed:', err);
+      console.log('[lockstep] audio init failed:', err);
       _audioReady = false;
     }
   }
@@ -382,7 +393,8 @@
       var copy = new Int16Array(pcm);
       _audioWorklet.port.postMessage(copy, [copy.buffer]);
     } else {
-      // AudioBufferSourceNode fallback — schedule a buffer per frame
+      // AudioBufferSourceNode fallback — schedule a buffer per frame.
+      // Keep lookahead tight: max 50ms ahead of currentTime to minimize latency.
       var buf = _audioCtx.createBuffer(2, n, _audioRate);
       var chL = buf.getChannelData(0);
       var chR = buf.getChannelData(1);
@@ -394,9 +406,12 @@
       src.buffer = buf;
       src.connect(_audioCtx.destination);
       var now = _audioCtx.currentTime;
-      // Snap to now if fallen behind — prevents accumulating latency
       if (!window._kn_audioNextTime || window._kn_audioNextTime < now) {
         window._kn_audioNextTime = now;
+      }
+      // Cap lookahead: if we're scheduling too far ahead, snap back
+      if (window._kn_audioNextTime > now + 0.05) {
+        window._kn_audioNextTime = now + 0.01;
       }
       src.start(window._kn_audioNextTime);
       window._kn_audioNextTime += buf.duration;
@@ -667,7 +682,7 @@
           var hostHash = parseInt(parts[2], 10);
           if (_frameNum === syncFrame) {
             var localHash = hashGameState();
-            if (localHash !== hostHash) {
+            if (localHash !== null && localHash !== hostHash) {
               console.log('[lockstep] DESYNC at frame', syncFrame,
                 'local:', localHash, 'host:', hostHash, '-- requesting state');
               peer.dc.send('sync-request');
@@ -710,11 +725,11 @@
         return;
       }
 
-      // Binary: sync state chunk (large) or input (8 bytes)
-      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8) {
-        // Sync chunk from host
+      // Binary: sync state chunk or input (8 bytes).
+      // Sync chunks only arrive between sync-start and completion (_syncExpected > 0).
+      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8 && _syncExpected > 0) {
         _syncChunks.push(new Uint8Array(e.data));
-        if (_syncChunks.length >= _syncExpected && _syncExpected > 0) {
+        if (_syncChunks.length >= _syncExpected) {
           handleSyncChunksComplete();
         }
         return;
@@ -1167,6 +1182,7 @@
 
     // Blit loop: copy emulator canvas to capture canvas every frame
     function blitFrame() {
+      if (!_origRAF) return;  // stopped
       _origRAF.call(window, blitFrame);
       ctx.drawImage(canvas, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
@@ -1338,7 +1354,7 @@
     runner(frameTimeMs);
 
     // Force GL composite via real rAF no-op
-    _origRAF.call(window, function () {});
+    if (_origRAF) _origRAF.call(window, function () {});
     return true;
   }
 
@@ -1569,34 +1585,43 @@
     _frameNum++;
     window._frameNum = _frameNum;
 
-    // Deferred sync check: guest was behind when sync-hash arrived, now caught up
-    if (_pendingSyncCheck && _frameNum === _pendingSyncCheck.frame) {
-      var localHash = hashGameState();
-      if (localHash !== _pendingSyncCheck.hash) {
-        console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
-        var syncPeer = _peers[_pendingSyncCheck.peerSid];
-        if (syncPeer && syncPeer.dc) {
-          try { syncPeer.dc.send('sync-request'); } catch (_) {}
+    // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
+    // Compare when we reach or pass the target frame (within a small window).
+    if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
+      // Only compare if we haven't overshot too far (state changes rapidly)
+      if (_frameNum - _pendingSyncCheck.frame <= 2) {
+        var localHash = hashGameState();
+        if (localHash !== null && localHash !== _pendingSyncCheck.hash) {
+          console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame,
+            '(checked at', _frameNum + ')');
+          var syncPeer = _peers[_pendingSyncCheck.peerSid];
+          if (syncPeer && syncPeer.dc) {
+            try { syncPeer.dc.send('sync-request'); } catch (_) {}
+          }
         }
       }
-      _pendingSyncCheck = null;
-    } else if (_pendingSyncCheck && _frameNum > _pendingSyncCheck.frame) {
-      // Passed the frame — discard stale check
       _pendingSyncCheck = null;
     }
 
     // -- Periodic desync check: host hashes game state (first 64KB), broadcasts hash.
-    // With the forked core's deterministic timing, desyncs should not occur.
-    // This serves as a safety net for edge cases or fallback to stock core.
+    // Pre-compresses state so sync-request responses are instant (no re-capture).
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
         _frameNum % _syncCheckInterval === 0) {
-      var hostHash = hashGameState();
+      var result = hashGameState(true);  // keepBytes=true
+      if (result === null) return;  // hash failed, skip this check
+      var hostHash = result.hash;
       var syncMsg = 'sync-hash:' + _frameNum + ':' + hostHash;
       var ap = getActivePeers();
       for (var s = 0; s < ap.length; s++) {
         try { ap[s].dc.send(syncMsg); } catch (_) {}
       }
-      // Log every 10th check (~50 seconds)
+      // Pre-compress in background so it's ready when sync-request arrives.
+      // This eliminates getState()+compress from the critical resync path.
+      var cacheFrame = _frameNum;
+      compressState(result.bytes).then(function (compressed) {
+        _cachedSyncState = { frame: cacheFrame, data: compressed };
+      }).catch(function () {});
+      // Log every 10th check
       if (_frameNum % (_syncCheckInterval * 10) === 0) {
         console.log('[lockstep] sync check at frame', _frameNum, 'hash:', hostHash);
       }
@@ -1905,9 +1930,10 @@
     console.log('[lockstep] enabled mobile touch controls');
   }
 
-  function hashGameState() {
+  function hashGameState(keepBytes) {
     // Hash first _syncHashBytes of save state (game state only, excludes audio buffers).
-    // getState() costs ~3ms; hashing 64KB is negligible. Called every ~5s.
+    // getState() costs ~3ms; hashing 64KB is negligible. Called every ~1s.
+    // If keepBytes is true, returns {hash, bytes} so caller can reuse the state.
     try {
       var gm = window.EJS_emulator.gameManager;
       var state = gm.getState();
@@ -1918,19 +1944,35 @@
         hash ^= bytes[i];
         hash = Math.imul(hash, 0x01000193);
       }
-      return hash | 0;
+      hash = hash | 0;
+      return keepBytes ? { hash: hash, bytes: bytes } : hash;
     } catch (e) {
-      return 0;
+      return null;  // null = hash failed, skip this check
     }
   }
 
   // -- Async state sync (compress/decompress on main thread via streams) -----
 
+  var _pushingSyncState = false;  // debounce concurrent sync-request handling
+  var _cachedSyncState = null;    // {frame, data} pre-compressed state from last hash check
+
   function pushSyncState() {
-    // Host: capture state, compress, and send via DC in chunks
+    // Host: send pre-compressed state if cached, otherwise capture fresh.
+    // The periodic hash check pre-compresses state in the background,
+    // so this is usually an instant send with no async work.
     if (_playerSlot !== 0 || !_syncEnabled) return;
+    if (_pushingSyncState) return;
+
+    // Use cached pre-compressed state if available and recent (within 2 check intervals)
+    if (_cachedSyncState && (_frameNum - _cachedSyncState.frame) < _syncCheckInterval * 2) {
+      sendSyncChunks(_cachedSyncState.data, _cachedSyncState.frame);
+      return;
+    }
+
+    // Fallback: compress fresh (shouldn't normally happen)
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
+    _pushingSyncState = true;
     var raw = gm.getState();
     var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     var frame = _frameNum;
@@ -1938,6 +1980,8 @@
       sendSyncChunks(compressed, frame);
     }).catch(function (err) {
       console.log('[lockstep] sync compress failed:', err);
+    }).finally(function () {
+      _pushingSyncState = false;
     });
   }
 
@@ -1989,6 +2033,9 @@
   function applySyncState(bytes, frame) {
     // Guest: hot-swap state without stopping the tick loop.
     // The tick loop keeps running — we just replace the emulator state underneath it.
+    // The frame counter rewinds to the sync frame so the tick loop replays from the
+    // correct state with real inputs (no fast-forward — that would use wrong inputs
+    // and immediately re-desync).
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
 
@@ -2002,8 +2049,7 @@
     _frameNum = frame;
     window._frameNum = _frameNum;
 
-    // Fill any gaps in input buffers around the new frame so we don't stall.
-    // Don't clear the whole buffer — keep existing inputs that are still valid.
+    // Fill input buffer gaps around the new frame so we don't stall.
     var pKeys = Object.keys(_peers);
     for (var pk = 0; pk < pKeys.length; pk++) {
       var pSlot = _peers[pKeys[pk]].slot;
@@ -2113,7 +2159,8 @@
     _resyncCount = 0;
     _syncChunks = [];
     _syncExpected = 0;
-    if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
+    _pushingSyncState = false;
+    _cachedSyncState = null;
 
     // Clean up audio bypass
     if (_audioWorklet) {
