@@ -1336,15 +1336,30 @@
         var text = document.getElementById('reconnect-text');
         var rejoinBtn = document.getElementById('reconnect-rejoin');
         if (!overlay) return;
-        if (isReconnecting) {
+
+        // Only show overlay if ALL our DCs are down (we're the disconnected one).
+        // If some DCs are still open, other peers handle reconnect — just show toast.
+        var peers = window._peers || {};
+        var hasOpenDC = Object.values(peers).some(function (p) {
+          return p.dc && p.dc.readyState === 'open';
+        });
+        var anyReconnecting = Object.values(peers).some(function (p) {
+          return p.reconnecting;
+        });
+
+        if (isReconnecting && !hasOpenDC) {
+          // We have no open DCs — show overlay
           overlay.classList.remove('hidden');
           if (text) text.textContent = 'Connection lost — reconnecting...';
           if (rejoinBtn) rejoinBtn.classList.add('hidden');
-        } else {
-          overlay.classList.add('hidden');
-          // Check if we need to show rejoin (all peers gone)
+        } else if (!isReconnecting) {
+          // A peer finished reconnecting — hide overlay if no peers still reconnecting
+          if (!anyReconnecting) {
+            overlay.classList.add('hidden');
+          }
+          // Check if we need to show rejoin (all peers gone, none reconnecting)
           var info = engine && engine.getInfo ? engine.getInfo() : null;
-          if (info && info.playerCount <= 1 && info.running) {
+          if (info && info.playerCount <= 1 && info.running && !anyReconnecting) {
             overlay.classList.remove('hidden');
             if (text) text.textContent = 'Reconnection failed';
             if (rejoinBtn) {

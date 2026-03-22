@@ -1788,42 +1788,69 @@
     window._lockstepActive = true;
 
     // Pause/resume on tab visibility change (alt-tab)
+    // Only broadcast if tab was hidden for >500ms (avoids spam when switching
+    // between two game tabs on the same machine).
+    var _pausedAt = 0;
     document.addEventListener('visibilitychange', function () {
       if (!_running) return;
       if (document.hidden) {
-        // Pause: stop ticking, notify peers
         _paused = true;
         _pausedAtFrame = _frameNum;
+        _pausedAt = Date.now();
         console.log('[lockstep] tab hidden — paused at frame', _frameNum);
+      } else {
+        _paused = false;
+        var pauseDuration = Date.now() - _pausedAt;
+        console.log('[lockstep] tab visible — resuming from frame', _pausedAtFrame,
+          '(paused', pauseDuration, 'ms)');
+
+        // Short pause (<500ms): just resume ticking, no broadcast or resync.
+        // This handles rapid tab-switching on the same machine.
+        if (pauseDuration < 500) return;
+
+        // Long pause: broadcast resume and request resync
         var activePeers = getActivePeers();
         for (var i = 0; i < activePeers.length; i++) {
-          try { activePeers[i].dc.send('peer-paused'); } catch (_) {}
+          try { activePeers[i].dc.send('peer-resumed'); } catch (_) {}
         }
-        // Socket.IO fallback if no DC peers
         if (activePeers.length === 0 && socket) {
-          socket.emit('data-message', { type: 'peer-paused', sender: socket.id });
-        }
-      } else {
-        // Resume: unpause, notify peers, request resync
-        _paused = false;
-        console.log('[lockstep] tab visible — resuming from frame', _pausedAtFrame);
-        var activePeers2 = getActivePeers();
-        for (var j = 0; j < activePeers2.length; j++) {
-          try { activePeers2[j].dc.send('peer-resumed'); } catch (_) {}
-        }
-        if (activePeers2.length === 0 && socket) {
           socket.emit('data-message', { type: 'peer-resumed', sender: socket.id });
         }
-        // Resync: if host, broadcast hash immediately. If guest, request state.
+        // Resync: if host, reset check interval. If guest, request state.
         if (_playerSlot === 0 && _syncEnabled) {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
-        } else {
-          // Send sync-request to host
+        } else if (_syncEnabled) {
           var hostPeer = Object.values(_peers).find(function (p) { return p.slot === 0; });
           if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
             try { hostPeer.dc.send('sync-request'); } catch (_) {}
           }
+        }
+      }
+    });
+
+    // Broadcast pause after a short delay — only if still hidden.
+    // This avoids spamming peers during rapid tab switches.
+    var _pauseBroadcastTimer = null;
+    document.addEventListener('visibilitychange', function () {
+      if (!_running) return;
+      if (document.hidden) {
+        if (_pauseBroadcastTimer) clearTimeout(_pauseBroadcastTimer);
+        _pauseBroadcastTimer = setTimeout(function () {
+          _pauseBroadcastTimer = null;
+          if (!document.hidden || !_paused) return;
+          var activePeers = getActivePeers();
+          for (var i = 0; i < activePeers.length; i++) {
+            try { activePeers[i].dc.send('peer-paused'); } catch (_) {}
+          }
+          if (activePeers.length === 0 && socket) {
+            socket.emit('data-message', { type: 'peer-paused', sender: socket.id });
+          }
+        }, 500);
+      } else {
+        if (_pauseBroadcastTimer) {
+          clearTimeout(_pauseBroadcastTimer);
+          _pauseBroadcastTimer = null;
         }
       }
     });
