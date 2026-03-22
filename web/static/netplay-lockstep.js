@@ -143,6 +143,9 @@
   // of time to deliver their input before we need it.
   var DELAY_FRAMES = 2;
 
+  var _onExtraDataChannel = null;
+  var _onUnhandledMessage = null;
+
   var _rttSamples = [];
   var _rttComplete = false;
   var _rttPingCount = 0;
@@ -563,10 +566,23 @@
         ordered: true,
       });
       setupDataChannel(remoteSid, peer.dc);
+      // Delegate non-lockstep channels created by remote
+      peer.pc.ondatachannel = function (e) {
+        if (e.channel.label === 'lockstep') {
+          peer.dc = e.channel;
+          setupDataChannel(remoteSid, peer.dc);
+        } else if (_onExtraDataChannel) {
+          _onExtraDataChannel(remoteSid, e.channel);
+        }
+      };
     } else {
       peer.pc.ondatachannel = function (e) {
-        peer.dc = e.channel;
-        setupDataChannel(remoteSid, peer.dc);
+        if (e.channel.label === 'lockstep') {
+          peer.dc = e.channel;
+          setupDataChannel(remoteSid, peer.dc);
+        } else if (_onExtraDataChannel) {
+          _onExtraDataChannel(remoteSid, e.channel);
+        }
       };
     }
     return peer;
@@ -2302,12 +2318,21 @@
       socket.off('data-message', onDataMessage);
     }
 
+    _onExtraDataChannel = null;
+    _onUnhandledMessage = null;
+
     _config = null;
   }
 
   window.NetplayLockstep = {
     init: init,
     stop: stop,
+    onExtraDataChannel: function (cb) { _onExtraDataChannel = cb; },
+    onUnhandledMessage: function (cb) { _onUnhandledMessage = cb; },
+    getPeerConnection: function (sid) {
+      var p = _peers[sid];
+      return p ? p.pc : null;
+    },
     setSyncEnabled: function (on) { _syncEnabled = !!on; },
     isSyncEnabled: function () { return _syncEnabled; },
     setSyncInterval: function (frames) { _syncBaseInterval = _syncCheckInterval = Math.max(30, frames); },
