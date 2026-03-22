@@ -697,6 +697,47 @@
 
     try {
       if (data.offer) {
+        // Reconnect: if peer exists and reconnect flag set, replace old PC
+        if (data.reconnect && _peers[senderSid]) {
+          var existingPeer = _peers[senderSid];
+          console.log('[lockstep] received reconnect offer from', senderSid);
+
+          // Detach old PC
+          if (existingPeer.pc) {
+            existingPeer.pc.onconnectionstatechange = null;
+            existingPeer.pc.ondatachannel = null;
+            existingPeer.pc.onicecandidate = null;
+            existingPeer.pc.ontrack = null;
+            try { existingPeer.pc.close(); } catch (_) {}
+          }
+
+          // Create new PC on existing peer object (preserve slot, input state)
+          existingPeer.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+          existingPeer.pendingCandidates = [];
+          existingPeer.remoteDescSet = false;
+          existingPeer.ready = false;
+
+          existingPeer.pc.onicecandidate = function (e) {
+            if (e.candidate && _peers[senderSid] === existingPeer) {
+              socket.emit('webrtc-signal', { target: senderSid, candidate: e.candidate });
+            }
+          };
+          existingPeer.pc.onconnectionstatechange = function () {
+            var s = existingPeer.pc.connectionState;
+            console.log('[lockstep] reconnect peer', senderSid, 'connection-state:', s);
+          };
+          existingPeer.pc.ondatachannel = function (e) {
+            if (e.channel.label === 'lockstep') {
+              existingPeer.dc = e.channel;
+              setupDataChannel(senderSid, existingPeer.dc);
+            } else if (_onExtraDataChannel) {
+              _onExtraDataChannel(senderSid, e.channel);
+            }
+          };
+
+          peer = existingPeer;
+        }
+
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await drainCandidates(peer);
         var answer = await peer.pc.createAnswer();
@@ -753,6 +794,25 @@
         startSpectatorStreamForPeer(remoteSid);
       }
 
+      // If this is a reconnect, clear reconnecting state and resync
+      if (peer.reconnecting) {
+        if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
+        peer.reconnecting = false;
+        var rKnown = _knownPlayers[remoteSid];
+        var rName = rKnown ? rKnown.playerName : 'P' + ((peer.slot || 0) + 1);
+        setStatus(rName + ' reconnected');
+        if (_config && _config.onToast) _config.onToast(rName + ' reconnected');
+        if (_config && _config.onReconnecting) _config.onReconnecting(remoteSid, false);
+        if (_config && _config.onPeerReconnected) _config.onPeerReconnected(remoteSid);
+        // Request resync
+        if (_playerSlot !== 0) {
+          try { ch.send('sync-request'); } catch (_) {}
+        } else {
+          _consecutiveResyncs = 0;
+          _syncCheckInterval = _syncBaseInterval;
+        }
+      }
+
       if (!_gameStarted) startGameSequence();
     };
 
@@ -776,6 +836,10 @@
       if (typeof e.data === 'string') {
         if (e.data === 'ready')     { peer.ready = true; }
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        if (e.data === 'leaving') {
+          peer._intentionalLeave = true;
+          return;
+        }
         if (e.data === 'peer-paused') {
           peer.paused = true;
           if (peer.slot !== null && peer.slot !== undefined) {
@@ -960,6 +1024,69 @@
     }
     if (_config && _config.onToast) _config.onToast(name + ' dropped');
     if (_config && _config.onReconnecting) _config.onReconnecting(remoteSid, false);
+  }
+
+  function attemptReconnect(remoteSid) {
+    var peer = _peers[remoteSid];
+    if (!peer || !peer.reconnecting) return;
+
+    console.log('[lockstep] initiating reconnect to', remoteSid);
+
+    // Detach old PC handlers to prevent stale events
+    if (peer.pc) {
+      peer.pc.onconnectionstatechange = null;
+      peer.pc.ondatachannel = null;
+      peer.pc.onicecandidate = null;
+      peer.pc.ontrack = null;
+      try { peer.pc.close(); } catch (_) {}
+    }
+
+    // Create new PeerConnection
+    peer.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    peer.pendingCandidates = [];
+    peer.remoteDescSet = false;
+    peer.ready = false;
+
+    peer.pc.onicecandidate = function (e) {
+      if (e.candidate && _peers[remoteSid] === peer) {
+        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
+      }
+    };
+
+    peer.pc.onconnectionstatechange = function () {
+      var s = peer.pc.connectionState;
+      console.log('[lockstep] reconnect peer', remoteSid, 'connection-state:', s);
+      if (s === 'failed') {
+        console.log('[lockstep] reconnect PC failed for', remoteSid);
+        hardDisconnectPeer(remoteSid);
+      }
+    };
+
+    peer.pc.ondatachannel = function (e) {
+      if (e.channel.label === 'lockstep') {
+        peer.dc = e.channel;
+        setupDataChannel(remoteSid, peer.dc);
+      } else if (_onExtraDataChannel) {
+        _onExtraDataChannel(remoteSid, e.channel);
+      }
+    };
+
+    // Create new DC and send offer
+    peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
+    setupDataChannel(remoteSid, peer.dc);
+
+    peer.pc.createOffer().then(function (offer) {
+      return peer.pc.setLocalDescription(offer);
+    }).then(function () {
+      socket.emit('webrtc-signal', {
+        target: remoteSid,
+        offer: peer.pc.localDescription,
+        reconnect: true,
+      });
+    }).catch(function (err) {
+      console.log('[lockstep] reconnect offer failed:', err);
+      hardDisconnectPeer(remoteSid);
+    });
   }
 
   // -- Helper: get active player peers ---------------------------------------
