@@ -38,6 +38,7 @@
   var _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   var ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
   var ROM_CHUNK_SIZE = 64 * 1024;        // 64KB
+  var _currentInputType = 'keyboard';    // 'keyboard' or 'gamepad' — last used
 
   function escapeHtml(s) {
     var div = document.createElement('div');
@@ -1304,15 +1305,24 @@
         if (entries[j].slot === i) { playerInSlot = entries[j]; break; }
       }
 
+      var gpEl = slotEl.querySelector('.gamepad');
+
       if (playerInSlot) {
         var isOwner = ownerSid && playerInSlot.socketId === ownerSid;
         var suffix = isOwner ? ' (host)' : '';
         if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
+        // Show input type indicator
+        if (gpEl) {
+          var itype = playerInSlot.inputType || 'keyboard';
+          gpEl.textContent = itype === 'gamepad' ? '\uD83C\uDFAE' : '\u2328\uFE0F';
+          gpEl.title = itype === 'gamepad' ? 'Gamepad' : 'Keyboard';
+        }
       } else {
         nameEl.textContent = 'Open';
         nameEl.classList.add('empty');
+        if (gpEl) { gpEl.textContent = ''; gpEl.title = ''; }
       }
     }
 
@@ -1496,6 +1506,27 @@
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
 
+  // ── Input Type Detection ─────────────────────────────────────────────
+
+  function setInputType(type) {
+    if (type === _currentInputType) return;
+    _currentInputType = type;
+    if (socket && socket.connected) {
+      socket.emit('input-type', { type: type });
+    }
+  }
+
+  function setupInputTypeDetection() {
+    // Keyboard → set to keyboard
+    document.addEventListener('keydown', function () {
+      setInputType('keyboard');
+    });
+
+    // Gamepad → set to gamepad (checked via GamepadManager onUpdate)
+    // The updateGamepadUI callback already fires on gamepad changes;
+    // we piggyback on that in updateGamepadUI below.
+  }
+
   function startGamepadManager() {
     if (!window.GamepadManager) return;
     GamepadManager.start({
@@ -1518,6 +1549,11 @@
     var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     var assignments = window.GamepadManager ? GamepadManager.getAssignments() : {};
     var statusEl = document.getElementById('gamepad-status');
+
+    // Update input type based on gamepad detection
+    if (detected.length > 0) {
+      setInputType('gamepad');
+    }
 
     if (statusEl && !_wizardActive) {
       if (detected.length > 0) {
@@ -2031,6 +2067,7 @@
 
     connect();
     startGamepadManager();
+    setupInputTypeDetection();
     setupRomDrop();
 
     // Remap wizard buttons

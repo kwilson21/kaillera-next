@@ -71,6 +71,7 @@ class Room:
     rom_hash: str | None = None # SHA-256 of ROM, set on start-game
     rom_sharing: bool = False     # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
+    input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -98,6 +99,7 @@ def _players_payload(room: Room) -> dict:
                 **info,
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
+                "inputType": room.input_types.get(info["socketId"], "keyboard"),
             }
             for pid, info in room.players.items()
         },
@@ -424,6 +426,24 @@ async def rom_ready(sid: str, data: dict) -> str | None:
         room.rom_ready.add(sid)
     else:
         room.rom_ready.discard(sid)
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    return None
+
+
+@sio.on("input-type")
+async def input_type(sid: str, data: dict) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+
+    itype = data.get("type", "keyboard")
+    if itype not in ("keyboard", "gamepad"):
+        itype = "keyboard"
+    room.input_types[sid] = itype
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
