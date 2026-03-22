@@ -436,3 +436,57 @@ button:hover { background: #4a6fa5; }
   color: #6af;
   margin-top: 8px;
 }
+
+/* ROM sharing */
+.rom-sharing-disclaimer {
+  font-size: 11px;
+  color: #a88;
+  margin: 2px 0 4px 0;
+  line-height: 1.3;
+}
+
+#rom-sharing-prompt {
+  text-align: center;
+  padding: 1rem;
+}
+
+.rom-sharing-prompt-text {
+  font-size: 14px;
+  color: #ccc;
+  margin-bottom: 8px;
+}
+
+.rom-sharing-prompt-legal {
+  font-size: 11px;
+  color: #a88;
+  margin-bottom: 12px;
+  line-height: 1.3;
+}
+
+.rom-sharing-prompt-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.rom-progress-bar-container {
+  background: #2a2a40;
+  border-radius: 4px;
+  height: 8px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.rom-progress-bar {
+  background: #6af;
+  height: 100%;
+  width: 0%;
+  transition: width 0.2s;
+  border-radius: 4px;
+}
+
+#rom-transfer-progress {
+  text-align: center;
+  padding: 1rem;
+}

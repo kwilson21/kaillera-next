@@ -47,6 +47,21 @@
           <p class="rom-hint">.z64 / .n64 / .v64 / .zip</p>
           <p id="rom-status" class="rom-status"></p>
         </div>
+        <div id="rom-sharing-prompt" style="display:none">
+          <p class="rom-sharing-prompt-text">The host is offering to share their ROM file with you.</p>
+          <p class="rom-sharing-prompt-legal">By accepting, you confirm you own a legal copy of this game. The file is transferred directly from the host — not through any server.</p>
+          <div class="rom-sharing-prompt-buttons">
+            <button id="rom-accept-btn" class="small-btn">Accept</button>
+            <button id="rom-decline-btn" class="small-btn">Decline — I'll load my own</button>
+          </div>
+        </div>
+        <div id="rom-transfer-progress" style="display:none">
+          <div class="rom-progress-bar-container">
+            <div id="rom-progress-bar" class="rom-progress-bar"></div>
+          </div>
+          <p id="rom-progress-text" class="rom-status">Waiting for ROM from host...</p>
+          <button id="rom-transfer-cancel" class="small-btn">Cancel</button>
+        </div>
       </div>
 
       <div class="card-section" id="gamepad-area">
@@ -90,6 +105,12 @@
             <span id="delay-effective" class="opt-hint"></span>
           </div>
         </div>
+        <div id="rom-sharing-options" class="host-options-row">
+          <label><input type="checkbox" id="opt-rom-sharing" disabled> Share ROM with players</label>
+        </div>
+        <p id="rom-sharing-disclaimer" class="opt-hint rom-sharing-disclaimer" style="display:none">
+          By sharing, you confirm you have the legal right to distribute this file. Recipients must own a legal copy of this game.
+        </p>
         <button id="start-btn" disabled>Start Game (need 2+)</button>
       </div>
 
