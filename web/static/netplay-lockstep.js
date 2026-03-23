@@ -257,6 +257,16 @@
 
   let INPUT_BASE       = 715364;  // auto-discovered at startup
 
+  // -- Diagnostics state (DIAG logger) ----------------------------------------
+  let _diagPlayerAddrs = [null, null, null, null]; // per-player input base addresses
+  let _diagLastTickTime = 0;       // wall-clock time of previous tick() call
+  let _diagEventLog     = [];      // buffered async events [{t, type, detail}]
+  let _diagHookInstalled = false;  // true once async event hooks are set up
+  var DIAG_HASH_INTERVAL  = 30;    // frames between RDRAM hash logs (~2x/sec)
+  var DIAG_INPUT_INTERVAL = 30;    // frames between input read logs
+  var DIAG_TIME_INTERVAL  = 60;    // frames between timing logs
+  var DIAG_EARLY_FRAMES   = 300;   // log everything for first N frames
+
   // -- State -----------------------------------------------------------------
 
   let socket             = null;
@@ -312,6 +322,156 @@
       socket.emit('debug-sync', { slot: _playerSlot, msg: msg });
     }
   }
+
+  // -- Diagnostic logger functions -------------------------------------------
+
+  function _diagShouldLog(frameNum, interval) {
+    return frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
+  }
+
+  // DIAG-HASH: compute and stream RDRAM hash for this player
+  function _diagHash(frameNum) {
+    if (!_diagShouldLog(frameNum, DIAG_HASH_INTERVAL)) return;
+    var hashBytes = getHashBytes();
+    if (!hashBytes) return;
+    var f = frameNum;
+    workerPost({ type: 'hash', data: hashBytes }).then(function (res) {
+      _streamSync('DIAG-HASH f=' + f + ' hash=' + res.hash);
+    }).catch(function () {});
+  }
+
+  // DIAG-INPUT: read back per-player inputs from WASM memory using discovered addresses
+  function _diagInput(frameNum, applyFrame) {
+    if (!_diagShouldLog(frameNum, DIAG_INPUT_INTERVAL)) return;
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod || !mod.HEAPU8) return;
+    var mem = mod.HEAPU8;
+    var vals = [];
+    for (var p = 0; p < 4; p++) {
+      var addr = _diagPlayerAddrs[p];
+      if (addr === null) { vals.push('?'); continue; }
+      // Read 4 bytes (32-bit LE) at the player's button 0 address
+      if (addr + 3 < mem.length) {
+        var v = mem[addr] | (mem[addr+1] << 8) | (mem[addr+2] << 16) | (mem[addr+3] << 24);
+        vals.push(v);
+      } else {
+        vals.push('OOB');
+      }
+    }
+    _streamSync('DIAG-INPUT f=' + frameNum + ' apply=' + applyFrame +
+      ' p0=' + vals[0] + ' p1=' + vals[1] + ' p2=' + vals[2] + ' p3=' + vals[3]);
+  }
+
+  // DIAG-TIME: timing values after frame step
+  function _diagTime(frameNum, wallBefore, wallAfter) {
+    if (!_diagShouldLog(frameNum, DIAG_TIME_INTERVAL)) return;
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    var cycleTime = (mod && mod._kn_get_cycle_time_ms) ? mod._kn_get_cycle_time_ms() : -1;
+    var frameArg = window._kn_frameTime || -1;
+    var wallDelta = _diagLastTickTime > 0 ? (wallBefore - _diagLastTickTime) : 0;
+    var stepDuration = wallAfter - wallBefore;
+    _streamSync('DIAG-TIME f=' + frameNum +
+      ' cycle=' + (typeof cycleTime === 'number' ? cycleTime.toFixed(1) : cycleTime) +
+      ' frameArg=' + (typeof frameArg === 'number' ? frameArg.toFixed(1) : frameArg) +
+      ' wallDelta=' + wallDelta.toFixed(1) +
+      ' stepMs=' + stepDuration.toFixed(1));
+  }
+
+  // DIAG-EVENT: flush buffered async events
+  function _diagFlushEvents(frameNum) {
+    if (_diagEventLog.length === 0) return;
+    for (var i = 0; i < _diagEventLog.length; i++) {
+      var ev = _diagEventLog[i];
+      _streamSync('DIAG-EVENT f=' + frameNum + ' type=' + ev.type +
+        ' detail=' + ev.detail + ' t=' + ev.t.toFixed(1));
+    }
+    _diagEventLog.length = 0;
+  }
+
+  // Install async event hooks (called once at lockstep start)
+  function _diagInstallHooks() {
+    if (_diagHookInstalled) return;
+    _diagHookInstalled = true;
+
+    // Visibility change (tab hidden/shown)
+    document.addEventListener('visibilitychange', function () {
+      _diagEventLog.push({
+        t: performance.now(),
+        type: 'visibility',
+        detail: document.visibilityState
+      });
+    });
+
+    // Window focus/blur
+    window.addEventListener('focus', function () {
+      _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'gained' });
+    });
+    window.addEventListener('blur', function () {
+      _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'lost' });
+    });
+
+    // Touch events on emulator canvas
+    var canvas = document.querySelector('#game canvas, canvas');
+    if (canvas) {
+      ['touchstart', 'touchend', 'touchmove'].forEach(function (evName) {
+        canvas.addEventListener(evName, function (e) {
+          _diagEventLog.push({
+            t: performance.now(),
+            type: 'touch',
+            detail: evName + ':' + e.touches.length
+          });
+        }, { passive: true });
+      });
+    }
+
+    // EJS settings menu open/close (MutationObserver on body for settings panel)
+    var observer = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var mut = mutations[i];
+        for (var j = 0; j < mut.addedNodes.length; j++) {
+          var node = mut.addedNodes[j];
+          if (node.nodeType === 1 && (node.classList.contains('ejs--settings') ||
+              (node.querySelector && node.querySelector('.ejs--settings')))) {
+            _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'opened' });
+          }
+        }
+        for (var k = 0; k < mut.removedNodes.length; k++) {
+          var rnode = mut.removedNodes[k];
+          if (rnode.nodeType === 1 && (rnode.classList.contains('ejs--settings') ||
+              (rnode.querySelector && rnode.querySelector('.ejs--settings')))) {
+            _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'closed' });
+          }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Monkey-patch pauseMainLoop/resumeMainLoop to detect unexpected pauses
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (mod) {
+      var origPause = mod.pauseMainLoop;
+      var origResume = mod.resumeMainLoop;
+      if (origPause) {
+        mod.pauseMainLoop = function () {
+          _diagEventLog.push({ t: performance.now(), type: 'mainloop', detail: 'paused' });
+          return origPause.apply(this, arguments);
+        };
+      }
+      if (origResume) {
+        mod.resumeMainLoop = function () {
+          _diagEventLog.push({ t: performance.now(), type: 'mainloop', detail: 'resumed' });
+          return origResume.apply(this, arguments);
+        };
+      }
+    }
+
+    console.log('[lockstep] DIAG hooks installed');
+    _streamSync('DIAG-HOOKS installed');
+  }
+
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
@@ -1159,24 +1319,24 @@
           mod._simulate_input(0, 0, 0);
           console.log('[lockstep] INPUT_BASE auto-discovered: ' + INPUT_BASE);
 
-          // Discover address for ALL buttons to verify _simulate_input works
-          var btnAddrs = {};
-          for (var bi = 0; bi < 20; bi++) {
-            mod._simulate_input(0, bi, 0);
-            var snap2 = new Uint8Array(mod.HEAPU8.buffer.slice(INPUT_BASE, INPUT_BASE + 1000));
-            mod._simulate_input(0, bi, 1);
-            var found = false;
-            for (var si2 = 0; si2 < 1000; si2++) {
-              if (mod.HEAPU8[INPUT_BASE + si2] !== snap2[si2]) {
-                btnAddrs[bi] = INPUT_BASE + si2;
-                found = true;
+          // Discover per-player input base addresses (button 0 address for each player)
+          // This replaces the old per-button scan which only covered player 0.
+          var scanRange = 8 * 1024 * 1024; // 8MB scan window
+          var scanLen = Math.min(mod.HEAPU8.length, scanRange);
+          for (var pi = 0; pi < 4; pi++) {
+            mod._simulate_input(pi, 0, 0);
+            var pSnap = new Uint8Array(mod.HEAPU8.buffer.slice(0, scanLen));
+            mod._simulate_input(pi, 0, 1);
+            for (var psi = 0; psi < scanLen; psi++) {
+              if (mod.HEAPU8[psi] !== pSnap[psi]) {
+                _diagPlayerAddrs[pi] = psi;
                 break;
               }
             }
-            if (!found) btnAddrs[bi] = 'NO CHANGE';
-            mod._simulate_input(0, bi, 0);
+            mod._simulate_input(pi, 0, 0);
           }
-          console.log('[lockstep] button addresses:', JSON.stringify(btnAddrs));
+          console.log('[lockstep] per-player input addrs: ' + JSON.stringify(_diagPlayerAddrs));
+          _streamSync('DIAG-ADDRS ' + JSON.stringify(_diagPlayerAddrs));
         } catch (e) {
           console.log('[lockstep] INPUT_BASE auto-discovery failed, using default: ' + INPUT_BASE);
         }
@@ -1783,6 +1943,16 @@
     }
 
     initAudioPlayback();
+    _diagInstallHooks();
+
+    // DIAG: one-time startup banner for log self-description
+    var ua = navigator.userAgent;
+    var engine = /Firefox/.test(ua) ? 'SpiderMonkey' : /Chrome/.test(ua) ? 'V8' :
+                 /Safari/.test(ua) ? 'JSC' : 'unknown';
+    var isMobile = /Mobile|Android|iPhone|iPad/.test(ua);
+    _streamSync('DIAG-START slot=' + _playerSlot + ' engine=' + engine +
+      ' mobile=' + isMobile + ' forkedCore=' + _hasForkedCore +
+      ' ua=' + ua.substring(0, 120));
 
     var activePeers = getActivePeers();
     var peerSlots = activePeers.map((p) => p.slot);
@@ -1988,25 +2158,16 @@
       delete _localInputs[applyFrame];
     }
 
-    // -- Input verification log (determinism diagnostic) --
-    // Read back input values from WASM memory after writing, before stepping.
-    if (applyFrame >= 0 && (_frameNum < 100 || _frameNum % 120 === 0)) {
-      var imod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-                 window.EJS_emulator.gameManager.Module;
-      if (imod && INPUT_BASE) {
-        var imem = imod.HEAPU8;
-        var ivals = [];
-        for (var ip = 0; ip < 3; ip++) {
-          var addr = INPUT_BASE + ip * 20;
-          var b0 = imem[addr] | (imem[addr+1] << 8) | (imem[addr+2] << 16) | (imem[addr+3] << 24);
-          ivals.push(b0);
-        }
-        _streamSync('INPUT f=' + _frameNum + ' apply=' + applyFrame +
-          ' p0=' + ivals[0] + ' p1=' + ivals[1] + ' p2=' + ivals[2]);
-      }
+    // -- DIAG: input read-back (correct per-player addresses) --
+    if (applyFrame >= 0) {
+      _diagInput(_frameNum, applyFrame);
     }
 
+    // -- DIAG: flush any async events that fired since last tick --
+    _diagFlushEvents(_frameNum);
+
     // Step one frame with audio capture
+    var wallBefore = performance.now();
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
@@ -2014,9 +2175,17 @@
     stepOneFrame();
     _inDeterministicStep = false;
     feedAudio();
+    var wallAfter = performance.now();
 
     _frameNum++;
     window._frameNum = _frameNum;
+
+    // -- DIAG: timing values (after step, using new _frameNum) --
+    _diagTime(_frameNum - 1, wallBefore, wallAfter);
+    _diagLastTickTime = wallBefore;
+
+    // -- DIAG: RDRAM hash (after step, captures post-step state) --
+    _diagHash(_frameNum - 1);
 
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
     // Compare when we reach or pass the target frame (within a small window).
