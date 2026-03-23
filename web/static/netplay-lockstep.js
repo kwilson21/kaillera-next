@@ -301,8 +301,8 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 120;    // check hash every N frames (~2s at 60fps)
-  let _syncBaseInterval  = 120;    // no backoff — resync as fast as possible
+  let _syncCheckInterval = 600;    // check hash every N frames (~10s at 60fps)
+  let _syncBaseInterval  = 600;    // getState() is expensive (~3ms + 16MB serialize)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
