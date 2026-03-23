@@ -317,10 +317,10 @@
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   function _streamSync(msg) {
-    // Stream sync events to server in real-time (appends to logs/live.log)
-    if (socket && socket.connected) {
-      socket.emit('debug-sync', { slot: _playerSlot, msg: msg });
-    }
+    // Disabled for production — re-enable for diagnostics
+    // if (socket && socket.connected) {
+    //   socket.emit('debug-sync', { slot: _playerSlot, msg: msg });
+    // }
   }
 
   // -- Diagnostic logger functions -------------------------------------------
@@ -2227,38 +2227,17 @@
       delete _localInputs[applyFrame];
     }
 
-    // -- DIAG: input read-back (correct per-player addresses) --
-    if (applyFrame >= 0) {
-      _diagInput(_frameNum, applyFrame);
-    }
-
-    // -- DIAG: flush any async events that fired since last tick --
-    _diagFlushEvents(_frameNum);
-
     // Step one frame with audio capture
-    var wallBefore = performance.now();
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
-    // kn_canon_fpu_regs disabled — corrupts integer data in FPU registers
-    // (same issue as LWC1 canonicalization). FPU registers are a union that
-    // holds both floats and integers; scanning as float corrupts integer data.
     _inDeterministicStep = true;
     stepOneFrame();
     _inDeterministicStep = false;
     feedAudio();
-    var wallAfter = performance.now();
 
     _frameNum++;
     window._frameNum = _frameNum;
-
-    // -- DIAG: timing values (after step, using new _frameNum) --
-    _diagTime(_frameNum - 1, wallBefore, wallAfter);
-    _diagLastTickTime = wallBefore;
-
-    // -- DIAG: RDRAM hash (after step, captures post-step state) --
-    _diagHash(_frameNum - 1);
-    _diagDump(_frameNum - 1);
 
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
     // Compare when we reach or pass the target frame (within a small window).
