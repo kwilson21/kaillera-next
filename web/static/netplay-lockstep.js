@@ -2420,9 +2420,10 @@
     // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
     if (_hashRegion && _hashRegion.ptr && mod.HEAPU8) {
       try {
-        // Use mod.HEAPU8 directly instead of creating a new Uint8Array view
-        // of the entire WASM memory (~256MB) — avoids GC pressure on mobile.
-        var live = mod.HEAPU8;
+        // Create a fresh TypedArray view of the current WASM memory buffer.
+        // mod.HEAPU8 can be stale after memory growth — .buffer always current.
+        // This is a VIEW (64-byte header), not a copy of 256MB.
+        var live = new Uint8Array(mod.HEAPU8.buffer);
         var base = _hashRegion.ptr;
 
 
