@@ -156,6 +156,13 @@
     <div class="error-card"></div>
   </div>
 
+  <!-- Fetch ICE server config from server (before netplay scripts load) -->
+  <script>
+    fetch('/ice-servers').then(r => r.json()).then(s => { window._iceServers = s; }).catch(() => {
+      window._iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    });
+  </script>
+
   <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
   <script src="/static/core-redirector.js"></script>
 
@@ -167,15 +174,6 @@
     <div class="game-loading-content">
       <div class="game-loading-spinner"></div>
       <span id="game-loading-text">Loading...</span>
-    </div>
-  </div>
-
-  <!-- Reconnect overlay -->
-  <div id="reconnect-overlay" class="hidden">
-    <div class="game-loading-content">
-      <div class="game-loading-spinner"></div>
-      <span id="reconnect-text">Connection lost — reconnecting...</span>
-      <button id="reconnect-rejoin" class="hidden" style="margin-top:12px;padding:8px 16px;cursor:pointer;">Rejoin</button>
     </div>
   </div>
 
@@ -192,6 +190,9 @@
 
   <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
   <script src="/static/gamepad-manager.js"></script>
+
+  <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
+  <script src="/static/shared.js"></script>
 
   <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
   <script src="/static/netplay-lockstep.js"></script>

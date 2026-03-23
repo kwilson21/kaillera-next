@@ -369,9 +369,6 @@
     dismissGameLoading();
     hideToolbar();
     showOverlay();
-    // Clear reconnect overlay (may persist from mid-game reconnect)
-    var reconnectOverlay = document.getElementById('reconnect-overlay');
-    if (reconnectOverlay) reconnectOverlay.classList.add('hidden');
     // Clear stale engine status
     var statusEl = document.getElementById('engine-status');
     if (statusEl) statusEl.textContent = '';
@@ -1334,29 +1331,9 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
-      onReconnecting: function (sid, isReconnecting) {
-        var overlay = document.getElementById('reconnect-overlay');
-        if (!overlay) return;
-
-        if (!isReconnecting) {
-          // Always hide on false (reconnect resolved, game ended, or cleanup)
-          overlay.classList.add('hidden');
-          return;
-        }
-
-        // Only show overlay if ALL our DCs are down (we're the disconnected one).
-        var peers = window._peers || {};
-        var hasOpenDC = Object.values(peers).some(function (p) {
-          return p.dc && p.dc.readyState === 'open';
-        });
-
-        if (!hasOpenDC) {
-          overlay.classList.remove('hidden');
-          var text = document.getElementById('reconnect-text');
-          var rejoinBtn = document.getElementById('reconnect-rejoin');
-          if (text) text.textContent = 'Connection lost — reconnecting...';
-          if (rejoinBtn) rejoinBtn.classList.add('hidden');
-        }
+      onReconnecting: function () {
+        // No overlay — toasts from the engine are sufficient.
+        // The game keeps running underneath during reconnect.
       },
       onPeerReconnected: function (sid) {
         // Resume ROM transfer if waiting — mark DC to wait for receiver's rom-resume

@@ -148,8 +148,8 @@ def test_pause_toast_on_visibility_change(browser, server_url):
         _cleanup(host, guest, ctx)
 
 
-def test_reconnect_overlay_on_dc_close(browser, server_url):
-    """Reconnect overlay appears when DataChannel dies."""
+def test_reconnect_toast_on_dc_close(browser, server_url):
+    """DC death shows toast notifications (no blocking overlay)."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
@@ -172,15 +172,10 @@ def test_reconnect_overlay_on_dc_close(browser, server_url):
             timeout=10000,
         )
 
-        # Guest's reconnect overlay should appear (all DCs dead)
-        expect(guest.locator("#reconnect-overlay")).not_to_have_class(
-            re.compile(r"hidden"), timeout=15000
-        )
-
-        # Wait for reconnect to resolve — overlay disappears or rejoin appears
-        guest.wait_for_function(
-            """document.getElementById('reconnect-overlay').classList.contains('hidden')
-               || !document.getElementById('reconnect-rejoin').classList.contains('hidden')""",
+        # Wait for reconnect or timeout (15s) — check for "reconnected" or "dropped" toast
+        host.wait_for_function(
+            """document.getElementById('toast-container').textContent.includes('reconnected')
+               || document.getElementById('toast-container').textContent.includes('dropped')""",
             timeout=20000,
         )
     finally:
