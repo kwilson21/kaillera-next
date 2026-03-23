@@ -1192,11 +1192,10 @@
       hookVirtualGamepad();
 
       // Late join: request state from host instead of normal sync flow.
-      // Also trigger if host is already running (ROM sharing case: player was
-      // in the room at game start but emulator booted late due to ROM transfer).
-      var hostAlreadyRunning = Object.values(_peers).some(function (p) {
-        return p.slot === 0 && p.dc && p.dc.readyState === 'open' && p.emuReady;
-      });
+      // Also trigger if host is already in the lockstep loop (ROM sharing case:
+      // player was in room at game start but emulator booted late due to ROM transfer).
+      // _lastRemoteFrame > 0 means we've received actual game input = host is running.
+      var hostAlreadyRunning = _lastRemoteFrame > 0;
       if ((_lateJoin || hostAlreadyRunning) && _playerSlot !== 0) {
         console.log('[lockstep] using late-join path (lateJoin=' + _lateJoin +
           ', hostRunning=' + hostAlreadyRunning + ')');
