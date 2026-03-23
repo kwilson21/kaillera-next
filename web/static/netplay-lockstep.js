@@ -2615,6 +2615,16 @@
     mod.pauseMainLoop();
     mod.resumeMainLoop();
 
+    // loadState may trigger WASM memory growth, detaching HEAPU8.buffer.
+    // Force Emscripten to refresh its typed array views.
+    if (mod.updateMemoryViews) {
+      mod.updateMemoryViews();
+    } else if (mod._emscripten_notify_memory_growth) {
+      mod._emscripten_notify_memory_growth(0);
+    }
+    // Invalidate cached RDRAM region so it's re-discovered with fresh buffer
+    _hashRegion = null;
+
     _resyncCount++;
     _consecutiveResyncs++;
 
