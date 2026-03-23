@@ -67,7 +67,7 @@
  *        Input peers = peers who have sent at least one input (excludes
  *        late-joiners still booting). If missing:
  *          - Stall: return early, retry via setTimeout(1) for sub-16ms
- *            retry. After MAX_STALL_MS (3s), inject zero input to unstick.
+ *            retry. After MAX_STALL_MS (500ms), inject zero input to unstick.
  *     5. Write all players' inputs to WASM memory via _simulate_input()
  *        (iterates 16 digital buttons + 4 analog axis pairs per player)
  *     6. Reset audio buffer, step one frame, feed audio samples to
@@ -242,7 +242,7 @@
 
   // Maximum time (ms) to stall waiting for remote input before treating
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
-  const MAX_STALL_MS = 3000;
+  const MAX_STALL_MS = 500;
 
   // -- Direct memory input layout -----------------------------------------------
   //
