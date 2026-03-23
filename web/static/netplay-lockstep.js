@@ -1942,6 +1942,9 @@
         console.log('[lockstep] C-level deterministic timing enabled (session-wide)');
       }
 
+      // CP0_COUNT reset disabled — translate_event_queue corrupts host state.
+      // The --denan WASM pass handles NaN determinism without needing cycle sync.
+
       // Override performance.now() during WASM frame steps for COMPLETE timing
       // determinism. Emscripten's _emscripten_get_now calls performance.now()
       // internally, and it's captured in a closure we can't override from outside.
@@ -2392,13 +2395,8 @@
 
     // Virtual gamepad (mobile touch controls)
     // EJS simulateInput uses indices 0-15 for digital buttons (value 0 or 1)
-    // and 16+ for analog axes with SIGNED values (±32767):
-    //   index 16 = left stick X (positive = right, negative = left)
-    //   index 17 = left stick Y (positive = down, negative = up)
-    //   index 18 = right stick X, index 19 = right stick Y
-    // Our bitmask uses BIT PAIRS per axis:
-    //   bits 16/17 = stick X (right/left), bits 18/19 = stick Y (down/up)
-    //   bits 20/21 = C-stick X, bits 22/23 = C-stick Y
+    // and 16-23 for analog axes (value ±32767). Our bitmask uses one bit per
+    // direction: even index = positive, odd = negative.
     // Skip entirely if an EJS menu/popup is visible — stale touch state from
     // before the menu opened would otherwise keep sending non-zero input.
     var ejs = window.EJS_emulator;
@@ -2415,12 +2413,8 @@
       if (!val) continue;
       if (idx < 16) {
         mask |= (1 << idx);
-      } else if (idx >= 16 && idx <= 19) {
-        // Convert EJS axis index (16=X, 17=Y, 18=CX, 19=CY) with signed value
-        // to our bit-pair layout (each axis uses 2 consecutive bits: pos, neg).
-        var baseBit = 16 + (idx - 16) * 2;  // 16→16, 17→18, 18→20, 19→22
-        if (val > 0) mask |= (1 << baseBit);       // positive direction
-        if (val < 0) mask |= (1 << (baseBit + 1)); // negative direction
+      } else if (idx >= 16 && idx <= 23) {
+        if (val > 0) mask |= (1 << idx);
       }
     }
 
