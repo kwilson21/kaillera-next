@@ -818,7 +818,10 @@
           var parts = e.data.split(':');
           var syncFrame = parseInt(parts[1], 10);
           var hostHash = parseInt(parts[2], 10);
-          if (_frameNum === syncFrame || (_frameNum > syncFrame && _frameNum - syncFrame <= 2)) {
+          var frameDiff = _frameNum - syncFrame;
+          if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
+            console.log('[lockstep] sync check received: hostFrame=' + syncFrame +
+              ' myFrame=' + _frameNum + ' (diff=' + frameDiff + ') — comparing');
             // Hash directly from HEAPU8 (RDRAM) — avoids expensive getState()
             try {
               var guestBytes = getHashBytes();
@@ -830,16 +833,20 @@
                     'local:', res.hash, 'host:', hostHash, '-- requesting state');
                   try { peerRef.dc.send('sync-request'); } catch (_) {}
                 } else {
+                  console.log('[lockstep] sync OK at frame', syncFrame);
                   _consecutiveResyncs = 0;
                   _syncCheckInterval = _syncBaseInterval;
                 }
               }).catch(function () {});
             } catch (_) {}
           } else if (_frameNum < syncFrame) {
-            // We're behind — store for deferred check when we reach that frame
+            console.log('[lockstep] sync check deferred: hostFrame=' + syncFrame +
+              ' myFrame=' + _frameNum + ' (behind by ' + (syncFrame - _frameNum) + ')');
             _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
+          } else {
+            console.log('[lockstep] sync check skipped: hostFrame=' + syncFrame +
+              ' myFrame=' + _frameNum + ' (ahead by ' + frameDiff + ')');
           }
-          // If _frameNum > syncFrame, skip — frame already passed
         }
         // State sync: host received request, or chunked binary transfer header
         if (e.data === 'sync-request' && _playerSlot === 0) {
@@ -1978,11 +1985,15 @@
       if (hashBytes) {
         var checkFrame = _frameNum;
         var peers = getActivePeers();
+        var peerSlotList = peers.map(function (p) { return p.slot; });
         workerPost({ type: 'hash', data: hashBytes }).then(function (res) {
           var syncMsg = 'sync-hash:' + checkFrame + ':' + res.hash;
+          var sent = 0;
           for (var s = 0; s < peers.length; s++) {
-            try { peers[s].dc.send(syncMsg); } catch (_) {}
+            try { peers[s].dc.send(syncMsg); sent++; } catch (_) {}
           }
+          console.log('[lockstep] sync check at frame ' + checkFrame +
+            ' sent to ' + sent + '/' + peers.length + ' peers (slots: ' + peerSlotList.join(',') + ')');
         }).catch(function () {});
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
           console.log('[lockstep] sync check at frame', _frameNum);

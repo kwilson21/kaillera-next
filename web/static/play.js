@@ -72,6 +72,12 @@
     window._socket = socket;  // expose for E2E tests
 
     socket.on('connect', onConnect);
+    socket.on('disconnect', (reason) => {
+      console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
+    });
+    socket.on('reconnect', (attempt) => {
+      console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
+    });
     socket.on('connect_error', (e) => {
       if (!gameRunning) {
         showError(`Connection error: ${e.message}`);
