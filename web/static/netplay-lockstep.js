@@ -2446,16 +2446,12 @@
           }
         }
 
-        // Hash the active game state regions identified by RDRAM scan:
-        // 0x80000-0xA0000 (128KB) + 0xC0000-0xD0000 (64KB) = 192KB
-        // These chunks change every frame during gameplay and contain
-        // player positions, physics, damage%, stocks.
-        var part1 = live.slice(base + 0x80000, base + 0xA0000);  // 128KB
-        var part2 = live.slice(base + 0xC0000, base + 0xD0000);  // 64KB
-        var combined = new Uint8Array(part1.length + part2.length);
-        combined.set(part1, 0);
-        combined.set(part2, part1.length);
-        return combined;
+        // Hash ONLY the 0xC0000-0xD0000 region (64KB).
+        // The 0x80000-0xA0000 region contains non-deterministic emulator
+        // internals that differ between instances even when game is in sync
+        // (confirmed: game visually synced but hash differs every check).
+        // 0xC0000 changes during gameplay and is more likely pure game state.
+        return live.slice(base + 0xC0000, base + 0xD0000);
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
       }
