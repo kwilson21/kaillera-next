@@ -2446,12 +2446,34 @@
           }
         }
 
-        // Hash ONLY the 0xC0000-0xD0000 region (64KB).
-        // The 0x80000-0xA0000 region contains non-deterministic emulator
-        // internals that differ between instances even when game is in sync
-        // (confirmed: game visually synced but hash differs every check).
-        // 0xC0000 changes during gameplay and is more likely pure game state.
-        return live.slice(base + 0xC0000, base + 0xD0000);
+        // Test: hash multiple small regions independently and log which
+        // ones match vs differ. This identifies exactly which areas are
+        // deterministic (usable for sync) vs non-deterministic (false positive).
+        var testRegions = [
+          [0x0A4D00, 0x0A4E00, 'match-config'],  // 256B: stock mode, settings
+          [0x0A4E00, 0x0A5000, 'match-ext'],      // 512B: extended match data
+          [0x40000,  0x40100,  'chunk-256K'],      // 256B sample from 256K
+          [0x80000,  0x80100,  'chunk-512K'],      // 256B sample from 512K
+          [0x90000,  0x90100,  'chunk-576K'],      // 256B sample from 576K
+          [0xC0000,  0xC0100,  'chunk-768K'],      // 256B sample from 768K
+          [0x190000, 0x190100, 'chunk-1600K'],     // 256B sample from 1600K
+          [0x260000, 0x260100, 'chunk-2432K'],     // 256B sample from 2432K
+        ];
+        // Hash each region independently
+        var regionHashes = [];
+        for (var ri = 0; ri < testRegions.length; ri++) {
+          var rStart = base + testRegions[ri][0];
+          var rEnd = base + testRegions[ri][1];
+          var rData = live.slice(rStart, rEnd);
+          var h = 0x811c9dc5;
+          for (var hi = 0; hi < rData.length; hi++) {
+            h ^= rData[hi]; h = Math.imul(h, 0x01000193);
+          }
+          regionHashes.push(testRegions[ri][2] + '=' + (h | 0));
+        }
+        _streamSync('regions: ' + regionHashes.join(' '));
+        // Use match-config for actual sync comparison (smallest, most likely deterministic)
+        return live.slice(base + 0x0A4D00, base + 0x0A4E00);
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
       }
