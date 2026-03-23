@@ -37,6 +37,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # Disable caching for dev — prevents stale JS/CSS in incognito sessions
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return response
 
 
