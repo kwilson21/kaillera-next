@@ -306,8 +306,6 @@
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   let _lastResyncRequest = 0;      // timestamp of last sync-request (30s cooldown)
-  let _prevChunkHashes = null;     // RDRAM scan: previous chunk hashes for delta detection
-
   function _streamSync(msg) {
     // Stream sync events to server in real-time (appends to logs/live.log)
     if (socket && socket.connected) {
@@ -2420,65 +2418,19 @@
         var live = new Uint8Array(liveBuf);
         var base = _hashRegion.ptr;
 
-        // Scan RDRAM to find active game data regions. Hash 128 chunks of 64KB
-        // and compare between frames — only log chunks that CHANGED.
-        if (!_prevChunkHashes) _prevChunkHashes = [];
-        if (_frameNum <= _syncCheckInterval * 3 || _frameNum % (_syncCheckInterval * 5) === 0) {
-          var chunkSize = 0x10000; // 64KB
-          var changed = [];
-          for (var ci = 0; ci < 128; ci++) {
-            var cStart = base + ci * chunkSize;
-            // FNV-1a on first 256 bytes of each chunk (fast fingerprint)
-            var h = 0x811c9dc5;
-            for (var fi = 0; fi < 256; fi++) {
-              h ^= live[cStart + fi]; h = Math.imul(h, 0x01000193);
-            }
-            h = h | 0;
-            if (_prevChunkHashes[ci] !== undefined && _prevChunkHashes[ci] !== h) {
-              changed.push((ci * 64) + 'K');
-            }
-            _prevChunkHashes[ci] = h;
-          }
-          if (changed.length > 0) {
-            var changedMsg = 'RDRAM changed: ' + changed.join(',');
-            console.log('[lockstep] ' + changedMsg);
-            _streamSync(changedMsg);
-          }
-        }
 
-        // Test: hash multiple small regions independently and log which
-        // ones match vs differ. This identifies exactly which areas are
-        // deterministic (usable for sync) vs non-deterministic (false positive).
-        var testRegions = [
-          [0x0A4D00, 0x0A4E00, 'match-config'],  // 256B: stock mode, settings
-          [0x0A4E00, 0x0A5000, 'match-ext'],      // 512B: extended match data
-          [0x40000,  0x40100,  'chunk-256K'],      // 256B sample from 256K
-          [0x80000,  0x80100,  'chunk-512K'],      // 256B sample from 512K
-          [0x90000,  0x90100,  'chunk-576K'],      // 256B sample from 576K
-          [0xC0000,  0xC0100,  'chunk-768K'],      // 256B sample from 768K
-          [0x190000, 0x190100, 'chunk-1600K'],     // 256B sample from 1600K
-          [0x260000, 0x260100, 'chunk-2432K'],     // 256B sample from 2432K
-        ];
-        // Hash each region independently
-        var regionHashes = [];
-        for (var ri = 0; ri < testRegions.length; ri++) {
-          var rStart = base + testRegions[ri][0];
-          var rEnd = base + testRegions[ri][1];
-          var rData = live.slice(rStart, rEnd);
-          var h = 0x811c9dc5;
-          for (var hi = 0; hi < rData.length; hi++) {
-            h ^= rData[hi]; h = Math.imul(h, 0x01000193);
-          }
-          regionHashes.push(testRegions[ri][2] + '=' + (h | 0));
-        }
-        _streamSync('regions: ' + regionHashes.join(' '));
-        // Hash only DETERMINISTIC regions (confirmed by live testing:
-        // match-config, match-ext, 768K, 1600K, 2432K always match between
-        // synced players. 256K/512K/576K are non-deterministic emulator internals).
-        var d1 = live.slice(base + 0x0A4D00, base + 0x0A5000);  // 768B: match config+ext
-        var d2 = live.slice(base + 0xC0000,  base + 0xC0100);   // 256B: chunk-768K
-        var d3 = live.slice(base + 0x190000, base + 0x190100);  // 256B: chunk-1600K
-        var d4 = live.slice(base + 0x260000, base + 0x260100);  // 256B: chunk-2432K
+        // Hash DETERMINISTIC RDRAM regions only (verified by live testing —
+        // these always match between synced players, zero false positives):
+        //   0x0A4D00-0x0A5000: match config + extended match data (768B)
+        //   0xC0000-0xC0100:   game state sample (256B)
+        //   0x190000-0x190100: game state sample (256B)
+        //   0x260000-0x260100: game state sample (256B)
+        // Non-deterministic regions (emulator internals, always differ):
+        //   0x40000 (256K), 0x80000 (512K), 0x90000 (576K)
+        var d1 = live.slice(base + 0x0A4D00, base + 0x0A5000);
+        var d2 = live.slice(base + 0xC0000,  base + 0xC0100);
+        var d3 = live.slice(base + 0x190000, base + 0x190100);
+        var d4 = live.slice(base + 0x260000, base + 0x260100);
         var combined = new Uint8Array(d1.length + d2.length + d3.length + d4.length);
         combined.set(d1, 0);
         combined.set(d2, d1.length);
