@@ -369,6 +369,9 @@
     dismissGameLoading();
     hideToolbar();
     showOverlay();
+    // Clear reconnect overlay (may persist from mid-game reconnect)
+    var reconnectOverlay = document.getElementById('reconnect-overlay');
+    if (reconnectOverlay) reconnectOverlay.classList.add('hidden');
     // Clear stale engine status
     var statusEl = document.getElementById('engine-status');
     if (statusEl) statusEl.textContent = '';
