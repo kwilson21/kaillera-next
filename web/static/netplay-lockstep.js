@@ -300,11 +300,12 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 60;     // check hash every N frames (~1s at 60fps)
-  let _syncBaseInterval  = 60;     // base interval before adaptive backoff
+  let _syncCheckInterval = 600;    // check hash every N frames (~10s at 60fps)
+  let _syncBaseInterval  = 600;    // base interval before adaptive backoff
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
+  let _lastResyncRequest = 0;      // timestamp of last sync-request (30s cooldown)
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
@@ -831,9 +832,12 @@
                 if (res.hash !== hostHash) {
                   console.log('[lockstep] DESYNC at frame ' + syncFrame +
                     ' local=' + res.hash + ' host=' + hostHash);
-                  // Only request state if no resync is already pending
-                  if (!_pendingResyncState) {
+                  // Rate-limit resync: no pending resync AND 30s cooldown
+                  var now = performance.now();
+                  if (!_pendingResyncState && (!_lastResyncRequest || now - _lastResyncRequest > 30000)) {
+                    _lastResyncRequest = now;
                     try { peerRef.dc.send('sync-request'); } catch (_) {}
+                    console.log('[lockstep] sync-request sent (next allowed in 30s)');
                   }
                 } else {
                   console.log('[lockstep] sync OK at frame ' + syncFrame +
