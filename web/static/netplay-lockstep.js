@@ -346,7 +346,7 @@
       // Try AudioWorklet first (requires secure context), fall back to
       // AudioBufferSourceNode scheduling (works everywhere including mobile HTTP).
       var workletOk = false;
-      if (_audioCtx.audioWorklet && window.isSecureContext) {
+      if (_audioCtx.audioWorklet) {
         try {
           await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
           _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
