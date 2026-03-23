@@ -30,3 +30,5 @@ web/static/roms/
 
 # Screenshots (dev artifacts)
 *.png
+logs/*.log
+logs/*.json
