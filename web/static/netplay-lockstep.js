@@ -2427,23 +2427,35 @@
         var live = new Uint8Array(buf);
         var base = _hashRegion.ptr;
 
-        // SSB64 RDRAM map (verified by automated Playwright scan):
-        //   0x130000          — game state indicator (stable within state, changes between)
-        //   0x394000-0x3DA000 — match gameplay data (280KB, volatile only during gameplay)
-        //   0x3B000-0xC7000   — NEVER hash (core internals, always volatile = false positives)
-        var STATE_IND = 0x130000;
-        var GAME_START = 0x394000;
-        var GAME_END = 0x3DA000;
-        var SAMPLE_SIZE = 256;
-        var SAMPLE_COUNT = 16;
-        var stride = Math.floor((GAME_END - GAME_START) / SAMPLE_COUNT);
-
-        // State indicator (256B) + 16 × 256B gameplay samples = 4.25KB total
-        var combined = new Uint8Array(SAMPLE_SIZE + SAMPLE_SIZE * SAMPLE_COUNT);
-        combined.set(live.subarray(base + STATE_IND, base + STATE_IND + SAMPLE_SIZE), 0);
-        for (var gi = 0; gi < SAMPLE_COUNT; gi++) {
-          var gOff = base + GAME_START + gi * stride;
-          combined.set(live.subarray(gOff, gOff + SAMPLE_SIZE), SAMPLE_SIZE + gi * SAMPLE_SIZE);
+        // SSB64 VS mode RDRAM map (verified by visual Playwright MCP scan).
+        // Match-only volatile regions (change during gameplay, NOT during menus):
+        //   0xA4000          — player/match config (near GameShark addresses)
+        //   0xBA000-0xC7000  — player/match state
+        //   0x262000-0x26C000 — physics/animation
+        //   0x32B000-0x335000 — physics/animation
+        // NEVER hash (core internals, always volatile = false positives):
+        //   0x3B000-0xA3000, 0xA5000-0xB9000, 0xD5000-0xD6000
+        //
+        // Sample 256B from each match-only volatile block (lightweight).
+        var gameRegions = [
+          0xA4000,   // player/match config
+          0xBA000,   // player state block start
+          0xBF000,   // player state block mid
+          0xC4000,   // player state block end
+          0x262000,  // physics block 1
+          0x266000,  // physics block 1 mid
+          0x26A000,  // physics block 1 end
+          0x290000,  // misc gameplay
+          0x2F6000,  // physics block 2
+          0x32B000,  // physics block 3 start
+          0x330000,  // physics block 3 mid
+          0x335000,  // physics block 3 end
+        ];
+        var SAMPLE = 256;
+        var combined = new Uint8Array(SAMPLE * gameRegions.length);
+        for (var gi = 0; gi < gameRegions.length; gi++) {
+          var gOff = base + gameRegions[gi];
+          combined.set(live.subarray(gOff, gOff + SAMPLE), gi * SAMPLE);
         }
         return combined;
       } catch (e) {

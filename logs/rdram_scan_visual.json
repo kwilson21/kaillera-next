@@ -1,0 +1,27 @@
+{
+  "method": "manual_navigation_via_playwright_mcp",
+  "states_verified": ["title", "main_menu", "charsel", "stagesel", "match_vs"],
+  "match_only_volatile_chunks_4KB": [
+    "0xa4000", "0xab000", "0xac000",
+    "0xba000", "0xbb000", "0xbc000", "0xbd000", "0xbe000", "0xbf000",
+    "0xc0000", "0xc1000", "0xc2000", "0xc3000", "0xc4000", "0xc5000", "0xc6000", "0xc7000",
+    "0x18d000", "0x19d000", "0x1b6000", "0x248000",
+    "0x262000", "0x263000", "0x264000", "0x265000", "0x266000", "0x267000",
+    "0x269000", "0x26a000", "0x26b000", "0x26c000",
+    "0x279000", "0x290000", "0x291000",
+    "0x2f6000", "0x2f7000", "0x2f8000", "0x2f9000",
+    "0x32b000", "0x32d000", "0x32e000", "0x32f000",
+    "0x330000", "0x331000", "0x332000", "0x333000", "0x334000", "0x335000"
+  ],
+  "always_volatile_never_hash": [
+    "0x3b000-0x47000", "0x60000-0x73000", "0x7b000-0x9f000",
+    "0xad000-0xb9000", "0xd5000-0xd6000", "0x130000-0x131000"
+  ],
+  "state_indicator_0x130000": "88 b3 0e 80 68 b2 0e 80 (same across all states - NOT a state indicator)",
+  "notes": [
+    "Previous automated scan entered 1P Game, not VS - regions were different (0x394000-0x3DA000)",
+    "This VS mode scan found gameplay data at 0xA4000-0xC7000 and 0x262000-0x335000",
+    "0x130000 was NOT a valid state indicator - same bytes in all states",
+    "Need to find actual state indicator by reading specific bytes and comparing across states"
+  ]
+}
