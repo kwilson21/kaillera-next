@@ -2389,15 +2389,31 @@
       } catch (_) {}
     }
 
-    // Use getState() for hash — HEAPU8 direct access returns stale data
-    // (the RDRAM pointer from get_memory_data may point to a frozen region).
-    // getState() captures the core's live state through the RetroArch API.
+    // Read RDRAM via wasmMemory.buffer (always current, unlike HEAPU8 which
+    // can be a stale TypedArray after WASM memory growth).
+    if (_hashRegion && _hashRegion.ptr && mod.wasmMemory) {
+      try {
+        var live = new Uint8Array(mod.wasmMemory.buffer);
+        // Hash RDRAM from 0x80000 to 0x200000 (game heap area, ~1.5MB).
+        // Avoids bottom of RDRAM (N64 OS/boot data, volatile counters) and
+        // top (framebuffer/texture data that differs from rendering timing).
+        // Game state (player positions, damage, stocks, timer) lives in
+        // the heap area for SSB64 and most N64 games.
+        var GAME_START = 0x80000;   // 512KB into RDRAM
+        var GAME_END = 0x200000;    // 2MB into RDRAM
+        var start = _hashRegion.ptr + GAME_START;
+        var end = _hashRegion.ptr + Math.min(GAME_END, _hashRegion.size);
+        return live.slice(start, end);
+      } catch (e) {
+        console.log('[lockstep] hash: wasmMemory read failed:', e.message);
+      }
+    }
+
+    // Fallback: getState() with header skip
     try {
       var gm = window.EJS_emulator.gameManager;
       var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      // Skip first 1024 bytes (save state header/metadata contains timestamps
-      // and core version info that differs between instances)
       var SKIP = 1024;
       var len = bytes.length - SKIP;
       if (len <= 0) return bytes.slice(0, Math.min(bytes.length, 65536));
