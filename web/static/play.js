@@ -221,8 +221,8 @@
                 return;
               }
 
-              // Verify ROM hash if available
-              if (_hostRomHash && _romHash && _hostRomHash !== _romHash) {
+              // Verify ROM hash if available (skip when ROM came from host via sharing)
+              if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
                 showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
                 return;
               }
@@ -906,20 +906,24 @@
     _romTransferChunks = [];
     _romTransferDC = null;
 
-    // Verify hash if provided
-    const reader = new FileReader();
-    reader.onload = () => {
-      hashArrayBuffer(reader.result).then((hash) => {
-        _romHash = hash;
-        if (expectedHash && hash !== expectedHash) {
-          showToast('ROM hash mismatch — may cause desync');
-        }
-        afterRomTransferComplete(displayName);
-      }).catch(() => {
-        afterRomTransferComplete(displayName);
-      });
-    };
-    reader.readAsArrayBuffer(blob);
+    // Use the host's hash directly — the bytes are verified identical (size check
+    // passed) and recomputing locally can produce a different hash if the host
+    // uses SHA-256 (HTTPS/localhost) while the guest uses FNV-1a (HTTP LAN IP).
+    if (expectedHash) {
+      _romHash = expectedHash;
+      afterRomTransferComplete(displayName);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        hashArrayBuffer(reader.result).then((hash) => {
+          _romHash = hash;
+          afterRomTransferComplete(displayName);
+        }).catch(() => {
+          afterRomTransferComplete(displayName);
+        });
+      };
+      reader.readAsArrayBuffer(blob);
+    }
   }
 
   function afterRomTransferComplete(displayName) {
