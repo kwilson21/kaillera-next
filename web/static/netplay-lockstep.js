@@ -2487,7 +2487,7 @@
         toCompress[i] = currentState[i] ^ _lastSyncState[i];
       }
     }
-    _lastSyncState = currentState;
+    _lastSyncState = new Uint8Array(currentState);
 
     compressState(toCompress).then(function (compressed) {
       var sizeKB = Math.round(compressed.length / 1024);
