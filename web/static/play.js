@@ -37,7 +37,9 @@
   let _romTransferDCs = {};         // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   const ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
-  const _isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent))
+    || (navigator.userAgentData && navigator.userAgentData.mobile);
   const ROM_CHUNK_SIZE = _isMobile ? 16 * 1024 : 64 * 1024;
   const ROM_BUFFER_THRESHOLD = _isMobile ? 256 * 1024 : 1024 * 1024;
   let _romTransferBytesReceived = 0;
@@ -94,6 +96,12 @@
     socket.on('data-message', onDataMessageForRomSharing);
   }
 
+  function sendDeviceType() {
+    if (socket && socket.connected) {
+      socket.emit('device-type', { type: _isMobile ? 'mobile' : 'desktop' });
+    }
+  }
+
   function onConnect() {
     if (isHost) {
       socket.emit('open-room', {
@@ -108,6 +116,7 @@
       }, (err) => {
         if (err) { showError(`Failed to create room: ${err}`); return; }
         mySlot = 0;
+        sendDeviceType();
         showOverlay();
       });
     } else {
@@ -150,6 +159,7 @@
                   if (err2) { showError(`Failed to join: ${err2}`); return; }
                   mySlot = null;
                   if (joinData2) lastUsersData = joinData2;
+                  sendDeviceType();
                   showRoomFullBanner();
                   showOverlay();
                 });
@@ -171,6 +181,8 @@
               mySlot = null;
               if (_autoSpectated) showRoomFullBanner();
             }
+
+            sendDeviceType();
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
@@ -329,8 +341,8 @@
     mode = data.mode || mode;
     _gameRollbackEnabled = !!data.rollbackEnabled;
 
-    // Verify ROM hash matches host's
-    if (data.romHash && _romHash && data.romHash !== _romHash) {
+    // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
+    if (data.romHash && _romHash && data.romHash !== _romHash && _romSharingDecision !== 'accepted') {
       showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
       return;
     }
@@ -1462,8 +1474,8 @@
   function dismissLateJoinPrompt() {
     _pendingLateJoin = false;
 
-    // Verify ROM hash before joining
-    if (_hostRomHash && _romHash && _hostRomHash !== _romHash) {
+    // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
+    if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
       showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
       return;
     }
@@ -1536,6 +1548,7 @@
       }
 
       const gpEl = slotEl.querySelector('.gamepad');
+      const devEl = slotEl.querySelector('.device');
 
       if (playerInSlot) {
         const isOwner = ownerSid && playerInSlot.socketId === ownerSid;
@@ -1549,10 +1562,17 @@
           gpEl.textContent = itype === 'gamepad' ? '\uD83C\uDFAE' : '\u2328\uFE0F';
           gpEl.title = itype === 'gamepad' ? 'Gamepad' : 'Keyboard';
         }
+        // Show device type indicator
+        if (devEl) {
+          const dtype = playerInSlot.deviceType || 'desktop';
+          devEl.textContent = dtype === 'mobile' ? '\uD83D\uDCF1' : '\uD83D\uDDA5\uFE0F';
+          devEl.title = dtype === 'mobile' ? 'Mobile' : 'Desktop';
+        }
       } else {
         nameEl.textContent = 'Open';
         nameEl.classList.add('empty');
         if (gpEl) { gpEl.textContent = ''; gpEl.title = ''; }
+        if (devEl) { devEl.textContent = ''; devEl.title = ''; }
       }
     }
 
