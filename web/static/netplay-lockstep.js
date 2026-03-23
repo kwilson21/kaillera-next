@@ -2434,8 +2434,16 @@
           }
         }
 
-        // Hash 0x0A4D00 - 0x0B0000 for sync comparison (known game data region)
-        return live.slice(base + 0x0A4D00, base + 0x0B0000);
+        // Hash the active game state regions identified by RDRAM scan:
+        // 0x80000-0xA0000 (128KB) + 0xC0000-0xD0000 (64KB) = 192KB
+        // These chunks change every frame during gameplay and contain
+        // player positions, physics, damage%, stocks.
+        var part1 = live.slice(base + 0x80000, base + 0xA0000);  // 128KB
+        var part2 = live.slice(base + 0xC0000, base + 0xD0000);  // 64KB
+        var combined = new Uint8Array(part1.length + part2.length);
+        combined.set(part1, 0);
+        combined.set(part2, part1.length);
+        return combined;
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
       }
