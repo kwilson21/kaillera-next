@@ -324,8 +324,6 @@ button:hover { background: #4a6fa5; }
   min-height: 36px;
 }
 
-#toolbar-sync { background: #444; }
-#toolbar-sync:hover { background: #555; }
 .toolbar-toggle { background: #333; font-size: 11px !important; padding: 4px 10px !important; min-height: 28px !important; }
 .toolbar-toggle.active { background: #4a6; }
 #toolbar-end { background: #8a3a3a; }
@@ -589,6 +587,35 @@ button:hover { background: #4a6fa5; }
 }
 
 #game-loading.hidden { display: none; }
+
+/* Reconnect overlay */
+#reconnect-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 95;
+  pointer-events: auto;
+}
+
+#reconnect-overlay.hidden { display: none; }
+
+#reconnect-text {
+  font-size: 14px;
+  color: #aaa;
+}
+
+#reconnect-rejoin {
+  background: #6af;
+  color: #000;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+#reconnect-rejoin.hidden { display: none; }
 
 #game-loading.fade-out {
   opacity: 0;

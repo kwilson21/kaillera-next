@@ -144,7 +144,7 @@
 (function () {
   'use strict';
 
-  const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+  const ICE_SERVERS = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
@@ -2751,12 +2751,18 @@
     // Stop lockstep tick loop
     stopSync();
 
-    // Close all peer connections
+    // Close all peer connections and clear reconnect timers
     Object.keys(_peers).forEach(function (sid) {
       var p = _peers[sid];
+      if (p._reconnectTimeout) { clearTimeout(p._reconnectTimeout); p._reconnectTimeout = null; }
+      if (p._disconnectTimer) { clearTimeout(p._disconnectTimer); p._disconnectTimer = null; }
       if (p.dc) try { p.dc.close(); } catch (_) {}
       if (p.pc) try { p.pc.close(); } catch (_) {}
     });
+    // Signal all reconnecting states cleared before nulling config
+    if (_config && _config.onReconnecting) {
+      try { _config.onReconnecting(null, false); } catch (_) {}
+    }
     _peers = {};
     window._peers = _peers;
 

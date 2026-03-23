@@ -1336,43 +1336,26 @@
       onToast: showToast,
       onReconnecting: function (sid, isReconnecting) {
         var overlay = document.getElementById('reconnect-overlay');
-        var text = document.getElementById('reconnect-text');
-        var rejoinBtn = document.getElementById('reconnect-rejoin');
         if (!overlay) return;
 
+        if (!isReconnecting) {
+          // Always hide on false (reconnect resolved, game ended, or cleanup)
+          overlay.classList.add('hidden');
+          return;
+        }
+
         // Only show overlay if ALL our DCs are down (we're the disconnected one).
-        // If some DCs are still open, other peers handle reconnect — just show toast.
         var peers = window._peers || {};
         var hasOpenDC = Object.values(peers).some(function (p) {
           return p.dc && p.dc.readyState === 'open';
         });
-        var anyReconnecting = Object.values(peers).some(function (p) {
-          return p.reconnecting;
-        });
 
-        if (isReconnecting && !hasOpenDC) {
-          // We have no open DCs — show overlay
+        if (!hasOpenDC) {
           overlay.classList.remove('hidden');
+          var text = document.getElementById('reconnect-text');
+          var rejoinBtn = document.getElementById('reconnect-rejoin');
           if (text) text.textContent = 'Connection lost — reconnecting...';
           if (rejoinBtn) rejoinBtn.classList.add('hidden');
-        } else if (!isReconnecting) {
-          // A peer finished reconnecting — hide overlay if no peers still reconnecting
-          if (!anyReconnecting) {
-            overlay.classList.add('hidden');
-          }
-          // Check if we need to show rejoin (all peers gone, none reconnecting)
-          var info = engine && engine.getInfo ? engine.getInfo() : null;
-          if (info && info.playerCount <= 1 && info.running && !anyReconnecting) {
-            overlay.classList.remove('hidden');
-            if (text) text.textContent = 'Reconnection failed';
-            if (rejoinBtn) {
-              rejoinBtn.classList.remove('hidden');
-              rejoinBtn.onclick = function () {
-                overlay.classList.add('hidden');
-                window.location.reload();
-              };
-            }
-          }
         }
       },
       onPeerReconnected: function (sid) {
@@ -1624,8 +1607,6 @@
     var endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
 
-    var syncBtn = document.getElementById('toolbar-sync');
-    if (syncBtn) syncBtn.style.display = isHost ? '' : 'none';
   }
 
   function hideToolbar() {
