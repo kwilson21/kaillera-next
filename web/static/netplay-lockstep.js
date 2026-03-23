@@ -2475,6 +2475,8 @@
     // Delta sync: XOR against previous state. The delta is mostly zeros
     // (unchanged bytes) which compresses ~100x better than full state.
     var isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
+    _streamSync('pushSync: lastState=' + (_lastSyncState ? _lastSyncState.length : 'null') +
+      ' current=' + currentState.length + ' isFull=' + isFull);
     var toCompress;
     if (isFull) {
       toCompress = currentState;
