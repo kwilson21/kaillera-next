@@ -1196,6 +1196,14 @@
       sendInitialState();
     }
     // Guests: wait for save state via handleSaveStateMsg
+
+    // Timeout: if sync hasn't completed in 30s, show helpful status
+    setTimeout(function () {
+      if (!_running && _selfEmuReady && _gameStarted) {
+        setStatus('Sync timed out — try reloading the page');
+        if (_config && _config.onToast) _config.onToast('Sync stalled — reload to retry');
+      }
+    }, 30000);
   }
 
   function checkAllLockstepReady() {
