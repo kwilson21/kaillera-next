@@ -88,35 +88,29 @@ Non-host joins via a play link (no `&spectate=1`). The client already calls
 `roomData.player_count >= roomData.max_players`, show the room-full screen
 instead of emitting `join-room`.
 
-### UI
+### Behavior
 
-Reuse the existing overlay container (`#overlay`). Show:
+Auto-join as spectator and show a dismissible banner at the top of the screen:
 
 ```
-┌────────────────────────────────────┐
-│                                    │
-│      This game is full (4/4)       │
-│                                    │
-│    [ Join as Spectator ]           │
-│                                    │
-│    or go back to the lobby         │
-│                                    │
-└────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  Game is full — you've joined as a spectator  ✕  │
+└──────────────────────────────────────────────────┘
 ```
 
-- **"Join as Spectator"** button: sets `isSpectator = true` and proceeds with
-  the normal join flow (emits `join-room` with `spectate: true`)
-- **"back to the lobby"** link: navigates to `/`
-- Shows the current player count and max (e.g., "4/4")
+- Banner auto-dismisses after ~5s or on click of the ✕
+- Player lands directly into spectator mode — no blocking screen
+- If a slot opens up later, the existing "Claim Slot" flow lets them
+  become a player
 
 ### Race condition handling
 
 The REST check is best-effort — the room can fill between the REST call and
 the Socket.IO `join-room` emit. The server already returns `"Room is full"`
-from `join-room` when `next_slot()` returns `None`. If the `join-room`
-callback receives `err === "Room is full"`, show the same room-full UI
-(with spectator option) instead of the generic `showError`. This closes the
-race condition's UX gap.
+from `join-room` when `next_slot()` returns `None`. Both paths (REST check
+and `join-room` error) should trigger the same behavior: auto-join as
+spectator with the banner. For the `join-room` error case, re-emit
+`join-room` with `spectate: true` and show the banner.
 
 ### No server changes needed
 

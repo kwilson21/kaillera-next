@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from src.api.signaling import rooms
+from src.ratelimit import check_ip
 
 
 # ── Security headers middleware ───────────────────────────────────────────────
@@ -33,6 +34,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return response
@@ -40,13 +42,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 # ── App factory ───────────────────────────────────────────────────────────────
 
-def create_app() -> FastAPI:
+def create_app(lifespan=None) -> FastAPI:
     """Create and return the FastAPI app."""
     app = FastAPI(
         title="kaillera-next",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.add_middleware(SecurityHeadersMiddleware)
 
@@ -54,9 +57,19 @@ def create_app() -> FastAPI:
     def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/ice-servers")
+    def ice_servers() -> list:
+        import json, os
+        custom = os.environ.get("ICE_SERVERS")
+        if custom:
+            try:
+                return json.loads(custom)
+            except json.JSONDecodeError:
+                pass
+        return [{"urls": "stun:stun.cloudflare.com:3478"}]
+
     @app.get("/room/{room_id}")
     def get_room(room_id: str, request: Request) -> dict:
-        from src.ratelimit import check_ip
         client_ip = request.headers.get(
             "x-forwarded-for",
             request.client.host if request.client else "unknown",
@@ -76,7 +89,13 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/list")
-    def list_rooms(game_id: str | None = None) -> list:
+    def list_rooms(game_id: str | None = None, request: Request = None) -> list:
+        client_ip = request.headers.get(
+            "x-forwarded-for",
+            request.client.host if request.client else "unknown",
+        ).split(",")[0].strip()
+        if not check_ip(client_ip, "room-lookup"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         result = []
         for session_id, room in rooms.items():
             if game_id and room.game_id != game_id:

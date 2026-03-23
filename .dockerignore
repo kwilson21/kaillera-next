@@ -14,9 +14,6 @@ dist
 # Build artifacts (WASM core compilation — very large)
 build/
 
-# V2 code not needed for Docker
-netplay/
-
 # Documentation and tests
 docs/
 tests/

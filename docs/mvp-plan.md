@@ -7,25 +7,16 @@
 
 ## Current State Assessment
 
-The technical netplay layer is solid and Playwright-verified. What is missing is
-the *product layer* -- the UI, flows, and polish that turn a working prototype
-into something a non-technical friend can use from a link on their phone.
+P0 items have shipped. The product layer is in place: lobby page, invite links,
+host-controlled start flow, responsive layout, and gamepad support are all done.
 
-**What exists:**
-- Lockstep v4 (netplay-lockstep-v4.js, 1162 lines) -- 4-player mesh, spectators, drop handling
-- Streaming mode (netplay-streaming.js, 784 lines) -- zero-desync single-emu streaming
+**What shipped:**
+- Lockstep engine (netplay-lockstep.js) -- 4-player mesh, spectators, late join, desync detection
+- Streaming mode (netplay-streaming.js) -- zero-desync single-emu streaming
 - Python signaling server (FastAPI + Socket.IO) -- rooms, WebRTC relay, slot management
-- Dev UI: a fixed-position panel in top-right corner with name input, create/join/spectate buttons, room code display
-
-**What is missing:**
-- No dedicated lobby page (index.html just embeds the emulator immediately)
-- No invite link flow (no URL parameter for room code)
-- No controller setup UI
-- No mobile/touch support
-- No chat
-- No host-controlled start/end flow (game auto-starts on peer connection)
-- No mode selection UI (requires editing the URL query string)
-- No loading states, error handling, or connection status beyond a one-line status text
+- Lobby page (index.html) with create/join room flow and invite links
+- Play page (play.html) with overlay, emulator embed, toolbar, gamepad support
+- P2P ROM sharing, connection status, end game / restart flow
 
 ---
 
@@ -45,7 +36,7 @@ web/
     controller.js     -- Controller setup / mapping UI
     touch-controls.js -- Mobile touch overlay
     chat.js           -- Chat module (lobby + in-game)
-    netplay-lockstep-v4.js  -- (existing, refactored to export an init function)
+    netplay-lockstep.js  -- (existing, refactored to export an init function)
     netplay-streaming.js    -- (existing, refactored to export an init function)
 ```
 
@@ -71,7 +62,7 @@ Create `web/index.html` as a proper landing page and `web/play.html` as the game
 
 - Landing page: big "Create Room" button, "Join Room" input, brief explanation
 - Creating a room generates a short room code (already exists) and redirects to
-  `/play.html?room=ABC123&host=1&mode=lockstep-v4`
+  `/play.html?room=ABC123&host=1&mode=lockstep`
 - Invite URL: `https://yoursite.com/play.html?room=ABC123`
 - When a guest visits the invite URL, they land on the play page and auto-join
 - Also support manual code entry on the landing page
@@ -380,18 +371,12 @@ but ships faster.
 
 ## Server-Side Changes Needed
 
-The signaling server needs these additions for the MVP:
+The signaling server needed these additions for the MVP:
 
-1. **`start-game` event** -- Host emits, server broadcasts to room. Payload
-   includes the selected mode (lockstep/streaming).
+1. **`start-game` event** -- Done. Host emits, server broadcasts to room.
 
-2. **`chat-message` event** -- Client emits with `{room_id, message}`, server
-   broadcasts to room with sender info.
+2. **`chat-message` event** -- Cut from scope. Not needed for friend test.
 
-3. **`ready` event** -- Player signals they are ready (controller set up, etc.).
-   Server tracks ready state per player in the Room dataclass.
+3. **`ready` event** -- Replaced by `rom-ready` (player signals ROM loaded).
 
-4. **Room info endpoint** -- `GET /room/{room_id}` returns room state (players,
-   mode, status) so the play page can show lobby info before Socket.IO connects.
-
-These are all small additions to the existing `signaling.py` and `app.py`.
+4. **Room info endpoint** -- Done. `GET /room/{room_id}` returns room state.

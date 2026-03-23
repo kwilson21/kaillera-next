@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
-_counters: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+_counters: dict[str, dict[str, deque[float]]] = defaultdict(lambda: defaultdict(deque))
 _connections: dict[str, int] = defaultdict(int)
 _sid_ip: dict[str, str] = {}
 
@@ -15,6 +15,8 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "snapshot": (2, 1),
     "data-message": (60, 1),
     "room-lookup": (10, 60),
+    "webrtc-signal": (60, 1),
+    "input": (120, 1),
 }
 
 MAX_CONNECTIONS_PER_IP = 20
@@ -31,37 +33,30 @@ def unregister_sid(sid: str) -> None:
         _connections[ip] -= 1
 
 
-def check(sid: str, event: str) -> bool:
-    ip = _sid_ip.get(sid, "unknown")
+def _check_key(key: str, event: str) -> bool:
+    """Shared rate-limit check for a given key (IP address) and event."""
     limit = _LIMITS.get(event)
     if not limit:
         return True
     max_count, window = limit
     now = time.monotonic()
-    timestamps = _counters[ip][event]
+    timestamps = _counters[key][event]
     cutoff = now - window
     while timestamps and timestamps[0] < cutoff:
-        timestamps.pop(0)
+        timestamps.popleft()
     if len(timestamps) >= max_count:
         return False
     timestamps.append(now)
     return True
+
+
+def check(sid: str, event: str) -> bool:
+    ip = _sid_ip.get(sid, "unknown")
+    return _check_key(ip, event)
 
 
 def check_ip(ip: str, event: str) -> bool:
-    limit = _LIMITS.get(event)
-    if not limit:
-        return True
-    max_count, window = limit
-    now = time.monotonic()
-    timestamps = _counters[ip][event]
-    cutoff = now - window
-    while timestamps and timestamps[0] < cutoff:
-        timestamps.pop(0)
-    if len(timestamps) >= max_count:
-        return False
-    timestamps.append(now)
-    return True
+    return _check_key(ip, event)
 
 
 def connection_allowed(ip: str) -> bool:
@@ -73,8 +68,10 @@ def cleanup() -> None:
     stale_ips = []
     for ip, events in list(_counters.items()):
         for event, timestamps in list(events.items()):
-            events[event] = [t for t in timestamps if now - t < 120]
-            if not events[event]:
+            fresh = deque(t for t in timestamps if now - t < 120)
+            if fresh:
+                events[event] = fresh
+            else:
                 del events[event]
         if not events:
             stale_ips.append(ip)

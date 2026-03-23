@@ -11,6 +11,10 @@ build/output/
 
 # ROM files — copyrighted, not committed
 web/static/rom/
+web/static/roms/
+
+# pytest
+.pytest_cache/
 
 # Environment
 .env

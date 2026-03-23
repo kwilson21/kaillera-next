@@ -20,10 +20,11 @@ import asyncio
 import hmac
 import logging
 import re
-import sys
 from dataclasses import dataclass, field
 
 import socketio
+
+from src.ratelimit import check, check_ip, register_sid, connection_allowed, unregister_sid, cleanup
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _VALID_MODES = {"lockstep", "streaming"}
 _MAX_RELAY_SIZE = 2 * 1024 * 1024  # 2MB
+MAX_ROOMS = 100
+MAX_SPECTATORS = 20
 
 
 def _sanitize_str(value: str, max_len: int) -> str:
@@ -112,6 +115,18 @@ def _players_payload(room: Room) -> dict:
     }
 
 
+def _get_room(sid: str) -> tuple[str, Room] | None:
+    """Look up the room for a given sid. Returns (session_id, room) or None."""
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return None
+    session_id = entry[0]
+    room = rooms.get(session_id)
+    if room is None:
+        return None
+    return (session_id, room)
+
+
 async def _leave(sid: str) -> None:
     """Remove sid from its room; handle ownership transfer and cleanup."""
     entry = _sid_to_room.pop(sid, None)
@@ -135,6 +150,9 @@ async def _leave(sid: str) -> None:
                 break
         if rm_slot is not None:
             del room.slots[rm_slot]
+
+    room.rom_ready.discard(sid)
+    room.input_types.pop(sid, None)
 
     await sio.leave_room(sid, session_id)
     log.info("SIO %s left room %s (playerId=%s, spectator=%s)", sid, session_id, player_id, is_spectator)
@@ -188,7 +206,6 @@ async def _leave(sid: str) -> None:
 
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
-    from src.ratelimit import register_sid, connection_allowed, check_ip
     forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
     ip = forwarded.split(",")[0].strip() if forwarded else environ.get("REMOTE_ADDR", "unknown")
     if not connection_allowed(ip):
@@ -206,7 +223,6 @@ async def _cleanup_empty_rooms() -> None:
         for sid in empty:
             del rooms[sid]
             log.debug("Cleanup: deleted empty room %s", sid)
-        from src.ratelimit import cleanup
         cleanup()
 
 
@@ -214,13 +230,14 @@ async def _cleanup_empty_rooms() -> None:
 
 @sio.on("open-room")
 async def open_room(sid: str, data: dict) -> str | None:
-    from src.ratelimit import check
+    if not isinstance(data, dict):
+        return "Invalid data"
     if not check(sid, "open-room"):
         return "Rate limited"
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
-    player_id: str = extra.get("playerId", sid)
+    player_id = sid
     player_name: str = extra.get("player_name", "Player")
     room_name: str = extra.get("room_name", "Room")
     game_id: str = extra.get("game_id", "")
@@ -233,6 +250,8 @@ async def open_room(sid: str, data: dict) -> str | None:
         return "Invalid room code"
     if session_id in rooms:
         return "Room already exists"
+    if len(rooms) >= MAX_ROOMS:
+        return "Server is full"
 
     player_name = _sanitize_str(player_name, 32)
     room_name = _sanitize_str(room_name, 64)
@@ -260,18 +279,22 @@ async def open_room(sid: str, data: dict) -> str | None:
 
 @sio.on("join-room")
 async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
-    from src.ratelimit import check
+    if not isinstance(data, dict):
+        return ("Invalid data", None)
     if not check(sid, "join-room"):
         return ("Rate limited", None)
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
-    player_id: str = extra.get("userid", sid)
+    player_id = sid
     player_name: str = extra.get("player_name", "Player")
     password: str | None = data.get("password") or None
     spectate: bool = extra.get("spectate", False)
 
     player_name = _sanitize_str(player_name, 32)
+
+    if not session_id or not _ALNUM_RE.match(session_id) or not (3 <= len(session_id) <= 16):
+        return ("Invalid room code", None)
 
     room = rooms.get(session_id)
     if room is None:
@@ -280,6 +303,8 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
         return ("Wrong password", None)
 
     if spectate:
+        if len(room.spectators) >= MAX_SPECTATORS:
+            return ("Room spectator limit reached", None)
         room.spectators[player_id] = {"socketId": sid, "playerName": player_name}
         _sid_to_room[sid] = (session_id, player_id, True)
     else:
@@ -304,6 +329,8 @@ async def leave_room(sid: str, data: dict | None = None) -> None:
 @sio.on("claim-slot")
 async def claim_slot(sid: str, data: dict) -> str | None:
     """Spectator claims a vacated player slot."""
+    if not isinstance(data, dict):
+        return "Invalid data"
     entry = _sid_to_room.get(sid)
     if entry is None:
         return "Not in a room"
@@ -340,13 +367,12 @@ async def claim_slot(sid: str, data: dict) -> str | None:
 
 @sio.on("start-game")
 async def start_game(sid: str, data: dict) -> str | None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
         return "Not in a room"
-    session_id = entry[0]
-    room = rooms.get(session_id)
-    if room is None:
-        return "Room not found"
+    session_id, room = result
     if room.owner != sid:
         return "Only the host can start the game"
 
@@ -375,13 +401,12 @@ async def start_game(sid: str, data: dict) -> str | None:
 
 @sio.on("end-game")
 async def end_game(sid: str, data: dict) -> str | None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
         return "Not in a room"
-    session_id = entry[0]
-    room = rooms.get(session_id)
-    if room is None:
-        return "Room not found"
+    session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
 
@@ -394,13 +419,12 @@ async def end_game(sid: str, data: dict) -> str | None:
 
 @sio.on("rom-sharing-toggle")
 async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
         return "Not in a room"
-    session_id = entry[0]
-    room = rooms.get(session_id)
-    if room is None:
-        return "Room not found"
+    session_id, room = result
     if room.owner != sid:
         return "Only the host can toggle ROM sharing"
 
@@ -413,13 +437,12 @@ async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
 
 @sio.on("rom-ready")
 async def rom_ready(sid: str, data: dict) -> str | None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
         return "Not in a room"
-    session_id = entry[0]
-    room = rooms.get(session_id)
-    if room is None:
-        return "Room not found"
+    session_id, room = result
 
     ready = bool(data.get("ready", True))
     if ready:
@@ -432,13 +455,12 @@ async def rom_ready(sid: str, data: dict) -> str | None:
 
 @sio.on("input-type")
 async def input_type(sid: str, data: dict) -> str | None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
         return "Not in a room"
-    session_id = entry[0]
-    room = rooms.get(session_id)
-    if room is None:
-        return "Room not found"
+    session_id, room = result
 
     itype = data.get("type", "keyboard")
     if itype not in ("keyboard", "gamepad"):
@@ -450,6 +472,10 @@ async def input_type(sid: str, data: dict) -> str | None:
 
 @sio.on("webrtc-signal")
 async def webrtc_signal(sid: str, data: dict) -> None:
+    if not isinstance(data, dict):
+        return
+    if not check(sid, "webrtc-signal"):
+        return
     target: str | None = data.get("target")
     if not target:
         return
@@ -459,49 +485,64 @@ async def webrtc_signal(sid: str, data: dict) -> None:
         return
     if sender_entry[0] != target_entry[0]:
         return
-    await sio.emit("webrtc-signal", {"sender": sid, **data}, to=target)
+    payload = {
+        "sender": sid,
+        "target": target,
+    }
+    for key in ("offer", "answer", "candidate", "reconnect", "requestRenegotiate"):
+        value = data.get(key)
+        if value is not None:
+            payload[key] = value
+    await sio.emit("webrtc-signal", payload, to=target)
 
 
 @sio.on("data-message")
 async def data_message(sid: str, data: dict) -> None:
-    from src.ratelimit import check
+    if not isinstance(data, dict):
+        return
     if not check(sid, "data-message"):
         return
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    result = _get_room(sid)
+    if result is None:
         return
-    if sys.getsizeof(str(data)) > _MAX_RELAY_SIZE:
+    if len(str(data)) > _MAX_RELAY_SIZE:
         return
-    session_id = entry[0]
+    session_id, room = result
     await sio.emit("data-message", data, room=session_id, skip_sid=sid)
 
 
 @sio.on("snapshot")
 async def snapshot(sid: str, data: dict) -> None:
-    from src.ratelimit import check
+    if not isinstance(data, dict):
+        return
     if not check(sid, "snapshot"):
         return
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    result = _get_room(sid)
+    if result is None:
         return
-    if sys.getsizeof(str(data)) > _MAX_RELAY_SIZE:
+    if len(str(data)) > _MAX_RELAY_SIZE:
         return
-    session_id = entry[0]
+    session_id, room = result
     await sio.emit("snapshot", data, room=session_id, skip_sid=sid)
 
 
 @sio.on("input")
 async def game_input(sid: str, data: dict) -> None:
-    entry = _sid_to_room.get(sid)
-    if entry is None:
+    if not isinstance(data, dict):
         return
-    session_id = entry[0]
+    if not check(sid, "input"):
+        return
+    if len(str(data)) > _MAX_RELAY_SIZE:
+        return
+    result = _get_room(sid)
+    if result is None:
+        return
+    session_id, room = result
     await sio.emit("input", data, room=session_id, skip_sid=sid)
 
 
 @sio.event
 async def disconnect(sid: str) -> None:
-    from src.ratelimit import unregister_sid
     log.info("SIO disconnect %s", sid)
     unregister_sid(sid)
     await _leave(sid)

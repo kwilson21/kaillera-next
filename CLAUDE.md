@@ -107,6 +107,9 @@ All events go through the default Socket.IO namespace (`/`).
 | `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode) |
+| `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
+| `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
+| `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `users-updated` | server→room | `{players, spectators, owner}` | Room state broadcast |
 | `game-started` | server→room | `{mode, rollbackEnabled}` | Game started |
 | `game-ended` | server→room | `{}` | Back to lobby |

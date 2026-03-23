@@ -20,7 +20,7 @@ RUN groupadd -r appuser && useradd -r -g appuser -s /usr/sbin/nologin appuser \
 USER appuser
 
 # Default env — override ALLOWED_ORIGIN in production (e.g. "https://yourdomain.com")
-ENV ALLOWED_ORIGIN="*"
+ENV ALLOWED_ORIGIN=""
 
 EXPOSE 8000
 

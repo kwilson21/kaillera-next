@@ -8,7 +8,7 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     // Ring buffer: ~50ms at the given sample rate (3 frames at 60fps)
-    var rate = options.processorOptions && options.processorOptions.sampleRate || 33600;
+    const rate = options.processorOptions?.sampleRate ?? 33600;
     this._bufSize = Math.ceil(rate * 0.05) * 2; // stereo samples
     this._buf = new Float32Array(this._bufSize);
     this._readPos = 0;
@@ -19,9 +19,9 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
   }
 
   _onMessage(e) {
-    var int16 = e.data; // Int16Array, stereo interleaved
-    var len = int16.length;
-    for (var i = 0; i < len; i++) {
+    const int16 = e.data; // Int16Array, stereo interleaved
+    const len = int16.length;
+    for (let i = 0; i < len; i++) {
       this._buf[this._writePos] = int16[i] / 32768.0;
       this._writePos = (this._writePos + 1) % this._bufSize;
     }
@@ -30,12 +30,12 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs, outputs) {
-    var outL = outputs[0][0];
-    var outR = outputs[0][1];
+    const outL = outputs[0][0];
+    const outR = outputs[0][1];
     if (!outL) return true;
 
-    var frames = outL.length; // typically 128
-    for (var i = 0; i < frames; i++) {
+    const frames = outL.length; // typically 128
+    for (let i = 0; i < frames; i++) {
       if (this._count >= 2) {
         outL[i] = this._buf[this._readPos];
         outR[i] = this._buf[this._readPos + 1];

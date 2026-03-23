@@ -71,40 +71,7 @@
 (function () {
   'use strict';
 
-  const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-
-  // Standard online cheats — applied on host only
-  const SSB64_ONLINE_CHEATS = [
-    { desc: 'Have All Characters',   code: '810A4938 0FF0' },
-    { desc: 'Have Mushroom Kingdom', code: '800A4937 00FF' },
-    { desc: 'Stock Mode',            code: '800A4D0B 0002' },
-    { desc: '5 Stocks',              code: '800A4D0F 0004' },
-    { desc: 'Timer On',              code: '800A4D11 0001' },
-    { desc: 'Items Off',             code: '800A4D24 0000' },
-    { desc: 'No Wind',               code: '810BA9F1 0000+800BA9F3 0000' },
-  ];
-
-  // Default N64 keymap (EJS defaults) — fallback when EJS controls unavailable
-  const DEFAULT_N64_KEYMAP = {
-    67: 0,    // C → A (JOYPAD_B)
-    88: 1,    // X → B (JOYPAD_Y)
-    86: 3,    // V → Start
-    38: 4,    // Up → D-Up
-    40: 5,    // Down → D-Down
-    37: 6,    // Left → D-Left
-    39: 7,    // Right → D-Right
-    84: 10,   // T → L (JOYPAD_L)
-    89: 11,   // Y → R (JOYPAD_R)
-    90: 12,   // Z → Z trigger (JOYPAD_L2)
-    68: 16,   // D → Analog Right (L STICK RIGHT)
-    65: 17,   // A → Analog Left (L STICK LEFT)
-    83: 18,   // S → Analog Down (L STICK DOWN)
-    87: 19,   // W → Analog Up (L STICK UP)
-    74: 20,   // J → C-Left (R STICK RIGHT → CSTICK_LEFT)
-    76: 21,   // L → C-Right (R STICK LEFT → CSTICK_RIGHT)
-    75: 22,   // K → C-Down (R STICK DOWN → CSTICK_DOWN)
-    73: 23,   // I → C-Up (R STICK UP → CSTICK_UP)
-  };
+  const ICE_SERVERS = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -402,8 +369,8 @@
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
-    triggerEmulatorStart();
-    applyStandardCheats();
+    KNShared.triggerEmulatorStart();
+    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
     setupKeyTracking();
     disableEJSKeyboard();
 
@@ -546,7 +513,7 @@
         // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
         sender.setParameters(params).then(() => {
-          console.log('[netplay] video encoding optimized: 60fps, 10Mbps max, 2x downscale');
+          console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
         }).catch(err => {
           console.log('[netplay] setParameters failed:', err);
         });
@@ -629,7 +596,7 @@
       let bitrate = null;
       let encodeTime = null, qualLimit = null;
 
-      stats.forEach(function (s) {
+      stats.forEach((s) => {
         if (s.type === 'outbound-rtp' && s.kind === 'video') {
           fps = s.framesPerSecond || 0;
           res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
@@ -737,61 +704,10 @@
     dbg.style.whiteSpace = 'pre';
   }
 
-  // ── Cheats ─────────────────────────────────────────────────────────────
-
-  function applyStandardCheats() {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(attempt, 500); return; }
-      try {
-        SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code));
-        console.log('[netplay] applied', SSB64_ONLINE_CHEATS.length, 'standard cheats');
-      } catch (_) { setTimeout(attempt, 500); return; }
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 2000);
-      setTimeout(() => { try { SSB64_ONLINE_CHEATS.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 5000);
-    };
-    attempt();
-  }
-
   // ── Keyboard / input ───────────────────────────────────────────────────
 
   function setupKeyTracking() {
-    if (_p1KeyMap) return;
-
-    // Check localStorage for custom keyboard mapping first
-    try {
-      const saved = localStorage.getItem('keyboard-mapping');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && Object.keys(parsed).length > 0) {
-          _p1KeyMap = {};
-          for (const k in parsed) _p1KeyMap[parseInt(k, 10)] = parsed[k];
-        }
-      }
-    } catch (_) {}
-
-    // Try EJS controls if no custom mapping
-    if (!_p1KeyMap) {
-      const ejs = window.EJS_emulator;
-      if (ejs && ejs.controls && ejs.controls[0]) {
-        _p1KeyMap = {};
-        Object.entries(ejs.controls[0]).forEach(([btnIdx, binding]) => {
-          const kc = binding && binding.value;
-          if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
-        });
-      }
-    }
-
-    if (!_p1KeyMap || Object.keys(_p1KeyMap).length === 0) {
-      _p1KeyMap = Object.assign({}, DEFAULT_N64_KEYMAP);
-    }
-
-    // Only need to add listeners once
-    if (!setupKeyTracking._listenersAdded) {
-      document.addEventListener('keydown', (e) => { _heldKeys.add(e['keyCode']); }, true);
-      document.addEventListener('keyup',   (e) => { _heldKeys.delete(e['keyCode']); }, true);
-      setupKeyTracking._listenersAdded = true;
-    }
+    _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   }
 
   function disableEJSKeyboard() {
@@ -846,37 +762,6 @@
     _prevSlotMasks[slot] = inputMask;
   }
 
-  // ── Emulator start ─────────────────────────────────────────────────────
-
-  function triggerEmulatorStart() {
-    let attempts = 0;
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (gm && gm.Module) {
-        console.log('[netplay] emulator already running (auto-start)');
-        enableMobileTouch();
-        return;
-      }
-      const btn = document.querySelector('.ejs_start_button');
-      if (btn) {
-        if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
-        btn.click();
-        return;
-      }
-      if (++attempts < 150) setTimeout(attempt, 200);
-    };
-    attempt();
-  }
-
-  function enableMobileTouch() {
-    if (!('ontouchstart' in window)) return;
-    const ejs = window.EJS_emulator;
-    if (!ejs || ejs.touch) return;
-    ejs.touch = true;
-    if (ejs.virtualGamepad) ejs.virtualGamepad.style.display = '';
-    console.log('[netplay] enabled mobile touch controls');
-  }
-
   // -- Init / Stop API -------------------------------------------------------
 
   let _config = null;
@@ -912,7 +797,7 @@
     _cachedInfo = null;
 
     // Close all peer connections
-    Object.keys(_peers).forEach(function (sid) {
+    Object.keys(_peers).forEach((sid) => {
       const p = _peers[sid];
       if (p.dc) try { p.dc.close(); } catch (_) {}
       if (p.pc) try { p.pc.close(); } catch (_) {}
@@ -922,7 +807,7 @@
 
     // Clean up streams
     if (_hostStream) {
-      _hostStream.getTracks().forEach(function (t) { t.stop(); });
+      _hostStream.getTracks().forEach((t) => { t.stop(); });
       _hostStream = null;
     }
     if (_guestVideo) {
@@ -943,6 +828,6 @@
     _config = null;
   }
 
-  window.NetplayStreaming = { init: init, stop: stop, getInfo: function () { return _cachedInfo; } };
+  window.NetplayStreaming = { init: init, stop: stop, getInfo: () => _cachedInfo };
 
 })();

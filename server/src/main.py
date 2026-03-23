@@ -4,7 +4,7 @@ kaillera-next server entry point — V1 (browser-based EmulatorJS netplay).
 Starts a single HTTP server on :8000 that handles:
   - Socket.IO signaling  (/socket.io/)
   - REST API             (/health, /list, /room)
-  - Static web frontend  (/ → web/index.html, /static/rom/ssb64.z64)
+  - Static web frontend  (/ → web/index.html, /static/roms/)
 
 V2 will re-add TCP :45000 + UDP :45000 for Mupen64Plus native netplay.
 
@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 
 import socketio
 import uvicorn
@@ -30,6 +31,13 @@ log = logging.getLogger(__name__)
 _WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web")
 
 
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(_cleanup_empty_rooms())
+    yield
+    task.cancel()
+
+
 def run() -> None:
     """Entry point called by `kaillera-server` CLI command."""
     logging.basicConfig(
@@ -38,16 +46,15 @@ def run() -> None:
     )
 
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
+    if not allowed_origin:
+        log.error("ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development.")
+        sys.exit(1)
     if allowed_origin == "*":
         log.warning("CORS allowed origin is '*' — set ALLOWED_ORIGIN for production")
     log.info("CORS allowed origin: %s", allowed_origin)
     configure_cors(allowed_origin)
 
-    app = create_app()
-
-    @app.on_event("startup")
-    async def startup() -> None:
-        asyncio.create_task(_cleanup_empty_rooms())
+    app = create_app(lifespan=lifespan)
 
     # Serve web/ as static files — must be mounted BEFORE Socket.IO wraps the app
     from fastapi.staticfiles import StaticFiles

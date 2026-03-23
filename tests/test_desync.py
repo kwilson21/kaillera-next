@@ -12,7 +12,7 @@ def test_lockstep_no_desync(browser, server_url):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=DSYNC1&host=1&name=Host&mode=lockstep-v4")
+        host.goto(f"{server_url}/play.html?room=DSYNC1&host=1&name=Host&mode=lockstep")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=DSYNC1&name=Guest")
@@ -90,7 +90,7 @@ def test_lockstep_frame_pacing(browser, server_url):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=PACE1&host=1&name=Host&mode=lockstep-v4")
+        host.goto(f"{server_url}/play.html?room=PACE1&host=1&name=Host&mode=lockstep")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=PACE1&name=Guest")
@@ -153,7 +153,7 @@ def test_resync_after_forced_desync(browser, server_url):
 
     try:
         # Host creates room with rollback enabled
-        host.goto(f"{server_url}/play.html?room=RESYNC1&host=1&name=Host&mode=lockstep-v4")
+        host.goto(f"{server_url}/play.html?room=RESYNC1&host=1&name=Host&mode=lockstep")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=RESYNC1&name=Guest")
@@ -244,7 +244,7 @@ def test_resync_sustains_over_time(browser, server_url):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=SUST01&host=1&name=Host&mode=lockstep-v4")
+        host.goto(f"{server_url}/play.html?room=SUST01&host=1&name=Host&mode=lockstep")
         host.wait_for_selector("#overlay", timeout=10000)
         guest.goto(f"{server_url}/play.html?room=SUST01&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
@@ -300,7 +300,7 @@ def test_end_game_with_rollback(browser, server_url):
     guest.on("pageerror", lambda err: guest_errors.append(str(err)))
 
     try:
-        host.goto(f"{server_url}/play.html?room=END01&host=1&name=Host&mode=lockstep-v4")
+        host.goto(f"{server_url}/play.html?room=END01&host=1&name=Host&mode=lockstep")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=END01&name=Guest")
