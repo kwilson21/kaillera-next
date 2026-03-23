@@ -2389,21 +2389,50 @@
       } catch (_) {}
     }
 
-    // Read RDRAM via wasmMemory.buffer (always current, unlike HEAPU8 which
-    // can be a stale TypedArray after WASM memory growth).
+    // SSB64 game-specific sync: read targeted RDRAM regions containing
+    // match state and player data. Uses wasmMemory.buffer for live access.
+    // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
     if (_hashRegion && _hashRegion.ptr && mod.wasmMemory) {
       try {
         var live = new Uint8Array(mod.wasmMemory.buffer);
-        // Hash RDRAM from 0x80000 to 0x200000 (game heap area, ~1.5MB).
-        // Avoids bottom of RDRAM (N64 OS/boot data, volatile counters) and
-        // top (framebuffer/texture data that differs from rendering timing).
-        // Game state (player positions, damage, stocks, timer) lives in
-        // the heap area for SSB64 and most N64 games.
-        var GAME_START = 0x80000;   // 512KB into RDRAM
-        var GAME_END = 0x200000;    // 2MB into RDRAM
-        var start = _hashRegion.ptr + GAME_START;
-        var end = _hashRegion.ptr + Math.min(GAME_END, _hashRegion.size);
-        return live.slice(start, end);
+        var base = _hashRegion.ptr;
+
+        // Diagnostic: sample specific SSB64 addresses to verify live reads.
+        // Known working GameShark addresses (RDRAM offsets):
+        //   0x0A4D0B = stock mode (should be 0x02)
+        //   0x0A4D0F = stock count (should be 0x04 = 5 stocks)
+        //   0x0A4D11 = timer (should be 0x01)
+        var stockMode = live[base + 0x0A4D0B];
+        var stockCount = live[base + 0x0A4D0F];
+        var timerOn = live[base + 0x0A4D11];
+
+        // Sample 32 bytes at 16 different offsets across the game data region
+        // to find which areas change during gameplay
+        var sampleOffsets = [
+          0x0A4D00, 0x0A4D40, 0x0A4D80, 0x0A4DC0,
+          0x0A4E00, 0x0A4F00, 0x0A5000, 0x0A6000,
+          0x0A8000, 0x0AA000, 0x0AC000, 0x0AE000,
+          0x0B0000, 0x0B2000, 0x0B4000, 0x0B8000,
+        ];
+        var samples = [];
+        for (var si = 0; si < sampleOffsets.length; si++) {
+          var sOff = sampleOffsets[si];
+          // Read 4 bytes, format as hex
+          var b0 = live[base + sOff], b1 = live[base + sOff + 1];
+          var b2 = live[base + sOff + 2], b3 = live[base + sOff + 3];
+          samples.push(sOff.toString(16) + ':' +
+            ((b0 << 24 | b1 << 16 | b2 << 8 | b3) >>> 0).toString(16));
+        }
+
+        // Log diagnostic every 10th sync check
+        if (_frameNum % (_syncCheckInterval * 10) === 0 || _frameNum <= _syncCheckInterval * 2) {
+          console.log('[lockstep] RDRAM diag: stockMode=' + stockMode +
+            ' stocks=' + stockCount + ' timer=' + timerOn +
+            ' samples=[' + samples.join(',') + ']');
+        }
+
+        // Hash the match/player data region (0x0A4D00 - 0x0B0000, ~44KB)
+        return live.slice(base + 0x0A4D00, base + 0x0B0000);
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
       }
