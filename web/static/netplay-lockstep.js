@@ -2135,9 +2135,8 @@
   function getSyncWorker() {
     if (_syncWorker) return _syncWorker;
     var code = [
-      'var hashBytes = 65536;',
       'function fnv1a(bytes) {',
-      '  var h = 0x811c9dc5, len = Math.min(bytes.length, hashBytes);',
+      '  var h = 0x811c9dc5, len = bytes.length;',
       '  for (var i = 0; i < len; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }',
       '  return h | 0;',
       '}',
