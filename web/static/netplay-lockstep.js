@@ -830,8 +830,11 @@
               workerPost({ type: 'hash', data: guestBytes }).then(function (res) {
                 if (res.hash !== hostHash) {
                   console.log('[lockstep] DESYNC at frame ' + syncFrame +
-                    ' local=' + res.hash + ' host=' + hostHash + ' -- requesting state');
-                  try { peerRef.dc.send('sync-request'); } catch (_) {}
+                    ' local=' + res.hash + ' host=' + hostHash);
+                  // Only request state if no resync is already pending
+                  if (!_pendingResyncState) {
+                    try { peerRef.dc.send('sync-request'); } catch (_) {}
+                  }
                 } else {
                   console.log('[lockstep] sync OK at frame ' + syncFrame +
                     ' hash=' + res.hash);
@@ -1963,8 +1966,10 @@
             workerPost({ type: 'hash', data: deferBytes }).then(function (res) {
               if (res.hash !== deferCheck.hash) {
                 console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
-                var sp = _peers[deferCheck.peerSid];
-                if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+                if (!_pendingResyncState) {
+                  var sp = _peers[deferCheck.peerSid];
+                  if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+                }
               } else {
                 _consecutiveResyncs = 0;
                 _syncCheckInterval = _syncBaseInterval;
@@ -2498,15 +2503,22 @@
     _resyncCount++;
     _consecutiveResyncs++;
 
-    // Adaptive backoff: if resyncing every check (cores differ fundamentally),
-    // widen the interval to reduce the cost of getState()+loadState() churn.
-    // Each consecutive resync doubles the interval up to ~30s. A clean check
-    // resets back to base.
+    // Adaptive backoff: if resyncing every check, the core isn't deterministic
+    // enough to stay in sync. Widen interval aggressively to avoid resync storm.
     if (_consecutiveResyncs >= 3) {
       _syncCheckInterval = Math.min(
         _syncBaseInterval * Math.pow(2, _consecutiveResyncs - 2),
-        360   // cap at ~6s
+        1800   // cap at ~30s
       );
+    }
+    // Give up after too many consecutive resyncs — core can't maintain sync
+    if (_consecutiveResyncs >= 10) {
+      _syncEnabled = false;
+      console.log('[lockstep] sync disabled — too many consecutive resyncs (' +
+        _consecutiveResyncs + ')');
+      if (_config && _config.onToast) {
+        _config.onToast('Resync disabled — cores cannot maintain sync');
+      }
     }
 
     // Purge stale remote inputs above the new frame
