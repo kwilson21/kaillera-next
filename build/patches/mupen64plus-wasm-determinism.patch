@@ -31,19 +31,28 @@ index b661ea9..f6e6c0a 100644
  	gSPSetupFunctions();
  	// Set GeometryMode flags
 diff --git a/Makefile b/Makefile
-index 2c28955..80c78e3 100644
+index 2c28955..a5c2110 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -627,8 +627,19 @@ COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE
+@@ -563,7 +563,10 @@ else ifeq ($(platform), emscripten)
+       PLATCFLAGS += -pthread
+    endif
+ 
+-   CPUFLAGS += -msimd128 -ftree-vectorize
++   # kaillera-next: disable auto-vectorization for cross-engine WASM determinism.
++   # WASM SIMD FP operations share NaN non-determinism with scalar ops.
++   # Auto-vectorized loops bypass the FPU NaN canonicalization in fpu.h.
++   CPUFLAGS += -msimd128 -fno-tree-vectorize
+    #CPUFLAGS += -msimd128 -mfloat-abi=hard -mfpu=neon
+    HAVE_NEON = 0
+ 
+@@ -627,8 +630,16 @@ COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE
  ifeq ($(DEBUG), 1)
     CPUOPTS += -O0 -g
     CPUOPTS += -DOPENGL_DEBUG
 +else
 +ifeq ($(platform), emscripten)
 +   # kaillera-next: strict IEEE 754 for cross-engine WASM determinism.
-+   # Removes -ffast-math to ensure Clang emits spec-compliant WASM FP opcodes.
-+   # -ffp-contract=off prevents FMA fusion (different rounding than separate mul+add).
-+   # -ftrivial-auto-var-init=zero eliminates UB from uninitialized stack variables.
 +   CPUOPTS += -DNDEBUG -fsigned-char -fno-fast-math -ffp-contract=off \
 +              -fno-associative-math -fno-reciprocal-math \
 +              -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden \
@@ -54,8 +63,27 @@ index 2c28955..80c78e3 100644
  ifneq ($(platform), libnx)
     CPUOPTS := -O3 $(CPUOPTS)
  endif
+diff --git a/mupen64plus-core/src/backends/clock_ctime_plus_delta.c b/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
+index f4b1492..6579c51 100644
+--- a/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
++++ b/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
+@@ -30,7 +30,14 @@ time_t ctime_plus_delta_get_time(void* clock)
+         ? 0
+         : *(time_t*)clock;
+ 
++#ifdef __EMSCRIPTEN__
++    /* kaillera-next: deterministic RTC for cross-instance sync.
++     * Return fixed epoch so all instances see the same N64 clock. */
++    (void)user_delta;
++    return (time_t)0;
++#else
+     return user_delta + time(NULL);
++#endif
+ }
+ 
+ const struct clock_backend_interface g_iclock_ctime_plus_delta =
 diff --git a/mupen64plus-core/src/device/r4300/fpu.h b/mupen64plus-core/src/device/r4300/fpu.h
-index 6d17553..8727a44 100644
+index 6d17553..da3ee5b 100644
 --- a/mupen64plus-core/src/device/r4300/fpu.h
 +++ b/mupen64plus-core/src/device/r4300/fpu.h
 @@ -24,6 +24,7 @@
@@ -66,14 +94,11 @@ index 6d17553..8727a44 100644
  
  #ifdef _MSC_VER
  #define M64P_FPU_INLINE static __inline
-@@ -224,10 +225,27 @@ M64P_FPU_INLINE void fpu_check_input_double(uint32_t* fcr31, const double* value
+@@ -224,10 +225,24 @@ M64P_FPU_INLINE void fpu_check_input_double(uint32_t* fcr31, const double* value
  
  M64P_FPU_INLINE void fpu_check_output_float(uint32_t* fcr31, const float* value)
  {
 +#ifdef __EMSCRIPTEN__
-+    /* kaillera-next: canonicalize NaN for cross-engine WASM determinism.
-+     * The WASM spec allows non-deterministic NaN payloads. Force all NaN
-+     * values to the MIPS R4300i canonical quiet NaN (0x7FC00000). */
 +    if (isnan(*value))
 +    {
 +        static const uint32_t canon_nan_f = 0x7FC00000;
@@ -95,7 +120,7 @@ index 6d17553..8727a44 100644
  #endif /* ACCURATE_FPU_BEHAVIOR */
  
 diff --git a/mupen64plus-core/src/device/r4300/r4300_core.c b/mupen64plus-core/src/device/r4300/r4300_core.c
-index 76e9f50..e78d4b0 100644
+index 76e9f50..e8bc2f9 100644
 --- a/mupen64plus-core/src/device/r4300/r4300_core.c
 +++ b/mupen64plus-core/src/device/r4300/r4300_core.c
 @@ -64,7 +64,11 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
@@ -103,7 +128,7 @@ index 76e9f50..e78d4b0 100644
      r4300->randomize_interrupt = randomize_interrupt;
      r4300->start_address = start_address;
 +#ifdef __EMSCRIPTEN__
-+    srand(0); /* kaillera-next: deterministic seed for cross-instance sync */
++    srand(0);
 +#else
      srand((unsigned int) time(NULL));
 +#endif
