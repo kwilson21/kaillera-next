@@ -149,18 +149,18 @@
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
-  var DELAY_FRAMES = 2;
+  let DELAY_FRAMES = 2;
 
-  var _onExtraDataChannel = null;
-  var _onUnhandledMessage = null;
+  let _onExtraDataChannel = null;
+  let _onUnhandledMessage = null;
 
-  var _paused = false;
-  var _pausedAtFrame = 0;
+  let _paused = false;
+  let _pausedAtFrame = 0;
 
-  var _rttSamples = [];
-  var _rttComplete = false;
-  var _rttPeersComplete = 0;
-  var _rttPeersTotal = 0;
+  let _rttSamples = [];
+  let _rttComplete = false;
+  let _rttPeersComplete = 0;
+  let _rttPeersTotal = 0;
 
   function startRttMeasurement(peer) {
     peer._rttSamples = [];
@@ -174,13 +174,13 @@
     if (peer._rttPingCount >= 3) {
       peer._rttComplete = true;
       // Copy per-peer samples into peer.rttSamples for getInfo()
-      peer.rttSamples = peer._rttSamples.slice().sort(function (a, b) { return a - b; });
+      peer.rttSamples = peer._rttSamples.slice().sort((a, b) => a - b);
       // Accumulate into global _rttSamples
-      peer._rttSamples.forEach(function (s) { _rttSamples.push(s); });
+      peer._rttSamples.forEach((s) => { _rttSamples.push(s); });
       _rttPeersComplete++;
       // When all peers are done, compute auto delay from max median across peers
       if (_rttPeersComplete >= _rttPeersTotal) {
-        _rttSamples.sort(function (a, b) { return a - b; });
+        _rttSamples.sort((a, b) => a - b);
         var median = _rttSamples[Math.floor(_rttSamples.length / 2)];
         var delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
         _rttComplete = true;
@@ -210,7 +210,7 @@
 
   function broadcastLockstepReady() {
     var dl = window.getDelayPreference ? window.getDelayPreference() : 2;
-    Object.values(_peers).forEach(function (p) {
+    Object.values(_peers).forEach((p) => {
       if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
         try {
           p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl }));
@@ -223,39 +223,6 @@
   // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
   const MAX_STALL_MS = 30000;
 
-  // Standard online cheats
-  const SSB64_ONLINE_CHEATS = [
-    { desc: 'Have All Characters',   code: '810A4938 0FF0' },
-    { desc: 'Have Mushroom Kingdom', code: '800A4937 00FF' },
-    { desc: 'Stock Mode',            code: '800A4D0B 0002' },
-    { desc: '5 Stocks',              code: '800A4D0F 0004' },
-    { desc: 'Timer On',              code: '800A4D11 0001' },
-    { desc: 'Items Off',             code: '800A4D24 0000' },
-    { desc: 'No Wind',               code: '810BA9F1 0000+800BA9F3 0000' },
-  ];
-
-  // Default N64 keymap (EJS defaults) -- fallback when EJS controls unavailable
-  const DEFAULT_N64_KEYMAP = {
-    67: 0,    // C -> A (JOYPAD_B)
-    88: 1,    // X -> B (JOYPAD_Y)
-    86: 3,    // V -> Start
-    38: 4,    // Up -> D-Up
-    40: 5,    // Down -> D-Down
-    37: 6,    // Left -> D-Left
-    39: 7,    // Right -> D-Right
-    84: 10,   // T -> L (JOYPAD_L)
-    89: 11,   // Y -> R (JOYPAD_R)
-    90: 12,   // Z -> Z trigger (JOYPAD_L2)
-    68: 16,   // D -> Analog Right (L STICK RIGHT)
-    65: 17,   // A -> Analog Left (L STICK LEFT)
-    83: 18,   // S -> Analog Down (L STICK DOWN)
-    87: 19,   // W -> Analog Up (L STICK UP)
-    74: 20,   // J -> C-Left (R STICK RIGHT -> CSTICK_LEFT)
-    76: 21,   // L -> C-Right (R STICK LEFT -> CSTICK_RIGHT)
-    75: 22,   // K -> C-Down (R STICK DOWN -> CSTICK_DOWN)
-    73: 23,   // I -> C-Up (R STICK UP -> CSTICK_UP)
-  };
-
   // -- Direct memory input layout -----------------------------------------------
   //
   // Layout: int32[20][4] -- 20 buttons x 4 players
@@ -266,7 +233,7 @@
   // at startup by calling _simulate_input and detecting which byte changed.
   // Fallback: 715364 (CDN core address).
 
-  var INPUT_BASE       = 715364;  // auto-discovered at startup
+  let INPUT_BASE       = 715364;  // auto-discovered at startup
 
   // -- State -----------------------------------------------------------------
 
@@ -274,12 +241,12 @@
   let _playerSlot        = -1;      // 0-3 for players, null for spectators
   let _isSpectator       = false;
   // -- Audio bypass state --
-  var _audioCtx = null;
-  var _audioWorklet = null;
-  var _audioDestNode = null;
-  var _audioPtr = 0;
-  var _audioRate = 0;
-  var _audioReady = false;
+  let _audioCtx = null;
+  let _audioWorklet = null;
+  let _audioDestNode = null;
+  let _audioPtr = 0;
+  let _audioRate = 0;
+  let _audioReady = false;
   let _peers             = {};      // remoteSid -> PeerState
   let _knownPlayers      = {};      // socketId -> {slot, playerName}
   let _gameStarted       = false;
@@ -505,14 +472,12 @@
 
     // Rebuild known players map
     _knownPlayers = {};
-    Object.values(players).forEach(function (p) {
+    Object.values(players).forEach((p) => {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     });
 
     // Update my slot from server (handles spectator -> player transition)
-    var myPlayerEntry = Object.values(players).find(function (p) {
-      return p.socketId === socket.id;
-    });
+    var myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
     if (myPlayerEntry) {
       if (_isSpectator) {
         console.log('[lockstep] transitioned from spectator to player, slot:', myPlayerEntry.slot);
@@ -523,9 +488,7 @@
       window._playerSlot = _playerSlot;
     }
 
-    var otherPlayers = Object.values(players).filter(function (p) {
-      return p.socketId !== socket.id;
-    });
+    var otherPlayers = Object.values(players).filter((p) => p.socketId !== socket.id);
 
     // Establish mesh connections to other players
     // Normal: lower slot initiates (creates data channel + sends offer)
@@ -862,7 +825,7 @@
         // State sync: hash check from host
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
-        if (e.data.substring(0, 10) === 'sync-hash:') {
+        if (e.data.startsWith('sync-hash:')) {
           // Star topology: only accept sync-hash from host (slot 0)
           if (peer.slot !== 0) return;
           // Don't compare while a resync is already pending (prevents delta base drift)
@@ -897,7 +860,7 @@
         if (e.data === 'sync-request' && _playerSlot === 0) {
           pushSyncState(remoteSid);
         }
-        if (e.data.substring(0, 11) === 'sync-start:') {
+        if (e.data.startsWith('sync-start:')) {
           var parts = e.data.split(':');
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
@@ -1093,10 +1056,10 @@
 
   // All connected player peers (for sending input to)
   function getActivePeers() {
-    return Object.values(_peers).filter(function (p) {
-      return p.slot !== null && p.slot !== undefined
-        && p.dc && p.dc.readyState === 'open';
-    });
+    return Object.values(_peers).filter((p) =>
+      p.slot !== null && p.slot !== undefined
+        && p.dc && p.dc.readyState === 'open'
+    );
   }
 
   // Wait for all active peers that have started sending input.
@@ -1108,15 +1071,15 @@
   // length — prevents peers from dropping out when their buffer is
   // momentarily empty between frames (causes 3+ player desync).
   function getInputPeers() {
-    return getActivePeers().filter(function (p) {
-      return _peerInputStarted[p.slot] && !p.paused && !p.reconnecting;
-    });
+    return getActivePeers().filter((p) =>
+      _peerInputStarted[p.slot] && !p.paused && !p.reconnecting
+    );
   }
 
   // -- Game start sequence ---------------------------------------------------
 
   // Minimum frames the emulator must run before we consider it ready.
-  var MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
+  const MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
 
   function startGameSequence() {
     if (_gameStarted) return;
@@ -1129,8 +1092,8 @@
     }
 
     setStatus('Starting emulator...');
-    triggerEmulatorStart();
-    applyStandardCheats();
+    KNShared.triggerEmulatorStart();
+    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
     disableEJSInput();
 
     // Wait for gameManager AND for the emulator to be ready.
@@ -1229,7 +1192,7 @@
       }
 
       // Notify all connected peers
-      Object.values(_peers).forEach(function (p) {
+      Object.values(_peers).forEach((p) => {
         if (p.dc && p.dc.readyState === 'open') {
           try { p.dc.send('emu-ready'); } catch (_) {}
         }
@@ -1246,20 +1209,18 @@
     if (_running) return;
 
     // Wait for ALL player peers to be emu-ready (not just 1)
-    var playerPeers = Object.values(_peers).filter(function (p) {
-      return p.slot !== null && p.slot !== undefined;
-    });
+    var playerPeers = Object.values(_peers).filter((p) =>
+      p.slot !== null && p.slot !== undefined
+    );
     if (playerPeers.length === 0) return;
 
-    var readyPeers = playerPeers.filter(function (p) { return p.emuReady; });
-    var notReady = playerPeers.filter(function (p) { return !p.emuReady; });
+    var readyPeers = playerPeers.filter((p) => p.emuReady);
+    var notReady = playerPeers.filter((p) => !p.emuReady);
 
     if (notReady.length > 0) {
       // Show who we're waiting for
-      var waiting = notReady.map(function (p) {
-        var known = _knownPlayers[Object.keys(_peers).find(function (sid) {
-          return _peers[sid] === p;
-        })];
+      var waiting = notReady.map((p) => {
+        var known = _knownPlayers[Object.keys(_peers).find((sid) => _peers[sid] === p)];
         return known ? known.playerName : 'P' + (p.slot + 1);
       });
       setStatus('Waiting for ' + waiting.join(', ') + ' to load... (' + readyPeers.length + '/' + playerPeers.length + ')');
@@ -1281,20 +1242,18 @@
     if (_running) return;
 
     // Check that at least 1 player peer is lockstep-ready
-    var playerPeerSids = Object.keys(_peers).filter(function (sid) {
-      var p = _peers[sid];
+    var playerPeerSids = Object.keys(_peers).filter((sid) => {
+      const p = _peers[sid];
       return p.slot !== null && p.slot !== undefined;
     });
-    var readyCount = playerPeerSids.filter(function (sid) {
-      return _lockstepReadyPeers[sid];
-    }).length;
+    var readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
 
     if (readyCount < playerPeerSids.length) return;
 
     // Negotiate delay: ceiling of all players
     var ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
     var maxDelay = ownDelay;
-    Object.values(_peers).forEach(function (p) {
+    Object.values(_peers).forEach((p) => {
       if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
     });
     DELAY_FRAMES = maxDelay;
@@ -1442,7 +1401,7 @@
 
       for (var f = Math.max(0, startFrame - DELAY_FRAMES); f <= startFrame + DELAY_FRAMES; f++) {
         if (!_localInputs[f]) _localInputs[f] = 0;
-        Object.values(_peers).forEach(function (p) {
+        Object.values(_peers).forEach((p) => {
           if (p.slot !== null && p.slot !== undefined) {
             if (!_remoteInputs[p.slot]) _remoteInputs[p.slot] = {};
             if (!_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = 0;
@@ -1502,9 +1461,7 @@
     console.log('[lockstep] spectator capture stream started (640x480)');
 
     // Add tracks to all existing spectator peer connections
-    Object.entries(_peers).forEach(function (entry) {
-      var sid = entry[0];
-      var peer = entry[1];
+    Object.entries(_peers).forEach(([sid, peer]) => {
       if (peer.slot === null) {
         addStreamToPeer(sid);
       }
@@ -1524,7 +1481,7 @@
     var peer = _peers[remoteSid];
     if (!peer || !_hostStream) return;
 
-    _hostStream.getTracks().forEach(function (track) {
+    _hostStream.getTracks().forEach((track) => {
       peer.pc.addTrack(track, _hostStream);
     });
     renegotiate(remoteSid);
@@ -1628,23 +1585,23 @@
     console.log('[lockstep] entered manual mode');
   }
 
-  var _hasForkedCore = false;  // true if Module exports kn_set_deterministic
+  let _hasForkedCore = false;  // true if Module exports kn_set_deterministic
 
   function stepOneFrame() {
     if (!_pendingRunner) return false;
-    var runner = _pendingRunner;
+    const runner = _pendingRunner;
     _pendingRunner = null;
 
-    var frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+    const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
     window._kn_frameTime = frameTimeMs;
 
     // On first lockstep frame, switch from flat time to relative cycle counter.
     // Captures current cycle count as baseline — subtracts transition divergence.
     if (_hasForkedCore && !window._kn_useRelativeCycles && _frameNum === 0) {
-      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-                window.EJS_emulator.gameManager.Module;
-      if (mod && mod._kn_get_cycle_time_ms) {
-        window._kn_cycleStart = mod._kn_get_cycle_time_ms();
+      const cycleModule = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                          window.EJS_emulator.gameManager.Module;
+      if (cycleModule && cycleModule._kn_get_cycle_time_ms) {
+        window._kn_cycleStart = cycleModule._kn_get_cycle_time_ms();
         window._kn_cycleBase = frameTimeMs;
         window._kn_useRelativeCycles = true;
         console.log('[lockstep] switched to relative cycle counter at',
@@ -1654,17 +1611,17 @@
 
     // C-level: always update frame time (kn_deterministic_mode stays ON)
     if (_hasForkedCore) {
-      var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-                window.EJS_emulator.gameManager.Module;
-      if (mod && mod._kn_set_frame_time) {
-        mod._kn_set_frame_time(frameTimeMs);
+      const frameModule = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                          window.EJS_emulator.gameManager.Module;
+      if (frameModule && frameModule._kn_set_frame_time) {
+        frameModule._kn_set_frame_time(frameTimeMs);
       }
     }
 
     runner(frameTimeMs);
 
     // Force GL composite via real rAF no-op
-    if (_origRAF) _origRAF.call(window, function () {});
+    if (_origRAF) _origRAF.call(window, () => {});
     return true;
   }
 
@@ -1680,15 +1637,15 @@
   //   6. Increment frame counter
 
   // FPS + debug tracking
-  var _fpsLastTime     = 0;
-  var _fpsFrameCount   = 0;
-  var _fpsCurrent      = 0;
-  var _remoteReceived  = 0;
-  var _remoteMissed    = 0;
-  var _remoteApplied   = 0;
-  var _lastRemoteFrame = -1;
-  var _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
-  var _stallRetryPending = false;
+  let _fpsLastTime     = 0;
+  let _fpsFrameCount   = 0;
+  let _fpsCurrent      = 0;
+  let _remoteReceived  = 0;
+  let _remoteMissed    = 0;
+  let _remoteApplied   = 0;
+  let _lastRemoteFrame = -1;
+  let _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
+  let _stallRetryPending = false;
 
   function startLockstep() {
     if (_running) return;
@@ -1755,13 +1712,13 @@
     var mod2 = window.EJS_emulator && window.EJS_emulator.gameManager &&
                window.EJS_emulator.gameManager.Module;
     if (mod2 && mod2.AL && mod2.AL.contexts) {
-      Object.keys(mod2.AL.contexts).forEach(function (id) {
-        var ctx = mod2.AL.contexts[id];
+      Object.keys(mod2.AL.contexts).forEach((id) => {
+        const ctx = mod2.AL.contexts[id];
         if (!ctx) return;
         // Stop all sources (AL_PLAYING 0x1012 -> AL_STOPPED 0x1014)
         if (ctx.sources) {
-          Object.keys(ctx.sources).forEach(function (sid) {
-            var src = ctx.sources[sid];
+          Object.keys(ctx.sources).forEach((sid) => {
+            const src = ctx.sources[sid];
             if (src && src.state === 0x1012) {
               mod2.AL.setSourceState(src, 0x1014);
             }
@@ -1771,7 +1728,7 @@
         // it on user gestures by overriding resume() to be a no-op.
         if (ctx.audioCtx) {
           ctx.audioCtx.suspend();
-          ctx.audioCtx.resume = function () { return Promise.resolve(); };
+          ctx.audioCtx.resume = () => Promise.resolve();
         }
         console.log('[lockstep] killed OpenAL audio system (context ' + id + ')');
       });
@@ -1780,7 +1737,7 @@
     initAudioPlayback();
 
     var activePeers = getActivePeers();
-    var peerSlots = activePeers.map(function (p) { return p.slot; });
+    var peerSlots = activePeers.map((p) => p.slot);
     console.log('[lockstep] lockstep started -- slot:', _playerSlot,
       'peerSlots:', peerSlots.join(','), 'delay:', DELAY_FRAMES);
     setStatus('Connected -- game on!');
@@ -1805,10 +1762,25 @@
           '(paused', pauseDuration, 'ms)');
 
         // Short pause (<500ms): just resume ticking, no broadcast or resync.
-        // This handles rapid tab-switching on the same machine.
         if (pauseDuration < 500) return;
 
-        // Long pause: broadcast resume and request resync
+        // Fast-forward _frameNum to catch up with peers. While we were paused,
+        // peers kept running and our old frame's remote inputs are long gone.
+        // Without this, tick() stalls forever waiting for input that will never arrive.
+        if (_lastRemoteFrame > _frameNum) {
+          console.log('[lockstep] fast-forward:', _frameNum, '->', _lastRemoteFrame);
+          _frameNum = _lastRemoteFrame;
+          window._frameNum = _frameNum;
+          // Clear stale input buffers
+          _localInputs = {};
+          _remoteInputs = {};
+          // Pre-fill delay gap with zero input so tick() doesn't stall
+          for (var d = 0; d < DELAY_FRAMES; d++) {
+            _localInputs[_frameNum + d] = 0;
+          }
+        }
+
+        // Broadcast resume and request resync
         var activePeers = getActivePeers();
         for (var i = 0; i < activePeers.length; i++) {
           try { activePeers[i].dc.send('peer-resumed'); } catch (_) {}
@@ -1816,11 +1788,14 @@
         if (activePeers.length === 0 && socket) {
           socket.emit('data-message', { type: 'peer-resumed', sender: socket.id });
         }
-        // Resync: if host, reset check interval. If guest, request state.
-        if (_playerSlot === 0 && _syncEnabled) {
+        // Resync after pause: always request state from host (frame fast-forward
+        // puts us at the right frame but emulator state is stale).
+        if (_playerSlot === 0) {
+          // Host: reset sync check so guests can detect drift quickly
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
-        } else if (_syncEnabled) {
+        } else {
+          // Guest: request full state from host
           var hostPeer = Object.values(_peers).find(function (p) { return p.slot === 0; });
           if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
             try { hostPeer.dc.send('sync-request'); } catch (_) {}
@@ -2063,11 +2038,9 @@
       if (dbg) {
         dbg.style.display = '';
         var playerCount = activePeers.length + 1;  // +1 for self
-        var spectatorCount = Object.values(_peers).filter(function (p) {
-          return p.slot === null;
-        }).length;
+        var spectatorCount = Object.values(_peers).filter((p) => p.slot === null).length;
         var remoteBufTotal = 0;
-        Object.keys(_remoteInputs).forEach(function (slot) {
+        Object.keys(_remoteInputs).forEach((slot) => {
           remoteBufTotal += Object.keys(_remoteInputs[slot] || {}).length;
         });
         dbg.textContent =
@@ -2092,7 +2065,7 @@
   // EJS calls simulateInput(player, button, value) directly into WASM.
   // We intercept it to track which buttons are held, so readLocalInput()
   // can include touch inputs in the netplay bitmask.
-  var _touchInputState = {};  // { buttonIndex: value }
+  let _touchInputState = {};  // { buttonIndex: value }
 
   function hookVirtualGamepad() {
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
@@ -2131,8 +2104,8 @@
 
     // Keyboard
     if (_p1KeyMap) {
-      _heldKeys.forEach(function (kc) {
-        var btnIdx = _p1KeyMap[kc];
+      _heldKeys.forEach((kc) => {
+        const btnIdx = _p1KeyMap[kc];
         if (btnIdx !== undefined) mask |= (1 << btnIdx);
       });
     }
@@ -2185,9 +2158,9 @@
   // Offloads CPU-intensive sync work (FNV-1a hash, gzip compress/decompress)
   // to a dedicated thread so the main thread tick loop isn't blocked.
 
-  var _syncWorker = null;
-  var _syncWorkerCallbacks = {};  // id -> callback
-  var _syncWorkerNextId = 0;
+  let _syncWorker = null;
+  let _syncWorkerCallbacks = {};  // id -> callback
+  let _syncWorkerNextId = 0;
 
   function getSyncWorker() {
     if (_syncWorker) return _syncWorker;
@@ -2294,7 +2267,7 @@
       if (result.value) chunks.push(result.value);
       if (result.done) break;
     }
-    var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+    var out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
     var offset = 0;
     for (var i = 0; i < chunks.length; i++) {
       out.set(chunks[i], offset);
@@ -2320,7 +2293,7 @@
         if (result2.value) chunks.push(result2.value);
         if (result2.done) break;
       }
-      var out = new Uint8Array(chunks.reduce(function (a, c) { return a + c.length; }, 0));
+      var out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
       var offset = 0;
       for (var i = 0; i < chunks.length; i++) {
         out.set(chunks[i], offset);
@@ -2375,66 +2348,10 @@
     }
   }
 
-  // -- Cheats ----------------------------------------------------------------
-
-  function applyStandardCheats() {
-    var attempt = function () {
-      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(attempt, 500); return; }
-      try {
-        SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
-        console.log('[lockstep] applied', SSB64_ONLINE_CHEATS.length, 'standard cheats');
-      } catch (_) { setTimeout(attempt, 500); return; }
-      setTimeout(function () {
-        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
-      }, 2000);
-      setTimeout(function () {
-        try { SSB64_ONLINE_CHEATS.forEach(function (c, i) { gm.setCheat(i, 1, c.code); }); } catch (_) {}
-      }, 5000);
-    };
-    attempt();
-  }
-
   // -- Keyboard / input setup ------------------------------------------------
 
   function setupKeyTracking() {
-    if (_p1KeyMap) return;
-
-    // Check localStorage for custom keyboard mapping first
-    try {
-      var saved = localStorage.getItem('keyboard-mapping');
-      if (saved) {
-        var parsed = JSON.parse(saved);
-        if (parsed && Object.keys(parsed).length > 0) {
-          _p1KeyMap = {};
-          for (var k in parsed) _p1KeyMap[parseInt(k, 10)] = parsed[k];
-        }
-      }
-    } catch (_) {}
-
-    // Try EJS controls if no custom mapping
-    if (!_p1KeyMap) {
-      var ejs = window.EJS_emulator;
-      if (ejs && ejs.controls && ejs.controls[0]) {
-        _p1KeyMap = {};
-        Object.entries(ejs.controls[0]).forEach(function (entry) {
-          var btnIdx = entry[0];
-          var binding = entry[1];
-          var kc = binding && binding.value;
-          if (kc) _p1KeyMap[kc] = parseInt(btnIdx, 10);
-        });
-      }
-    }
-
-    if (!_p1KeyMap || Object.keys(_p1KeyMap).length === 0) {
-      _p1KeyMap = Object.assign({}, DEFAULT_N64_KEYMAP);
-    }
-
-    if (!setupKeyTracking._listenersAdded) {
-      document.addEventListener('keydown', function (e) { _heldKeys.add(e['keyCode']); }, true);
-      document.addEventListener('keyup',   function (e) { _heldKeys.delete(e['keyCode']); }, true);
-      setupKeyTracking._listenersAdded = true;
-    }
+    _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   }
 
   function disableEJSInput() {
@@ -2466,54 +2383,6 @@
       navigator.getGamepads = function () { return []; };
     };
     attempt();
-  }
-
-  // -- Emulator start --------------------------------------------------------
-
-  function triggerEmulatorStart() {
-    // With EJS_startOnLoaded=true, the emulator auto-starts without a button.
-    // Fall back to polling for the start button in case auto-start isn't set.
-    var attempts = 0;
-    var attempt = function () {
-      // Check if emulator already started (EJS_startOnLoaded or mobile auto-start)
-      var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (gm && gm.Module) {
-        console.log('[lockstep] emulator already running (auto-start)');
-        enableMobileTouch();
-        return;
-      }
-      var btn = document.querySelector('.ejs_start_button');
-      if (btn) {
-        console.log('[lockstep] clicking EJS start button');
-        // On mobile, dispatch a touchstart first so EJS sets touch=true
-        if ('ontouchstart' in window) {
-          btn.dispatchEvent(new Event('touchstart'));
-        }
-        btn.click();
-        return;
-      }
-      attempts++;
-      if (attempts < 150) { // 30 seconds max
-        setTimeout(attempt, 200);
-      } else {
-        console.log('[lockstep] start button not found after 30s');
-        setStatus('Emulator failed to start');
-      }
-    };
-    attempt();
-  }
-
-  function enableMobileTouch() {
-    // EJS_startOnLoaded bypasses the start button, so EJS never detects touch.
-    // Force touch mode on mobile so the virtual gamepad appears.
-    if (!('ontouchstart' in window)) return;
-    var ejs = window.EJS_emulator;
-    if (!ejs || ejs.touch) return;
-    ejs.touch = true;
-    if (ejs.virtualGamepad) {
-      ejs.virtualGamepad.style.display = '';
-    }
-    console.log('[lockstep] enabled mobile touch controls');
   }
 
   // -- Direct memory hashing (avoids expensive getState() serialization) ------
@@ -2576,7 +2445,7 @@
 
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
-  var _pushingSyncState = false;  // debounce concurrent sync-request handling
+  let _pushingSyncState = false;  // debounce concurrent sync-request handling
 
   function pushSyncState(targetSid) {
     // Host: capture state, compute delta, compress, and send to requesting peer.
@@ -2634,7 +2503,7 @@
 
   function handleSyncChunksComplete() {
     // Guest: reassemble chunks, decompress, apply delta, buffer for async apply
-    var total = _syncChunks.reduce(function (a, c) { return a + c.length; }, 0);
+    var total = _syncChunks.reduce((a, c) => a + c.length, 0);
     var assembled = new Uint8Array(total);
     var offset = 0;
     for (var i = 0; i < _syncChunks.length; i++) {
@@ -2684,10 +2553,10 @@
     }
 
     // Purge stale remote inputs above the new frame
-    Object.keys(_remoteInputs).forEach(function (slot) {
-      var inputs = _remoteInputs[slot];
+    Object.keys(_remoteInputs).forEach((slot) => {
+      const inputs = _remoteInputs[slot];
       if (!inputs) return;
-      Object.keys(inputs).forEach(function (f) {
+      Object.keys(inputs).forEach((f) => {
         if (parseInt(f, 10) > _frameNum + DELAY_FRAMES) delete inputs[f];
       });
     });
@@ -2701,7 +2570,7 @@
 
   // -- Init / Stop API -------------------------------------------------------
 
-  var _config = null;
+  let _config = null;
 
   function init(config) {
     _config = config;
@@ -2733,7 +2602,7 @@
         if (peerCount === 0) {
           setStatus('No peer connection — check network');
         } else {
-          var anyOpen = Object.values(_peers).some(function (p) { return p.ready; });
+          var anyOpen = Object.values(_peers).some((p) => p.ready);
           if (!anyOpen) setStatus('Peer found but data channel not open');
         }
       }
@@ -2752,8 +2621,8 @@
     stopSync();
 
     // Close all peer connections and clear reconnect timers
-    Object.keys(_peers).forEach(function (sid) {
-      var p = _peers[sid];
+    Object.keys(_peers).forEach((sid) => {
+      const p = _peers[sid];
       if (p._reconnectTimeout) { clearTimeout(p._reconnectTimeout); p._reconnectTimeout = null; }
       if (p._disconnectTimer) { clearTimeout(p._disconnectTimer); p._disconnectTimer = null; }
       if (p.dc) try { p.dc.close(); } catch (_) {}
@@ -2822,7 +2691,7 @@
 
     // Clean up spectator stream
     if (_hostStream) {
-      _hostStream.getTracks().forEach(function (t) { t.stop(); });
+      _hostStream.getTracks().forEach((t) => { t.stop(); });
       _hostStream = null;
     }
     if (_guestVideo) {
@@ -2861,15 +2730,13 @@
       var rtt = _rttSamples.length > 0
         ? _rttSamples[Math.floor(_rttSamples.length / 2)]
         : null;
-      var peerInfo = peers.map(function (peer) {
-        return {
-          slot: peer.slot,
-          rtt: peer.rttSamples && peer.rttSamples.length > 0
-            ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)]
-            : null,
-          delayValue: peer.delayValue || null,
-        };
-      });
+      var peerInfo = peers.map((peer) => ({
+        slot: peer.slot,
+        rtt: peer.rttSamples && peer.rttSamples.length > 0
+          ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)]
+          : null,
+        delayValue: peer.delayValue || null,
+      }));
       return {
         fps: _fpsCurrent,
         frameDelay: DELAY_FRAMES,
