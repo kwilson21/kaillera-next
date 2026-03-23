@@ -2418,28 +2418,14 @@
     // SSB64 game-specific sync: read targeted RDRAM regions containing
     // match state and player data. Uses wasmMemory.buffer for live access.
     // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
-    // Use getState() and sample the RDRAM section (middle of save state).
-    // Direct HEAPU8 reads are unreliable (stale buffers, wrong offsets).
-    // getState() serializes through the RetroArch API — always correct.
-    //
-    // mupen64plus save state layout (~16MB):
-    //   0x000000-0x001000: header + CPU registers (~4KB)
-    //   0x001000-0x801000: RDRAM (8MB — the actual N64 game state)
-    //   0x801000+: RSP, RDP, audio, plugins (emulator internals — non-deterministic)
-    //
-    // Hash bytes 0x100000-0x300000 (2MB from the middle of RDRAM).
-    // Avoids header, CPU regs, and plugin state. Contains game heap.
+    // getState() approach: serialize through RetroArch API (always correct).
+    // Hash 2MB from the RDRAM section of the save state (offset 1MB-3MB).
+    // Expensive (~3ms + 16MB serialize) so interval must be ≥10s.
     try {
       var gm = window.EJS_emulator.gameManager;
       var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      var RDRAM_START = 0x100000;  // 1MB into state (safely past header, into RDRAM)
-      var RDRAM_END = 0x300000;    // 3MB into state (2MB sample)
-      if (bytes.length < RDRAM_END) {
-        // State smaller than expected — hash what we have
-        RDRAM_END = bytes.length;
-      }
-      return bytes.slice(RDRAM_START, RDRAM_END);
+      return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
     } catch (_) { return null; }
   }
 
