@@ -314,6 +314,7 @@
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
+  let _syncIsFull        = true;   // true=full state, false=XOR delta
   let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
   let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
@@ -870,6 +871,7 @@
           var parts = e.data.split(':');
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
+          _syncIsFull = parts[3] === '1';
           _syncChunks = [];
         }
         // JSON messages
@@ -2456,10 +2458,10 @@
 
   let _pushingSyncState = false;  // debounce concurrent sync-request handling
 
+  var _lastSyncState = null;  // host: previous state for delta computation
+
   function pushSyncState(targetSid) {
-    // Host: capture state, compute delta, compress, and send to requesting peer.
-    // Star topology: only the host produces sync state; targetSid specifies
-    // the peer that requested it (avoids broadcasting to already-synced peers).
+    // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
     if (_pushingSyncState) return;
 
@@ -2467,11 +2469,28 @@
     if (!gm) return;
     _pushingSyncState = true;
     var raw = gm.getState();
-    var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    var currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     var frame = _frameNum;
 
-    compressState(bytes).then(function (compressed) {
-      sendSyncChunks(compressed, frame, true, targetSid);
+    // Delta sync: XOR against previous state. The delta is mostly zeros
+    // (unchanged bytes) which compresses ~100x better than full state.
+    var isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
+    var toCompress;
+    if (isFull) {
+      toCompress = currentState;
+    } else {
+      // XOR delta
+      toCompress = new Uint8Array(currentState.length);
+      for (var i = 0; i < currentState.length; i++) {
+        toCompress[i] = currentState[i] ^ _lastSyncState[i];
+      }
+    }
+    _lastSyncState = currentState;
+
+    compressState(toCompress).then(function (compressed) {
+      var sizeKB = Math.round(compressed.length / 1024);
+      _streamSync((isFull ? 'full' : 'delta') + ' state: ' + sizeKB + 'KB compressed');
+      sendSyncChunks(compressed, frame, isFull, targetSid);
     }).catch(function (err) {
       console.log('[lockstep] sync compress failed:', err);
     }).finally(function () {
@@ -2511,7 +2530,7 @@
   }
 
   function handleSyncChunksComplete() {
-    // Guest: reassemble chunks, decompress, apply delta, buffer for async apply
+    // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     var total = _syncChunks.reduce((a, c) => a + c.length, 0);
     var assembled = new Uint8Array(total);
     var offset = 0;
@@ -2522,9 +2541,32 @@
     _syncChunks = [];
     _syncExpected = 0;
     var frame = _syncFrame;
+    var isFull = _syncIsFull;
+
     decompressState(assembled).then(function (decompressed) {
-      // Async resync: buffer for application at next clean frame boundary
-      _pendingResyncState = { bytes: decompressed, frame: frame };
+      if (isFull) {
+        // Full state — use directly
+        _pendingResyncState = { bytes: decompressed, frame: frame };
+      } else {
+        // Delta — XOR against our current state to reconstruct host's state
+        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+        if (!gm) return;
+        var raw = gm.getState();
+        var current = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+        if (current.length !== decompressed.length) {
+          console.log('[lockstep] delta size mismatch: current=' + current.length +
+            ' delta=' + decompressed.length + ' — falling back to full');
+          // Can't apply delta — request full state
+          return;
+        }
+        var reconstructed = new Uint8Array(current.length);
+        for (var j = 0; j < current.length; j++) {
+          reconstructed[j] = current[j] ^ decompressed[j];
+        }
+        _pendingResyncState = { bytes: reconstructed, frame: frame };
+      }
+      _streamSync('resync ready (' + (isFull ? 'full' : 'delta') + ', ' +
+        Math.round(assembled.length / 1024) + 'KB wire)');
     }).catch(function (err) {
       console.log('[lockstep] sync decompress failed:', err);
     });
