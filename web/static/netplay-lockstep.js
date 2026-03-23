@@ -2385,19 +2385,17 @@
       } catch (_) {}
     }
 
-    if (_hashRegion && _hashRegion.ptr) {
-      // Direct RDRAM access — hash the full RDRAM (8MB for expansion pak).
-      // FNV-1a on 8MB takes ~2-4ms which is acceptable every 60 frames.
-      return mod.HEAPU8.slice(_hashRegion.ptr, _hashRegion.ptr + _hashRegion.size);
-    }
-    // Fallback: getState() — skip first 1024 bytes (save state header/metadata
-    // contains timestamps and core version info that differs between instances
-    // even when gameplay is identical, causing false positive desyncs)
+    // Use getState() for hash — HEAPU8 direct access returns stale data
+    // (the RDRAM pointer from get_memory_data may point to a frozen region).
+    // getState() captures the core's live state through the RetroArch API.
     try {
-      var raw = window.EJS_emulator.gameManager.getState();
+      var gm = window.EJS_emulator.gameManager;
+      var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      var SKIP = 1024;  // skip metadata header
-      var len = Math.min(bytes.length - SKIP, 65536);
+      // Skip first 1024 bytes (save state header/metadata contains timestamps
+      // and core version info that differs between instances)
+      var SKIP = 1024;
+      var len = bytes.length - SKIP;
       if (len <= 0) return bytes.slice(0, Math.min(bytes.length, 65536));
       return bytes.slice(SKIP, SKIP + len);
     } catch (_) { return null; }
