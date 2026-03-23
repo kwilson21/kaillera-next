@@ -320,6 +320,8 @@
   let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
   let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
+  let _inDeterministicStep = false; // gate for performance.now() override during frame step
+  let _deterministicPerfNow = null; // saved override function
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -1713,6 +1715,27 @@
         mod._kn_set_deterministic(1);
         console.log('[lockstep] C-level deterministic timing enabled (session-wide)');
       }
+
+      // Override performance.now() during WASM frame steps for COMPLETE timing
+      // determinism. Emscripten's _emscripten_get_now calls performance.now()
+      // internally, and it's captured in a closure we can't override from outside.
+      // By overriding performance.now() itself, we catch ALL timing — clock_gettime,
+      // gettimeofday, emscripten_get_now, etc. The override only activates during
+      // stepOneFrame() (gated by _inDeterministicStep) so lockstep JS code
+      // (stall detection, FPS) still gets real time.
+      if (mod && mod._kn_get_cycle_time_ms) {
+        var _origPerfNow = performance.now.bind(performance);
+        _deterministicPerfNow = function () {
+          if (_inDeterministicStep) {
+            var m = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                    window.EJS_emulator.gameManager.Module;
+            if (m && m._kn_get_cycle_time_ms) return m._kn_get_cycle_time_ms();
+          }
+          return _origPerfNow();
+        };
+        performance.now = _deterministicPerfNow;
+        console.log('[lockstep] performance.now() intercepted for deterministic frame steps');
+      }
     }
 
     // Neutralize fast-forward / slow-motion WASM functions.
@@ -1965,11 +1988,31 @@
       delete _localInputs[applyFrame];
     }
 
+    // -- Input verification log (determinism diagnostic) --
+    // Read back input values from WASM memory after writing, before stepping.
+    if (applyFrame >= 0 && (_frameNum < 100 || _frameNum % 120 === 0)) {
+      var imod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                 window.EJS_emulator.gameManager.Module;
+      if (imod && INPUT_BASE) {
+        var imem = imod.HEAPU8;
+        var ivals = [];
+        for (var ip = 0; ip < 3; ip++) {
+          var addr = INPUT_BASE + ip * 20;
+          var b0 = imem[addr] | (imem[addr+1] << 8) | (imem[addr+2] << 16) | (imem[addr+3] << 24);
+          ivals.push(b0);
+        }
+        _streamSync('INPUT f=' + _frameNum + ' apply=' + applyFrame +
+          ' p0=' + ivals[0] + ' p1=' + ivals[1] + ' p2=' + ivals[2]);
+      }
+    }
+
     // Step one frame with audio capture
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
+    _inDeterministicStep = true;
     stepOneFrame();
+    _inDeterministicStep = false;
     feedAudio();
 
     _frameNum++;
