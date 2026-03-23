@@ -2472,8 +2472,19 @@
           regionHashes.push(testRegions[ri][2] + '=' + (h | 0));
         }
         _streamSync('regions: ' + regionHashes.join(' '));
-        // Use match-config for actual sync comparison (smallest, most likely deterministic)
-        return live.slice(base + 0x0A4D00, base + 0x0A4E00);
+        // Hash only DETERMINISTIC regions (confirmed by live testing:
+        // match-config, match-ext, 768K, 1600K, 2432K always match between
+        // synced players. 256K/512K/576K are non-deterministic emulator internals).
+        var d1 = live.slice(base + 0x0A4D00, base + 0x0A5000);  // 768B: match config+ext
+        var d2 = live.slice(base + 0xC0000,  base + 0xC0100);   // 256B: chunk-768K
+        var d3 = live.slice(base + 0x190000, base + 0x190100);  // 256B: chunk-1600K
+        var d4 = live.slice(base + 0x260000, base + 0x260100);  // 256B: chunk-2432K
+        var combined = new Uint8Array(d1.length + d2.length + d3.length + d4.length);
+        combined.set(d1, 0);
+        combined.set(d2, d1.length);
+        combined.set(d3, d1.length + d2.length);
+        combined.set(d4, d1.length + d2.length + d3.length);
+        return combined;
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
       }
