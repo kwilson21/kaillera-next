@@ -829,11 +829,12 @@
               var peerRef = peer;
               workerPost({ type: 'hash', data: guestBytes }).then(function (res) {
                 if (res.hash !== hostHash) {
-                  console.log('[lockstep] DESYNC at frame', syncFrame,
-                    'local:', res.hash, 'host:', hostHash, '-- requesting state');
+                  console.log('[lockstep] DESYNC at frame ' + syncFrame +
+                    ' local=' + res.hash + ' host=' + hostHash + ' -- requesting state');
                   try { peerRef.dc.send('sync-request'); } catch (_) {}
                 } else {
-                  console.log('[lockstep] sync OK at frame', syncFrame);
+                  console.log('[lockstep] sync OK at frame ' + syncFrame +
+                    ' hash=' + res.hash);
                   _consecutiveResyncs = 0;
                   _syncCheckInterval = _syncBaseInterval;
                 }
@@ -2395,9 +2396,10 @@
     }
 
     if (_hashRegion && _hashRegion.ptr) {
-      // Direct RDRAM access — ~0.1ms copy vs ~3ms getState() serialization
-      var len = Math.min(_hashRegion.size, 65536);
-      return mod.HEAPU8.slice(_hashRegion.ptr, _hashRegion.ptr + len);
+      // Direct RDRAM access — hash the full RDRAM (8MB for expansion pak).
+      // FNV-1a on 8MB takes ~2-4ms which is acceptable every 60 frames.
+      // Previous 64KB limit missed desyncs in game state stored above 64KB.
+      return mod.HEAPU8.slice(_hashRegion.ptr, _hashRegion.ptr + _hashRegion.size);
     }
     // Fallback: getState() — skip first 1024 bytes (save state header/metadata
     // contains timestamps and core version info that differs between instances
