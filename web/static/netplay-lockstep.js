@@ -306,6 +306,7 @@
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   let _lastResyncRequest = 0;      // timestamp of last sync-request (30s cooldown)
+  let _prevChunkHashes = null;     // RDRAM scan: previous chunk hashes for delta detection
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
@@ -2409,41 +2410,31 @@
         var live = new Uint8Array(liveBuf);
         var base = _hashRegion.ptr;
 
-        // Diagnostic: sample specific SSB64 addresses to verify live reads.
-        // Known working GameShark addresses (RDRAM offsets):
-        //   0x0A4D0B = stock mode (should be 0x02)
-        //   0x0A4D0F = stock count (should be 0x04 = 5 stocks)
-        //   0x0A4D11 = timer (should be 0x01)
-        var stockMode = live[base + 0x0A4D0B];
-        var stockCount = live[base + 0x0A4D0F];
-        var timerOn = live[base + 0x0A4D11];
-
-        // Sample 32 bytes at 16 different offsets across the game data region
-        // to find which areas change during gameplay
-        var sampleOffsets = [
-          0x0A4D00, 0x0A4D40, 0x0A4D80, 0x0A4DC0,
-          0x0A4E00, 0x0A4F00, 0x0A5000, 0x0A6000,
-          0x0A8000, 0x0AA000, 0x0AC000, 0x0AE000,
-          0x0B0000, 0x0B2000, 0x0B4000, 0x0B8000,
-        ];
-        var samples = [];
-        for (var si = 0; si < sampleOffsets.length; si++) {
-          var sOff = sampleOffsets[si];
-          // Read 4 bytes, format as hex
-          var b0 = live[base + sOff], b1 = live[base + sOff + 1];
-          var b2 = live[base + sOff + 2], b3 = live[base + sOff + 3];
-          samples.push(sOff.toString(16) + ':' +
-            ((b0 << 24 | b1 << 16 | b2 << 8 | b3) >>> 0).toString(16));
+        // Scan RDRAM to find active game data regions. Hash 128 chunks of 64KB
+        // and compare between frames — only log chunks that CHANGED.
+        if (!_prevChunkHashes) _prevChunkHashes = [];
+        if (_frameNum <= _syncCheckInterval * 3 || _frameNum % (_syncCheckInterval * 5) === 0) {
+          var chunkSize = 0x10000; // 64KB
+          var changed = [];
+          for (var ci = 0; ci < 128; ci++) {
+            var cStart = base + ci * chunkSize;
+            // FNV-1a on first 256 bytes of each chunk (fast fingerprint)
+            var h = 0x811c9dc5;
+            for (var fi = 0; fi < 256; fi++) {
+              h ^= live[cStart + fi]; h = Math.imul(h, 0x01000193);
+            }
+            h = h | 0;
+            if (_prevChunkHashes[ci] !== undefined && _prevChunkHashes[ci] !== h) {
+              changed.push((ci * 64) + 'K');
+            }
+            _prevChunkHashes[ci] = h;
+          }
+          if (changed.length > 0) {
+            console.log('[lockstep] RDRAM changed regions (64KB chunks): ' + changed.join(','));
+          }
         }
 
-        // Log diagnostic every 10th sync check
-        if (_frameNum % (_syncCheckInterval * 10) === 0 || _frameNum <= _syncCheckInterval * 2) {
-          console.log('[lockstep] RDRAM diag: stockMode=' + stockMode +
-            ' stocks=' + stockCount + ' timer=' + timerOn +
-            ' samples=[' + samples.join(',') + ']');
-        }
-
-        // Hash the match/player data region (0x0A4D00 - 0x0B0000, ~44KB)
+        // Hash 0x0A4D00 - 0x0B0000 for sync comparison (known game data region)
         return live.slice(base + 0x0A4D00, base + 0x0B0000);
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
