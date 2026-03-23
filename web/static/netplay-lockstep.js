@@ -301,8 +301,8 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled       = false;   // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 600;    // check hash every N frames (~10s at 60fps)
-  let _syncBaseInterval  = 600;    // getState() is expensive (~3ms + 16MB serialize)
+  let _syncCheckInterval = 120;    // check hash every N frames (~2s at 60fps)
+  let _syncBaseInterval  = 120;    // direct RDRAM reads are ~0.1ms (no getState)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
@@ -2415,64 +2415,49 @@
       } catch (_) {}
     }
 
-    // Diagnostic: measure cost of each approach and stream to server.
-    var t0, t1, t2, t3;
-    var diagParts = [];
-
-    // 1. Try direct RDRAM read
-    if (_hashRegion && _hashRegion.ptr) {
-      t0 = performance.now();
-      var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
-      var bufDetached = !buf || buf.byteLength === 0;
-      t1 = performance.now();
-      diagParts.push('buf=' + (bufDetached ? 'DETACHED' : buf.byteLength + 'B') +
-        ' (' + (t1 - t0).toFixed(1) + 'ms)');
-
-      if (!bufDetached) {
-        t0 = performance.now();
+    // Direct RDRAM read using scan-verified regions (Playwright automated scan).
+    // Buffer staleness: detect detached buffer and try re-acquisition.
+    var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
+    if (!buf || buf.byteLength === 0) {
+      buf = (mod.wasmMemory && mod.wasmMemory.buffer) ||
+            (mod.asm && mod.asm.memory && mod.asm.memory.buffer) || null;
+    }
+    if (_hashRegion && _hashRegion.ptr && buf && buf.byteLength > 0) {
+      try {
         var live = new Uint8Array(buf);
         var base = _hashRegion.ptr;
-        // Read 4 bytes at 8 points across RDRAM to check liveness
-        var samples = [];
-        for (var si = 0; si < 8; si++) {
-          var off = base + si * 0x100000; // every 1MB
-          if (off + 4 <= live.length) {
-            samples.push(((live[off] << 24) | (live[off+1] << 16) |
-              (live[off+2] << 8) | live[off+3]) >>> 0);
-          }
-        }
-        t1 = performance.now();
-        diagParts.push('rdram=[' + samples.map(function(s) {
-          return s.toString(16);
-        }).join(',') + '] (' + (t1 - t0).toFixed(1) + 'ms)');
 
-        // Hash 4KB sample (256B from each of 16 points across RDRAM)
-        t0 = performance.now();
-        var sampleData = new Uint8Array(4096);
-        var stride = Math.floor(_hashRegion.size / 16);
-        for (var hi = 0; hi < 16; hi++) {
-          var hOff = base + hi * stride;
-          sampleData.set(live.subarray(hOff, hOff + 256), hi * 256);
+        // SSB64 RDRAM map (verified by automated Playwright scan):
+        //   0x130000          — game state indicator (stable within state, changes between)
+        //   0x394000-0x3DA000 — match gameplay data (280KB, volatile only during gameplay)
+        //   0x3B000-0xC7000   — NEVER hash (core internals, always volatile = false positives)
+        var STATE_IND = 0x130000;
+        var GAME_START = 0x394000;
+        var GAME_END = 0x3DA000;
+        var SAMPLE_SIZE = 256;
+        var SAMPLE_COUNT = 16;
+        var stride = Math.floor((GAME_END - GAME_START) / SAMPLE_COUNT);
+
+        // State indicator (256B) + 16 × 256B gameplay samples = 4.25KB total
+        var combined = new Uint8Array(SAMPLE_SIZE + SAMPLE_SIZE * SAMPLE_COUNT);
+        combined.set(live.subarray(base + STATE_IND, base + STATE_IND + SAMPLE_SIZE), 0);
+        for (var gi = 0; gi < SAMPLE_COUNT; gi++) {
+          var gOff = base + GAME_START + gi * stride;
+          combined.set(live.subarray(gOff, gOff + SAMPLE_SIZE), SAMPLE_SIZE + gi * SAMPLE_SIZE);
         }
-        t1 = performance.now();
-        diagParts.push('sample (' + (t1 - t0).toFixed(1) + 'ms)');
+        return combined;
+      } catch (e) {
+        console.log('[lockstep] hash: RDRAM read failed:', e.message);
       }
     }
 
-    // 2. Measure getState cost
-    t2 = performance.now();
-    var gm = window.EJS_emulator.gameManager;
-    var raw = gm.getState();
-    t3 = performance.now();
-    var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-    diagParts.push('getState=' + Math.round(bytes.length / 1024) + 'KB (' +
-      (t3 - t2).toFixed(1) + 'ms)');
-
-    // Stream diagnostic
-    _streamSync('diag: ' + diagParts.join(' | '));
-
-    // Use getState RDRAM section for hash
-    return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
+    // Fallback: getState() — expensive but always correct
+    try {
+      var gm = window.EJS_emulator.gameManager;
+      var raw = gm.getState();
+      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
+    } catch (_) { return null; }
   }
 
   // -- Async state sync (compress/decompress via Web Worker) -----------------

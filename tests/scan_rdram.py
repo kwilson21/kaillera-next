@@ -153,27 +153,49 @@ def main():
         page.goto(f"{SERVER}/play.html?room=SCAN01&host=1&name=Scanner")
         page.wait_for_selector('#overlay', state='visible', timeout=15000)
 
-        # Load ROM via file chooser
-        with page.expect_file_chooser() as fc:
-            page.click('#rom-drop')
-        fc.value.set_files(ROM_PATH)
-        page.wait_for_function(
-            "document.querySelector('#rom-status') && "
-            "document.querySelector('#rom-status').textContent.includes('Loaded')",
-            timeout=15000,
-        )
-        print("ROM loaded")
-
-        # Boot emulator directly (single player, no lockstep)
+        # Load ROM and boot emulator directly (bypass multiplayer flow)
         page.evaluate("""
             (function() {
-                if (!window.EJS_emulator && typeof EmulatorJS === 'function') {
-                    var romUrl = document.querySelector('#rom-status') ?
-                        window.EJS_gameUrl : null;
-                    if (romUrl) {
-                        window.EJS_gameUrl = romUrl;
-                        // Boot will happen via play.js flow
-                    }
+                // Create a file input, load the ROM, and boot EmulatorJS
+                var input = document.createElement('input');
+                input.type = 'file';
+                input.style.display = 'none';
+                document.body.appendChild(input);
+                window._scanFileInput = input;
+            })()
+        """)
+
+        # Set ROM via file chooser on our hidden input, then boot
+        with page.expect_file_chooser() as fc:
+            page.evaluate("window._scanFileInput.click()")
+        fc.value.set_files(ROM_PATH)
+
+        # Read the file and boot EmulatorJS directly
+        page.evaluate("""
+            (async function() {
+                var input = window._scanFileInput;
+                var file = input.files[0];
+                if (!file) return;
+                var url = URL.createObjectURL(file);
+                window.EJS_gameUrl = url;
+
+                // Hide the overlay so emulator can render
+                var overlay = document.getElementById('overlay');
+                if (overlay) overlay.classList.add('hidden');
+
+                // Boot EmulatorJS
+                if (typeof EmulatorJS === 'function') {
+                    window.EJS_emulator = new EmulatorJS(
+                        window.EJS_player || '#game',
+                        { gameUrl: url, core: 'n64',
+                          pathtodata: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
+                          startOnLoaded: true }
+                    );
+                } else {
+                    // Inject the loader script
+                    var script = document.createElement('script');
+                    script.src = window.EJS_pathtodata + 'loader.js';
+                    document.body.appendChild(script);
                 }
             })()
         """)
@@ -184,11 +206,11 @@ def main():
             "window.EJS_emulator && window.EJS_emulator.gameManager && "
             "window.EJS_emulator.gameManager.Module && "
             "window.EJS_emulator.gameManager.Module.HEAPU8",
-            timeout=30000,
+            timeout=60000,
         )
         # Give the game time to reach the title screen
         print("Emulator booted, waiting for title screen...")
-        time.sleep(5)
+        time.sleep(8)
 
         # ── STATE 1: Title Screen ──────────────────────────────────
         print("\n=== STATE: Title Screen ===")
