@@ -2415,18 +2415,64 @@
       } catch (_) {}
     }
 
-    // SSB64 game-specific sync: read targeted RDRAM regions containing
-    // match state and player data. Uses wasmMemory.buffer for live access.
-    // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
-    // getState() approach: serialize through RetroArch API (always correct).
-    // Hash 2MB from the RDRAM section of the save state (offset 1MB-3MB).
-    // Expensive (~3ms + 16MB serialize) so interval must be ≥10s.
-    try {
-      var gm = window.EJS_emulator.gameManager;
-      var raw = gm.getState();
-      var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
-    } catch (_) { return null; }
+    // Diagnostic: measure cost of each approach and stream to server.
+    var t0, t1, t2, t3;
+    var diagParts = [];
+
+    // 1. Try direct RDRAM read
+    if (_hashRegion && _hashRegion.ptr) {
+      t0 = performance.now();
+      var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
+      var bufDetached = !buf || buf.byteLength === 0;
+      t1 = performance.now();
+      diagParts.push('buf=' + (bufDetached ? 'DETACHED' : buf.byteLength + 'B') +
+        ' (' + (t1 - t0).toFixed(1) + 'ms)');
+
+      if (!bufDetached) {
+        t0 = performance.now();
+        var live = new Uint8Array(buf);
+        var base = _hashRegion.ptr;
+        // Read 4 bytes at 8 points across RDRAM to check liveness
+        var samples = [];
+        for (var si = 0; si < 8; si++) {
+          var off = base + si * 0x100000; // every 1MB
+          if (off + 4 <= live.length) {
+            samples.push(((live[off] << 24) | (live[off+1] << 16) |
+              (live[off+2] << 8) | live[off+3]) >>> 0);
+          }
+        }
+        t1 = performance.now();
+        diagParts.push('rdram=[' + samples.map(function(s) {
+          return s.toString(16);
+        }).join(',') + '] (' + (t1 - t0).toFixed(1) + 'ms)');
+
+        // Hash 4KB sample (256B from each of 16 points across RDRAM)
+        t0 = performance.now();
+        var sampleData = new Uint8Array(4096);
+        var stride = Math.floor(_hashRegion.size / 16);
+        for (var hi = 0; hi < 16; hi++) {
+          var hOff = base + hi * stride;
+          sampleData.set(live.subarray(hOff, hOff + 256), hi * 256);
+        }
+        t1 = performance.now();
+        diagParts.push('sample (' + (t1 - t0).toFixed(1) + 'ms)');
+      }
+    }
+
+    // 2. Measure getState cost
+    t2 = performance.now();
+    var gm = window.EJS_emulator.gameManager;
+    var raw = gm.getState();
+    t3 = performance.now();
+    var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    diagParts.push('getState=' + Math.round(bytes.length / 1024) + 'KB (' +
+      (t3 - t2).toFixed(1) + 'ms)');
+
+    // Stream diagnostic
+    _streamSync('diag: ' + diagParts.join(' | '));
+
+    // Use getState RDRAM section for hash
+    return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
   }
 
   // -- Async state sync (compress/decompress via Web Worker) -----------------
@@ -2443,9 +2489,13 @@
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
     _pushingSyncState = true;
+    var ps0 = performance.now();
     var raw = gm.getState();
+    var ps1 = performance.now();
     var currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     var frame = _frameNum;
+    _streamSync('host getState: ' + Math.round(currentState.length / 1024) + 'KB, ' +
+      (ps1 - ps0).toFixed(1) + 'ms');
 
     // Delta sync: XOR against previous state. The delta is mostly zeros
     // (unchanged bytes) which compresses ~100x better than full state.
@@ -2559,7 +2609,9 @@
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
     if (!gm) return;
 
+    var lt0 = performance.now();
     gm.loadState(bytes);
+    var lt1 = performance.now();
 
     // Re-capture rAF runner (loadState may invalidate _pendingRunner)
     var mod = gm.Module;
@@ -2568,7 +2620,9 @@
 
     _resyncCount++;
     _consecutiveResyncs++;
-    // No backoff — keep checking at base interval for fastest correction.
+
+    _streamSync('loadState: ' + Math.round(bytes.length / 1024) + 'KB, ' +
+      (lt1 - lt0).toFixed(1) + 'ms');
 
     // Purge stale remote inputs above the new frame
     Object.keys(_remoteInputs).forEach((slot) => {
