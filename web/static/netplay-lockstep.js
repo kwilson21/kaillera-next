@@ -164,6 +164,7 @@
           var parts = [];
           for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
           _debugLog.push('[' + ts + '] ' + parts.join(' '));
+          if (_debugLog.length > 2000) _debugLog.splice(0, 500);
         }
       }
     };
@@ -2417,16 +2418,11 @@
     // SSB64 game-specific sync: read targeted RDRAM regions containing
     // match state and player data. Uses wasmMemory.buffer for live access.
     // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
-    // Try multiple ways to access live WASM memory (varies by Emscripten build)
-    var liveBuf = null;
-    if (mod.wasmMemory) liveBuf = mod.wasmMemory.buffer;
-    else if (mod.asm && mod.asm.memory) liveBuf = mod.asm.memory.buffer;
-    else if (mod.buffer) liveBuf = mod.buffer;
-    else if (mod.HEAPU8) liveBuf = mod.HEAPU8.buffer;
-
-    if (_hashRegion && _hashRegion.ptr && liveBuf) {
+    if (_hashRegion && _hashRegion.ptr && mod.HEAPU8) {
       try {
-        var live = new Uint8Array(liveBuf);
+        // Use mod.HEAPU8 directly instead of creating a new Uint8Array view
+        // of the entire WASM memory (~256MB) — avoids GC pressure on mobile.
+        var live = mod.HEAPU8;
         var base = _hashRegion.ptr;
 
 
@@ -2451,9 +2447,12 @@
           hashes.push(rh);
           parts.push(rd);
         }
-        _streamSync('regions: ' + regions.map(function(r, i) {
-          return r[2] + '=' + hashes[i];
-        }).join(' '));
+        // Only stream region details periodically (not every check — too chatty on mobile)
+        if (_frameNum % (_syncCheckInterval * 5) === 0) {
+          _streamSync('regions: ' + regions.map(function(r, i) {
+            return r[2] + '=' + hashes[i];
+          }).join(' '));
+        }
         // Combine for overall hash
         var totalLen = parts.reduce(function(a, p) { return a + p.length; }, 0);
         var combined = new Uint8Array(totalLen);
