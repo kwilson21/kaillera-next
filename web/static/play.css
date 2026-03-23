@@ -138,6 +138,12 @@ body {
   margin-left: auto;
 }
 
+.player-slot .device {
+  font-size: 14px;
+  color: #888;
+  margin-left: 6px;
+}
+
 .gamepad-detected { color: #6f6 !important; }
 
 #spectator-list {

@@ -47,7 +47,7 @@
   let _romTransferResumeAttempts = 0;
   let _romTransferLastChunkAt = 0;
   let _romTransferWatchdog = null;
-  let _currentInputType = 'keyboard';    // 'keyboard' or 'gamepad' — last used
+  let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
   function escapeHtml(s) {
@@ -99,6 +99,7 @@
   function sendDeviceType() {
     if (socket && socket.connected) {
       socket.emit('device-type', { type: _isMobile ? 'mobile' : 'desktop' });
+      socket.emit('input-type', { type: _currentInputType });
     }
   }
 
@@ -1856,10 +1857,12 @@
   }
 
   function setupInputTypeDetection() {
-    // Keyboard → set to keyboard
-    document.addEventListener('keydown', () => {
-      setInputType('keyboard');
-    });
+    // Mobile always uses gamepad (virtual touch or real) — no keyboard switching
+    if (!_isMobile) {
+      document.addEventListener('keydown', () => {
+        setInputType('keyboard');
+      });
+    }
 
     // Gamepad → set to gamepad (checked via GamepadManager onUpdate)
     // The updateGamepadUI callback already fires on gamepad changes;
