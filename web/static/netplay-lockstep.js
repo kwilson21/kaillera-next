@@ -430,29 +430,6 @@
     if (msg.type === 'save-state')          handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state')     handleLateJoinState(msg);
     if (msg.type === 'request-late-join')   handleLateJoinRequest(msg);
-    if (msg.type === 'peer-paused' && msg.sender) {
-      var senderPeer = _peers[msg.sender];
-      if (senderPeer) {
-        senderPeer.paused = true;
-        if (senderPeer.slot !== null && senderPeer.slot !== undefined) {
-          try { writeInputToMemory(senderPeer.slot, 0); } catch (_) {}
-        }
-        var known = _knownPlayers[msg.sender];
-        var name = known ? known.playerName : 'Player';
-        setStatus(name + ' paused');
-        if (_config && _config.onToast) _config.onToast(name + ' paused');
-      }
-    }
-    if (msg.type === 'peer-resumed' && msg.sender) {
-      var senderPeer2 = _peers[msg.sender];
-      if (senderPeer2) {
-        senderPeer2.paused = false;
-        var known2 = _knownPlayers[msg.sender];
-        var name2 = known2 ? known2.playerName : 'Player';
-        setStatus(name2 + ' returned');
-        if (_config && _config.onToast) _config.onToast(name2 + ' returned');
-      }
-    }
   }
 
   function handleLateJoinRequest(msg) {
@@ -803,23 +780,10 @@
           peer._intentionalLeave = true;
           return;
         }
-        if (e.data === 'peer-paused') {
-          peer.paused = true;
-          if (peer.slot !== null && peer.slot !== undefined) {
-            try { writeInputToMemory(peer.slot, 0); } catch (_) {}
-          }
+        if (e.data === 'peer-resumed') {
           var known = _knownPlayers[remoteSid];
           var name = known ? known.playerName : 'P' + ((peer.slot || 0) + 1);
-          setStatus(name + ' paused');
-          if (_config && _config.onToast) _config.onToast(name + ' paused');
-          return;
-        }
-        if (e.data === 'peer-resumed') {
-          peer.paused = false;
-          var known2 = _knownPlayers[remoteSid];
-          var name2 = known2 ? known2.playerName : 'P' + ((peer.slot || 0) + 1);
-          setStatus(name2 + ' returned');
-          if (_config && _config.onToast) _config.onToast(name2 + ' returned');
+          if (_config && _config.onToast) _config.onToast(name + ' returned');
           return;
         }
         // State sync: hash check from host
@@ -940,9 +904,8 @@
       if (_config && _config.onToast) _config.onToast(name + ' disconnected — reconnecting...');
       if (_config && _config.onReconnecting) _config.onReconnecting(remoteSid, true);
 
-      // Lower slot initiates reconnect (unless paused — visible side initiates)
-      var shouldInitiate = (!peer.paused && _playerSlot < peer.slot) || (peer.paused);
-      if (shouldInitiate) {
+      // Lower slot initiates reconnect
+      if (_playerSlot < peer.slot) {
         attemptReconnect(remoteSid);
       }
 
@@ -1072,7 +1035,7 @@
   // momentarily empty between frames (causes 3+ player desync).
   function getInputPeers() {
     return getActivePeers().filter((p) =>
-      _peerInputStarted[p.slot] && !p.paused && !p.reconnecting
+      _peerInputStarted[p.slot] && !p.reconnecting
     );
   }
 
@@ -1744,9 +1707,11 @@
 
     window._lockstepActive = true;
 
-    // Pause/resume on tab visibility change (alt-tab)
-    // Only broadcast if tab was hidden for >500ms (avoids spam when switching
-    // between two game tabs on the same machine).
+    // Background tab handling: silently pause tick loop to prevent frame drift,
+    // then fast-forward and resync on return. NO peer-paused/peer-resumed
+    // messages — peers handle missing input naturally via stall timeout.
+    // This is critical for multi-tab setups (2 players in different tabs on
+    // the same machine) where one tab is always document.hidden.
     var _pausedAt = 0;
     document.addEventListener('visibilitychange', function () {
       if (!_running) return;
@@ -1761,71 +1726,39 @@
         console.log('[lockstep] tab visible — resuming from frame', _pausedAtFrame,
           '(paused', pauseDuration, 'ms)');
 
-        // Short pause (<500ms): just resume ticking, no broadcast or resync.
+        // Short pause (<500ms): just resume ticking, no resync needed.
         if (pauseDuration < 500) return;
+
+        // Notify peers we returned (toast only, no gameplay effect)
+        var activePeers2 = getActivePeers();
+        for (var r = 0; r < activePeers2.length; r++) {
+          try { activePeers2[r].dc.send('peer-resumed'); } catch (_) {}
+        }
 
         // Fast-forward _frameNum to catch up with peers. While we were paused,
         // peers kept running and our old frame's remote inputs are long gone.
-        // Without this, tick() stalls forever waiting for input that will never arrive.
+        // Without this, tick() stalls forever waiting for input that never arrives.
         if (_lastRemoteFrame > _frameNum) {
           console.log('[lockstep] fast-forward:', _frameNum, '->', _lastRemoteFrame);
           _frameNum = _lastRemoteFrame;
           window._frameNum = _frameNum;
-          // Clear stale input buffers
           _localInputs = {};
           _remoteInputs = {};
-          // Pre-fill delay gap with zero input so tick() doesn't stall
+          // Pre-fill delay gap so tick() doesn't stall immediately
           for (var d = 0; d < DELAY_FRAMES; d++) {
             _localInputs[_frameNum + d] = 0;
           }
         }
 
-        // Broadcast resume and request resync
-        var activePeers = getActivePeers();
-        for (var i = 0; i < activePeers.length; i++) {
-          try { activePeers[i].dc.send('peer-resumed'); } catch (_) {}
-        }
-        if (activePeers.length === 0 && socket) {
-          socket.emit('data-message', { type: 'peer-resumed', sender: socket.id });
-        }
-        // Resync after pause: always request state from host (frame fast-forward
-        // puts us at the right frame but emulator state is stale).
+        // Request resync from host (emulator state is stale after fast-forward)
         if (_playerSlot === 0) {
-          // Host: reset sync check so guests can detect drift quickly
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
         } else {
-          // Guest: request full state from host
           var hostPeer = Object.values(_peers).find(function (p) { return p.slot === 0; });
           if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
             try { hostPeer.dc.send('sync-request'); } catch (_) {}
           }
-        }
-      }
-    });
-
-    // Broadcast pause after a short delay — only if still hidden.
-    // This avoids spamming peers during rapid tab switches.
-    var _pauseBroadcastTimer = null;
-    document.addEventListener('visibilitychange', function () {
-      if (!_running) return;
-      if (document.hidden) {
-        if (_pauseBroadcastTimer) clearTimeout(_pauseBroadcastTimer);
-        _pauseBroadcastTimer = setTimeout(function () {
-          _pauseBroadcastTimer = null;
-          if (!document.hidden || !_paused) return;
-          var activePeers = getActivePeers();
-          for (var i = 0; i < activePeers.length; i++) {
-            try { activePeers[i].dc.send('peer-paused'); } catch (_) {}
-          }
-          if (activePeers.length === 0 && socket) {
-            socket.emit('data-message', { type: 'peer-paused', sender: socket.id });
-          }
-        }, 500);
-      } else {
-        if (_pauseBroadcastTimer) {
-          clearTimeout(_pauseBroadcastTimer);
-          _pauseBroadcastTimer = null;
         }
       }
     });

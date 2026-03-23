@@ -105,8 +105,8 @@ def _start_lockstep_game(host, guest, server_url, room):
     )
 
 
-def test_pause_toast_on_visibility_change(browser, server_url):
-    """Background pause broadcasts pause/resume and shows toasts."""
+def test_resume_toast_on_visibility_change(browser, server_url):
+    """Returning from background sends 'returned' toast to peers."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
@@ -114,7 +114,7 @@ def test_pause_toast_on_visibility_change(browser, server_url):
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P1"))
 
-        # Simulate guest going to background
+        # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
             Object.defineProperty(document, 'hidden', {
                 value: true, configurable: true
@@ -122,16 +122,8 @@ def test_pause_toast_on_visibility_change(browser, server_url):
             document.dispatchEvent(new Event('visibilitychange'));
         """)
 
-        # Pause broadcast is debounced by 500ms
         time.sleep(0.8)
 
-        # Host should see "paused" toast
-        host.wait_for_function(
-            "document.getElementById('toast-container').textContent.includes('paused')",
-            timeout=5000,
-        )
-
-        # Simulate guest returning (>500ms later to trigger resume path)
         guest.evaluate("""
             Object.defineProperty(document, 'hidden', {
                 value: false, configurable: true
@@ -228,8 +220,8 @@ def test_rom_transfer_mobile_ua(browser, server_url):
         _cleanup(host, guest, host_ctx, mobile_ctx)
 
 
-def test_paused_peer_input_excluded(browser, server_url):
-    """Paused peer is marked as paused on the host side."""
+def test_background_tab_resumes_cleanly(browser, server_url):
+    """Background tab fast-forwards and resyncs on return."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
@@ -237,10 +229,10 @@ def test_paused_peer_input_excluded(browser, server_url):
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P2"))
 
-        # Record frame number
+        # Record host frame
         initial_frame = host.evaluate("window._frameNum")
 
-        # Simulate guest going to background
+        # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
             Object.defineProperty(document, 'hidden', {
                 value: true, configurable: true
@@ -248,26 +240,16 @@ def test_paused_peer_input_excluded(browser, server_url):
             document.dispatchEvent(new Event('visibilitychange'));
         """)
 
-        # Wait for debounced pause broadcast
-        time.sleep(0.8)
-
-        # Verify peer is marked as paused on host side
-        host.wait_for_function(
-            """(() => {
-                var peers = Object.values(window._peers || {});
-                return peers.length > 0 && peers[0].paused === true;
-            })()""",
-            timeout=5000,
-        )
-
-        # Verify host game continues (frames advance despite paused peer)
+        # Let host advance while guest is paused
         time.sleep(2)
+
+        # Host should keep advancing
         later_frame = host.evaluate("window._frameNum")
         assert later_frame > initial_frame, (
-            f"Game stalled: frame stayed at {initial_frame}"
+            f"Host stalled: frame stayed at {initial_frame}"
         )
 
-        # Simulate guest returning
+        # Guest returns
         guest.evaluate("""
             Object.defineProperty(document, 'hidden', {
                 value: false, configurable: true
@@ -275,13 +257,10 @@ def test_paused_peer_input_excluded(browser, server_url):
             document.dispatchEvent(new Event('visibilitychange'));
         """)
 
-        # Verify peer is no longer paused
-        host.wait_for_function(
-            """(() => {
-                var peers = Object.values(window._peers || {});
-                return peers.length > 0 && peers[0].paused === false;
-            })()""",
-            timeout=5000,
+        # Guest should fast-forward and resume (frame advances past 0)
+        guest.wait_for_function(
+            "window._frameNum > 0",
+            timeout=10000,
         )
     finally:
         _cleanup(host, guest, ctx)
