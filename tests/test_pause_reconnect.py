@@ -6,13 +6,35 @@ Requires: dev server running at localhost:8000, ROM file at ROM_PATH.
 """
 
 import os
+import random
 import re
+import string
 import time
 
 import pytest
 from playwright.sync_api import expect
 
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
+
+
+def _room_id(prefix):
+    """Generate a unique room name to avoid stale room conflicts."""
+    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    return f"{prefix}{suffix}"
+
+
+@pytest.fixture(scope="module")
+def server_url():
+    """Use the already-running dev server (user manages it)."""
+    import requests
+    url = "http://localhost:8000"
+    try:
+        r = requests.get(f"{url}/health", timeout=2)
+        if r.status_code != 200:
+            pytest.skip("Dev server not running on localhost:8000")
+    except Exception:
+        pytest.skip("Dev server not running on localhost:8000")
+    return url
 
 
 @pytest.fixture(autouse=True)
@@ -34,12 +56,30 @@ def _load_rom(page):
     )
 
 
+def _cleanup(*pages_and_contexts):
+    """Navigate pages to about:blank (forces Socket.IO disconnect), then close."""
+    for item in pages_and_contexts:
+        try:
+            if hasattr(item, "goto") and not item.is_closed():
+                item.goto("about:blank")
+        except Exception:
+            pass
+    time.sleep(0.3)
+    for item in pages_and_contexts:
+        try:
+            item.close()
+        except Exception:
+            pass
+
+
 def _start_lockstep_game(host, guest, server_url, room):
     """Set up a 2-player lockstep game with real ROM, wait for lockstep loop."""
-    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host",
+              wait_until="networkidle")
     expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-    guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+    guest.goto(f"{server_url}/play.html?room={room}&name=Guest",
+               wait_until="networkidle")
     expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
     _load_rom(host)
@@ -67,11 +107,12 @@ def _start_lockstep_game(host, guest, server_url, room):
 
 def test_pause_toast_on_visibility_change(browser, server_url):
     """Background pause broadcasts pause/resume and shows toasts."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    ctx = browser.new_context()
+    host = ctx.new_page()
+    guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, "PAUSE01")
+        _start_lockstep_game(host, guest, server_url, _room_id("P1"))
 
         # Simulate guest going to background
         guest.evaluate("""
@@ -104,17 +145,17 @@ def test_pause_toast_on_visibility_change(browser, server_url):
             timeout=5000,
         )
     finally:
-        host.close()
-        guest.close()
+        _cleanup(host, guest, ctx)
 
 
 def test_reconnect_overlay_on_dc_close(browser, server_url):
     """Reconnect overlay appears when DataChannel dies."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    ctx = browser.new_context()
+    host = ctx.new_page()
+    guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, "RECON01")
+        _start_lockstep_game(host, guest, server_url, _room_id("RC"))
 
         # Kill guest's DataChannel (only DC in 2-player game)
         guest.evaluate("""
@@ -143,13 +184,14 @@ def test_reconnect_overlay_on_dc_close(browser, server_url):
             timeout=20000,
         )
     finally:
-        host.close()
-        guest.close()
+        _cleanup(host, guest, ctx)
 
 
 def test_rom_transfer_mobile_ua(browser, server_url):
     """ROM transfer completes with mobile user agent (smaller chunks)."""
-    host = browser.new_page()
+    room = _room_id("MR")
+    host_ctx = browser.new_context()
+    host = host_ctx.new_page()
     mobile_ctx = browser.new_context(
         user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
                    "AppleWebKit/605.1.15"
@@ -157,7 +199,8 @@ def test_rom_transfer_mobile_ua(browser, server_url):
     guest = mobile_ctx.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=MOBROM01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host",
+                  wait_until="networkidle")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
         _load_rom(host)
@@ -169,7 +212,8 @@ def test_rom_transfer_mobile_ua(browser, server_url):
         """)
 
         # Guest joins
-        guest.goto(f"{server_url}/play.html?room=MOBROM01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest",
+                   wait_until="networkidle")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Guest accepts ROM sharing
@@ -186,18 +230,17 @@ def test_rom_transfer_mobile_ua(browser, server_url):
             timeout=60000,
         )
     finally:
-        host.close()
-        guest.close()
-        mobile_ctx.close()
+        _cleanup(host, guest, host_ctx, mobile_ctx)
 
 
 def test_paused_peer_input_excluded(browser, server_url):
     """Paused peer is marked as paused on the host side."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    ctx = browser.new_context()
+    host = ctx.new_page()
+    guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, "PAUSE02")
+        _start_lockstep_game(host, guest, server_url, _room_id("P2"))
 
         # Record frame number
         initial_frame = host.evaluate("window._frameNum")
@@ -246,5 +289,4 @@ def test_paused_peer_input_excluded(browser, server_url):
             timeout=5000,
         )
     finally:
-        host.close()
-        guest.close()
+        _cleanup(host, guest, ctx)
