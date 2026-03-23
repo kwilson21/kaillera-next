@@ -75,6 +75,7 @@ class Room:
     rom_sharing: bool = False     # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
+    device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -103,6 +104,7 @@ def _players_payload(room: Room) -> dict:
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
                 "inputType": room.input_types.get(info["socketId"], "keyboard"),
+                "deviceType": room.device_types.get(info["socketId"], "desktop"),
             }
             for pid, info in room.players.items()
         },
@@ -153,6 +155,7 @@ async def _leave(sid: str) -> None:
 
     room.rom_ready.discard(sid)
     room.input_types.pop(sid, None)
+    room.device_types.pop(sid, None)
 
     await sio.leave_room(sid, session_id)
     log.info("SIO %s left room %s (playerId=%s, spectator=%s)", sid, session_id, player_id, is_spectator)
@@ -470,6 +473,23 @@ async def input_type(sid: str, data: dict) -> str | None:
     return None
 
 
+@sio.on("device-type")
+async def device_type(sid: str, data: dict) -> str | None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
+        return "Not in a room"
+    session_id, room = result
+
+    dtype = data.get("type", "desktop")
+    if dtype not in ("desktop", "mobile"):
+        dtype = "desktop"
+    room.device_types[sid] = dtype
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    return None
+
+
 @sio.on("webrtc-signal")
 async def webrtc_signal(sid: str, data: dict) -> None:
     if not isinstance(data, dict):
@@ -539,6 +559,21 @@ async def game_input(sid: str, data: dict) -> None:
         return
     session_id, room = result
     await sio.emit("input", data, room=session_id, skip_sid=sid)
+
+
+@sio.on("debug-sync")
+async def debug_sync(sid: str, data: dict) -> None:
+    """Real-time sync status — appends to logs/live.log for live tailing."""
+    from pathlib import Path
+    entry = _sid_to_room.get(sid)
+    room_id = entry[0] if entry else "?"
+    slot = data.get("slot", "?")
+    msg = data.get("msg", "")
+    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    with open(log_dir / "live.log", "a") as f:
+        f.write(f"[P{slot}] {msg}\n")
+        f.flush()
 
 
 @sio.on("debug-logs")

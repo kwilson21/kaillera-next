@@ -307,6 +307,13 @@
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
   let _lastResyncRequest = 0;      // timestamp of last sync-request (30s cooldown)
   let _prevChunkHashes = null;     // RDRAM scan: previous chunk hashes for delta detection
+
+  function _streamSync(msg) {
+    // Stream sync events to server in real-time (appends to logs/live.log)
+    if (socket && socket.connected) {
+      socket.emit('debug-sync', { slot: _playerSlot, msg: msg });
+    }
+  }
   let _syncChunks        = [];     // incoming chunks from host DC
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
@@ -831,18 +838,20 @@
               var peerRef = peer;
               workerPost({ type: 'hash', data: guestBytes }).then(function (res) {
                 if (res.hash !== hostHash) {
-                  console.log('[lockstep] DESYNC at frame ' + syncFrame +
-                    ' local=' + res.hash + ' host=' + hostHash);
+                  var msg = 'DESYNC frame=' + syncFrame + ' local=' + res.hash + ' host=' + hostHash;
+                  console.log('[lockstep] ' + msg);
+                  _streamSync(msg);
                   // Rate-limit resync: no pending resync AND 30s cooldown
                   var now = performance.now();
                   if (!_pendingResyncState && (!_lastResyncRequest || now - _lastResyncRequest > 30000)) {
                     _lastResyncRequest = now;
                     try { peerRef.dc.send('sync-request'); } catch (_) {}
-                    console.log('[lockstep] sync-request sent (next allowed in 30s)');
+                    _streamSync('sync-request sent');
                   }
                 } else {
-                  console.log('[lockstep] sync OK at frame ' + syncFrame +
-                    ' hash=' + res.hash);
+                  var msg2 = 'sync OK frame=' + syncFrame + ' hash=' + res.hash;
+                  console.log('[lockstep] ' + msg2);
+                  _streamSync(msg2);
                   _consecutiveResyncs = 0;
                   _syncCheckInterval = _syncBaseInterval;
                 }
@@ -1996,15 +2005,16 @@
       if (hashBytes) {
         var checkFrame = _frameNum;
         var peers = getActivePeers();
-        var peerSlotList = peers.map(function (p) { return p.slot; });
         workerPost({ type: 'hash', data: hashBytes }).then(function (res) {
           var syncMsg = 'sync-hash:' + checkFrame + ':' + res.hash;
           var sent = 0;
           for (var s = 0; s < peers.length; s++) {
             try { peers[s].dc.send(syncMsg); sent++; } catch (_) {}
           }
-          console.log('[lockstep] sync check at frame ' + checkFrame +
-            ' sent to ' + sent + '/' + peers.length + ' peers (slots: ' + peerSlotList.join(',') + ')');
+          var hostMsg = 'sync-check frame=' + checkFrame + ' hash=' + res.hash +
+            ' sent=' + sent + '/' + peers.length;
+          console.log('[lockstep] ' + hostMsg);
+          _streamSync(hostMsg);
         }).catch(function () {});
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
           console.log('[lockstep] sync check at frame', _frameNum);
@@ -2430,7 +2440,9 @@
             _prevChunkHashes[ci] = h;
           }
           if (changed.length > 0) {
-            console.log('[lockstep] RDRAM changed regions (64KB chunks): ' + changed.join(','));
+            var changedMsg = 'RDRAM changed: ' + changed.join(',');
+            console.log('[lockstep] ' + changedMsg);
+            _streamSync(changedMsg);
           }
         }
 
@@ -2583,11 +2595,10 @@
       });
     });
 
-    if (_resyncCount <= 3 || _resyncCount % 10 === 0) {
-      console.log('[lockstep] sync #' + _resyncCount + ' applied (state from frame ' +
-        frame + ', continuing at ' + _frameNum +
-        ', next check in ' + _syncCheckInterval + ' frames)');
-    }
+    var syncMsg = 'sync #' + _resyncCount + ' applied (frame ' + frame +
+      ' -> ' + _frameNum + ', next in ' + _syncCheckInterval + 'f)';
+    console.log('[lockstep] ' + syncMsg);
+    _streamSync(syncMsg);
   }
 
   // -- Init / Stop API -------------------------------------------------------
