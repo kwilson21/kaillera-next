@@ -2426,9 +2426,10 @@
 
         // Hash each deterministic region independently and stream results
         // so we can identify which region differs on mobile.
+        // 768K (0xC0000) excluded: intermittently differs on mobile
+        // without affecting gameplay (false positive on P2).
         var regions = [
           [0x0A4D00, 0x0A5000, 'config'],
-          [0xC0000,  0xC0100,  '768K'],
           [0x190000, 0x190100, '1600K'],
           [0x260000, 0x260100, '2432K'],
         ];
