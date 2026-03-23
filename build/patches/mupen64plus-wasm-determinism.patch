@@ -83,7 +83,7 @@ index f4b1492..6579c51 100644
  
  const struct clock_backend_interface g_iclock_ctime_plus_delta =
 diff --git a/mupen64plus-core/src/device/r4300/fpu.h b/mupen64plus-core/src/device/r4300/fpu.h
-index 6d17553..da3ee5b 100644
+index 6d17553..515e592 100644
 --- a/mupen64plus-core/src/device/r4300/fpu.h
 +++ b/mupen64plus-core/src/device/r4300/fpu.h
 @@ -24,6 +24,7 @@
@@ -94,7 +94,7 @@ index 6d17553..da3ee5b 100644
  
  #ifdef _MSC_VER
  #define M64P_FPU_INLINE static __inline
-@@ -224,10 +225,24 @@ M64P_FPU_INLINE void fpu_check_input_double(uint32_t* fcr31, const double* value
+@@ -224,13 +225,49 @@ M64P_FPU_INLINE void fpu_check_input_double(uint32_t* fcr31, const double* value
  
  M64P_FPU_INLINE void fpu_check_output_float(uint32_t* fcr31, const float* value)
  {
@@ -118,6 +118,87 @@ index 6d17553..da3ee5b 100644
 +#endif
  }
  #endif /* ACCURATE_FPU_BEHAVIOR */
+ 
++#ifdef __EMSCRIPTEN__
++M64P_FPU_INLINE void fpu_canon_float(float* value)
++{
++    if (isnan(*value))
++    {
++        static const uint32_t canon_nan_f = 0x7FC00000;
++        memcpy(value, &canon_nan_f, sizeof(float));
++    }
++}
++M64P_FPU_INLINE void fpu_canon_double(double* value)
++{
++    if (isnan(*value))
++    {
++        static const uint64_t canon_nan_d = 0x7FF8000000000000ULL;
++        memcpy(value, &canon_nan_d, sizeof(double));
++    }
++}
++#else
++M64P_FPU_INLINE void fpu_canon_float(float* value) { (void)value; }
++M64P_FPU_INLINE void fpu_canon_double(double* value) { (void)value; }
++#endif
++
+ M64P_FPU_INLINE void cvt_s_w(uint32_t* fcr31, const int32_t* source, float* dest)
+ {
+     set_rounding(*fcr31);
+diff --git a/mupen64plus-core/src/device/r4300/mips_instructions.def b/mupen64plus-core/src/device/r4300/mips_instructions.def
+index d6d46bd..c4317fa 100644
+--- a/mupen64plus-core/src/device/r4300/mips_instructions.def
++++ b/mupen64plus-core/src/device/r4300/mips_instructions.def
+@@ -1446,6 +1446,7 @@ DECLARE_INSTRUCTION(LWC1)
+     ADD_TO_PC(1);
+ 
+     r4300_read_aligned_word(r4300, lslfaddr, (uint32_t*)r4300_cp1_regs_simple(&r4300->cp1)[lslfft]);
++    fpu_canon_float(r4300_cp1_regs_simple(&r4300->cp1)[lslfft]);
+ }
+ 
+ DECLARE_INSTRUCTION(LDC1)
+@@ -1457,6 +1458,7 @@ DECLARE_INSTRUCTION(LDC1)
+     ADD_TO_PC(1);
+ 
+     r4300_read_aligned_dword(r4300, lslfaddr, (uint64_t*)r4300_cp1_regs_double(&r4300->cp1)[lslfft]);
++    fpu_canon_double(r4300_cp1_regs_double(&r4300->cp1)[lslfft]);
+ }
+ 
+ DECLARE_INSTRUCTION(SWC1)
+@@ -1467,6 +1469,7 @@ DECLARE_INSTRUCTION(SWC1)
+     if (check_cop1_unusable(r4300)) { return; }
+     ADD_TO_PC(1);
+ 
++    fpu_canon_float(r4300_cp1_regs_simple(&r4300->cp1)[lslfft]);
+     r4300_write_aligned_word(r4300, lslfaddr, *((uint32_t*)(r4300_cp1_regs_simple(&r4300->cp1))[lslfft]), ~UINT32_C(0));
+ }
+ 
+@@ -1478,6 +1481,7 @@ DECLARE_INSTRUCTION(SDC1)
+     if (check_cop1_unusable(r4300)) { return; }
+     ADD_TO_PC(1);
+ 
++    fpu_canon_double(r4300_cp1_regs_double(&r4300->cp1)[lslfft]);
+     r4300_write_aligned_dword(r4300, lslfaddr, *((uint64_t*)(r4300_cp1_regs_double(&r4300->cp1))[lslfft]), ~UINT64_C(0));
+ }
+ 
+@@ -1485,7 +1489,8 @@ DECLARE_INSTRUCTION(MFC1)
+ {
+     DECLARE_R4300
+     if (check_cop1_unusable(r4300)) { return; }
+-    rrt = SE32(*((int32_t*) (r4300_cp1_regs_simple(&r4300->cp1))[rfs]));
++    fpu_canon_float(r4300_cp1_regs_simple(&r4300->cp1)[rfs]);
++    rrt = SE32(*((int32_t*)(r4300_cp1_regs_simple(&r4300->cp1))[rfs]));
+     ADD_TO_PC(1);
+ }
+ 
+@@ -1493,7 +1498,8 @@ DECLARE_INSTRUCTION(DMFC1)
+ {
+     DECLARE_R4300
+     if (check_cop1_unusable(r4300)) { return; }
+-    rrt = *((int64_t*) (r4300_cp1_regs_double(&r4300->cp1))[rfs]);
++    fpu_canon_double(r4300_cp1_regs_double(&r4300->cp1)[rfs]);
++    rrt = *((int64_t*)(r4300_cp1_regs_double(&r4300->cp1))[rfs]);
+     ADD_TO_PC(1);
+ }
  
 diff --git a/mupen64plus-core/src/device/r4300/r4300_core.c b/mupen64plus-core/src/device/r4300/r4300_core.c
 index 76e9f50..e8bc2f9 100644

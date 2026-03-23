@@ -262,7 +262,7 @@
   let _diagLastTickTime = 0;       // wall-clock time of previous tick() call
   let _diagEventLog     = [];      // buffered async events [{t, type, detail}]
   let _diagHookInstalled = false;  // true once async event hooks are set up
-  var DIAG_HASH_INTERVAL  = 30;    // frames between RDRAM hash logs (~2x/sec)
+  var DIAG_HASH_INTERVAL  = 10;    // frames between RDRAM hash+dump logs (~6x/sec)
   var DIAG_INPUT_INTERVAL = 30;    // frames between input read logs
   var DIAG_TIME_INTERVAL  = 60;    // frames between timing logs
   var DIAG_EARLY_FRAMES   = 300;   // log everything for first N frames
@@ -329,15 +329,81 @@
     return frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
   }
 
-  // DIAG-HASH: compute and stream RDRAM hash for this player
+  // DIAG-HASH: compute and stream per-region RDRAM hashes for this player
+  var _diagRegionNames = [
+    'cfg', 'ps0', 'ps1', 'ps2', 'ph1a', 'ph1b', 'ph1c', 'misc', 'ph2', 'ph3a', 'ph3b', 'ph3c'
+  ];
+  // Hex lookup table for byte-to-hex conversion
+  var _hexLUT = [];
+  for (var _hi = 0; _hi < 256; _hi++) _hexLUT[_hi] = (_hi < 16 ? '0' : '') + _hi.toString(16);
+  function _bytesToHex(bytes, off, len) {
+    var s = '';
+    for (var i = off; i < off + len; i++) s += _hexLUT[bytes[i]];
+    return s;
+  }
+
+  function _diagGetRdram() {
+    var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+              window.EJS_emulator.gameManager.Module;
+    if (!mod) return null;
+    if (!_hashRegion) { getHashBytes(); }
+    if (!_hashRegion || !_hashRegion.ptr) return null;
+    var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
+    if (!buf || buf.byteLength === 0) return null;
+    return { live: new Uint8Array(buf), base: _hashRegion.ptr };
+  }
+
   function _diagHash(frameNum) {
     if (!_diagShouldLog(frameNum, DIAG_HASH_INTERVAL)) return;
-    var hashBytes = getHashBytes();
-    if (!hashBytes) return;
+    var rd = _diagGetRdram();
+    if (!rd) return;
+    var gameRegions = [
+      0xA4000, 0xBA000, 0xBF000, 0xC4000,
+      0x262000, 0x266000, 0x26A000, 0x290000,
+      0x2F6000, 0x32B000, 0x330000, 0x335000
+    ];
+    var SAMPLE = 256;
     var f = frameNum;
-    workerPost({ type: 'hash', data: hashBytes }).then(function (res) {
-      _streamSync('DIAG-HASH f=' + f + ' hash=' + res.hash);
-    }).catch(function () {});
+    var pending = gameRegions.length;
+    var regionHashes = new Array(gameRegions.length);
+    for (var gi = 0; gi < gameRegions.length; gi++) {
+      (function (idx) {
+        var gOff = rd.base + gameRegions[idx];
+        var regionBytes = rd.live.slice(gOff, gOff + SAMPLE);
+        workerPost({ type: 'hash', data: regionBytes }).then(function (res) {
+          regionHashes[idx] = res.hash;
+          pending--;
+          if (pending === 0) {
+            var parts = [];
+            for (var r = 0; r < regionHashes.length; r++) {
+              parts.push(_diagRegionNames[r] + '=' + regionHashes[r]);
+            }
+            _streamSync('DIAG-HASH f=' + f + ' ' + parts.join(' '));
+          }
+        }).catch(function () { pending--; });
+      })(gi);
+    }
+  }
+
+  // DIAG-DUMP: hex dump of ps0 (0xBA000) and ps1 (0xBF000) — the diverging regions.
+  // Dumps 64 bytes from each at 4 sub-offsets (0, 64, 128, 192) to find which
+  // part of the 256-byte sample diverges. Runs every DIAG_HASH_INTERVAL frames.
+  function _diagDump(frameNum) {
+    if (!_diagShouldLog(frameNum, DIAG_HASH_INTERVAL)) return;
+    var rd = _diagGetRdram();
+    if (!rd) return;
+    // Dump 4 x 32-byte chunks from ps0 and ps1 (128 hex chars per chunk, manageable)
+    var dumpRegions = [
+      { name: 'ps0', off: 0xBA000 },
+      { name: 'ps1', off: 0xBF000 }
+    ];
+    for (var di = 0; di < dumpRegions.length; di++) {
+      var addr = rd.base + dumpRegions[di].off;
+      // 4 chunks of 64 bytes = full 256 byte sample
+      var hex = _bytesToHex(rd.live, addr, 256);
+      _streamSync('DIAG-DUMP f=' + frameNum + ' ' + dumpRegions[di].name +
+        ' @0x' + dumpRegions[di].off.toString(16) + ' ' + hex);
+    }
   }
 
   // DIAG-INPUT: read back per-player inputs from WASM memory using discovered addresses
@@ -2186,6 +2252,7 @@
 
     // -- DIAG: RDRAM hash (after step, captures post-step state) --
     _diagHash(_frameNum - 1);
+    _diagDump(_frameNum - 1);
 
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
     // Compare when we reach or pass the target frame (within a small window).
