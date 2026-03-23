@@ -315,6 +315,7 @@
   let _syncExpected      = 0;      // expected chunk count
   let _syncFrame         = 0;      // frame number of incoming sync
   let _syncIsFull        = true;   // true=full state, false=XOR delta
+  let _lastResyncTime    = 0;      // timestamp of last resync request (10s cooldown)
   let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
   let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
@@ -839,9 +840,11 @@
                   var msg = 'DESYNC frame=' + syncFrame + ' local=' + res.hash + ' host=' + hostHash;
                   console.log('[lockstep] ' + msg);
                   _streamSync(msg);
-                  // Request resync immediately (host's _pushingSyncState guard
-                  // naturally prevents concurrent state pushes)
-                  if (!_pendingResyncState) {
+                  // Request resync with 10s cooldown — constant resyncs freeze
+                  // the game (loadState blocks main thread on mobile)
+                  var now2 = performance.now();
+                  if (!_pendingResyncState && now2 - _lastResyncTime > 10000) {
+                    _lastResyncTime = now2;
                     try { peerRef.dc.send('sync-request'); } catch (_) {}
                     _streamSync('sync-request sent');
                   }
@@ -1978,7 +1981,9 @@
             workerPost({ type: 'hash', data: deferBytes }).then(function (res) {
               if (res.hash !== deferCheck.hash) {
                 console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
-                if (!_pendingResyncState) {
+                var now3 = performance.now();
+                if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
+                  _lastResyncTime = now3;
                   var sp = _peers[deferCheck.peerSid];
                   if (sp && sp.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
                 }
