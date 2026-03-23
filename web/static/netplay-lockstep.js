@@ -146,6 +146,29 @@
 
   const ICE_SERVERS = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
+  // ── Debug log capture ─────────────────────────────────────────────────
+  // Intercepts all console.log('[lockstep] ...') calls for remote debugging.
+  // Unbounded array — game sessions are finite. Pushed to server on demand.
+  var _debugLog = [];
+  var _debugLogStart = Date.now();
+  (function () {
+    var _origLog = console.log;
+    console.log = function () {
+      _origLog.apply(console, arguments);
+      // Capture [lockstep] and [play] prefixed messages
+      if (arguments.length > 0) {
+        var first = String(arguments[0]);
+        if (first.indexOf('[lockstep]') === 0 || first.indexOf('[play]') === 0 ||
+            (arguments.length > 1 && String(arguments[1]).indexOf('[lockstep]') >= 0)) {
+          var ts = ((Date.now() - _debugLogStart) / 1000).toFixed(3);
+          var parts = [];
+          for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+          _debugLog.push('[' + ts + '] ' + parts.join(' '));
+        }
+      }
+    };
+  })();
+
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
@@ -2682,6 +2705,22 @@
         resyncCount: _resyncCount,
         peers: peerInfo,
       };
+    },
+    getDebugLog: function () { return _debugLog.slice(); },
+    dumpLogs: function () {
+      if (socket && socket.connected) {
+        var info = {
+          slot: _playerSlot,
+          frame: _frameNum,
+          running: _running,
+          syncEnabled: _syncEnabled,
+          resyncCount: _resyncCount,
+          peerCount: Object.keys(_peers).length,
+          ua: navigator.userAgent,
+        };
+        socket.emit('debug-logs', { info: info, logs: _debugLog });
+        console.log('[lockstep] dumped', _debugLog.length, 'log entries to server');
+      }
     },
   };
 

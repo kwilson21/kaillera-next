@@ -541,6 +541,34 @@ async def game_input(sid: str, data: dict) -> None:
     await sio.emit("input", data, room=session_id, skip_sid=sid)
 
 
+@sio.on("debug-logs")
+async def debug_logs(sid: str, data: dict) -> None:
+    """Receive debug logs from a client and write to local file."""
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    entry = _sid_to_room.get(sid)
+    room_id = entry[0] if entry else "unknown"
+    info = data.get("info", {})
+    logs = data.get("logs", [])
+
+    filename = f"debug-{room_id}-slot{info.get('slot', '?')}-{datetime.now().strftime('%H%M%S')}.log"
+    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    out = log_dir / filename
+
+    with open(out, "w") as f:
+        f.write(f"Room: {room_id}  SID: {sid}\n")
+        f.write(f"Info: {json.dumps(info, indent=2)}\n")
+        f.write(f"Entries: {len(logs)}\n")
+        f.write("---\n")
+        for line in logs:
+            f.write(line + "\n")
+
+    log.info("Debug logs written: %s (%d entries)", out, len(logs))
+
+
 @sio.event
 async def disconnect(sid: str) -> None:
     log.info("SIO disconnect %s", sid)

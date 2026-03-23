@@ -358,6 +358,10 @@
   function onGameEnded() {
     gameRunning = false;
     if (engine) {
+      // Auto-dump debug logs before stopping
+      if (engine.dumpLogs) {
+        try { engine.dumpLogs(); } catch (_) {}
+      }
       engine.stop();
       engine = null;
     }
@@ -2311,6 +2315,14 @@
 
     const toolbarInfo = document.getElementById('toolbar-info');
     if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
+
+    const dumpLogsBtn = document.getElementById('dump-logs-btn');
+    if (dumpLogsBtn) dumpLogsBtn.addEventListener('click', function () {
+      if (engine && engine.dumpLogs) {
+        engine.dumpLogs();
+        showToast('Debug logs sent to server');
+      }
+    });
 
     const toolbarShare = document.getElementById('toolbar-share');
     if (toolbarShare) toolbarShare.addEventListener('click', toggleShareDropdown);
