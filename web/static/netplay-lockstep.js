@@ -154,8 +154,6 @@
   let _onExtraDataChannel = null;
   let _onUnhandledMessage = null;
 
-  let _paused = false;
-  let _pausedAtFrame = 0;
 
   let _rttSamples = [];
   let _rttComplete = false;
@@ -1707,27 +1705,26 @@
 
     window._lockstepActive = true;
 
-    // Background tab handling: silently pause tick loop to prevent frame drift,
-    // then fast-forward and resync on return. NO peer-paused/peer-resumed
-    // messages — peers handle missing input naturally via stall timeout.
-    // This is critical for multi-tab setups (2 players in different tabs on
-    // the same machine) where one tab is always document.hidden.
-    var _pausedAt = 0;
+    // Background tab handling: do NOT pause the tick loop. Browser naturally
+    // throttles setInterval to ~1fps in background tabs, which keeps the
+    // player sending input (slowly). Pausing completely breaks multi-tab
+    // setups where one tab is always document.hidden.
+    //
+    // On return to foreground: fast-forward frame counter to catch up with
+    // peers, then resync emulator state from host.
+    var _backgroundAt = 0;
     document.addEventListener('visibilitychange', function () {
       if (!_running) return;
       if (document.hidden) {
-        _paused = true;
-        _pausedAtFrame = _frameNum;
-        _pausedAt = Date.now();
-        console.log('[lockstep] tab hidden — paused at frame', _frameNum);
+        _backgroundAt = Date.now();
+        console.log('[lockstep] tab hidden at frame', _frameNum);
       } else {
-        _paused = false;
-        var pauseDuration = Date.now() - _pausedAt;
-        console.log('[lockstep] tab visible — resuming from frame', _pausedAtFrame,
-          '(paused', pauseDuration, 'ms)');
+        var bgDuration = _backgroundAt ? Date.now() - _backgroundAt : 0;
+        _backgroundAt = 0;
+        console.log('[lockstep] tab visible (was background', bgDuration, 'ms)');
 
-        // Short pause (<500ms): just resume ticking, no resync needed.
-        if (pauseDuration < 500) return;
+        // Short background (<500ms): no action needed
+        if (bgDuration < 500) return;
 
         // Notify peers we returned (toast only, no gameplay effect)
         var activePeers2 = getActivePeers();
@@ -1735,22 +1732,20 @@
           try { activePeers2[r].dc.send('peer-resumed'); } catch (_) {}
         }
 
-        // Fast-forward _frameNum to catch up with peers. While we were paused,
-        // peers kept running and our old frame's remote inputs are long gone.
-        // Without this, tick() stalls forever waiting for input that never arrives.
+        // Fast-forward _frameNum to catch up with peers. Background throttling
+        // means we fell behind — peers have moved far ahead.
         if (_lastRemoteFrame > _frameNum) {
           console.log('[lockstep] fast-forward:', _frameNum, '->', _lastRemoteFrame);
           _frameNum = _lastRemoteFrame;
           window._frameNum = _frameNum;
           _localInputs = {};
           _remoteInputs = {};
-          // Pre-fill delay gap so tick() doesn't stall immediately
           for (var d = 0; d < DELAY_FRAMES; d++) {
             _localInputs[_frameNum + d] = 0;
           }
         }
 
-        // Request resync from host (emulator state is stale after fast-forward)
+        // Request resync (emulator state drifted during background throttling)
         if (_playerSlot === 0) {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
@@ -1807,7 +1802,6 @@
 
   function tick() {
     if (!_running) return;
-    if (_paused) return;
 
     // Async resync: apply buffered state at clean frame boundary
     if (_pendingResyncState) {
@@ -2583,8 +2577,6 @@
     _frameNum = 0;
     window._frameNum = 0;
     _running = false;
-    _paused = false;
-    _pausedAtFrame = 0;
     _lateJoin = false;
     _gameStarted = false;
     _selfEmuReady = false;
