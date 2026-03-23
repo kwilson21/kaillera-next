@@ -2418,65 +2418,28 @@
     // SSB64 game-specific sync: read targeted RDRAM regions containing
     // match state and player data. Uses wasmMemory.buffer for live access.
     // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
-    if (_hashRegion && _hashRegion.ptr && mod.HEAPU8) {
-      try {
-        // Create a fresh TypedArray view of the current WASM memory buffer.
-        // mod.HEAPU8 can be stale after memory growth — .buffer always current.
-        // This is a VIEW (64-byte header), not a copy of 256MB.
-        var live = new Uint8Array(mod.HEAPU8.buffer);
-        var base = _hashRegion.ptr;
-
-
-        // Hash each deterministic region independently and stream results
-        // so we can identify which region differs on mobile.
-        // Only 1600K and 2432K are truly deterministic across all players
-        // and sessions. config (0x0A4D00) drifts over longer sessions.
-        // 768K (0xC0000) differs intermittently on mobile.
-        var regions = [
-          [0x190000, 0x190100, '1600K'],
-          [0x260000, 0x260100, '2432K'],
-        ];
-        var hashes = [];
-        var parts = [];
-        for (var ri = 0; ri < regions.length; ri++) {
-          var rd = live.slice(base + regions[ri][0], base + regions[ri][1]);
-          var rh = 0x811c9dc5;
-          for (var rhi = 0; rhi < rd.length; rhi++) {
-            rh ^= rd[rhi]; rh = Math.imul(rh, 0x01000193);
-          }
-          rh = rh | 0;
-          hashes.push(rh);
-          parts.push(rd);
-        }
-        // Only stream region details periodically (not every check — too chatty on mobile)
-        if (_frameNum % (_syncCheckInterval * 5) === 0) {
-          _streamSync('regions: ' + regions.map(function(r, i) {
-            return r[2] + '=' + hashes[i];
-          }).join(' '));
-        }
-        // Combine for overall hash
-        var totalLen = parts.reduce(function(a, p) { return a + p.length; }, 0);
-        var combined = new Uint8Array(totalLen);
-        var off = 0;
-        for (var pi = 0; pi < parts.length; pi++) {
-          combined.set(parts[pi], off);
-          off += parts[pi].length;
-        }
-        return combined;
-      } catch (e) {
-        console.log('[lockstep] hash: wasmMemory read failed:', e.message);
-      }
-    }
-
-    // Fallback: getState() with header skip
+    // Use getState() and sample the RDRAM section (middle of save state).
+    // Direct HEAPU8 reads are unreliable (stale buffers, wrong offsets).
+    // getState() serializes through the RetroArch API — always correct.
+    //
+    // mupen64plus save state layout (~16MB):
+    //   0x000000-0x001000: header + CPU registers (~4KB)
+    //   0x001000-0x801000: RDRAM (8MB — the actual N64 game state)
+    //   0x801000+: RSP, RDP, audio, plugins (emulator internals — non-deterministic)
+    //
+    // Hash bytes 0x100000-0x300000 (2MB from the middle of RDRAM).
+    // Avoids header, CPU regs, and plugin state. Contains game heap.
     try {
       var gm = window.EJS_emulator.gameManager;
       var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      var SKIP = 1024;
-      var len = bytes.length - SKIP;
-      if (len <= 0) return bytes.slice(0, Math.min(bytes.length, 65536));
-      return bytes.slice(SKIP, SKIP + len);
+      var RDRAM_START = 0x100000;  // 1MB into state (safely past header, into RDRAM)
+      var RDRAM_END = 0x300000;    // 3MB into state (2MB sample)
+      if (bytes.length < RDRAM_END) {
+        // State smaller than expected — hash what we have
+        RDRAM_END = bytes.length;
+      }
+      return bytes.slice(RDRAM_START, RDRAM_END);
     } catch (_) { return null; }
   }
 
