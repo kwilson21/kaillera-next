@@ -1,0 +1,128 @@
+diff --git a/GLideN64/src/GraphicsDrawer.cpp b/GLideN64/src/GraphicsDrawer.cpp
+index a2fb0af..a15c5fb 100644
+--- a/GLideN64/src/GraphicsDrawer.cpp
++++ b/GLideN64/src/GraphicsDrawer.cpp
+@@ -1825,7 +1825,11 @@ void GraphicsDrawer::_initStates()
+ 
+ 	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+ 
++#ifdef __EMSCRIPTEN__
++	srand(0);
++#else
+ 	srand(static_cast<u32>(time(nullptr)));
++#endif
+ 
+ 	wnd.swapBuffers();
+ }
+diff --git a/GLideN64/src/uCodes/F5Indi_Naboo.cpp b/GLideN64/src/uCodes/F5Indi_Naboo.cpp
+index b661ea9..f6e6c0a 100644
+--- a/GLideN64/src/uCodes/F5Indi_Naboo.cpp
++++ b/GLideN64/src/uCodes/F5Indi_Naboo.cpp
+@@ -2329,7 +2329,11 @@ void F5INDI_Texture(u32 w0, u32 w1)
+ 
+ void F5Indi_Naboo_Init()
+ {
++#ifdef __EMSCRIPTEN__
++	srand(0);
++#else
+ 	srand((unsigned int)time(NULL));
++#endif
+ 
+ 	gSPSetupFunctions();
+ 	// Set GeometryMode flags
+diff --git a/Makefile b/Makefile
+index 2c28955..80c78e3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -627,8 +627,19 @@ COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE
+ ifeq ($(DEBUG), 1)
+    CPUOPTS += -O0 -g
+    CPUOPTS += -DOPENGL_DEBUG
++else
++ifeq ($(platform), emscripten)
++   # kaillera-next: strict IEEE 754 for cross-engine WASM determinism.
++   # Removes -ffast-math to ensure Clang emits spec-compliant WASM FP opcodes.
++   # -ffp-contract=off prevents FMA fusion (different rounding than separate mul+add).
++   # -ftrivial-auto-var-init=zero eliminates UB from uninitialized stack variables.
++   CPUOPTS += -DNDEBUG -fsigned-char -fno-fast-math -ffp-contract=off \
++              -fno-associative-math -fno-reciprocal-math \
++              -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden \
++              -ftrivial-auto-var-init=zero
+ else
+    CPUOPTS += -DNDEBUG -fsigned-char -ffast-math -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden
++endif
+ ifneq ($(platform), libnx)
+    CPUOPTS := -O3 $(CPUOPTS)
+ endif
+diff --git a/mupen64plus-core/src/device/r4300/fpu.h b/mupen64plus-core/src/device/r4300/fpu.h
+index 6d17553..8727a44 100644
+--- a/mupen64plus-core/src/device/r4300/fpu.h
++++ b/mupen64plus-core/src/device/r4300/fpu.h
+@@ -24,6 +24,7 @@
+ 
+ #include <math.h>
+ #include <stdint.h>
++#include <string.h>
+ 
+ #ifdef _MSC_VER
+ #define M64P_FPU_INLINE static __inline
+@@ -224,10 +225,27 @@ M64P_FPU_INLINE void fpu_check_input_double(uint32_t* fcr31, const double* value
+ 
+ M64P_FPU_INLINE void fpu_check_output_float(uint32_t* fcr31, const float* value)
+ {
++#ifdef __EMSCRIPTEN__
++    /* kaillera-next: canonicalize NaN for cross-engine WASM determinism.
++     * The WASM spec allows non-deterministic NaN payloads. Force all NaN
++     * values to the MIPS R4300i canonical quiet NaN (0x7FC00000). */
++    if (isnan(*value))
++    {
++        static const uint32_t canon_nan_f = 0x7FC00000;
++        memcpy((void*)value, &canon_nan_f, sizeof(float));
++    }
++#endif
+ }
+ 
+ M64P_FPU_INLINE void fpu_check_output_double(uint32_t* fcr31, const double* value)
+ {
++#ifdef __EMSCRIPTEN__
++    if (isnan(*value))
++    {
++        static const uint64_t canon_nan_d = 0x7FF8000000000000ULL;
++        memcpy((void*)value, &canon_nan_d, sizeof(double));
++    }
++#endif
+ }
+ #endif /* ACCURATE_FPU_BEHAVIOR */
+ 
+diff --git a/mupen64plus-core/src/device/r4300/r4300_core.c b/mupen64plus-core/src/device/r4300/r4300_core.c
+index 76e9f50..e78d4b0 100644
+--- a/mupen64plus-core/src/device/r4300/r4300_core.c
++++ b/mupen64plus-core/src/device/r4300/r4300_core.c
+@@ -64,7 +64,11 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
+     r4300->rdram = rdram;
+     r4300->randomize_interrupt = randomize_interrupt;
+     r4300->start_address = start_address;
++#ifdef __EMSCRIPTEN__
++    srand(0); /* kaillera-next: deterministic seed for cross-instance sync */
++#else
+     srand((unsigned int) time(NULL));
++#endif
+ }
+ 
+ void poweron_r4300(struct r4300_core* r4300)
+diff --git a/mupen64plus-core/subprojects/minizip/crypt.h b/mupen64plus-core/subprojects/minizip/crypt.h
+index f4b93b7..858e560 100644
+--- a/mupen64plus-core/subprojects/minizip/crypt.h
++++ b/mupen64plus-core/subprojects/minizip/crypt.h
+@@ -106,7 +106,11 @@ static unsigned crypthead(const char* passwd,       /* password string */
+      */
+     if (++calls == 1)
+     {
++#ifdef __EMSCRIPTEN__
++        srand(0);
++#else
+         srand((unsigned)(time(NULL) ^ ZCR_SEED2));
++#endif
+     }
+     init_keys(passwd, pkeys, pcrc_32_tab);
+     for (n = 0; n < RAND_HEAD_LEN-2; n++)
