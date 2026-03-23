@@ -2379,7 +2379,8 @@
           var rdramPtr = parseInt(parts[1], 10);
           if (rdramPtr > 0 && rdramSize > 0) {
             if (_hashRegion === null) {
-              console.log('[lockstep] hash: RDRAM direct at HEAPU8[' + rdramPtr + '], size=' + rdramSize);
+              var bufSrc = mod.wasmMemory ? 'wasmMemory' : mod.asm && mod.asm.memory ? 'asm.memory' : mod.buffer ? 'mod.buffer' : 'HEAPU8.buffer';
+              console.log('[lockstep] hash: RDRAM at [' + rdramPtr + '], size=' + rdramSize + ', buf=' + bufSrc);
             } else if (_hashRegion && _hashRegion.ptr !== rdramPtr) {
               console.log('[lockstep] hash: RDRAM moved! old=' + _hashRegion.ptr + ' new=' + rdramPtr);
             }
@@ -2392,9 +2393,16 @@
     // SSB64 game-specific sync: read targeted RDRAM regions containing
     // match state and player data. Uses wasmMemory.buffer for live access.
     // Regions based on SSB64 USA GameShark addresses (0x0A4xxx-0x0BBxxx).
-    if (_hashRegion && _hashRegion.ptr && mod.wasmMemory) {
+    // Try multiple ways to access live WASM memory (varies by Emscripten build)
+    var liveBuf = null;
+    if (mod.wasmMemory) liveBuf = mod.wasmMemory.buffer;
+    else if (mod.asm && mod.asm.memory) liveBuf = mod.asm.memory.buffer;
+    else if (mod.buffer) liveBuf = mod.buffer;
+    else if (mod.HEAPU8) liveBuf = mod.HEAPU8.buffer;
+
+    if (_hashRegion && _hashRegion.ptr && liveBuf) {
       try {
-        var live = new Uint8Array(mod.wasmMemory.buffer);
+        var live = new Uint8Array(liveBuf);
         var base = _hashRegion.ptr;
 
         // Diagnostic: sample specific SSB64 addresses to verify live reads.
@@ -2556,14 +2564,11 @@
         1800   // cap at ~30s
       );
     }
-    // Give up after too many consecutive resyncs — core can't maintain sync
-    if (_consecutiveResyncs >= 10) {
-      _syncEnabled = false;
-      console.log('[lockstep] sync disabled — too many consecutive resyncs (' +
-        _consecutiveResyncs + ')');
-      if (_config && _config.onToast) {
-        _config.onToast('Resync disabled — cores cannot maintain sync');
-      }
+    // After many consecutive resyncs, stop requesting state (too expensive)
+    // but keep checking hashes for diagnostic logging
+    if (_consecutiveResyncs >= 10 && _consecutiveResyncs % 10 === 0) {
+      console.log('[lockstep] sync: ' + _consecutiveResyncs +
+        ' consecutive resyncs — reducing to diagnostic-only');
     }
 
     // Purge stale remote inputs above the new frame
