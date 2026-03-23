@@ -262,10 +262,10 @@
   let _diagLastTickTime = 0;       // wall-clock time of previous tick() call
   let _diagEventLog     = [];      // buffered async events [{t, type, detail}]
   let _diagHookInstalled = false;  // true once async event hooks are set up
-  var DIAG_HASH_INTERVAL  = 10;    // frames between RDRAM hash+dump logs (~6x/sec)
-  var DIAG_INPUT_INTERVAL = 30;    // frames between input read logs
+  var DIAG_HASH_INTERVAL  = 300;   // frames between RDRAM hash+dump logs (~once per 5s)
+  var DIAG_INPUT_INTERVAL = 300;   // frames between input read logs
   var DIAG_TIME_INTERVAL  = 60;    // frames between timing logs
-  var DIAG_EARLY_FRAMES   = 300;   // log everything for first N frames
+  var DIAG_EARLY_FRAMES   = 30;    // log everything for first N frames
 
   // -- State -----------------------------------------------------------------
 
