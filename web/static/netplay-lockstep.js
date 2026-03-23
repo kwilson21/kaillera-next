@@ -2240,7 +2240,9 @@
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
               window.EJS_emulator.gameManager.Module;
     if (mod && mod._kn_reset_audio) mod._kn_reset_audio();
-    if (mod && mod._kn_canon_fpu_regs) mod._kn_canon_fpu_regs();
+    // kn_canon_fpu_regs disabled — corrupts integer data in FPU registers
+    // (same issue as LWC1 canonicalization). FPU registers are a union that
+    // holds both floats and integers; scanning as float corrupts integer data.
     _inDeterministicStep = true;
     stepOneFrame();
     _inDeterministicStep = false;
