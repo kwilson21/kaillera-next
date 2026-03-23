@@ -2362,43 +2362,32 @@
               window.EJS_emulator.gameManager.Module;
     if (!mod) return null;
 
-    // Lazy RDRAM discovery — runs once, during first hash check (not boot).
-    // RetroArch's EmulatorJS build exports _get_memory_data(key) which takes
-    // a string key and returns "size|pointer" as a string.
-    if (_hashRegion === null) {
-      if (mod.cwrap) {
-        try {
-          var getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
-          var result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
-          if (result) {
-            var parts = result.split('|');
-            var rdramSize = parseInt(parts[0], 10);
-            var rdramPtr = parseInt(parts[1], 10);
-            if (rdramPtr > 0 && rdramSize > 0) {
-              _hashRegion = { ptr: rdramPtr, size: rdramSize };
+    // Discover RDRAM pointer FRESH each time. The core may remap RDRAM
+    // after save state loads (which happen during lockstep initial sync
+    // and resyncs), making cached pointers stale.
+    if (mod.cwrap) {
+      try {
+        var getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
+        var result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
+        if (result) {
+          var parts = result.split('|');
+          var rdramSize = parseInt(parts[0], 10);
+          var rdramPtr = parseInt(parts[1], 10);
+          if (rdramPtr > 0 && rdramSize > 0) {
+            if (_hashRegion === null) {
               console.log('[lockstep] hash: RDRAM direct at HEAPU8[' + rdramPtr + '], size=' + rdramSize);
-            } else {
-              _hashRegion = false;
-              console.log('[lockstep] hash: RDRAM unavailable (ptr=' + rdramPtr + ' size=' + rdramSize + ')');
+            } else if (_hashRegion && _hashRegion.ptr !== rdramPtr) {
+              console.log('[lockstep] hash: RDRAM moved! old=' + _hashRegion.ptr + ' new=' + rdramPtr);
             }
-          } else {
-            _hashRegion = false;
-            console.log('[lockstep] hash: get_memory_data returned null');
+            _hashRegion = { ptr: rdramPtr, size: rdramSize };
           }
-        } catch (e) {
-          _hashRegion = false;
-          console.log('[lockstep] hash: RDRAM discovery failed:', e.message);
         }
-      } else {
-        _hashRegion = false;
-        console.log('[lockstep] hash: cwrap not available');
-      }
+      } catch (_) {}
     }
 
     if (_hashRegion && _hashRegion.ptr) {
       // Direct RDRAM access — hash the full RDRAM (8MB for expansion pak).
       // FNV-1a on 8MB takes ~2-4ms which is acceptable every 60 frames.
-      // Previous 64KB limit missed desyncs in game state stored above 64KB.
       return mod.HEAPU8.slice(_hashRegion.ptr, _hashRegion.ptr + _hashRegion.size);
     }
     // Fallback: getState() — skip first 1024 bytes (save state header/metadata
