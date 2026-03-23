@@ -2424,23 +2424,37 @@
         var base = _hashRegion.ptr;
 
 
-        // Hash DETERMINISTIC RDRAM regions only (verified by live testing —
-        // these always match between synced players, zero false positives):
-        //   0x0A4D00-0x0A5000: match config + extended match data (768B)
-        //   0xC0000-0xC0100:   game state sample (256B)
-        //   0x190000-0x190100: game state sample (256B)
-        //   0x260000-0x260100: game state sample (256B)
-        // Non-deterministic regions (emulator internals, always differ):
-        //   0x40000 (256K), 0x80000 (512K), 0x90000 (576K)
-        var d1 = live.slice(base + 0x0A4D00, base + 0x0A5000);
-        var d2 = live.slice(base + 0xC0000,  base + 0xC0100);
-        var d3 = live.slice(base + 0x190000, base + 0x190100);
-        var d4 = live.slice(base + 0x260000, base + 0x260100);
-        var combined = new Uint8Array(d1.length + d2.length + d3.length + d4.length);
-        combined.set(d1, 0);
-        combined.set(d2, d1.length);
-        combined.set(d3, d1.length + d2.length);
-        combined.set(d4, d1.length + d2.length + d3.length);
+        // Hash each deterministic region independently and stream results
+        // so we can identify which region differs on mobile.
+        var regions = [
+          [0x0A4D00, 0x0A5000, 'config'],
+          [0xC0000,  0xC0100,  '768K'],
+          [0x190000, 0x190100, '1600K'],
+          [0x260000, 0x260100, '2432K'],
+        ];
+        var hashes = [];
+        var parts = [];
+        for (var ri = 0; ri < regions.length; ri++) {
+          var rd = live.slice(base + regions[ri][0], base + regions[ri][1]);
+          var rh = 0x811c9dc5;
+          for (var rhi = 0; rhi < rd.length; rhi++) {
+            rh ^= rd[rhi]; rh = Math.imul(rh, 0x01000193);
+          }
+          rh = rh | 0;
+          hashes.push(rh);
+          parts.push(rd);
+        }
+        _streamSync('regions: ' + regions.map(function(r, i) {
+          return r[2] + '=' + hashes[i];
+        }).join(' '));
+        // Combine for overall hash
+        var totalLen = parts.reduce(function(a, p) { return a + p.length; }, 0);
+        var combined = new Uint8Array(totalLen);
+        var off = 0;
+        for (var pi = 0; pi < parts.length; pi++) {
+          combined.set(parts[pi], off);
+          off += parts[pi].length;
+        }
         return combined;
       } catch (e) {
         console.log('[lockstep] hash: wasmMemory read failed:', e.message);
