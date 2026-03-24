@@ -19,13 +19,16 @@
   var STICK_RADIUS = 50;
   var MAX_AXIS = 32767;
 
+  // N64 button mapping (verified from mupen64plus core source):
+  // N64 A = JOYPAD_B = index 0, N64 B = JOYPAD_Y = index 1
+  // Z = JOYPAD_L2 = index 12, L = JOYPAD_L = index 10, R = JOYPAD_R = index 11
   var BUTTONS = [
-    [8,  'A',      'vgp-a'],
-    [0,  'B',      'vgp-b'],
+    [0,  'A',      'vgp-a'],
+    [1,  'B',      'vgp-b'],
     [3,  'Start',  'vgp-start'],
-    [9,  'L',      'vgp-l'],
-    [10, 'R',      'vgp-r'],
-    [11, 'Z',      'vgp-z'],
+    [10, 'L',      'vgp-l'],
+    [11, 'R',      'vgp-r'],
+    [12, 'Z',      'vgp-z'],
     [4,  '\u25B2', 'vgp-du'],
     [5,  '\u25BC', 'vgp-dd'],
     [6,  '\u25C0', 'vgp-dl'],
@@ -65,9 +68,9 @@
       '}',
 
       // Left column: stick zone + dpad
-      '.vgp-left { grid-area: left-top / left-top / left-bot / left-bot; position: relative; min-height: 160px; }',
+      '.vgp-left { grid-area: left-top / left-top / left-bot / left-bot; position: relative; min-height: 210px; }',
       // Right column: buttons
-      '.vgp-right { grid-area: right-top / right-top / right-bot / right-bot; position: relative; min-height: 160px; }',
+      '.vgp-right { grid-area: right-top / right-top / right-bot / right-bot; position: relative; min-height: 210px; }',
       // Shoulders bar across top
       '.vgp-shoulders { grid-column: 1 / -1; display: flex; justify-content: space-between; padding: 2px 4px; }',
       // Start bar across bottom
@@ -87,36 +90,36 @@
       // Shoulder buttons (in .vgp-shoulders flow, not absolute)
       '.vgp-l, .vgp-r, .vgp-z { position: static; border-radius: 8px; padding: 4px 12px; font-size: 13px; }',
 
-      // Stick zone — inside .vgp-left, centered
-      '.vgp-stick-zone {',
-      '  position: absolute; left: 8px; top: 8px;',
-      '  width: 120px; height: 120px; border-radius: 50%;',
-      '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
-      '}',
-      '.vgp-stick-knob {',
-      '  position: absolute; width: 48px; height: 48px; border-radius: 50%;',
-      '  background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);',
-      '  left: 50%; top: 50%; transform: translate(-50%,-50%);',
-      '  transition: none; will-change: transform;',
-      '}',
-
-      // D-pad — inside .vgp-left, bottom area
-      '.vgp-dpad { position: absolute; bottom: 0; left: 10px; width: 90px; height: 90px; }',
+      // D-pad — inside .vgp-left, TOP area (above stick)
+      '.vgp-dpad { position: absolute; top: 4px; left: 10px; width: 90px; height: 90px; }',
       '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 11px; width: 28px; height: 28px; }',
       '.vgp-du { left: 31px; top: 0; }',
       '.vgp-dd { left: 31px; bottom: 0; top: auto; }',
       '.vgp-dl { left: 0; top: 31px; }',
       '.vgp-dr { right: 0; top: 31px; }',
 
-      // A + B — inside .vgp-right
-      '.vgp-a { width: 54px; height: 54px; right: 8px; top: 40px; font-size: 18px; }',
-      '.vgp-b { width: 44px; height: 44px; right: 68px; top: 28px; font-size: 15px; }',
+      // Stick zone — inside .vgp-left, BELOW dpad
+      '.vgp-stick-zone {',
+      '  position: absolute; left: 8px; bottom: 4px;',
+      '  width: 110px; height: 110px; border-radius: 50%;',
+      '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
+      '}',
+      '.vgp-stick-knob {',
+      '  position: absolute; width: 46px; height: 46px; border-radius: 50%;',
+      '  background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);',
+      '  left: 50%; top: 50%; transform: translate(-50%,-50%);',
+      '  transition: none; will-change: transform;',
+      '}',
 
-      // C-buttons diamond — inside .vgp-right
-      '.vgp-cu { width: 34px; height: 34px; right: 130px; top: 10px; font-size: 10px; }',
-      '.vgp-cd { width: 34px; height: 34px; right: 130px; top: 76px; font-size: 10px; }',
-      '.vgp-cl { width: 34px; height: 34px; right: 164px; top: 43px; font-size: 10px; }',
-      '.vgp-cr { width: 34px; height: 34px; right: 96px; top: 43px; font-size: 10px; }',
+      // C-buttons diamond — inside .vgp-right, TOP area
+      '.vgp-cu { width: 34px; height: 34px; left: 30px; top: 4px; font-size: 10px; }',
+      '.vgp-cd { width: 34px; height: 34px; left: 30px; top: 70px; font-size: 10px; }',
+      '.vgp-cl { width: 34px; height: 34px; left: 0; top: 37px; font-size: 10px; }',
+      '.vgp-cr { width: 34px; height: 34px; left: 60px; top: 37px; font-size: 10px; }',
+
+      // A + B — inside .vgp-right, BELOW C-buttons
+      '.vgp-a { width: 54px; height: 54px; right: 8px; bottom: 8px; top: auto; font-size: 18px; }',
+      '.vgp-b { width: 44px; height: 44px; right: 68px; bottom: 16px; top: auto; font-size: 15px; }',
 
       // Start — in flow inside .vgp-center
       '.vgp-start { position: static; border-radius: 14px; padding: 4px 16px; font-size: 11px; }',
@@ -128,20 +131,25 @@
       '    display: block; padding: 0; min-height: 0;',
       '    z-index: 55;',
       '  }',
-      '  .vgp-left, .vgp-right { position: fixed; top: 0; bottom: 78px; }',
-      '  .vgp-left { left: 0; width: 180px; }',
-      '  .vgp-right { right: 0; width: 220px; }',
+      '  .vgp-left, .vgp-right { position: fixed; top: 30px; bottom: 78px; }',
+      '  .vgp-left { left: 0; width: 160px; }',
+      '  .vgp-right { right: 0; width: 240px; }',
       '  .vgp-shoulders { position: fixed; top: 4px; left: 0; right: 0; padding: 0 8px; z-index: 56; }',
-      '  .vgp-center { position: fixed; bottom: 78px; left: 50%; transform: translateX(-50%); z-index: 56; }',
-      '  .vgp-stick-zone { left: 8px; top: 50%; transform: translateY(-50%); width: 110px; height: 110px; }',
-      '  .vgp-stick-knob { width: 44px; height: 44px; }',
-      '  .vgp-dpad { bottom: 8px; left: 8px; }',
-      '  .vgp-a { right: 12px; top: 35%; }',
-      '  .vgp-b { right: 72px; top: 25%; }',
-      '  .vgp-cu { right: 140px; top: 15%; }',
-      '  .vgp-cd { right: 140px; top: 60%; }',
-      '  .vgp-cl { right: 174px; top: 38%; }',
-      '  .vgp-cr { right: 106px; top: 38%; }',
+      // Start on right side in landscape
+      '  .vgp-center { position: fixed; bottom: 80px; right: 100px; left: auto; transform: none; z-index: 56; }',
+      // Dpad at top of left panel
+      '  .vgp-dpad { top: 4px; left: 8px; bottom: auto; }',
+      // Stick below dpad in left panel
+      '  .vgp-stick-zone { left: 8px; bottom: 4px; top: auto; transform: none; width: 100px; height: 100px; }',
+      '  .vgp-stick-knob { width: 42px; height: 42px; }',
+      // C-buttons at top of right panel
+      '  .vgp-cu { left: 50px; top: 4px; }',
+      '  .vgp-cd { left: 50px; top: 70px; }',
+      '  .vgp-cl { left: 20px; top: 37px; }',
+      '  .vgp-cr { left: 80px; top: 37px; }',
+      // A/B below C-buttons in right panel
+      '  .vgp-a { right: 12px; bottom: 8px; top: auto; }',
+      '  .vgp-b { right: 72px; bottom: 16px; top: auto; }',
       '}',
 
       '</style>',

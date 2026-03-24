@@ -438,12 +438,11 @@ button:hover { background: #4a6fa5; }
     flex-direction: row;
     flex-wrap: wrap;
     gap: 0 8px;
-    max-height: 22px;
-    overflow: hidden;
-    transition: max-height 0.2s ease;
+    max-height: none;
+    overflow: visible;
   }
   #info-overlay.expanded {
-    max-height: 200px;
+    /* no longer needed — info is fully visible */
   }
   #info-header {
     font-size: 10px;
