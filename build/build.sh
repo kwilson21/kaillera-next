@@ -44,6 +44,7 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
         cd "${SRC_DIR}/RetroArch"
+        git checkout -- . 2>/dev/null || true
         git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
             echo "    RetroArch patch already applied or failed"
@@ -52,6 +53,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ] || \
        [ -f "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" ]; then
         cd "${SRC_DIR}/mupen64plus-libretro-nx"
+        git checkout -- . 2>/dev/null || true
     fi
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
@@ -66,6 +68,13 @@ if [ -d "${PATCHES_DIR}" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" && \
             echo "    Applied mupen64plus determinism patch" || \
             echo "    mupen64plus determinism patch already applied or failed"
+    fi
+
+    if [ -f "${PATCHES_DIR}/kn-sync.patch" ]; then
+        cd "${SRC_DIR}/mupen64plus-libretro-nx"
+        git apply "${PATCHES_DIR}/kn-sync.patch" && \
+            echo "    Applied kn-sync patch (C-level resync)" || \
+            echo "    kn-sync patch already applied or failed"
     fi
 fi
 
