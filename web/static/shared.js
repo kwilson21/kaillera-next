@@ -34,17 +34,59 @@
   };
 
   function applyStandardCheats(cheats) {
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(attempt, 500); return; }
-      try {
-        cheats.forEach((c, i) => gm.setCheat(i, 1, c.code));
-        console.log('[netplay] applied', cheats.length, 'standard cheats');
-      } catch (_) { setTimeout(attempt, 500); return; }
-      setTimeout(() => { try { cheats.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 2000);
-      setTimeout(() => { try { cheats.forEach((c, i) => gm.setCheat(i, 1, c.code)); } catch(_){} }, 5000);
-    };
-    attempt();
+    waitForEmulator().then(function (gm) {
+      var retries = 0;
+      var maxRetries = 5;
+
+      function apply() {
+        try {
+          cheats.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
+        } catch (e) {
+          console.error('[netplay] cheat application threw:', e.message);
+          return;
+        }
+
+        // Verify by reading back a canary address from RDRAM.
+        // Stock Mode cheat: 800A4D0B 0002 → byte at offset 0x0A4D0B should be 0x02.
+        setTimeout(function () {
+          if (verifyCheats(gm)) {
+            console.log('[netplay] applied and verified', cheats.length, 'standard cheats');
+          } else if (++retries < maxRetries) {
+            console.log('[netplay] cheat verification failed, retry', retries);
+            apply();
+          } else {
+            console.warn('[netplay] cheats applied but verification failed after', maxRetries, 'retries');
+          }
+        }, 200);
+      }
+      apply();
+    }).catch(function (err) {
+      console.error('[netplay] cannot apply cheats:', err.message);
+    });
+  }
+
+  function verifyCheats(gm) {
+    try {
+      var mod = gm.Module;
+      if (!mod || !mod.cwrap) return true;  // can't verify, assume OK
+      var getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
+      var result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
+      if (!result) return true;  // can't verify
+      var parts = result.split('|');
+      var rdramPtr = parseInt(parts[1], 10);
+      if (!rdramPtr || rdramPtr <= 0) return true;  // can't verify
+
+      var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
+      if (!buf || buf.byteLength === 0) return true;  // can't verify
+      var mem = new Uint8Array(buf);
+
+      // Check "Stock Mode" cheat: address 0x0A4D0B should be 0x02
+      var canaryOffset = rdramPtr + 0x0A4D0B;
+      if (canaryOffset < mem.length) {
+        return mem[canaryOffset] === 0x02;
+      }
+    } catch (_) {}
+    return true;  // verification error → assume OK, don't retry forever
   }
 
   let _listenersAdded = false;
@@ -93,29 +135,55 @@
     return resolved;
   }
 
+  var _bootPromise = null;  // deduplication: only one poll loop at a time
+
+  function waitForEmulator(timeoutMs) {
+    if (_bootPromise) return _bootPromise;
+    timeoutMs = timeoutMs || 30000;
+
+    _bootPromise = new Promise(function (resolve, reject) {
+      var attempts = 0;
+      var maxAttempts = Math.ceil(timeoutMs / 200);
+
+      function attempt() {
+        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+        if (gm && gm.Module) {
+          var frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
+          console.log('[netplay] emulator running (frames=' + frames + ')');
+          _bootPromise = null;
+          enableMobileTouch();
+          resolve(gm);
+          return;
+        }
+
+        var btn = document.querySelector('.ejs_start_button');
+        if (btn) {
+          console.log('[netplay] triggerEmulatorStart: clicking start button');
+          if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
+          btn.click();
+        }
+
+        if (attempts === 0) {
+          console.log('[netplay] waiting for emulator...');
+        }
+        if (++attempts >= maxAttempts) {
+          _bootPromise = null;
+          reject(new Error('Emulator boot timed out after ' + timeoutMs + 'ms'));
+          return;
+        }
+        setTimeout(attempt, 200);
+      }
+      attempt();
+    });
+
+    return _bootPromise;
+  }
+
+  // Fire-and-forget wrapper for backward compat
   function triggerEmulatorStart() {
-    let attempts = 0;
-    const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (gm && gm.Module) {
-        const frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
-        console.log('[netplay] emulator already running (auto-start) frames=' + frames);
-        enableMobileTouch();
-        return;
-      }
-      const btn = document.querySelector('.ejs_start_button');
-      if (btn) {
-        console.log('[netplay] triggerEmulatorStart: clicking start button');
-        if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
-        btn.click();
-        return;
-      }
-      if (attempts === 0) {
-        console.log('[netplay] triggerEmulatorStart: no gm/Module, no start button — polling');
-      }
-      if (++attempts < 150) setTimeout(attempt, 200);
-    };
-    attempt();
+    waitForEmulator().catch(function (err) {
+      console.error('[netplay]', err.message);
+    });
   }
 
   function enableMobileTouch() {
@@ -133,6 +201,7 @@
     applyStandardCheats: applyStandardCheats,
     setupKeyTracking: setupKeyTracking,
     triggerEmulatorStart: triggerEmulatorStart,
+    waitForEmulator: waitForEmulator,
     enableMobileTouch: enableMobileTouch,
   };
 

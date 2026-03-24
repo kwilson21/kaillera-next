@@ -3036,10 +3036,15 @@
   }
 
   function disableEJSInput() {
+    var attempts = 0;
     var attempt = function () {
       var ejs = window.EJS_emulator;
       var gm = ejs && ejs.gameManager;
-      if (!gm) { setTimeout(attempt, 200); return; }
+      if (!gm) {
+        if (++attempts < 150) { setTimeout(attempt, 200); }
+        else { console.warn('[lockstep] disableEJSInput timed out'); }
+        return;
+      }
 
       // Disable EJS keyboard handling
       gm.setKeyboardEnabled(false);

@@ -743,10 +743,15 @@
   }
 
   function disableEJSInput() {
+    let attempts = 0;
     const attempt = () => {
       const ejs = window.EJS_emulator;
       const gm = ejs && ejs.gameManager;
-      if (!gm) { setTimeout(attempt, 200); return; }
+      if (!gm) {
+        if (++attempts < 150) { setTimeout(attempt, 200); }
+        else { console.warn('[streaming] disableEJSInput timed out'); }
+        return;
+      }
 
       // Disable EJS keyboard handling
       gm.setKeyboardEnabled(false);
