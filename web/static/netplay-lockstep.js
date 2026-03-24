@@ -324,6 +324,9 @@
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount       = 0;
   let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
+  // Resync cooldown: C-level path is <2ms so we can resync frequently.
+  // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
+  const _resyncCooldownMs = () => _hasKnSync ? 2000 : 10000;
   const _streamSync = (msg) => {
     // Disabled for production — re-enable for diagnostics
     // if (socket && socket.connected) {
@@ -1124,10 +1127,14 @@
                 console.log(`[lockstep] ${desyncMsg}`);
                 _streamSync(desyncMsg);
                 const now2 = performance.now();
-                if (now2 - _lastResyncTime > 10000) {
+                const cooldownElapsed = now2 - _lastResyncTime;
+                if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
-                  try { peer.dc.send('sync-request'); } catch (_) {}
+                  console.log(`[lockstep] sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms)`);
+                  try { peer.dc.send('sync-request'); } catch (e) { console.log('[lockstep] sync-request send failed:', e); }
                   _streamSync('sync-request sent');
+                } else {
+                  console.log(`[lockstep] DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
                 }
               } else {
                 const okMsg = `sync OK frame=${syncFrame} hash=${guestHash}`;
@@ -1148,7 +1155,7 @@
                     console.log(`[lockstep] ${desyncMsg}`);
                     _streamSync(desyncMsg);
                     const now2 = performance.now();
-                    if (!_pendingResyncState && now2 - _lastResyncTime > 10000) {
+                    if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
                       _lastResyncTime = now2;
                       try { peerRef.dc.send('sync-request'); } catch (_) {}
                       _streamSync('sync-request sent');
@@ -1173,6 +1180,7 @@
         }
         // State sync: host received request, or chunked binary transfer header
         if (e.data === 'sync-request' && _playerSlot === 0) {
+          console.log('[lockstep] received sync-request from', remoteSid);
           pushSyncState(remoteSid);
         }
         if (e.data.startsWith('sync-start:')) {
@@ -2601,10 +2609,14 @@
           if (guestHash !== _pendingSyncCheck.hash) {
             console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
             const now3 = performance.now();
-            if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
+            const cooldownElapsed3 = now3 - _lastResyncTime;
+            if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
+              console.log(`[lockstep] sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms)`);
               const sp = _peers[_pendingSyncCheck.peerSid];
-              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { console.log('[lockstep] deferred sync-request failed:', e); } }
+            } else {
+              console.log(`[lockstep] DESYNC (deferred) but blocked: pending=${!!_pendingResyncState} cooldown=${Math.round(cooldownElapsed3)}ms`);
             }
           } else {
             _consecutiveResyncs = 0;
@@ -2620,7 +2632,7 @@
                 if (res.hash !== deferCheck.hash) {
                   console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
                   const now3 = performance.now();
-                  if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
+                  if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
                     _lastResyncTime = now3;
                     const sp = _peers[deferCheck.peerSid];
                     if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
@@ -3167,6 +3179,7 @@
         return;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
+      console.log(`[lockstep] host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
       _streamSync(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     } else {
       // Fallback: existing getState path
@@ -3174,6 +3187,7 @@
       const raw = gm.getState();
       const ps1 = performance.now();
       currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      console.log(`[lockstep] host getState (FALLBACK): ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
       _streamSync(`host getState: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     }
 
@@ -3299,6 +3313,7 @@
 
       _resyncCount++;
       _consecutiveResyncs++;
+      console.log(`[lockstep] kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
       _streamSync(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     } else {
       // Fallback: existing loadState path
@@ -3449,6 +3464,11 @@
     if (window._kn_scriptProcessor) {
       window._kn_scriptProcessor.disconnect();
       window._kn_scriptProcessor = null;
+    }
+    if (window._kn_audioEl) {
+      window._kn_audioEl.pause();
+      window._kn_audioEl.srcObject = null;
+      window._kn_audioEl = null;
     }
     if (window._kn_keepAliveOsc) {
       try { window._kn_keepAliveOsc.stop(); } catch (_) {}
