@@ -351,8 +351,9 @@
 
     gameRunning = true;
 
-    // Spectators don't run an emulator — they receive a video stream.
-    // Skip all ROM checks and go straight to engine init (same as mid-game join).
+    // Spectators don't run an emulator — they receive a video stream from the
+    // host (canvas capture in lockstep, MediaStream in streaming).
+    // Skip all ROM checks and go straight to engine init.
     if (isSpectator) {
       hideOverlay();
       showToolbar();
