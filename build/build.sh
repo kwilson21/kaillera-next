@@ -50,22 +50,24 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
+    # mupen64plus patches: apply only if not already present.
+    # Patches may fail on non-main.c files due to repo version drift;
+    # the critical main.c changes are checked explicitly.
     cd "${SRC_DIR}/mupen64plus-libretro-nx"
-    git checkout -- . 2>/dev/null || true
 
-    # Apply all mupen64plus patches in order.
-    # kn-all includes: timing + determinism + C-level sync exports.
-    # It applies to the post-timing-patch state.
-    if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
-        git apply "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" && \
-            echo "    Applied mupen64plus timing patch" || \
-            echo "    mupen64plus timing patch already applied or failed"
-    fi
-
-    if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
-        git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
-            echo "    Applied mupen64plus kn-all patch" || \
-            echo "    mupen64plus kn-all patch already applied or failed"
+    if ! grep -q 'kn_sync_hash' mupen64plus-core/src/main/main.c 2>/dev/null; then
+        git checkout -- mupen64plus-core/src/main/main.c 2>/dev/null || true
+        if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
+            git apply --include='mupen64plus-core/src/main/*' "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" 2>/dev/null && \
+                echo "    Applied mupen64plus timing patch (main.c)" || true
+        fi
+        if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
+            git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
+                echo "    Applied mupen64plus kn-all patch" || \
+                echo "    WARN: kn-all patch failed"
+        fi
+    else
+        echo "    mupen64plus main.c already patched (kn_sync_hash present)"
     fi
 fi
 
