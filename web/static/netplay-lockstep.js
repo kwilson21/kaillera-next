@@ -545,6 +545,8 @@
   let _hasKnSync = false;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
+  let _awaitingResync = false;  // guest: pause emulator while waiting for resync data
+  let _awaitingResyncAt = 0;    // timestamp when pause started (safety timeout)
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null;     // stored for removal in stopSync()
@@ -1130,7 +1132,8 @@
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
-                  console.log(`[lockstep] sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms)`);
+                  if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
+                  console.log(`[lockstep] sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms, pause=${_awaitingResync})`);
                   try { peer.dc.send('sync-request'); } catch (e) { console.log('[lockstep] sync-request send failed:', e); }
                   _streamSync('sync-request sent');
                 } else {
@@ -2354,8 +2357,12 @@
         // Short background (<500ms): no action needed
         if (bgDuration < 500) return;
 
-        // Force full resync after background return (delta base is stale)
-        _lastSyncState = null;
+        // Force full resync after background return (delta base is stale).
+        // Only reset on guest — host's delta base should persist so it can
+        // send small deltas instead of 8MB full state every time.
+        if (_playerSlot !== 0) {
+          _lastSyncState = null;
+        }
 
         // Notify peers we returned (toast only, no gameplay effect)
         const activePeers2 = getActivePeers();
@@ -2455,6 +2462,7 @@
     if (_pendingResyncState) {
       const pending = _pendingResyncState;
       _pendingResyncState = null;
+      _awaitingResync = false;
       applySyncState(pending.bytes, pending.frame);
     }
 
@@ -2592,6 +2600,19 @@
       if (cleanupBefore >= 0) delete _localInputs[cleanupBefore];
     }
 
+    // Guest: pause emulator while waiting for resync data.
+    // Input sending above continues so the host doesn't INPUT-STALL,
+    // but the emulator doesn't advance (no divergent frames).
+    // Safety: resume after 3s if resync data never arrives.
+    if (_awaitingResync) {
+      if (performance.now() - _awaitingResyncAt > 3000) {
+        console.log('[lockstep] resync wait timeout — resuming');
+        _awaitingResync = false;
+      } else {
+        return;
+      }
+    }
+
     // Step one frame with audio capture
     const tickMod = window.EJS_emulator?.gameManager?.Module;
     if (tickMod?._kn_reset_audio) tickMod._kn_reset_audio();
@@ -2616,7 +2637,8 @@
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
-              console.log(`[lockstep] sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms)`);
+              if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
+              console.log(`[lockstep] sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms, pause=${_awaitingResync})`);
               const sp = _peers[_pendingSyncCheck.peerSid];
               if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { console.log('[lockstep] deferred sync-request failed:', e); } }
             } else {
