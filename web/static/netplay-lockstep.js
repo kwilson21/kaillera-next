@@ -587,7 +587,19 @@
     }
 
     try {
-      _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
+      // Reuse gesture-created context if available (already running on mobile).
+      // Otherwise create a new one at the correct sample rate.
+      if (!_audioCtx || _audioCtx.state === 'closed') {
+        _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
+      } else {
+        // Stop keep-alive oscillator now that real audio is taking over
+        if (window._kn_keepAliveOsc) {
+          try { window._kn_keepAliveOsc.stop(); } catch (_) {}
+          window._kn_keepAliveOsc = null;
+        }
+        console.log('[lockstep] reusing gesture-created AudioContext (state: ' +
+          _audioCtx.state + ', rate: ' + _audioCtx.sampleRate + ')');
+      }
 
       // Try AudioWorklet first (requires secure context), fall back to
       // AudioBufferSourceNode scheduling (works everywhere including mobile HTTP).
@@ -616,27 +628,81 @@
       }
 
       if (!workletOk) {
-        // Fallback: schedule AudioBufferSourceNodes per frame.
-        // Works on mobile HTTP where AudioWorklet requires secure context.
+        // Fallback: ScriptProcessorNode with ring buffer.
+        // AudioBufferSourceNode per-frame scheduling doesn't produce sound
+        // on iOS WKWebView (FxiOS). ScriptProcessorNode continuously pulls
+        // audio, keeping the iOS audio session active.
         _audioWorklet = null;
-        window._kn_audioNextTime = 0;
-        console.log('[lockstep] audio using AudioBufferSourceNode fallback');
+        var ringSize = Math.ceil(_audioRate * 0.1) * 2; // ~100ms stereo
+        window._kn_audioRing = new Float32Array(ringSize);
+        window._kn_audioRingWrite = 0;
+        window._kn_audioRingRead = 0;
+        window._kn_audioRingCount = 0;
+        var spNode = _audioCtx.createScriptProcessor(2048, 0, 2);
+        spNode.onaudioprocess = function (e) {
+          var outL = e.outputBuffer.getChannelData(0);
+          var outR = e.outputBuffer.getChannelData(1);
+          var ring = window._kn_audioRing;
+          var rSize = ring.length;
+          for (var si = 0; si < outL.length; si++) {
+            if (window._kn_audioRingCount >= 2) {
+              outL[si] = ring[window._kn_audioRingRead];
+              outR[si] = ring[(window._kn_audioRingRead + 1) % rSize];
+              window._kn_audioRingRead = (window._kn_audioRingRead + 2) % rSize;
+              window._kn_audioRingCount -= 2;
+            } else {
+              outL[si] = 0;
+              outR[si] = 0;
+            }
+          }
+        };
+        if (_playerSlot === 0) {
+          _audioDestNode = _audioCtx.createMediaStreamDestination();
+          spNode.connect(_audioDestNode);
+        }
+        // Route through <audio> element via MediaStream if available
+        // (activates iOS playback session). Fall back to direct destination.
+        if (window._kn_audioEl) {
+          var mediaDest = _audioCtx.createMediaStreamDestination();
+          spNode.connect(mediaDest);
+          window._kn_audioEl.srcObject = mediaDest.stream;
+          window._kn_audioEl.play().catch(function (e) {
+            console.log('[lockstep] audio element play failed: ' + e.message);
+          });
+          console.log('[lockstep] audio routed through <audio> element');
+        } else {
+          spNode.connect(_audioCtx.destination);
+        }
+        window._kn_scriptProcessor = spNode;
+        console.log('[lockstep] audio using ScriptProcessorNode fallback (ring=' + ringSize + ')');
       }
 
       _audioReady = true;
 
-      // Resume AudioContext on first user interaction (autoplay policy).
-      if (_audioCtx.state === 'suspended') {
+      // Resume AudioContext on user interaction (autoplay policy).
+      // Use capture phase so EmulatorJS virtual controls can't block via
+      // stopPropagation. Retry on every interaction until actually running.
+      if (_audioCtx.state !== 'running') {
         var resumeAudio = function () {
-          if (_audioCtx) _audioCtx.resume();
-          document.removeEventListener('click', resumeAudio);
-          document.removeEventListener('keydown', resumeAudio);
-          document.removeEventListener('touchstart', resumeAudio);
+          if (!_audioCtx || _audioCtx.state === 'running') {
+            document.removeEventListener('click', resumeAudio, true);
+            document.removeEventListener('keydown', resumeAudio, true);
+            document.removeEventListener('touchstart', resumeAudio, true);
+            return;
+          }
+          _audioCtx.resume().then(function () {
+            console.log('[lockstep] audio resumed via gesture (state: ' + _audioCtx.state + ')');
+            document.removeEventListener('click', resumeAudio, true);
+            document.removeEventListener('keydown', resumeAudio, true);
+            document.removeEventListener('touchstart', resumeAudio, true);
+          }).catch(function (e) {
+            console.log('[lockstep] audio resume failed: ' + e.message);
+          });
         };
-        document.addEventListener('click', resumeAudio);
-        document.addEventListener('keydown', resumeAudio);
-        document.addEventListener('touchstart', resumeAudio);
-        console.log('[lockstep] audio suspended — tap or press a key to enable');
+        document.addEventListener('click', resumeAudio, true);
+        document.addEventListener('keydown', resumeAudio, true);
+        document.addEventListener('touchstart', resumeAudio, true);
+        console.log('[lockstep] audio context state: ' + _audioCtx.state + ' — waiting for gesture to resume');
       }
 
       console.log('[lockstep] audio playback initialized (rate: ' + _audioRate + ')');
@@ -646,6 +712,7 @@
     }
   }
 
+  var _audioFeedCount = 0;
   function feedAudio() {
     if (!_audioReady || !_audioCtx) return;
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
@@ -655,6 +722,23 @@
     var n = mod._kn_get_audio_samples();
     if (n <= 0) return;
 
+    // Log audio state periodically (every 600 frames ≈ 10s)
+    _audioFeedCount++;
+    if (_audioFeedCount === 1 || _audioFeedCount % 600 === 0) {
+      // Check PCM level (RMS of first 100 samples)
+      var pcmCheck = new Int16Array(mod.HEAPU8.buffer, _audioPtr, Math.min(n * 2, 200));
+      var rms = 0;
+      for (var ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
+      rms = Math.sqrt(rms / pcmCheck.length);
+      console.log('[lockstep] audio-feed #' + _audioFeedCount +
+        ' ctx=' + _audioCtx.state +
+        ' samples=' + n +
+        ' time=' + _audioCtx.currentTime.toFixed(2) +
+        ' worklet=' + !!_audioWorklet +
+        ' rms=' + rms.toFixed(1) +
+        ' ringCount=' + (window._kn_audioRingCount || 0));
+    }
+
     var pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
 
     if (_audioWorklet) {
@@ -662,28 +746,19 @@
       var copy = new Int16Array(pcm);
       _audioWorklet.port.postMessage(copy, [copy.buffer]);
     } else {
-      // AudioBufferSourceNode fallback — schedule a buffer per frame.
-      // Keep lookahead tight: max 50ms ahead of currentTime to minimize latency.
-      var buf = _audioCtx.createBuffer(2, n, _audioRate);
-      var chL = buf.getChannelData(0);
-      var chR = buf.getChannelData(1);
-      for (var i = 0; i < n; i++) {
-        chL[i] = pcm[i * 2] / 32768.0;
-        chR[i] = pcm[i * 2 + 1] / 32768.0;
+      // ScriptProcessorNode fallback — push PCM to ring buffer.
+      // The ScriptProcessorNode's onaudioprocess callback pulls from it.
+      var ring = window._kn_audioRing;
+      if (ring) {
+        var rSize = ring.length;
+        for (var i = 0; i < n; i++) {
+          ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
+          ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
+          window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
+        }
+        window._kn_audioRingCount += n * 2;
+        if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
       }
-      var src = _audioCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(_audioCtx.destination);
-      var now = _audioCtx.currentTime;
-      if (!window._kn_audioNextTime || window._kn_audioNextTime < now) {
-        window._kn_audioNextTime = now;
-      }
-      // Cap lookahead: if we're scheduling too far ahead, snap back
-      if (window._kn_audioNextTime > now + 0.05) {
-        window._kn_audioNextTime = now + 0.01;
-      }
-      src.start(window._kn_audioNextTime);
-      window._kn_audioNextTime += buf.duration;
     }
   }
 
@@ -1394,11 +1469,61 @@
           if (_bootGestureReceived) return;
           _bootGestureReceived = true;
           promptEl.classList.add('hidden');
-          // Unlock audio within this gesture's call stack
+          // Create gesture-unlocked AudioContexts for both EJS and lockstep.
+          // On iOS, the gesture audio unlock expires after a few seconds.
+          // If the WASM core takes >3s to download (slow connections), EJS
+          // creates its AudioContext outside the gesture window → suspended
+          // → Asyncify stalls at frame 6. We fix both problems here:
+          //   1. Monkey-patch AudioContext so EJS gets a running context
+          //   2. Pre-create _audioCtx for lockstep audio (stays running)
           var AC = window.AudioContext || window.webkitAudioContext;
           if (AC) {
-            var ctx = new AC();
-            ctx.resume().catch(function () {});
+            var _ejsCtx = new AC();
+            _ejsCtx.resume().catch(function () {});
+            // Pre-create the lockstep AudioContext at 44100Hz (N64 core rate).
+            // iOS WKWebView may silently fail when AudioBufferSourceNode
+            // buffers don't match the context's sample rate.
+            if (!_audioCtx) {
+              try {
+                _audioCtx = new AC({ sampleRate: 44100 });
+              } catch (_) {
+                _audioCtx = new AC(); // fallback to native rate
+              }
+              _audioCtx.resume().catch(function () {});
+              // Keep the iOS audio session alive with a silent oscillator.
+              var _keepAliveGain = _audioCtx.createGain();
+              _keepAliveGain.gain.value = 0;
+              var _keepAliveOsc = _audioCtx.createOscillator();
+              _keepAliveOsc.connect(_keepAliveGain);
+              _keepAliveGain.connect(_audioCtx.destination);
+              _keepAliveOsc.start();
+              window._kn_keepAliveOsc = _keepAliveOsc;
+              // Pre-create and play an <audio> element within this gesture.
+              // On iOS, <audio>.play() in a gesture activates the "playback"
+              // audio session, which may output sound even with the silent
+              // switch on. initAudioPlayback() sets srcObject later.
+              var audioEl = document.createElement('audio');
+              audioEl.setAttribute('playsinline', '');
+              audioEl.play().catch(function () {});
+              window._kn_audioEl = audioEl;
+              console.log('[lockstep] lockstep AudioContext pre-created in gesture (rate: ' + _audioCtx.sampleRate + ')');
+            }
+            var _RealAC = AC;
+            var _hijacked = false;
+            var _HijackAC = function () {
+              if (!_hijacked) {
+                _hijacked = true;
+                // Restore original constructors
+                if (window.AudioContext === _HijackAC) window.AudioContext = _RealAC;
+                if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealAC;
+                console.log('[lockstep] AudioContext hijack: returning gesture-unlocked context');
+                return _ejsCtx;
+              }
+              return new _RealAC();
+            };
+            _HijackAC.prototype = _RealAC.prototype;
+            if (window.AudioContext) window.AudioContext = _HijackAC;
+            if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
           // Start emulator within gesture context so audio works
           KNShared.triggerEmulatorStart();
@@ -3273,6 +3398,16 @@
       _audioWorklet.disconnect();
       _audioWorklet = null;
     }
+    if (window._kn_scriptProcessor) {
+      window._kn_scriptProcessor.disconnect();
+      window._kn_scriptProcessor = null;
+    }
+    if (window._kn_keepAliveOsc) {
+      try { window._kn_keepAliveOsc.stop(); } catch (_) {}
+      window._kn_keepAliveOsc = null;
+    }
+    window._kn_audioRing = null;
+    window._kn_audioRingCount = 0;
     if (_audioDestNode) {
       _audioDestNode.disconnect();
       _audioDestNode = null;
