@@ -35,18 +35,23 @@ No new network protocol, server changes, or EJS modifications required.
 **`web/static/virtual-gamepad.js`** — Self-contained module, no dependencies.
 
 Exports:
-- `VirtualGamepad.init(container)` — Creates the overlay DOM inside `container`, attaches touch listeners
-- `VirtualGamepad.destroy()` — Removes overlay and listeners
-- `VirtualGamepad.getState()` — Returns the `_touchInputState` object (or a reference stored externally)
+- `VirtualGamepad.init(container, stateObj)` — Creates the overlay DOM inside `container`, attaches touch listeners. Writes touch state directly into the provided `stateObj` (owned by the streaming engine).
+- `VirtualGamepad.destroy()` — Removes overlay, detaches listeners, clears `stateObj`
 - `VirtualGamepad.setVisible(bool)` — Show/hide (for physical gamepad connect/disconnect)
+
+**State ownership:** The streaming engine owns the `_touchInputState` object and passes it to `VirtualGamepad.init()`. The virtual gamepad writes into it; `readLocalInput()` reads from it. This avoids coupling — the module doesn't export state, it writes to a provided target.
 
 ### Modified Files
 
 **`web/static/netplay-streaming.js`**:
-1. Add `_touchInputState` object (same as lockstep)
-2. Add touch input reading to `readLocalInput()` — analog stick deadzone logic (absolute: 3500, relative: 40%) and digital button/C-button bitmask, same as lockstep's implementation
-3. Call `VirtualGamepad.init()` in streaming `init()` when mobile + guest condition is met
-4. Call `VirtualGamepad.destroy()` in `stop()`
+1. Add `_touchInputState` object (same format as lockstep)
+2. Add touch input reading to `readLocalInput()` — analog stick deadzone logic (absolute: 3500, relative: 40%) and digital button/C-button bitmask. This is ~35 lines of new logic ported from lockstep's `readLocalInput()`. Note: the EJS menu-open guard from lockstep is **not needed** here since streaming guests don't run EJS.
+3. Call `VirtualGamepad.init(container, _touchInputState)` in streaming `init()` when `config.isMobile` is true and the player is a guest (not host, not spectator)
+4. Call `VirtualGamepad.destroy()` in `stop()` — this clears `_touchInputState` to prevent stale input on restart
+
+**`web/static/play.js`**:
+1. Pass `isMobile: _isMobile` in the config object passed to `NetplayStreaming.init()` (the existing `_isMobile` detection at line 40–42)
+2. In the `GamepadManager.start()` `onUpdate` callback (where EJS's `virtualGamepad` visibility is already toggled), add a parallel call to `VirtualGamepad.setVisible()` when in streaming mode
 
 **`web/play.html`**:
 1. Add `<script src="static/virtual-gamepad.js"></script>` tag
@@ -129,6 +134,8 @@ Uses the exact same index mapping as EJS's `simulateInput()`:
 - No interference with the existing toolbar or debug overlay
 
 ## Physical Gamepad Behavior
+
+**Integration point:** `web/static/play.js`, inside the existing `GamepadManager.start()` `onUpdate` callback. This callback already toggles `ejs.virtualGamepad.style.display` when gamepads connect/disconnect. The same callback will also call `VirtualGamepad.setVisible()` when in streaming mode.
 
 When `GamepadManager` detects a physical gamepad connecting:
 - Hide the virtual gamepad (`VirtualGamepad.setVisible(false)`)
