@@ -147,7 +147,7 @@
     socket.on('game-ended', onGameEnded);
     socket.on('room-closed', onRoomClosed);
     socket.on('rom-sharing-updated', onRomSharingUpdated);
-    socket.on('data-message', onDataMessageForRomSharing);
+    socket.on('data-message', onDataMessage);
   }
 
   function sendDeviceType() {
@@ -304,6 +304,14 @@
     const players = data.players || {};
     const spectators = data.spectators || {};
     const ownerSid = data.owner || null;
+
+    // Track room mode from server (set by host's set-mode event)
+    if (data.mode) {
+      mode = data.mode;
+      // Sync mode-select dropdown if we're the host
+      const modeSel = document.getElementById('mode-select');
+      if (modeSel && !isHost) modeSel.value = mode;
+    }
 
     // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
     if (data.romSharing !== undefined) {
@@ -545,7 +553,15 @@
     }
   }
 
-  function onDataMessageForRomSharing(data) {
+  function onDataMessage(data) {
+    // Host broadcasts mode selection to guests pre-game
+    if (data.type === 'mode-select' && !isHost && data.mode) {
+      mode = data.mode;
+      const modeSel = document.getElementById('mode-select');
+      if (modeSel) modeSel.value = mode;
+      updateRomDeclarePrompt();
+      if (lastUsersData) updateStartButton(lastUsersData.players || {});
+    }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
       // Use engine's peer connection if available, otherwise pre-game connection
       if (engine && engine.getPeerConnection && engine.getPeerConnection(data.sender)) {
@@ -582,6 +598,7 @@
     const romDrop = document.getElementById('rom-drop');
     const prompt = document.getElementById('rom-sharing-prompt');
     const progress = document.getElementById('rom-transfer-progress');
+    const retryBtn = document.getElementById('rom-transfer-retry');
 
     if (isHost) return;
     if (isSpectator) return;
@@ -589,6 +606,9 @@
     console.log(`[play] updateRomSharingUI: enabled=${_romSharingEnabled}` +
       ` decision=${_romSharingDecision} state=${_romTransferState}` +
       ` hasRom=${!!_romBlob}`);
+
+    // Hide retry button by default — only shown in paused state
+    if (retryBtn) retryBtn.style.display = 'none';
 
     if (_romSharingEnabled && _romSharingDecision === null && !_romBlob) {
       // Show accept/decline prompt
@@ -601,14 +621,17 @@
       if (prompt) prompt.style.display = 'none';
       if (progress) progress.style.display = '';
     } else if (_romTransferState === 'paused') {
-      // Paused — show progress bar with paused state
+      // Paused — show progress bar with retry button
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.style.display = 'none';
       if (progress) progress.style.display = '';
+      if (retryBtn) retryBtn.style.display = '';
       const text = document.getElementById('rom-progress-text');
       if (text && _romTransferHeader) {
         const pct = Math.round((_romTransferBytesReceived / _romTransferHeader.size) * 100);
         text.textContent = `ROM transfer paused — ${pct}% received`;
+      } else if (text) {
+        text.textContent = 'ROM transfer failed';
       }
     } else if (_romTransferState === 'resuming') {
       // Resuming — show progress bar with reconnecting text
@@ -729,6 +752,15 @@
     showToast('ROM transfer cancelled');
   }
 
+  function retryRomTransfer() {
+    if (_romTransferState !== 'paused' && _romTransferState !== 'idle') return;
+    _romTransferRetries = 0;
+    _romTransferState = 'resuming';
+    updateRomSharingUI();
+    showToast('Retrying ROM transfer...');
+    requestResumeTransfer();
+  }
+
   function resetRomTransfer() {
     // Game-end cleanup — same as cancel but no toast, also closes sender DCs
     _romTransferState = 'idle';
@@ -832,9 +864,7 @@
 
     dc.onopen = function () {
       console.log('[play] pre-game rom-transfer DC open to', peerSid);
-      if (!dc._waitForResume) {
-        sendRomOverChannel(dc, peerSid);
-      }
+      // Always wait for receiver's rom-resume message with offset.
     };
     dc.onmessage = function (e) {
       if (typeof e.data === 'string') {
@@ -905,11 +935,8 @@
 
     dc.onopen = () => {
       console.log('[play] rom-transfer DC open to', peerSid);
-      // Don't auto-send if this was triggered by onPeerReconnected —
-      // wait for receiver's rom-resume message with offset instead.
-      if (!dc._waitForResume) {
-        sendRomOverChannel(dc, peerSid);
-      }
+      // Always wait for receiver's rom-resume message with offset.
+      // This prevents double-sending when the guest also signals rom-resume.
     };
     dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
@@ -1044,24 +1071,32 @@
     channel.binaryType = 'arraybuffer';
 
     if (_romTransferState === 'resuming' || _romTransferState === 'paused') {
-      // Resume: keep cached chunks, send resume offset
+      // Resume: keep cached chunks
       clearTimeout(_romTransferResumeTimer);
       _romTransferResumeTimer = null;
-      _romTransferState = 'receiving';
       console.log('[play] resuming ROM transfer from offset', _romTransferBytesReceived);
-      channel.onopen = () => {
-        channel.send(JSON.stringify({ type: 'rom-resume', offset: _romTransferBytesReceived }));
-      };
-      if (channel.readyState === 'open') {
-        channel.send(JSON.stringify({ type: 'rom-resume', offset: _romTransferBytesReceived }));
-      }
     } else {
-      // Fresh transfer
+      // Fresh transfer: clear any stale state
       _romTransferChunks = [];
       _romTransferHeader = null;
       _romTransferBytesReceived = 0;
       _romTransferRetries = 0;
-      _romTransferState = 'receiving';
+    }
+
+    _romTransferState = 'receiving';
+
+    // Always tell the host where to start sending from.
+    // offset 0 = fresh (host sends header + all chunks)
+    // offset N = resume (host sends chunks from N, no header)
+    var resumeOffset = _romTransferBytesReceived;
+    function sendResumeMsg() {
+      console.log('[play] sending rom-resume offset', resumeOffset);
+      channel.send(JSON.stringify({ type: 'rom-resume', offset: resumeOffset }));
+    }
+    if (channel.readyState === 'open') {
+      sendResumeMsg();
+    } else {
+      channel.onopen = sendResumeMsg;
     }
 
     _romTransferLastChunkAt = Date.now();
@@ -1732,9 +1767,6 @@
         // Resume ROM transfer if paused — mark DC to wait for receiver's rom-resume
         if (_romTransferState === 'paused' && engine && engine.getPeerConnection) {
           startRomTransferTo(sid);
-          if (_romTransferDCs[sid]) {
-            _romTransferDCs[sid]._waitForResume = true;
-          }
         }
       },
       initialPlayers: lastUsersData,
@@ -1950,9 +1982,10 @@
     const prompt = document.getElementById('rom-declare-prompt');
     const romDrop = document.getElementById('rom-drop');
     if (!prompt) return;
-    // Show for non-host, non-spectator players when ROM sharing is off.
-    // If ROM sharing is on, the guest gets the accept/decline flow instead.
-    const show = !isHost && !isSpectator && !_romSharingEnabled;
+    // Show only in streaming mode for non-host, non-spectator players
+    // when ROM sharing is off. In lockstep mode, normal ROM loading applies.
+    const isStreaming = mode === 'streaming';
+    const show = isStreaming && !isHost && !isSpectator && !_romSharingEnabled;
     prompt.style.display = show ? '' : 'none';
     // Hide ROM drop box when declaration is checked (streaming guests don't need a ROM)
     if (romDrop && show && _romDeclared) {
@@ -2822,6 +2855,12 @@
         }
         updateRomDeclarePrompt();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
+        // Broadcast mode to guests so they can show/hide declaration prompt
+        if (socket && socket.connected) {
+          socket.emit('data-message', { type: 'mode-select', mode: modeSelect.value });
+          // Also set on server for users-updated payload (requires server restart)
+          socket.emit('set-mode', { mode: modeSelect.value });
+        }
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();
@@ -2848,6 +2887,8 @@
     const romDeclineBtn = document.getElementById('rom-decline-btn');
     if (romDeclineBtn) romDeclineBtn.addEventListener('click', declineRomSharing);
 
+    const romRetryBtn = document.getElementById('rom-transfer-retry');
+    if (romRetryBtn) romRetryBtn.addEventListener('click', retryRomTransfer);
     const romCancelBtn = document.getElementById('rom-transfer-cancel');
     if (romCancelBtn) romCancelBtn.addEventListener('click', cancelRomTransfer);
 
