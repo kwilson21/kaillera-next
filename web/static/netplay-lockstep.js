@@ -1819,14 +1819,16 @@
 
   function startSpectatorStream() {
     if (_playerSlot !== 0) return;
+    if (_hostStream) return;  // already started
 
     var canvas = document.querySelector('#game canvas');
     if (!canvas) {
-      console.log('[lockstep] canvas not found for spectator stream');
+      console.log('[lockstep] canvas not found for spectator stream, retrying...');
+      setTimeout(startSpectatorStream, 200);
       return;
     }
 
-    // Create a smaller capture canvas for efficiency (same as streaming prototype)
+    // Create a smaller capture canvas for efficiency (same as streaming engine)
     var captureCanvas = document.createElement('canvas');
     captureCanvas.width = 640;
     captureCanvas.height = 480;
@@ -1846,9 +1848,11 @@
     var captureTrack = _hostStream.getVideoTracks()[0];
 
     // Blit loop: copy emulator canvas to capture canvas every frame
+    // Use _origRAF (saved real rAF) when available, fall back to native rAF
+    var raf = _origRAF || window.requestAnimationFrame;
     function blitFrame() {
-      if (!_origRAF) return;  // stopped
-      _origRAF.call(window, blitFrame);
+      if (!_running) return;  // stopped
+      raf.call(window, blitFrame);
       ctx.drawImage(canvas, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
     }
@@ -2621,7 +2625,7 @@
     // center, causing a brief "up" input that triggers unwanted jumps.
     // Relative deadzone (40% of major axis) suppresses near-cardinal
     // diagonals, giving ~±22° cardinal zones around each direction.
-    var TOUCH_ABS_DEADZONE = 5000;
+    var TOUCH_ABS_DEADZONE = 3500;
     var stR = _touchInputState[16] || 0;
     var stL = _touchInputState[17] || 0;
     var stD = _touchInputState[18] || 0;
@@ -3307,6 +3311,7 @@
   window.NetplayLockstep = {
     init: init,
     stop: stop,
+    _startSpectatorStream: startSpectatorStream,  // test hook
     onExtraDataChannel: function (cb) { _onExtraDataChannel = cb; },
     onUnhandledMessage: function (cb) { _onUnhandledMessage = cb; },
     getPeerConnection: function (sid) {
