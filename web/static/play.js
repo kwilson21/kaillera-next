@@ -1121,13 +1121,24 @@
   function destroyEmulator() {
     const emu = window.EJS_emulator;
     if (emu) {
-      // Close the emulator's own AudioContext to stop lingering audio.
+      // Close ALL emulator AudioContexts to stop lingering audio.
       // The netplay engine's stop() handles its custom audio pipeline;
-      // this catches the EJS/SDL2 AudioContext that runs independently.
+      // this catches the EJS/SDL2 and OpenAL AudioContexts.
       try {
         const gm = emu.gameManager;
-        if (gm && gm.Module && gm.Module.SDL2 && gm.Module.SDL2.audioContext) {
-          gm.Module.SDL2.audioContext.close();
+        if (gm && gm.Module) {
+          if (gm.Module.SDL2 && gm.Module.SDL2.audioContext) {
+            gm.Module.SDL2.audioContext.close();
+          }
+          // OpenAL AudioContexts — suspended during lockstep but never closed
+          if (gm.Module.AL && gm.Module.AL.contexts) {
+            Object.keys(gm.Module.AL.contexts).forEach((id) => {
+              const ctx = gm.Module.AL.contexts[id];
+              if (ctx && ctx.audioCtx) {
+                try { ctx.audioCtx.close(); } catch (_) {}
+              }
+            });
+          }
         }
       } catch (_) {}
     }

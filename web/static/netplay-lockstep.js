@@ -1704,6 +1704,9 @@
       if (!_running && _selfEmuReady && _gameStarted) {
         setStatus('Sync timed out — try reloading the page');
         if (_config && _config.onToast) _config.onToast('Sync stalled — reload to retry');
+        // Reset sync state so a reconnected peer can re-trigger the flow
+        _syncStarted = false;
+        _lockstepReadyPeers = {};
       }
     }, 30000);
   }
