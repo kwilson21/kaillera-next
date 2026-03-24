@@ -121,6 +121,14 @@
         </div>
       </div>
 
+      <!-- ROM ownership declaration (streaming mode guests) -->
+      <div id="rom-declare-prompt" style="display:none" class="card-section">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+          <input type="checkbox" id="rom-declare-cb">
+          <span style="font-size:13px;">I own a legal copy of this game and accept all liability</span>
+        </label>
+      </div>
+
       <p id="guest-status" style="display:none">Waiting for host to start...</p>
       <div id="engine-status"></div>
 
@@ -199,13 +207,18 @@
   </script>
 
   <!-- Socket.IO -->
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"
+          integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"
+          crossorigin="anonymous"></script>
 
   <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
   <script src="/static/gamepad-manager.js"></script>
 
   <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
   <script src="/static/shared.js"></script>
+
+  <!-- Virtual gamepad for mobile streaming guests -->
+  <script src="/static/virtual-gamepad.js"></script>
 
   <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
   <script src="/static/netplay-lockstep.js?v=2"></script>

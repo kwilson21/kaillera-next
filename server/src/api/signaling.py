@@ -74,6 +74,7 @@ class Room:
     rom_hash: str | None = None # SHA-256 of ROM, set on start-game
     rom_sharing: bool = False     # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
+    rom_declared: set[str] = field(default_factory=set)  # sids that declared ROM ownership (streaming)
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
 
@@ -103,6 +104,7 @@ def _players_payload(room: Room) -> dict:
                 **info,
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
+                "romDeclared": info["socketId"] in room.rom_declared,
                 "inputType": room.input_types.get(info["socketId"], "keyboard"),
                 "deviceType": room.device_types.get(info["socketId"], "desktop"),
             }
@@ -156,6 +158,7 @@ async def _leave(sid: str) -> None:
             del room.slots[rm_slot]
 
     room.rom_ready.discard(sid)
+    room.rom_declared.discard(sid)
     room.input_types.pop(sid, None)
     room.device_types.pop(sid, None)
 
@@ -381,16 +384,24 @@ async def start_game(sid: str, data: dict) -> str | None:
     if room.owner != sid:
         return "Only the host can start the game"
 
-    # Check all players have ROMs (or host is sharing)
-    if not room.rom_sharing:
+    mode = data.get("mode", "lockstep")
+    if mode not in _VALID_MODES:
+        mode = "lockstep"
+
+    # Streaming: check all players declared ROM ownership
+    # Lockstep: check all players have ROMs (or host is sharing)
+    if mode == "streaming":
+        for pid, info in room.players.items():
+            if info["socketId"] == room.owner:
+                continue  # host has the ROM
+            if info["socketId"] not in room.rom_declared:
+                return "Not all players have declared ROM ownership"
+    elif not room.rom_sharing:
         for pid, info in room.players.items():
             if info["socketId"] not in room.rom_ready:
                 return "Not all players have a ROM loaded"
 
     room.status = "playing"
-    mode = data.get("mode", "lockstep")
-    if mode not in _VALID_MODES:
-        mode = "lockstep"
     room.mode = mode
     rom_hash = data.get("romHash")
     if rom_hash and isinstance(rom_hash, str) and len(rom_hash) == 64:
@@ -454,6 +465,25 @@ async def rom_ready(sid: str, data: dict) -> str | None:
         room.rom_ready.add(sid)
     else:
         room.rom_ready.discard(sid)
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    return None
+
+
+@sio.on("rom-declare")
+async def rom_declare(sid: str, data: dict) -> str | None:
+    """Player declares they own a legal copy of the ROM (streaming mode)."""
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
+        return "Not in a room"
+    session_id, room = result
+
+    declared = bool(data.get("declared", True))
+    if declared:
+        room.rom_declared.add(sid)
+    else:
+        room.rom_declared.discard(sid)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
@@ -592,12 +622,18 @@ async def game_input(sid: str, data: dict) -> None:
 
 @sio.on("debug-sync")
 async def debug_sync(sid: str, data: dict) -> None:
-    """Real-time sync status — appends to logs/live.log for live tailing."""
+    """Real-time sync status — appends to logs/live.log for live tailing.
+    Only active when DEBUG_MODE=1 env var is set."""
+    import os
+    if not os.environ.get("DEBUG_MODE"):
+        return
+    if not check(sid, "data-message"):
+        return
     from pathlib import Path
     entry = _sid_to_room.get(sid)
     room_id = entry[0] if entry else "?"
     slot = data.get("slot", "?")
-    msg = data.get("msg", "")
+    msg = str(data.get("msg", ""))[:1000]  # cap message size
     log_dir = Path(__file__).parent.parent.parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     with open(log_dir / "live.log", "a") as f:
@@ -607,30 +643,42 @@ async def debug_sync(sid: str, data: dict) -> None:
 
 @sio.on("debug-logs")
 async def debug_logs(sid: str, data: dict) -> None:
-    """Receive debug logs from a client and write to local file."""
+    """Receive debug logs from a client and log to stdout.
+    In DEBUG_MODE, also writes to local file."""
+    if not check(sid, "data-message"):
+        return
     import json
-    from datetime import datetime
-    from pathlib import Path
 
     entry = _sid_to_room.get(sid)
     room_id = entry[0] if entry else "unknown"
     info = data.get("info", {})
     logs = data.get("logs", [])
+    if not isinstance(logs, list) or len(logs) > 5000:
+        return
 
-    filename = f"debug-{room_id}-slot{info.get('slot', '?')}-{datetime.now().strftime('%H%M%S')}.log"
-    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
-    log_dir.mkdir(exist_ok=True)
-    out = log_dir / filename
+    # Always log summary + entries to stdout (captured by docker logs)
+    slot = info.get("slot", "?")
+    log.info("DEBUG-DUMP room=%s slot=%s entries=%d info=%s",
+             room_id, slot, len(logs), json.dumps(info))
+    for line in logs[:5000]:
+        log.info("[P%s] %s", slot, str(line)[:500])
 
-    with open(out, "w") as f:
-        f.write(f"Room: {room_id}  SID: {sid}\n")
-        f.write(f"Info: {json.dumps(info, indent=2)}\n")
-        f.write(f"Entries: {len(logs)}\n")
-        f.write("---\n")
-        for line in logs:
-            f.write(line + "\n")
-
-    log.info("Debug logs written: %s (%d entries)", out, len(logs))
+    # In DEBUG_MODE, also write to local file for convenience
+    import os
+    if os.environ.get("DEBUG_MODE"):
+        from datetime import datetime
+        from pathlib import Path
+        filename = f"debug-{room_id}-slot{slot}-{datetime.now().strftime('%H%M%S')}.log"
+        log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        out = log_dir / filename
+        with open(out, "w") as f:
+            f.write(f"Room: {room_id}  SID: {sid}\n")
+            f.write(f"Info: {json.dumps(info, indent=2)}\n")
+            f.write(f"Entries: {len(logs)}\n---\n")
+            for line in logs[:5000]:
+                f.write(str(line)[:500] + "\n")
+        log.info("Debug logs also written to: %s", out)
 
 
 @sio.event

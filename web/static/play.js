@@ -30,6 +30,7 @@
   let _pendingLateJoin = false;  // waiting for ROM before late-join init
   let _romSharingEnabled = false;   // room-level: host has sharing toggled on
   let _romSharingDecision = null;   // 'accepted', 'declined', or null (page-lifetime)
+  let _romDeclared = false;         // true if user declared ROM ownership (streaming, page-lifetime)
   let _romTransferInProgress = false;
   let _romTransferChunks = [];
   let _romTransferHeader = null;
@@ -70,6 +71,26 @@
     isSpectator = params.get('spectate') === '1';
   }
 
+  // ── Global error handler ───────────────────────────────────────────────
+
+  window.addEventListener('unhandledrejection', function (e) {
+    console.error('[play] unhandled rejection:', e.reason);
+    showToast('Something went wrong — check console');
+  });
+
+  // ── Clean tab close ───────────────────────────────────────────────────
+
+  window.addEventListener('pagehide', function () {
+    // Notify peers this is intentional so they skip the 15s reconnect wait
+    if (engine && window._peers) {
+      Object.values(window._peers).forEach(function (p) {
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send('leaving'); } catch (_) {}
+        }
+      });
+    }
+  });
+
   // ── Socket.IO ──────────────────────────────────────────────────────────
 
   function connect() {
@@ -80,9 +101,38 @@
     socket.on('connect', onConnect);
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
+      if (!gameRunning) showToast('Connection lost — reconnecting...');
     });
     socket.on('reconnect', (attempt) => {
       console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
+      showToast('Reconnected — rejoining room...');
+      // Re-join the room — server lost our SID-to-room mapping on disconnect
+      socket.emit('join-room', {
+        extra: {
+          sessionid: roomCode,
+          userid: socket.id,
+          player_name: playerName,
+          spectate: isSpectator,
+        },
+      }, (err, joinData) => {
+        if (err) {
+          console.log('[play] rejoin failed:', err);
+          showToast('Rejoin failed — returning to lobby...');
+          setTimeout(() => { window.location.href = '/'; }, 2000);
+          return;
+        }
+        console.log('[play] rejoined room after reconnect');
+        if (joinData && joinData.players) {
+          const entries = Object.values(joinData.players);
+          for (let i = 0; i < entries.length; i++) {
+            if (entries[i].socketId === socket.id) {
+              mySlot = entries[i].slot;
+              break;
+            }
+          }
+        }
+        sendDeviceType();
+      });
     });
     socket.on('connect_error', (e) => {
       if (!gameRunning) {
@@ -301,6 +351,7 @@
     // Update overlay UI if in pre-game
     if (!gameRunning) {
       updatePlayerList(players, spectators, ownerSid);
+      updateRomDeclarePrompt();
       updateStartButton(players);
       updateGamepadSlot();
       // Show/hide host controls after ownership transfer
@@ -372,20 +423,27 @@
       return;
     }
 
-    // If we accepted ROM sharing but don't have a ROM yet, stay in overlay
-    // with progress UI while connecting WebRTC and receiving the ROM
-    if (_romSharingDecision === 'accepted' && !_romBlob && !_romBlobUrl) {
-      _romTransferInProgress = true;
-      updateRomSharingUI();
+    // If ROM sharing is enabled and we don't have a ROM yet (regardless of
+    // whether the guest accepted, declined, or hasn't decided), stay in overlay.
+    // This handles the race where the host starts before the guest finishes
+    // downloading or even accepts the sharing prompt.
+    if (_romSharingEnabled && !_romBlob && !_romBlobUrl) {
       // Start engine in connect-only mode for gameplay connections
       initEngine();
-      if (_preGamePC) {
-        // Pre-game ROM transfer already in progress — let it continue
-        console.log('[play] game started — pre-game ROM transfer in progress');
+      if (_romSharingDecision === 'accepted') {
+        // Already accepted — transfer in progress or about to start
+        _romTransferInProgress = true;
+        updateRomSharingUI();
+        if (_preGamePC) {
+          console.log('[play] game started — pre-game ROM transfer in progress');
+        } else {
+          console.log('[play] game started — waiting for ROM transfer');
+          waitForDCAndSendRomAccepted();
+        }
       } else {
-        // No pre-game transfer — fall back to engine-based transfer
-        console.log('[play] game started — waiting for ROM transfer');
-        waitForDCAndSendRomAccepted();
+        // Guest hasn't decided yet — keep sharing prompt visible in overlay
+        console.log('[play] game started — waiting for guest to accept ROM sharing');
+        updateRomSharingUI();
       }
       return;
     }
@@ -478,6 +536,15 @@
       }
       cleanupPreGameConnections();
       showToast('ROM sharing disabled by host');
+    }
+
+    // If sharing was re-enabled and we previously accepted but lost the
+    // transfer (cancelled mid-download), auto-restart without re-prompting.
+    if (!isHost && _romSharingEnabled && !wasEnabled &&
+        _romSharingDecision === 'accepted' && !_romBlob && !_romTransferInProgress) {
+      console.log('[play] ROM sharing re-enabled — restarting transfer');
+      _romTransferInProgress = true;
+      waitForDCAndSendRomAccepted();
     }
 
     updateRomSharingUI();
@@ -1137,12 +1204,21 @@
           if (gm.Module.SDL2 && gm.Module.SDL2.audioContext) {
             gm.Module.SDL2.audioContext.close();
           }
-          // OpenAL AudioContexts — suspended during lockstep but never closed
+          // OpenAL AudioContexts — lockstep overrides resume() to a no-op
+          // to prevent auto-resuming during gameplay. Restore it before closing
+          // so mobile WebKit can properly release the audio resources.
           if (gm.Module.AL && gm.Module.AL.contexts) {
             Object.keys(gm.Module.AL.contexts).forEach((id) => {
               const ctx = gm.Module.AL.contexts[id];
               if (ctx && ctx.audioCtx) {
-                try { ctx.audioCtx.close(); } catch (_) {}
+                try {
+                  // Restore native resume() if it was monkey-patched
+                  var proto = AudioContext.prototype || webkitAudioContext.prototype;
+                  if (proto && proto.resume) {
+                    ctx.audioCtx.resume = proto.resume;
+                  }
+                  ctx.audioCtx.close();
+                } catch (_) {}
               }
             });
           }
@@ -1520,6 +1596,7 @@
       gameElement: document.getElementById('game'),
       rollbackEnabled: rollbackEnabled,
       romHash: _romHash || null,
+      isMobile: _isMobile,
       onStatus: (msg) => {
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
         const toolbarEl = document.getElementById('toolbar-status');
@@ -1781,23 +1858,57 @@
     }
   }
 
+  function updateRomDeclarePrompt() {
+    const prompt = document.getElementById('rom-declare-prompt');
+    const romDrop = document.getElementById('rom-drop');
+    if (!prompt) return;
+    // Show for non-host, non-spectator players when ROM sharing is off.
+    // If ROM sharing is on, the guest gets the accept/decline flow instead.
+    const show = !isHost && !isSpectator && !_romSharingEnabled;
+    prompt.style.display = show ? '' : 'none';
+    // Hide ROM drop box when declaration is checked (streaming guests don't need a ROM)
+    if (romDrop && show && _romDeclared) {
+      romDrop.style.display = 'none';
+    } else if (romDrop && !_romDeclared && !_romSharingEnabled) {
+      romDrop.style.display = '';
+    }
+  }
+
   function updateStartButton(players) {
     const btn = document.getElementById('start-btn');
     if (!btn || !isHost) return;
+    const sel = document.getElementById('mode-select');
+    const selectedMode = sel ? sel.value : mode;
     const playerCount = Object.keys(players).length;
     const entries = Object.values(players);
-    const allReady = entries.every((p) => { return p.romReady; });
 
     if (playerCount < 2) {
       btn.disabled = true;
       btn.textContent = 'Start Game (need 2+)';
-    } else if (!allReady && !_romSharingEnabled) {
-      btn.disabled = true;
-      const readyCount = entries.filter((p) => { return p.romReady; }).length;
-      btn.textContent = `Waiting for ROMs (${readyCount}/${playerCount})`;
+    } else if (selectedMode === 'streaming') {
+      // Streaming: check ROM declarations (host is exempt)
+      const guestsReady = entries.every((p) => {
+        return p.slot === 0 || p.romDeclared;
+      });
+      if (!guestsReady) {
+        btn.disabled = true;
+        const declaredCount = entries.filter((p) => { return p.slot === 0 || p.romDeclared; }).length;
+        btn.textContent = `Waiting for declarations (${declaredCount}/${playerCount})`;
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Start Game';
+      }
     } else {
-      btn.disabled = false;
-      btn.textContent = 'Start Game';
+      // Lockstep: check ROMs loaded
+      const allReady = entries.every((p) => { return p.romReady; });
+      if (!allReady && !_romSharingEnabled) {
+        btn.disabled = true;
+        const readyCount = entries.filter((p) => { return p.romReady; }).length;
+        btn.textContent = `Waiting for ROMs (${readyCount}/${playerCount})`;
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Start Game';
+      }
     }
   }
 
@@ -2112,6 +2223,15 @@
         ejs.virtualGamepad.style.display = 'none';
       } else if (ejs.touch) {
         ejs.virtualGamepad.style.display = '';
+      }
+    }
+
+    // Toggle standalone virtual gamepad (streaming mode guests)
+    if (window.VirtualGamepad) {
+      if (detected.length > 0) {
+        VirtualGamepad.setVisible(false);
+      } else if ('ontouchstart' in window) {
+        VirtualGamepad.setVisible(true);
       }
     }
 
@@ -2542,6 +2662,14 @@
     const toolbarInfo = document.getElementById('toolbar-info');
     if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
 
+    // Mobile: tap info overlay to expand/collapse details
+    const infoOverlay = document.getElementById('info-overlay');
+    if (infoOverlay && _isMobile) {
+      infoOverlay.addEventListener('click', function () {
+        infoOverlay.classList.toggle('expanded');
+      });
+    }
+
     const dumpLogsBtn = document.getElementById('dump-logs-btn');
     if (dumpLogsBtn) dumpLogsBtn.addEventListener('click', function () {
       if (engine && engine.dumpLogs) {
@@ -2604,6 +2732,8 @@
             socket.emit('rom-sharing-toggle', { enabled: false });
           }
         }
+        updateRomDeclarePrompt();
+        if (lastUsersData) updateStartButton(lastUsersData.players || {});
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();
@@ -2632,6 +2762,20 @@
 
     const romCancelBtn = document.getElementById('rom-transfer-cancel');
     if (romCancelBtn) romCancelBtn.addEventListener('click', cancelRomTransfer);
+
+    // ROM ownership declaration (streaming mode)
+    const romDeclareCb = document.getElementById('rom-declare-cb');
+    if (romDeclareCb) {
+      // Restore cached state
+      if (_romDeclared) romDeclareCb.checked = true;
+      romDeclareCb.addEventListener('change', () => {
+        _romDeclared = romDeclareCb.checked;
+        if (socket && socket.connected) {
+          socket.emit('rom-declare', { declared: _romDeclared });
+        }
+        updateRomDeclarePrompt();
+      });
+    }
 
     // Delay picker
     const delayAuto = document.getElementById('delay-auto');
@@ -2692,6 +2836,11 @@
         if (nextIdx === currentIdx) nextIdx = detected[0].index;
         GamepadManager.reassignSlot(slot, nextIdx);
       });
+    }
+
+    // Mobile landscape prompt — game is unplayable in portrait on phones
+    if (_isMobile && window.innerHeight > window.innerWidth) {
+      showToast('Rotate to landscape for best experience');
     }
   });
 })();

@@ -134,11 +134,21 @@ def create_app(lifespan=None) -> FastAPI:
             media_type="application/octet-stream",
         )
 
+    _MAX_CACHE_ENTRIES = 50
+
     @app.post("/api/cache-state/{rom_hash}")
     async def cache_state(rom_hash: str, request: Request) -> dict:
+        client_ip = request.headers.get(
+            "x-forwarded-for",
+            request.client.host if request.client else "unknown",
+        ).split(",")[0].strip()
+        if not check_ip(client_ip, "cache-state"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         body = await request.body()
         if len(body) > _STATE_MAX_SIZE:
             raise HTTPException(status_code=413, detail="State too large")
+        if len(_state_cache) >= _MAX_CACHE_ENTRIES and rom_hash not in _state_cache:
+            raise HTTPException(status_code=507, detail="Cache full")
         _state_cache[rom_hash] = body
         log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
         return {"status": "cached", "size": len(body)}

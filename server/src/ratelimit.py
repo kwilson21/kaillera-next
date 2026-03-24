@@ -17,6 +17,8 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "room-lookup": (10, 60),
     "webrtc-signal": (60, 1),
     "input": (120, 1),
+    "rom-signal": (60, 1),
+    "cache-state": (5, 60),
 }
 
 MAX_CONNECTIONS_PER_IP = 20

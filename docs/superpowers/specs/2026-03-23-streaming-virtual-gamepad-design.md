@@ -140,11 +140,13 @@ Uses the exact same index mapping as EJS's `simulateInput()`:
 When `GamepadManager` detects a physical gamepad connecting:
 - Hide the virtual gamepad (`VirtualGamepad.setVisible(false)`)
 - Clear `_touchInputState` to prevent stale touch values
+- Transition game screen from top-aligned to vertically centered (`#game` margin: `0` → `auto 0`)
 
 When all physical gamepads disconnect on a touch device:
 - Show the virtual gamepad again (`VirtualGamepad.setVisible(true)`)
+- Transition game screen from centered to top-aligned (`#game` margin: `auto 0` → `0`) to make room for controls
 
-This mirrors EJS's existing behavior for its built-in virtual gamepad.
+This mirrors EJS's existing behavior for its built-in virtual gamepad. The game screen repositioning ensures the video is fully visible whether controls are overlaid or not.
 
 ## What's NOT In Scope
 

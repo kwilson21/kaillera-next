@@ -557,6 +557,8 @@
   let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
+  let _visChangeHandler = null;     // stored for removal in stopSync()
+  let _syncWorkerUrl = null;        // Blob URL for sync worker (revoke on stop)
 
   // Spectator streaming state
   let _hostStream        = null;    // MediaStream for spectator canvas streaming
@@ -1546,6 +1548,13 @@
         return;
       }
 
+      // Timeout after 60 seconds of polling (600 polls at 100ms)
+      if (_bootPollCount > 600) {
+        setStatus('Emulator failed to load — try reloading the page');
+        if (_config && _config.onStatus) _config.onStatus('Emulator failed to load — try reloading');
+        return;
+      }
+
       var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) {
         _bootPollCount++;
@@ -1629,6 +1638,19 @@
 
       _selfEmuReady = true;
       hookVirtualGamepad();
+
+      // On mobile: hide EJS's built-in virtual gamepad and use our custom one.
+      // Our VirtualGamepad writes directly to _touchInputState which
+      // readLocalInput() already reads — no hookVirtualGamepad needed for it.
+      if (_config && _config.isMobile && window.VirtualGamepad) {
+        var ejs2 = window.EJS_emulator;
+        if (ejs2 && ejs2.virtualGamepad) {
+          ejs2.virtualGamepad.style.display = 'none';
+          ejs2.touch = false;  // prevent EJS from re-showing it
+        }
+        var gameEl2 = document.getElementById('game');
+        if (gameEl2) VirtualGamepad.init(gameEl2, _touchInputState);
+      }
 
       // Late join: request state from host instead of normal sync flow.
       // Also trigger if host is already in the lockstep loop (ROM sharing case:
@@ -2298,7 +2320,10 @@
     }
 
     initAudioPlayback();
-    _diagInstallHooks();
+    // Only install diagnostic hooks when explicitly enabled — they add
+    // MutationObserver on document.body, touch listeners, and write to
+    // _diagEventLog which grows unboundedly (17MB+ on mobile in 30 min).
+    if (window._KN_DIAG) _diagInstallHooks();
 
     // DIAG: one-time startup banner for log self-description
     var ua = navigator.userAgent;
@@ -2325,7 +2350,7 @@
     // On return to foreground: fast-forward frame counter to catch up with
     // peers, then resync emulator state from host.
     var _backgroundAt = 0;
-    document.addEventListener('visibilitychange', function () {
+    _visChangeHandler = function () {
       if (!_running) return;
       if (document.hidden) {
         _backgroundAt = Date.now();
@@ -2368,7 +2393,8 @@
           }
         }
       }
-    });
+    };
+    document.addEventListener('visibilitychange', _visChangeHandler);
 
     // Use setInterval so background tabs are not throttled
     _tickInterval = setInterval(tick, 16);
@@ -2397,6 +2423,17 @@
       }
       _origToggleFF = null;
       _origToggleSM = null;
+    }
+    // Restore performance.now — the override closure retains references to the
+    // WASM Module, preventing GC of tens of MB after destroyEmulator().
+    if (_deterministicPerfNow) {
+      performance.now = Performance.prototype.now.bind(performance);
+      _deterministicPerfNow = null;
+    }
+    // Remove visibilitychange handler to prevent duplicates on game restart
+    if (_visChangeHandler) {
+      document.removeEventListener('visibilitychange', _visChangeHandler);
+      _visChangeHandler = null;
     }
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
@@ -2857,7 +2894,8 @@
       '};',
     ].join('\n');
     var blob = new Blob([code], { type: 'application/javascript' });
-    _syncWorker = new Worker(URL.createObjectURL(blob));
+    _syncWorkerUrl = URL.createObjectURL(blob);
+    _syncWorker = new Worker(_syncWorkerUrl);
     _syncWorker.onmessage = function (e) {
       var cb = _syncWorkerCallbacks[e.data.id];
       if (cb) { delete _syncWorkerCallbacks[e.data.id]; cb(e.data); }
@@ -3384,7 +3422,9 @@
     _pendingResyncState = null;
     _hashRegion = null;
     if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
+    if (_syncWorkerUrl) { URL.revokeObjectURL(_syncWorkerUrl); _syncWorkerUrl = null; }
     _syncWorkerCallbacks = {};
+    _lastSyncState = null;
 
     // Clean up audio bypass
     if (_audioWorklet) {
@@ -3433,6 +3473,11 @@
 
     _onExtraDataChannel = null;
     _onUnhandledMessage = null;
+
+    // Clean up custom virtual gamepad
+    if (window.VirtualGamepad) {
+      VirtualGamepad.destroy();
+    }
 
     // Dismiss gesture prompt if still showing
     var gp = document.getElementById('gesture-prompt');

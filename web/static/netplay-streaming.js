@@ -87,6 +87,7 @@
   let _prevSlotMasks     = {};
   let _gameRunning       = false;
   let _cachedInfo        = null;
+  let _touchInputState   = {};     // virtual gamepad touch state (index → value)
 
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
@@ -750,6 +751,35 @@
         if (btnIdx !== undefined) mask |= (1 << btnIdx);
       });
     }
+
+    // Virtual gamepad touch input (same logic as lockstep readLocalInput)
+    // Left stick (indices 16-19): apply absolute + relative deadzone
+    var TOUCH_ABS_DEADZONE = 3500;
+    var stR = _touchInputState[16] || 0;
+    var stL = _touchInputState[17] || 0;
+    var stD = _touchInputState[18] || 0;
+    var stU = _touchInputState[19] || 0;
+    var stMajor = Math.max(stR, stL, stD, stU);
+    if (stMajor > TOUCH_ABS_DEADZONE) {
+      var stThresh = stMajor * 0.4;
+      if (stR > stThresh) mask |= (1 << 16);
+      if (stL > stThresh) mask |= (1 << 17);
+      if (stD > stThresh) mask |= (1 << 18);
+      if (stU > stThresh) mask |= (1 << 19);
+    }
+    // Digital buttons + C-buttons
+    for (var ti in _touchInputState) {
+      var idx = parseInt(ti, 10);
+      if (idx >= 16 && idx <= 19) continue;
+      var val = _touchInputState[idx];
+      if (!val) continue;
+      if (idx < 16) {
+        mask |= (1 << idx);
+      } else if (idx >= 20 && idx <= 23) {
+        if (val > 0) mask |= (1 << idx);
+      }
+    }
+
     return mask;
   }
 
@@ -802,6 +832,15 @@
       onUsersUpdated(config.initialPlayers);
     }
     // startHost() / startGuestInputLoop() triggered from ch.onopen (same as before)
+
+    // Virtual gamepad for mobile streaming guests
+    if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
+      var gameEl = config.gameElement || document.getElementById('game');
+      if (gameEl) {
+        VirtualGamepad.init(gameEl, _touchInputState);
+        gameEl.style.margin = '0';
+      }
+    }
   }
 
   function stop() {
@@ -838,9 +877,23 @@
       socket.off('webrtc-signal', onWebRTCSignal);
     }
 
+    // Clean up virtual gamepad
+    if (window.VirtualGamepad) {
+      VirtualGamepad.destroy();
+    }
+    _touchInputState = {};
+
     _config = null;
   }
 
-  window.NetplayStreaming = { init: init, stop: stop, getInfo: () => _cachedInfo };
+  window.NetplayStreaming = {
+    init: init,
+    stop: stop,
+    getInfo: () => _cachedInfo,
+    getPeerConnection: function (sid) {
+      var p = _peers[sid];
+      return p ? p.pc : null;
+    },
+  };
 
 })();
