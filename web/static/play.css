@@ -59,6 +59,22 @@ body {
 }
 #gamepad-indicator.hidden { display: none; }
 
+/* Tap-to-unmute banner (streaming guests, mobile) */
+#unmute-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 14px;
+  padding: 8px 20px;
+  border-radius: 20px;
+  z-index: 60;
+  cursor: pointer;
+}
+#unmute-banner.hidden { display: none; }
+
 #game canvas, #game video {
   max-width: 100%;
   width: 100%;

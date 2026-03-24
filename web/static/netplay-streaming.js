@@ -88,6 +88,7 @@
   let _gameRunning       = false;
   let _cachedInfo        = null;
   let _touchInputState   = {};     // virtual gamepad touch state (index → value)
+  let _audioStreamDest   = null;   // MediaStreamAudioDestinationNode (host only)
 
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
@@ -185,9 +186,24 @@
           _guestVideo.disableRemotePlayback = true;
           _guestVideo.setAttribute('playsinline', '');
 
-          // Unmute after playback starts
-          _guestVideo.addEventListener('playing', () => {
+          // Unmute after playback starts. On mobile, programmatic unmute
+          // requires a user gesture — show a banner if it fails.
+          _guestVideo.addEventListener('playing', function () {
             _guestVideo.muted = false;
+            if (_guestVideo.muted) {
+              var banner = document.getElementById('unmute-banner');
+              if (banner) {
+                banner.classList.remove('hidden');
+                var doUnmute = function () {
+                  _guestVideo.muted = false;
+                  banner.classList.add('hidden');
+                  banner.removeEventListener('click', doUnmute);
+                  document.removeEventListener('touchstart', doUnmute, true);
+                };
+                banner.addEventListener('click', doUnmute);
+                document.addEventListener('touchstart', doUnmute, true);
+              }
+            }
           }, { once: true });
 
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
@@ -426,6 +442,16 @@
 
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
+
+      // Capture emulator audio (polls until AL contexts are populated)
+      var audioAttempts = 0;
+      var waitForAudio = function () {
+        if (!_gameRunning) return;
+        if (captureEmulatorAudio()) return;
+        if (++audioAttempts < 150) setTimeout(waitForAudio, 200);
+        else console.log('[netplay] audio capture timed out — streaming video only');
+      };
+      waitForAudio();
     };
     waitForEmu();
   }
@@ -740,6 +766,45 @@
     attempt();
   }
 
+  // ── Audio capture for streaming ──────────────────────────────────────
+  // Connects the emulator's OpenAL master gain node to a MediaStreamDestination
+  // so audio is included in the WebRTC stream to guests.
+
+  function captureEmulatorAudio() {
+    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    var mod = gm && gm.Module;
+    if (!mod || !mod.AL || !mod.AL.contexts) return false;
+
+    var alCtx = null;
+    for (var id in mod.AL.contexts) {
+      var c = mod.AL.contexts[id];
+      if (c && c.audioCtx && c.audioCtx.state !== 'closed' && c.gain) {
+        alCtx = c;
+        break;
+      }
+    }
+    if (!alCtx) return false;
+
+    try {
+      _audioStreamDest = alCtx.audioCtx.createMediaStreamDestination();
+      alCtx.gain.connect(_audioStreamDest);
+
+      var audioTrack = _audioStreamDest.stream.getAudioTracks()[0];
+      if (audioTrack && _hostStream) {
+        _hostStream.addTrack(audioTrack);
+        console.log('[netplay] added audio track to host stream');
+        Object.entries(_peers).forEach(function ([sid, peer]) {
+          peer.pc.addTrack(audioTrack, _hostStream);
+          renegotiate(sid);
+        });
+        return true;
+      }
+    } catch (e) {
+      console.log('[netplay] audio capture failed:', e.message);
+    }
+    return false;
+  }
+
   function readLocalInput() {
     let mask = 0;
 
@@ -864,6 +929,12 @@
     _peers = {};
     window._peers = _peers;
 
+    // Clean up audio capture
+    if (_audioStreamDest) {
+      try { _audioStreamDest.disconnect(); } catch (_) {}
+      _audioStreamDest = null;
+    }
+
     // Clean up streams
     if (_hostStream) {
       _hostStream.getTracks().forEach((t) => { t.stop(); });
@@ -874,6 +945,8 @@
       if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
       _guestVideo = null;
     }
+    var unmuteBanner = document.getElementById('unmute-banner');
+    if (unmuteBanner) unmuteBanner.classList.add('hidden');
 
     _knownPlayers = {};
     _prevSlotMasks = {};
