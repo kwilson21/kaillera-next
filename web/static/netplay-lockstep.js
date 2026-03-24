@@ -3440,6 +3440,14 @@
       try { window._kn_keepAliveOsc.stop(); } catch (_) {}
       window._kn_keepAliveOsc = null;
     }
+    // Clean up the <audio> element used for iOS audio routing — if left
+    // playing with a dead MediaStream source it loops glitchy audio on mobile.
+    if (window._kn_audioEl) {
+      try { window._kn_audioEl.pause(); } catch (_) {}
+      window._kn_audioEl.srcObject = null;
+      try { window._kn_audioEl.load(); } catch (_) {}
+      window._kn_audioEl = null;
+    }
     window._kn_audioRing = null;
     window._kn_audioRingCount = 0;
     if (_audioDestNode) {
