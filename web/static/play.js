@@ -1334,7 +1334,20 @@
           if (gm.Module.AL && gm.Module.AL.contexts) {
             Object.keys(gm.Module.AL.contexts).forEach((id) => {
               const ctx = gm.Module.AL.contexts[id];
-              if (ctx && ctx.audioCtx) {
+              if (!ctx) return;
+              // Stop all OpenAL sources before restoring resume() —
+              // during lockstep the emulator may set sources to PLAYING
+              // even though the context was suspended. Restoring resume()
+              // with active sources can briefly play stale audio on mobile.
+              if (ctx.sources && gm.Module.AL.setSourceState) {
+                Object.keys(ctx.sources).forEach((sid) => {
+                  var src = ctx.sources[sid];
+                  if (src && src.state === 0x1012) {
+                    try { gm.Module.AL.setSourceState(src, 0x1014); } catch (_) {}
+                  }
+                });
+              }
+              if (ctx.audioCtx) {
                 try {
                   // Restore native resume() if it was monkey-patched
                   var proto = AudioContext.prototype || webkitAudioContext.prototype;
@@ -2356,6 +2369,18 @@
       }
     }
 
+    // Mobile: constrain game to 4:3 for vertical centering when gamepad hides virtual controls
+    const gameEl = document.getElementById('game');
+    if (gameEl && 'ontouchstart' in window) {
+      gameEl.classList.toggle('gamepad-connected', detected.length > 0);
+    }
+
+    // Mobile: show/hide gamepad indicator during gameplay
+    const gamepadIndicator = document.getElementById('gamepad-indicator');
+    if (gamepadIndicator && 'ontouchstart' in window) {
+      gamepadIndicator.classList.toggle('hidden', detected.length === 0);
+    }
+
     // Update .gamepad spans in player slots
     for (let i = 0; i < 4; i++) {
       const span = document.querySelector(`.player-slot[data-slot="${i}"] .gamepad`);
@@ -2395,6 +2420,7 @@
   ];
 
   let _wizardActive = false;
+  let _wizardInGame = false;  // true when wizard launched from in-game toolbar
   let _wizardStep = 0;
   let _wizardDebounce = 0;
   let _wizardRafId = null;
@@ -2407,7 +2433,7 @@
   let _wizardHadGamepad = false;
   let _wizardHotPlugCheck = 0;
 
-  function startWizard() {
+  function startWizard(inGame) {
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const gamepadId = detected.length > 0 ? detected[0].id : null;
 
@@ -2445,20 +2471,28 @@
     _wizardSnapshots = [];
     _wizardStep = 0;
     _wizardActive = true;
+    window._remapWizardActive = true;  // exposed for netplay input suppression
+    _wizardInGame = !!inGame;
     _wizardDebounce = 0;
 
-    // Show wizard UI, hide normal controls
-    const wizardEl = document.getElementById('remap-wizard');
-    const controlsEl = document.getElementById('gamepad-controls');
-    const statusEl = document.getElementById('gamepad-status');
-    if (wizardEl) wizardEl.style.display = '';
-    if (controlsEl) controlsEl.style.display = 'none';
-    if (statusEl) statusEl.style.display = 'none';
+    if (_wizardInGame) {
+      // Show in-game remap overlay
+      const igOverlay = document.getElementById('ingame-remap');
+      if (igOverlay) igOverlay.classList.remove('hidden');
+    } else {
+      // Show wizard UI in pre-game overlay, hide normal controls
+      const wizardEl = document.getElementById('remap-wizard');
+      const controlsEl = document.getElementById('gamepad-controls');
+      const statusEl = document.getElementById('gamepad-status');
+      if (wizardEl) wizardEl.style.display = '';
+      if (controlsEl) controlsEl.style.display = 'none';
+      if (statusEl) statusEl.style.display = 'none';
+    }
 
     // Capture baseline gamepad buttons (ignore already-pressed)
     _wizardBaselineButtons = {};
     if (gamepadId) {
-      const gps = navigator.getGamepads();
+      const gps = GamepadManager.nativeGetGamepads();
       for (let gi = 0; gi < gps.length; gi++) {
         if (gps[gi]) {
           for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
@@ -2479,7 +2513,7 @@
     document.addEventListener('keydown', _wizardKeyHandler, true);
 
     // Track initial gamepad presence for hot-plug notifications
-    const initGps = navigator.getGamepads();
+    const initGps = GamepadManager.nativeGetGamepads();
     _wizardHadGamepad = false;
     for (let gi2 = 0; gi2 < initGps.length; gi2++) {
       if (initGps[gi2]) { _wizardHadGamepad = true; break; }
@@ -2492,19 +2526,27 @@
   }
 
   function cancelWizard() {
+    const wasInGame = _wizardInGame;
     _wizardActive = false;
-    if (_wizardRafId) { cancelAnimationFrame(_wizardRafId); _wizardRafId = null; }
+    window._remapWizardActive = false;
+    _wizardInGame = false;
+    if (_wizardRafId) { clearTimeout(_wizardRafId); _wizardRafId = null; }
     if (_wizardKeyHandler) {
       document.removeEventListener('keydown', _wizardKeyHandler, true);
       _wizardKeyHandler = null;
     }
 
-    const wizardEl = document.getElementById('remap-wizard');
-    const controlsEl = document.getElementById('gamepad-controls');
-    const statusEl = document.getElementById('gamepad-status');
-    if (wizardEl) wizardEl.style.display = 'none';
-    if (controlsEl) controlsEl.style.display = '';
-    if (statusEl) statusEl.style.display = '';
+    if (wasInGame) {
+      const igOverlay = document.getElementById('ingame-remap');
+      if (igOverlay) igOverlay.classList.add('hidden');
+    } else {
+      const wizardEl = document.getElementById('remap-wizard');
+      const controlsEl = document.getElementById('gamepad-controls');
+      const statusEl = document.getElementById('gamepad-status');
+      if (wizardEl) wizardEl.style.display = 'none';
+      if (controlsEl) controlsEl.style.display = '';
+      if (statusEl) statusEl.style.display = '';
+    }
   }
 
   function saveWizard() {
@@ -2542,9 +2584,10 @@
   }
 
   function updateWizardPrompt() {
-    const promptEl = document.getElementById('remap-prompt');
-    const progressEl = document.getElementById('remap-progress');
-    const backBtn = document.getElementById('remap-back');
+    const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
+    const promptEl = document.getElementById(prefix + '-prompt');
+    const progressEl = document.getElementById(prefix + '-progress');
+    const backBtn = document.getElementById(prefix + '-back');
     if (promptEl) promptEl.textContent = `${WIZARD_STEPS[_wizardStep].prompt} (gamepad or key)`;
     if (progressEl) progressEl.textContent = `(${_wizardStep + 1}/${WIZARD_STEPS.length})`;
     if (backBtn) backBtn.disabled = (_wizardStep === 0);
@@ -2567,7 +2610,7 @@
     }
     // Reset baseline for new step
     _wizardBaselineButtons = {};
-    const gps = navigator.getGamepads();
+    const gps = GamepadManager.nativeGetGamepads();
     for (let gi = 0; gi < gps.length; gi++) {
       if (gps[gi]) {
         for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
@@ -2597,11 +2640,13 @@
 
   function wizardPoll() {
     if (!_wizardActive) return;
-    _wizardRafId = requestAnimationFrame(wizardPoll);
+    // Use setTimeout instead of rAF — lockstep overrides rAF and our
+    // callback would replace the emulator's frame runner, freezing the game.
+    _wizardRafId = setTimeout(wizardPoll, 16);
 
     if (Date.now() < _wizardDebounce) return;
 
-    const gps = navigator.getGamepads();
+    const gps = GamepadManager.nativeGetGamepads();
 
     // Hot-plug detection (check every ~30 frames / 500ms)
     _wizardHotPlugCheck++;
@@ -2669,7 +2714,8 @@
 
       // Check if partner direction was already captured on a different axis
       if (cap.index !== undefined && cap.index !== axisIndex) {
-        const promptEl = document.getElementById('remap-prompt');
+        const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
+        const promptEl = document.getElementById(prefix + '-prompt');
         if (promptEl) {
           const pairName = group === 'stickY' ? 'UP' : 'LEFT';
           promptEl.textContent = `Must use same stick as ${pairName} — try again`;
@@ -2935,6 +2981,19 @@
 
     const cancelBtn = document.getElementById('remap-cancel');
     if (cancelBtn) cancelBtn.addEventListener('click', cancelWizard);
+
+    // In-game remap (toolbar button + overlay buttons)
+    const toolbarRemapBtn = document.getElementById('toolbar-remap');
+    if (toolbarRemapBtn) toolbarRemapBtn.addEventListener('click', () => startWizard(true));
+
+    const igBackBtn = document.getElementById('ingame-remap-back');
+    if (igBackBtn) igBackBtn.addEventListener('click', wizardBack);
+
+    const igSkipBtn = document.getElementById('ingame-remap-skip');
+    if (igSkipBtn) igSkipBtn.addEventListener('click', wizardSkip);
+
+    const igCancelBtn = document.getElementById('ingame-remap-cancel');
+    if (igCancelBtn) igCancelBtn.addEventListener('click', cancelWizard);
 
     // Click .gamepad span to cycle through detected gamepads
     const gamepadSpans = document.querySelectorAll('.player-slot .gamepad');

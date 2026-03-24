@@ -742,6 +742,10 @@
 
   function readLocalInput() {
     let mask = 0;
+
+    // Suppress all input while remap wizard is active (prevents desyncs)
+    if (window._remapWizardActive) return 0;
+
     if (window.GamepadManager) {
       mask |= GamepadManager.readGamepad(_playerSlot);
     }
@@ -839,6 +843,9 @@
       if (gameEl) {
         VirtualGamepad.init(gameEl, _touchInputState);
         gameEl.style.margin = '0';
+        // If a physical gamepad is already connected, hide virtual controls immediately
+        var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+        if (detected.length > 0) VirtualGamepad.setVisible(false);
       }
     }
   }

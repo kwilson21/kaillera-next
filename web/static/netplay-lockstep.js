@@ -1650,6 +1650,10 @@
         }
         var gameEl2 = document.getElementById('game');
         if (gameEl2) VirtualGamepad.init(gameEl2, _touchInputState);
+        // If a physical gamepad is already connected, hide virtual controls immediately
+        // (GamepadManager.onUpdate won't fire if nothing changed since last game)
+        var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+        if (detected.length > 0) VirtualGamepad.setVisible(false);
       }
 
       // Late join: request state from host instead of normal sync flow.
@@ -2748,6 +2752,9 @@
 
   function readLocalInput() {
     var mask = 0;
+
+    // Suppress all input while remap wizard is active (prevents desyncs)
+    if (window._remapWizardActive) return 0;
 
     // Gamepad via GamepadManager (profile-based mapping)
     if (document.hasFocus() && window.GamepadManager) {

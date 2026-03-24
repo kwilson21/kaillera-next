@@ -37,6 +37,28 @@ body {
   }
 }
 
+/* Mobile: when physical gamepad connected and virtual gamepad hidden,
+   constrain game to 4:3 so margin:auto can vertically center it. */
+#game.gamepad-connected {
+  max-height: calc(100vw * 3 / 4);
+}
+
+/* Gamepad connected indicator (mobile, during gameplay) —
+   in-flow flex child just above the toolbar */
+#gamepad-indicator {
+  order: 9;           /* just before toolbar (order:10) */
+  flex-shrink: 0;
+  align-self: center;
+  background: rgba(0, 0, 0, 0.6);
+  color: #999;
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 12px;
+  pointer-events: none;
+  margin-bottom: 4px;
+}
+#gamepad-indicator.hidden { display: none; }
+
 #game canvas, #game video {
   max-width: 100%;
   width: 100%;
@@ -497,6 +519,45 @@ button:hover { background: #4a6fa5; }
 @keyframes toastOut {
   from { opacity: 1; }
   to { opacity: 0; }
+}
+
+/* In-game remap overlay */
+#ingame-remap {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 150;
+}
+#ingame-remap.hidden { display: none; }
+
+.ingame-remap-card {
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 12px;
+  padding: 1.25rem;
+  max-width: 360px;
+  width: 85vw;
+  text-align: center;
+}
+
+#ingame-remap-prompt {
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+#ingame-remap-progress {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 14px;
+}
+
+.ingame-remap-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
 }
 
 /* Error overlay */

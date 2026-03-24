@@ -323,5 +323,8 @@
         return localStorage.getItem('gamepad-profile:' + gamepadId) !== null;
       } catch (_) { return false; }
     },
+
+    // Expose the real getGamepads (before lockstep overrides it)
+    nativeGetGamepads: () => _nativeGetGamepads(),
   };
 })();
