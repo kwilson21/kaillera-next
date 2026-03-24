@@ -1,8 +1,8 @@
 diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
-index 3ef61a2..d7873c2 100644
+index 3ef61a2..65f09ec 100644
 --- a/mupen64plus-core/src/main/main.c
 +++ b/mupen64plus-core/src/main/main.c
-@@ -129,6 +129,119 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+@@ -129,6 +129,29 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
  
  struct device g_dev;
  
@@ -18,105 +18,15 @@ index 3ef61a2..d7873c2 100644
 +    uint32_t cycles = g_dev.r4300.cp0.regs[CP0_COUNT_REG];
 +    return (double)cycles / 93750.0;
 +}
-+
-+EMSCRIPTEN_KEEPALIVE void kn_reset_cycle_count(void)
-+{
-+    extern void translate_event_queue(struct cp0*, unsigned int);
-+    translate_event_queue(&g_dev.r4300.cp0, UINT32_C(0));
-+}
-+
++EMSCRIPTEN_KEEPALIVE void kn_reset_cycle_count(void) { extern void translate_event_queue(struct cp0*, unsigned int); translate_event_queue(&g_dev.r4300.cp0, UINT32_C(0)); }
 +#include "../device/r4300/cp1.h"
 +#include <string.h>
 +#include <math.h>
-+EMSCRIPTEN_KEEPALIVE void kn_canon_fpu_regs(void)
-+{
-+    static const uint32_t canon_nan_f = 0x7FC00000;
-+    cp1_reg* regs = r4300_cp1_regs(&g_dev.r4300.cp1);
-+    int i;
-+    for (i = 0; i < 32; i++) {
-+        if (isnan(regs[i].float32[0]))
-+            memcpy(&regs[i].float32[0], &canon_nan_f, sizeof(float));
-+        if (isnan(regs[i].float32[1]))
-+            memcpy(&regs[i].float32[1], &canon_nan_f, sizeof(float));
-+    }
-+}
-+
++EMSCRIPTEN_KEEPALIVE void kn_canon_fpu_regs(void) { static const uint32_t canon_nan_f = 0x7FC00000; cp1_reg* regs = r4300_cp1_regs(&g_dev.r4300.cp1); int i; for (i = 0; i < 32; i++) { if (isnan(regs[i].float32[0])) memcpy(&regs[i].float32[0], &canon_nan_f, sizeof(float)); if (isnan(regs[i].float32[1])) memcpy(&regs[i].float32[1], &canon_nan_f, sizeof(float)); } }
 +#include "../device/r4300/r4300_core.h"
-+
-+EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_hash(void)
-+{
-+    const uint8_t *rdram = (const uint8_t *)g_dev.rdram.dram;
-+    uint32_t hash = 2166136261u;
-+    int i, r;
-+    static const uint32_t regions[] = {
-+        0xA4000,  0xBA000,  0xBF000,  0xC4000,
-+        0x262000, 0x266000, 0x26A000, 0x290000,
-+        0x2F6000, 0x32B000, 0x330000, 0x335000
-+    };
-+    static const int SAMPLE = 256;
-+    for (r = 0; r < 12; r++) {
-+        const uint8_t *p = rdram + regions[r];
-+        for (i = 0; i < SAMPLE; i++) { hash ^= p[i]; hash *= 16777619u; }
-+    }
-+    return hash;
-+}
-+
-+EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size)
-+{
-+    struct device *dev = &g_dev;
-+    uint8_t *p = buf;
-+    uint32_t *header;
-+    int i;
-+    char queue[1024];
-+    if (!buf || max_size < RDRAM_MAX_SIZE + 16384) return 0;
-+    header = (uint32_t *)p;
-+    header[0] = 0x4B4E5331; header[1] = 1; header[2] = 0; header[3] = 0;
-+    p += 16;
-+    memcpy(p, dev->rdram.dram, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE;
-+    memcpy(p, r4300_regs(&dev->r4300), 32*8); p += 32*8;
-+    memcpy(p, r4300_cp0_regs(&dev->r4300.cp0), CP0_REGS_COUNT*4); p += CP0_REGS_COUNT*4;
-+    { unsigned int ni = *r4300_cp0_next_interrupt(&dev->r4300.cp0); uint32_t cnt = dev->r4300.cp0.regs[CP0_COUNT_REG]; memcpy(p,&ni,4); p+=4; memcpy(p,&cnt,4); p+=4; }
-+    memcpy(p, r4300_cp1_regs(&dev->r4300.cp1), 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg);
-+    { uint32_t f0=*r4300_cp1_fcr0(&dev->r4300.cp1), f31=*r4300_cp1_fcr31(&dev->r4300.cp1); memcpy(p,&f0,4); p+=4; memcpy(p,&f31,4); p+=4; }
-+    { unsigned int lb=*r4300_llbit(&dev->r4300); int64_t hi=*r4300_mult_hi(&dev->r4300), lo=*r4300_mult_lo(&dev->r4300); uint32_t pc=*r4300_pc(&dev->r4300); memcpy(p,&lb,4); p+=4; memcpy(p,&hi,8); p+=8; memcpy(p,&lo,8); p+=8; memcpy(p,&pc,4); p+=4; }
-+    { unsigned int vf=dev->vi.field, vd=dev->vi.delay; memcpy(p,&vf,4); p+=4; memcpy(p,&vd,4); p+=4; }
-+    for (i=0; i<32; i++) { memcpy(p, &dev->r4300.cp0.tlb.entries[i], sizeof(dev->r4300.cp0.tlb.entries[i])); p += sizeof(dev->r4300.cp0.tlb.entries[i]); }
-+    save_eventqueue_infos(&dev->r4300.cp0, queue); memcpy(p, queue, sizeof(queue)); p += sizeof(queue);
-+    memcpy(p, dev->sp.mem, SP_MEM_SIZE); p += SP_MEM_SIZE;
-+    memcpy(p, dev->pif.ram, PIF_RAM_SIZE); p += PIF_RAM_SIZE;
-+    header[2] = (uint32_t)(p - buf);
-+    return (uint32_t)(p - buf);
-+}
-+
-+EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf, uint32_t size)
-+{
-+    struct device *dev = &g_dev;
-+    const uint8_t *p = buf;
-+    const uint32_t *header;
-+    int i;
-+    char queue[1024];
-+    uint32_t pc_val;
-+    if (!buf || size < 16) return -1;
-+    header = (const uint32_t *)p;
-+    if (header[0] != 0x4B4E5331 || header[1] != 1) return -1;
-+    p += 16;
-+    memcpy(dev->rdram.dram, p, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE;
-+    memcpy(r4300_regs(&dev->r4300), p, 32*8); p += 32*8;
-+    memcpy(r4300_cp0_regs(&dev->r4300.cp0), p, CP0_REGS_COUNT*4); p += CP0_REGS_COUNT*4;
-+    { unsigned int ni; uint32_t cnt; memcpy(&ni,p,4); p+=4; memcpy(&cnt,p,4); p+=4; *r4300_cp0_next_interrupt(&dev->r4300.cp0)=ni; dev->r4300.cp0.regs[CP0_COUNT_REG]=cnt; }
-+    memcpy(r4300_cp1_regs(&dev->r4300.cp1), p, 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg);
-+    { uint32_t f0,f31; memcpy(&f0,p,4); p+=4; memcpy(&f31,p,4); p+=4; *r4300_cp1_fcr0(&dev->r4300.cp1)=f0; *r4300_cp1_fcr31(&dev->r4300.cp1)=f31; }
-+    { unsigned int lb; int64_t hi,lo; memcpy(&lb,p,4); p+=4; memcpy(&hi,p,8); p+=8; memcpy(&lo,p,8); p+=8; memcpy(&pc_val,p,4); p+=4; *r4300_llbit(&dev->r4300)=lb; *r4300_mult_hi(&dev->r4300)=hi; *r4300_mult_lo(&dev->r4300)=lo; }
-+    { unsigned int vf,vd; memcpy(&vf,p,4); p+=4; memcpy(&vd,p,4); p+=4; dev->vi.field=vf; dev->vi.delay=vd; }
-+    memset(dev->r4300.cp0.tlb.LUT_r, 0, 0x400000);
-+    memset(dev->r4300.cp0.tlb.LUT_w, 0, 0x400000);
-+    for (i=0; i<32; i++) { memcpy(&dev->r4300.cp0.tlb.entries[i], p, sizeof(dev->r4300.cp0.tlb.entries[i])); p += sizeof(dev->r4300.cp0.tlb.entries[i]); tlb_map(&dev->r4300.cp0.tlb, i); }
-+    memcpy(queue, p, sizeof(queue)); p += sizeof(queue); load_eventqueue_infos(&dev->r4300.cp0, queue);
-+    memcpy(dev->sp.mem, p, SP_MEM_SIZE); p += SP_MEM_SIZE;
-+    memcpy(p, dev->pif.ram, PIF_RAM_SIZE); p += PIF_RAM_SIZE; setup_channels_format(&dev->pif);
-+    { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); }
-+    return 0;
-+}
++EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_hash(void) { const uint8_t *rdram = (const uint8_t *)g_dev.rdram.dram; uint32_t hash = 2166136261u; int i, r; static const uint32_t regions[] = { 0xA4000, 0xBA000, 0xBF000, 0xC4000, 0x262000, 0x266000, 0x26A000, 0x290000, 0x2F6000, 0x32B000, 0x330000, 0x335000 }; static const int SAMPLE = 256; for (r = 0; r < 12; r++) { const uint8_t *p = rdram + regions[r]; for (i = 0; i < SAMPLE; i++) { hash ^= p[i]; hash *= 16777619u; } } return hash; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size) { struct device *dev = &g_dev; uint8_t *p = buf; uint32_t *header; int i; char queue[1024]; if (!buf || max_size < RDRAM_MAX_SIZE + 16384) return 0; header = (uint32_t *)p; header[0] = 0x4B4E5331; header[1] = 1; header[2] = 0; header[3] = 0; p += 16; memcpy(p, dev->rdram.dram, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE; memcpy(p, r4300_regs(&dev->r4300), 32*8); p += 32*8; memcpy(p, r4300_cp0_regs(&dev->r4300.cp0), CP0_REGS_COUNT*4); p += CP0_REGS_COUNT*4; { unsigned int ni = *r4300_cp0_next_interrupt(&dev->r4300.cp0); uint32_t cnt = dev->r4300.cp0.regs[CP0_COUNT_REG]; memcpy(p,&ni,4); p+=4; memcpy(p,&cnt,4); p+=4; } memcpy(p, r4300_cp1_regs(&dev->r4300.cp1), 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg); { uint32_t f0=*r4300_cp1_fcr0(&dev->r4300.cp1), f31=*r4300_cp1_fcr31(&dev->r4300.cp1); memcpy(p,&f0,4); p+=4; memcpy(p,&f31,4); p+=4; } { unsigned int lb=*r4300_llbit(&dev->r4300); int64_t hi=*r4300_mult_hi(&dev->r4300), lo=*r4300_mult_lo(&dev->r4300); uint32_t pc=*r4300_pc(&dev->r4300); memcpy(p,&lb,4); p+=4; memcpy(p,&hi,8); p+=8; memcpy(p,&lo,8); p+=8; memcpy(p,&pc,4); p+=4; } { unsigned int vf=dev->vi.field, vd=dev->vi.delay; memcpy(p,&vf,4); p+=4; memcpy(p,&vd,4); p+=4; } for (i=0; i<32; i++) { memcpy(p, &dev->r4300.cp0.tlb.entries[i], sizeof(dev->r4300.cp0.tlb.entries[i])); p += sizeof(dev->r4300.cp0.tlb.entries[i]); } save_eventqueue_infos(&dev->r4300.cp0, queue); memcpy(p, queue, sizeof(queue)); p += sizeof(queue); memcpy(p, dev->sp.mem, SP_MEM_SIZE); p += SP_MEM_SIZE; memcpy(p, dev->pif.ram, PIF_RAM_SIZE); p += PIF_RAM_SIZE; header[2] = (uint32_t)(p - buf); return (uint32_t)(p - buf); }
++EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf, uint32_t size) { struct device *dev = &g_dev; const uint8_t *p = buf; const uint32_t *header; int i; char queue[1024]; uint32_t pc_val; if (!buf || size < 16) return -1; header = (const uint32_t *)p; if (header[0] != 0x4B4E5331 || header[1] != 1) return -1; p += 16; memcpy(dev->rdram.dram, p, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE; memcpy(r4300_regs(&dev->r4300), p, 32*8); p += 32*8; memcpy(r4300_cp0_regs(&dev->r4300.cp0), p, CP0_REGS_COUNT*4); p += CP0_REGS_COUNT*4; { unsigned int ni; uint32_t cnt; memcpy(&ni,p,4); p+=4; memcpy(&cnt,p,4); p+=4; *r4300_cp0_next_interrupt(&dev->r4300.cp0)=ni; dev->r4300.cp0.regs[CP0_COUNT_REG]=cnt; } memcpy(r4300_cp1_regs(&dev->r4300.cp1), p, 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg); { uint32_t f0,f31; memcpy(&f0,p,4); p+=4; memcpy(&f31,p,4); p+=4; *r4300_cp1_fcr0(&dev->r4300.cp1)=f0; *r4300_cp1_fcr31(&dev->r4300.cp1)=f31; } { unsigned int lb; int64_t hi,lo; memcpy(&lb,p,4); p+=4; memcpy(&hi,p,8); p+=8; memcpy(&lo,p,8); p+=8; memcpy(&pc_val,p,4); p+=4; *r4300_llbit(&dev->r4300)=lb; *r4300_mult_hi(&dev->r4300)=hi; *r4300_mult_lo(&dev->r4300)=lo; } { unsigned int vf,vd; memcpy(&vf,p,4); p+=4; memcpy(&vd,p,4); p+=4; dev->vi.field=vf; dev->vi.delay=vd; } memset(dev->r4300.cp0.tlb.LUT_r, 0, 0x400000); memset(dev->r4300.cp0.tlb.LUT_w, 0, 0x400000); for (i=0; i<32; i++) { memcpy(&dev->r4300.cp0.tlb.entries[i], p, sizeof(dev->r4300.cp0.tlb.entries[i])); p += sizeof(dev->r4300.cp0.tlb.entries[i]); tlb_map(&dev->r4300.cp0.tlb, i); } memcpy(queue, p, sizeof(queue)); p += sizeof(queue); load_eventqueue_infos(&dev->r4300.cp0, queue); memcpy(dev->sp.mem, p, SP_MEM_SIZE); p += SP_MEM_SIZE; memcpy(dev->pif.ram, p, PIF_RAM_SIZE); p += PIF_RAM_SIZE; setup_channels_format(&dev->pif); { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); } return 0; }
 +#endif
 +
  m64p_media_loader g_media_loader;

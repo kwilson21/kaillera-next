@@ -53,6 +53,9 @@ if [ -d "${PATCHES_DIR}" ]; then
     cd "${SRC_DIR}/mupen64plus-libretro-nx"
     git checkout -- . 2>/dev/null || true
 
+    # Apply all mupen64plus patches in order.
+    # kn-all includes: timing + determinism + C-level sync exports.
+    # It applies to the post-timing-patch state.
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" && \
             echo "    Applied mupen64plus timing patch" || \
@@ -61,7 +64,7 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
-            echo "    Applied mupen64plus kn-all patch (determinism + sync)" || \
+            echo "    Applied mupen64plus kn-all patch" || \
             echo "    mupen64plus kn-all patch already applied or failed"
     fi
 fi
