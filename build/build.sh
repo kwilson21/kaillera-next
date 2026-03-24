@@ -50,31 +50,19 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
-    if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ] || \
-       [ -f "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" ]; then
-        cd "${SRC_DIR}/mupen64plus-libretro-nx"
-        git checkout -- . 2>/dev/null || true
-    fi
+    cd "${SRC_DIR}/mupen64plus-libretro-nx"
+    git checkout -- . 2>/dev/null || true
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
-        cd "${SRC_DIR}/mupen64plus-libretro-nx"
         git apply "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" && \
             echo "    Applied mupen64plus timing patch" || \
             echo "    mupen64plus timing patch already applied or failed"
     fi
 
-    if [ -f "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" ]; then
-        cd "${SRC_DIR}/mupen64plus-libretro-nx"
-        git apply "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" && \
-            echo "    Applied mupen64plus determinism patch" || \
-            echo "    mupen64plus determinism patch already applied or failed"
-    fi
-
-    if [ -f "${PATCHES_DIR}/kn-sync.patch" ]; then
-        cd "${SRC_DIR}/mupen64plus-libretro-nx"
-        git apply "${PATCHES_DIR}/kn-sync.patch" && \
-            echo "    Applied kn-sync patch (C-level resync)" || \
-            echo "    kn-sync patch already applied or failed"
+    if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
+            echo "    Applied mupen64plus kn-all patch (determinism + sync)" || \
+            echo "    mupen64plus kn-all patch already applied or failed"
     fi
 fi
 
