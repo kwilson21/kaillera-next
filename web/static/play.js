@@ -75,7 +75,7 @@
   function connect() {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
     window._socket = socket;  // expose for E2E tests
-    Object.defineProperty(window, '_isSpectator', { get: () => isSpectator, configurable: true });
+    window._isSpectator = isSpectator;
 
     socket.on('connect', onConnect);
     socket.on('disconnect', (reason) => {
