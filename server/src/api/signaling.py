@@ -433,6 +433,29 @@ async def end_game(sid: str, data: dict) -> str | None:
     return None
 
 
+@sio.on("set-mode")
+async def set_mode(sid: str, data: dict) -> str | None:
+    """Host sets the game mode pre-game so guests can update their UI."""
+    if not isinstance(data, dict):
+        return "Invalid data"
+    result = _get_room(sid)
+    if result is None:
+        return "Not in a room"
+    session_id, room = result
+    if room.owner != sid:
+        return "Only the host can set the mode"
+    if room.status != "lobby":
+        return "Cannot change mode during game"
+
+    mode = data.get("mode", "lockstep")
+    if mode not in _VALID_MODES:
+        mode = "lockstep"
+    room.mode = mode
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    log.info("Mode set to %s in room %s", mode, session_id)
+    return None
+
+
 @sio.on("rom-sharing-toggle")
 async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
     if not isinstance(data, dict):
