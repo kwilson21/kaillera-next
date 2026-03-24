@@ -31,7 +31,10 @@
   let _romSharingEnabled = false;   // room-level: host has sharing toggled on
   let _romSharingDecision = null;   // 'accepted', 'declined', or null (page-lifetime)
   let _romDeclared = false;         // true if user declared ROM ownership (streaming, page-lifetime)
-  let _romTransferInProgress = false;
+  let _romTransferState = 'idle';       // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
+  let _romTransferStallTimer = null;    // setTimeout ID — resets on each chunk
+  let _romTransferResumeTimer = null;   // setTimeout ID — 15s resume timeout
+  let _romTransferRetries = 0;          // auto-retry count, capped at 3
   let _romTransferChunks = [];
   let _romTransferHeader = null;
   let _romTransferDC = null;        // active rom-transfer DataChannel (receiver side)
@@ -44,10 +47,7 @@
   const ROM_CHUNK_SIZE = 64 * 1024;           // 64KB — same for all platforms
   const ROM_BUFFER_THRESHOLD = 1024 * 1024;   // 1MB — DC handles this fine on mobile
   let _romTransferBytesReceived = 0;
-  let _romTransferWaitingResume = false;
-  let _romTransferResumeAttempts = 0;
   let _romTransferLastChunkAt = 0;
-  let _romTransferWatchdog = null;
   let _preGamePC = null;            // guest: pre-game RTCPeerConnection for ROM preload
   let _preGamePCs = {};             // host: pre-game RTCPeerConnections (sid → pc)
   let _romSignalHandler = null;     // pre-game rom-signal Socket.IO listener
@@ -428,11 +428,11 @@
     // This handles the race where the host starts before the guest finishes
     // downloading or even accepts the sharing prompt.
     if (_romSharingEnabled && !_romBlob && !_romBlobUrl) {
-      // Start engine in connect-only mode for gameplay connections
       initEngine();
       if (_romSharingDecision === 'accepted') {
-        // Already accepted — transfer in progress or about to start
-        _romTransferInProgress = true;
+        if (_romTransferState === 'idle') {
+          _romTransferState = 'resuming';
+        }
         updateRomSharingUI();
         if (_preGamePC) {
           console.log('[play] game started — pre-game ROM transfer in progress');
@@ -441,7 +441,6 @@
           waitForDCAndSendRomAccepted();
         }
       } else {
-        // Guest hasn't decided yet — keep sharing prompt visible in overlay
         console.log('[play] game started — waiting for guest to accept ROM sharing');
         updateRomSharingUI();
       }
@@ -482,21 +481,7 @@
     const statusEl = document.getElementById('engine-status');
     if (statusEl) statusEl.textContent = '';
     // Clean up ROM transfer state (decision persists for page lifetime)
-    _romTransferInProgress = false;
-    _romTransferChunks = [];
-    _romTransferHeader = null;
-    if (_romTransferDC) {
-      try { _romTransferDC.close(); } catch (_) {}
-      _romTransferDC = null;
-    }
-    Object.keys(_romTransferDCs).forEach((sid) => {
-      try { _romTransferDCs[sid].close(); } catch (_) {}
-    });
-    _romTransferDCs = {};
-    if (_romAcceptPollInterval) {
-      clearInterval(_romAcceptPollInterval);
-      _romAcceptPollInterval = null;
-    }
+    resetRomTransfer();
     cleanupPreGameConnections();
   }
 
@@ -519,37 +504,42 @@
     _romSharingEnabled = !!data.romSharing;
     console.log('[play] rom-sharing-updated:', _romSharingEnabled);
 
-    // Notify joiners
     if (!isHost) {
       if (_romSharingEnabled && !wasEnabled) showToast('Host is sharing their ROM');
       if (!_romSharingEnabled && wasEnabled) showToast('Host stopped sharing their ROM');
     }
 
-    // If sharing was just disabled and we're mid-transfer, cancel
-    if (wasEnabled && !_romSharingEnabled && _romTransferInProgress) {
-      _romTransferInProgress = false;
-      _romTransferChunks = [];
-      _romTransferHeader = null;
-      if (_romTransferDC) {
-        try { _romTransferDC.close(); } catch (_) {}
-        _romTransferDC = null;
+    // Host disabled sharing — pause transfer but KEEP chunks
+    if (wasEnabled && !_romSharingEnabled) {
+      if (_romTransferState === 'receiving' || _romTransferState === 'resuming') {
+        if (_romTransferDC) {
+          try { _romTransferDC.close(); } catch (_) {}
+          _romTransferDC = null;
+        }
+        stopStallTimer();
+        clearTimeout(_romTransferResumeTimer);
+        _romTransferResumeTimer = null;
+        _romTransferState = 'paused';
       }
       cleanupPreGameConnections();
-      showToast('ROM sharing disabled by host');
     }
 
-    // If sharing was re-enabled and we previously accepted but lost the
-    // transfer (cancelled mid-download), auto-restart without re-prompting.
+    // Host re-enabled sharing — resume if we have cached progress
     if (!isHost && _romSharingEnabled && !wasEnabled &&
-        _romSharingDecision === 'accepted' && !_romBlob && !_romTransferInProgress) {
-      console.log('[play] ROM sharing re-enabled — restarting transfer');
-      _romTransferInProgress = true;
-      waitForDCAndSendRomAccepted();
+        _romSharingDecision === 'accepted' && !_romBlob) {
+      if (_romTransferState === 'paused' && _romTransferBytesReceived > 0) {
+        console.log('[play] ROM sharing re-enabled — resuming from offset', _romTransferBytesReceived);
+        _romTransferState = 'resuming';
+        requestResumeTransfer();
+      } else if (_romTransferState === 'idle') {
+        console.log('[play] ROM sharing re-enabled — starting fresh transfer');
+        _romTransferState = 'resuming';
+        requestResumeTransfer();
+      }
     }
 
     updateRomSharingUI();
 
-    // Refresh start button — sharing state affects ROM readiness gating
     if (isHost && lastUsersData) {
       updateStartButton(lastUsersData.players || {});
     }
@@ -593,27 +583,42 @@
     const prompt = document.getElementById('rom-sharing-prompt');
     const progress = document.getElementById('rom-transfer-progress');
 
-    // Host never sees the prompt/progress
     if (isHost) return;
-    // Spectators don't need ROMs
     if (isSpectator) return;
 
     console.log(`[play] updateRomSharingUI: enabled=${_romSharingEnabled}` +
-      ` decision=${_romSharingDecision} transfer=${_romTransferInProgress}` +
+      ` decision=${_romSharingDecision} state=${_romTransferState}` +
       ` hasRom=${!!_romBlob}`);
 
     if (_romSharingEnabled && _romSharingDecision === null && !_romBlob) {
-      // Show accept/decline prompt, hide drop zone (only if no ROM loaded)
+      // Show accept/decline prompt
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.style.display = '';
       if (progress) progress.style.display = 'none';
-    } else if (_romSharingEnabled && _romSharingDecision === 'accepted' && _romTransferInProgress) {
+    } else if (_romTransferState === 'receiving') {
       // Transfer in progress — show progress bar
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.style.display = 'none';
       if (progress) progress.style.display = '';
-    } else if (_romSharingEnabled && _romSharingDecision === 'accepted' && !_romTransferInProgress && _romBlob) {
-      // Transfer complete — show loaded state in drop zone
+    } else if (_romTransferState === 'paused') {
+      // Paused — show progress bar with paused state
+      if (romDrop) romDrop.style.display = 'none';
+      if (prompt) prompt.style.display = 'none';
+      if (progress) progress.style.display = '';
+      const text = document.getElementById('rom-progress-text');
+      if (text && _romTransferHeader) {
+        const pct = Math.round((_romTransferBytesReceived / _romTransferHeader.size) * 100);
+        text.textContent = `ROM transfer paused — ${pct}% received`;
+      }
+    } else if (_romTransferState === 'resuming') {
+      // Resuming — show progress bar with reconnecting text
+      if (romDrop) romDrop.style.display = 'none';
+      if (prompt) prompt.style.display = 'none';
+      if (progress) progress.style.display = '';
+      const text = document.getElementById('rom-progress-text');
+      if (text) text.textContent = 'ROM transfer reconnecting...';
+    } else if (_romTransferState === 'complete' || (_romSharingDecision === 'accepted' && _romBlob)) {
+      // Transfer complete
       if (romDrop) { romDrop.style.display = ''; romDrop.classList.add('loaded'); }
       if (prompt) prompt.style.display = 'none';
       if (progress) progress.style.display = 'none';
@@ -636,9 +641,11 @@
 
   function acceptRomSharing() {
     _romSharingDecision = 'accepted';
-    _romTransferInProgress = true;
     _romTransferChunks = [];
     _romTransferHeader = null;
+    _romTransferBytesReceived = 0;
+    _romTransferRetries = 0;
+    _romTransferState = 'resuming';
     updateRomSharingUI();
 
     // Pre-game: initiate early ROM transfer via standalone WebRTC connection
@@ -700,20 +707,51 @@
   }
 
   function cancelRomTransfer() {
-    _romTransferInProgress = false;
-    _romTransferChunks = [];
-    _romTransferHeader = null;
+    _romTransferState = 'idle';
     if (_romTransferDC) {
       try { _romTransferDC.close(); } catch (_) {}
       _romTransferDC = null;
     }
+    clearTimeout(_romTransferStallTimer);
+    _romTransferStallTimer = null;
+    clearTimeout(_romTransferResumeTimer);
+    _romTransferResumeTimer = null;
     if (_romAcceptPollInterval) {
       clearInterval(_romAcceptPollInterval);
       _romAcceptPollInterval = null;
     }
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    _romTransferBytesReceived = 0;
+    _romTransferRetries = 0;
+    cleanupPreGameConnections();
     updateRomSharingUI();
     showToast('ROM transfer cancelled');
-    cleanupPreGameConnections();
+  }
+
+  function resetRomTransfer() {
+    // Game-end cleanup — same as cancel but no toast, also closes sender DCs
+    _romTransferState = 'idle';
+    if (_romTransferDC) {
+      try { _romTransferDC.close(); } catch (_) {}
+      _romTransferDC = null;
+    }
+    Object.keys(_romTransferDCs).forEach((sid) => {
+      try { _romTransferDCs[sid].close(); } catch (_) {}
+    });
+    _romTransferDCs = {};
+    clearTimeout(_romTransferStallTimer);
+    _romTransferStallTimer = null;
+    clearTimeout(_romTransferResumeTimer);
+    _romTransferResumeTimer = null;
+    if (_romAcceptPollInterval) {
+      clearInterval(_romAcceptPollInterval);
+      _romAcceptPollInterval = null;
+    }
+    _romTransferChunks = [];
+    _romTransferHeader = null;
+    _romTransferBytesReceived = 0;
+    _romTransferRetries = 0;
   }
 
   // ── Pre-game ROM Preloading ─────────────────────────────────────────
@@ -794,7 +832,20 @@
 
     dc.onopen = function () {
       console.log('[play] pre-game rom-transfer DC open to', peerSid);
-      sendRomOverChannel(dc, peerSid);
+      if (!dc._waitForResume) {
+        sendRomOverChannel(dc, peerSid);
+      }
+    };
+    dc.onmessage = function (e) {
+      if (typeof e.data === 'string') {
+        try {
+          var msg = JSON.parse(e.data);
+          if (msg.type === 'rom-resume' && msg.offset >= 0) {
+            console.log('[play] pre-game ROM resume from offset', msg.offset);
+            sendRomOverChannel(dc, peerSid, msg.offset);
+          }
+        } catch (_) {}
+      }
     };
     dc.onclose = function () {
       delete _romTransferDCs[peerSid];
@@ -992,10 +1043,11 @@
     _romTransferDC = channel;
     channel.binaryType = 'arraybuffer';
 
-    // Resume: keep existing chunks, send resume offset
-    if (_romTransferWaitingResume) {
-      _romTransferWaitingResume = false;
-      _romTransferInProgress = true;
+    if (_romTransferState === 'resuming' || _romTransferState === 'paused') {
+      // Resume: keep cached chunks, send resume offset
+      clearTimeout(_romTransferResumeTimer);
+      _romTransferResumeTimer = null;
+      _romTransferState = 'receiving';
       console.log('[play] resuming ROM transfer from offset', _romTransferBytesReceived);
       channel.onopen = () => {
         channel.send(JSON.stringify({ type: 'rom-resume', offset: _romTransferBytesReceived }));
@@ -1008,12 +1060,12 @@
       _romTransferChunks = [];
       _romTransferHeader = null;
       _romTransferBytesReceived = 0;
-      _romTransferResumeAttempts = 0;
+      _romTransferRetries = 0;
+      _romTransferState = 'receiving';
     }
 
-    _romTransferInProgress = true;
     _romTransferLastChunkAt = Date.now();
-    startRomTransferWatchdog();
+    resetStallTimer();
 
     channel.onmessage = (e) => {
       if (typeof e.data === 'string') {
@@ -1026,11 +1078,20 @@
               cancelRomTransfer();
               return;
             }
+            // If header differs from cached (host changed ROM), clear chunks
+            if (_romTransferHeader &&
+                (msg.hash !== _romTransferHeader.hash || msg.size !== _romTransferHeader.size)) {
+              console.log('[play] ROM changed — clearing cached chunks');
+              _romTransferChunks = [];
+              _romTransferBytesReceived = 0;
+            }
             _romTransferHeader = msg;
-            _romTransferBytesReceived = 0;
-            updateRomProgress(0, msg.size);
+            if (_romTransferBytesReceived === 0) {
+              updateRomProgress(0, msg.size);
+            }
           } else if (msg.type === 'rom-complete') {
-            stopRomTransferWatchdog();
+            stopStallTimer();
+            _romTransferState = 'complete';
             finishRomTransfer();
           }
         } catch (_) {}
@@ -1038,6 +1099,7 @@
         _romTransferChunks.push(new Uint8Array(e.data));
         _romTransferBytesReceived += e.data.byteLength;
         _romTransferLastChunkAt = Date.now();
+        resetStallTimer();
         if (_romTransferHeader) {
           updateRomProgress(_romTransferBytesReceived, _romTransferHeader.size);
         }
@@ -1045,46 +1107,73 @@
     };
 
     channel.onclose = () => {
-      if (_romTransferInProgress && !_romBlob) {
-        _romTransferInProgress = false;
+      if (_romTransferState === 'receiving') {
         _romTransferDC = null;
-        stopRomTransferWatchdog();
+        stopStallTimer();
+        _romTransferRetries++;
+        _romTransferState = 'paused';
+        console.log('[play] ROM transfer DC closed, retry', _romTransferRetries, '/ 3');
 
-        if (_romTransferResumeAttempts < 3 && _romTransferBytesReceived > 0) {
-          _romTransferResumeAttempts++;
-          _romTransferWaitingResume = true;
-          showToast(`ROM transfer interrupted — retry ${_romTransferResumeAttempts}/3`);
-        } else {
-          showToast('ROM transfer failed — load ROM manually');
-          _romTransferChunks = [];
-          _romTransferWaitingResume = false;
-          updateRomSharingUI();
+        if (_romTransferRetries <= 3 && _romTransferBytesReceived > 0) {
+          showToast(`ROM transfer interrupted — retry ${_romTransferRetries}/3`);
+          // Auto-retry after backoff
+          _romTransferResumeTimer = setTimeout(() => {
+            if (_romTransferState !== 'paused') return;
+            _romTransferState = 'resuming';
+            updateRomSharingUI();
+            requestResumeTransfer();
+          }, 2000);
+        } else if (_romTransferRetries > 3) {
+          showToast('ROM transfer stalled — cancel or wait for host');
         }
+        updateRomSharingUI();
       }
     };
 
     updateRomSharingUI();
   }
 
-  function startRomTransferWatchdog() {
-    stopRomTransferWatchdog();
-    _romTransferWatchdog = setInterval(() => {
-      if (!_romTransferInProgress || _romTransferWaitingResume) return;
-      if (Date.now() - _romTransferLastChunkAt > 10000) {
-        console.log('[play] ROM transfer stalled — triggering resume');
-        showToast('ROM transfer stalled — retrying...');
-        if (_romTransferDC) {
-          try { _romTransferDC.close(); } catch (_) {}
-        }
-        // onclose handler will set _romTransferWaitingResume
+  function requestResumeTransfer() {
+    // Re-request transfer from host via Socket.IO
+    socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
+    // Timeout: if no DC arrives in 15s, fall back to paused
+    _romTransferResumeTimer = setTimeout(() => {
+      if (_romTransferState !== 'resuming') return;
+      _romTransferState = 'paused';
+      _romTransferRetries++;
+      console.log('[play] ROM resume timed out, retry', _romTransferRetries);
+      if (_romTransferRetries <= 3) {
+        showToast('ROM transfer resume timed out — will retry');
+        // Schedule another attempt
+        _romTransferResumeTimer = setTimeout(() => {
+          if (_romTransferState !== 'paused') return;
+          _romTransferState = 'resuming';
+          updateRomSharingUI();
+          requestResumeTransfer();
+        }, 2000);
+      } else {
+        showToast('ROM transfer stalled — cancel or wait for host');
       }
-    }, 3000);
+      updateRomSharingUI();
+    }, 15000);
   }
 
-  function stopRomTransferWatchdog() {
-    if (_romTransferWatchdog) {
-      clearInterval(_romTransferWatchdog);
-      _romTransferWatchdog = null;
+  function resetStallTimer() {
+    clearTimeout(_romTransferStallTimer);
+    _romTransferStallTimer = setTimeout(onStallTimeout, 10000);
+  }
+
+  function stopStallTimer() {
+    clearTimeout(_romTransferStallTimer);
+    _romTransferStallTimer = null;
+  }
+
+  function onStallTimeout() {
+    if (_romTransferState !== 'receiving') return;
+    console.log('[play] ROM transfer stalled — no chunks for 10s');
+    // Close DC — onclose will transition to paused
+    if (_romTransferDC) {
+      try { _romTransferDC.close(); } catch (_) {}
     }
   }
 
@@ -1108,7 +1197,7 @@
 
     if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
       showToast('ROM transfer size mismatch — load manually');
-      _romTransferInProgress = false;
+      _romTransferState = 'idle';
       _romTransferChunks = [];
       updateRomSharingUI();
       return;
@@ -1124,7 +1213,7 @@
     _romBlobUrl = URL.createObjectURL(blob);
     window.EJS_gameUrl = _romBlobUrl;
 
-    _romTransferInProgress = false;
+    _romTransferState = 'complete';
     _romTransferChunks = [];
     _romTransferDC = null;
 
@@ -1640,10 +1729,9 @@
         }
       },
       onPeerReconnected: (sid) => {
-        // Resume ROM transfer if waiting — mark DC to wait for receiver's rom-resume
-        if (_romTransferWaitingResume && engine && engine.getPeerConnection) {
+        // Resume ROM transfer if paused — mark DC to wait for receiver's rom-resume
+        if (_romTransferState === 'paused' && engine && engine.getPeerConnection) {
           startRomTransferTo(sid);
-          // Mark the just-created DC as resume-aware so onopen doesn't auto-send
           if (_romTransferDCs[sid]) {
             _romTransferDCs[sid]._waitForResume = true;
           }
