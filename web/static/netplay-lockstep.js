@@ -1905,7 +1905,7 @@
       _guestVideo.id = 'guest-video';
       _guestVideo.autoplay = true;
       _guestVideo.playsInline = true;
-      _guestVideo.muted = false;
+      _guestVideo.muted = true;  // start muted so autoplay works without gesture
       _guestVideo.disableRemotePlayback = true;
       _guestVideo.setAttribute('playsinline', '');
 
@@ -1916,6 +1916,11 @@
       } else {
         document.body.appendChild(_guestVideo);
       }
+
+      // Unmute after playback starts (user can also click to unmute)
+      _guestVideo.addEventListener('playing', function () {
+        _guestVideo.muted = false;
+      }, { once: true });
     }
     _guestVideo.srcObject = event.streams[0];
 

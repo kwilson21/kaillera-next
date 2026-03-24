@@ -176,13 +176,18 @@
           _guestVideo.id = 'guest-video';
           _guestVideo.autoplay = true;
           _guestVideo.playsInline = true;
-          _guestVideo.muted = false;
+          _guestVideo.muted = true;  // start muted so autoplay works without gesture
 
           // Minimize video decode/display latency:
           // - disableRemotePlayback: don't add cast overlay
           // - no buffering: play ASAP
           _guestVideo.disableRemotePlayback = true;
           _guestVideo.setAttribute('playsinline', '');
+
+          // Unmute after playback starts
+          _guestVideo.addEventListener('playing', () => {
+            _guestVideo.muted = false;
+          }, { once: true });
 
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           gameDiv.innerHTML = '';
