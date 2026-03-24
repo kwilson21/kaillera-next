@@ -1720,12 +1720,12 @@
     }
     // Guests without ROM hash: wait for save state via handleSaveStateMsg
 
-    // Timeout: if sync hasn't completed in 30s, show helpful status
+    // Timeout: if sync hasn't completed in 30s, reset sync state so a
+    // reconnecting peer can re-trigger the sync flow instead of getting stuck.
     setTimeout(() => {
       if (!_running && _selfEmuReady && _gameStarted) {
-        setStatus('Sync timed out — try reloading the page');
-        _config?.onToast?.('Sync stalled — reload to retry');
-        // Reset sync state so a reconnected peer can re-trigger the flow
+        setStatus('Sync timed out — waiting for reconnect...');
+        _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
         _syncStarted = false;
         _lockstepReadyPeers = {};
       }
@@ -3219,6 +3219,7 @@
 
     // Delta sync: XOR against previous state
     const isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
+    console.log(`[lockstep] pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
     _streamSync(`pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
     let toCompress;
     if (isFull) {
