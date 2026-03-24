@@ -75,6 +75,7 @@
   function connect() {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
     window._socket = socket;  // expose for E2E tests
+    Object.defineProperty(window, '_isSpectator', { get: () => isSpectator, configurable: true });
 
     socket.on('connect', onConnect);
     socket.on('disconnect', (reason) => {
@@ -192,6 +193,9 @@
             if (roomData.status === 'playing') {
               gameRunning = true;
               _lateJoin = !isSpectator;
+              // Pick up the game mode from the room — game-started event
+              // won't fire since the game is already running
+              if (roomData.mode) mode = roomData.mode;
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;
@@ -345,13 +349,23 @@
     mode = data.mode || mode;
     _gameRollbackEnabled = !!data.rollbackEnabled;
 
+    gameRunning = true;
+
+    // Spectators don't run an emulator — they receive a video stream.
+    // Skip all ROM checks and go straight to engine init (same as mid-game join).
+    if (isSpectator) {
+      hideOverlay();
+      showToolbar();
+      showGameLoading();
+      initEngine();
+      return;
+    }
+
     // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
     if (data.romHash && _romHash && data.romHash !== _romHash && _romSharingDecision !== 'accepted') {
       showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
       return;
     }
-
-    gameRunning = true;
 
     // If we accepted ROM sharing but don't have a ROM yet, stay in overlay
     // with progress UI while connecting WebRTC and receiving the ROM
@@ -1456,12 +1470,13 @@
   }
 
   function initEngine() {
+    // Spectators receive a video stream — never boot a local emulator
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
-    if (_romBlob || _romBlobUrl) {
+    if (!isSpectator && (_romBlob || _romBlobUrl)) {
       bootEmulator();
     } else {
-      console.log('[play] initEngine: connect-only mode (no ROM yet)');
+      console.log('[play] initEngine: connect-only mode (spectator or no ROM)');
     }
 
     const Engine = mode === 'streaming'
@@ -1669,6 +1684,17 @@
     } else {
       if (hostControls) hostControls.style.display = 'none';
       if (guestStatus) guestStatus.style.display = '';
+    }
+
+    // Spectators don't need ROM, gamepad, or player controls — just the player list
+    const romDrop = document.getElementById('rom-drop');
+    const romSharingPrompt = document.getElementById('rom-sharing-prompt');
+    const gamepadArea = document.getElementById('gamepad-area');
+    if (isSpectator) {
+      if (romDrop) romDrop.style.display = 'none';
+      if (romSharingPrompt) romSharingPrompt.style.display = 'none';
+      if (gamepadArea) gamepadArea.style.display = 'none';
+      if (guestStatus) guestStatus.textContent = 'Waiting for host to start the game...';
     }
 
     // Show player controls (delay picker) for all non-spectator players in lockstep mode

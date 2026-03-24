@@ -98,6 +98,7 @@ def create_app(lifespan=None) -> FastAPI:
             "has_password": room.password is not None,
             "rom_hash": room.rom_hash,
             "rom_sharing": room.rom_sharing,
+            "mode": room.mode,
         }
 
     @app.get("/list")
