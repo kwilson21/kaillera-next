@@ -193,9 +193,10 @@
             if (roomData.status === 'playing') {
               gameRunning = true;
               _lateJoin = !isSpectator;
-              // Pick up the game mode from the room — game-started event
-              // won't fire since the game is already running
+              // Pick up the game mode — game-started event won't fire
+              // since the game is already running. Try REST then join callback.
               if (roomData.mode) mode = roomData.mode;
+              else if (joinData && joinData.mode) mode = joinData.mode;
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;

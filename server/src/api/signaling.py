@@ -114,6 +114,8 @@ def _players_payload(room: Room) -> dict:
         },
         "owner": room.owner,
         "romSharing": room.rom_sharing,
+        "mode": room.mode,
+        "status": room.status,
     }
 
 
