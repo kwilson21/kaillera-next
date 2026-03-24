@@ -1510,8 +1510,8 @@
         // Update game loading overlay
         const loadingText = document.getElementById('game-loading-text');
         if (loadingText) loadingText.textContent = msg;
-        // Dismiss loading overlay when lockstep loop starts
-        if (msg.indexOf('game on') !== -1 || msg.indexOf('Spectating') !== -1) {
+        // Dismiss loading overlay when game loop starts or stream connects
+        if (msg.indexOf('game on') !== -1 || msg.indexOf('Spectating') !== -1 || msg.indexOf('streaming') !== -1) {
           dismissGameLoading();
         }
       },
