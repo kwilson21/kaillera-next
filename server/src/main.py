@@ -78,4 +78,16 @@ def run() -> None:
         pass
 
     log.info("HTTP + Socket.IO listening on :8000 (loop=%s)", loop_setting)
-    uvicorn.run(socket_app, host="0.0.0.0", port=8000, log_level="info", loop=loop_setting)
+    uvicorn.run(
+        socket_app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+        loop=loop_setting,
+        # Disable websocket-level keepalive pings — Socket.IO's Engine.IO
+        # layer handles its own ping/pong. The websockets library's legacy
+        # protocol has a race condition in _drain_helper that triggers
+        # AssertionError when a connection closes mid-ping.
+        ws_ping_interval=None,
+        ws_ping_timeout=None,
+    )
