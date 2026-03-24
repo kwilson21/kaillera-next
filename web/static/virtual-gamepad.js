@@ -29,10 +29,10 @@
     [10, 'L',      'vgp-l'],
     [11, 'R',      'vgp-r'],
     [12, 'Z',      'vgp-z'],
-    [4,  '\u25B2', 'vgp-du'],
-    [5,  '\u25BC', 'vgp-dd'],
-    [6,  '\u25C0', 'vgp-dl'],
-    [7,  '\u25B6', 'vgp-dr'],
+    [4,  '\u25B4', 'vgp-du'],
+    [5,  '\u25BE', 'vgp-dd'],
+    [6,  '\u25C2', 'vgp-dl'],
+    [7,  '\u25B8', 'vgp-dr'],
     [23, 'CU',     'vgp-cu'],
     [22, 'CD',     'vgp-cd'],
     [21, 'CL',     'vgp-cl'],
@@ -70,7 +70,7 @@
       // Shoulders bar — FIRST row, above everything
       '.vgp-shoulders { grid-area: shoulders; display: flex; justify-content: space-between; padding: 2px 4px; }',
       // Left column: dpad on top, stick below
-      '.vgp-left { grid-area: left; position: relative; min-height: 210px; }',
+      '.vgp-left { grid-area: left; position: relative; min-height: 230px; }',
       // Right column: c-buttons on top, A/B below
       '.vgp-right { grid-area: right; position: relative; min-height: 210px; }',
       // Start bar — LAST row
@@ -88,15 +88,15 @@
       '.vgp-btn.active { background: rgba(255,255,255,0.4); }',
 
       // Shoulder buttons (in .vgp-shoulders flow, not absolute)
-      '.vgp-l, .vgp-r, .vgp-z { position: static; border-radius: 8px; padding: 4px 12px; font-size: 13px; }',
+      '.vgp-l, .vgp-r, .vgp-z { position: static; border-radius: 8px; padding: 6px 16px; font-size: 14px; }',
 
       // D-pad — inside .vgp-left, TOP area (above stick)
-      '.vgp-dpad { position: absolute; top: 4px; left: 10px; width: 90px; height: 90px; }',
-      '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 11px; width: 28px; height: 28px; }',
-      '.vgp-du { left: 31px; top: 0; }',
-      '.vgp-dd { left: 31px; bottom: 0; top: auto; }',
-      '.vgp-dl { left: 0; top: 31px; }',
-      '.vgp-dr { right: 0; top: 31px; }',
+      '.vgp-dpad { position: absolute; top: 4px; left: 10px; width: 96px; height: 96px; }',
+      '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 13px; width: 34px; height: 34px; }',
+      '.vgp-du { left: 28px; top: 0; }',
+      '.vgp-dd { left: 28px; bottom: 0; top: auto; }',
+      '.vgp-dl { left: 0; top: 28px; }',
+      '.vgp-dr { right: 0; top: 28px; }',
 
       // Stick zone — inside .vgp-left, BELOW dpad
       '.vgp-stick-zone {',
@@ -112,17 +112,17 @@
       '}',
 
       // C-buttons diamond — inside .vgp-right, TOP area
-      '.vgp-cu { width: 34px; height: 34px; left: 30px; top: 4px; font-size: 10px; }',
-      '.vgp-cd { width: 34px; height: 34px; left: 30px; top: 70px; font-size: 10px; }',
-      '.vgp-cl { width: 34px; height: 34px; left: 0; top: 37px; font-size: 10px; }',
-      '.vgp-cr { width: 34px; height: 34px; left: 60px; top: 37px; font-size: 10px; }',
+      '.vgp-cu { width: 38px; height: 38px; left: 30px; top: 4px; font-size: 11px; }',
+      '.vgp-cd { width: 38px; height: 38px; left: 30px; top: 74px; font-size: 11px; }',
+      '.vgp-cl { width: 38px; height: 38px; left: 0; top: 39px; font-size: 11px; }',
+      '.vgp-cr { width: 38px; height: 38px; left: 64px; top: 39px; font-size: 11px; }',
 
-      // A + B — inside .vgp-right, BELOW C-buttons
-      '.vgp-a { width: 54px; height: 54px; right: 8px; bottom: 8px; top: auto; font-size: 18px; }',
-      '.vgp-b { width: 44px; height: 44px; right: 68px; bottom: 16px; top: auto; font-size: 15px; }',
+      // A + B — same size, inside .vgp-right, BELOW C-buttons
+      '.vgp-a { width: 52px; height: 52px; right: 8px; bottom: 8px; top: auto; font-size: 17px; }',
+      '.vgp-b { width: 52px; height: 52px; right: 66px; bottom: 8px; top: auto; font-size: 17px; }',
 
       // Start — in flow inside .vgp-center
-      '.vgp-start { position: static; border-radius: 14px; padding: 4px 16px; font-size: 11px; }',
+      '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
 
       // ── Landscape overrides ──
       '@media (orientation: landscape) {',
@@ -148,9 +148,9 @@
       '  .vgp-cd { right: 60px; left: auto; top: 120px; }',
       '  .vgp-cl { right: 94px; left: auto; top: 88px; }',
       '  .vgp-cr { right: 26px; left: auto; top: 88px; }',
-      // A/B bottom-right, with gap above Start
+      // A/B bottom-right, same size, with gap above Start
       '  .vgp-a { right: 12px; bottom: 40px; top: auto; }',
-      '  .vgp-b { right: 72px; bottom: 48px; top: auto; }',
+      '  .vgp-b { right: 70px; bottom: 40px; top: auto; }',
       '}',
 
       '</style>',
