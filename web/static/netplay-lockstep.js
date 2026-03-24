@@ -538,6 +538,10 @@
   let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
   let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
+  // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
+  let _hasKnSync = false;
+  let _syncBufPtr = 0;
+  let _syncBufSize = 0;
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null;     // stored for removal in stopSync()
@@ -1042,6 +1046,7 @@
       if (peer.reconnecting) {
         if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
         peer.reconnecting = false;
+        _lastSyncState = null;  // force full resync after reconnect
         const rKnown = _knownPlayers[remoteSid];
         const rName = rKnown ? rKnown.playerName : `P${(peer.slot ?? 0) + 1}`;
         setStatus(`${rName} reconnected`);
@@ -1102,9 +1107,7 @@
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
         if (e.data.startsWith('sync-hash:')) {
-          // Star topology: only accept sync-hash from host (slot 0)
           if (peer.slot !== 0) return;
-          // Don't compare while a resync is already pending (prevents delta base drift)
           if (_pendingResyncState) return;
           const parts = e.data.split(':');
           const syncFrame = parseInt(parts[1], 10);
@@ -1112,38 +1115,60 @@
           const frameDiff = _frameNum - syncFrame;
           if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
             console.log(`[lockstep] sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`);
-            // Hash directly from HEAPU8 (RDRAM) — avoids expensive getState()
-            try {
-              const guestBytes = getHashBytes();
-              if (!guestBytes) return;
-              const peerRef = peer;
-              workerPost({ type: 'hash', data: guestBytes }).then((res) => {
-                if (res.hash !== hostHash) {
-                  const desyncMsg = `DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`;
-                  console.log(`[lockstep] ${desyncMsg}`);
-                  _streamSync(desyncMsg);
-                  // Request resync with 10s cooldown — constant resyncs freeze
-                  // the game (loadState blocks main thread on mobile)
-                  const now2 = performance.now();
-                  if (!_pendingResyncState && now2 - _lastResyncTime > 10000) {
-                    _lastResyncTime = now2;
-                    try { peerRef.dc.send('sync-request'); } catch (_) {}
-                    _streamSync('sync-request sent');
-                  }
-                } else {
-                  const okMsg = `sync OK frame=${syncFrame} hash=${res.hash}`;
-                  console.log(`[lockstep] ${okMsg}`);
-                  _streamSync(okMsg);
-                  _consecutiveResyncs = 0;
-                  _syncCheckInterval = _syncBaseInterval;
+            if (_hasKnSync) {
+              // C-level hash — synchronous comparison
+              const mod = window.EJS_emulator.gameManager.Module;
+              const guestHash = mod._kn_sync_hash();
+              if (guestHash !== hostHash) {
+                const desyncMsg = `DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`;
+                console.log(`[lockstep] ${desyncMsg}`);
+                _streamSync(desyncMsg);
+                const now2 = performance.now();
+                if (now2 - _lastResyncTime > 10000) {
+                  _lastResyncTime = now2;
+                  try { peer.dc.send('sync-request'); } catch (_) {}
+                  _streamSync('sync-request sent');
                 }
-              }).catch(() => {});
-            } catch (_) {}
+              } else {
+                const okMsg = `sync OK frame=${syncFrame} hash=${guestHash}`;
+                console.log(`[lockstep] ${okMsg}`);
+                _streamSync(okMsg);
+                _consecutiveResyncs = 0;
+                _syncCheckInterval = _syncBaseInterval;
+              }
+            } else {
+              // Fallback: async hash via HEAPU8 (RDRAM) — avoids expensive getState()
+              try {
+                const guestBytes = getHashBytes();
+                if (!guestBytes) return;
+                const peerRef = peer;
+                workerPost({ type: 'hash', data: guestBytes }).then((res) => {
+                  if (res.hash !== hostHash) {
+                    const desyncMsg = `DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`;
+                    console.log(`[lockstep] ${desyncMsg}`);
+                    _streamSync(desyncMsg);
+                    const now2 = performance.now();
+                    if (!_pendingResyncState && now2 - _lastResyncTime > 10000) {
+                      _lastResyncTime = now2;
+                      try { peerRef.dc.send('sync-request'); } catch (_) {}
+                      _streamSync('sync-request sent');
+                    }
+                  } else {
+                    const okMsg = `sync OK frame=${syncFrame} hash=${res.hash}`;
+                    console.log(`[lockstep] ${okMsg}`);
+                    _streamSync(okMsg);
+                    _consecutiveResyncs = 0;
+                    _syncCheckInterval = _syncBaseInterval;
+                  }
+                }).catch(() => {});
+              } catch (_) {}
+            }
           } else if (_frameNum < syncFrame) {
             console.log(`[lockstep] sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`);
             _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
           } else {
             console.log(`[lockstep] sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
+
           }
         }
         // State sync: host received request, or chunked binary transfer header
@@ -2284,6 +2309,18 @@
 
     window._lockstepActive = true;
 
+    // C-level sync: detect patched core with kn_sync exports
+    var knMod = window.EJS_emulator && window.EJS_emulator.gameManager &&
+                window.EJS_emulator.gameManager.Module;
+    _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
+    if (_hasKnSync) {
+      _syncBufSize = 8 * 1024 * 1024 + 16384;
+      _syncBufPtr = knMod._malloc(_syncBufSize);
+      console.log('[lockstep] C-level sync available, buf at', _syncBufPtr);
+    } else {
+      console.log('[lockstep] C-level sync NOT available, using getState/loadState fallback');
+    }
+
     // Background tab handling: do NOT pause the tick loop. Browser naturally
     // throttles setInterval to ~1fps in background tabs, which keeps the
     // player sending input (slowly). Pausing completely breaks multi-tab
@@ -2304,6 +2341,9 @@
 
         // Short background (<500ms): no action needed
         if (bgDuration < 500) return;
+
+        // Force full resync after background return (delta base is stale)
+        _lastSyncState = null;
 
         // Notify peers we returned (toast only, no gameplay effect)
         const activePeers2 = getActivePeers();
@@ -2386,6 +2426,14 @@
     _manualMode = false;
     _pendingRunner = null;
     _pendingSyncCheck = null;
+    _lastSyncState = null;
+    // Free C-level sync buffer
+    if (_syncBufPtr && _hasKnSync) {
+      const modStop = window.EJS_emulator?.gameManager?.Module;
+      if (modStop?._free) modStop._free(_syncBufPtr);
+      _syncBufPtr = 0;
+    }
+    _hasKnSync = false;
   };
 
   const tick = () => {
@@ -2544,57 +2592,83 @@
     KNState.frameNum = _frameNum;
 
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
-    // Compare when we reach or pass the target frame (within a small window).
     if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
-      // Only compare if we haven't overshot too far (state changes rapidly)
       if (_frameNum - _pendingSyncCheck.frame <= 2) {
-        // Hash directly from HEAPU8 (RDRAM) — avoids expensive getState()
-        try {
-          const deferBytes = getHashBytes();
-          if (deferBytes) {
-            const deferCheck = _pendingSyncCheck;  // capture before nulling
-            workerPost({ type: 'hash', data: deferBytes }).then((res) => {
-              if (res.hash !== deferCheck.hash) {
-                console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
-                const now3 = performance.now();
-                if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
-                  _lastResyncTime = now3;
-                  const sp = _peers[deferCheck.peerSid];
-                  if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
-                }
-              } else {
-                _consecutiveResyncs = 0;
-                _syncCheckInterval = _syncBaseInterval;
-              }
-            }).catch(() => {});
+        if (_hasKnSync) {
+          // C-level hash — synchronous comparison
+          const mod = window.EJS_emulator.gameManager.Module;
+          const guestHash = mod._kn_sync_hash();
+          if (guestHash !== _pendingSyncCheck.hash) {
+            console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
+            const now3 = performance.now();
+            if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
+              _lastResyncTime = now3;
+              const sp = _peers[_pendingSyncCheck.peerSid];
+              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+            }
+          } else {
+            _consecutiveResyncs = 0;
+            _syncCheckInterval = _syncBaseInterval;
           }
-        } catch (_) {}
+        } else {
+          // Fallback: async hash via HEAPU8 (RDRAM)
+          try {
+            const deferBytes = getHashBytes();
+            if (deferBytes) {
+              const deferCheck = _pendingSyncCheck;  // capture before nulling
+              workerPost({ type: 'hash', data: deferBytes }).then((res) => {
+                if (res.hash !== deferCheck.hash) {
+                  console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
+                  const now3 = performance.now();
+                  if (!_pendingResyncState && now3 - _lastResyncTime > 10000) {
+                    _lastResyncTime = now3;
+                    const sp = _peers[deferCheck.peerSid];
+                    if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+                  }
+                } else {
+                  _consecutiveResyncs = 0;
+                  _syncCheckInterval = _syncBaseInterval;
+                }
+              }).catch(() => {});
+            }
+          } catch (_) {}
+        }
       }
       _pendingSyncCheck = null;
     }
 
     // -- Periodic desync check (star topology: host-only) -----
-    // Hash directly from HEAPU8 (RDRAM) when available — avoids the ~3ms
-    // getState() serialization AND the pre-compression that used to run every
-    // check interval.  State is only captured/compressed on actual resync.
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
         _frameNum % _syncCheckInterval === 0) {
-      const hashBytes = getHashBytes();
-      if (hashBytes) {
-        const checkFrame = _frameNum;
+      if (_hasKnSync) {
+        // C-level hash — synchronous, no HEAPU8, no worker
+        const mod = window.EJS_emulator.gameManager.Module;
+        const hash = mod._kn_sync_hash();
+        const syncMsg = `sync-hash:${_frameNum}:${hash}`;
         const peers = getActivePeers();
-        workerPost({ type: 'hash', data: hashBytes }).then((res) => {
-          const syncMsg = `sync-hash:${checkFrame}:${res.hash}`;
-          let sent = 0;
-          for (const p of peers) {
-            try { p.dc.send(syncMsg); sent++; } catch (_) {}
-          }
-          const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
-          console.log(`[lockstep] ${hostMsg}`);
-          _streamSync(hostMsg);
-        }).catch(() => {});
+        let sent = 0;
+        for (const p of peers) {
+          try { p.dc.send(syncMsg); sent++; } catch (_) {}
+        }
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
-          console.log('[lockstep] sync check at frame', _frameNum);
+          _streamSync(`sync-check frame=${_frameNum} hash=${hash} sent=${sent}`);
+        }
+      } else {
+        // Fallback: async hash via HEAPU8 + worker
+        const hashBytes = getHashBytes();
+        if (hashBytes) {
+          const checkFrame = _frameNum;
+          const peers = getActivePeers();
+          workerPost({ type: 'hash', data: hashBytes }).then((res) => {
+            const syncMsg = `sync-hash:${checkFrame}:${res.hash}`;
+            let sent = 0;
+            for (const p of peers) {
+              try { p.dc.send(syncMsg); sent++; } catch (_) {}
+            }
+            const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
+            console.log(`[lockstep] ${hostMsg}`);
+            _streamSync(hostMsg);
+          }).catch(() => {});
         }
       }
     }
@@ -3078,28 +3152,45 @@
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
     _pushingSyncState = true;
-    const ps0 = performance.now();
-    const raw = gm.getState();
-    const ps1 = performance.now();
-    const currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    let currentState;
     const frame = _frameNum;
-    _streamSync(`host getState: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
 
-    // Delta sync: XOR against previous state. The delta is mostly zeros
-    // (unchanged bytes) which compresses ~100x better than full state.
+    if (_hasKnSync) {
+      // C-level: read state directly from g_dev — no getState(), no memory growth
+      const mod = gm.Module;
+      const ps0 = performance.now();
+      const bytesWritten = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
+      const ps1 = performance.now();
+      if (bytesWritten === 0) {
+        console.log('[lockstep] kn_sync_read returned 0');
+        _pushingSyncState = false;
+        return;
+      }
+      currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
+      _streamSync(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+    } else {
+      // Fallback: existing getState path
+      const ps0 = performance.now();
+      const raw = gm.getState();
+      const ps1 = performance.now();
+      currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      _streamSync(`host getState: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+    }
+
+    // Delta sync: XOR against previous state
     const isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
     _streamSync(`pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
     let toCompress;
     if (isFull) {
       toCompress = currentState;
     } else {
-      // XOR delta
       toCompress = new Uint8Array(currentState.length);
       for (let i = 0; i < currentState.length; i++) {
         toCompress[i] = currentState[i] ^ _lastSyncState[i];
       }
     }
-    _lastSyncState = new Uint8Array(currentState);
+    // Update delta base (guest caches after applying)
+    _lastSyncState = currentState;
 
     compressState(toCompress).then((compressed) => {
       const sizeKB = Math.round(compressed.length / 1024);
@@ -3162,19 +3253,15 @@
         // Full state — use directly
         _pendingResyncState = { bytes: decompressed, frame };
       } else {
-        // Delta — XOR against our current state to reconstruct host's state
-        const gm = window.EJS_emulator?.gameManager;
-        if (!gm) return;
-        const raw = gm.getState();
-        const current = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-        if (current.length !== decompressed.length) {
-          console.log(`[lockstep] delta size mismatch: current=${current.length} delta=${decompressed.length} — falling back to full`);
-          // Can't apply delta — request full state
+        // Delta: XOR against _lastSyncState (the state from the last completed
+        // resync). Both host and guest cached this, so the XOR base matches.
+        if (!_lastSyncState || _lastSyncState.length !== decompressed.length) {
+          console.log(`[lockstep] delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length}`);
           return;
         }
-        const reconstructed = new Uint8Array(current.length);
-        for (let j = 0; j < current.length; j++) {
-          reconstructed[j] = current[j] ^ decompressed[j];
+        const reconstructed = new Uint8Array(_lastSyncState.length);
+        for (let j = 0; j < _lastSyncState.length; j++) {
+          reconstructed[j] = _lastSyncState[j] ^ decompressed[j];
         }
         _pendingResyncState = { bytes: reconstructed, frame };
       }
@@ -3194,29 +3281,51 @@
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
 
-    const lt0 = performance.now();
-    gm.loadState(bytes);
-    const lt1 = performance.now();
+    if (_hasKnSync) {
+      // C-level write: copy into WASM buffer, call kn_sync_write
+      const mod = gm.Module;
+      mod.HEAPU8.set(bytes, _syncBufPtr);
+      const lt0 = performance.now();
+      const result = mod._kn_sync_write(_syncBufPtr, bytes.length);
+      const lt1 = performance.now();
 
-    // Re-capture rAF runner (loadState may invalidate _pendingRunner)
-    const mod = gm.Module;
-    mod.pauseMainLoop();
-    mod.resumeMainLoop();
+      if (result !== 0) {
+        console.log('[lockstep] kn_sync_write failed:', result);
+        return;
+      }
 
-    // loadState may trigger WASM memory growth, detaching HEAPU8.buffer.
-    // Force Emscripten to refresh its typed array views.
-    if (mod.updateMemoryViews) {
-      mod.updateMemoryViews();
-    } else if (mod._emscripten_notify_memory_growth) {
-      mod._emscripten_notify_memory_growth(0);
+      // Cache applied state as delta base for next resync
+      _lastSyncState = bytes.slice();
+
+      _resyncCount++;
+      _consecutiveResyncs++;
+      _streamSync(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+    } else {
+      // Fallback: existing loadState path
+      const lt0 = performance.now();
+      gm.loadState(bytes);
+      const lt1 = performance.now();
+
+      // Re-capture rAF runner (loadState may invalidate _pendingRunner)
+      const mod = gm.Module;
+      mod.pauseMainLoop();
+      mod.resumeMainLoop();
+
+      // loadState may trigger WASM memory growth, detaching HEAPU8.buffer.
+      if (mod.updateMemoryViews) {
+        mod.updateMemoryViews();
+      } else if (mod._emscripten_notify_memory_growth) {
+        mod._emscripten_notify_memory_growth(0);
+      }
+      _hashRegion = null;
+
+      // Cache applied state as delta base
+      _lastSyncState = new Uint8Array(bytes);
+
+      _resyncCount++;
+      _consecutiveResyncs++;
+      _streamSync(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     }
-    // Invalidate cached RDRAM region so it's re-discovered with fresh buffer
-    _hashRegion = null;
-
-    _resyncCount++;
-    _consecutiveResyncs++;
-
-    _streamSync(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
 
     // Purge stale remote inputs above the new frame
     for (const [slot, inputs] of Object.entries(_remoteInputs)) {
