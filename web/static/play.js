@@ -40,8 +40,8 @@
   const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
     || (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent))
     || (navigator.userAgentData && navigator.userAgentData.mobile);
-  const ROM_CHUNK_SIZE = _isMobile ? 16 * 1024 : 64 * 1024;
-  const ROM_BUFFER_THRESHOLD = _isMobile ? 256 * 1024 : 1024 * 1024;
+  const ROM_CHUNK_SIZE = 64 * 1024;           // 64KB — same for all platforms
+  const ROM_BUFFER_THRESHOLD = 1024 * 1024;   // 1MB — DC handles this fine on mobile
   let _romTransferBytesReceived = 0;
   let _romTransferWaitingResume = false;
   let _romTransferResumeAttempts = 0;
@@ -871,7 +871,7 @@
             console.log('[play] ROM send: backpressure retry', backpressureRetries);
             waitForDrain();
           }
-        }, 5000);
+        }, 1000);
 
         dc.onbufferedamountlow = () => {
           clearTimeout(drainTimeout);
