@@ -372,7 +372,7 @@
     KNShared.triggerEmulatorStart();
     KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
     setupKeyTracking();
-    disableEJSKeyboard();
+    disableEJSInput();
 
     // Wait for emulator to be running, then capture canvas stream
     const waitForEmu = () => {
@@ -710,17 +710,25 @@
     _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   }
 
-  function disableEJSKeyboard() {
+  function disableEJSInput() {
     const attempt = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-      if (!gm) { setTimeout(attempt, 200); return; }
-      gm.setKeyboardEnabled(false);
       const ejs = window.EJS_emulator;
+      const gm = ejs && ejs.gameManager;
+      if (!gm) { setTimeout(attempt, 200); return; }
+
+      // Disable EJS keyboard handling
+      gm.setKeyboardEnabled(false);
       const parent = ejs.elements && ejs.elements.parent;
       if (parent) {
         const block = e => e.stopImmediatePropagation();
         parent.addEventListener('keydown', block, true);
         parent.addEventListener('keyup',   block, true);
+      }
+
+      // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
+      if (ejs.gamepad) {
+        if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
+        ejs.gamepad.loop = function () {};
       }
     };
     attempt();
