@@ -54,7 +54,8 @@ idle → receiving → paused → complete
 | `paused` | user cancels | `idle` | **Clear chunks** |
 | `resuming` | new DC arrives | `receiving` | Send `rom-resume` with offset, start stall timer |
 | `resuming` | resume timeout (15s) | `paused` | Increment retry count, show toast |
-| `complete` | (terminal) | — | — |
+| `complete` | `onGameEnded` | `idle` | Full cleanup via `resetRomTransfer()` |
+| any | `onGameEnded` | `idle` | Full cleanup via `resetRomTransfer()` |
 
 ### Chunk caching rules
 
@@ -96,16 +97,19 @@ No more interval polling. No more checking `_romTransferWaitingResume` inside a 
 
 When transitioning to `resuming` (from `paused`):
 
-1. Guest emits `rom-accepted` via Socket.IO `data-message` with `{ type: 'rom-accepted', sender: socket.id, resumeOffset: _romTransferBytesReceived }`.
+1. Guest emits `rom-accepted` via Socket.IO `data-message` with `{ type: 'rom-accepted', sender: socket.id }`.
 2. Start a 15s resume timeout. If no DC arrives, fall back to `paused`.
-3. When the host receives `rom-accepted` with `resumeOffset`, it calls `sendRomOverChannel(dc, peerSid, resumeOffset)` — this path already exists and works.
-4. When the guest receives the new DC in `onExtraDataChannel`, it transitions to `receiving` and sends `rom-resume` with the cached offset.
+3. Host receives `rom-accepted`, creates a DC with `_waitForResume = true` (existing pattern in `startRomTransferTo`).
+4. Guest receives the new DC in `onExtraDataChannel`, transitions to `receiving`, and sends `rom-resume` with the cached byte offset over the DC.
+5. Host receives `rom-resume` and calls `sendRomOverChannel(dc, peerSid, offset)`.
 
-The host side already supports `startOffset` in `sendRomOverChannel` — no sender changes needed.
+This is the existing two-step resume dance — no new protocol fields needed.
 
-### Clean cancellation
+### Clean cancellation and cleanup
 
-`cancelRomTransfer()` becomes a single function that handles all cleanup:
+Two cleanup functions:
+
+**`cancelRomTransfer()`** — user-initiated cancel (clears chunks):
 
 ```
 function cancelRomTransfer():
@@ -120,6 +124,12 @@ function cancelRomTransfer():
     _romTransferState = 'idle'
     update UI
 ```
+
+**`resetRomTransfer()`** — game-end cleanup (called by `onGameEnded`):
+
+Same as `cancelRomTransfer()`. Consolidates the inline cleanup currently in
+`onGameEnded` (lines 484-495) so all timer/state teardown goes through one path.
+`onGameEnded` replaces its inline cleanup with a single `resetRomTransfer()` call.
 
 ### Variables
 
@@ -140,6 +150,7 @@ function cancelRomTransfer():
 - `_romTransferDCs` (host-side sender channels)
 - `_romTransferBytesReceived`, `_romTransferLastChunkAt`
 - `_romSharingEnabled`, `_romSharingDecision`
+- `_romAcceptPollInterval`
 
 ### UI mapping
 
@@ -154,20 +165,37 @@ The `updateRomSharingUI()` function maps states to display:
 | `resuming` | Progress bar with "reconnecting..." text + cancel button |
 | `complete` | "Loaded" state in drop zone |
 
+### Required changes to existing functions
+
+**`onRomSharingUpdated`** (line 517): When host disables sharing and we're mid-transfer,
+the current code clears chunks (`_romTransferChunks = []`). This must change to preserve
+chunks — only close the DC and transition to `paused`. Chunks are preserved so that when
+sharing is re-enabled, we resume from the cached offset.
+
+**`startPreGameRomTransfer`** (line 770): Currently has no `onmessage` handler for
+`rom-resume` and always starts from byte 0. Add an `onmessage` handler on the DC that
+listens for `rom-resume` messages (same pattern as `startRomTransferTo` lines 863-872),
+and add `_waitForResume` support so pre-game resume works.
+
+**`onPeerReconnected`** (~line 1643): Currently checks `_romTransferWaitingResume`. Must
+be updated to check `_romTransferState === 'paused'` instead.
+
+**`onGameEnded`** (~line 484): Replace inline ROM cleanup with `resetRomTransfer()` call.
+
+### Resume approach
+
+Keep the existing two-step resume dance: host creates DC with `_waitForResume = true`,
+guest sends `rom-resume` with offset over the DC once it opens. This already works in
+`startRomTransferTo` and avoids complicating the `rom-accepted` data-message protocol.
+No `resumeOffset` field needed in `rom-accepted`.
+
 ### What doesn't change
 
-- **Host-side sending** — `sendRomOverChannel`, `startRomTransferTo`, `startPreGameRomTransfer` already work correctly and support `startOffset`.
+- **`sendRomOverChannel`** — Already supports `startOffset`. No changes.
 - **Server-side signaling** — No changes to `signaling.py`.
-- **Pre-game WebRTC setup** — `registerRomSignalHandler`, `cleanupPreGameConnections` unchanged.
+- **`registerRomSignalHandler`**, **`cleanupPreGameConnections`** — Unchanged.
 - **`finishRomTransfer`** — Assembly logic is fine; just called from the `receiving → complete` transition.
 - **`afterRomTransferComplete`** — Post-transfer boot logic unchanged.
-
-### Host-side `rom-accepted` with resumeOffset
-
-One small addition: when the host receives a `rom-accepted` data-message that includes
-`resumeOffset`, pass it through to `sendRomOverChannel`. Currently `onDataMessageForRomSharing`
-ignores extra fields — add `resumeOffset` forwarding. This avoids the two-step dance of
-"open DC, wait for rom-resume message" when the guest already knows its offset.
 
 ### Edge cases
 
@@ -175,3 +203,5 @@ ignores extra fields — add `resumeOffset` forwarding. This avoids the two-step
 - **Guest refreshes page:** All in-memory state lost. Fresh accept → fresh transfer. By design.
 - **Multiple stalls in a row:** Each stall increments retry count. After 3 auto-retries, guest stays `paused`. Manual cancel or host action required.
 - **Host toggles off during `resuming`:** Cancel resume timeout, transition to `paused`.
+- **`sendRomOverChannel(dc, peerSid, 0)`:** The `!startOffset` check treats 0 as falsy, so offset 0 sends the header (fresh start). This is correct — a resume from byte 0 is equivalent to a fresh transfer.
+- **Peer reconnect during paused state:** `onPeerReconnected` sees `state === 'paused'`, host creates new DC with `_waitForResume = true`, guest sends `rom-resume` on DC open.
