@@ -203,9 +203,9 @@
               // Store host's ROM hash for verification
               _hostRomHash = roomData.rom_hash || null;
 
-              // Spectators don't need a ROM — they receive a video stream
-              // from the host. Skip ROM checks and go straight to engine init.
-              if (isSpectator) {
+              // Spectators and streaming guests don't need a ROM — they
+              // receive a video stream. Skip ROM checks and go to engine init.
+              if (isSpectator || mode === 'streaming') {
                 hideOverlay();
                 showToolbar();
                 showGameLoading();
@@ -351,10 +351,9 @@
 
     gameRunning = true;
 
-    // Spectators don't run an emulator — they receive a video stream from the
-    // host (canvas capture in lockstep, MediaStream in streaming).
-    // Skip all ROM checks and go straight to engine init.
-    if (isSpectator) {
+    // Spectators and streaming-mode guests don't run an emulator — they
+    // receive a video stream from the host. Skip ROM checks and boot.
+    if (isSpectator || (mode === 'streaming' && !isHost)) {
       hideOverlay();
       showToolbar();
       showGameLoading();
@@ -1471,10 +1470,11 @@
   }
 
   function initEngine() {
-    // Spectators receive a video stream — never boot a local emulator
+    // Spectators and streaming guests receive video — don't boot emulator.
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
-    if (!isSpectator && (_romBlob || _romBlobUrl)) {
+    var needsEmulator = !isSpectator && !(mode === 'streaming' && !isHost);
+    if (needsEmulator && (_romBlob || _romBlobUrl)) {
       bootEmulator();
     } else {
       console.log('[play] initEngine: connect-only mode (spectator or no ROM)');
