@@ -14,6 +14,7 @@
   const DEFAULT_N64_KEYMAP = {
     67: 0,    // C -> A (JOYPAD_B)
     88: 1,    // X -> B (JOYPAD_Y)
+    13: 3,    // Enter -> Start
     86: 3,    // V -> Start
     38: 4,    // Up -> D-Up
     40: 5,    // Down -> D-Down
