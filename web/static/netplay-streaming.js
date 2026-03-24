@@ -87,7 +87,7 @@
   let _prevSlotMasks     = {};
   let _gameRunning       = false;
   let _cachedInfo        = null;
-  let _touchInputState   = {};     // virtual gamepad touch state (index → value)
+  // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest   = null;   // MediaStreamAudioDestinationNode (host only)
 
   // Expose for Playwright
@@ -831,10 +831,10 @@
     // Virtual gamepad touch input (same logic as lockstep readLocalInput)
     // Left stick (indices 16-19): apply absolute + relative deadzone
     var TOUCH_ABS_DEADZONE = 3500;
-    var stR = _touchInputState[16] || 0;
-    var stL = _touchInputState[17] || 0;
-    var stD = _touchInputState[18] || 0;
-    var stU = _touchInputState[19] || 0;
+    var stR = KNState.touchInput[16] || 0;
+    var stL = KNState.touchInput[17] || 0;
+    var stD = KNState.touchInput[18] || 0;
+    var stU = KNState.touchInput[19] || 0;
     var stMajor = Math.max(stR, stL, stD, stU);
     if (stMajor > TOUCH_ABS_DEADZONE) {
       var stThresh = stMajor * 0.4;
@@ -844,10 +844,10 @@
       if (stU > stThresh) mask |= (1 << 19);
     }
     // Digital buttons + C-buttons
-    for (var ti in _touchInputState) {
+    for (var ti in KNState.touchInput) {
       var idx = parseInt(ti, 10);
       if (idx >= 16 && idx <= 19) continue;
-      var val = _touchInputState[idx];
+      var val = KNState.touchInput[idx];
       if (!val) continue;
       if (idx < 16) {
         mask |= (1 << idx);
@@ -913,7 +913,7 @@
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
       var gameEl = config.gameElement || document.getElementById('game');
       if (gameEl) {
-        VirtualGamepad.init(gameEl, _touchInputState);
+        VirtualGamepad.init(gameEl);
         gameEl.style.margin = '0';
         // If a physical gamepad is already connected, hide virtual controls immediately
         var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
@@ -968,7 +968,9 @@
     if (window.VirtualGamepad) {
       VirtualGamepad.destroy();
     }
-    _touchInputState = {};
+    for (var ck in KNState.touchInput) {
+      if (KNState.touchInput.hasOwnProperty(ck)) delete KNState.touchInput[ck];
+    }
 
     _config = null;
   }

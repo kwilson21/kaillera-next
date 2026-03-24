@@ -1639,7 +1639,7 @@
       hookVirtualGamepad();
 
       // On mobile: hide EJS's built-in virtual gamepad and use our custom one.
-      // Our VirtualGamepad writes directly to _touchInputState which
+      // Our VirtualGamepad writes directly to KNState.touchInput which
       // readLocalInput() already reads — no hookVirtualGamepad needed for it.
       if (_config && _config.isMobile && window.VirtualGamepad) {
         var ejs2 = window.EJS_emulator;
@@ -1647,8 +1647,13 @@
           ejs2.virtualGamepad.style.display = 'none';
           ejs2.touch = false;  // prevent EJS from re-showing it
         }
+        // Also hide EJS menu bar — if left visible, readLocalInput()'s
+        // ejsMenuOpen check clears touch state every frame.
+        if (ejs2 && ejs2.elements && ejs2.elements.menu) {
+          ejs2.elements.menu.classList.add('ejs_menu_bar_hidden');
+        }
         var gameEl2 = document.getElementById('game');
-        if (gameEl2) VirtualGamepad.init(gameEl2, _touchInputState);
+        if (gameEl2) VirtualGamepad.init(gameEl2);
         // If a physical gamepad is already connected, hide virtual controls immediately
         // (GamepadManager.onUpdate won't fire if nothing changed since last game)
         var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
@@ -2714,7 +2719,8 @@
   // EJS calls simulateInput(player, button, value) directly into WASM.
   // We intercept it to track which buttons are held, so readLocalInput()
   // can include touch inputs in the netplay bitmask.
-  let _touchInputState = {};  // { buttonIndex: value }
+  // Touch state lives in KNState.touchInput — shared with VirtualGamepad
+  // via the global namespace (no fragile object-reference passing).
 
   function hookVirtualGamepad() {
     var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
@@ -2734,7 +2740,7 @@
           if (ejs.elements && ejs.elements.menu &&
               !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')) return;
         }
-        _touchInputState[index] = value;
+        KNState.touchInput[index] = value;
       }
       // Don't call original — our writeInputToMemory handles input delivery.
       // Letting EJS also write would double-apply and bypass lockstep.
@@ -2776,7 +2782,13 @@
       (ejs.elements && ejs.elements.menu &&
        !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden'))
     );
-    if (ejsMenuOpen) _touchInputState = {};
+    if (ejsMenuOpen) {
+      // Clear in-place — VirtualGamepad reads KNState.touchInput via the
+      // same global, so this correctly zeroes both sides.
+      for (var ck in KNState.touchInput) {
+        if (KNState.touchInput.hasOwnProperty(ck)) KNState.touchInput[ck] = 0;
+      }
+    }
 
     // Left stick (indices 16-19): apply absolute + relative deadzone.
     // Absolute deadzone (~15% of max 32767) filters out the small spurious
@@ -2786,10 +2798,10 @@
     // Relative deadzone (40% of major axis) suppresses near-cardinal
     // diagonals, giving ~±22° cardinal zones around each direction.
     var TOUCH_ABS_DEADZONE = 3500;
-    var stR = _touchInputState[16] || 0;
-    var stL = _touchInputState[17] || 0;
-    var stD = _touchInputState[18] || 0;
-    var stU = _touchInputState[19] || 0;
+    var stR = KNState.touchInput[16] || 0;
+    var stL = KNState.touchInput[17] || 0;
+    var stD = KNState.touchInput[18] || 0;
+    var stU = KNState.touchInput[19] || 0;
     var stMajor = Math.max(stR, stL, stD, stU);
     if (stMajor > TOUCH_ABS_DEADZONE) {
       var stThresh = stMajor * 0.4;
@@ -2800,10 +2812,10 @@
     }
 
     // Digital buttons + C-buttons (non-stick indices)
-    for (var ti in _touchInputState) {
+    for (var ti in KNState.touchInput) {
       var idx = parseInt(ti, 10);
       if (idx >= 16 && idx <= 19) continue;  // left stick handled above
-      var val = _touchInputState[idx];
+      var val = KNState.touchInput[idx];
       if (!val) continue;
       if (idx < 16) {
         mask |= (1 << idx);
@@ -3486,6 +3498,9 @@
     // Clean up custom virtual gamepad
     if (window.VirtualGamepad) {
       VirtualGamepad.destroy();
+    }
+    for (var ck in KNState.touchInput) {
+      if (KNState.touchInput.hasOwnProperty(ck)) delete KNState.touchInput[ck];
     }
 
     // Dismiss gesture prompt if still showing

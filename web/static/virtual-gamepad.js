@@ -1,6 +1,6 @@
 // web/static/virtual-gamepad.js
 // Standalone N64 virtual gamepad for mobile streaming (and lockstep) guests.
-// Writes touch state into a provided stateObj using EJS simulateInput indices.
+// Writes touch state into KNState.touchInput using EJS simulateInput indices.
 //
 // Layout strategy: the gamepad is an IN-FLOW flex child of <body> using CSS
 // order to sit between the game area and toolbar. No position:fixed — all
@@ -9,7 +9,10 @@
   'use strict';
 
   var _overlay = null;
-  var _stateObj = null;
+  // Use KNState.touchInput as the canonical touch state object.
+  // Both VirtualGamepad and netplay engines read/write this directly —
+  // no fragile shared-reference passing.
+  function _state() { return window.KNState && window.KNState.touchInput; }
   var _stickTouch = null;
   var _stickCenter = null;
   var _buttonTouches = {};
@@ -231,7 +234,7 @@
         var idx = parseInt(btnEl.dataset.idx, 10);
         _buttonTouches[t.identifier] = idx;
         btnEl.classList.add('active');
-        if (_stateObj) _stateObj[idx] = 1;
+        var s = _state(); if (s) s[idx] = 1;
       }
     }
   }
@@ -253,14 +256,14 @@
       if (t.identifier === _stickTouch) {
         _stickTouch = null;
         _stickCenter = null;
-        if (_stateObj) { _stateObj[16] = 0; _stateObj[17] = 0; _stateObj[18] = 0; _stateObj[19] = 0; }
+        var s2 = _state(); if (s2) { s2[16] = 0; s2[17] = 0; s2[18] = 0; s2[19] = 0; }
         if (_stickEl) _stickEl.style.transform = 'translate(-50%, -50%)';
         continue;
       }
       var idx = _buttonTouches[t.identifier];
       if (idx !== undefined) {
         delete _buttonTouches[t.identifier];
-        if (_stateObj) _stateObj[idx] = 0;
+        var s3 = _state(); if (s3) s3[idx] = 0;
         var btns = _overlay.querySelectorAll('.vgp-btn[data-idx="' + idx + '"]');
         for (var b = 0; b < btns.length; b++) btns[b].classList.remove('active');
       }
@@ -268,7 +271,8 @@
   }
 
   function updateStick(clientX, clientY) {
-    if (!_stickCenter || !_stateObj) return;
+    var st = _state();
+    if (!_stickCenter || !st) return;
     var dx = clientX - _stickCenter.x;
     var dy = clientY - _stickCenter.y;
     var dist = Math.sqrt(dx * dx + dy * dy);
@@ -280,22 +284,22 @@
     if (_stickEl) {
       _stickEl.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
     }
-    _stateObj[16] = dx > 0 ? Math.round((dx / STICK_RADIUS) * MAX_AXIS) : 0;
-    _stateObj[17] = dx < 0 ? Math.round((-dx / STICK_RADIUS) * MAX_AXIS) : 0;
-    _stateObj[18] = dy > 0 ? Math.round((dy / STICK_RADIUS) * MAX_AXIS) : 0;
-    _stateObj[19] = dy < 0 ? Math.round((-dy / STICK_RADIUS) * MAX_AXIS) : 0;
+    st[16] = dx > 0 ? Math.round((dx / STICK_RADIUS) * MAX_AXIS) : 0;
+    st[17] = dx < 0 ? Math.round((-dx / STICK_RADIUS) * MAX_AXIS) : 0;
+    st[18] = dy > 0 ? Math.round((dy / STICK_RADIUS) * MAX_AXIS) : 0;
+    st[19] = dy < 0 ? Math.round((-dy / STICK_RADIUS) * MAX_AXIS) : 0;
   }
 
   function clearState() {
-    if (!_stateObj) return;
-    for (var k in _stateObj) {
-      if (_stateObj.hasOwnProperty(k)) _stateObj[k] = 0;
+    var st = _state();
+    if (!st) return;
+    for (var k in st) {
+      if (st.hasOwnProperty(k)) st[k] = 0;
     }
   }
 
   window.VirtualGamepad = {
-    init: function (container, stateObj) {
-      _stateObj = stateObj;
+    init: function (container) {
       createOverlay();
       // Shrink game to share space — gamepad is an in-flow sibling
       var gameEl = document.getElementById('game');
@@ -313,7 +317,6 @@
         _overlay = null;
       }
       clearState();
-      _stateObj = null;
       _stickTouch = null;
       _stickCenter = null;
       _buttonTouches = {};
