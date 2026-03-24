@@ -57,24 +57,24 @@
       '#virtual-gamepad * { pointer-events: auto; }',
 
       // ── Portrait: controls below video ──
-      // Two-row grid: top row = stick + buttons, bottom row = dpad + start
+      // 3-row grid: shoulders on top, left+right content, start at bottom
       '#virtual-gamepad {',
       '  display: grid;',
       '  grid-template-columns: 1fr 1fr;',
-      '  grid-template-rows: auto auto;',
-      '  grid-template-areas: "left-top right-top" "left-bot right-bot";',
+      '  grid-template-rows: auto 1fr auto;',
+      '  grid-template-areas: "shoulders shoulders" "left right" "center center";',
       '  padding: 4px 8px;',
       '  gap: 0;',
       '}',
 
-      // Left column: stick zone + dpad
-      '.vgp-left { grid-area: left-top / left-top / left-bot / left-bot; position: relative; min-height: 210px; }',
-      // Right column: buttons
-      '.vgp-right { grid-area: right-top / right-top / right-bot / right-bot; position: relative; min-height: 210px; }',
-      // Shoulders bar across top
-      '.vgp-shoulders { grid-column: 1 / -1; display: flex; justify-content: space-between; padding: 2px 4px; }',
-      // Start bar across bottom
-      '.vgp-center { grid-column: 1 / -1; display: flex; justify-content: center; padding: 4px 0; }',
+      // Shoulders bar — FIRST row, above everything
+      '.vgp-shoulders { grid-area: shoulders; display: flex; justify-content: space-between; padding: 2px 4px; }',
+      // Left column: dpad on top, stick below
+      '.vgp-left { grid-area: left; position: relative; min-height: 210px; }',
+      // Right column: c-buttons on top, A/B below
+      '.vgp-right { grid-area: right; position: relative; min-height: 210px; }',
+      // Start bar — LAST row
+      '.vgp-center { grid-area: center; display: flex; justify-content: center; padding: 4px 0; }',
 
       // ── Shared button styles ──
       '.vgp-btn {',
@@ -131,25 +131,26 @@
       '    display: block; padding: 0; min-height: 0;',
       '    z-index: 55;',
       '  }',
-      '  .vgp-left, .vgp-right { position: fixed; top: 30px; bottom: 78px; }',
+      '  .vgp-left, .vgp-right { position: fixed; top: 0; bottom: 78px; }',
       '  .vgp-left { left: 0; width: 160px; }',
-      '  .vgp-right { right: 0; width: 240px; }',
-      '  .vgp-shoulders { position: fixed; top: 4px; left: 0; right: 0; padding: 0 8px; z-index: 56; }',
-      // Start on right side in landscape
-      '  .vgp-center { position: fixed; bottom: 80px; right: 100px; left: auto; transform: none; z-index: 56; }',
-      // Dpad at top of left panel
-      '  .vgp-dpad { top: 4px; left: 8px; bottom: auto; }',
+      '  .vgp-right { right: 0; width: 200px; }',
+      // L/R/Z shifted down from top edge (user feedback: not at very top)
+      '  .vgp-shoulders { position: fixed; top: 20px; left: 0; right: 0; padding: 0 8px; z-index: 56; }',
+      // Start on right side, above A/B with gap
+      '  .vgp-center { position: fixed; bottom: 80px; right: 80px; left: auto; transform: none; z-index: 56; }',
+      // Dpad at top of left panel (below shoulders)
+      '  .vgp-dpad { top: 30px; left: 8px; bottom: auto; }',
       // Stick below dpad in left panel
       '  .vgp-stick-zone { left: 8px; bottom: 4px; top: auto; transform: none; width: 100px; height: 100px; }',
       '  .vgp-stick-knob { width: 42px; height: 42px; }',
-      // C-buttons at top of right panel
-      '  .vgp-cu { left: 50px; top: 4px; }',
-      '  .vgp-cd { left: 50px; top: 70px; }',
-      '  .vgp-cl { left: 20px; top: 37px; }',
-      '  .vgp-cr { left: 80px; top: 37px; }',
-      // A/B below C-buttons in right panel
-      '  .vgp-a { right: 12px; bottom: 8px; top: auto; }',
-      '  .vgp-b { right: 72px; bottom: 16px; top: auto; }',
+      // C-buttons — right side, below shoulders (top:50px clears R/Z at top:20px+30px)
+      '  .vgp-cu { right: 60px; left: auto; top: 55px; }',
+      '  .vgp-cd { right: 60px; left: auto; top: 120px; }',
+      '  .vgp-cl { right: 94px; left: auto; top: 88px; }',
+      '  .vgp-cr { right: 26px; left: auto; top: 88px; }',
+      // A/B bottom-right, with gap above Start
+      '  .vgp-a { right: 12px; bottom: 40px; top: auto; }',
+      '  .vgp-b { right: 72px; bottom: 48px; top: auto; }',
       '}',
 
       '</style>',
