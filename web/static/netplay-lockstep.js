@@ -2317,14 +2317,18 @@
 
     window._lockstepActive = true;
 
-    // C-level sync: detect patched core with kn_sync exports
+    // C-level sync: detect patched core with kn_sync exports.
+    // Only allocate the WASM buffer when sync is enabled — the 8MB malloc
+    // can trigger WASM memory growth which detaches HEAPU8.buffer.
     var knMod = window.EJS_emulator && window.EJS_emulator.gameManager &&
                 window.EJS_emulator.gameManager.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
-    if (_hasKnSync) {
+    if (_hasKnSync && _syncEnabled) {
       _syncBufSize = 8 * 1024 * 1024 + 16384;
       _syncBufPtr = knMod._malloc(_syncBufSize);
       console.log('[lockstep] C-level sync available, buf at', _syncBufPtr);
+    } else if (_hasKnSync) {
+      console.log('[lockstep] C-level sync available (buffer deferred — sync disabled)');
     } else {
       console.log('[lockstep] C-level sync NOT available, using getState/loadState fallback');
     }
