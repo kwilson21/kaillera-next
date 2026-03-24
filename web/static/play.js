@@ -347,6 +347,10 @@
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
   function onGameStarted(data) {
+    console.log('[play] onGameStarted:', JSON.stringify(data),
+      'engine=' + !!engine, 'EJS=' + !!window.EJS_emulator,
+      'romBlob=' + !!_romBlob, 'romBlobUrl=' + !!_romBlobUrl,
+      'gameRunning=' + gameRunning);
     mode = data.mode || mode;
     _gameRollbackEnabled = !!data.rollbackEnabled;
 
@@ -398,6 +402,8 @@
   }
 
   function onGameEnded() {
+    console.log('[play] onGameEnded: engine=' + !!engine, 'EJS=' + !!window.EJS_emulator,
+      'romBlob=' + !!_romBlob, 'romBlobUrl=' + !!_romBlobUrl);
     gameRunning = false;
     if (engine) {
       // Auto-dump debug logs before stopping
@@ -1119,6 +1125,7 @@
   }
 
   function destroyEmulator() {
+    console.log('[play] destroyEmulator: EJS=' + !!window.EJS_emulator);
     const emu = window.EJS_emulator;
     if (emu) {
       // Close ALL emulator AudioContexts to stop lingering audio.
