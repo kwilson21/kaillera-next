@@ -44,7 +44,6 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
         cd "${SRC_DIR}/RetroArch"
-        git checkout -- . 2>/dev/null || true
         git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
             echo "    RetroArch patch already applied or failed"
@@ -53,7 +52,6 @@ if [ -d "${PATCHES_DIR}" ]; then
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ] || \
        [ -f "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" ]; then
         cd "${SRC_DIR}/mupen64plus-libretro-nx"
-        git checkout -- . 2>/dev/null || true
     fi
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
