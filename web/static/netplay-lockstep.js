@@ -567,8 +567,8 @@
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
   window._isSpectator = _isSpectator;
-  window._peers       = _peers;
-  window._frameNum    = 0;
+  KNState.peers       = _peers;
+  KNState.frameNum    = 0;
 
   async function initAudioPlayback() {
     var mod = window.EJS_emulator && window.EJS_emulator.gameManager &&
@@ -928,7 +928,7 @@
     }
 
     _peers[remoteSid] = peer;
-    window._peers = _peers;
+    KNState.peers = _peers;
 
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('lockstep', {
@@ -1319,7 +1319,7 @@
 
     delete _peers[remoteSid];
     delete _lockstepReadyPeers[remoteSid];
-    window._peers = _peers;
+    KNState.peers = _peers;
     console.log('[lockstep] peer hard-disconnected:', remoteSid, 'slot:', peer.slot);
 
     var known = _knownPlayers[remoteSid];
@@ -2378,7 +2378,7 @@
         if (_lastRemoteFrame > _frameNum) {
           console.log('[lockstep] fast-forward:', _frameNum, '->', _lastRemoteFrame);
           _frameNum = _lastRemoteFrame;
-          window._frameNum = _frameNum;
+          KNState.frameNum = _frameNum;
           _localInputs = {};
           _remoteInputs = {};
           for (var d = 0; d < DELAY_FRAMES; d++) {
@@ -2629,7 +2629,7 @@
     feedAudio();
 
     _frameNum++;
-    window._frameNum = _frameNum;
+    KNState.frameNum = _frameNum;
 
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
     // Compare when we reach or pass the target frame (within a small window).
@@ -2754,7 +2754,7 @@
     var mask = 0;
 
     // Suppress all input while remap wizard is active (prevents desyncs)
-    if (window._remapWizardActive) return 0;
+    if (KNState.remapActive) return 0;
 
     // Gamepad via GamepadManager (profile-based mapping)
     if (document.hasFocus() && window.GamepadManager) {
@@ -3393,7 +3393,7 @@
       try { _config.onReconnecting(null, false); } catch (_) {}
     }
     _peers = {};
-    window._peers = _peers;
+    KNState.peers = _peers;
 
     // Restore rAF — emulator DOM is destroyed by play.js, so just clean up
     if (_manualMode && _origRAF) {
@@ -3408,7 +3408,7 @@
     _peerInputStarted = {};
     _localInputs = {};
     _frameNum = 0;
-    window._frameNum = 0;
+    KNState.frameNum = 0;
     _running = false;
     _lateJoin = false;
     _gameStarted = false;

@@ -93,7 +93,7 @@
   // Expose for Playwright
   window._playerSlot  = _playerSlot;
   window._isSpectator = _isSpectator;
-  window._peers       = _peers;
+  KNState.peers       = _peers;
 
   function setStatus(msg) {
     if (_config && _config.onStatus) _config.onStatus(msg);
@@ -261,7 +261,7 @@
     }
 
     _peers[remoteSid] = peer;
-    window._peers = _peers;
+    KNState.peers = _peers;
 
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('inputs', {
@@ -381,7 +381,7 @@
       applyInputForSlot(peer.slot, 0);
     }
     delete _peers[remoteSid];
-    window._peers = _peers;
+    KNState.peers = _peers;
     console.log('[netplay] peer disconnected:', remoteSid);
   }
 
@@ -809,7 +809,7 @@
     let mask = 0;
 
     // Suppress all input while remap wizard is active (prevents desyncs)
-    if (window._remapWizardActive) return 0;
+    if (KNState.remapActive) return 0;
 
     if (window.GamepadManager) {
       mask |= GamepadManager.readGamepad(_playerSlot);
@@ -927,7 +927,7 @@
       if (p.pc) try { p.pc.close(); } catch (_) {}
     });
     _peers = {};
-    window._peers = _peers;
+    KNState.peers = _peers;
 
     // Clean up audio capture
     if (_audioStreamDest) {

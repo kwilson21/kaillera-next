@@ -82,8 +82,8 @@
 
   window.addEventListener('pagehide', function () {
     // Notify peers this is intentional so they skip the 15s reconnect wait
-    if (engine && window._peers) {
-      Object.values(window._peers).forEach(function (p) {
+    if (engine && KNState.peers) {
+      Object.values(KNState.peers).forEach(function (p) {
         if (p.dc && p.dc.readyState === 'open') {
           try { p.dc.send('leaving'); } catch (_) {}
         }
@@ -690,7 +690,7 @@
     if (engine && engine.getPeerConnection) {
       const hostSid = findHostSid();
       if (hostSid) {
-        const peers = window._peers || {};
+        const peers = KNState.peers || {};
         const hostPeer = peers[hostSid];
         if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
           hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
@@ -707,7 +707,7 @@
     _romAcceptPollInterval = setInterval(() => {
       const hostSid = findHostSid();
       if (!hostSid) return;
-      const peers = window._peers || {};
+      const peers = KNState.peers || {};
       const hostPeer = peers[hostSid];
       if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
         clearInterval(_romAcceptPollInterval);
@@ -1763,7 +1763,7 @@
         }
 
         // Only show overlay if ALL our DCs are down (we're the disconnected one).
-        const peers = window._peers || {};
+        const peers = KNState.peers || {};
         const hasOpenDC = Object.values(peers).some((p) => {
           return p.dc && p.dc.readyState === 'open';
         });
@@ -1828,8 +1828,8 @@
 
   function leaveGame() {
     // Notify peers this is intentional (prevents reconnect attempt)
-    if (engine && window._peers) {
-      Object.values(window._peers).forEach((p) => {
+    if (engine && KNState.peers) {
+      Object.values(KNState.peers).forEach((p) => {
         if (p.dc && p.dc.readyState === 'open') {
           try { p.dc.send('leaving'); } catch (_) {}
         }
@@ -2471,7 +2471,7 @@
     _wizardSnapshots = [];
     _wizardStep = 0;
     _wizardActive = true;
-    window._remapWizardActive = true;  // exposed for netplay input suppression
+    KNState.remapActive = true;  // exposed for netplay input suppression
     _wizardInGame = !!inGame;
     _wizardDebounce = 0;
 
@@ -2528,7 +2528,7 @@
   function cancelWizard() {
     const wasInGame = _wizardInGame;
     _wizardActive = false;
-    window._remapWizardActive = false;
+    KNState.remapActive = false;
     _wizardInGame = false;
     if (_wizardRafId) { clearTimeout(_wizardRafId); _wizardRafId = null; }
     if (_wizardKeyHandler) {
@@ -2764,13 +2764,13 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  window._delayAutoValue = 2;
+  KNState.delayAutoValue = 2;
 
   function getDelayPreference() {
     const autoEl = document.getElementById('delay-auto');
     const selectEl = document.getElementById('delay-select');
     if (autoEl && autoEl.checked) {
-      return window._delayAutoValue;
+      return KNState.delayAutoValue;
     }
     if (selectEl) {
       const v = parseInt(selectEl.value, 10);
@@ -2782,7 +2782,7 @@
   window.getDelayPreference = getDelayPreference;
 
   function setAutoDelay(value) {
-    window._delayAutoValue = value;
+    KNState.delayAutoValue = value;
     const selectEl = document.getElementById('delay-select');
     const autoEl = document.getElementById('delay-auto');
     if (selectEl && autoEl && autoEl.checked) {
