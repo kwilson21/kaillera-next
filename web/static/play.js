@@ -1484,6 +1484,7 @@
       playerName: playerName,
       gameElement: document.getElementById('game'),
       rollbackEnabled: rollbackEnabled,
+      romHash: _romHash || null,
       onStatus: (msg) => {
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
         const toolbarEl = document.getElementById('toolbar-status');

@@ -9,12 +9,22 @@ V1 endpoints:
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from src.api.signaling import rooms
 from src.ratelimit import check_ip
+
+log = logging.getLogger(__name__)
+
+# In-memory save state cache: rom_hash -> raw state bytes.
+# Eliminates host/guest asymmetry — all players load the same cached state.
+# Persists across games but not server restarts.
+_state_cache: dict[str, bytes] = {}
+_STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 
 
 # ── Security headers middleware ───────────────────────────────────────────────
@@ -113,5 +123,23 @@ def create_app(lifespan=None) -> FastAPI:
                 "has_password": room.password is not None,
             })
         return result
+
+    @app.get("/api/cached-state/{rom_hash}")
+    async def get_cached_state(rom_hash: str) -> Response:
+        if rom_hash not in _state_cache:
+            raise HTTPException(status_code=404, detail="No cached state")
+        return Response(
+            content=_state_cache[rom_hash],
+            media_type="application/octet-stream",
+        )
+
+    @app.post("/api/cache-state/{rom_hash}")
+    async def cache_state(rom_hash: str, request: Request) -> dict:
+        body = await request.body()
+        if len(body) > _STATE_MAX_SIZE:
+            raise HTTPException(status_code=413, detail="State too large")
+        _state_cache[rom_hash] = body
+        log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
+        return {"status": "cached", "size": len(body)}
 
     return app

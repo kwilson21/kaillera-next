@@ -310,6 +310,7 @@
   let _manualMode        = false;   // true once enterManualMode() called
   let _stallStart        = 0;       // timestamp when current stall began
   let _resendSent        = false;   // true once resend request sent for current stall
+  let _syncStarted       = false;   // true once initial state sync begins (prevents re-entry)
   let _tickInterval      = null;    // setInterval handle for tick loop
 
   // Saved originals of WASM speed-control functions — neutralized during lockstep
@@ -1556,14 +1557,22 @@
       return;
     }
 
+    if (_syncStarted) return;  // guard against re-entrant calls
+    _syncStarted = true;
+
     console.log('[lockstep] ' + (readyPeers.length + 1) + ' emulators ready -- syncing initial state');
     setStatus('Syncing...');
 
-    if (_playerSlot === 0) {
-      // Host: capture and send save state
+    // Try cached state first — eliminates host/guest asymmetry.
+    // All players (including host) fetch the same cached state.
+    var romHash = _config && _config.romHash;
+    if (romHash) {
+      fetchCachedState(romHash);
+    } else if (_playerSlot === 0) {
+      // No ROM hash — fall back to host capture
       sendInitialState();
     }
-    // Guests: wait for save state via handleSaveStateMsg
+    // Guests without ROM hash: wait for save state via handleSaveStateMsg
 
     // Timeout: if sync hasn't completed in 30s, show helpful status
     setTimeout(function () {
@@ -1606,6 +1615,16 @@
       _guestStateBytes = gm.getState();
     }
 
+    // Soft-reset the core before loading state — clears internal state
+    // (JIT caches, hardware registers, plugin state) that loadState()
+    // alone doesn't overwrite. Without this, the host retains residual
+    // state from its boot frames, causing host-only desync.
+    var mod = gm.Module;
+    if (mod && mod._retro_reset) {
+      mod._retro_reset();
+      console.log('[lockstep] core soft-reset before state load');
+    }
+
     // First loadState: fully restores CPU + RAM (needs main loop active)
     gm.loadState(_guestStateBytes);
 
@@ -1629,13 +1648,38 @@
     }
   }
 
+  function fetchCachedState(romHash) {
+    var url = '/api/cached-state/' + encodeURIComponent(romHash);
+    console.log('[lockstep] checking for cached state: ' + romHash.substring(0, 16) + '...');
+    fetch(url).then(function (resp) {
+      if (!resp.ok) throw new Error('no cached state');
+      return resp.arrayBuffer();
+    }).then(function (raw) {
+      var bytes = new Uint8Array(raw);
+      if (bytes.length < 1000) throw new Error('cached state too small: ' + bytes.length);
+      console.log('[lockstep] cached state loaded (' + bytes.length + ' bytes)');
+      _guestStateBytes = bytes;
+
+      _selfLockstepReady = true;
+      if (_rttComplete) broadcastLockstepReady();
+      checkAllLockstepReady();
+    }).catch(function () {
+      // No cached state — fall back to host capture / guest wait
+      console.log('[lockstep] no cached state — using live capture');
+      if (_playerSlot === 0) {
+        sendInitialState();
+      }
+      // Guests: wait for save state via handleSaveStateMsg
+    });
+  }
+
   async function sendInitialState() {
     var gm = window.EJS_emulator.gameManager;
     try {
       var raw = gm.getState();
       var bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      // Store for host to also load (resets GL context for proper rendering)
-      _guestStateBytes = bytes;
+      // Copy before compressAndEncode — worker transfer detaches the buffer
+      var cacheBytes = new Uint8Array(bytes);
       var encoded = await compressAndEncode(bytes);
       console.log('[lockstep] sending initial state via Socket.IO (' +
         Math.round(encoded.rawSize / 1024) + 'KB raw -> ' +
@@ -1645,7 +1689,22 @@
       // data channels (SCTP limit with maxRetransmits).
       socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
 
-      // Host is ready
+      // Upload raw bytes to cache, then fetch from cache — host goes
+      // through the same path as all other players. Using locally-captured
+      // bytes directly causes host-only desync (residual internal state).
+      var romHash = _config && _config.romHash;
+      if (romHash) {
+        await fetch('/api/cache-state/' + encodeURIComponent(romHash), {
+          method: 'POST',
+          body: cacheBytes,
+        });
+        console.log('[lockstep] state cached — host fetching from cache');
+        fetchCachedState(romHash);
+        return;  // fetchCachedState handles _selfLockstepReady
+      }
+
+      // Fallback: no ROM hash, use direct bytes
+      _guestStateBytes = bytes;
       _selfLockstepReady = true;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -2555,16 +2614,20 @@
     );
     if (ejsMenuOpen) _touchInputState = {};
 
-    // Left stick (indices 16-19): apply relative deadzone so near-cardinal
-    // pushes on the touchscreen joystick don't register as diagonal.  The
-    // minor axis must exceed 40% of the major axis to set a second direction
-    // bit, giving ~±22° cardinal zones around each cardinal direction.
+    // Left stick (indices 16-19): apply absolute + relative deadzone.
+    // Absolute deadzone (~15% of max 32767) filters out the small spurious
+    // displacement that EJS's virtual joystick sends on initial finger
+    // placement — the touch point is typically slightly above the joystick
+    // center, causing a brief "up" input that triggers unwanted jumps.
+    // Relative deadzone (40% of major axis) suppresses near-cardinal
+    // diagonals, giving ~±22° cardinal zones around each direction.
+    var TOUCH_ABS_DEADZONE = 5000;
     var stR = _touchInputState[16] || 0;
     var stL = _touchInputState[17] || 0;
     var stD = _touchInputState[18] || 0;
     var stU = _touchInputState[19] || 0;
     var stMajor = Math.max(stR, stL, stD, stU);
-    if (stMajor > 0) {
+    if (stMajor > TOUCH_ABS_DEADZONE) {
       var stThresh = stMajor * 0.4;
       if (stR > stThresh) mask |= (1 << 16);
       if (stL > stThresh) mask |= (1 << 17);
@@ -3179,6 +3242,7 @@
     _gameStarted = false;
     _selfEmuReady = false;
     _selfLockstepReady = false;
+    _syncStarted = false;
     _lockstepReadyPeers = {};
     _guestStateBytes = null;
     _knownPlayers = {};
