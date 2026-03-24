@@ -35,58 +35,15 @@
 
   function applyStandardCheats(cheats) {
     waitForEmulator().then(function (gm) {
-      var retries = 0;
-      var maxRetries = 5;
-
-      function apply() {
-        try {
-          cheats.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
-        } catch (e) {
-          console.error('[netplay] cheat application threw:', e.message);
-          return;
-        }
-
-        // Verify by reading back a canary address from RDRAM.
-        // Stock Mode cheat: 800A4D0B 0002 → byte at offset 0x0A4D0B should be 0x02.
-        setTimeout(function () {
-          if (verifyCheats(gm)) {
-            console.log('[netplay] applied and verified', cheats.length, 'standard cheats');
-          } else if (++retries < maxRetries) {
-            console.log('[netplay] cheat verification failed, retry', retries);
-            apply();
-          } else {
-            console.warn('[netplay] cheats applied but verification failed after', maxRetries, 'retries');
-          }
-        }, 200);
+      try {
+        cheats.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
+        console.log('[netplay] applied', cheats.length, 'standard cheats');
+      } catch (e) {
+        console.error('[netplay] cheat application failed:', e.message);
       }
-      apply();
     }).catch(function (err) {
       console.error('[netplay] cannot apply cheats:', err.message);
     });
-  }
-
-  function verifyCheats(gm) {
-    try {
-      var mod = gm.Module;
-      if (!mod || !mod.cwrap) return true;  // can't verify, assume OK
-      var getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
-      var result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
-      if (!result) return true;  // can't verify
-      var parts = result.split('|');
-      var rdramPtr = parseInt(parts[1], 10);
-      if (!rdramPtr || rdramPtr <= 0) return true;  // can't verify
-
-      var buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
-      if (!buf || buf.byteLength === 0) return true;  // can't verify
-      var mem = new Uint8Array(buf);
-
-      // Check "Stock Mode" cheat: address 0x0A4D0B should be 0x02
-      var canaryOffset = rdramPtr + 0x0A4D0B;
-      if (canaryOffset < mem.length) {
-        return mem[canaryOffset] === 0x02;
-      }
-    } catch (_) {}
-    return true;  // verification error → assume OK, don't retry forever
   }
 
   let _listenersAdded = false;

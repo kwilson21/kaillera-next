@@ -1362,8 +1362,8 @@
         }
       } catch (_) {}
     }
-    // Restore native fetch/XHR (core-redirector intercepts are no longer needed)
-    if (window._knCoreRestore) window._knCoreRestore();
+    // Note: fetch/XHR intercepts from core-redirector stay active for the
+    // page lifetime — game restart needs them to redirect the core download.
 
     // Wipe EmulatorJS from the DOM entirely — clean slate for next game
     const gameEl = document.getElementById('game');

@@ -431,7 +431,11 @@
 
       console.log('[netplay] capture stream started (640x480 2D blit)');
 
-      // Add tracks to all existing peer connections and optimize encoding
+      // Try to capture audio immediately (before adding tracks to peers).
+      // If AL contexts are ready, audio track joins video in the first offer.
+      captureEmulatorAudio();
+
+      // Add all current stream tracks to existing peer connections
       Object.entries(_peers).forEach(([sid, peer]) => {
         _hostStream.getTracks().forEach(track => {
           peer.pc.addTrack(track, _hostStream);
@@ -443,15 +447,17 @@
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
 
-      // Capture emulator audio (polls until AL contexts are populated)
-      var audioAttempts = 0;
-      var waitForAudio = function () {
-        if (!_gameRunning) return;
-        if (captureEmulatorAudio()) return;
-        if (++audioAttempts < 150) setTimeout(waitForAudio, 200);
-        else console.log('[netplay] audio capture timed out — streaming video only');
-      };
-      waitForAudio();
+      // If audio wasn't ready, poll and add to _hostStream for future peers
+      if (!_audioStreamDest) {
+        var audioAttempts = 0;
+        var waitForAudio = function () {
+          if (!_gameRunning) return;
+          if (captureEmulatorAudio()) return;
+          if (++audioAttempts < 150) setTimeout(waitForAudio, 200);
+          else console.log('[netplay] audio capture timed out — streaming video only');
+        };
+        waitForAudio();
+      }
     };
     waitForEmu();
   }
@@ -798,10 +804,6 @@
       if (audioTrack && _hostStream) {
         _hostStream.addTrack(audioTrack);
         console.log('[netplay] added audio track to host stream');
-        Object.entries(_peers).forEach(function ([sid, peer]) {
-          peer.pc.addTrack(audioTrack, _hostStream);
-          renegotiate(sid);
-        });
         return true;
       }
     } catch (e) {
