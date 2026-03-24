@@ -624,3 +624,41 @@ button:hover { background: #4a6fa5; }
   font-size: 14px;
   color: #aaa;
 }
+
+/* Gesture prompt overlay — above everything including EmulatorJS */
+#gesture-prompt {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#gesture-prompt.hidden { display: none; }
+
+.gesture-prompt-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  user-select: none;
+}
+
+.gesture-prompt-icon {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 30px 0 30px 52px;
+  border-color: transparent transparent transparent #6af;
+  filter: drop-shadow(0 0 16px rgba(102, 170, 255, 0.4));
+}
+
+.gesture-prompt-text {
+  font-size: 18px;
+  color: #ccc;
+  letter-spacing: 0.5px;
+}

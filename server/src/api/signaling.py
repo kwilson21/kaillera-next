@@ -516,6 +516,33 @@ async def webrtc_signal(sid: str, data: dict) -> None:
     await sio.emit("webrtc-signal", payload, to=target)
 
 
+@sio.on("rom-signal")
+async def rom_signal(sid: str, data: dict) -> None:
+    """Pre-game WebRTC signaling for ROM preloading (same relay as webrtc-signal)."""
+    if not isinstance(data, dict):
+        return
+    if not check(sid, "rom-signal"):
+        return
+    target: str | None = data.get("target")
+    if not target:
+        return
+    sender_entry = _sid_to_room.get(sid)
+    target_entry = _sid_to_room.get(target)
+    if not sender_entry or not target_entry:
+        return
+    if sender_entry[0] != target_entry[0]:
+        return
+    payload = {
+        "sender": sid,
+        "target": target,
+    }
+    for key in ("offer", "answer", "candidate"):
+        value = data.get(key)
+        if value is not None:
+            payload[key] = value
+    await sio.emit("rom-signal", payload, to=target)
+
+
 @sio.on("data-message")
 async def data_message(sid: str, data: dict) -> None:
     if not isinstance(data, dict):

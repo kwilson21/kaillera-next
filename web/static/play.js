@@ -47,6 +47,9 @@
   let _romTransferResumeAttempts = 0;
   let _romTransferLastChunkAt = 0;
   let _romTransferWatchdog = null;
+  let _preGamePC = null;            // guest: pre-game RTCPeerConnection for ROM preload
+  let _preGamePCs = {};             // host: pre-game RTCPeerConnections (sid → pc)
+  let _romSignalHandler = null;     // pre-game rom-signal Socket.IO listener
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
@@ -353,13 +356,18 @@
     // If we accepted ROM sharing but don't have a ROM yet, stay in overlay
     // with progress UI while connecting WebRTC and receiving the ROM
     if (_romSharingDecision === 'accepted' && !_romBlob && !_romBlobUrl) {
-      console.log('[play] game started — waiting for ROM transfer');
       _romTransferInProgress = true;
       updateRomSharingUI();
-      // Start engine in connect-only mode (WebRTC without emulator)
+      // Start engine in connect-only mode for gameplay connections
       initEngine();
-      // Once DC opens to host, send rom-accepted signal
-      waitForDCAndSendRomAccepted();
+      if (_preGamePC) {
+        // Pre-game ROM transfer already in progress — let it continue
+        console.log('[play] game started — pre-game ROM transfer in progress');
+      } else {
+        // No pre-game transfer — fall back to engine-based transfer
+        console.log('[play] game started — waiting for ROM transfer');
+        waitForDCAndSendRomAccepted();
+      }
       return;
     }
 
@@ -410,6 +418,7 @@
       clearInterval(_romAcceptPollInterval);
       _romAcceptPollInterval = null;
     }
+    cleanupPreGameConnections();
   }
 
   function onRoomClosed(data) {
@@ -446,6 +455,7 @@
         try { _romTransferDC.close(); } catch (_) {}
         _romTransferDC = null;
       }
+      cleanupPreGameConnections();
       showToast('ROM sharing disabled by host');
     }
 
@@ -458,10 +468,15 @@
   }
 
   function onDataMessageForRomSharing(data) {
-    // Socket.IO fallback for rom-accepted (broadcast to all peers; only host acts)
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
-      console.log('[play] peer', data.sender, 'accepted ROM sharing (via socket)');
-      startRomTransferTo(data.sender);
+      // Use engine's peer connection if available, otherwise pre-game connection
+      if (engine && engine.getPeerConnection && engine.getPeerConnection(data.sender)) {
+        console.log('[play] peer', data.sender, 'accepted ROM sharing (via engine)');
+        startRomTransferTo(data.sender);
+      } else {
+        console.log('[play] peer', data.sender, 'accepted ROM sharing (pre-game)');
+        startPreGameRomTransfer(data.sender);
+      }
     }
   }
 
@@ -481,6 +496,7 @@
         try { _romTransferDCs[sid].close(); } catch (_) {}
       });
       _romTransferDCs = {};
+      cleanupPreGameConnections();
     }
   }
 
@@ -537,11 +553,11 @@
     _romTransferHeader = null;
     updateRomSharingUI();
 
-    // Pre-game: no WebRTC connections exist yet. Just store the decision.
-    // The rom-accepted signal will be sent when the game starts and
-    // WebRTC connects (see onGameStarted).
+    // Pre-game: initiate early ROM transfer via standalone WebRTC connection
     if (!gameRunning) {
-      console.log('[play] ROM sharing accepted pre-game — will transfer after game starts');
+      console.log('[play] ROM sharing accepted pre-game — requesting early transfer');
+      registerRomSignalHandler();
+      socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
       return;
     }
 
@@ -609,6 +625,124 @@
     }
     updateRomSharingUI();
     showToast('ROM transfer cancelled');
+    cleanupPreGameConnections();
+  }
+
+  // ── Pre-game ROM Preloading ─────────────────────────────────────────
+
+  function registerRomSignalHandler() {
+    if (_romSignalHandler) return;
+    _romSignalHandler = async (data) => {
+      var remoteSid = data.sender;
+      if (!remoteSid) return;
+
+      if (data.offer && !isHost) {
+        // Guest: received offer from host for ROM preload
+        var ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+        if (_preGamePC) {
+          try { _preGamePC.close(); } catch (_) {}
+        }
+        _preGamePC = new RTCPeerConnection({ iceServers: ICE });
+
+        _preGamePC.onicecandidate = function (e) {
+          if (e.candidate) {
+            socket.emit('rom-signal', { target: remoteSid, candidate: e.candidate });
+          }
+        };
+
+        _preGamePC.ondatachannel = function (e) {
+          if (e.channel.label === 'rom-transfer') {
+            onExtraDataChannel(remoteSid, e.channel);
+          }
+        };
+
+        await _preGamePC.setRemoteDescription(data.offer);
+        var answer = await _preGamePC.createAnswer();
+        await _preGamePC.setLocalDescription(answer);
+        socket.emit('rom-signal', { target: remoteSid, answer: _preGamePC.localDescription });
+      }
+
+      if (data.answer && isHost) {
+        var pc = _preGamePCs[remoteSid];
+        if (pc) {
+          await pc.setRemoteDescription(data.answer);
+        }
+      }
+
+      if (data.candidate) {
+        var pc2 = isHost ? _preGamePCs[remoteSid] : _preGamePC;
+        if (pc2) {
+          try { await pc2.addIceCandidate(data.candidate); } catch (_) {}
+        }
+      }
+    };
+    socket.on('rom-signal', _romSignalHandler);
+  }
+
+  function startPreGameRomTransfer(peerSid) {
+    if (!_romBlob || !isHost) return;
+    if (_romBlob.size > ROM_MAX_SIZE) {
+      console.log('[play] ROM too large to share:', _romBlob.size);
+      return;
+    }
+
+    registerRomSignalHandler();
+
+    var ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    var pc = new RTCPeerConnection({ iceServers: ICE });
+    _preGamePCs[peerSid] = pc;
+
+    pc.onicecandidate = function (e) {
+      if (e.candidate) {
+        socket.emit('rom-signal', { target: peerSid, candidate: e.candidate });
+      }
+    };
+
+    // Create rom-transfer DataChannel (same pattern as startRomTransferTo)
+    var dc = pc.createDataChannel('rom-transfer', { ordered: true });
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+    _romTransferDCs[peerSid] = dc;
+
+    dc.onopen = function () {
+      console.log('[play] pre-game rom-transfer DC open to', peerSid);
+      sendRomOverChannel(dc, peerSid);
+    };
+    dc.onclose = function () {
+      delete _romTransferDCs[peerSid];
+      if (_preGamePCs[peerSid]) {
+        try { _preGamePCs[peerSid].close(); } catch (_) {}
+        delete _preGamePCs[peerSid];
+      }
+    };
+    dc.onerror = function () {
+      delete _romTransferDCs[peerSid];
+      if (_preGamePCs[peerSid]) {
+        try { _preGamePCs[peerSid].close(); } catch (_) {}
+        delete _preGamePCs[peerSid];
+      }
+    };
+
+    pc.createOffer().then(function (offer) {
+      return pc.setLocalDescription(offer);
+    }).then(function () {
+      socket.emit('rom-signal', { target: peerSid, offer: pc.localDescription });
+    });
+  }
+
+  function cleanupPreGameConnections() {
+    if (_romSignalHandler) {
+      socket.off('rom-signal', _romSignalHandler);
+      _romSignalHandler = null;
+    }
+    if (_preGamePC) {
+      try { _preGamePC.close(); } catch (_) {}
+      _preGamePC = null;
+    }
+    Object.keys(_preGamePCs).forEach(function (sid) {
+      try { _preGamePCs[sid].close(); } catch (_) {}
+    });
+    _preGamePCs = {};
   }
 
   // ── ROM Transfer: Host sending ──────────────────────────────────────
@@ -951,6 +1085,9 @@
     }
 
     showToast('ROM loaded from host');
+
+    // Clean up pre-game WebRTC connections (ROM delivered, no longer needed)
+    cleanupPreGameConnections();
   }
 
   function notifyRomReady() {
@@ -1010,6 +1147,15 @@
       if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = URL.createObjectURL(_romBlob);
     }
+    // Guests: disable auto-start so the emulator waits for a user gesture.
+    // Without a gesture, browsers block the AudioContext and the WASM emulator
+    // stalls at frame 6. The lockstep engine's gesture handler clicks the EJS
+    // start button within a real user gesture context.
+    if (!isHost) {
+      window.EJS_startOnLoaded = false;
+      console.log('[play] bootEmulator: guest — disabled auto-start for gesture gate');
+    }
+
     console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
 
@@ -1024,7 +1170,7 @@
           gameUrl: _romBlobUrl,
           dataPath: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
           system: window.EJS_core || 'n64',
-          startOnLoad: true,
+          startOnLoad: isHost,
         }
       );
       return;

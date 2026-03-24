@@ -241,12 +241,15 @@
     });
   }
 
-  // Maximum time (ms) to stall waiting for remote input before repeating
-  // the peer's last known input. 3s tolerates brief hiccups (iOS share
-  // sheet, tab switch) without prediction. Beyond 3s, we repeat-last
-  // instead of injecting zero — all players repeat the same value since
-  // they all received the same DataChannel messages.
+  // Two-stage stall timeout:
+  //   Stage 1 (0 – MAX_STALL_MS): stall waiting for remote input.
+  //   Stage 2 (MAX_STALL_MS – MAX_STALL_MS + RESEND_TIMEOUT_MS): send
+  //     "resend:<frame>" to the missing peer and keep stalling.
+  //   Hard timeout: fabricate 0 for all missing slots and advance.
+  //     Always 0, never _lastKnownInput — different players may have
+  //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
+  const RESEND_TIMEOUT_MS = 2000;
   let _lastKnownInput = {};  // slot -> last input mask received from that peer
 
   // -- Direct memory input layout -----------------------------------------------
@@ -306,6 +309,7 @@
   let _pendingRunner     = null;    // captured Emscripten MainLoop_runner
   let _manualMode        = false;   // true once enterManualMode() called
   let _stallStart        = 0;       // timestamp when current stall began
+  let _resendSent        = false;   // true once resend request sent for current stall
   let _tickInterval      = null;    // setInterval handle for tick loop
 
   // Saved originals of WASM speed-control functions — neutralized during lockstep
@@ -1040,6 +1044,14 @@
         if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
         if (e.data === 'leaving') {
           peer._intentionalLeave = true;
+          return;
+        }
+        if (e.data.startsWith('resend:')) {
+          var resendFrame = parseInt(e.data.split(':')[1], 10);
+          var localMask = _localInputs[resendFrame];
+          if (localMask !== undefined) {
+            try { peer.dc.send(new Int32Array([resendFrame, localMask]).buffer); } catch (_) {}
+          }
           return;
         }
         if (e.data === 'peer-resumed') {
@@ -2255,6 +2267,7 @@
         // STALL -- remote input not here yet
         if (_stallStart === 0) {
           _stallStart = now;
+          _resendSent = false;
           // Log first stall occurrence with full state
           var rBufSizes = {};
           Object.keys(_remoteInputs).forEach(function(s) {
@@ -2267,27 +2280,45 @@
             ' rBuf=' + JSON.stringify(rBufSizes) +
             ' peerStarted=' + JSON.stringify(_peerInputStarted));
         }
-        if (now - _stallStart >= MAX_STALL_MS) {
-          // Timeout -- repeat last known input for missing peers.
-          // All players have the same "last known" for a given slot
-          // (same DataChannel messages), so they all predict the same
-          // value — no desync from independent prediction.
+        var stallDuration = now - _stallStart;
+        if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+          // Hard timeout — fabricate 0 for all missing slots.
+          // Always 0 (never _lastKnownInput) so all players agree.
           var repeatInfo = [];
           for (var k = 0; k < inputPeers.length; k++) {
             var s = inputPeers[k].slot;
             if (!_remoteInputs[s]) _remoteInputs[s] = {};
             if (_remoteInputs[s][applyFrame] === undefined) {
-              var repeated = _lastKnownInput[s] || 0;
-              _remoteInputs[s][applyFrame] = repeated;
-              repeatInfo.push('s' + s + '=' + repeated);
+              _remoteInputs[s][applyFrame] = 0;
+              repeatInfo.push('s' + s + '=0');
             }
           }
-          console.log('[lockstep] INPUT-STALL timeout f=' + _frameNum +
+          console.log('[lockstep] INPUT-STALL hard-timeout f=' + _frameNum +
             ' apply=' + applyFrame +
             ' missing=[' + _missingSlots.join(',') + ']' +
-            ' stallMs=' + (now - _stallStart).toFixed(0) +
-            ' repeat=[' + repeatInfo.join(',') + ']');
+            ' stallMs=' + stallDuration.toFixed(0) +
+            ' fabricated=[' + repeatInfo.join(',') + ']');
           _stallStart = 0;
+        } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
+          // Stage 2 — request resend from missing peers (once per stall)
+          _resendSent = true;
+          for (var k2 = 0; k2 < inputPeers.length; k2++) {
+            var s2 = inputPeers[k2].slot;
+            if (_remoteInputs[s2] && _remoteInputs[s2][applyFrame] !== undefined) continue;
+            var dc2 = inputPeers[k2].dc;
+            if (dc2 && dc2.readyState === 'open') {
+              try { dc2.send('resend:' + applyFrame); } catch (_) {}
+            }
+          }
+          console.log('[lockstep] INPUT-STALL resend-request f=' + _frameNum +
+            ' apply=' + applyFrame +
+            ' missing=[' + _missingSlots.join(',') + ']');
+          _remoteMissed++;
+          if (!_stallRetryPending) {
+            _stallRetryPending = true;
+            setTimeout(function () { _stallRetryPending = false; tick(); }, 1);
+          }
+          return;
         } else {
           _remoteMissed++;
           // Retry quickly via setTimeout(1) to avoid 16ms wait
@@ -2354,8 +2385,11 @@
       }
       _remoteApplied++;
 
-      // Cleanup old local entry
-      delete _localInputs[applyFrame];
+      // Cleanup old local inputs — keep a history window for resend requests.
+      // Peers may request frames up to (MAX_STALL_MS + RESEND_TIMEOUT_MS) / 16.67
+      // frames behind, so keep ~600 frames (~10s at 60fps).
+      var cleanupBefore = applyFrame - 600;
+      if (cleanupBefore >= 0) delete _localInputs[cleanupBefore];
     }
 
     // Step one frame with audio capture
@@ -3244,6 +3278,7 @@
       };
     },
     getDebugLog: function () { return _debugLog.slice(); },
+    _getPeers: function () { return _peers; },
     dumpLogs: function () {
       if (socket && socket.connected) {
         var info = {

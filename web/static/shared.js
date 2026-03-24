@@ -97,15 +97,20 @@
     const attempt = () => {
       const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (gm && gm.Module) {
-        console.log('[netplay] emulator already running (auto-start)');
+        const frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
+        console.log('[netplay] emulator already running (auto-start) frames=' + frames);
         enableMobileTouch();
         return;
       }
       const btn = document.querySelector('.ejs_start_button');
       if (btn) {
+        console.log('[netplay] triggerEmulatorStart: clicking start button');
         if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
         btn.click();
         return;
+      }
+      if (attempts === 0) {
+        console.log('[netplay] triggerEmulatorStart: no gm/Module, no start button — polling');
       }
       if (++attempts < 150) setTimeout(attempt, 200);
     };
