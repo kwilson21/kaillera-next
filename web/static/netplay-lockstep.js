@@ -241,9 +241,13 @@
     });
   }
 
-  // Maximum time (ms) to stall waiting for remote input before treating
-  // the peer as disconnected. Like Kaillera, we WAIT -- no prediction.
-  const MAX_STALL_MS = 500;
+  // Maximum time (ms) to stall waiting for remote input before repeating
+  // the peer's last known input. 3s tolerates brief hiccups (iOS share
+  // sheet, tab switch) without prediction. Beyond 3s, we repeat-last
+  // instead of injecting zero — all players repeat the same value since
+  // they all received the same DataChannel messages.
+  const MAX_STALL_MS = 3000;
+  let _lastKnownInput = {};  // slot -> last input mask received from that peer
 
   // -- Direct memory input layout -----------------------------------------------
   //
@@ -1144,13 +1148,27 @@
       if (e.data instanceof ArrayBuffer && e.data.byteLength === 8) {
         if (peer.slot === null || peer.slot === undefined) return;  // spectators don't send input
         var arr = new Int32Array(e.data);
+        var recvFrame = arr[0];
+        var recvMask = arr[1];
         if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
-        _remoteInputs[peer.slot][arr[0]] = arr[1];
-        if (!_peerInputStarted[peer.slot]) _peerInputStarted[peer.slot] = true;
+        // Log if we receive input for a frame we already applied (too late)
+        var currentApply = _frameNum - DELAY_FRAMES;
+        if (_running && recvFrame < currentApply) {
+          console.log('[lockstep] INPUT-LATE slot=' + peer.slot +
+            ' recvF=' + recvFrame + ' applyF=' + currentApply +
+            ' behind=' + (currentApply - recvFrame));
+        }
+        _remoteInputs[peer.slot][recvFrame] = recvMask;
+        _lastKnownInput[peer.slot] = recvMask;
+        if (!_peerInputStarted[peer.slot]) {
+          _peerInputStarted[peer.slot] = true;
+          console.log('[lockstep] INPUT-FIRST slot=' + peer.slot +
+            ' f=' + recvFrame + ' myF=' + _frameNum);
+        }
         _remoteReceived++;
-        if (arr[0] > _lastRemoteFrame) _lastRemoteFrame = arr[0];
-        if (!_lastRemoteFramePerSlot[peer.slot] || arr[0] > _lastRemoteFramePerSlot[peer.slot]) {
-          _lastRemoteFramePerSlot[peer.slot] = arr[0];
+        if (recvFrame > _lastRemoteFrame) _lastRemoteFrame = recvFrame;
+        if (!_lastRemoteFramePerSlot[peer.slot] || recvFrame > _lastRemoteFramePerSlot[peer.slot]) {
+          _lastRemoteFramePerSlot[peer.slot] = recvFrame;
         }
       }
     };
@@ -1330,21 +1348,70 @@
       return;
     }
 
-    setStatus('Starting emulator...');
-    KNShared.triggerEmulatorStart();
-    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
-    disableEJSInput();
+    // The emulator halts at ~frame 6 without a user gesture (AudioContext
+    // blocked → Asyncify stalls permanently). The host already has a gesture
+    // (ROM drag-drop auto-starts the emulator). For guests, we delay start
+    // until a tap provides the gesture, so the emulator starts with audio.
+    var _bootPollCount = 0;
+    var _bootGestureReceived = false;
 
-    // Wait for gameManager AND for the emulator to be ready.
-    // Host: waits for MIN_BOOT_FRAMES (needs a fully booted emulator to capture state).
-    // Guest: only waits for Module to exist (will load host's state, no independent boot).
-    // This prevents boot frame count differences that cause desync.
-    var _bootStatusCount = 0;
+    // Only mobile guests need a user gesture before the emulator starts.
+    // iOS blocks AudioContext without a gesture, causing the WASM to stall
+    // at frame 6. Desktop browsers and the host don't have this restriction.
+    // Host has a user gesture from ROM drag-drop, so AudioContext is allowed.
+    // All guests (desktop + mobile) need a gesture — browsers block AudioContext
+    // without one, causing the WASM emulator to stall at frame 6.
+    var _needsGesture = _playerSlot !== 0;
+
+    if (!_needsGesture) {
+      // Host: proceed immediately (gesture from ROM load)
+      _bootGestureReceived = true;
+      console.log('[lockstep] host auto-boot (slot=0)');
+      setStatus('Loading emulator...');
+      KNShared.triggerEmulatorStart();
+      KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+      disableEJSInput();
+    } else {
+      // Guest: show full-screen gesture prompt (above EmulatorJS overlay)
+      console.log('[lockstep] guest — showing gesture prompt (slot=' + _playerSlot + ')');
+      var promptEl = document.getElementById('gesture-prompt');
+      if (promptEl) {
+        promptEl.classList.remove('hidden');
+        var onPromptClick = function () {
+          if (_bootGestureReceived) return;
+          _bootGestureReceived = true;
+          promptEl.classList.add('hidden');
+          // Unlock audio within this gesture's call stack
+          var AC = window.AudioContext || window.webkitAudioContext;
+          if (AC) {
+            var ctx = new AC();
+            ctx.resume().catch(function () {});
+          }
+          // Start emulator within gesture context so audio works
+          KNShared.triggerEmulatorStart();
+          KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+          disableEJSInput();
+          setStatus('Loading emulator...');
+          console.log('[lockstep] gesture received — emulator starting');
+          promptEl.removeEventListener('click', onPromptClick);
+          promptEl.removeEventListener('touchend', onPromptClick);
+        };
+        promptEl.addEventListener('click', onPromptClick);
+        promptEl.addEventListener('touchend', onPromptClick);
+      }
+    }
+
     var waitForEmu = function () {
+      // Wait for gesture before polling
+      if (!_bootGestureReceived) {
+        setTimeout(waitForEmu, 200);
+        return;
+      }
+
       var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
       if (!gm) {
-        _bootStatusCount++;
-        if (_bootStatusCount % 10 === 0) setStatus('Loading emulator...');
+        _bootPollCount++;
+        if (_bootPollCount % 10 === 0) setStatus('Loading emulator...');
         setTimeout(waitForEmu, 100);
         return;
       }
@@ -1353,17 +1420,22 @@
       var frames = mod && mod._get_current_frame_count
         ? mod._get_current_frame_count() : 0;
 
-      if (_playerSlot === 0 && frames < MIN_BOOT_FRAMES) {
-        // Host: needs full boot to capture a valid state
-        if (_bootStatusCount++ % 5 === 0) setStatus('Booting emulator... (' + frames + '/' + MIN_BOOT_FRAMES + ')');
+      if (frames < MIN_BOOT_FRAMES) {
+        if (_bootPollCount++ % 5 === 0) {
+          console.log('[lockstep] boot slot=' + _playerSlot +
+            ' f=' + frames + '/' + MIN_BOOT_FRAMES);
+          setStatus('Booting emulator... (' + frames + '/' + MIN_BOOT_FRAMES + ')');
+        }
         setTimeout(waitForEmu, 100);
         return;
       }
-      if (_playerSlot !== 0 && !mod._simulate_input) {
-        // Guest: just needs Module initialized (will load host's state).
-        // Don't wait for frame count — _get_current_frame_count may not
-        // exist if the CDN core loaded instead of our patched core.
-        if (_bootStatusCount++ % 5 === 0) setStatus('Booting emulator...');
+      if (!mod._simulate_input) {
+        if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
+        setTimeout(waitForEmu, 100);
+        return;
+      }
+      if (!mod._simulate_input) {
+        if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
       }
@@ -1411,7 +1483,7 @@
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
       console.log('[lockstep] emulator ready (' + frames + ' frames) — paused' +
-        (_playerSlot === 0 ? ' (host, full boot)' : ' (guest, minimal boot)'));
+        (_playerSlot === 0 ? ' (host)' : ' (guest)'));
 
       // Set up key tracking now that ejs.controls is available
       _p1KeyMap = null;  // force re-read from EJS controls
@@ -1802,10 +1874,16 @@
 
     // Analog axes (16-23): bit pairs → ±32767 axis values
     // 16-19: left stick (N64 analog), 20-23: right stick (N64 C-buttons)
+    // When both X and Y are active (diagonal), scale each axis by 1/√2 so
+    // the combined magnitude matches cardinal (prevents diagonal speed boost).
+    var lxActive = ((inputMask >> 16) & 1) | ((inputMask >> 17) & 1);
+    var lyActive = ((inputMask >> 18) & 1) | ((inputMask >> 19) & 1);
+    var diagScale = (lxActive && lyActive) ? 23170 : 32767;  // 32767/√2 ≈ 23170
     for (var base = 16; base < 24; base += 2) {
       var posPressed = (inputMask >> base) & 1;
       var negPressed = (inputMask >> (base + 1)) & 1;
-      var axisVal = (posPressed - negPressed) * 32767;
+      var mag = (base < 20) ? diagScale : 32767;  // normalize left stick only
+      var axisVal = (posPressed - negPressed) * mag;
       mod._simulate_input(player, base, axisVal);
       mod._simulate_input(player, base + 1, 0);
     }
@@ -1919,6 +1997,7 @@
       _localInputs = {};
       _remoteInputs = {};
       _peerInputStarted = {};
+      _lastKnownInput = {};
     }
     _fpsLastTime = performance.now();
     _fpsFrameCount = 0;
@@ -2151,8 +2230,9 @@
     var mask = readLocalInput();
     _localInputs[_frameNum] = mask;
     var buf = new Int32Array([_frameNum, mask]).buffer;
+    var _sendFails = 0;
     for (var i = 0; i < activePeers.length; i++) {
-      try { activePeers[i].dc.send(buf); } catch (_) {}
+      try { activePeers[i].dc.send(buf); } catch (_) { _sendFails++; }
     }
 
     // Check if all INPUT peers (peers who have sent at least 1 input)
@@ -2162,11 +2242,12 @@
     var applyFrame = _frameNum - DELAY_FRAMES;
     if (applyFrame >= 0) {
       var allArrived = true;
+      var _missingSlots = [];
       for (var j = 0; j < inputPeers.length; j++) {
         var pSlot = inputPeers[j].slot;
         if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
           allArrived = false;
-          break;
+          _missingSlots.push(pSlot);
         }
       }
 
@@ -2174,18 +2255,38 @@
         // STALL -- remote input not here yet
         if (_stallStart === 0) {
           _stallStart = now;
+          // Log first stall occurrence with full state
+          var rBufSizes = {};
+          Object.keys(_remoteInputs).forEach(function(s) {
+            rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
+          });
+          console.log('[lockstep] INPUT-STALL start f=' + _frameNum +
+            ' apply=' + applyFrame +
+            ' missing=[' + _missingSlots.join(',') + ']' +
+            ' inputPeers=' + inputPeers.map(function(p) { return p.slot; }).join(',') +
+            ' rBuf=' + JSON.stringify(rBufSizes) +
+            ' peerStarted=' + JSON.stringify(_peerInputStarted));
         }
         if (now - _stallStart >= MAX_STALL_MS) {
-          // Timeout -- inject zero input for missing peers to unstick
-          console.log('[lockstep] stall timeout at frame', applyFrame,
-            '(' + MAX_STALL_MS + 'ms)');
+          // Timeout -- repeat last known input for missing peers.
+          // All players have the same "last known" for a given slot
+          // (same DataChannel messages), so they all predict the same
+          // value — no desync from independent prediction.
+          var repeatInfo = [];
           for (var k = 0; k < inputPeers.length; k++) {
             var s = inputPeers[k].slot;
             if (!_remoteInputs[s]) _remoteInputs[s] = {};
             if (_remoteInputs[s][applyFrame] === undefined) {
-              _remoteInputs[s][applyFrame] = 0;
+              var repeated = _lastKnownInput[s] || 0;
+              _remoteInputs[s][applyFrame] = repeated;
+              repeatInfo.push('s' + s + '=' + repeated);
             }
           }
+          console.log('[lockstep] INPUT-STALL timeout f=' + _frameNum +
+            ' apply=' + applyFrame +
+            ' missing=[' + _missingSlots.join(',') + ']' +
+            ' stallMs=' + (now - _stallStart).toFixed(0) +
+            ' repeat=[' + repeatInfo.join(',') + ']');
           _stallStart = 0;
         } else {
           _remoteMissed++;
@@ -2205,12 +2306,42 @@
 
       // Write ALL inputs to Wasm memory — use inputPeers for peers
       // we're synced with, activePeers for all connected
-      writeInputToMemory(_playerSlot, _localInputs[applyFrame] || 0);
+      var localMask = _localInputs[applyFrame] || 0;
+      writeInputToMemory(_playerSlot, localMask);
       for (var m = 0; m < inputPeers.length; m++) {
         var peerSlot = inputPeers[m].slot;
         var remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
         writeInputToMemory(peerSlot, remoteMask);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+      }
+
+      // Periodic input pipeline log (every 60 frames = ~1s)
+      if (_frameNum % 60 === 0) {
+        var rBufTot = 0;
+        var rBufDetail = {};
+        Object.keys(_remoteInputs).forEach(function(sl) {
+          var n = Object.keys(_remoteInputs[sl] || {}).length;
+          rBufTot += n;
+          rBufDetail[sl] = n;
+        });
+        var dcStates = {};
+        Object.keys(_peers).forEach(function(sid) {
+          var p = _peers[sid];
+          if (p.slot !== null && p.slot !== undefined) {
+            dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
+          }
+        });
+        console.log('[lockstep] INPUT-LOG f=' + _frameNum +
+          ' apply=' + applyFrame +
+          ' local=' + localMask +
+          ' delay=' + DELAY_FRAMES +
+          ' inputPeers=[' + inputPeers.map(function(p) { return p.slot; }).join(',') + ']' +
+          ' rBuf=' + JSON.stringify(rBufDetail) +
+          ' dc=' + JSON.stringify(dcStates) +
+          ' missed=' + _remoteMissed +
+          ' applied=' + _remoteApplied +
+          ' sendFails=' + _sendFails +
+          ' fps=' + _fpsCurrent);
       }
       // Zero disconnected player slots so loadState() can't restore stale input
       for (var zs = 0; zs < 4; zs++) {
@@ -2375,9 +2506,10 @@
     }
 
     // Virtual gamepad (mobile touch controls)
-    // EJS simulateInput uses indices 0-15 for digital buttons (value 0 or 1)
-    // and 16-23 for analog axes (value ±32767). Our bitmask uses one bit per
-    // direction: even index = positive, odd = negative.
+    // EJS simulateInput uses per-direction positive values:
+    //   indices 0-15: digital buttons (value 0 or 1)
+    //   indices 16-19: left stick (right/left/down/up, value 0 to 32767)
+    //   indices 20-23: C-buttons (right/left/down/up, value 0 or 1)
     // Skip entirely if an EJS menu/popup is visible — stale touch state from
     // before the menu opened would otherwise keep sending non-zero input.
     var ejs = window.EJS_emulator;
@@ -2388,13 +2520,33 @@
        !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden'))
     );
     if (ejsMenuOpen) _touchInputState = {};
+
+    // Left stick (indices 16-19): apply relative deadzone so near-cardinal
+    // pushes on the touchscreen joystick don't register as diagonal.  The
+    // minor axis must exceed 40% of the major axis to set a second direction
+    // bit, giving ~±22° cardinal zones around each cardinal direction.
+    var stR = _touchInputState[16] || 0;
+    var stL = _touchInputState[17] || 0;
+    var stD = _touchInputState[18] || 0;
+    var stU = _touchInputState[19] || 0;
+    var stMajor = Math.max(stR, stL, stD, stU);
+    if (stMajor > 0) {
+      var stThresh = stMajor * 0.4;
+      if (stR > stThresh) mask |= (1 << 16);
+      if (stL > stThresh) mask |= (1 << 17);
+      if (stD > stThresh) mask |= (1 << 18);
+      if (stU > stThresh) mask |= (1 << 19);
+    }
+
+    // Digital buttons + C-buttons (non-stick indices)
     for (var ti in _touchInputState) {
       var idx = parseInt(ti, 10);
+      if (idx >= 16 && idx <= 19) continue;  // left stick handled above
       var val = _touchInputState[idx];
       if (!val) continue;
       if (idx < 16) {
         mask |= (1 << idx);
-      } else if (idx >= 16 && idx <= 23) {
+      } else if (idx >= 20 && idx <= 23) {
         if (val > 0) mask |= (1 << idx);
       }
     }
@@ -3046,6 +3198,10 @@
 
     _onExtraDataChannel = null;
     _onUnhandledMessage = null;
+
+    // Dismiss gesture prompt if still showing
+    var gp = document.getElementById('gesture-prompt');
+    if (gp) gp.classList.add('hidden');
 
     _config = null;
   }
