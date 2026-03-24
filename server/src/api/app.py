@@ -10,6 +10,7 @@ V1 endpoints:
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -30,6 +31,9 @@ _STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 # ── Security headers middleware ───────────────────────────────────────────────
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    # Production mode when ALLOWED_ORIGIN is set to a real domain (not "*")
+    _production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
+
     async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[override]
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
@@ -47,9 +51,24 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        # Disable caching for dev — prevents stale JS/CSS in incognito sessions
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Cache-Control"] = self._cache_control(request.url.path)
         return response
+
+    @classmethod
+    def _cache_control(cls, path: str) -> str:
+        if not cls._production:
+            return "no-store, no-cache, must-revalidate, max-age=0"
+        # WASM core + data — versioned, cache aggressively (7 days)
+        if path.startswith("/static/ejs/cores/"):
+            return "public, max-age=604800, immutable"
+        # JS/CSS — cache 1 hour, revalidate via ETag after that
+        if path.endswith((".js", ".css")):
+            return "public, max-age=3600, must-revalidate"
+        # HTML pages — always revalidate (ETag still avoids re-download)
+        if path.endswith(".html") or path == "/":
+            return "no-cache"
+        # API responses and everything else
+        return "no-store"
 
 
 # ── App factory ───────────────────────────────────────────────────────────────

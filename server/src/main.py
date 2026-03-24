@@ -84,6 +84,10 @@ def run() -> None:
         port=8000,
         log_level="info",
         loop=loop_setting,
+        # Trust X-Forwarded-For/Proto from reverse proxy so logs show real
+        # client IPs and the app sees the correct scheme (https).
+        proxy_headers=True,
+        forwarded_allow_ips="*",
         # Disable websocket-level keepalive pings — Socket.IO's Engine.IO
         # layer handles its own ping/pong. The websockets library's legacy
         # protocol has a race condition in _drain_helper that triggers
