@@ -2184,7 +2184,6 @@
   let _remoteApplied   = 0;
   let _lastRemoteFrame = -1;
   let _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
-  let _stallRetryPending = false;
 
   function startLockstep() {
     if (_running) return;
@@ -2510,21 +2509,12 @@
             ' apply=' + applyFrame +
             ' missing=[' + _missingSlots.join(',') + ']');
           _remoteMissed++;
-          if (!_stallRetryPending) {
-            _stallRetryPending = true;
-            setTimeout(function () { _stallRetryPending = false; tick(); }, 1);
-          }
+          // Don't re-enter full tick() — that causes burst frame processing
+          // when buffered inputs resolve. Let setInterval(16) handle the
+          // next frame step at the natural 60fps cadence.
           return;
         } else {
           _remoteMissed++;
-          // Retry quickly via setTimeout(1) to avoid 16ms wait
-          if (!_stallRetryPending) {
-            _stallRetryPending = true;
-            setTimeout(function () {
-              _stallRetryPending = false;
-              tick();
-            }, 1);
-          }
           return;
         }
       } else {
