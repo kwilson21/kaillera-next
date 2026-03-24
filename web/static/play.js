@@ -1362,6 +1362,9 @@
         }
       } catch (_) {}
     }
+    // Restore native fetch/XHR (core-redirector intercepts are no longer needed)
+    if (window._knCoreRestore) window._knCoreRestore();
+
     // Wipe EmulatorJS from the DOM entirely — clean slate for next game
     const gameEl = document.getElementById('game');
     if (gameEl) gameEl.innerHTML = '';
@@ -1422,11 +1425,20 @@
       return;
     }
 
-    const script = document.createElement('script');
-    script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
-    script.onload = () => { console.log('[play] loader.js loaded'); };
-    script.onerror = () => { console.log('[play] loader.js FAILED to load'); };
-    document.body.appendChild(script);
+    // Wait for IDB cache clear (core-redirector) before loading EJS.
+    // If the clear hasn't finished, EJS might use stale cached core data.
+    var injectLoader = function () {
+      var script = document.createElement('script');
+      script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+      script.onload = function () { console.log('[play] loader.js loaded'); };
+      script.onerror = function () { console.log('[play] loader.js FAILED to load'); };
+      document.body.appendChild(script);
+    };
+    if (window._knCoreReady) {
+      window._knCoreReady.then(injectLoader, injectLoader);
+    } else {
+      injectLoader();
+    }
   }
 
   function setupRomDrop() {
