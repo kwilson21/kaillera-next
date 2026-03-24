@@ -41,9 +41,9 @@
  * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
  *
  *   Emscripten's main loop is driven by requestAnimationFrame. To control
- *   frame timing, we intercept rAF:
- *     - Save the real requestAnimationFrame as _origRAF
- *     - Replace window.requestAnimationFrame with an interceptor that
+ *   frame timing, we intercept rAF via APISandbox:
+ *     - APISandbox saves the real rAF at page load
+ *     - We replace window.requestAnimationFrame with an interceptor that
  *       captures the callback (_pendingRunner) instead of scheduling it
  *     - Call Module.resumeMainLoop() so Emscripten registers its runner
  *       through our interceptor, giving us the callback
@@ -304,8 +304,7 @@
   let _running            = false;  // tick loop active
   let _lateJoin           = false;  // true when joining a game already in progress
 
-  // Manual mode / rAF interception state
-  let _origRAF           = null;    // saved window.requestAnimationFrame
+  // Manual mode / rAF interception state (native refs managed by APISandbox)
   let _pendingRunner     = null;    // captured Emscripten MainLoop_runner
   let _manualMode        = false;   // true once enterManualMode() called
   let _stallStart        = 0;       // timestamp when current stall began
@@ -2002,11 +2001,10 @@
     var captureTrack = _hostStream.getVideoTracks()[0];
 
     // Blit loop: copy emulator canvas to capture canvas every frame
-    // Use _origRAF (saved real rAF) when available, fall back to native rAF
-    var raf = _origRAF || window.requestAnimationFrame;
+    // Use native rAF (lockstep overrides the global)
     function blitFrame() {
       if (!_running) return;  // stopped
-      raf.call(window, blitFrame);
+      APISandbox.nativeRAF(blitFrame);
       ctx.drawImage(canvas, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
     }
@@ -2131,17 +2129,14 @@
 
     var mod = window.EJS_emulator.gameManager.Module;
 
-    // Save the real requestAnimationFrame
-    _origRAF = window.requestAnimationFrame;
-
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
     // Replace rAF with interceptor that captures the runner
-    window.requestAnimationFrame = function (cb) {
+    APISandbox.overrideRAF(function (cb) {
       _pendingRunner = cb;
       return -999;
-    };
+    });
 
     // Resume to capture fresh runner
     mod.resumeMainLoop();
@@ -2186,7 +2181,7 @@
     runner(frameTimeMs);
 
     // Force GL composite via real rAF no-op
-    if (_origRAF) _origRAF.call(window, () => {});
+    APISandbox.nativeRAF(function () {});
     return true;
   }
 
@@ -2265,16 +2260,15 @@
       // stepOneFrame() (gated by _inDeterministicStep) so lockstep JS code
       // (stall detection, FPS) still gets real time.
       if (mod && mod._kn_get_cycle_time_ms) {
-        var _origPerfNow = performance.now.bind(performance);
         _deterministicPerfNow = function () {
           if (_inDeterministicStep) {
             var m = window.EJS_emulator && window.EJS_emulator.gameManager &&
                     window.EJS_emulator.gameManager.Module;
             if (m && m._kn_get_cycle_time_ms) return m._kn_get_cycle_time_ms();
           }
-          return _origPerfNow();
+          return APISandbox.nativePerfNow();
         };
-        performance.now = _deterministicPerfNow;
+        APISandbox.overridePerfNow(_deterministicPerfNow);
         console.log('[lockstep] performance.now() intercepted for deterministic frame steps');
       }
     }
@@ -2443,10 +2437,9 @@
       clearInterval(_tickInterval);
       _tickInterval = null;
     }
-    // Restore original rAF if we intercepted it
-    if (_origRAF) {
-      window.requestAnimationFrame = _origRAF;
-      _origRAF = null;
+    // Restore rAF if we intercepted it (other overrides restored in stop())
+    if (_manualMode) {
+      APISandbox.restoreAll();
     }
     _manualMode = false;
     _pendingRunner = null;
@@ -3064,9 +3057,8 @@
       // Block navigator.getGamepads globally so the WASM core's internal
       // Emscripten SDL gamepad layer also gets no gamepads. The core has
       // its own RetroArch button mapping that conflicts with our profiles.
-      // GamepadManager uses a saved reference (_nativeGetGamepads) so it
-      // still works.
-      navigator.getGamepads = function () { return []; };
+      // GamepadManager uses APISandbox.nativeGetGamepads() so it still works.
+      APISandbox.overrideGetGamepads(function () { return []; });
     };
     attempt();
   }
@@ -3400,12 +3392,9 @@
     _peers = {};
     KNState.peers = _peers;
 
-    // Restore rAF — emulator DOM is destroyed by play.js, so just clean up
-    if (_manualMode && _origRAF) {
-      window.requestAnimationFrame = _origRAF;
-    }
+    // Restore all overridden browser APIs (rAF, performance.now, getGamepads)
+    APISandbox.restoreAll();
     _manualMode = false;
-    _origRAF = null;
     _pendingRunner = null;
 
     // Reset lockstep state

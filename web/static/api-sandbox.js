@@ -1,0 +1,77 @@
+/**
+ * api-sandbox.js — Centralized native browser API reference management.
+ *
+ * Must be loaded BEFORE all other scripts. Saves native references to
+ * browser APIs that lockstep mode overrides, and provides explicit
+ * override/restore lifecycle.
+ *
+ * Usage:
+ *   APISandbox.nativeRAF(cb)          — real requestAnimationFrame
+ *   APISandbox.nativePerfNow()        — real performance.now()
+ *   APISandbox.nativeGetGamepads()    — real navigator.getGamepads()
+ *   APISandbox.overrideRAF(fn)        — replace rAF (returns restore fn)
+ *   APISandbox.overridePerfNow(fn)    — replace performance.now
+ *   APISandbox.overrideGetGamepads(fn) — replace navigator.getGamepads
+ *   APISandbox.restoreAll()           — restore all overrides at once
+ */
+(function () {
+  'use strict';
+
+  // Save native references at load time — before anything can override them.
+  var _nativeRAF = window.requestAnimationFrame.bind(window);
+  var _nativeCancelRAF = window.cancelAnimationFrame.bind(window);
+  var _nativePerfNow = performance.now.bind(performance);
+  var _nativeGetGamepads = navigator.getGamepads.bind(navigator);
+
+  // Track which APIs are currently overridden
+  var _rafOverridden = false;
+  var _perfNowOverridden = false;
+  var _getGamepadsOverridden = false;
+
+  window.APISandbox = {
+    // ── Native references (always return real browser behavior) ──
+    nativeRAF: function (cb) { return _nativeRAF(cb); },
+    nativeCancelRAF: function (id) { return _nativeCancelRAF(id); },
+    nativePerfNow: function () { return _nativePerfNow(); },
+    nativeGetGamepads: function () { return _nativeGetGamepads(); },
+
+    // ── Individual overrides (applied at different times by lockstep) ──
+    overrideRAF: function (fn) {
+      window.requestAnimationFrame = fn;
+      _rafOverridden = true;
+    },
+
+    overridePerfNow: function (fn) {
+      performance.now = fn;
+      _perfNowOverridden = true;
+    },
+
+    overrideGetGamepads: function (fn) {
+      navigator.getGamepads = fn;
+      _getGamepadsOverridden = true;
+    },
+
+    // ── Restore all overrides at once ──
+    restoreAll: function () {
+      if (_rafOverridden) {
+        window.requestAnimationFrame = _nativeRAF;
+        _rafOverridden = false;
+      }
+      if (_perfNowOverridden) {
+        performance.now = _nativePerfNow;
+        _perfNowOverridden = false;
+      }
+      if (_getGamepadsOverridden) {
+        navigator.getGamepads = _nativeGetGamepads;
+        _getGamepadsOverridden = false;
+      }
+    },
+
+    isOverridden: function (api) {
+      if (api === 'raf') return _rafOverridden;
+      if (api === 'perfNow') return _perfNowOverridden;
+      if (api === 'getGamepads') return _getGamepadsOverridden;
+      return false;
+    },
+  };
+})();

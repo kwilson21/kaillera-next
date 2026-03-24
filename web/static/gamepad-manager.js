@@ -15,9 +15,8 @@
 (function () {
   'use strict';
 
-  // Save real getGamepads — the global may be overridden to block
-  // the WASM core's internal Emscripten SDL gamepad polling.
-  const _nativeGetGamepads = navigator.getGamepads.bind(navigator);
+  // Use APISandbox for native getGamepads (lockstep overrides the global).
+  var _nativeGetGamepads = function () { return APISandbox.nativeGetGamepads(); };
 
   // ── Profile Registry ─────────────────────────────────────────────────
   // Ordered array. First match wins. Raphnet before Standard (fallback).
