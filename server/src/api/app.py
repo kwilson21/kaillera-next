@@ -57,24 +57,38 @@ def _save_pinned(pinned: set[str]) -> None:
 
 
 async def cleanup_old_logs() -> None:
-    """Background task: delete non-pinned logs older than LOG_RETENTION_DAYS."""
+    """Background task: delete non-pinned logs older than LOG_RETENTION_DAYS.
+
+    Also enforces a max file count (LOG_MAX_FILES, default 500) to prevent
+    disk exhaustion from high-volume sessions.
+    """
     while True:
         await asyncio.sleep(3600)
         try:
             retention = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
+            max_files = int(os.environ.get("LOG_MAX_FILES", "500"))
             if not _SYNC_LOG_DIR.exists():
                 continue
             pinned = _pinned_set()
             cutoff = time.time() - (retention * 86400)
             cleaned = 0
+            # Time-based: remove logs older than retention period
             for f in _SYNC_LOG_DIR.glob("sync-*.log"):
                 if f.name in pinned:
                     continue
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
                     cleaned += 1
+            # Count-based: if still over limit, remove oldest non-pinned first
+            logs = sorted(_SYNC_LOG_DIR.glob("sync-*.log"), key=lambda f: f.stat().st_mtime)
+            unpinned = [f for f in logs if f.name not in pinned]
+            while len(logs) > max_files and unpinned:
+                unpinned[0].unlink()
+                unpinned.pop(0)
+                logs = [f for f in logs if f.exists()]
+                cleaned += 1
             if cleaned:
-                log.info("Log cleanup: removed %d expired log(s)", cleaned)
+                log.info("Log cleanup: removed %d log(s)", cleaned)
         except Exception as e:
             log.warning("Log cleanup error: %s", e)
 
