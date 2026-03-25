@@ -2617,6 +2617,7 @@
     if (_awaitingResync) {
       if (performance.now() - _awaitingResyncAt > 3000) {
         _syncLog('resync wait timeout — resuming');
+        console.warn('[lockstep] resync timeout — log dump:\n' + exportSyncLog());
         _awaitingResync = false;
       } else {
         return;
