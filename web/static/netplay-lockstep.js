@@ -764,13 +764,22 @@
   }
 
   let _audioFeedCount = 0;
+  let _audioEmptyCount = 0;
   const feedAudio = () => {
     if (!_audioReady || !_audioCtx) return;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod) return;
 
     const n = mod._kn_get_audio_samples();
-    if (n <= 0) return;
+    if (n <= 0) {
+      _audioEmptyCount++;
+      // Log once after 300 consecutive empty frames (~5s) to detect silent audio
+      if (_audioEmptyCount === 300) {
+        _syncLog(`audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state})`);
+      }
+      return;
+    }
+    _audioEmptyCount = 0;
 
     // Log audio state periodically (every 600 frames ≈ 10s)
     _audioFeedCount++;
@@ -1869,6 +1878,10 @@
     _guestStateBytes = null;
     _syncLog('double-loaded state (CPU + free-frame fix)');
 
+    // Re-apply cheats after state load. _retro_reset() and loadState() can
+    // clear the cheat table, so cheats applied during boot may be lost.
+    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+
     // Both sides reset and start true lockstep sync
     // (Warmup removed — deterministic timing patch makes it unnecessary)
     _frameNum = 0;
@@ -1884,7 +1897,11 @@
     const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
     try {
-      const resp = await fetch(url);
+      // Timeout after 10s — mobile fetching 16MB can hang indefinitely
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 10000);
+      const resp = await fetch(url, { signal: ac.signal });
+      clearTimeout(timer);
       if (!resp.ok) throw new Error('no cached state');
       const raw = await resp.arrayBuffer();
       const bytes = new Uint8Array(raw);
@@ -1892,12 +1909,22 @@
       _syncLog(`cached state loaded (${bytes.length} bytes)`);
       _guestStateBytes = bytes;
 
+      // Host: also send cached bytes to guests via Socket.IO as fallback.
+      // Guest cache fetch may hang/timeout on slow mobile connections.
+      if (_playerSlot === 0) {
+        compressAndEncode(new Uint8Array(bytes)).then((encoded) => {
+          _syncLog(`sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`);
+          socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
+        }).catch(() => {});
+      }
+
       _selfLockstepReady = true;
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
-    } catch (_) {
-      // No cached state — fall back to host capture / guest wait
-      _syncLog('no cached state — using live capture');
+    } catch (e) {
+      // No cached state or fetch timed out — fall back to host capture / guest wait
+      const reason = e?.name === 'AbortError' ? 'fetch timed out' : (e?.message || 'unknown');
+      _syncLog(`no cached state — ${reason}, using live capture`);
       if (_playerSlot === 0) {
         sendInitialState();
       }
@@ -1947,6 +1974,7 @@
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
+    if (_selfLockstepReady) return; // already loaded (e.g. from cache)
     _syncLog('received initial state');
     setStatus('Loading initial state...');
 
@@ -2579,7 +2607,7 @@
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
-          if (_frameAdvRaw > DELAY_FRAMES + 1) {
+          if (_frameAdvRaw >= DELAY_FRAMES + 1) {
             // Too far ahead — skip this tick entirely.
             // Don't send input (adds to pile remote can't consume).
             // Don't step emulator (diverges further).
