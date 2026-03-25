@@ -936,7 +936,7 @@
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
       _syncLog(`peer ${remoteSid} connection-state: ${s}`);
-      if (s === 'connecting') setStatus('Connecting...');
+      if (s === 'connecting') setStatus('Connecting to players...');
       if (s === 'connected') {
         // Clear any pending disconnect grace timer — connection recovered
         if (peer._disconnectTimer) {
@@ -955,14 +955,14 @@
         // Failed is terminal — disconnect immediately
         if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
         if (_peers[remoteSid] !== peer) return;
-        setStatus('Peer connection failed');
+        setStatus('Player dropped — connection failed');
         handlePeerDisconnect(remoteSid);
       }
       if (s === 'disconnected') {
         // Disconnected is recoverable — give ICE time to reconnect (mobile-friendly)
         if (_peers[remoteSid] !== peer) return;
         if (!peer._disconnectTimer) {
-          setStatus('Peer connection unstable...');
+          setStatus('Player connection unstable...');
           peer._disconnectTimer = setTimeout(() => {
             peer._disconnectTimer = null;
             // Still disconnected or failed after grace period — give up

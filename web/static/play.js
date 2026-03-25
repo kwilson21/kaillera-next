@@ -2247,14 +2247,15 @@
 
   const copyLink = () => {
     const url = `${window.location.origin}/play.html?room=${roomCode}`;
+    const shareText = `Join my kaillera-next room: ${url}`;
     // navigator.clipboard requires HTTPS; use execCommand fallback for HTTP
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(url).then(() => {
+      navigator.clipboard.writeText(shareText).then(() => {
         showToast('Link copied!');
       });
     } else {
       const ta = document.createElement('textarea');
-      ta.value = url;
+      ta.value = shareText;
       ta.style.position = 'fixed';
       ta.style.opacity = '0';
       document.body.appendChild(ta);
@@ -2812,13 +2813,16 @@
 
   window.setAutoDelay = setAutoDelay;
 
+  const KAILLERA_LABELS = ['LAN', 'Excellent', 'Excellent', 'Good', 'Good', 'Average', 'Average', 'Low', 'Bad', 'Bad'];
+
   const showEffectiveDelay = (own, room) => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
+    const label = KAILLERA_LABELS[room] ?? '';
     if (room > own) {
-      el.textContent = `(room: ${room})`;
+      el.textContent = `(room: ${room} — ${label})`;
     } else {
-      el.textContent = '';
+      el.textContent = label ? `(${label})` : '';
     }
   };
 
@@ -2827,6 +2831,7 @@
   // ── Init ───────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', () => {
+    console.log('kaillera-next — v0.9 forever');
     parseParams();
     if (!roomCode) {
       window.location.href = '/';
@@ -2871,14 +2876,14 @@
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) sharePlay.addEventListener('click', () => {
       const url = `${window.location.origin}/play.html?room=${roomCode}`;
-      copyToClipboard(url, 'Play link');
+      copyToClipboard(`Join my kaillera-next room: ${url}`, 'Play link');
       closeShareDropdown();
     });
 
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch) shareWatch.addEventListener('click', () => {
       const url = `${window.location.origin}/play.html?room=${roomCode}&spectate=1`;
-      copyToClipboard(url, 'Watch link');
+      copyToClipboard(`Watch my kaillera-next room: ${url}`, 'Watch link');
       closeShareDropdown();
     });
 
