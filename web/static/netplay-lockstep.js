@@ -2705,7 +2705,18 @@
             dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
           }
         }
-        _syncLog(`INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent}`);
+        _syncLog(`INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`);
+      }
+      // Periodic pacing summary (~5s)
+      if (_frameNum % 300 === 0 && _pacingAdvCount > 0) {
+        const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
+        _syncLog(`PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`);
+        // Reset window
+        _pacingCapsCount = 0;
+        _pacingCapsFrames = 0;
+        _pacingMaxAdv = 0;
+        _pacingAdvSum = 0;
+        _pacingAdvCount = 0;
       }
       // Zero disconnected player slots so loadState() can't restore stale input
       for (let zs = 0; zs < 4; zs++) {
