@@ -3234,7 +3234,7 @@
     const igCancelBtn = document.getElementById('ingame-remap-cancel');
     if (igCancelBtn) igCancelBtn.addEventListener('click', cancelWizard);
 
-    // Sync log upload (lockstep mode only — streaming engine has no exportSyncLog)
+    // Sync log upload
     const toolbarLogs = document.getElementById('toolbar-logs');
     if (toolbarLogs) {
       toolbarLogs.addEventListener('click', () => {

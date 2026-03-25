@@ -106,6 +106,30 @@
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
 
+  // -- Sync log ring buffer (matches lockstep — uploaded on game end) --------
+  const SYNC_LOG_MAX = 5000;
+  const _syncLogRing = new Array(SYNC_LOG_MAX);
+  let _syncLogHead = 0;
+  let _syncLogCount = 0;
+  let _syncLogSeq = 0;
+
+  const _syncLog = (msg) => {
+    _syncLogRing[_syncLogHead] = { seq: _syncLogSeq++, t: performance.now(), f: 0, msg };
+    _syncLogHead = (_syncLogHead + 1) % SYNC_LOG_MAX;
+    if (_syncLogCount < SYNC_LOG_MAX) _syncLogCount++;
+    console.log(`[streaming] ${msg}`);
+  };
+
+  const exportSyncLog = () => {
+    const lines = [];
+    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
+    for (let i = 0; i < _syncLogCount; i++) {
+      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
+      lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
+    }
+    return lines.join('\n');
+  };
+
   // Expose for Playwright
   window._playerSlot = _playerSlot;
   window._isSpectator = _isSpectator;
@@ -113,7 +137,7 @@
 
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
-    console.log('[netplay]', msg);
+    _syncLog(msg);
   };
 
   // ── users-updated (star topology) ──────────────────────────────────────
@@ -133,8 +157,8 @@
       window._playerSlot = _playerSlot;
     }
 
-    console.log(
-      `[streaming] onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
+    _syncLog(
+      `onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
     );
     if (_playerSlot === 0) {
       // HOST: initiate connections to all non-host players and spectators
@@ -144,7 +168,7 @@
           _peers[p.socketId].slot = p.slot;
           continue;
         }
-        console.log(`[streaming] host creating peer for ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
+        _syncLog(`host creating peer for ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
         createPeer(p.socketId, p.slot, true);
         sendOffer(p.socketId);
       }
@@ -182,7 +206,7 @@
       const s = peer.pc.connectionState;
       if (s === 'failed' || s === 'disconnected') {
         if (_peers[remoteSid] !== peer) return;
-        console.log('[netplay] peer', remoteSid, 'connection', s);
+        _syncLog(`peer ${remoteSid} connection ${s}`);
         handlePeerDisconnect(remoteSid);
       }
     };
@@ -198,7 +222,7 @@
     // Guest/spectator: listen for incoming video tracks
     if (_playerSlot !== 0 || _isSpectator) {
       peer.pc.ontrack = (event) => {
-        console.log('[netplay] received track:', event.track.kind);
+        _syncLog(`received track: ${event.track.kind} streams=${event.streams?.length ?? 0}`);
         if (!_guestVideo) {
           _guestVideo = document.createElement('video');
           _guestVideo.id = 'guest-video';
@@ -240,7 +264,28 @@
           gameDiv.innerHTML = '';
           gameDiv.appendChild(_guestVideo);
         }
-        _guestVideo.srcObject = event.streams[0];
+
+        // Set srcObject only once — re-setting the same stream aborts any
+        // pending play() on iOS WebKit, causing "The operation was aborted".
+        // ontrack fires per-track (audio then video ~20ms apart) but they
+        // share the same MediaStream, so we only need to set it once.
+        const stream = event.streams?.[0];
+        if (stream) {
+          if (_guestVideo.srcObject !== stream) {
+            _guestVideo.srcObject = stream;
+          }
+        } else {
+          // Safari may not populate event.streams during renegotiation
+          _syncLog('event.streams empty — building MediaStream from track');
+          if (!_guestVideo.srcObject) {
+            _guestVideo.srcObject = new MediaStream();
+          }
+          _guestVideo.srcObject.addTrack(event.track);
+        }
+
+        // Only start playback and configure after the video track arrives —
+        // starting on the audio track alone triggers a load that gets aborted.
+        if (event.track.kind !== 'video') return;
 
         // Minimize jitter buffer: set minimum playout delay on the receiver.
         // The default jitter buffer adds 50-150ms of latency for smooth
@@ -248,24 +293,26 @@
         try {
           for (const recv of peer.pc.getReceivers()) {
             if (recv.track?.kind === 'video') {
-              // playoutDelayHint: target playout delay in seconds
-              // 0 = minimum possible (decode and display ASAP)
               if ('playoutDelayHint' in recv) {
                 recv.playoutDelayHint = 0;
-                console.log('[netplay] set playoutDelayHint = 0 (minimum jitter buffer)');
+                _syncLog('set playoutDelayHint = 0 (minimum jitter buffer)');
               }
-              // jitterBufferTarget: alternative API (Chrome 114+)
               if ('jitterBufferTarget' in recv) {
                 recv.jitterBufferTarget = 0;
-                console.log('[netplay] set jitterBufferTarget = 0');
+                _syncLog('set jitterBufferTarget = 0');
               }
             }
           }
         } catch (e) {
-          console.log('[netplay] jitter buffer config failed:', e);
+          _syncLog(`jitter buffer config failed: ${e}`);
         }
 
         setStatus('🟢 Connected — streaming!');
+
+        const src = _guestVideo.srcObject;
+        const trackInfo = src ? `${src.getVideoTracks().length}v+${src.getAudioTracks().length}a` : 'no-src';
+        _syncLog(`video state: readyState=${_guestVideo.readyState} paused=${_guestVideo.paused} tracks=${trackInfo}`);
+        _guestVideo.play()?.catch((e) => _syncLog(`video play() rejected: ${e.message}`));
 
         // Measure actual display latency via requestVideoFrameCallback
         if (_guestVideo.requestVideoFrameCallback) {
@@ -351,7 +398,7 @@
         }
       }
     } catch (err) {
-      console.log('[netplay] WebRTC signal error:', err.message || err);
+      _syncLog(`WebRTC signal error: ${err.message || err}`);
     }
   };
 
@@ -364,14 +411,14 @@
 
     ch.onopen = () => {
       const peer = _peers[remoteSid];
-      console.log(
-        `[streaming] DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
+      _syncLog(
+        `DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
       );
 
       if (_playerSlot === 0) {
         // Host: if emulator isn't started yet, start it now
         if (!_gameRunning) {
-          console.log('[streaming] DC open: starting host emulator');
+          _syncLog('DC open: starting host emulator');
           startHost();
         } else if (_hostStream) {
           // Late-joiner: add stream tracks if createPeer didn't already
@@ -380,36 +427,36 @@
             const existingSenders = peer.pc.getSenders();
             const alreadyHasTracks = existingSenders.some((s) => s.track);
             if (!alreadyHasTracks) {
-              console.log('[streaming] DC open: adding stream to late peer');
+              _syncLog('DC open: adding stream to late peer');
               for (const track of _hostStream.getTracks()) {
                 peer.pc.addTrack(track, _hostStream);
               }
               optimizeVideoEncoding(peer.pc);
               renegotiate(remoteSid);
             } else {
-              console.log('[streaming] DC open: peer already has tracks from createPeer');
+              _syncLog('DC open: peer already has tracks from createPeer');
             }
           }
         } else {
-          console.log('[streaming] DC open: host running but stream not ready yet');
+          _syncLog('DC open: host running but stream not ready yet');
         }
       } else if (!_isSpectator) {
         // Guest: start sending input
-        console.log('[streaming] DC open: starting guest input loop');
+        _syncLog('DC open: starting guest input loop');
         startGuestInputLoop();
       } else {
-        console.log('[streaming] DC open: spectator, no input loop');
+        _syncLog('DC open: spectator, no input loop');
       }
     };
 
     ch.onclose = () => {
       const current = _peers[remoteSid];
       if (!current || current.dc !== ch) return;
-      console.log('[netplay] DC closed with', remoteSid);
+      _syncLog(`DC closed with ${remoteSid}`);
       handlePeerDisconnect(remoteSid);
     };
 
-    ch.onerror = (e) => console.log('[netplay] DC error:', remoteSid, e);
+    ch.onerror = (e) => _syncLog(`DC error: ${remoteSid} ${e}`);
 
     ch.onmessage = (e) => {
       if (_playerSlot !== 0) return; // only host processes input
@@ -433,7 +480,7 @@
     }
     delete _peers[remoteSid];
     KNState.peers = _peers;
-    console.log('[netplay] peer disconnected:', remoteSid);
+    _syncLog(`peer disconnected: ${remoteSid}`);
   };
 
   // ── Host: emulator + stream ────────────────────────────────────────────
@@ -452,7 +499,7 @@
         setTimeout(waitForEmu, 100);
         return;
       }
-      console.log('[netplay] emulator running — capturing stream');
+      _syncLog('emulator running — capturing stream');
 
       // The emulator canvas is WebGL at 1280x960. Capturing it directly
       // requires expensive GPU readback (~5MB/frame). Instead, blit onto a
@@ -460,7 +507,7 @@
       // GPU-accelerated and the 2D canvas readback is much cheaper.
       const srcCanvas = document.querySelector('#game canvas');
       if (!srcCanvas) {
-        console.log('[netplay] canvas not found, retrying…');
+        _syncLog('canvas not found, retrying…');
         setTimeout(waitForEmu, 200);
         return;
       }
@@ -470,7 +517,7 @@
       captureCanvas.height = 480;
       const ctx = captureCanvas.getContext('2d');
 
-      console.log(`[netplay] source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
+      _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator canvas to capture canvas every frame
       _hostStream = captureCanvas.captureStream(0); // manual frame control
@@ -484,7 +531,7 @@
       };
       blitFrame();
 
-      console.log('[netplay] capture stream started (640x480 2D blit)');
+      _syncLog('capture stream started (640x480 2D blit)');
 
       // Try to capture audio immediately (before adding tracks to peers).
       // If AL contexts are ready, audio track joins video in the first offer.
@@ -509,7 +556,7 @@
           if (!_gameRunning) return;
           if (captureEmulatorAudio()) return;
           if (++audioAttempts < 150) setTimeout(waitForAudio, 200);
-          else console.log('[netplay] audio capture timed out — streaming video only');
+          else _syncLog('audio capture timed out — streaming video only');
         };
         waitForAudio();
       }
@@ -527,7 +574,7 @@
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
-      console.log('[netplay] renegotiate failed:', err);
+      _syncLog(`renegotiate failed: ${err}`);
     }
   };
 
@@ -608,9 +655,9 @@
         params.degradationPreference = 'maintain-framerate';
         try {
           await sender.setParameters(params);
-          console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
+          _syncLog('video encoding optimized: 60fps, 5Mbps max');
         } catch (err) {
-          console.log('[netplay] setParameters failed:', err);
+          _syncLog(`setParameters failed: ${err}`);
         }
       }
     }
@@ -839,11 +886,11 @@
       const audioTrack = _audioStreamDest.stream.getAudioTracks()[0];
       if (audioTrack && _hostStream) {
         _hostStream.addTrack(audioTrack);
-        console.log('[netplay] added audio track to host stream');
+        _syncLog('added audio track to host stream');
         return true;
       }
     } catch (e) {
-      console.log('[netplay] audio capture failed:', e.message);
+      _syncLog(`audio capture failed: ${e.message}`);
     }
     return false;
   };
@@ -967,12 +1014,18 @@
       if (Object.prototype.hasOwnProperty.call(KNState.touchInput, ck)) delete KNState.touchInput[ck];
     }
 
+    // Reset sync log for next game
+    _syncLogHead = 0;
+    _syncLogCount = 0;
+    _syncLogSeq = 0;
+
     _config = null;
   };
 
   window.NetplayStreaming = {
     init,
     stop,
+    exportSyncLog,
     getInfo: () => _cachedInfo,
     getPeerConnection: (sid) => {
       const p = _peers[sid];
