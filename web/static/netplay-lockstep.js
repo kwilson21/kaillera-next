@@ -3234,7 +3234,7 @@
       const ps0 = performance.now();
       const raw = gm.getState();
       const ps1 = performance.now();
-      currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      currentState = raw instanceof Uint8Array ? raw.slice() : new Uint8Array(raw);
       _syncLog(`host getState (FALLBACK): ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     }
 
