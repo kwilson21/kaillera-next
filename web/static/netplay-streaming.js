@@ -504,6 +504,23 @@
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
+
+    // Force preserveDrawingBuffer on the EJS WebGL canvas so drawImage
+    // can reliably read content for canvas capture at 60fps. Without
+    // this, the compositor clears the framebuffer before drawImage runs
+    // and captureStream produces blank frames.
+    const _origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === 'webgl' || type === 'webgl2') {
+        attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
+      }
+      return _origGetContext.call(this, type, attrs);
+    };
+    // Restore after EJS creates its canvas (waitForEmu finds it)
+    const _restoreGetContext = () => {
+      HTMLCanvasElement.prototype.getContext = _origGetContext;
+    };
+
     KNShared.bootWithCheats('streaming');
     setupKeyTracking();
 
@@ -535,26 +552,30 @@
         setTimeout(waitForEmu, 200);
         return;
       }
+      _restoreGetContext(); // EJS canvas created — restore native getContext
 
       const captureCanvas = document.createElement('canvas');
       captureCanvas.width = 640;
       captureCanvas.height = 480;
       const ctx = captureCanvas.getContext('2d');
 
-      _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
+      const glAttrs = srcCanvas.getContext('webgl')?.getContextAttributes?.();
+      _syncLog(
+        `source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480 (preserveDrawingBuffer=${glAttrs?.preserveDrawingBuffer})`,
+      );
 
-      // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
-      // captureStream(30) auto-samples the 2D canvas at 30fps.
-      // captureStream(0)+requestFrame() produces blank frames because
-      // drawImage from a WebGL canvas with preserveDrawingBuffer=false
-      // reads cleared framebuffers intermittently.
-      _hostStream = captureCanvas.captureStream(30);
+      // Blit loop with manual frame control at 60fps.
+      // preserveDrawingBuffer=true (forced above) ensures drawImage
+      // reads actual content from the WebGL canvas, not cleared frames.
+      _hostStream = captureCanvas.captureStream(0);
+      const captureTrack = _hostStream.getVideoTracks()[0];
 
       let _blitCount = 0;
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
+        captureTrack.requestFrame();
         _blitCount++;
         if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
       };
