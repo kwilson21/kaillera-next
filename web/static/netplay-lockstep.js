@@ -207,7 +207,7 @@
         const delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
-        console.log(`[lockstep] RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
+        _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
       }
       return;
     }
@@ -550,8 +550,7 @@
       }
     }
 
-    console.log('[lockstep] DIAG hooks installed');
-    _streamSync('DIAG-HOOKS installed');
+    _syncLog('DIAG hooks installed');
   };
 
   let _syncChunks        = [];     // incoming chunks from host DC
@@ -589,14 +588,14 @@
 
     if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples ||
         !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
-      console.log('[lockstep] audio capture exports not found — audio disabled');
+      _syncLog('audio capture exports not found — audio disabled');
       return;
     }
 
     _audioPtr = mod._kn_get_audio_ptr();
     _audioRate = mod._kn_get_audio_rate();
     if (!_audioRate || _audioRate <= 0) {
-      console.log('[lockstep] audio rate not set yet, defaulting to 33600');
+      _syncLog('audio rate not set yet, defaulting to 33600');
       _audioRate = 33600;
     }
 
@@ -611,7 +610,7 @@
           try { window._kn_keepAliveOsc.stop(); } catch (_) {}
           window._kn_keepAliveOsc = null;
         }
-        console.log(`[lockstep] reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
+        _syncLog(`reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
       }
 
       // Try AudioWorklet first (requires secure context), fall back to
@@ -634,9 +633,9 @@
 
           _audioWorklet.connect(_audioCtx.destination);
           workletOk = true;
-          console.log('[lockstep] audio using AudioWorklet');
+          _syncLog('audio using AudioWorklet');
         } catch (wErr) {
-          console.log(`[lockstep] AudioWorklet failed, using fallback: ${wErr.message}`);
+          _syncLog(`AudioWorklet failed, using fallback: ${wErr.message}`);
         }
       }
 
@@ -678,7 +677,7 @@
         // on FxiOS when .play() runs outside the gesture window.
         spNode.connect(_audioCtx.destination);
         window._kn_scriptProcessor = spNode;
-        console.log(`[lockstep] audio using ScriptProcessorNode fallback (ring=${ringSize})`);
+        _syncLog(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
       }
 
       _audioReady = true;
@@ -695,23 +694,23 @@
             return;
           }
           _audioCtx.resume().then(() => {
-            console.log(`[lockstep] audio resumed via gesture (state: ${_audioCtx.state})`);
+            _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
             document.removeEventListener('click', resumeAudio, true);
             document.removeEventListener('keydown', resumeAudio, true);
             document.removeEventListener('touchstart', resumeAudio, true);
           }).catch((e) => {
-            console.log(`[lockstep] audio resume failed: ${e.message}`);
+            _syncLog(`audio resume failed: ${e.message}`);
           });
         };
         document.addEventListener('click', resumeAudio, true);
         document.addEventListener('keydown', resumeAudio, true);
         document.addEventListener('touchstart', resumeAudio, true);
-        console.log(`[lockstep] audio context state: ${_audioCtx.state} — waiting for gesture to resume`);
+        _syncLog(`audio context state: ${_audioCtx.state} — waiting for gesture to resume`);
       }
 
-      console.log(`[lockstep] audio playback initialized (rate: ${_audioRate})`);
+      _syncLog(`audio playback initialized (rate: ${_audioRate})`);
     } catch (err) {
-      console.log('[lockstep] audio init failed:', err);
+      _syncLog(`audio init failed: ${err}`);
       _audioReady = false;
     }
   }
@@ -733,7 +732,7 @@
       let rms = 0;
       for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
       rms = Math.sqrt(rms / pcmCheck.length);
-      console.log(`[lockstep] audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`);
+      _syncLog(`audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`);
     }
 
     const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
@@ -761,7 +760,7 @@
 
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
-    console.log('[lockstep]', msg);
+    _syncLog(msg);
   };
 
   const onDataMessage = (msg) => {
@@ -776,7 +775,7 @@
     if (_playerSlot !== 0 || !_running) return;
     const requesterSid = msg.requesterSid;
     if (!requesterSid) return;
-    console.log('[lockstep] received late-join request from', requesterSid);
+    _syncLog(`received late-join request from ${requesterSid}`);
     sendLateJoinState(requesterSid);
   };
 
@@ -795,7 +794,7 @@
     const myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
     if (myPlayerEntry) {
       if (_isSpectator) {
-        console.log('[lockstep] transitioned from spectator to player, slot:', myPlayerEntry.slot);
+        _syncLog(`transitioned from spectator to player, slot: ${myPlayerEntry.slot}`);
         _isSpectator = false;
         window._isSpectator = false;
       }
@@ -867,14 +866,14 @@
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
-      console.log('[lockstep] peer', remoteSid, 'connection-state:', s);
+      _syncLog(`peer ${remoteSid} connection-state: ${s}`);
       if (s === 'connecting') setStatus('Connecting...');
       if (s === 'connected') {
         // Clear any pending disconnect grace timer — connection recovered
         if (peer._disconnectTimer) {
           clearTimeout(peer._disconnectTimer);
           peer._disconnectTimer = null;
-          console.log('[lockstep] peer', remoteSid, 'reconnected (ICE recovery)');
+          _syncLog(`peer ${remoteSid} reconnected (ICE recovery)`);
           setStatus('Connected -- game on!');
           // Reset sync backoff so next desync check happens within ~1s
           // (connection hiccup likely caused a desync — don't wait 30s)
@@ -899,7 +898,7 @@
             // Still disconnected or failed after grace period — give up
             const currentState = peer.pc.connectionState;
             if (currentState === 'disconnected' || currentState === 'failed') {
-              console.log('[lockstep] peer', remoteSid, 'disconnect grace expired (was', currentState, ')');
+              _syncLog(`peer ${remoteSid} disconnect grace expired (was ${currentState})`);
               if (_peers[remoteSid] !== peer) return;
               setStatus('Peer connection lost');
               handlePeerDisconnect(remoteSid);
@@ -912,7 +911,7 @@
     // Spectators: listen for incoming video tracks from host
     if (_isSpectator || (remoteSlot === 0 && _playerSlot === null)) {
       peer.pc.ontrack = (event) => {
-        console.log('[lockstep] received track:', event.track.kind);
+        _syncLog(`received track: ${event.track.kind}`);
         showSpectatorVideo(event, peer);
       };
     }
@@ -974,7 +973,7 @@
         // Reconnect: if peer exists and reconnect flag set, replace old PC
         if (data.reconnect && _peers[senderSid]) {
           const existingPeer = _peers[senderSid];
-          console.log('[lockstep] received reconnect offer from', senderSid);
+          _syncLog(`received reconnect offer from ${senderSid}`);
 
           // Detach old PC
           if (existingPeer.pc) {
@@ -998,7 +997,7 @@
           };
           existingPeer.pc.onconnectionstatechange = () => {
             const s = existingPeer.pc.connectionState;
-            console.log('[lockstep] reconnect peer', senderSid, 'connection-state:', s);
+            _syncLog(`reconnect peer ${senderSid} connection-state: ${s}`);
           };
           existingPeer.pc.ondatachannel = (e) => {
             if (e.channel.label === 'lockstep') {
@@ -1030,7 +1029,7 @@
         }
       }
     } catch (err) {
-      console.log('[lockstep] WebRTC signal error:', err.message || err);
+      _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
   }
@@ -1053,7 +1052,7 @@
       if (!peer) return;
       const known = _knownPlayers[remoteSid];
       const peerName = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
-      console.log('[lockstep] DC open with', remoteSid, 'slot:', peer.slot, peerName);
+      _syncLog(`DC open with ${remoteSid} slot: ${peer.slot} ${peerName}`);
       setStatus(`Connected to ${peerName}`);
       peer.ready = true;
       ch.send('ready');
@@ -1095,12 +1094,12 @@
       // Guard: ignore stale close events from replaced peers after restart
       const current = _peers[remoteSid];
       if (!current || current.dc !== ch) return;
-      console.log('[lockstep] DC closed with', remoteSid);
+      _syncLog(`DC closed with ${remoteSid}`);
       handlePeerDisconnect(remoteSid);
     };
 
     ch.onerror = (e) => {
-      console.log('[lockstep] DC error:', remoteSid, e);
+      _syncLog(`DC error: ${remoteSid} ${e}`);
     };
 
     ch.onmessage = (e) => {
@@ -1140,30 +1139,25 @@
           const hostHash = parseInt(parts[2], 10);
           const frameDiff = _frameNum - syncFrame;
           if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
-            console.log(`[lockstep] sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`);
+            _syncLog(`sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`);
             if (_hasKnSync) {
               // C-level hash — synchronous comparison
               const mod = window.EJS_emulator.gameManager.Module;
               const guestHash = mod._kn_sync_hash();
               if (guestHash !== hostHash) {
-                const desyncMsg = `DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`;
-                console.log(`[lockstep] ${desyncMsg}`);
-                _streamSync(desyncMsg);
+                _syncLog(`DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`);
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
                   if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
-                  console.log(`[lockstep] sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms, pause=${_awaitingResync})`);
-                  try { peer.dc.send('sync-request'); } catch (e) { console.log('[lockstep] sync-request send failed:', e); }
-                  _streamSync('sync-request sent');
+                  _syncLog(`sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms, pause=${_awaitingResync})`);
+                  try { peer.dc.send('sync-request'); } catch (e) { _syncLog(`sync-request send failed: ${e}`); }
                 } else {
-                  console.log(`[lockstep] DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
+                  _syncLog(`DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
                 }
               } else {
-                const okMsg = `sync OK frame=${syncFrame} hash=${guestHash}`;
-                console.log(`[lockstep] ${okMsg}`);
-                _streamSync(okMsg);
+                _syncLog(`sync OK frame=${syncFrame} hash=${guestHash}`);
                 _consecutiveResyncs = 0;
                 _syncCheckInterval = _syncBaseInterval;
               }
@@ -1175,19 +1169,15 @@
                 const peerRef = peer;
                 workerPost({ type: 'hash', data: guestBytes }).then((res) => {
                   if (res.hash !== hostHash) {
-                    const desyncMsg = `DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`;
-                    console.log(`[lockstep] ${desyncMsg}`);
-                    _streamSync(desyncMsg);
+                    _syncLog(`DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`);
                     const now2 = performance.now();
                     if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
                       _lastResyncTime = now2;
                       try { peerRef.dc.send('sync-request'); } catch (_) {}
-                      _streamSync('sync-request sent');
+                      _syncLog('sync-request sent');
                     }
                   } else {
-                    const okMsg = `sync OK frame=${syncFrame} hash=${res.hash}`;
-                    console.log(`[lockstep] ${okMsg}`);
-                    _streamSync(okMsg);
+                    _syncLog(`sync OK frame=${syncFrame} hash=${res.hash}`);
                     _consecutiveResyncs = 0;
                     _syncCheckInterval = _syncBaseInterval;
                   }
@@ -1195,16 +1185,16 @@
               } catch (_) {}
             }
           } else if (_frameNum < syncFrame) {
-            console.log(`[lockstep] sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`);
+            _syncLog(`sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`);
             _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
           } else {
-            console.log(`[lockstep] sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
+            _syncLog(`sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
 
           }
         }
         // State sync: host received request, or chunked binary transfer header
         if (e.data === 'sync-request' && _playerSlot === 0) {
-          console.log('[lockstep] received sync-request from', remoteSid);
+          _syncLog(`received sync-request from ${remoteSid}`);
           pushSyncState(remoteSid);
         }
         if (e.data.startsWith('sync-start:')) {
@@ -1258,13 +1248,13 @@
         // Log if we receive input for a frame we already applied (too late)
         const currentApply = _frameNum - DELAY_FRAMES;
         if (_running && recvFrame < currentApply) {
-          console.log(`[lockstep] INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`);
+          _syncLog(`INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`);
         }
         _remoteInputs[peer.slot][recvFrame] = recvMask;
         _lastKnownInput[peer.slot] = recvMask;
         if (!_peerInputStarted[peer.slot]) {
           _peerInputStarted[peer.slot] = true;
-          console.log(`[lockstep] INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
+          _syncLog(`INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
         }
         _remoteReceived++;
         if (recvFrame > _lastRemoteFrame) _lastRemoteFrame = recvFrame;
@@ -1284,7 +1274,7 @@
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_running && !peer._intentionalLeave) {
-      console.log('[lockstep] peer', remoteSid, 'DC died — attempting reconnect');
+      _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
       if (peer.slot !== null && peer.slot !== undefined) {
@@ -1307,7 +1297,7 @@
       // 15-second timeout — give up and hard disconnect
       peer._reconnectTimeout = setTimeout(() => {
         if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-        console.log('[lockstep] reconnect timeout for', remoteSid);
+        _syncLog(`reconnect timeout for ${remoteSid}`);
         hardDisconnectPeer(remoteSid);
       }, 15000);
 
@@ -1331,7 +1321,7 @@
     delete _peers[remoteSid];
     delete _lockstepReadyPeers[remoteSid];
     KNState.peers = _peers;
-    console.log('[lockstep] peer hard-disconnected:', remoteSid, 'slot:', peer.slot);
+    _syncLog(`peer hard-disconnected: ${remoteSid} slot: ${peer.slot}`);
 
     const known = _knownPlayers[remoteSid];
     const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
@@ -1351,7 +1341,7 @@
     const peer = _peers[remoteSid];
     if (!peer || !peer.reconnecting) return;
 
-    console.log('[lockstep] initiating reconnect to', remoteSid);
+    _syncLog(`initiating reconnect to ${remoteSid}`);
 
     // Detach old PC handlers to prevent stale events
     if (peer.pc) {
@@ -1376,9 +1366,9 @@
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
-      console.log('[lockstep] reconnect peer', remoteSid, 'connection-state:', s);
+      _syncLog(`reconnect peer ${remoteSid} connection-state: ${s}`);
       if (s === 'failed') {
-        console.log('[lockstep] reconnect PC failed for', remoteSid);
+        _syncLog(`reconnect PC failed for ${remoteSid}`);
         hardDisconnectPeer(remoteSid);
       }
     };
@@ -1405,7 +1395,7 @@
         reconnect: true,
       });
     }).catch((err) => {
-      console.log('[lockstep] reconnect offer failed:', err);
+      _syncLog(`reconnect offer failed: ${err}`);
       hardDisconnectPeer(remoteSid);
     });
   };
@@ -1465,7 +1455,7 @@
     if (!_needsGesture) {
       // Host: proceed immediately (gesture from ROM load)
       _bootGestureReceived = true;
-      console.log('[lockstep] host auto-boot (slot=0)');
+      _syncLog('host auto-boot (slot=0)');
       setStatus('Loading emulator...');
       KNShared.triggerEmulatorStart();
       KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
@@ -1475,7 +1465,7 @@
       // Defer until ROM is loaded — the prompt covers the entire screen
       // (z-index 10000) and would hide the ROM download progress bar.
       const showGesturePrompt = () => {
-        console.log(`[lockstep] guest — showing gesture prompt (slot=${_playerSlot})`);
+        _syncLog(`guest — showing gesture prompt (slot=${_playerSlot})`);
         const promptEl = document.getElementById('gesture-prompt');
         if (!promptEl) return;
         promptEl.classList.remove('hidden');
@@ -1512,7 +1502,7 @@
               _keepAliveGain.connect(_audioCtx.destination);
               _keepAliveOsc.start();
               window._kn_keepAliveOsc = _keepAliveOsc;
-              console.log(`[lockstep] lockstep AudioContext pre-created in gesture (rate: ${_audioCtx.sampleRate})`);
+              _syncLog(`lockstep AudioContext pre-created in gesture (rate: ${_audioCtx.sampleRate})`);
             }
             const _RealAC = AC;
             let _hijacked = false;
@@ -1524,7 +1514,7 @@
                 // Restore original constructors
                 if (window.AudioContext === _HijackAC) window.AudioContext = _RealAC;
                 if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealAC;
-                console.log('[lockstep] AudioContext hijack: returning gesture-unlocked context');
+                _syncLog('AudioContext hijack: returning gesture-unlocked context');
                 return _ejsCtx;
               }
               return new _RealAC();
@@ -1538,7 +1528,7 @@
           KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
           disableEJSInput();
           setStatus('Loading emulator...');
-          console.log('[lockstep] gesture received — emulator starting');
+          _syncLog('gesture received — emulator starting');
           promptEl.removeEventListener('click', onPromptClick);
           promptEl.removeEventListener('touchend', onPromptClick);
         };
@@ -1549,7 +1539,7 @@
       if (window.EJS_gameUrl) {
         showGesturePrompt();
       } else {
-        console.log('[lockstep] guest — ROM not loaded yet, deferring gesture prompt');
+        _syncLog('guest — ROM not loaded yet, deferring gesture prompt');
         setStatus('Waiting for ROM...');
         const romWaitId = setInterval(() => {
           if (window.EJS_gameUrl) {
@@ -1588,7 +1578,7 @@
 
       if (frames < MIN_BOOT_FRAMES) {
         if (_bootPollCount++ % 5 === 0) {
-          console.log(`[lockstep] boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
+          _syncLog(`boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
         }
         setTimeout(waitForEmu, 100);
@@ -1615,7 +1605,7 @@
             }
           }
           mod._simulate_input(0, 0, 0);
-          console.log(`[lockstep] INPUT_BASE auto-discovered: ${INPUT_BASE}`);
+          _syncLog(`INPUT_BASE auto-discovered: ${INPUT_BASE}`);
 
           // Discover per-player input base addresses (button 0 address for each player)
           // This replaces the old per-button scan which only covered player 0.
@@ -1633,16 +1623,15 @@
             }
             mod._simulate_input(pi, 0, 0);
           }
-          console.log(`[lockstep] per-player input addrs: ${JSON.stringify(_diagPlayerAddrs)}`);
-          _streamSync(`DIAG-ADDRS ${JSON.stringify(_diagPlayerAddrs)}`);
+          _syncLog(`per-player input addrs: ${JSON.stringify(_diagPlayerAddrs)}`);
         } catch (e) {
-          console.log(`[lockstep] INPUT_BASE auto-discovery failed, using default: ${INPUT_BASE}`);
+          _syncLog(`INPUT_BASE auto-discovery failed, using default: ${INPUT_BASE}`);
         }
       }
 
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
-      console.log(`[lockstep] emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
+      _syncLog(`emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
 
       // Set up key tracking now that ejs.controls is available
       _p1KeyMap = null;  // force re-read from EJS controls
@@ -1679,7 +1668,7 @@
       // _lastRemoteFrame > 0 means we've received actual game input = host is running.
       const hostAlreadyRunning = _lastRemoteFrame > 0;
       if ((_lateJoin || hostAlreadyRunning) && _playerSlot !== 0) {
-        console.log(`[lockstep] using late-join path (lateJoin=${_lateJoin}, hostRunning=${hostAlreadyRunning})`);
+        _syncLog(`using late-join path (lateJoin=${_lateJoin}, hostRunning=${hostAlreadyRunning})`);
         setStatus('Requesting game state...');
         socket.emit('data-message', {
           type: 'request-late-join',
@@ -1727,7 +1716,7 @@
     if (_syncStarted) return;  // guard against re-entrant calls
     _syncStarted = true;
 
-    console.log(`[lockstep] ${readyPeers.length + 1} emulators ready -- syncing initial state`);
+    _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
 
     // Try cached state first — eliminates host/guest asymmetry.
@@ -1774,9 +1763,9 @@
     }
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
-    console.log(`[lockstep] delay negotiated: own=${ownDelay} effective=${maxDelay}`);
+    _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}`);
 
-    console.log(`[lockstep] ${readyCount + 1} players lockstep-ready -- GO`);
+    _syncLog(`${readyCount + 1} players lockstep-ready -- GO`);
 
     const gm = window.EJS_emulator.gameManager;
 
@@ -1792,7 +1781,7 @@
     const readyMod = gm.Module;
     if (readyMod?._retro_reset) {
       readyMod._retro_reset();
-      console.log('[lockstep] core soft-reset before state load');
+      _syncLog('core soft-reset before state load');
     }
 
     // First loadState: fully restores CPU + RAM (needs main loop active)
@@ -1805,7 +1794,7 @@
     // and enterManualMode. Both sides now have identical state.
     gm.loadState(_guestStateBytes);
     _guestStateBytes = null;
-    console.log('[lockstep] double-loaded state (CPU + free-frame fix)');
+    _syncLog('double-loaded state (CPU + free-frame fix)');
 
     // Both sides reset and start true lockstep sync
     // (Warmup removed — deterministic timing patch makes it unnecessary)
@@ -1820,14 +1809,14 @@
 
   const fetchCachedState = async (romHash) => {
     const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
-    console.log(`[lockstep] checking for cached state: ${romHash.substring(0, 16)}...`);
+    _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
     try {
       const resp = await fetch(url);
       if (!resp.ok) throw new Error('no cached state');
       const raw = await resp.arrayBuffer();
       const bytes = new Uint8Array(raw);
       if (bytes.length < 1000) throw new Error(`cached state too small: ${bytes.length}`);
-      console.log(`[lockstep] cached state loaded (${bytes.length} bytes)`);
+      _syncLog(`cached state loaded (${bytes.length} bytes)`);
       _guestStateBytes = bytes;
 
       _selfLockstepReady = true;
@@ -1835,7 +1824,7 @@
       checkAllLockstepReady();
     } catch (_) {
       // No cached state — fall back to host capture / guest wait
-      console.log('[lockstep] no cached state — using live capture');
+      _syncLog('no cached state — using live capture');
       if (_playerSlot === 0) {
         sendInitialState();
       }
@@ -1851,7 +1840,7 @@
       // Copy before compressAndEncode — worker transfer detaches the buffer
       const cacheBytes = new Uint8Array(bytes);
       const encoded = await compressAndEncode(bytes);
-      console.log(`[lockstep] sending initial state via Socket.IO (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip)`);
+      _syncLog(`sending initial state via Socket.IO (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip)`);
 
       // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
       // data channels (SCTP limit with maxRetransmits).
@@ -1866,7 +1855,7 @@
           method: 'POST',
           body: cacheBytes,
         });
-        console.log('[lockstep] state cached — host fetching from cache');
+        _syncLog('state cached — host fetching from cache');
         fetchCachedState(romHash);
         return;  // fetchCachedState handles _selfLockstepReady
       }
@@ -1879,19 +1868,19 @@
       }
       checkAllLockstepReady();
     } catch (err) {
-      console.log('[lockstep] failed to send initial state:', err);
+      _syncLog(`failed to send initial state: ${err}`);
     }
   }
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
-    console.log('[lockstep] received initial state');
+    _syncLog('received initial state');
     setStatus('Loading initial state...');
 
     try {
       const bytes = await decodeAndDecompress(msg.data);
       _guestStateBytes = bytes;
-      console.log(`[lockstep] initial state decompressed (${bytes.length} bytes)`);
+      _syncLog(`initial state decompressed (${bytes.length} bytes)`);
 
       _selfLockstepReady = true;
       if (_rttComplete) {
@@ -1899,7 +1888,7 @@
       }
       checkAllLockstepReady();
     } catch (err) {
-      console.log('[lockstep] failed to decompress initial state:', err);
+      _syncLog(`failed to decompress initial state: ${err}`);
     }
   };
 
@@ -1917,7 +1906,7 @@
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       const encoded = await compressAndEncode(bytes);
-      console.log(`[lockstep] sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`);
+      _syncLog(`sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`);
 
       // Send via Socket.IO since save states are too large for DC
       socket.emit('data-message', {
@@ -1927,7 +1916,7 @@
         effectiveDelay: DELAY_FRAMES,
       });
     } catch (err) {
-      console.log('[lockstep] failed to send late-join state:', err);
+      _syncLog(`failed to send late-join state: ${err}`);
     }
   }
 
@@ -1935,20 +1924,20 @@
     if (_isSpectator) return;
     if (_running) return;  // already running, ignore duplicate
 
-    console.log('[lockstep] received late-join state for frame', msg.frame);
+    _syncLog(`received late-join state for frame ${msg.frame}`);
     setStatus('Loading late-join state...');
 
     try {
       const bytes = await decodeAndDecompress(msg.data);
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
-        console.log('[lockstep] gameManager not ready');
+        _syncLog('gameManager not ready');
         return;
       }
 
       if (msg.effectiveDelay) {
         DELAY_FRAMES = msg.effectiveDelay;
-        console.log(`[lockstep] late-join: using room delay ${DELAY_FRAMES}`);
+        _syncLog(`late-join: using room delay ${DELAY_FRAMES}`);
       }
 
       gm.loadState(bytes);
@@ -1972,10 +1961,10 @@
         }
       }
 
-      console.log(`[lockstep] late-join state loaded at frame ${msg.frame} synced to frame ${_frameNum} (lastRemote: ${_lastRemoteFrame})`);
+      _syncLog(`late-join state loaded at frame ${msg.frame} synced to frame ${_frameNum} (lastRemote: ${_lastRemoteFrame})`);
       startLockstep();
     } catch (err) {
-      console.log('[lockstep] failed to handle state:', err);
+      _syncLog(`failed to handle state: ${err}`);
     }
   };
 
@@ -1989,7 +1978,7 @@
 
     const canvas = document.querySelector('#game canvas');
     if (!canvas) {
-      console.log('[lockstep] canvas not found for spectator stream, retrying...');
+      _syncLog('canvas not found for spectator stream, retrying...');
       setTimeout(startSpectatorStream, 200);
       return;
     }
@@ -2008,7 +1997,7 @@
       for (let at = 0; at < audioTracks.length; at++) {
         _hostStream.addTrack(audioTracks[at]);
       }
-      console.log('[lockstep] added audio track to spectator stream');
+      _syncLog('added audio track to spectator stream');
     }
 
     const captureTrack = _hostStream.getVideoTracks()[0];
@@ -2023,7 +2012,7 @@
     };
     blitFrame();
 
-    console.log('[lockstep] spectator capture stream started (640x480)');
+    _syncLog('spectator capture stream started (640x480)');
 
     // Add tracks to all existing spectator peer connections
     for (const [sid, peer] of Object.entries(_peers)) {
@@ -2060,7 +2049,7 @@
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
-      console.log('[lockstep] renegotiate failed:', err);
+      _syncLog(`renegotiate failed: ${err}`);
     }
   }
 
@@ -2154,7 +2143,7 @@
     mod.resumeMainLoop();
 
     _manualMode = true;
-    console.log('[lockstep] entered manual mode');
+    _syncLog('entered manual mode');
   };
 
   let _hasForkedCore = false;  // true if Module exports kn_set_deterministic
@@ -2175,7 +2164,7 @@
         window._kn_cycleStart = cycleModule._kn_get_cycle_time_ms();
         window._kn_cycleBase = frameTimeMs;
         window._kn_useRelativeCycles = true;
-        console.log(`[lockstep] switched to relative cycle counter at ${window._kn_cycleStart.toFixed(1)}ms`);
+        _syncLog(`switched to relative cycle counter at ${window._kn_cycleStart.toFixed(1)}ms`);
       }
     }
 
@@ -2223,9 +2212,9 @@
     const lsMod = window.EJS_emulator?.gameManager?.Module;
     _hasForkedCore = !!(lsMod?._kn_set_deterministic && lsMod._kn_set_frame_time);
     if (_hasForkedCore) {
-      console.log('[lockstep] forked core detected — C-level deterministic timing');
+      _syncLog('forked core detected — C-level deterministic timing');
     } else {
-      console.log('[lockstep] stock core — JS-level timing patch (fallback)');
+      _syncLog('stock core — JS-level timing patch (fallback)');
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
@@ -2254,7 +2243,7 @@
       const detMod = window.EJS_emulator?.gameManager?.Module;
       if (detMod?._kn_set_deterministic) {
         detMod._kn_set_deterministic(1);
-        console.log('[lockstep] C-level deterministic timing enabled (session-wide)');
+        _syncLog('C-level deterministic timing enabled (session-wide)');
       }
 
       // CP0_COUNT reset disabled — translate_event_queue corrupts host state.
@@ -2276,7 +2265,7 @@
           return APISandbox.nativePerfNow();
         };
         APISandbox.overridePerfNow(_deterministicPerfNow);
-        console.log('[lockstep] performance.now() intercepted for deterministic frame steps');
+        _syncLog('performance.now() intercepted for deterministic frame steps');
       }
     }
 
@@ -2293,7 +2282,7 @@
       lsMod._toggle_slow_motion(0);
       lsMod._toggle_fastforward = () => {};
       lsMod._toggle_slow_motion = () => {};
-      console.log('[lockstep] neutralized fast-forward/slow-motion controls');
+      _syncLog('neutralized fast-forward/slow-motion controls');
     }
 
     // Kill OpenAL's audio system. An active AudioContext + AL_PLAYING source
@@ -2317,7 +2306,7 @@
           ctx.audioCtx.suspend();
           ctx.audioCtx.resume = () => Promise.resolve();
         }
-        console.log(`[lockstep] killed OpenAL audio system (context ${id})`);
+        _syncLog(`killed OpenAL audio system (context ${id})`);
       }
     }
 
@@ -2336,7 +2325,7 @@
 
     const activePeers = getActivePeers();
     const peerSlots = activePeers.map((p) => p.slot);
-    console.log(`[lockstep] lockstep started -- slot: ${_playerSlot} peerSlots: ${peerSlots.join(',')} delay: ${DELAY_FRAMES}`);
+    _syncLog(`lockstep started -- slot: ${_playerSlot} peerSlots: ${peerSlots.join(',')} delay: ${DELAY_FRAMES}`);
     setStatus('Connected -- game on!');
 
     window._lockstepActive = true;
@@ -2350,11 +2339,11 @@
     if (_hasKnSync && _syncEnabled) {
       _syncBufSize = 8 * 1024 * 1024 + 16384;
       _syncBufPtr = knMod._malloc(_syncBufSize);
-      console.log('[lockstep] C-level sync available, buf at', _syncBufPtr);
+      _syncLog(`C-level sync available, buf at ${_syncBufPtr}`);
     } else if (_hasKnSync) {
-      console.log('[lockstep] C-level sync available (buffer deferred — sync disabled)');
+      _syncLog('C-level sync available (buffer deferred — sync disabled)');
     } else {
-      console.log('[lockstep] C-level sync NOT available, using getState/loadState fallback');
+      _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
 
     // Background tab handling: do NOT pause the tick loop. Browser naturally
@@ -2369,11 +2358,11 @@
       if (!_running) return;
       if (document.hidden) {
         _backgroundAt = Date.now();
-        console.log('[lockstep] tab hidden at frame', _frameNum);
+        _syncLog(`tab hidden at frame ${_frameNum}`);
       } else {
         const bgDuration = _backgroundAt ? Date.now() - _backgroundAt : 0;
         _backgroundAt = 0;
-        console.log('[lockstep] tab visible (was background', bgDuration, 'ms)');
+        _syncLog(`tab visible (was background ${bgDuration} ms)`);
 
         // Short background (<500ms): no action needed
         if (bgDuration < 500) return;
@@ -2394,7 +2383,7 @@
         // Fast-forward _frameNum to catch up with peers. Background throttling
         // means we fell behind — peers have moved far ahead.
         if (_lastRemoteFrame > _frameNum) {
-          console.log('[lockstep] fast-forward:', _frameNum, '->', _lastRemoteFrame);
+          _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);
           _frameNum = _lastRemoteFrame;
           KNState.frameNum = _frameNum;
           _localInputs = {};
@@ -2533,7 +2522,7 @@
           for (const s of Object.keys(_remoteInputs)) {
             rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
           }
-          console.log(`[lockstep] INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`);
+          _syncLog(`INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`);
         }
         const stallDuration = now - _stallStart;
         if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
@@ -2548,7 +2537,7 @@
               repeatInfo.push(`s${s}=0`);
             }
           }
-          console.log(`[lockstep] INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`);
+          _syncLog(`INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`);
           _stallStart = 0;
         } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
           // Stage 2 — request resend from missing peers (once per stall)
@@ -2561,7 +2550,7 @@
               try { dc2.send(`resend:${applyFrame}`); } catch (_) {}
             }
           }
-          console.log(`[lockstep] INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`);
+          _syncLog(`INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`);
           _remoteMissed++;
           // Don't re-enter full tick() — that causes burst frame processing
           // when buffered inputs resolve. Let setInterval(16) handle the
@@ -2601,7 +2590,7 @@
             dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
           }
         }
-        console.log(`[lockstep] INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent}`);
+        _syncLog(`INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent}`);
       }
       // Zero disconnected player slots so loadState() can't restore stale input
       for (let zs = 0; zs < 4; zs++) {
@@ -2627,7 +2616,7 @@
     // Safety: resume after 3s if resync data never arrives.
     if (_awaitingResync) {
       if (performance.now() - _awaitingResyncAt > 3000) {
-        console.log('[lockstep] resync wait timeout — resuming');
+        _syncLog('resync wait timeout — resuming');
         _awaitingResync = false;
       } else {
         return;
@@ -2653,17 +2642,17 @@
           const mod = window.EJS_emulator.gameManager.Module;
           const guestHash = mod._kn_sync_hash();
           if (guestHash !== _pendingSyncCheck.hash) {
-            console.log('[lockstep] DESYNC (deferred) at frame', _pendingSyncCheck.frame);
+            _syncLog(`DESYNC (deferred) at frame ${_pendingSyncCheck.frame}`);
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
               if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
-              console.log(`[lockstep] sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms, pause=${_awaitingResync})`);
+              _syncLog(`sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms, pause=${_awaitingResync})`);
               const sp = _peers[_pendingSyncCheck.peerSid];
-              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { console.log('[lockstep] deferred sync-request failed:', e); } }
+              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { _syncLog(`deferred sync-request failed: ${e}`); } }
             } else {
-              console.log(`[lockstep] DESYNC (deferred) but blocked: pending=${!!_pendingResyncState} cooldown=${Math.round(cooldownElapsed3)}ms`);
+              _syncLog(`DESYNC (deferred) but blocked: pending=${!!_pendingResyncState} cooldown=${Math.round(cooldownElapsed3)}ms`);
             }
           } else {
             _consecutiveResyncs = 0;
@@ -2677,7 +2666,7 @@
               const deferCheck = _pendingSyncCheck;  // capture before nulling
               workerPost({ type: 'hash', data: deferBytes }).then((res) => {
                 if (res.hash !== deferCheck.hash) {
-                  console.log('[lockstep] DESYNC (deferred) at frame', deferCheck.frame);
+                  _syncLog(`DESYNC (deferred) at frame ${deferCheck.frame}`);
                   const now3 = performance.now();
                   if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
                     _lastResyncTime = now3;
@@ -2725,8 +2714,7 @@
               try { p.dc.send(syncMsg); sent++; } catch (_) {}
             }
             const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
-            console.log(`[lockstep] ${hostMsg}`);
-            _streamSync(hostMsg);
+            _syncLog(hostMsg);
           }).catch(() => {});
         }
       }
@@ -2782,7 +2770,7 @@
       // Letting EJS also write would double-apply and bypass lockstep.
     };
     gm._kn_hooked = true;
-    console.log('[lockstep] hooked EJS simulateInput for touch capture');
+    _syncLog('hooked EJS simulateInput for touch capture');
   };
 
   const readLocalInput = () => {
@@ -3130,9 +3118,9 @@
           if (rdramPtr > 0 && rdramSize > 0) {
             if (_hashRegion === null) {
               const bufSrc = mod.wasmMemory ? 'wasmMemory' : mod.asm?.memory ? 'asm.memory' : mod.buffer ? 'mod.buffer' : 'HEAPU8.buffer';
-              console.log(`[lockstep] hash: RDRAM at [${rdramPtr}], size=${rdramSize}, buf=${bufSrc}`);
+              _syncLog(`hash: RDRAM at [${rdramPtr}], size=${rdramSize}, buf=${bufSrc}`);
             } else if (_hashRegion?.ptr !== rdramPtr) {
-              console.log(`[lockstep] hash: RDRAM moved! old=${_hashRegion.ptr} new=${rdramPtr}`);
+              _syncLog(`hash: RDRAM moved! old=${_hashRegion.ptr} new=${rdramPtr}`);
             }
             _hashRegion = { ptr: rdramPtr, size: rdramSize };
           }
@@ -3184,7 +3172,7 @@
         }
         return combined;
       } catch (e) {
-        console.log(`[lockstep] hash: RDRAM read failed: ${e.message}`);
+        _syncLog(`hash: RDRAM read failed: ${e.message}`);
       }
     }
 
@@ -3221,27 +3209,24 @@
       const bytesWritten = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
       const ps1 = performance.now();
       if (bytesWritten === 0) {
-        console.log('[lockstep] kn_sync_read returned 0');
+        _syncLog('kn_sync_read returned 0');
         _pushingSyncState = false;
         return;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
-      console.log(`[lockstep] host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
-      _streamSync(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+      _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     } else {
       // Fallback: existing getState path
       const ps0 = performance.now();
       const raw = gm.getState();
       const ps1 = performance.now();
       currentState = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      console.log(`[lockstep] host getState (FALLBACK): ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
-      _streamSync(`host getState: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+      _syncLog(`host getState (FALLBACK): ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     }
 
     // Delta sync: XOR against previous state
     const isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
-    console.log(`[lockstep] pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
-    _streamSync(`pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
+    _syncLog(`pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
     let toCompress;
     if (isFull) {
       toCompress = currentState;
@@ -3259,7 +3244,7 @@
       _streamSync(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
       sendSyncChunks(compressed, frame, isFull, targetSid);
     }).catch((err) => {
-      console.log('[lockstep] sync compress failed:', err);
+      _syncLog(`sync compress failed: ${err}`);
     }).finally(() => {
       _pushingSyncState = false;
     });
@@ -3289,10 +3274,10 @@
           dc.send(compressed.slice(start, end));
         }
       } catch (err) {
-        console.log('[lockstep] sync send failed:', err);
+        _syncLog(`sync send failed: ${err}`);
       }
     }
-    console.log(`[lockstep] pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`);
+    _syncLog(`pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`);
   };
 
   const handleSyncChunksComplete = async () => {
@@ -3318,7 +3303,7 @@
         // Delta: XOR against _lastSyncState (the state from the last completed
         // resync). Both host and guest cached this, so the XOR base matches.
         if (!_lastSyncState || _lastSyncState.length !== decompressed.length) {
-          console.log(`[lockstep] delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length}`);
+          _syncLog(`delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length}`);
           return;
         }
         const reconstructed = new Uint8Array(_lastSyncState.length);
@@ -3329,7 +3314,7 @@
       }
       _streamSync(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
     } catch (err) {
-      console.log('[lockstep] sync decompress failed:', err);
+      _syncLog(`sync decompress failed: ${err}`);
     }
   };
 
@@ -3352,7 +3337,7 @@
       const lt1 = performance.now();
 
       if (result !== 0) {
-        console.log('[lockstep] kn_sync_write failed:', result);
+        _syncLog(`kn_sync_write failed: ${result}`);
         return;
       }
 
@@ -3361,8 +3346,7 @@
 
       _resyncCount++;
       _consecutiveResyncs++;
-      console.log(`[lockstep] kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
-      _streamSync(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+      _syncLog(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     } else {
       // Fallback: existing loadState path
       const lt0 = performance.now();
@@ -3399,8 +3383,7 @@
     }
 
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
-    console.log(`[lockstep] ${syncMsg}`);
-    _streamSync(syncMsg);
+    _syncLog(syncMsg);
   };
 
   // -- Init / Stop API -------------------------------------------------------
@@ -3624,7 +3607,7 @@
           ua: navigator.userAgent,
         };
         socket.emit('debug-logs', { info, logs: _debugLog });
-        console.log('[lockstep] dumped', _debugLog.length, 'log entries to server');
+        _syncLog(`dumped ${_debugLog.length} log entries to server`);
       }
     },
   };
