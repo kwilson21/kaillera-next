@@ -28,12 +28,18 @@ let running = false;
 for (let i = 0; i < arr.length; i++) { ... }
 ```
 
+**Edge cases:**
+- Declare-then-assign patterns (`var x; ... x = val;`) must become `let`, not `const`.
+- `var` redeclared in the same function scope (e.g., `var mod` twice in `startLockstep()`)
+  must be renamed or scoped — `let`/`const` does not allow redeclaration.
+
 ### Arrow Functions
 
 Traditional `function` expressions → arrow functions, except:
 - IIFE wrappers (keep `(function () { ... })()`)
 - Functions that use `this` binding
-- Functions used as constructors
+- Functions that use `arguments`
+- Functions used as constructors (called with `new`)
 
 ```javascript
 // Before
@@ -87,6 +93,10 @@ for (const [sid, p] of Object.entries(peers)) { ... }
 
 `.then()/.catch()` chains → `async`/`await` with `try`/`catch`, where the
 containing function can become async without changing its caller contract.
+
+**Constraint:** A function can only become `async` if no caller depends on it
+returning a non-Promise value (or returning synchronously). Fire-and-forget
+callers are safe. Functions whose return value is checked are not.
 
 ```javascript
 // Before
@@ -148,24 +158,39 @@ const { width, height } = rect;
   indexed iteration for a reason. Don't convert to `for...of`.
 - **EJS integration points** — `window.EJS_*` globals, `gm.simulateInput` hooks,
   `ejs.virtualGamepad` access. These are dictated by EmulatorJS, not us.
+- **Inline Worker code strings** — The string-built Web Worker in
+  `netplay-lockstep.js` (lines ~2853-2906) runs in a separate context. Do not
+  modernize code inside string literals.
+- **Functions using `arguments`** — Arrow functions don't have `arguments`.
+  These must stay as `function` expressions:
+  - `console.log` interceptor in `netplay-lockstep.js` (~line 156)
+  - `mod.pauseMainLoop` / `mod.resumeMainLoop` monkey-patches (~lines 532-541)
+  - `fetch` / `XMLHttpRequest.prototype.open` interceptors in `core-redirector.js`
+- **Functions used as constructors** — Arrow functions can't be called with `new`:
+  - `_HijackAC` in `netplay-lockstep.js` (~line 1514) — assigned to
+    `window.AudioContext` and called with `new` by EmulatorJS
+- **Functions relying on dynamic `this`** — The fetch/XHR interceptors in
+  `core-redirector.js` use `this` to forward calls to the original methods.
+  Arrow functions would bind `this` to the IIFE scope instead.
 
 ## File Order
 
 Modernize smallest/simplest files first to validate the transform patterns,
 then tackle the large files where most of the debt lives.
 
-| Order | File | Size | Modernization Debt |
-|-------|------|------|--------------------|
-| 1 | `kn-state.js` | 34 lines | Minimal — warm-up |
-| 2 | `shared.js` | 166 lines | Low — few `var`, promise chains |
-| 3 | `virtual-gamepad.js` | 340 lines | Medium — `var`, traditional loops |
-| 4 | `gamepad-manager.js` | 328 lines | Medium — mixed patterns |
-| 5 | `core-redirector.js` | ~100 lines | Low — mostly clean |
-| 6 | `lobby.js` | ~200 lines | Minimal — mostly modern |
-| 7 | `netplay-streaming.js` | 785 lines | Medium-high — mixed throughout |
-| 8 | `netplay-lockstep.js` | 3,571 lines | Highest — 450+ var, 167 string concat |
-| 9 | `play.js` | ~3,000 lines | High — scattered legacy patterns |
-| 10 | `audio-worklet-processor.js` | ~50 lines | Minimal — already modern |
+| Order | File | Size | Modernization Debt | Notes |
+|-------|------|------|--------------------|-------|
+| 1 | `kn-state.js` | 34 lines | Minimal — warm-up | |
+| 2 | `api-sandbox.js` | ~78 lines | Low — `var` declarations | Loaded first on play.html |
+| 3 | `shared.js` | 166 lines | Low — few `var`, promise chains | |
+| 4 | `virtual-gamepad.js` | 340 lines | Medium — `var`, traditional loops | |
+| 5 | `gamepad-manager.js` | 328 lines | Medium — mixed patterns | |
+| 6 | `core-redirector.js` | ~100 lines | Low — has `this`/`arguments` traps | |
+| 7 | `lobby.js` | ~200 lines | Minimal — mostly modern | Loaded from index.html, not play.html |
+| 8 | `netplay-streaming.js` | 785 lines | Medium-high — mixed throughout | |
+| 9 | `netplay-lockstep.js` | 3,571 lines | Highest — constructor trap, var redecls | |
+| 10 | `play.js` | ~3,000 lines | High — scattered legacy patterns | |
+| 11 | `audio-worklet-processor.js` | ~50 lines | Minimal — already modern | AudioWorklet scope |
 
 ## Risk Mitigation
 
@@ -175,10 +200,22 @@ then tackle the large files where most of the debt lives.
 - **Keep IIFE structure.** No module system changes, no build tooling changes.
 - **`const` by default.** Accidentally using `const` where `let` was needed produces
   an immediate, obvious runtime error — far safer than the silent bugs `var` enables.
+- **Explicit do-not-convert checklist.** Before converting any `function` expression,
+  check: does it use `this`? `arguments`? Is it called with `new`? If yes to any → keep
+  as `function`.
+- **`var` redeclaration scan.** Before converting `var` → `let`/`const`, check for
+  duplicate declarations in the same function scope. Rename duplicates first.
 
 ## Validation
 
 No automated test suite exists. Validation is:
 1. No syntax errors (file loads without throwing)
-2. Code review of each transformed file (mechanical correctness)
-3. Manual smoke test of core flows (lobby → game start → lockstep → late join)
+2. Code review with explicit checklist for `arguments`, `this`, constructors,
+   `var` redeclarations, and declare-then-assign patterns
+3. Manual smoke tests covering major code paths:
+   - Lobby → create room → join
+   - Lockstep 2P (host + guest)
+   - Streaming 2P (host + guest)
+   - Spectator join
+   - Late join during lockstep
+   - Mobile gesture → virtual gamepad input
