@@ -3395,8 +3395,11 @@
         toCompress[i] = currentState[i] ^ _lastSyncState[i];
       }
     }
-    // Update delta base (guest caches after applying)
-    _setLastSyncState(currentState, 'pushSync');
+    // Update delta base (guest caches after applying).
+    // Must .slice() because compressState() transfers the buffer to a Web Worker,
+    // which detaches the ArrayBuffer. Without the copy, _lastSyncState.length === 0
+    // on the next push and delta never fires.
+    _setLastSyncState(currentState.slice(), 'pushSync');
 
     compressState(toCompress).then((compressed) => {
       const sizeKB = Math.round(compressed.length / 1024);
