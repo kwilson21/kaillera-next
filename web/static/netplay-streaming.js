@@ -71,8 +71,8 @@
  * ── Connection Recovery ─────────────────────────────────────────────────
  *
  *   When a peer's ICE connection degrades (failed/disconnected state),
- *   renegotiate() performs a full SDP re-exchange with the same peer —
- *   new offer/answer with codec preferences and bitrate settings reapplied.
+ *   the peer is cleaned up and a new connection can be established via
+ *   the normal offer/answer flow (no renegotiation — unreliable on iOS).
  *   onconnectionstatechange handles cleanup when a peer fully disconnects.
  *
  * ── Debug Overlay ─────────────────────────────────────────────────────────
@@ -438,30 +438,9 @@
       );
 
       if (_playerSlot === 0) {
-        // Host: if emulator isn't started yet, start it now
-        if (!_gameRunning) {
-          _syncLog('DC open: starting host emulator');
-          startHost();
-        } else if (_hostStream) {
-          // Late-joiner: add stream tracks if createPeer didn't already
-          const peer = _peers[remoteSid];
-          if (peer) {
-            const existingSenders = peer.pc.getSenders();
-            const alreadyHasTracks = existingSenders.some((s) => s.track);
-            if (!alreadyHasTracks) {
-              _syncLog('DC open: adding stream to late peer');
-              for (const track of _hostStream.getTracks()) {
-                peer.pc.addTrack(track, _hostStream);
-              }
-              optimizeVideoEncoding(peer.pc);
-              renegotiate(remoteSid);
-            } else {
-              _syncLog('DC open: peer already has tracks from createPeer');
-            }
-          }
-        } else {
-          _syncLog('DC open: host running but stream not ready yet');
-        }
+        // Host: startHost() runs from init(), not from DC open.
+        // Tracks are included in the initial offer, so no action needed.
+        _syncLog('DC open: host (stream already initialized from init)');
       } else if (!_isSpectator) {
         // Guest: start sending input
         _syncLog('DC open: starting guest input loop');
@@ -584,23 +563,12 @@
       // If AL contexts are ready, audio track joins video in the first offer.
       captureEmulatorAudio();
 
-      // Add stream tracks to existing peer connections and renegotiate.
-      // The initial offer was DC-only; this renegotiation adds video.
-      const trackCount = _hostStream.getTracks().length;
-      _syncLog(`adding ${trackCount} tracks to ${Object.keys(_peers).length} peers`);
-      for (const [sid, peer] of Object.entries(_peers)) {
-        const senders = peer.pc.getSenders();
-        const hasTracks = senders.some((s) => s.track);
-        if (hasTracks) {
-          _syncLog(`peer ${sid} already has tracks — skipping addTrack`);
-          continue;
-        }
-        for (const track of _hostStream.getTracks()) {
-          peer.pc.addTrack(track, _hostStream);
-        }
-        optimizeVideoEncoding(peer.pc);
-        _syncLog(`renegotiating with ${sid} (senders=${peer.pc.getSenders().length})`);
-        renegotiate(sid);
+      // Stream is ready — now process peers. createPeer adds tracks
+      // (checks _hostStream) so the first offer includes video.
+      // No renegotiation needed — avoids iOS WebKit renegotiation issues.
+      _syncLog(`stream ready (${_hostStream.getTracks().length} tracks) — processing peers`);
+      if (_config?.initialPlayers) {
+        onUsersUpdated(_config.initialPlayers);
       }
 
       setStatus('🟢 Hosting — game on!');
@@ -619,21 +587,6 @@
       }
     };
     waitForEmu();
-  };
-
-  const renegotiate = async (remoteSid) => {
-    const peer = _peers[remoteSid];
-    if (!peer) return;
-    try {
-      const offer = await peer.pc.createOffer();
-      // Munge SDP to set higher bitrate floor for video
-      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
-      await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', { target: remoteSid, offer });
-      _syncLog(`renegotiate sent to ${remoteSid} (sdp has video=${offer.sdp.includes('m=video')})`);
-    } catch (err) {
-      _syncLog(`renegotiate failed: ${err}`);
-    }
   };
 
   const setSDPBitrate = (sdp, bitrateKbps) => {
@@ -981,18 +934,19 @@
       setupKeyTracking();
     }
 
-    // Host: apply cheats + disable EJS input at boot (same as lockstep).
-    // startHost() also applies cheats on DC open, but if the WebRTC handshake
-    // is delayed the emulator would run uncheatted until then.
     if (_playerSlot === 0) {
-      KNShared.bootWithCheats('streaming');
+      // Host: boot emulator and create stream BEFORE processing peers.
+      // This ensures the first offer includes video tracks — avoids
+      // renegotiation which is unreliable on iOS WebKit.
+      startHost();
+      // Don't process initialPlayers yet — startHost's waitForEmu will
+      // call onUsersUpdated after the stream is ready.
+    } else {
+      // Guest/spectator: process current peers immediately
+      if (config.initialPlayers) {
+        onUsersUpdated(config.initialPlayers);
+      }
     }
-
-    // Process current peers immediately
-    if (config.initialPlayers) {
-      onUsersUpdated(config.initialPlayers);
-    }
-    // startHost() / startGuestInputLoop() triggered from ch.onopen
 
     // Virtual gamepad for mobile streaming guests
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
