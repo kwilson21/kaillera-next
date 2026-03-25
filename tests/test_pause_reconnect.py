@@ -2,7 +2,7 @@
 
 Run: pytest tests/test_pause_reconnect.py -v
 
-Requires: dev server running at localhost:8000, ROM file at ROM_PATH.
+Requires: dev server running at localhost:27888, ROM file at ROM_PATH.
 """
 
 import os
@@ -27,13 +27,13 @@ def _room_id(prefix):
 def server_url():
     """Use the already-running dev server (user manages it)."""
     import requests
-    url = "http://localhost:8000"
+    url = "http://localhost:27888"
     try:
         r = requests.get(f"{url}/health", timeout=2)
         if r.status_code != 200:
-            pytest.skip("Dev server not running on localhost:8000")
+            pytest.skip("Dev server not running on localhost:27888")
     except Exception:
-        pytest.skip("Dev server not running on localhost:8000")
+        pytest.skip("Dev server not running on localhost:27888")
     return url
 
 

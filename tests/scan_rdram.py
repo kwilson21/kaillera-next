@@ -5,7 +5,7 @@ simulated input, and scans RDRAM at each state to find stable vs
 volatile regions. Results used to build state-aware desync detection.
 
 Run: python tests/scan_rdram.py
-Requires: dev server running at localhost:8000, ROM file available.
+Requires: dev server running at localhost:27888, ROM file available.
 """
 
 import json
@@ -13,7 +13,7 @@ import time
 from playwright.sync_api import sync_playwright
 
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
-SERVER = "http://localhost:8000"
+SERVER = "http://localhost:27888"
 
 # SSB64 key mappings from shared.js DEFAULT_N64_KEYMAP
 KEYS = {

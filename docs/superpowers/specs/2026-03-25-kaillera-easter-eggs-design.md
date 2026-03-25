@@ -18,17 +18,17 @@ Add Easter eggs and nostalgic touches referencing the original Kaillera netplay 
 
 ## Changes
 
-### 1. Port 27886
+### 1. Port 27888
 
 The original Kaillera default port replaces the current port 8000.
 
 **Files to update (all occurrences of port 8000):**
-- `server/src/main.py` — change `port=8000` to `port=27886` in `uvicorn.run()`, update module docstring, update log message to: `"Listening on :27886 — the original Kaillera port"`
-- `Dockerfile` line 25 — `EXPOSE 27886` instead of `EXPOSE 8000`
-- `Dockerfile` line 28 — HEALTHCHECK URL from `localhost:8000` to `localhost:27886`
+- `server/src/main.py` — change `port=8000` to `port=27888` in `uvicorn.run()`, update module docstring, update log message to: `"Listening on :27888 — the original Kaillera port"`
+- `Dockerfile` line 25 — `EXPOSE 27888` instead of `EXPOSE 8000`
+- `Dockerfile` line 28 — HEALTHCHECK URL from `localhost:8000` to `localhost:27888`
 - `README.md` — all references to port 8000 (lines 35, 37, 50, 69)
-- `CLAUDE.md` — architecture diagram `HTTP/WS :8000` → `HTTP/WS :27886`
-- `tests/conftest.py` line 10 — `SERVER_URL = "http://localhost:27886"`
+- `CLAUDE.md` — architecture diagram `HTTP/WS :8000` → `HTTP/WS :27888`
+- `tests/conftest.py` line 10 — `SERVER_URL = "http://localhost:27888"`
 - `tests/test_input_resend.py` — port references
 - `tests/test_pause_reconnect.py` — port references
 - `tests/test_virtual_gamepad.py` — port reference
@@ -120,9 +120,9 @@ Note: "Peer connection lost" was not found in the actual code — the `'disconne
 
 ## Testing
 
-- Verify server starts on port 27886
-- Verify Dockerfile exposes 27886 and HEALTHCHECK hits 27886
-- Verify all test files reference port 27886
+- Verify server starts on port 27888
+- Verify Dockerfile exposes 27888 and HEALTHCHECK hits 27888
+- Verify all test files reference port 27888
 - Verify frame delay labels appear correctly for all 10 values (0–9)
 - Verify classic messages appear in lockstep mode connection state changes
 - Verify lobby footer and HTML comments are present

@@ -19,7 +19,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
-SERVER = "http://localhost:8000"
+SERVER = "http://localhost:27888"
 SCREENSHOT_DIR = Path("/Users/kazon/kaillera-next/logs/screenshots")
 
 KEYS = {

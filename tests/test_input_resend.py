@@ -3,14 +3,14 @@
 Validates that when a peer's input is missing past MAX_STALL_MS (3s),
 a resend request is sent and the peer re-sends from _localInputs.
 
-Expects the dev server to be running on localhost:8000.
+Expects the dev server to be running on localhost:27888.
 Run: pytest tests/test_input_resend.py -v -s --no-header
 """
 import time
 
 import pytest
 
-SERVER_URL = "http://localhost:8000"
+SERVER_URL = "http://localhost:27888"
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 

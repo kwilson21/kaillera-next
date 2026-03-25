@@ -9,7 +9,7 @@ IPHONE_SE_PORTRAIT = {"width": 375, "height": 667}
 PIXEL_7_PORTRAIT = {"width": 412, "height": 915}
 IPAD_PORTRAIT = {"width": 820, "height": 1180}
 
-SERVER = "http://localhost:8000"
+SERVER = "http://localhost:27888"
 
 # Minimal page simulating play.html for a streaming guest
 STREAMING_GUEST_PAGE = """<!DOCTYPE html>

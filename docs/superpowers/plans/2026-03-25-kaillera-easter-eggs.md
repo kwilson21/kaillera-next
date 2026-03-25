@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add nostalgic Kaillera references throughout kaillera-next — port 27886, connection type labels, classic messages, credits, and view-source Easter eggs.
+**Goal:** Add nostalgic Kaillera references throughout kaillera-next — port 27888, connection type labels, classic messages, credits, and view-source Easter eggs.
 
 **Architecture:** Scattered string/config changes across existing files. No new files, no new abstractions. Each task is an independent set of edits that can be committed separately.
 
@@ -14,7 +14,7 @@
 
 ## Chunk 1: Infrastructure & Server
 
-### Task 1: Port 27886 — Server & Docker
+### Task 1: Port 27888 — Server & Docker
 
 **Files:**
 - Modify: `server/src/main.py:1-12,91-95`
@@ -28,7 +28,7 @@ Change the docstring at top of `server/src/main.py`:
 """
 kaillera-next server entry point — V1 (browser-based EmulatorJS netplay).
 
-Starts a single HTTP server on :27886 (the original Kaillera port) that handles:
+Starts a single HTTP server on :27888 (the original Kaillera port) that handles:
   - Socket.IO signaling  (/socket.io/)
   - REST API             (/health, /list, /room)
   - Static web frontend  (/ → web/index.html, /static/roms/)
@@ -45,11 +45,11 @@ In `server/src/main.py`, replace the log line and port:
 
 ```python
     log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
-    log.info("Listening on :27886 — the original Kaillera port (loop=%s)", loop_setting)
+    log.info("Listening on :27888 — the original Kaillera port (loop=%s)", loop_setting)
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
-        port=27886,
+        port=27888,
 ```
 
 - [ ] **Step 3: Update Dockerfile**
@@ -57,26 +57,26 @@ In `server/src/main.py`, replace the log line and port:
 In `Dockerfile`, change line 25 and line 28:
 
 ```dockerfile
-EXPOSE 27886
+EXPOSE 27888
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:27886/health')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:27888/health')"
 ```
 
-- [ ] **Step 4: Verify server starts on 27886**
+- [ ] **Step 4: Verify server starts on 27888**
 
 Run: `cd /Users/kazon/kaillera-next/server && python -c "from src.main import run; run()" &`
-Expected: Log output shows `Listening on :27886` and `continuing the legacy of Kaillera`
+Expected: Log output shows `Listening on :27888` and `continuing the legacy of Kaillera`
 Then kill the server.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add server/src/main.py Dockerfile
-git commit -m "feat: change default port to 27886 (original Kaillera port)"
+git commit -m "feat: change default port to 27888 (original Kaillera port)"
 ```
 
-### Task 2: Port 27886 — Documentation
+### Task 2: Port 27888 — Documentation
 
 **Files:**
 - Modify: `README.md:35,37,50,69`
@@ -86,23 +86,23 @@ git commit -m "feat: change default port to 27886 (original Kaillera port)"
 
 Replace all four occurrences of port 8000:
 
-Line 35: `# Run (serves both API and web frontend on :27886)`
-Line 37: `# → http://localhost:27886`
-Line 50: `docker run -p 27886:27886 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next`
-Line 69: `│ :27886               │`
+Line 35: `# Run (serves both API and web frontend on :27888)`
+Line 37: `# → http://localhost:27888`
+Line 50: `docker run -p 27888:27888 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next`
+Line 69: `│ :27888               │`
 
 - [ ] **Step 2: Update CLAUDE.md**
 
-Line 37: `HTTP/WS :27886`
+Line 37: `HTTP/WS :27888`
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add README.md CLAUDE.md
-git commit -m "docs: update port references from 8000 to 27886"
+git commit -m "docs: update port references from 8000 to 27888"
 ```
 
-### Task 3: Port 27886 — Test Files
+### Task 3: Port 27888 — Test Files
 
 **Files:**
 - Modify: `tests/conftest.py:10`
@@ -114,56 +114,56 @@ git commit -m "docs: update port references from 8000 to 27886"
 
 - [ ] **Step 1: Update all test file port references**
 
-Replace every `8000` with `27886` in these files:
+Replace every `8000` with `27888` in these files:
 
 `tests/conftest.py` line 10:
 ```python
-SERVER_URL = "http://localhost:27886"
+SERVER_URL = "http://localhost:27888"
 ```
 
 `tests/test_input_resend.py` line 6:
 ```
-Expects the dev server to be running on localhost:27886.
+Expects the dev server to be running on localhost:27888.
 ```
 Line 13:
 ```python
-SERVER_URL = "http://localhost:27886"
+SERVER_URL = "http://localhost:27888"
 ```
 
 `tests/test_pause_reconnect.py` line 5:
 ```
-Requires: dev server running at localhost:27886, ROM file at ROM_PATH.
+Requires: dev server running at localhost:27888, ROM file at ROM_PATH.
 ```
 Line 30:
 ```python
-    url = "http://localhost:27886"
+    url = "http://localhost:27888"
 ```
-Lines 34, 36: replace `localhost:8000` with `localhost:27886`
+Lines 34, 36: replace `localhost:8000` with `localhost:27888`
 
 `tests/test_virtual_gamepad.py` line 12:
 ```python
-SERVER = "http://localhost:27886"
+SERVER = "http://localhost:27888"
 ```
 
 `tests/scan_rdram.py` line 8:
 ```
-Requires: dev server running at localhost:27886, ROM file available.
+Requires: dev server running at localhost:27888, ROM file available.
 ```
 Line 16:
 ```python
-SERVER = "http://localhost:27886"
+SERVER = "http://localhost:27888"
 ```
 
 `tests/scan_rdram_visual.py` line 22:
 ```python
-SERVER = "http://localhost:27886"
+SERVER = "http://localhost:27888"
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add tests/
-git commit -m "test: update port references from 8000 to 27886"
+git commit -m "test: update port references from 8000 to 27888"
 ```
 
 ---
@@ -210,7 +210,7 @@ Replace the entire `web/index.html` content:
 
 - [ ] **Step 2: Verify in browser**
 
-Open `http://localhost:27886/` — confirm:
+Open `http://localhost:27888/` — confirm:
 - Footer text "Inspired by Kaillera by Christophe Thibault" visible below lobby card
 - Hovering over "kaillera-next" title shows "v0.9 forever" tooltip
 - View source shows both HTML comments

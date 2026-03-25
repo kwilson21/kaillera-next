@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import requests
 
-SERVER_URL = "http://localhost:8000"
+SERVER_URL = "http://localhost:27888"
 SERVER_DIR = str(Path(__file__).parent.parent / "server")
 
 
