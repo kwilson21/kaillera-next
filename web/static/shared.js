@@ -33,17 +33,14 @@
     73: 23,   // I -> C-Up (R STICK UP -> CSTICK_UP)
   };
 
-  function applyStandardCheats(cheats) {
-    waitForEmulator().then(function (gm) {
-      try {
-        cheats.forEach(function (c, i) { gm.setCheat(i, 1, c.code); });
-        console.log('[netplay] applied', cheats.length, 'standard cheats');
-      } catch (e) {
-        console.error('[netplay] cheat application failed:', e.message);
-      }
-    }).catch(function (err) {
-      console.error('[netplay] cannot apply cheats:', err.message);
-    });
+  async function applyStandardCheats(cheats) {
+    try {
+      const gm = await waitForEmulator();
+      cheats.forEach((c, i) => { gm.setCheat(i, 1, c.code); });
+      console.log('[netplay] applied', cheats.length, 'standard cheats');
+    } catch (e) {
+      console.error('[netplay] cheat application failed:', e?.message);
+    }
   }
 
   let _listenersAdded = false;
@@ -92,28 +89,28 @@
     return resolved;
   }
 
-  var _bootPromise = null;  // deduplication: only one poll loop at a time
+  let _bootPromise = null;  // deduplication: only one poll loop at a time
 
   function waitForEmulator(timeoutMs) {
     if (_bootPromise) return _bootPromise;
     timeoutMs = timeoutMs || 30000;
 
-    _bootPromise = new Promise(function (resolve, reject) {
-      var attempts = 0;
-      var maxAttempts = Math.ceil(timeoutMs / 200);
+    _bootPromise = new Promise((resolve, reject) => {
+      let attempts = 0;
+      const maxAttempts = Math.ceil(timeoutMs / 200);
 
-      function attempt() {
-        var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-        if (gm && gm.Module) {
-          var frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
-          console.log('[netplay] emulator running (frames=' + frames + ')');
+      const attempt = () => {
+        const gm = window.EJS_emulator?.gameManager;
+        if (gm?.Module) {
+          const frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
+          console.log(`[netplay] emulator running (frames=${frames})`);
           _bootPromise = null;
           enableMobileTouch();
           resolve(gm);
           return;
         }
 
-        var btn = document.querySelector('.ejs_start_button');
+        const btn = document.querySelector('.ejs_start_button');
         if (btn) {
           console.log('[netplay] triggerEmulatorStart: clicking start button');
           if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
@@ -125,11 +122,11 @@
         }
         if (++attempts >= maxAttempts) {
           _bootPromise = null;
-          reject(new Error('Emulator boot timed out after ' + timeoutMs + 'ms'));
+          reject(new Error(`Emulator boot timed out after ${timeoutMs}ms`));
           return;
         }
         setTimeout(attempt, 200);
-      }
+      };
       attempt();
     });
 
@@ -137,10 +134,12 @@
   }
 
   // Fire-and-forget wrapper for backward compat
-  function triggerEmulatorStart() {
-    waitForEmulator().catch(function (err) {
-      console.error('[netplay]', err.message);
-    });
+  async function triggerEmulatorStart() {
+    try {
+      await waitForEmulator();
+    } catch (err) {
+      console.error('[netplay]', err?.message);
+    }
   }
 
   function enableMobileTouch() {
