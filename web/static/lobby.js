@@ -8,11 +8,9 @@
   const savedName = localStorage.getItem('kaillera-name');
   if (savedName) nameInput.value = savedName;
 
-  function getName() {
-    return nameInput.value.trim() || 'Player';
-  }
+  const getName = () => nameInput.value.trim() || 'Player';
 
-  function getCode() {
+  const getCode = () => {
     let val = codeInput.value.trim();
     // Extract room code from full URL
     if (val.includes('room=')) {
@@ -20,22 +18,18 @@
       if (match) val = match[1];
     }
     return val.toUpperCase();
-  }
+  };
 
-  function randomCode() {
+  const randomCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const arr = new Uint8Array(8);
     crypto.getRandomValues(arr);
-    let code = '';
-    for (let i = 0; i < 8; i++) {
-      code += chars[arr[i] % chars.length];
-    }
-    return code;
-  }
+    return Array.from(arr, (byte) => chars[byte % chars.length]).join('');
+  };
 
-  function saveName() {
+  const saveName = () => {
     localStorage.setItem('kaillera-name', getName());
-  }
+  };
 
   document.getElementById('create-btn').addEventListener('click', () => {
     saveName();
@@ -45,14 +39,20 @@
 
   document.getElementById('join-btn').addEventListener('click', () => {
     const code = getCode();
-    if (!code) { codeInput.focus(); return; }
+    if (!code) {
+      codeInput.focus();
+      return;
+    }
     saveName();
     window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}`;
   });
 
   document.getElementById('watch-btn').addEventListener('click', () => {
     const code = getCode();
-    if (!code) { codeInput.focus(); return; }
+    if (!code) {
+      codeInput.focus();
+      return;
+    }
     saveName();
     window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}&spectate=1`;
   });
