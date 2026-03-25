@@ -1071,7 +1071,11 @@
       if (peer.reconnecting) {
         if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
         peer.reconnecting = false;
-        _lastSyncState = null;  // force full resync after reconnect
+        // Only guests should null their delta base on reconnect.
+        // Host needs its delta base to survive peer lifecycle events.
+        if (_playerSlot !== 0) {
+          _setLastSyncState(null, 'reconnect');
+        }
         const rKnown = _knownPlayers[remoteSid];
         const rName = rKnown ? rKnown.playerName : `P${(peer.slot ?? 0) + 1}`;
         setStatus(`${rName} reconnected`);
@@ -2371,7 +2375,7 @@
         // Only reset on guest — host's delta base should persist so it can
         // send small deltas instead of 8MB full state every time.
         if (_playerSlot !== 0) {
-          _lastSyncState = null;
+          _setLastSyncState(null, 'bg-return');
         }
 
         // Notify peers we returned (toast only, no gameplay effect)
@@ -2455,7 +2459,7 @@
     _manualMode = false;
     _pendingRunner = null;
     _pendingSyncCheck = null;
-    _lastSyncState = null;
+    _setLastSyncState(null, 'stopSync');
     // Free C-level sync buffer
     if (_syncBufPtr && _hasKnSync) {
       const modStop = window.EJS_emulator?.gameManager?.Module;
@@ -3247,7 +3251,7 @@
       }
     }
     // Update delta base (guest caches after applying)
-    _lastSyncState = currentState;
+    _setLastSyncState(currentState, 'pushSync');
 
     compressState(toCompress).then((compressed) => {
       const sizeKB = Math.round(compressed.length / 1024);
@@ -3352,7 +3356,7 @@
       }
 
       // Cache applied state as delta base for next resync
-      _lastSyncState = bytes.slice();
+      _setLastSyncState(bytes.slice(), 'applySyncC');
 
       _resyncCount++;
       _consecutiveResyncs++;
@@ -3377,7 +3381,7 @@
       _hashRegion = null;
 
       // Cache applied state as delta base
-      _lastSyncState = new Uint8Array(bytes);
+      _setLastSyncState(new Uint8Array(bytes), 'applySyncFallback');
 
       _resyncCount++;
       _consecutiveResyncs++;
@@ -3495,7 +3499,6 @@
     if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
     if (_syncWorkerUrl) { URL.revokeObjectURL(_syncWorkerUrl); _syncWorkerUrl = null; }
     _syncWorkerCallbacks = {};
-    _lastSyncState = null;
 
     // Clean up audio bypass
     if (_audioWorklet) {
