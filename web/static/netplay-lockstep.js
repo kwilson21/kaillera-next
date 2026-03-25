@@ -3190,7 +3190,16 @@
 
   let _pushingSyncState = false;  // debounce concurrent sync-request handling
 
-  let _lastSyncState = null;  // host: previous state for delta computation
+  let _lastSyncState = null;  // host/guest: previous state for delta computation
+  let _lastSyncStateInfo = null;  // { frame, setBy, ts } for debugging
+
+  const _setLastSyncState = (state, reason) => {
+    _lastSyncState = state;
+    _lastSyncStateInfo = state
+      ? { frame: _frameNum, setBy: reason, ts: performance.now() }
+      : null;
+    _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
+  };
 
   const pushSyncState = (targetSid) => {
     // Host: capture state, compute delta if possible, compress, and send.
