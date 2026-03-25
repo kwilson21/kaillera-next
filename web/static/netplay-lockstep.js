@@ -3558,6 +3558,7 @@
   window.NetplayLockstep = {
     init,
     stop,
+    exportSyncLog,
     _startSpectatorStream: startSpectatorStream,  // test hook
     onExtraDataChannel: (cb) => { _onExtraDataChannel = cb; },
     onUnhandledMessage: (cb) => { _onUnhandledMessage = cb; },
