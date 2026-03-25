@@ -2235,6 +2235,18 @@
     const isStreaming = mode === 'streaming';
     const show = isStreaming && !isHost && !isSpectator && !_romSharingEnabled;
     prompt.style.display = show ? '' : 'none';
+
+    // Auto-declare if guest already has a ROM loaded (e.g., from a previous
+    // lockstep game). They already loaded/owned the ROM — re-asking is friction.
+    if (show && !_romDeclared && (_romBlob || _romBlobUrl)) {
+      _romDeclared = true;
+      const cb = document.getElementById('rom-declare-cb');
+      if (cb) cb.checked = true;
+      if (socket?.connected) {
+        socket.emit('rom-declare', { declared: true });
+      }
+    }
+
     // Hide ROM drop box when declaration is checked (streaming guests don't need a ROM)
     if (romDrop && show && _romDeclared) {
       romDrop.style.display = 'none';
