@@ -1229,8 +1229,7 @@
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
-                  if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
-                  _syncLog(`sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms, pause=${_awaitingResync})`);
+                  _syncLog(`sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms)`);
                   try { peer.dc.send('sync-request'); } catch (e) { _syncLog(`sync-request send failed: ${e}`); }
                 } else {
                   _syncLog(`DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
@@ -1729,7 +1728,8 @@
         const ejs2 = window.EJS_emulator;
         if (ejs2?.virtualGamepad) {
           ejs2.virtualGamepad.style.display = 'none';
-          ejs2.touch = false;  // prevent EJS from re-showing it
+          ejs2.touch = false;
+          window._kn_ejsTouchDisabled = true; // prevent enableMobileTouch() from re-showing it
         }
         // Also hide EJS menu bar — if left visible, readLocalInput()'s
         // ejsMenuOpen check clears touch state every frame.
@@ -2821,8 +2821,7 @@
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
-              if (_hasKnSync) { _awaitingResync = true; _awaitingResyncAt = performance.now(); }
-              _syncLog(`sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms, pause=${_awaitingResync})`);
+              _syncLog(`sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms)`);
               const sp = _peers[_pendingSyncCheck.peerSid];
               if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { _syncLog(`deferred sync-request failed: ${e}`); } }
             } else {
@@ -3741,6 +3740,7 @@
     _onUnhandledMessage = null;
 
     // Clean up custom virtual gamepad
+    window._kn_ejsTouchDisabled = false;
     if (window.VirtualGamepad) {
       VirtualGamepad.destroy();
     }
