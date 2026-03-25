@@ -95,21 +95,21 @@
   window._isSpectator = _isSpectator;
   KNState.peers       = _peers;
 
-  function setStatus(msg) {
-    if (_config && _config.onStatus) _config.onStatus(msg);
+  const setStatus = (msg) => {
+    if (_config?.onStatus) _config.onStatus(msg);
     console.log('[netplay]', msg);
-  }
+  };
 
   // ── users-updated (star topology) ──────────────────────────────────────
 
-  function onUsersUpdated(data) {
+  const onUsersUpdated = (data) => {
     const players    = data.players    || {};
     const spectators = data.spectators || {};
 
     _knownPlayers = {};
-    Object.values(players).forEach(p => {
+    for (const p of Object.values(players)) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
-    });
+    }
 
     const myPlayerEntry = Object.values(players).find(p => p.socketId === socket.id);
     if (myPlayerEntry) { _playerSlot = myPlayerEntry.slot; window._playerSlot = _playerSlot; }
@@ -132,14 +132,14 @@
     // Guests/spectators: wait for host to initiate (don't create connections)
 
     // Notify controller
-    if (_config && _config.onPlayersChanged) {
+    if (_config?.onPlayersChanged) {
       _config.onPlayersChanged(data);
     }
-  }
+  };
 
   // ── WebRTC ─────────────────────────────────────────────────────────────
 
-  function createPeer(remoteSid, remoteSlot, isInitiator) {
+  const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peer = {
       pc: new RTCPeerConnection({ iceServers: ICE_SERVERS }),
       dc: null,
@@ -163,9 +163,9 @@
 
     // Host: add video stream tracks BEFORE creating data channel / offer
     if (_playerSlot === 0 && _hostStream) {
-      _hostStream.getTracks().forEach(track => {
+      for (const track of _hostStream.getTracks()) {
         peer.pc.addTrack(track, _hostStream);
-      });
+      }
       optimizeVideoEncoding(peer.pc);
     }
 
@@ -188,13 +188,13 @@
 
           // Unmute after playback starts. On mobile, programmatic unmute
           // requires a user gesture — show a banner if it fails.
-          _guestVideo.addEventListener('playing', function () {
+          _guestVideo.addEventListener('playing', () => {
             _guestVideo.muted = false;
             if (_guestVideo.muted) {
-              var banner = document.getElementById('unmute-banner');
+              const banner = document.getElementById('unmute-banner');
               if (banner) {
                 banner.classList.remove('hidden');
-                var doUnmute = function () {
+                const doUnmute = () => {
                   _guestVideo.muted = false;
                   banner.classList.add('hidden');
                   banner.removeEventListener('click', doUnmute);
@@ -216,9 +216,8 @@
         // The default jitter buffer adds 50-150ms of latency for smooth
         // playback on unreliable networks. For gaming we want minimum delay.
         try {
-          const receivers = peer.pc.getReceivers();
-          for (const recv of receivers) {
-            if (recv.track && recv.track.kind === 'video') {
+          for (const recv of peer.pc.getReceivers()) {
+            if (recv.track?.kind === 'video') {
               // playoutDelayHint: target playout delay in seconds
               // 0 = minimum possible (decode and display ASAP)
               if ('playoutDelayHint' in recv) {
@@ -240,7 +239,7 @@
 
         // Measure actual display latency via requestVideoFrameCallback
         if (_guestVideo.requestVideoFrameCallback) {
-          function measureLatency(now, metadata) {
+          const measureLatency = (now, metadata) => {
             // metadata.receiveTime = when the frame was received from network
             // metadata.expectedDisplayTime = when browser plans to show it
             // The difference is the decode + display pipeline delay
@@ -254,7 +253,7 @@
               window._videoE2EDelay = e2eDelay.toFixed(1);
             }
             _guestVideo.requestVideoFrameCallback(measureLatency);
-          }
+          };
           _guestVideo.requestVideoFrameCallback(measureLatency);
         }
       };
@@ -276,18 +275,18 @@
     }
 
     return peer;
-  }
+  };
 
-  async function sendOffer(remoteSid) {
+  const sendOffer = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
     const offer = await peer.pc.createOffer();
     offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
     await peer.pc.setLocalDescription(offer);
     socket.emit('webrtc-signal', { target: remoteSid, offer });
-  }
+  };
 
-  async function onWebRTCSignal(data) {
+  const onWebRTCSignal = async (data) => {
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
@@ -321,9 +320,9 @@
     } catch (err) {
       console.log('[netplay] WebRTC signal error:', err.message || err);
     }
-  }
+  };
 
-  async function drainCandidates(peer) {
+  const drainCandidates = async (peer) => {
     peer.remoteDescSet = true;
     if (peer.pendingCandidates) {
       for (const c of peer.pendingCandidates) {
@@ -331,16 +330,16 @@
       }
       peer.pendingCandidates = [];
     }
-  }
+  };
 
   // ── Data channel ───────────────────────────────────────────────────────
 
-  function setupDataChannel(remoteSid, ch) {
+  const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
     ch.onopen = () => {
       const peer = _peers[remoteSid];
-      console.log('[netplay] DC open with', remoteSid, 'slot:', peer ? peer.slot : '?');
+      console.log('[netplay] DC open with', remoteSid, `slot: ${peer ? peer.slot : '?'}`);
 
       if (_playerSlot === 0) {
         // Host: if emulator isn't started yet, start it now
@@ -371,9 +370,9 @@
         applyInputForSlot(peer.slot, mask);
       }
     };
-  }
+  };
 
-  function handlePeerDisconnect(remoteSid) {
+  const handlePeerDisconnect = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
     // Zero their input if they were a player
@@ -383,11 +382,11 @@
     delete _peers[remoteSid];
     KNState.peers = _peers;
     console.log('[netplay] peer disconnected:', remoteSid);
-  }
+  };
 
   // ── Host: emulator + stream ────────────────────────────────────────────
 
-  function startHost() {
+  const startHost = () => {
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
@@ -398,7 +397,7 @@
 
     // Wait for emulator to be running, then capture canvas stream
     const waitForEmu = () => {
-      const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+      const gm = window.EJS_emulator?.gameManager;
       if (!gm) { setTimeout(waitForEmu, 100); return; }
       console.log('[netplay] emulator running — capturing stream');
 
@@ -414,19 +413,18 @@
       captureCanvas.height = 480;
       const ctx = captureCanvas.getContext('2d');
 
-      console.log('[netplay] source canvas:', srcCanvas.width + 'x' + srcCanvas.height,
-        '→ capture canvas: 640x480');
+      console.log(`[netplay] source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator canvas to capture canvas every frame
       _hostStream = captureCanvas.captureStream(0);  // manual frame control
       const captureTrack = _hostStream.getVideoTracks()[0];
 
-      function blitFrame() {
+      const blitFrame = () => {
         if (!_gameRunning) return;  // stop loop when game ends
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         captureTrack.requestFrame();  // signal new frame to captureStream
-      }
+      };
       blitFrame();
 
       console.log('[netplay] capture stream started (640x480 2D blit)');
@@ -436,21 +434,21 @@
       captureEmulatorAudio();
 
       // Add all current stream tracks to existing peer connections
-      Object.entries(_peers).forEach(([sid, peer]) => {
-        _hostStream.getTracks().forEach(track => {
+      for (const [sid, peer] of Object.entries(_peers)) {
+        for (const track of _hostStream.getTracks()) {
           peer.pc.addTrack(track, _hostStream);
-        });
+        }
         optimizeVideoEncoding(peer.pc);
         renegotiate(sid);
-      });
+      }
 
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
 
       // If audio wasn't ready, poll and add to _hostStream for future peers
       if (!_audioStreamDest) {
-        var audioAttempts = 0;
-        var waitForAudio = function () {
+        let audioAttempts = 0;
+        const waitForAudio = () => {
           if (!_gameRunning) return;
           if (captureEmulatorAudio()) return;
           if (++audioAttempts < 150) setTimeout(waitForAudio, 200);
@@ -460,9 +458,9 @@
       }
     };
     waitForEmu();
-  }
+  };
 
-  async function renegotiate(remoteSid) {
+  const renegotiate = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
     try {
@@ -474,9 +472,9 @@
     } catch (err) {
       console.log('[netplay] renegotiate failed:', err);
     }
-  }
+  };
 
-  function setSDPBitrate(sdp, bitrateKbps) {
+  const setSDPBitrate = (sdp, bitrateKbps) => {
     // Add b=AS: line after video m-line to set session-level bitrate
     const lines = sdp.split('\r\n');
     const result = [];
@@ -489,13 +487,13 @@
         inVideo = false;
       }
       if (inVideo && line.startsWith('c=')) {
-        result.push('b=AS:' + bitrateKbps);
+        result.push(`b=AS:${bitrateKbps}`);
       }
     }
     return result.join('\r\n');
-  }
+  };
 
-  function preferCodecs(sdp) {
+  const preferCodecs = (sdp) => {
     // Reorder video codecs in the SDP m-line for optimal encoding.
     // Preference: VP9 (best compression, some HW support) → H264 (good HW
     // support via VideoToolbox/NVENC) → VP8 (software fallback).
@@ -531,17 +529,16 @@
       }
       return line;
     }).join('\r\n');
-  }
+  };
 
-  function optimizeVideoEncoding(pc) {
+  const optimizeVideoEncoding = (pc) => {
     // Force high bitrate and 60fps for low-latency game streaming.
     // WebRTC defaults are conservative and cap at ~40fps. We override:
     // - minBitrate prevents the bandwidth estimator from throttling too low
     // - maxFramerate = 60 is non-negotiable for game feel
     // - maintain-framerate tells the encoder to drop resolution, never FPS
-    const senders = pc.getSenders();
-    for (const sender of senders) {
-      if (sender.track && sender.track.kind === 'video') {
+    for (const sender of pc.getSenders()) {
+      if (sender.track?.kind === 'video') {
         const params = sender.getParameters();
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
@@ -557,11 +554,11 @@
         });
       }
     }
-  }
+  };
 
-  function startHostInputLoop() {
+  const startHostInputLoop = () => {
     let _debugFrame = 0;
-    function tick() {
+    const tick = () => {
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
@@ -569,21 +566,21 @@
 
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
-    }
+    };
     tick();
-  }
+  };
 
   // ── Guest: input sender ────────────────────────────────────────────────
 
   let _guestLoopStarted = false;
 
-  function startGuestInputLoop() {
+  const startGuestInputLoop = () => {
     if (_guestLoopStarted) return;
     _guestLoopStarted = true;
 
     let _lastSentMask = -1;
     let _debugFrame = 0;
-    function tick() {
+    const tick = () => {
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
@@ -591,7 +588,7 @@
       // Only send when input changes — reduces DC overhead
       if (mask !== _lastSentMask) {
         const hostPeer = Object.values(_peers).find(p => p.slot === 0);
-        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+        if (hostPeer?.dc?.readyState === 'open') {
           try { hostPeer.dc.send(new Int32Array([mask]).buffer); } catch (_) {}
           _lastSentMask = mask;
         }
@@ -599,13 +596,13 @@
 
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
-    }
+    };
     tick();
-  }
+  };
 
   // ── Debug overlay ────────────────────────────────────────────────────────
 
-  async function gatherStats() {
+  const gatherStats = async () => {
     const peers = _peers || {};
     const pc = Object.values(peers)[0]?.pc;
     const playerCount = Object.keys(peers).length + (_isSpectator ? 0 : 1);
@@ -615,7 +612,7 @@
         mode: 'streaming',
         fps: 0,
         ping: null,
-        playerCount: playerCount,
+        playerCount,
         codec: null,
         resolution: null,
         encodeTime: null,
@@ -637,7 +634,7 @@
       stats.forEach((s) => {
         if (s.type === 'outbound-rtp' && s.kind === 'video') {
           fps = s.framesPerSecond || 0;
-          res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
+          res = `${s.frameWidth || '?'}x${s.frameHeight || '?'}`;
           if (s.totalEncodeTime && s.framesEncoded && s.framesEncoded > 0) {
             encodeTime = parseFloat((s.totalEncodeTime / s.framesEncoded * 1000).toFixed(1));
           }
@@ -647,7 +644,7 @@
         }
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
           fps = s.framesPerSecond || 0;
-          res = (s.frameWidth || '?') + 'x' + (s.frameHeight || '?');
+          res = `${s.frameWidth || '?'}x${s.frameHeight || '?'}`;
           jitterVal = s.jitter !== undefined ? parseFloat((s.jitter * 1000).toFixed(1)) : null;
           pktLost = s.packetsLost || 0;
           pktRecv = s.packetsReceived || 0;
@@ -660,7 +657,7 @@
             bitrate = parseFloat((s.availableOutgoingBitrate / 1_000_000).toFixed(1));
           }
         }
-        if (s.type === 'codec' && s.mimeType && s.mimeType.includes('video')) {
+        if (s.type === 'codec' && s.mimeType?.includes('video')) {
           codec = s.mimeType.replace('video/', '');
         }
       });
@@ -669,24 +666,24 @@
 
       return {
         mode: 'streaming',
-        fps: fps,
-        ping: ping,
-        playerCount: playerCount,
-        codec: codec,
+        fps,
+        ping,
+        playerCount,
+        codec,
         resolution: res,
-        encodeTime: encodeTime,
-        bitrate: bitrate,
+        encodeTime,
+        bitrate,
         jitter: jitterVal,
-        lossRate: lossRate,
-        dropped: dropped,
-        qualLimit: qualLimit,
+        lossRate,
+        dropped,
+        qualLimit,
       };
     } catch (_) {
       return {
         mode: 'streaming',
         fps: 0,
         ping: null,
-        playerCount: playerCount,
+        playerCount,
         codec: null,
         resolution: null,
         encodeTime: null,
@@ -697,9 +694,9 @@
         qualLimit: null,
       };
     }
-  }
+  };
 
-  async function updateDebugOverlay() {
+  const updateDebugOverlay = async () => {
     const dbg = document.getElementById('np-debug');
     if (!dbg) return;
     dbg.style.display = '';
@@ -707,10 +704,10 @@
     const info = await gatherStats();
     _cachedInfo = info;
 
-    const role = _playerSlot === 0 ? 'Host' : 'Guest (P' + _playerSlot + ')';
+    const role = _playerSlot === 0 ? 'Host' : `Guest (P${_playerSlot})`;
 
     if (!Object.values(_peers || {})[0]?.pc) {
-      dbg.textContent = role + ' | players:' + info.playerCount;
+      dbg.textContent = `${role} | players:${info.playerCount}`;
       return;
     }
 
@@ -718,41 +715,39 @@
     const fpsStr = info.fps || '?';
     const codecStr = info.codec || '?';
     const resStr = info.resolution || '?';
-    const rttStr = info.ping !== null ? info.ping + 'ms' : '?';
-    const qualLimitStr = info.qualLimit ? ' [' + info.qualLimit + ']' : '';
+    const rttStr = info.ping !== null ? `${info.ping}ms` : '?';
+    const qualLimitStr = info.qualLimit ? ` [${info.qualLimit}]` : '';
 
-    const line1 = role + ' | ' + codecStr + ' ' + resStr + ' ' + fpsStr + 'fps' + qualLimitStr;
+    const line1 = `${role} | ${codecStr} ${resStr} ${fpsStr}fps${qualLimitStr}`;
     let line2;
     if (_playerSlot === 0) {
       // Host: show encode time, send bitrate
-      const encStr = info.encodeTime !== null ? info.encodeTime + 'ms' : '?';
-      const bwStr = info.bitrate !== null ? info.bitrate + 'Mbps' : '?';
-      line2 = 'rtt:' + rttStr + ' encode:' + encStr + ' bw:' + bwStr
-        + ' | players:' + info.playerCount;
+      const encStr = info.encodeTime !== null ? `${info.encodeTime}ms` : '?';
+      const bwStr = info.bitrate !== null ? `${info.bitrate}Mbps` : '?';
+      line2 = `rtt:${rttStr} encode:${encStr} bw:${bwStr} | players:${info.playerCount}`;
     } else {
       // Guest: show jitter, packet loss, pipeline delay, e2e delay
-      const jitterStr = info.jitter !== null ? info.jitter + 'ms' : '?';
-      const lossStr = info.lossRate !== null ? info.lossRate + '%' : '0%';
-      const pipeline = window._videoPipelineDelay ? window._videoPipelineDelay + 'ms' : '?';
-      const e2e = window._videoE2EDelay ? window._videoE2EDelay + 'ms' : '?';
-      line2 = 'rtt:' + rttStr + ' jitter:' + jitterStr + ' pipeline:' + pipeline
-        + ' e2e:' + e2e + ' loss:' + lossStr + ' dropped:' + (info.dropped !== null ? info.dropped : 0);
+      const jitterStr = info.jitter !== null ? `${info.jitter}ms` : '?';
+      const lossStr = info.lossRate !== null ? `${info.lossRate}%` : '0%';
+      const pipeline = window._videoPipelineDelay ? `${window._videoPipelineDelay}ms` : '?';
+      const e2e = window._videoE2EDelay ? `${window._videoE2EDelay}ms` : '?';
+      line2 = `rtt:${rttStr} jitter:${jitterStr} pipeline:${pipeline} e2e:${e2e} loss:${lossStr} dropped:${info.dropped !== null ? info.dropped : 0}`;
     }
-    dbg.textContent = line1 + '\n' + line2;
+    dbg.textContent = `${line1}\n${line2}`;
     dbg.style.whiteSpace = 'pre';
-  }
+  };
 
   // ── Keyboard / input ───────────────────────────────────────────────────
 
-  function setupKeyTracking() {
+  const setupKeyTracking = () => {
     _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
-  }
+  };
 
-  function disableEJSInput() {
+  const disableEJSInput = () => {
     let attempts = 0;
     const attempt = () => {
       const ejs = window.EJS_emulator;
-      const gm = ejs && ejs.gameManager;
+      const gm = ejs?.gameManager;
       if (!gm) {
         if (++attempts < 150) { setTimeout(attempt, 200); }
         else { console.warn('[streaming] disableEJSInput timed out'); }
@@ -761,7 +756,7 @@
 
       // Disable EJS keyboard handling
       gm.setKeyboardEnabled(false);
-      const parent = ejs.elements && ejs.elements.parent;
+      const parent = ejs.elements?.parent;
       if (parent) {
         const block = e => e.stopImmediatePropagation();
         parent.addEventListener('keydown', block, true);
@@ -771,24 +766,24 @@
       // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
       if (ejs.gamepad) {
         if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
-        ejs.gamepad.loop = function () {};
+        ejs.gamepad.loop = () => {};
       }
     };
     attempt();
-  }
+  };
 
   // ── Audio capture for streaming ──────────────────────────────────────
   // Connects the emulator's OpenAL master gain node to a MediaStreamDestination
   // so audio is included in the WebRTC stream to guests.
 
-  function captureEmulatorAudio() {
-    var gm = window.EJS_emulator && window.EJS_emulator.gameManager;
-    var mod = gm && gm.Module;
+  const captureEmulatorAudio = () => {
+    const gm = window.EJS_emulator?.gameManager;
+    const mod = gm?.Module;
     if (!mod || !mod.AL || !mod.AL.contexts) return false;
 
-    var alCtx = null;
-    for (var id in mod.AL.contexts) {
-      var c = mod.AL.contexts[id];
+    let alCtx = null;
+    for (const id in mod.AL.contexts) {
+      const c = mod.AL.contexts[id];
       if (c && c.audioCtx && c.audioCtx.state !== 'closed' && c.gain) {
         alCtx = c;
         break;
@@ -800,7 +795,7 @@
       _audioStreamDest = alCtx.audioCtx.createMediaStreamDestination();
       alCtx.gain.connect(_audioStreamDest);
 
-      var audioTrack = _audioStreamDest.stream.getAudioTracks()[0];
+      const audioTrack = _audioStreamDest.stream.getAudioTracks()[0];
       if (audioTrack && _hostStream) {
         _hostStream.addTrack(audioTrack);
         console.log('[netplay] added audio track to host stream');
@@ -810,9 +805,9 @@
       console.log('[netplay] audio capture failed:', e.message);
     }
     return false;
-  }
+  };
 
-  function readLocalInput() {
+  const readLocalInput = () => {
     let mask = 0;
 
     // Suppress all input while remap wizard is active (prevents desyncs)
@@ -830,24 +825,24 @@
 
     // Virtual gamepad touch input (same logic as lockstep readLocalInput)
     // Left stick (indices 16-19): apply absolute + relative deadzone
-    var TOUCH_ABS_DEADZONE = 3500;
-    var stR = KNState.touchInput[16] || 0;
-    var stL = KNState.touchInput[17] || 0;
-    var stD = KNState.touchInput[18] || 0;
-    var stU = KNState.touchInput[19] || 0;
-    var stMajor = Math.max(stR, stL, stD, stU);
+    const TOUCH_ABS_DEADZONE = 3500;
+    const stR = KNState.touchInput[16] || 0;
+    const stL = KNState.touchInput[17] || 0;
+    const stD = KNState.touchInput[18] || 0;
+    const stU = KNState.touchInput[19] || 0;
+    const stMajor = Math.max(stR, stL, stD, stU);
     if (stMajor > TOUCH_ABS_DEADZONE) {
-      var stThresh = stMajor * 0.4;
+      const stThresh = stMajor * 0.4;
       if (stR > stThresh) mask |= (1 << 16);
       if (stL > stThresh) mask |= (1 << 17);
       if (stD > stThresh) mask |= (1 << 18);
       if (stU > stThresh) mask |= (1 << 19);
     }
     // Digital buttons + C-buttons
-    for (var ti in KNState.touchInput) {
-      var idx = parseInt(ti, 10);
+    for (const ti in KNState.touchInput) {
+      const idx = parseInt(ti, 10);
       if (idx >= 16 && idx <= 19) continue;
-      var val = KNState.touchInput[idx];
+      const val = KNState.touchInput[idx];
       if (!val) continue;
       if (idx < 16) {
         mask |= (1 << idx);
@@ -857,10 +852,10 @@
     }
 
     return mask;
-  }
+  };
 
-  function applyInputForSlot(slot, inputMask) {
-    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+  const applyInputForSlot = (slot, inputMask) => {
+    const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
     const prevMask = _prevSlotMasks[slot] || 0;
     if (inputMask === prevMask) return;  // skip if unchanged — saves simulateInput calls
@@ -879,13 +874,13 @@
       }
     }
     _prevSlotMasks[slot] = inputMask;
-  }
+  };
 
   // -- Init / Stop API -------------------------------------------------------
 
   let _config = null;
 
-  function init(config) {
+  const init = (config) => {
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
@@ -911,28 +906,28 @@
 
     // Virtual gamepad for mobile streaming guests
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
-      var gameEl = config.gameElement || document.getElementById('game');
+      const gameEl = config.gameElement || document.getElementById('game');
       if (gameEl) {
         VirtualGamepad.init(gameEl);
         gameEl.style.margin = '0';
         // If a physical gamepad is already connected, hide virtual controls immediately
-        var detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+        const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (detected.length > 0) VirtualGamepad.setVisible(false);
       }
     }
-  }
+  };
 
-  function stop() {
+  const stop = () => {
     _gameRunning = false;
     _guestLoopStarted = false;
     _cachedInfo = null;
 
     // Close all peer connections
-    Object.keys(_peers).forEach((sid) => {
+    for (const sid of Object.keys(_peers)) {
       const p = _peers[sid];
       if (p.dc) try { p.dc.close(); } catch (_) {}
       if (p.pc) try { p.pc.close(); } catch (_) {}
-    });
+    }
     _peers = {};
     KNState.peers = _peers;
 
@@ -944,7 +939,7 @@
 
     // Clean up streams
     if (_hostStream) {
-      _hostStream.getTracks().forEach((t) => { t.stop(); });
+      for (const t of _hostStream.getTracks()) { t.stop(); }
       _hostStream = null;
     }
     if (_guestVideo) {
@@ -952,7 +947,7 @@
       if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
       _guestVideo = null;
     }
-    var unmuteBanner = document.getElementById('unmute-banner');
+    const unmuteBanner = document.getElementById('unmute-banner');
     if (unmuteBanner) unmuteBanner.classList.add('hidden');
 
     _knownPlayers = {};
@@ -968,19 +963,19 @@
     if (window.VirtualGamepad) {
       VirtualGamepad.destroy();
     }
-    for (var ck in KNState.touchInput) {
-      if (KNState.touchInput.hasOwnProperty(ck)) delete KNState.touchInput[ck];
+    for (const ck in KNState.touchInput) {
+      if (Object.prototype.hasOwnProperty.call(KNState.touchInput, ck)) delete KNState.touchInput[ck];
     }
 
     _config = null;
-  }
+  };
 
   window.NetplayStreaming = {
-    init: init,
-    stop: stop,
+    init,
+    stop,
     getInfo: () => _cachedInfo,
-    getPeerConnection: function (sid) {
-      var p = _peers[sid];
+    getPeerConnection: (sid) => {
+      const p = _peers[sid];
       return p ? p.pc : null;
     },
   };
