@@ -2986,6 +2986,22 @@
     const igCancelBtn = document.getElementById('ingame-remap-cancel');
     if (igCancelBtn) igCancelBtn.addEventListener('click', cancelWizard);
 
+    // Sync log download (lockstep mode only — streaming engine has no exportSyncLog)
+    const toolbarLogs = document.getElementById('toolbar-logs');
+    if (toolbarLogs) {
+      toolbarLogs.addEventListener('click', () => {
+        const logs = engine?.exportSyncLog?.();
+        if (!logs) return;
+        const blob = new Blob([logs], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `kn-sync-p${window._playerSlot ?? 'x'}-${Date.now()}.log`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    }
+
     // Click .gamepad span to cycle through detected gamepads
     const gamepadSpans = document.querySelectorAll('.player-slot .gamepad');
     for (const span of gamepadSpans) {
