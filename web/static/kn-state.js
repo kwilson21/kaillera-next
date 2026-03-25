@@ -9,7 +9,7 @@
 
   // N64 input bitmask indices (shared between virtual-gamepad,
   // netplay-lockstep, netplay-streaming, and gamepad-manager).
-  var INPUT = Object.freeze({
+  const INPUT = Object.freeze({
     A: 0, B: 1, START: 3,
     D_UP: 4, D_DOWN: 5, D_LEFT: 6, D_RIGHT: 7,
     L: 10, R: 11, Z: 12,
