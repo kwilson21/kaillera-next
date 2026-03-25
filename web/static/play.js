@@ -463,10 +463,8 @@
       `romBlob=${!!_romBlob}`, `romBlobUrl=${!!_romBlobUrl}`);
     gameRunning = false;
     if (engine) {
-      // Auto-dump debug logs before stopping
-      if (engine.dumpLogs) {
-        try { engine.dumpLogs(); } catch (_) {}
-      }
+      // Upload sync logs to server before stopping
+      uploadSyncLogs('game-ended');
       engine.stop();
       engine = null;
     }
@@ -1811,6 +1809,29 @@
     });
   };
 
+  // ── Sync log upload ──────────────────────────────────────────────────
+  const uploadSyncLogs = (trigger) => {
+    const logs = engine?.exportSyncLog?.();
+    if (!logs) return;
+    const slot = window._playerSlot ?? 'x';
+    const room = roomCode ?? 'unknown';
+    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}`;
+    fetch(url, { method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' } })
+      .then((res) => {
+        if (res.ok) {
+          console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
+          showToast?.('Logs uploaded');
+        } else {
+          console.log(`[play] sync log upload failed: ${res.status}`);
+          showToast?.(`Log upload failed: ${res.status}`);
+        }
+      })
+      .catch((err) => {
+        console.log('[play] sync log upload error:', err);
+        showToast?.('Log upload failed');
+      });
+  };
+
   const endGame = () => {
     socket.emit('end-game', {}, (err) => {
       if (err) {
@@ -1830,7 +1851,7 @@
       }
     }
     socket.emit('leave-room', {});
-    if (engine) { engine.stop(); engine = null; }
+    if (engine) { uploadSyncLogs('leave'); engine.stop(); engine = null; }
     window.location.href = '/';
   };
 
@@ -2986,19 +3007,11 @@
     const igCancelBtn = document.getElementById('ingame-remap-cancel');
     if (igCancelBtn) igCancelBtn.addEventListener('click', cancelWizard);
 
-    // Sync log download (lockstep mode only — streaming engine has no exportSyncLog)
+    // Sync log upload (lockstep mode only — streaming engine has no exportSyncLog)
     const toolbarLogs = document.getElementById('toolbar-logs');
     if (toolbarLogs) {
       toolbarLogs.addEventListener('click', () => {
-        const logs = engine?.exportSyncLog?.();
-        if (!logs) return;
-        const blob = new Blob([logs], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `kn-sync-p${window._playerSlot ?? 'x'}-${Date.now()}.log`;
-        a.click();
-        URL.revokeObjectURL(url);
+        uploadSyncLogs('manual');
       });
     }
 

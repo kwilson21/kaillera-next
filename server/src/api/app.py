@@ -5,6 +5,7 @@ V1 endpoints:
   GET  /health
   GET  /list?game_id=...  EmulatorJS-Netplay room listing
   GET  /room/{room_id}    minimal room info (rate-limited)
+  POST /api/sync-logs     upload sync diagnostic logs
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -166,5 +169,31 @@ def create_app(lifespan=None) -> FastAPI:
         _state_cache[rom_hash] = body
         log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
         return {"status": "cached", "size": len(body)}
+
+    # ── Sync log upload ────────────────────────────────────────────────────
+    _SYNC_LOG_DIR = Path(os.environ.get("SYNC_LOG_DIR", "logs/sync"))
+    _SYNC_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB max per upload
+
+    @app.post("/api/sync-logs")
+    async def upload_sync_logs(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "sync-logs"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        body = await request.body()
+        if len(body) > _SYNC_LOG_MAX_SIZE:
+            raise HTTPException(status_code=413, detail="Log too large")
+        if len(body) == 0:
+            raise HTTPException(status_code=400, detail="Empty log")
+        # Extract metadata from query params
+        room = request.query_params.get("room", "unknown")[:32]
+        slot = request.query_params.get("slot", "x")[:4]
+        ts = int(time.time())
+        # Sanitize room name for filename
+        safe_room = "".join(c if c.isalnum() or c in "-_" else "_" for c in room)
+        filename = f"sync-p{slot}-{safe_room}-{ts}.log"
+        _SYNC_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = _SYNC_LOG_DIR / filename
+        path.write_bytes(body)
+        log.info("Sync log saved: %s (%d KB)", filename, len(body) // 1024)
+        return {"status": "saved", "filename": filename, "size": len(body)}
 
     return app
