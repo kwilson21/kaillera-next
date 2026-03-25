@@ -8,24 +8,24 @@
 (function () {
   'use strict';
 
-  var _overlay = null;
+  let _overlay = null;
   // Use KNState.touchInput as the canonical touch state object.
   // Both VirtualGamepad and netplay engines read/write this directly —
   // no fragile shared-reference passing.
-  function _state() { return window.KNState && window.KNState.touchInput; }
-  var _stickTouch = null;
-  var _stickCenter = null;
-  var _buttonTouches = {};
-  var _stickEl = null;
-  var _stickZone = null;
+  const _state = () => window.KNState?.touchInput;
+  let _stickTouch = null;
+  let _stickCenter = null;
+  let _buttonTouches = {};
+  let _stickEl = null;
+  let _stickZone = null;
 
-  var STICK_RADIUS = 50;
-  var MAX_AXIS = 32767;
+  const STICK_RADIUS = 50;
+  const MAX_AXIS = 32767;
 
   // N64 button mapping (verified from mupen64plus core source):
   // N64 A = JOYPAD_B = index 0, N64 B = JOYPAD_Y = index 1
   // Z = JOYPAD_L2 = index 12, L = JOYPAD_L = index 10, R = JOYPAD_R = index 11
-  var BUTTONS = [
+  const BUTTONS = [
     [0,  'A',      'vgp-a'],
     [1,  'B',      'vgp-b'],
     [3,  'Start',  'vgp-start'],
@@ -42,7 +42,7 @@
     [20, 'CR',     'vgp-cr'],
   ];
 
-  function createOverlay() {
+  const createOverlay = () => {
     _overlay = document.createElement('div');
     _overlay.id = 'virtual-gamepad';
     _overlay.innerHTML = [
@@ -169,19 +169,18 @@
     ].join('\n');
 
     // Place buttons in their containers
-    var shouldersEl = _overlay.querySelector('.vgp-shoulders');
-    var leftEl = _overlay.querySelector('.vgp-left');
-    var rightEl = _overlay.querySelector('.vgp-right');
-    var centerEl = _overlay.querySelector('.vgp-center');
-    var dpadEl = _overlay.querySelector('.vgp-dpad');
+    const shouldersEl = _overlay.querySelector('.vgp-shoulders');
+    const leftEl = _overlay.querySelector('.vgp-left');
+    const rightEl = _overlay.querySelector('.vgp-right');
+    const centerEl = _overlay.querySelector('.vgp-center');
+    const dpadEl = _overlay.querySelector('.vgp-dpad');
 
-    for (var i = 0; i < BUTTONS.length; i++) {
-      var btn = document.createElement('div');
-      btn.className = 'vgp-btn ' + BUTTONS[i][2];
-      btn.textContent = BUTTONS[i][1];
-      btn.dataset.idx = BUTTONS[i][0];
+    for (const [idx, label, cls] of BUTTONS) {
+      const btn = document.createElement('div');
+      btn.className = `vgp-btn ${cls}`;
+      btn.textContent = label;
+      btn.dataset.idx = idx;
 
-      var cls = BUTTONS[i][2];
       if (cls === 'vgp-l' || cls === 'vgp-r' || cls === 'vgp-z') {
         shouldersEl.appendChild(btn);
       } else if (cls === 'vgp-start') {
@@ -194,9 +193,9 @@
     }
 
     // Reorder shoulders: L, Z on left, R on right
-    var spacer = document.createElement('div');
+    const spacer = document.createElement('div');
     spacer.style.flex = '1';
-    var rBtn = shouldersEl.querySelector('.vgp-r');
+    const rBtn = shouldersEl.querySelector('.vgp-r');
     if (rBtn) {
       shouldersEl.insertBefore(spacer, rBtn);
     }
@@ -212,125 +211,120 @@
     _overlay.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
     document.body.appendChild(_overlay);
-  }
+  };
 
-  function onTouchStart(e) {
+  const onTouchStart = (e) => {
     e.preventDefault();
-    for (var i = 0; i < e.changedTouches.length; i++) {
-      var t = e.changedTouches[i];
-      var el = document.elementFromPoint(t.clientX, t.clientY);
+    for (const t of e.changedTouches) {
+      const el = document.elementFromPoint(t.clientX, t.clientY);
 
-      if (el === _stickZone || el === _stickEl || (el && el.parentNode === _stickZone)) {
+      if (el === _stickZone || el === _stickEl || el?.parentNode === _stickZone) {
         _stickTouch = t.identifier;
-        var rect = _stickZone.getBoundingClientRect();
+        const rect = _stickZone.getBoundingClientRect();
         _stickCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         updateStick(t.clientX, t.clientY);
         continue;
       }
 
-      var btnEl = el && el.closest ? el.closest('.vgp-btn') : null;
-      if (!btnEl && el && el.classList && el.classList.contains('vgp-btn')) btnEl = el;
+      const btnEl = el?.closest?.('.vgp-btn') ?? (el?.classList?.contains('vgp-btn') ? el : null);
       if (btnEl && btnEl.dataset.idx !== undefined) {
-        var idx = parseInt(btnEl.dataset.idx, 10);
+        const idx = parseInt(btnEl.dataset.idx, 10);
         _buttonTouches[t.identifier] = idx;
         btnEl.classList.add('active');
-        var s = _state(); if (s) s[idx] = 1;
+        const s = _state(); if (s) s[idx] = 1;
       }
     }
-  }
+  };
 
-  function onTouchMove(e) {
+  const onTouchMove = (e) => {
     e.preventDefault();
-    for (var i = 0; i < e.changedTouches.length; i++) {
-      var t = e.changedTouches[i];
+    for (const t of e.changedTouches) {
       if (t.identifier === _stickTouch && _stickCenter) {
         updateStick(t.clientX, t.clientY);
       }
     }
-  }
+  };
 
-  function onTouchEnd(e) {
+  const onTouchEnd = (e) => {
     e.preventDefault();
-    for (var i = 0; i < e.changedTouches.length; i++) {
-      var t = e.changedTouches[i];
+    for (const t of e.changedTouches) {
       if (t.identifier === _stickTouch) {
         _stickTouch = null;
         _stickCenter = null;
-        var s2 = _state(); if (s2) { s2[16] = 0; s2[17] = 0; s2[18] = 0; s2[19] = 0; }
+        const s = _state(); if (s) { s[16] = 0; s[17] = 0; s[18] = 0; s[19] = 0; }
         if (_stickEl) _stickEl.style.transform = 'translate(-50%, -50%)';
         continue;
       }
-      var idx = _buttonTouches[t.identifier];
+      const idx = _buttonTouches[t.identifier];
       if (idx !== undefined) {
         delete _buttonTouches[t.identifier];
-        var s3 = _state(); if (s3) s3[idx] = 0;
-        var btns = _overlay.querySelectorAll('.vgp-btn[data-idx="' + idx + '"]');
-        for (var b = 0; b < btns.length; b++) btns[b].classList.remove('active');
+        const s = _state(); if (s) s[idx] = 0;
+        const btns = _overlay.querySelectorAll(`.vgp-btn[data-idx="${idx}"]`);
+        for (const b of btns) b.classList.remove('active');
       }
     }
-  }
+  };
 
-  function updateStick(clientX, clientY) {
-    var st = _state();
+  const updateStick = (clientX, clientY) => {
+    const st = _state();
     if (!_stickCenter || !st) return;
-    var dx = clientX - _stickCenter.x;
-    var dy = clientY - _stickCenter.y;
-    var dist = Math.sqrt(dx * dx + dy * dy);
+    let dx = clientX - _stickCenter.x;
+    let dy = clientY - _stickCenter.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist > STICK_RADIUS) {
       dx = dx / dist * STICK_RADIUS;
       dy = dy / dist * STICK_RADIUS;
-      dist = STICK_RADIUS;
     }
     if (_stickEl) {
-      _stickEl.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
+      _stickEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
     }
     st[16] = dx > 0 ? Math.round((dx / STICK_RADIUS) * MAX_AXIS) : 0;
     st[17] = dx < 0 ? Math.round((-dx / STICK_RADIUS) * MAX_AXIS) : 0;
     st[18] = dy > 0 ? Math.round((dy / STICK_RADIUS) * MAX_AXIS) : 0;
     st[19] = dy < 0 ? Math.round((-dy / STICK_RADIUS) * MAX_AXIS) : 0;
-  }
+  };
 
-  function clearState() {
-    var st = _state();
+  const clearState = () => {
+    const st = _state();
     if (!st) return;
-    for (var k in st) {
-      if (st.hasOwnProperty(k)) st[k] = 0;
+    for (const k of Object.keys(st)) {
+      st[k] = 0;
     }
-  }
+  };
 
   window.VirtualGamepad = {
-    init: function (container) {
+    init: (container) => {
       createOverlay();
       // Shrink game to share space — gamepad is an in-flow sibling
-      var gameEl = document.getElementById('game');
+      const gameEl = document.getElementById('game');
       if (gameEl) gameEl.style.margin = '0';
       console.log('[virtual-gamepad] initialized');
     },
 
-    destroy: function () {
+    destroy: () => {
       if (_overlay) {
         _overlay.removeEventListener('touchstart', onTouchStart);
         _overlay.removeEventListener('touchmove', onTouchMove);
         _overlay.removeEventListener('touchend', onTouchEnd);
         _overlay.removeEventListener('touchcancel', onTouchEnd);
-        if (_overlay.parentNode) _overlay.parentNode.removeChild(_overlay);
+        _overlay.parentNode?.removeChild(_overlay);
         _overlay = null;
       }
       clearState();
       _stickTouch = null;
       _stickCenter = null;
       _buttonTouches = {};
-      var gameEl = document.getElementById('game');
+      const gameEl = document.getElementById('game');
       if (gameEl) { gameEl.style.margin = ''; }
       console.log('[virtual-gamepad] destroyed');
     },
 
-    setVisible: function (visible) {
+    setVisible: (visible) => {
       if (_overlay) {
         _overlay.style.display = visible ? '' : 'none';
         if (!visible) clearState();
       }
-      var gameEl = document.getElementById('game');
+      const gameEl = document.getElementById('game');
       if (gameEl) {
         gameEl.style.margin = visible ? '0' : 'auto 0';
       }
