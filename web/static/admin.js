@@ -155,6 +155,18 @@
     await loadLogs();
   };
 
+  // ── Init ──────────────────────────────────────────────────────────────
+
+  const loadAll = async () => {
+    await loadStats();
+    await loadLogs();
+  };
+
+  const init = async () => {
+    const ok = await checkAuth();
+    if (ok) loadAll();
+  };
+
   // ── Event delegation ──────────────────────────────────────────────────
 
   $('#log-table').addEventListener('click', (e) => {
@@ -174,7 +186,7 @@
     if (row) viewLog(row.dataset.filename);
   });
 
-  $('#refresh-btn').addEventListener('click', loadAll);
+  $('#refresh-btn').addEventListener('click', () => loadAll());
 
   $('#cleanup-btn').addEventListener('click', async () => {
     if (!confirm('Delete all unpinned logs older than the retention period?')) return;
@@ -187,18 +199,6 @@
     }
     await loadAll();
   });
-
-  // ── Init ──────────────────────────────────────────────────────────────
-
-  const loadAll = async () => {
-    await loadStats();
-    await loadLogs();
-  };
-
-  const init = async () => {
-    const ok = await checkAuth();
-    if (ok) loadAll();
-  };
 
   init();
 })();
