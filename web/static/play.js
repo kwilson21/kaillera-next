@@ -86,6 +86,28 @@
         }
       }
     }
+
+    // Capture sync logs before page unloads
+    if (!engine) return;
+    const logs = engine.exportSyncLog?.();
+    if (!logs) return;
+    const room = roomCode ?? 'unknown';
+    const slot = window._playerSlot ?? 'x';
+
+    // Store full log in localStorage for reliable recovery on next visit
+    try {
+      localStorage.setItem('kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
+    } catch (_) {}
+
+    // Also fire sendBeacon with truncated log (browsers cap at ~64KB)
+    const MAX_BEACON = 60000;
+    let beaconLog = logs;
+    if (logs.length > MAX_BEACON) {
+      const cutIdx = logs.indexOf('\n', logs.length - MAX_BEACON);
+      beaconLog = logs.slice(cutIdx === -1 ? logs.length - MAX_BEACON : cutIdx + 1);
+    }
+    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=beacon`;
+    try { navigator.sendBeacon(url, new Blob([beaconLog], { type: 'text/plain' })); } catch (_) {}
   });
 
   // ── Socket.IO ──────────────────────────────────────────────────────────
