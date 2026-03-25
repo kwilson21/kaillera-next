@@ -282,13 +282,16 @@
         // muted). Build a video-only stream for the <video> element.
         // Audio is added after playback starts (via the playing event).
         if (event.track.kind === 'audio') {
-          // Stash audio track — will add after video starts playing
           _guestVideo._knAudioTrack = event.track;
           return;
         }
 
-        // Video track — create a video-only MediaStream
-        const videoOnlyStream = new MediaStream([event.track]);
+        // Video track — log track state for debugging
+        const vt = event.track;
+        _syncLog(`video track state: readyState=${vt.readyState} muted=${vt.muted} enabled=${vt.enabled}`);
+
+        // Create a video-only MediaStream
+        const videoOnlyStream = new MediaStream([vt]);
         _guestVideo.srcObject = videoOnlyStream;
 
         // Minimize jitter buffer: set minimum playout delay on the receiver.
@@ -542,20 +545,17 @@
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
-      // MUST use window.requestAnimationFrame (not APISandbox.nativeRAF)
-      // because EmulatorJS overrides rAF to synchronize with its WASM
-      // render loop. The EJS rAF timing ensures drawImage reads the WebGL
-      // canvas while it has content (before preserveDrawingBuffer clears).
-      // The native rAF runs at a different phase and reads blank frames.
-      _hostStream = captureCanvas.captureStream(0);
-      const captureTrack = _hostStream.getVideoTracks()[0];
+      // captureStream(30) auto-samples the 2D canvas at 30fps.
+      // captureStream(0)+requestFrame() produces blank frames because
+      // drawImage from a WebGL canvas with preserveDrawingBuffer=false
+      // reads cleared framebuffers intermittently.
+      _hostStream = captureCanvas.captureStream(30);
 
       let _blitCount = 0;
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
-        captureTrack.requestFrame();
         _blitCount++;
         if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
       };
