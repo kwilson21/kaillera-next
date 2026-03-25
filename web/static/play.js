@@ -43,7 +43,7 @@
   const ROM_MAX_SIZE = 128 * 1024 * 1024;  // 128MB
   const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
     || (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent))
-    || (navigator.userAgentData && navigator.userAgentData.mobile);
+    || (navigator.userAgentData?.mobile);
   const ROM_CHUNK_SIZE = 64 * 1024;           // 64KB — same for all platforms
   const ROM_BUFFER_THRESHOLD = 1024 * 1024;   // 1MB — DC handles this fine on mobile
   let _romTransferBytesReceived = 0;
@@ -54,46 +54,46 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
-  function escapeHtml(s) {
+  const escapeHtml = (s) => {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(s));
     return div.innerHTML;
-  }
+  };
 
   // ── URL Params ─────────────────────────────────────────────────────────
 
-  function parseParams() {
+  const parseParams = () => {
     const params = new URLSearchParams(window.location.search);
     roomCode = params.get('room');
     isHost = params.get('host') === '1';
     playerName = params.get('name') || localStorage.getItem('kaillera-name') || 'Player';
     mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
-  }
+  };
 
   // ── Global error handler ───────────────────────────────────────────────
 
-  window.addEventListener('unhandledrejection', function (e) {
+  window.addEventListener('unhandledrejection', (e) => {
     console.error('[play] unhandled rejection:', e.reason);
     showToast('Something went wrong — check console');
   });
 
   // ── Clean tab close ───────────────────────────────────────────────────
 
-  window.addEventListener('pagehide', function () {
+  window.addEventListener('pagehide', () => {
     // Notify peers this is intentional so they skip the 15s reconnect wait
     if (engine && KNState.peers) {
-      Object.values(KNState.peers).forEach(function (p) {
-        if (p.dc && p.dc.readyState === 'open') {
+      for (const p of Object.values(KNState.peers)) {
+        if (p.dc?.readyState === 'open') {
           try { p.dc.send('leaving'); } catch (_) {}
         }
-      });
+      }
     }
   });
 
   // ── Socket.IO ──────────────────────────────────────────────────────────
 
-  function connect() {
+  const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
     window._socket = socket;  // expose for E2E tests
     window._isSpectator = isSpectator;
@@ -122,11 +122,10 @@
           return;
         }
         console.log('[play] rejoined room after reconnect');
-        if (joinData && joinData.players) {
-          const entries = Object.values(joinData.players);
-          for (let i = 0; i < entries.length; i++) {
-            if (entries[i].socketId === socket.id) {
-              mySlot = entries[i].slot;
+        if (joinData?.players) {
+          for (const entry of Object.values(joinData.players)) {
+            if (entry.socketId === socket.id) {
+              mySlot = entry.slot;
               break;
             }
           }
@@ -148,16 +147,16 @@
     socket.on('room-closed', onRoomClosed);
     socket.on('rom-sharing-updated', onRomSharingUpdated);
     socket.on('data-message', onDataMessage);
-  }
+  };
 
-  function sendDeviceType() {
-    if (socket && socket.connected) {
+  const sendDeviceType = () => {
+    if (socket?.connected) {
       socket.emit('device-type', { type: _isMobile ? 'mobile' : 'desktop' });
       socket.emit('input-type', { type: _currentInputType });
     }
-  }
+  };
 
-  function onConnect() {
+  const onConnect = async () => {
     if (isHost) {
       socket.emit('open-room', {
         extra: {
@@ -176,134 +175,132 @@
       });
     } else {
       // Non-host: check room exists, then join
-      fetch(`/room/${encodeURIComponent(roomCode)}`)
-        .then((response) => {
-          if (!response.ok) { showError('Room not found'); return; }
-          return response.json();
-        })
-        .then((roomData) => {
-          if (!roomData) return;
+      try {
+        const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
+        if (!response.ok) { showError('Room not found'); return; }
+        const roomData = await response.json();
+        if (!roomData) return;
 
-          // Room full: auto-join as spectator with banner
-          if (!isSpectator && roomData.player_count >= roomData.max_players) {
-            isSpectator = true;
-            _autoSpectated = true;
-          }
+        // Room full: auto-join as spectator with banner
+        if (!isSpectator && roomData.player_count >= roomData.max_players) {
+          isSpectator = true;
+          _autoSpectated = true;
+        }
 
-          socket.emit('join-room', {
-            extra: {
-              sessionid: roomCode,
-              userid: socket.id,
-              player_name: playerName,
-              spectate: isSpectator,
-            },
-          }, (err, joinData) => {
-            if (err) {
-              // Room filled between REST check and join — auto-spectate
-              if (err === 'Room is full') {
-                isSpectator = true;
-                _autoSpectated = true;
-                socket.emit('join-room', {
-                  extra: {
-                    sessionid: roomCode,
-                    userid: socket.id,
-                    player_name: playerName,
-                    spectate: true,
-                  },
-                }, (err2, joinData2) => {
-                  if (err2) { showError(`Failed to join: ${err2}`); return; }
-                  mySlot = null;
-                  if (joinData2) lastUsersData = joinData2;
-                  sendDeviceType();
-                  showRoomFullBanner();
-                  showOverlay();
-                });
-                return;
-              }
-              showError(`Failed to join: ${err}`);
+        socket.emit('join-room', {
+          extra: {
+            sessionid: roomCode,
+            userid: socket.id,
+            player_name: playerName,
+            spectate: isSpectator,
+          },
+        }, (err, joinData) => {
+          if (err) {
+            // Room filled between REST check and join — auto-spectate
+            if (err === 'Room is full') {
+              isSpectator = true;
+              _autoSpectated = true;
+              socket.emit('join-room', {
+                extra: {
+                  sessionid: roomCode,
+                  userid: socket.id,
+                  player_name: playerName,
+                  spectate: true,
+                },
+              }, (err2, joinData2) => {
+                if (err2) { showError(`Failed to join: ${err2}`); return; }
+                mySlot = null;
+                if (joinData2) lastUsersData = joinData2;
+                sendDeviceType();
+                showRoomFullBanner();
+                showOverlay();
+              });
               return;
             }
+            showError(`Failed to join: ${err}`);
+            return;
+          }
 
-            if (!isSpectator && joinData && joinData.players) {
-              const entries = Object.values(joinData.players);
-              for (let i = 0; i < entries.length; i++) {
-                if (entries[i].socketId === socket.id) {
-                  mySlot = entries[i].slot;
-                  break;
-                }
+          if (!isSpectator && joinData?.players) {
+            for (const entry of Object.values(joinData.players)) {
+              if (entry.socketId === socket.id) {
+                mySlot = entry.slot;
+                break;
               }
-            } else if (isSpectator) {
-              mySlot = null;
-              if (_autoSpectated) showRoomFullBanner();
             }
+          } else if (isSpectator) {
+            mySlot = null;
+            if (_autoSpectated) showRoomFullBanner();
+          }
 
-            sendDeviceType();
+          sendDeviceType();
 
-            // Mid-game join handling
-            if (roomData.status === 'playing') {
-              gameRunning = true;
-              _lateJoin = !isSpectator;
-              // Pick up the game mode — game-started event won't fire
-              // since the game is already running. Try REST then join callback.
-              if (roomData.mode) mode = roomData.mode;
-              else if (joinData && joinData.mode) mode = joinData.mode;
-              // Use joinData directly — the users-updated socket event may not
-              // have arrived yet (ack returns before broadcast is delivered)
-              if (joinData) lastUsersData = joinData;
+          // Mid-game join handling
+          if (roomData.status === 'playing') {
+            gameRunning = true;
+            _lateJoin = !isSpectator;
+            // Pick up the game mode — game-started event won't fire
+            // since the game is already running. Try REST then join callback.
+            if (roomData.mode) mode = roomData.mode;
+            else if (joinData?.mode) mode = joinData.mode;
+            // Use joinData directly — the users-updated socket event may not
+            // have arrived yet (ack returns before broadcast is delivered)
+            if (joinData) lastUsersData = joinData;
 
-              // Store host's ROM hash for verification
-              _hostRomHash = roomData.rom_hash || null;
+            // Store host's ROM hash for verification
+            _hostRomHash = roomData.rom_hash ?? null;
 
-              // Spectators and streaming guests don't need a ROM — they
-              // receive a video stream. Skip ROM checks and go to engine init.
-              if (isSpectator || mode === 'streaming') {
-                hideOverlay();
-                showToolbar();
-                showGameLoading();
-                initEngine();
-                return;
-              }
-
-              // If no ROM cached, check if host is sharing
-              if (!_romBlob && !_romBlobUrl) {
-                if (roomData.rom_sharing) {
-                  // Show accept/decline prompt instead of ROM drop
-                  _romSharingEnabled = true;
-                  _pendingLateJoin = true;
-                  showLateJoinRomPrompt();
-                  updateRomSharingUI();
-                  return;
-                }
-                _pendingLateJoin = true;
-                showLateJoinRomPrompt();
-                return;
-              }
-
-              // Verify ROM hash if available (skip when ROM came from host via sharing)
-              if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
-                showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
-                return;
-              }
-
+            // Spectators and streaming guests don't need a ROM — they
+            // receive a video stream. Skip ROM checks and go to engine init.
+            if (isSpectator || mode === 'streaming') {
+              hideOverlay();
               showToolbar();
+              showGameLoading();
               initEngine();
               return;
             }
 
-            showOverlay();
-          });
-        })
-        .catch(() => showError('Failed to connect'));
+            // If no ROM cached, check if host is sharing
+            if (!_romBlob && !_romBlobUrl) {
+              if (roomData.rom_sharing) {
+                // Show accept/decline prompt instead of ROM drop
+                _romSharingEnabled = true;
+                _pendingLateJoin = true;
+                showLateJoinRomPrompt();
+                updateRomSharingUI();
+                return;
+              }
+              _pendingLateJoin = true;
+              showLateJoinRomPrompt();
+              return;
+            }
+
+            // Verify ROM hash if available (skip when ROM came from host via sharing)
+            if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
+              showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
+              return;
+            }
+
+            showToolbar();
+            initEngine();
+            return;
+          }
+
+          showOverlay();
+        });
+      } catch (_) {
+        showError('Failed to connect');
+      }
     }
-  }
+  };
 
   // ── Users Updated ──────────────────────────────────────────────────────
 
-  function onUsersUpdated(data) {
+  const onUsersUpdated = (data) => {
     lastUsersData = data;
     const players = data.players || {};
     const spectators = data.spectators || {};
-    const ownerSid = data.owner || null;
+    const ownerSid = data.owner ?? null;
 
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
@@ -325,10 +322,9 @@
     }
 
     // Update my slot
-    const entries = Object.values(players);
-    for (let i = 0; i < entries.length; i++) {
-      if (entries[i].socketId === socket.id) {
-        mySlot = entries[i].slot;
+    for (const entry of Object.values(players)) {
+      if (entry.socketId === socket.id) {
+        mySlot = entry.slot;
         break;
       }
     }
@@ -373,43 +369,42 @@
         if (guestStatus) guestStatus.style.display = '';
       }
     }
-  }
+  };
 
-  function diffForToasts(players, spectators) {
+  const diffForToasts = (players, spectators) => {
     // Skip first update
     if (Object.keys(previousPlayers).length === 0 &&
         Object.keys(previousSpectators).length === 0) return;
 
-    let pid;
-    for (pid in players) {
+    for (const pid in players) {
       if (!previousPlayers[pid] && !previousSpectators[pid]) {
         showToast(`${escapeHtml(players[pid].playerName)} joined`);
       }
     }
-    for (pid in previousPlayers) {
+    for (const pid in previousPlayers) {
       if (!players[pid] && !spectators[pid]) {
         showToast(`${escapeHtml(previousPlayers[pid].playerName)} left`);
       }
     }
-    for (pid in spectators) {
+    for (const pid in spectators) {
       if (!previousSpectators[pid] && !previousPlayers[pid]) {
         showToast(`${escapeHtml(spectators[pid].playerName)} is watching`);
       }
     }
-    for (pid in previousSpectators) {
+    for (const pid in previousSpectators) {
       if (!spectators[pid] && !players[pid]) {
         showToast(`${escapeHtml(previousSpectators[pid].playerName)} left`);
       }
     }
-  }
+  };
 
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
-  function onGameStarted(data) {
+  const onGameStarted = (data) => {
     console.log('[play] onGameStarted:', JSON.stringify(data),
-      'engine=' + !!engine, 'EJS=' + !!window.EJS_emulator,
-      'romBlob=' + !!_romBlob, 'romBlobUrl=' + !!_romBlobUrl,
-      'gameRunning=' + gameRunning);
+      `engine=${!!engine}`, `EJS=${!!window.EJS_emulator}`,
+      `romBlob=${!!_romBlob}`, `romBlobUrl=${!!_romBlobUrl}`,
+      `gameRunning=${gameRunning}`);
     mode = data.mode || mode;
     _gameRollbackEnabled = !!data.rollbackEnabled;
 
@@ -464,11 +459,11 @@
     const loadingText = document.getElementById('game-loading-text');
     if (loadingText) loadingText.textContent = 'Loading...';
     initEngine();
-  }
+  };
 
-  function onGameEnded() {
-    console.log('[play] onGameEnded: engine=' + !!engine, 'EJS=' + !!window.EJS_emulator,
-      'romBlob=' + !!_romBlob, 'romBlobUrl=' + !!_romBlobUrl);
+  const onGameEnded = () => {
+    console.log('[play] onGameEnded:', `engine=${!!engine}`, `EJS=${!!window.EJS_emulator}`,
+      `romBlob=${!!_romBlob}`, `romBlobUrl=${!!_romBlobUrl}`);
     gameRunning = false;
     if (engine) {
       // Auto-dump debug logs before stopping
@@ -491,23 +486,23 @@
     // Clean up ROM transfer state (decision persists for page lifetime)
     resetRomTransfer();
     cleanupPreGameConnections();
-  }
+  };
 
-  function onRoomClosed(data) {
+  const onRoomClosed = (data) => {
     gameRunning = false;
     if (engine) {
       engine.stop();
       engine = null;
     }
-    const reason = (data && data.reason) || 'closed';
+    const reason = data?.reason ?? 'closed';
     const msg = reason === 'host-left' ? 'Host left — returning to lobby...' : 'Room closed';
     showToast(msg);
     setTimeout(() => { window.location.href = '/'; }, 2000);
-  }
+  };
 
   // ── ROM Sharing ──────────────────────────────────────────────────────
 
-  function onRomSharingUpdated(data) {
+  const onRomSharingUpdated = (data) => {
     const wasEnabled = _romSharingEnabled;
     _romSharingEnabled = !!data.romSharing;
     console.log('[play] rom-sharing-updated:', _romSharingEnabled);
@@ -551,9 +546,9 @@
     if (isHost && lastUsersData) {
       updateStartButton(lastUsersData.players || {});
     }
-  }
+  };
 
-  function onDataMessage(data) {
+  const onDataMessage = (data) => {
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
       mode = data.mode;
@@ -564,7 +559,7 @@
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
       // Use engine's peer connection if available, otherwise pre-game connection
-      if (engine && engine.getPeerConnection && engine.getPeerConnection(data.sender)) {
+      if (engine?.getPeerConnection?.(data.sender)) {
         console.log('[play] peer', data.sender, 'accepted ROM sharing (via engine)');
         startRomTransferTo(data.sender);
       } else {
@@ -572,9 +567,9 @@
         startPreGameRomTransfer(data.sender);
       }
     }
-  }
+  };
 
-  function toggleRomSharing() {
+  const toggleRomSharing = () => {
     const cb = document.getElementById('opt-rom-sharing');
     if (!cb) return;
     const enabled = cb.checked;
@@ -583,18 +578,18 @@
       showToast('Load a ROM file before sharing');
       return;
     }
-    socket.emit('rom-sharing-toggle', { enabled: enabled });
+    socket.emit('rom-sharing-toggle', { enabled });
     // If disabling, close any active rom-transfer DataChannels
     if (!enabled) {
-      Object.keys(_romTransferDCs).forEach((sid) => {
+      for (const sid of Object.keys(_romTransferDCs)) {
         try { _romTransferDCs[sid].close(); } catch (_) {}
-      });
+      }
       _romTransferDCs = {};
       cleanupPreGameConnections();
     }
-  }
+  };
 
-  function updateRomSharingUI() {
+  const updateRomSharingUI = () => {
     const romDrop = document.getElementById('rom-drop');
     const prompt = document.getElementById('rom-sharing-prompt');
     const progress = document.getElementById('rom-transfer-progress');
@@ -651,18 +646,18 @@
       if (prompt) prompt.style.display = 'none';
       if (progress) progress.style.display = 'none';
     }
-  }
+  };
 
-  function findHostSid() {
-    if (!lastUsersData || !lastUsersData.players) return null;
+  const findHostSid = () => {
+    if (!lastUsersData?.players) return null;
     const players = lastUsersData.players;
     for (const pid in players) {
       if (players[pid].slot === 0) return players[pid].socketId;
     }
     return null;
-  }
+  };
 
-  function acceptRomSharing() {
+  const acceptRomSharing = () => {
     _romSharingDecision = 'accepted';
     _romTransferChunks = [];
     _romTransferHeader = null;
@@ -687,12 +682,12 @@
     }
 
     // Engine exists with open DataChannel: signal immediately
-    if (engine && engine.getPeerConnection) {
+    if (engine?.getPeerConnection) {
       const hostSid = findHostSid();
       if (hostSid) {
         const peers = KNState.peers || {};
         const hostPeer = peers[hostSid];
-        if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+        if (hostPeer?.dc?.readyState === 'open') {
           hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
           return;
         }
@@ -700,16 +695,16 @@
     }
     // Fallback: Socket.IO data-message
     socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
-  }
+  };
 
-  function waitForDCAndSendRomAccepted() {
+  const waitForDCAndSendRomAccepted = () => {
     if (_romAcceptPollInterval) clearInterval(_romAcceptPollInterval);
     _romAcceptPollInterval = setInterval(() => {
       const hostSid = findHostSid();
       if (!hostSid) return;
       const peers = KNState.peers || {};
       const hostPeer = peers[hostSid];
-      if (hostPeer && hostPeer.dc && hostPeer.dc.readyState === 'open') {
+      if (hostPeer?.dc?.readyState === 'open') {
         clearInterval(_romAcceptPollInterval);
         _romAcceptPollInterval = null;
         console.log('[play] DC open to host — sending rom-accepted');
@@ -722,14 +717,14 @@
         _romAcceptPollInterval = null;
       }
     }, 15000);
-  }
+  };
 
-  function declineRomSharing() {
+  const declineRomSharing = () => {
     _romSharingDecision = 'declined';
     updateRomSharingUI();
-  }
+  };
 
-  function cancelRomTransfer() {
+  const cancelRomTransfer = () => {
     _romTransferState = 'idle';
     if (_romTransferDC) {
       try { _romTransferDC.close(); } catch (_) {}
@@ -750,27 +745,27 @@
     cleanupPreGameConnections();
     updateRomSharingUI();
     showToast('ROM transfer cancelled');
-  }
+  };
 
-  function retryRomTransfer() {
+  const retryRomTransfer = () => {
     if (_romTransferState !== 'paused' && _romTransferState !== 'idle') return;
     _romTransferRetries = 0;
     _romTransferState = 'resuming';
     updateRomSharingUI();
     showToast('Retrying ROM transfer...');
     requestResumeTransfer();
-  }
+  };
 
-  function resetRomTransfer() {
+  const resetRomTransfer = () => {
     // Game-end cleanup — same as cancel but no toast, also closes sender DCs
     _romTransferState = 'idle';
     if (_romTransferDC) {
       try { _romTransferDC.close(); } catch (_) {}
       _romTransferDC = null;
     }
-    Object.keys(_romTransferDCs).forEach((sid) => {
+    for (const sid of Object.keys(_romTransferDCs)) {
       try { _romTransferDCs[sid].close(); } catch (_) {}
-    });
+    }
     _romTransferDCs = {};
     clearTimeout(_romTransferStallTimer);
     _romTransferStallTimer = null;
@@ -784,60 +779,60 @@
     _romTransferHeader = null;
     _romTransferBytesReceived = 0;
     _romTransferRetries = 0;
-  }
+  };
 
   // ── Pre-game ROM Preloading ─────────────────────────────────────────
 
-  function registerRomSignalHandler() {
+  const registerRomSignalHandler = () => {
     if (_romSignalHandler) return;
     _romSignalHandler = async (data) => {
-      var remoteSid = data.sender;
+      const remoteSid = data.sender;
       if (!remoteSid) return;
 
       if (data.offer && !isHost) {
         // Guest: received offer from host for ROM preload
-        var ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+        const ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
         if (_preGamePC) {
           try { _preGamePC.close(); } catch (_) {}
         }
         _preGamePC = new RTCPeerConnection({ iceServers: ICE });
 
-        _preGamePC.onicecandidate = function (e) {
+        _preGamePC.onicecandidate = (e) => {
           if (e.candidate) {
             socket.emit('rom-signal', { target: remoteSid, candidate: e.candidate });
           }
         };
 
-        _preGamePC.ondatachannel = function (e) {
+        _preGamePC.ondatachannel = (e) => {
           if (e.channel.label === 'rom-transfer') {
             onExtraDataChannel(remoteSid, e.channel);
           }
         };
 
         await _preGamePC.setRemoteDescription(data.offer);
-        var answer = await _preGamePC.createAnswer();
+        const answer = await _preGamePC.createAnswer();
         await _preGamePC.setLocalDescription(answer);
         socket.emit('rom-signal', { target: remoteSid, answer: _preGamePC.localDescription });
       }
 
       if (data.answer && isHost) {
-        var pc = _preGamePCs[remoteSid];
+        const pc = _preGamePCs[remoteSid];
         if (pc) {
           await pc.setRemoteDescription(data.answer);
         }
       }
 
       if (data.candidate) {
-        var pc2 = isHost ? _preGamePCs[remoteSid] : _preGamePC;
-        if (pc2) {
-          try { await pc2.addIceCandidate(data.candidate); } catch (_) {}
+        const targetPC = isHost ? _preGamePCs[remoteSid] : _preGamePC;
+        if (targetPC) {
+          try { await targetPC.addIceCandidate(data.candidate); } catch (_) {}
         }
       }
     };
     socket.on('rom-signal', _romSignalHandler);
-  }
+  };
 
-  function startPreGameRomTransfer(peerSid) {
+  const startPreGameRomTransfer = async (peerSid) => {
     if (!_romBlob || !isHost) return;
     if (_romBlob.size > ROM_MAX_SIZE) {
       console.log('[play] ROM too large to share:', _romBlob.size);
@@ -846,30 +841,30 @@
 
     registerRomSignalHandler();
 
-    var ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
-    var pc = new RTCPeerConnection({ iceServers: ICE });
+    const ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    const pc = new RTCPeerConnection({ iceServers: ICE });
     _preGamePCs[peerSid] = pc;
 
-    pc.onicecandidate = function (e) {
+    pc.onicecandidate = (e) => {
       if (e.candidate) {
         socket.emit('rom-signal', { target: peerSid, candidate: e.candidate });
       }
     };
 
     // Create rom-transfer DataChannel (same pattern as startRomTransferTo)
-    var dc = pc.createDataChannel('rom-transfer', { ordered: true });
+    const dc = pc.createDataChannel('rom-transfer', { ordered: true });
     dc.binaryType = 'arraybuffer';
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = function () {
+    dc.onopen = () => {
       console.log('[play] pre-game rom-transfer DC open to', peerSid);
       // Always wait for receiver's rom-resume message with offset.
     };
-    dc.onmessage = function (e) {
+    dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
         try {
-          var msg = JSON.parse(e.data);
+          const msg = JSON.parse(e.data);
           if (msg.type === 'rom-resume' && msg.offset >= 0) {
             console.log('[play] pre-game ROM resume from offset', msg.offset);
             sendRomOverChannel(dc, peerSid, msg.offset);
@@ -877,14 +872,14 @@
         } catch (_) {}
       }
     };
-    dc.onclose = function () {
+    dc.onclose = () => {
       delete _romTransferDCs[peerSid];
       if (_preGamePCs[peerSid]) {
         try { _preGamePCs[peerSid].close(); } catch (_) {}
         delete _preGamePCs[peerSid];
       }
     };
-    dc.onerror = function () {
+    dc.onerror = () => {
       delete _romTransferDCs[peerSid];
       if (_preGamePCs[peerSid]) {
         try { _preGamePCs[peerSid].close(); } catch (_) {}
@@ -892,14 +887,12 @@
       }
     };
 
-    pc.createOffer().then(function (offer) {
-      return pc.setLocalDescription(offer);
-    }).then(function () {
-      socket.emit('rom-signal', { target: peerSid, offer: pc.localDescription });
-    });
-  }
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('rom-signal', { target: peerSid, offer: pc.localDescription });
+  };
 
-  function cleanupPreGameConnections() {
+  const cleanupPreGameConnections = () => {
     if (_romSignalHandler) {
       socket.off('rom-signal', _romSignalHandler);
       _romSignalHandler = null;
@@ -908,21 +901,21 @@
       try { _preGamePC.close(); } catch (_) {}
       _preGamePC = null;
     }
-    Object.keys(_preGamePCs).forEach(function (sid) {
+    for (const sid of Object.keys(_preGamePCs)) {
       try { _preGamePCs[sid].close(); } catch (_) {}
-    });
+    }
     _preGamePCs = {};
-  }
+  };
 
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
-  function startRomTransferTo(peerSid) {
+  const startRomTransferTo = (peerSid) => {
     if (!_romBlob || !isHost) return;
     if (_romBlob.size > ROM_MAX_SIZE) {
       console.log('[play] ROM too large to share:', _romBlob.size);
       return;
     }
-    const pc = engine && engine.getPeerConnection ? engine.getPeerConnection(peerSid) : null;
+    const pc = engine?.getPeerConnection?.(peerSid) ?? null;
     if (!pc) {
       console.log('[play] no peer connection for', peerSid);
       return;
@@ -956,9 +949,9 @@
       console.log('[play] rom-transfer DC error:', peerSid, e);
       delete _romTransferDCs[peerSid];
     };
-  }
+  };
 
-  function sendRomOverChannel(dc, peerSid, startOffset) {
+  const sendRomOverChannel = (dc, peerSid, startOffset) => {
     const romName = localStorage.getItem('kaillera-rom-name') || 'rom.z64';
 
     if (!startOffset) {
@@ -976,7 +969,7 @@
       let backpressureRetries = 0;
       const MAX_BACKPRESSURE_RETRIES = 3;
 
-      function sendNextChunk() {
+      const sendNextChunk = () => {
         if (dc.readyState !== 'open') {
           console.log('[play] ROM send: DC closed at offset', offset);
           return;
@@ -1003,9 +996,9 @@
         // All chunks sent
         dc.send(JSON.stringify({ type: 'rom-complete' }));
         console.log('[play] ROM transfer complete to', peerSid);
-      }
+      };
 
-      function waitForDrain() {
+      const waitForDrain = () => {
         const drainTimeout = setTimeout(() => {
           dc.onbufferedamountlow = null;
           if (dc.readyState !== 'open') return;
@@ -1030,9 +1023,9 @@
           backpressureRetries = 0;
           sendNextChunk();
         };
-      }
+      };
 
-      function retryChunk(chunkStart, chunkEnd, attempt) {
+      const retryChunk = (chunkStart, chunkEnd, attempt) => {
         if (attempt >= 3) {
           console.log('[play] ROM send: chunk retry exhausted at offset', chunkStart);
           showToast('ROM transfer failed — load ROM manually');
@@ -1050,16 +1043,16 @@
             retryChunk(chunkStart, chunkEnd, attempt + 1);
           }
         }, 500);
-      }
+      };
 
       sendNextChunk();
     };
     reader.readAsArrayBuffer(_romBlob);
-  }
+  };
 
   // ── ROM Transfer: Joiner receiving ──────────────────────────────────
 
-  function onExtraDataChannel(remoteSid, channel) {
+  const onExtraDataChannel = (remoteSid, channel) => {
     if (channel.label !== 'rom-transfer') return;
     if (_romSharingDecision !== 'accepted') {
       channel.close();
@@ -1088,11 +1081,11 @@
     // Always tell the host where to start sending from.
     // offset 0 = fresh (host sends header + all chunks)
     // offset N = resume (host sends chunks from N, no header)
-    var resumeOffset = _romTransferBytesReceived;
-    function sendResumeMsg() {
+    const resumeOffset = _romTransferBytesReceived;
+    const sendResumeMsg = () => {
       console.log('[play] sending rom-resume offset', resumeOffset);
       channel.send(JSON.stringify({ type: 'rom-resume', offset: resumeOffset }));
-    }
+    };
     if (channel.readyState === 'open') {
       sendResumeMsg();
     } else {
@@ -1166,9 +1159,9 @@
     };
 
     updateRomSharingUI();
-  }
+  };
 
-  function requestResumeTransfer() {
+  const requestResumeTransfer = () => {
     // Re-request transfer from host via Socket.IO
     socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
     // Timeout: if no DC arrives in 15s, fall back to paused
@@ -1191,28 +1184,28 @@
       }
       updateRomSharingUI();
     }, 15000);
-  }
+  };
 
-  function resetStallTimer() {
+  const resetStallTimer = () => {
     clearTimeout(_romTransferStallTimer);
     _romTransferStallTimer = setTimeout(onStallTimeout, 10000);
-  }
+  };
 
-  function stopStallTimer() {
+  const stopStallTimer = () => {
     clearTimeout(_romTransferStallTimer);
     _romTransferStallTimer = null;
-  }
+  };
 
-  function onStallTimeout() {
+  const onStallTimeout = () => {
     if (_romTransferState !== 'receiving') return;
     console.log('[play] ROM transfer stalled — no chunks for 10s');
     // Close DC — onclose will transition to paused
     if (_romTransferDC) {
       try { _romTransferDC.close(); } catch (_) {}
     }
-  }
+  };
 
-  function updateRomProgress(received, total) {
+  const updateRomProgress = (received, total) => {
     const bar = document.getElementById('rom-progress-bar');
     const text = document.getElementById('rom-progress-text');
     const pct = total > 0 ? Math.round((received / total) * 100) : 0;
@@ -1222,12 +1215,12 @@
       const totMB = (total / (1024 * 1024)).toFixed(1);
       text.textContent = `Receiving ROM... ${pct}% (${recMB} / ${totMB} MB)`;
     }
-  }
+  };
 
-  function finishRomTransfer() {
+  const finishRomTransfer = () => {
     let totalSize = 0;
-    for (let i = 0; i < _romTransferChunks.length; i++) {
-      totalSize += _romTransferChunks[i].byteLength;
+    for (const chunk of _romTransferChunks) {
+      totalSize += chunk.byteLength;
     }
 
     if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
@@ -1239,8 +1232,8 @@
     }
 
     const blob = new Blob(_romTransferChunks);
-    const displayName = (_romTransferHeader && _romTransferHeader.name) || 'rom.z64';
-    const expectedHash = _romTransferHeader ? _romTransferHeader.hash : null;
+    const displayName = _romTransferHeader?.name ?? 'rom.z64';
+    const expectedHash = _romTransferHeader?.hash ?? null;
 
     // Set ROM data (ephemeral — do NOT cache to IndexedDB)
     _romBlob = blob;
@@ -1260,19 +1253,17 @@
       afterRomTransferComplete(displayName);
     } else {
       const reader = new FileReader();
-      reader.onload = () => {
-        hashArrayBuffer(reader.result).then((hash) => {
-          _romHash = hash;
-          afterRomTransferComplete(displayName);
-        }).catch(() => {
-          afterRomTransferComplete(displayName);
-        });
+      reader.onload = async () => {
+        try {
+          _romHash = await hashArrayBuffer(reader.result);
+        } catch (_) {}
+        afterRomTransferComplete(displayName);
       };
       reader.readAsArrayBuffer(blob);
     }
-  }
+  };
 
-  function afterRomTransferComplete(displayName) {
+  const afterRomTransferComplete = (displayName) => {
     console.log('[play] ROM transfer complete:', displayName);
     notifyRomReady();
 
@@ -1300,23 +1291,23 @@
 
     // Clean up pre-game WebRTC connections (ROM delivered, no longer needed)
     cleanupPreGameConnections();
-  }
+  };
 
-  function notifyRomReady() {
-    if (socket && socket.connected) {
+  const notifyRomReady = () => {
+    if (socket?.connected) {
       socket.emit('rom-ready', { ready: true });
     }
-  }
+  };
 
-  function onUnhandledEngineMessage(remoteSid, msg) {
+  const onUnhandledEngineMessage = (remoteSid, msg) => {
     if (msg.type === 'rom-accepted' && isHost && _romSharingEnabled) {
       console.log('[play] peer', remoteSid, 'accepted ROM sharing');
       startRomTransferTo(remoteSid);
     }
-  }
+  };
 
-  function destroyEmulator() {
-    console.log('[play] destroyEmulator: EJS=' + !!window.EJS_emulator);
+  const destroyEmulator = () => {
+    console.log('[play] destroyEmulator:', `EJS=${!!window.EJS_emulator}`);
     const emu = window.EJS_emulator;
     if (emu) {
       // Close ALL emulator AudioContexts to stop lingering audio.
@@ -1324,40 +1315,38 @@
       // this catches the EJS/SDL2 and OpenAL AudioContexts.
       try {
         const gm = emu.gameManager;
-        if (gm && gm.Module) {
-          if (gm.Module.SDL2 && gm.Module.SDL2.audioContext) {
+        if (gm?.Module) {
+          if (gm.Module.SDL2?.audioContext) {
             gm.Module.SDL2.audioContext.close();
           }
           // OpenAL AudioContexts — lockstep overrides resume() to a no-op
           // to prevent auto-resuming during gameplay. Restore it before closing
           // so mobile WebKit can properly release the audio resources.
-          if (gm.Module.AL && gm.Module.AL.contexts) {
-            Object.keys(gm.Module.AL.contexts).forEach((id) => {
-              const ctx = gm.Module.AL.contexts[id];
-              if (!ctx) return;
+          if (gm.Module.AL?.contexts) {
+            for (const [id, ctx] of Object.entries(gm.Module.AL.contexts)) {
+              if (!ctx) continue;
               // Stop all OpenAL sources before restoring resume() —
               // during lockstep the emulator may set sources to PLAYING
               // even though the context was suspended. Restoring resume()
               // with active sources can briefly play stale audio on mobile.
               if (ctx.sources && gm.Module.AL.setSourceState) {
-                Object.keys(ctx.sources).forEach((sid) => {
-                  var src = ctx.sources[sid];
-                  if (src && src.state === 0x1012) {
+                for (const [sid, src] of Object.entries(ctx.sources)) {
+                  if (src?.state === 0x1012) {
                     try { gm.Module.AL.setSourceState(src, 0x1014); } catch (_) {}
                   }
-                });
+                }
               }
               if (ctx.audioCtx) {
                 try {
                   // Restore native resume() if it was monkey-patched
-                  var proto = AudioContext.prototype || webkitAudioContext.prototype;
-                  if (proto && proto.resume) {
+                  const proto = AudioContext.prototype || webkitAudioContext.prototype;
+                  if (proto?.resume) {
                     ctx.audioCtx.resume = proto.resume;
                   }
                   ctx.audioCtx.close();
                 } catch (_) {}
               }
-            });
+            }
           }
         }
       } catch (_) {}
@@ -1377,9 +1366,9 @@
       URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = null;
     }
-  }
+  };
 
-  function bootEmulator() {
+  const bootEmulator = () => {
     // Re-initialize EmulatorJS if it was destroyed
     if (window.EJS_emulator) {
       console.log('[play] bootEmulator: EJS already exists, skipping');
@@ -1427,11 +1416,11 @@
 
     // Wait for IDB cache clear (core-redirector) before loading EJS.
     // If the clear hasn't finished, EJS might use stale cached core data.
-    var injectLoader = function () {
-      var script = document.createElement('script');
+    const injectLoader = () => {
+      const script = document.createElement('script');
       script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
-      script.onload = function () { console.log('[play] loader.js loaded'); };
-      script.onerror = function () { console.log('[play] loader.js FAILED to load'); };
+      script.onload = () => { console.log('[play] loader.js loaded'); };
+      script.onerror = () => { console.log('[play] loader.js FAILED to load'); };
       document.body.appendChild(script);
     };
     if (window._knCoreReady) {
@@ -1439,9 +1428,9 @@
     } else {
       injectLoader();
     }
-  }
+  };
 
-  function setupRomDrop() {
+  const setupRomDrop = () => {
     const drop = document.getElementById('rom-drop');
     if (!drop) return;
 
@@ -1497,17 +1486,18 @@
         statusEl.textContent = `Last used: ${savedRom} (file not cached — drop again)`;
       }
     });
-  }
+  };
 
-  function handleRomFile(file) {
+  const handleRomFile = (file) => {
     const statusEl = document.getElementById('rom-status');
     const isZip = file.name.toLowerCase().endsWith('.zip');
 
     if (isZip) {
-      if (statusEl) statusEl.textContent = 'Extracting ROM from zip…';
+      if (statusEl) statusEl.textContent = 'Extracting ROM from zip\u2026';
       const reader = new FileReader();
-      reader.onload = () => {
-        extractRomFromZip(reader.result).then((result) => {
+      reader.onload = async () => {
+        try {
+          const result = await extractRomFromZip(reader.result);
           if (!result) {
             if (statusEl) statusEl.textContent = 'No ROM found in zip (.z64/.n64/.v64)';
             return;
@@ -1515,18 +1505,18 @@
           const romBlob = new Blob([result.data]);
           const romFile = new File([romBlob], result.name);
           loadRomData(romFile, result.name);
-        }).catch((err) => {
+        } catch (err) {
           console.log('[play] zip extraction failed:', err);
           if (statusEl) statusEl.textContent = 'Failed to extract ROM from zip';
-        });
+        }
       };
       reader.readAsArrayBuffer(file);
     } else {
       loadRomData(file, file.name);
     }
-  }
+  };
 
-  function loadRomData(file, displayName) {
+  const loadRomData = (file, displayName) => {
     _romBlob = file;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
@@ -1545,29 +1535,29 @@
 
     // Compute ROM hash and proceed with any pending late-join
     const reader = new FileReader();
-    reader.onload = () => {
-      hashArrayBuffer(reader.result).then((hash) => {
+    reader.onload = async () => {
+      try {
+        const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
         localStorage.setItem('kaillera-rom-hash', hash);
-        console.log(`[play] ROM hash: ${hash.substring(0, 16)}…`);
-      }).catch((err) => {
+        console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
+      } catch (err) {
         console.log('[play] hash failed:', err);
-      }).then(() => {
-        notifyRomReady();
-        // Always proceed with late-join, even if hash computation failed
-        if (_pendingLateJoin) {
-          dismissLateJoinPrompt();
-        }
-      });
+      }
+      notifyRomReady();
+      // Always proceed with late-join, even if hash computation failed
+      if (_pendingLateJoin) {
+        dismissLateJoinPrompt();
+      }
     };
     reader.readAsArrayBuffer(file);
-  }
+  };
 
   // ── ZIP extraction ────────────────────────────────────────────────────
 
   const _ROM_EXTS = ['.z64', '.n64', '.v64', '.ndd'];
 
-  function extractRomFromZip(arrayBuffer) {
+  const extractRomFromZip = async (arrayBuffer) => {
     // Minimal ZIP parser using the central directory (reliable sizes).
     // Supports STORED (0) and DEFLATE (8) compression methods.
     const view = new DataView(arrayBuffer);
@@ -1579,7 +1569,7 @@
     for (let i = len - 22; i >= Math.max(0, len - 65557); i--) {
       if (view.getUint32(i, true) === 0x06054b50) { eocdOffset = i; break; }
     }
-    if (eocdOffset === -1) return Promise.resolve(null);
+    if (eocdOffset === -1) return null;
 
     const cdOffset = view.getUint32(eocdOffset + 16, true);
     const cdEntries = view.getUint16(eocdOffset + 10, true);
@@ -1601,8 +1591,8 @@
 
       const lower = fileName.toLowerCase();
       let isRom = false;
-      for (let j = 0; j < _ROM_EXTS.length; j++) {
-        if (lower.endsWith(_ROM_EXTS[j])) { isRom = true; break; }
+      for (const ext of _ROM_EXTS) {
+        if (lower.endsWith(ext)) { isRom = true; break; }
       }
 
       if (isRom && compSize > 0) {
@@ -1614,35 +1604,33 @@
         const baseName = fileName.split('/').pop();
 
         if (method === 0) {
-          return Promise.resolve({ name: baseName, data: compData.slice() });
+          return { name: baseName, data: compData.slice() };
         } else if (method === 8) {
           const blob = new Blob([compData]);
           const ds = new DecompressionStream('deflate-raw');
           const decompressed = blob.stream().pipeThrough(ds);
-          return new Response(decompressed).arrayBuffer().then((buf) => {
-            return { name: baseName, data: new Uint8Array(buf) };
-          });
+          const buf = await new Response(decompressed).arrayBuffer();
+          return { name: baseName, data: new Uint8Array(buf) };
         }
       }
 
       pos += 46 + nameLen + extraLen + commentLen;
     }
 
-    return Promise.resolve(null);
-  }
+    return null;
+  };
 
-  function hashArrayBuffer(buf) {
+  const hashArrayBuffer = async (buf) => {
     // crypto.subtle requires a secure context (HTTPS or localhost).
     // On LAN IPs over HTTP, fall back to a simple FNV-1a hash.
-    if (window.crypto && window.crypto.subtle) {
-      return crypto.subtle.digest('SHA-256', buf).then((digest) => {
-        const arr = new Uint8Array(digest);
-        let hex = '';
-        for (let i = 0; i < arr.length; i++) {
-          hex += ('0' + arr[i].toString(16)).slice(-2);
-        }
-        return hex;
-      });
+    if (window.crypto?.subtle) {
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      const arr = new Uint8Array(digest);
+      let hex = '';
+      for (const byte of arr) {
+        hex += (`0${byte.toString(16)}`).slice(-2);
+      }
+      return hex;
     }
     // Fallback: FNV-1a 64-bit (good enough for mismatch detection)
     const bytes = new Uint8Array(buf);
@@ -1657,25 +1645,25 @@
         h2 = Math.imul(h2, 0x01000193) >>> 0;
       }
     }
-    let hex = ('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8);
+    let hex = `${'00000000'.concat(h1.toString(16)).slice(-8)}${'00000000'.concat(h2.toString(16)).slice(-8)}`;
     // Pad to 64 chars to match SHA-256 length for server validation
     while (hex.length < 64) hex += '0';
-    return Promise.resolve(hex);
-  }
+    return hex;
+  };
 
   // ── ROM IDB Cache ──────────────────────────────────────────────────────
 
   const _ROM_DB = 'kaillera-rom-cache';
   const _ROM_STORE = 'roms';
 
-  function openRomDB(cb) {
+  const openRomDB = (cb) => {
     const req = indexedDB.open(_ROM_DB, 1);
     req.onupgradeneeded = () => { req.result.createObjectStore(_ROM_STORE); };
     req.onsuccess = () => { cb(req.result); };
     req.onerror = () => { cb(null); };
-  }
+  };
 
-  function cacheRom(file) {
+  const cacheRom = (file) => {
     const reader = new FileReader();
     reader.onload = () => {
       openRomDB((db) => {
@@ -1685,16 +1673,16 @@
       });
     };
     reader.readAsArrayBuffer(file);
-  }
+  };
 
-  function loadCachedRom(cb) {
+  const loadCachedRom = (cb) => {
     const name = localStorage.getItem('kaillera-rom-name');
     if (!name) { cb(null); return; }
     openRomDB((db) => {
       if (!db) { cb(null); return; }
       const tx = db.transaction(_ROM_STORE, 'readonly');
       const req = tx.objectStore(_ROM_STORE).get('current');
-      req.onsuccess = () => {
+      req.onsuccess = async () => {
         if (!req.result) { cb(null); return; }
         const blob = new Blob([req.result]);
         _romBlob = blob;
@@ -1702,22 +1690,21 @@
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
         // Compute hash from cached data
-        hashArrayBuffer(req.result).then((hash) => {
-          _romHash = hash;
-          localStorage.setItem('kaillera-rom-hash', hash);
-          notifyRomReady();
-          cb(name);
-        });
+        const hash = await hashArrayBuffer(req.result);
+        _romHash = hash;
+        localStorage.setItem('kaillera-rom-hash', hash);
+        notifyRomReady();
+        cb(name);
       };
       req.onerror = () => { cb(null); };
     });
-  }
+  };
 
-  function initEngine() {
+  const initEngine = () => {
     // Spectators and streaming guests receive video — don't boot emulator.
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
-    var needsEmulator = !isSpectator && !(mode === 'streaming' && !isHost);
+    const needsEmulator = !isSpectator && !(mode === 'streaming' && !isHost);
     if (needsEmulator && (_romBlob || _romBlobUrl)) {
       bootEmulator();
     } else {
@@ -1737,14 +1724,14 @@
 
     engine = Engine;
     engine.init({
-      socket: socket,
+      socket,
       sessionId: roomCode,
       playerSlot: isSpectator ? null : mySlot,
-      isSpectator: isSpectator,
-      playerName: playerName,
+      isSpectator,
+      playerName,
       gameElement: document.getElementById('game'),
-      rollbackEnabled: rollbackEnabled,
-      romHash: _romHash || null,
+      rollbackEnabled,
+      romHash: _romHash ?? null,
       isMobile: _isMobile,
       onStatus: (msg) => {
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
@@ -1756,7 +1743,7 @@
         const loadingText = document.getElementById('game-loading-text');
         if (loadingText) loadingText.textContent = msg;
         // Dismiss loading overlay when game loop starts or stream connects
-        if (msg.indexOf('game on') !== -1 || msg.indexOf('Spectating') !== -1 || msg.indexOf('streaming') !== -1) {
+        if (msg.includes('game on') || msg.includes('Spectating') || msg.includes('streaming')) {
           dismissGameLoading();
         }
       },
@@ -1776,9 +1763,7 @@
 
         // Only show overlay if ALL our DCs are down (we're the disconnected one).
         const peers = KNState.peers || {};
-        const hasOpenDC = Object.values(peers).some((p) => {
-          return p.dc && p.dc.readyState === 'open';
-        });
+        const hasOpenDC = Object.values(peers).some((p) => p.dc?.readyState === 'open');
 
         if (!hasOpenDC) {
           overlay.classList.remove('hidden');
@@ -1790,7 +1775,7 @@
       },
       onPeerReconnected: (sid) => {
         // Resume ROM transfer if paused — mark DC to wait for receiver's rom-resume
-        if (_romTransferState === 'paused' && engine && engine.getPeerConnection) {
+        if (_romTransferState === 'paused' && engine?.getPeerConnection) {
           startRomTransferTo(sid);
         }
       },
@@ -1810,9 +1795,9 @@
         onUnhandledEngineMessage(remoteSid, msg);
       });
     }
-  }
+  };
 
-  function startGame() {
+  const startGame = () => {
     if (!_romBlob && !_romBlobUrl) {
       showToast('Load a ROM file before starting');
       return;
@@ -1823,51 +1808,51 @@
     socket.emit('start-game', {
       mode: selectedMode,
       rollbackEnabled: optRollback ? optRollback.checked : false,
-      romHash: _romHash || null,
+      romHash: _romHash ?? null,
     }, (err) => {
       if (err) showToast(err);
     });
-  }
+  };
 
-  function endGame() {
+  const endGame = () => {
     socket.emit('end-game', {}, (err) => {
       if (err) {
         console.log('[play] end-game error:', err);
         showToast(`End game failed: ${err}`);
       }
     });
-  }
+  };
 
-  function leaveGame() {
+  const leaveGame = () => {
     // Notify peers this is intentional (prevents reconnect attempt)
     if (engine && KNState.peers) {
-      Object.values(KNState.peers).forEach((p) => {
-        if (p.dc && p.dc.readyState === 'open') {
+      for (const p of Object.values(KNState.peers)) {
+        if (p.dc?.readyState === 'open') {
           try { p.dc.send('leaving'); } catch (_) {}
         }
-      });
+      }
     }
     socket.emit('leave-room', {});
     if (engine) { engine.stop(); engine = null; }
     window.location.href = '/';
-  }
+  };
 
   // ── Late-Join ROM Prompt ─────────────────────────────────────────────
 
-  function showLateJoinRomPrompt() {
+  const showLateJoinRomPrompt = () => {
     // Show the overlay with only the ROM drop zone visible
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.remove('hidden');
 
     // Hide everything except the ROM section
     const sections = overlay.querySelectorAll('.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status');
-    for (let i = 0; i < sections.length; i++) {
-      sections[i].style.display = 'none';
+    for (const section of sections) {
+      section.style.display = 'none';
     }
 
     // Show only the ROM drop section
     const romDrop = document.getElementById('rom-drop');
-    if (romDrop && romDrop.parentNode) romDrop.parentNode.style.display = '';
+    if (romDrop?.parentNode) romDrop.parentNode.style.display = '';
 
     // Add a heading message
     const card = overlay.querySelector('.overlay-card');
@@ -1878,9 +1863,9 @@
       msg.textContent = 'Game in progress — load a ROM to join';
       card.insertBefore(msg, card.firstChild);
     }
-  }
+  };
 
-  function dismissLateJoinPrompt() {
+  const dismissLateJoinPrompt = () => {
     _pendingLateJoin = false;
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
@@ -1898,19 +1883,19 @@
     if (overlay) {
       overlay.classList.add('hidden');
       const sections = overlay.querySelectorAll('.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status');
-      for (let i = 0; i < sections.length; i++) {
-        sections[i].style.display = '';
+      for (const section of sections) {
+        section.style.display = '';
       }
     }
 
     // Now proceed with late join
     showToolbar();
     initEngine();
-  }
+  };
 
   // ── UI: Overlay ────────────────────────────────────────────────────────
 
-  function showOverlay() {
+  const showOverlay = () => {
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.remove('hidden');
 
@@ -1947,14 +1932,14 @@
 
     const modeSel = document.getElementById('mode-select');
     if (modeSel) modeSel.value = mode;
-  }
+  };
 
-  function hideOverlay() {
+  const hideOverlay = () => {
     const overlay = document.getElementById('overlay');
     if (overlay) overlay.classList.add('hidden');
-  }
+  };
 
-  function updatePlayerList(players, spectators, ownerSid) {
+  const updatePlayerList = (players, spectators, ownerSid) => {
     for (let i = 0; i < 4; i++) {
       const slotEl = document.querySelector(`.player-slot[data-slot="${i}"]`);
       if (!slotEl) continue;
@@ -1962,9 +1947,8 @@
       if (!nameEl) continue;
 
       let playerInSlot = null;
-      const entries = Object.values(players);
-      for (let j = 0; j < entries.length; j++) {
-        if (entries[j].slot === i) { playerInSlot = entries[j]; break; }
+      for (const entry of Object.values(players)) {
+        if (entry.slot === i) { playerInSlot = entry; break; }
       }
 
       const gpEl = slotEl.querySelector('.gamepad');
@@ -1998,12 +1982,12 @@
 
     const specEl = document.getElementById('spectator-list');
     if (specEl) {
-      const specNames = Object.values(spectators).map((s) => { return s.playerName; });
+      const specNames = Object.values(spectators).map((s) => s.playerName);
       specEl.textContent = specNames.length > 0 ? `Watching: ${specNames.join(', ')}` : '';
     }
-  }
+  };
 
-  function updateRomDeclarePrompt() {
+  const updateRomDeclarePrompt = () => {
     const prompt = document.getElementById('rom-declare-prompt');
     const romDrop = document.getElementById('rom-drop');
     if (!prompt) return;
@@ -2018,9 +2002,9 @@
     } else if (romDrop && !_romDeclared && !_romSharingEnabled) {
       romDrop.style.display = '';
     }
-  }
+  };
 
-  function updateStartButton(players) {
+  const updateStartButton = (players) => {
     const btn = document.getElementById('start-btn');
     if (!btn || !isHost) return;
     const sel = document.getElementById('mode-select');
@@ -2033,12 +2017,10 @@
       btn.textContent = 'Start Game (need 2+)';
     } else if (selectedMode === 'streaming') {
       // Streaming: check ROM declarations (host is exempt)
-      const guestsReady = entries.every((p) => {
-        return p.slot === 0 || p.romDeclared;
-      });
+      const guestsReady = entries.every((p) => p.slot === 0 || p.romDeclared);
       if (!guestsReady) {
         btn.disabled = true;
-        const declaredCount = entries.filter((p) => { return p.slot === 0 || p.romDeclared; }).length;
+        const declaredCount = entries.filter((p) => p.slot === 0 || p.romDeclared).length;
         btn.textContent = `Waiting for declarations (${declaredCount}/${playerCount})`;
       } else {
         btn.disabled = false;
@@ -2046,28 +2028,28 @@
       }
     } else {
       // Lockstep: check ROMs loaded
-      const allReady = entries.every((p) => { return p.romReady; });
+      const allReady = entries.every((p) => p.romReady);
       if (!allReady && !_romSharingEnabled) {
         btn.disabled = true;
-        const readyCount = entries.filter((p) => { return p.romReady; }).length;
+        const readyCount = entries.filter((p) => p.romReady).length;
         btn.textContent = `Waiting for ROMs (${readyCount}/${playerCount})`;
       } else {
         btn.disabled = false;
         btn.textContent = 'Start Game';
       }
     }
-  }
+  };
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
 
-  function showGameLoading() {
+  const showGameLoading = () => {
     const el = document.getElementById('game-loading');
     if (el) {
       el.classList.remove('hidden', 'fade-out');
     }
-  }
+  };
 
-  function dismissGameLoading() {
+  const dismissGameLoading = () => {
     const el = document.getElementById('game-loading');
     if (!el || el.classList.contains('hidden')) return;
     el.classList.add('fade-out');
@@ -2075,9 +2057,9 @@
       el.classList.add('hidden');
       el.classList.remove('fade-out');
     }, 400);
-  }
+  };
 
-  function showToolbar() {
+  const showToolbar = () => {
     const toolbar = document.getElementById('toolbar');
     if (toolbar) toolbar.classList.remove('hidden');
 
@@ -2087,20 +2069,20 @@
     const endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
 
-  }
+  };
 
-  function hideToolbar() {
+  const hideToolbar = () => {
     const toolbar = document.getElementById('toolbar');
     if (toolbar) toolbar.classList.add('hidden');
     hideInfoOverlay();
-  }
+  };
 
   // ── UI: Info Overlay ──────────────────────────────────────────────────
 
   let _infoVisible = false;
   let _infoInterval = null;
 
-  function toggleInfoOverlay() {
+  const toggleInfoOverlay = () => {
     _infoVisible = !_infoVisible;
     const el = document.getElementById('info-overlay');
     const btn = document.getElementById('toolbar-info');
@@ -2112,19 +2094,19 @@
     } else {
       hideInfoOverlay();
     }
-  }
+  };
 
-  function hideInfoOverlay() {
+  const hideInfoOverlay = () => {
     _infoVisible = false;
     const el = document.getElementById('info-overlay');
     const btn = document.getElementById('toolbar-info');
     if (el) el.classList.add('hidden');
     if (btn) btn.classList.remove('active');
     if (_infoInterval) { clearInterval(_infoInterval); _infoInterval = null; }
-  }
+  };
 
-  function updateInfoOverlay() {
-    const info = engine && engine.getInfo ? engine.getInfo() : null;
+  const updateInfoOverlay = () => {
+    const info = engine?.getInfo?.() ?? null;
 
     const headerEl = document.getElementById('info-header');
     const statsEl = document.getElementById('info-stats');
@@ -2138,7 +2120,7 @@
     }
 
     // Header: mode + input type
-    const inputType = (window.GamepadManager && window.GamepadManager.hasGamepad && window.GamepadManager.hasGamepad(mySlot))
+    const inputType = (window.GamepadManager?.hasGamepad?.(mySlot))
       ? 'Gamepad' : 'Keyboard';
     const modeLabel = info.mode === 'streaming' ? 'Streaming' : 'Lockstep';
     if (headerEl) headerEl.textContent = `${modeLabel} | ${inputType}`;
@@ -2167,10 +2149,10 @@
     // Peers detail
     const peerLines = [];
     if (info.mode === 'lockstep' && info.peers) {
-      info.peers.forEach((p) => {
+      for (const p of info.peers) {
         const pRtt = p.rtt !== null ? `${Math.round(p.rtt)}ms` : '--';
         peerLines.push(`P${p.slot + 1}: ${pRtt}`);
-      });
+      }
     } else if (info.mode === 'streaming') {
       // Streaming-specific detail (values are numeric from gatherStats)
       if (info.encodeTime !== null) peerLines.push(`Encode: ${info.encodeTime}ms`);
@@ -2179,11 +2161,11 @@
       if (info.lossRate && info.lossRate > 0) peerLines.push(`Loss: ${info.lossRate}%`);
     }
     if (peersEl) peersEl.textContent = peerLines.join(' | ');
-  }
+  };
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
 
-  function showToast(msg) {
+  const showToast = (msg) => {
     const container = document.getElementById('toast-container');
     if (!container) return;
 
@@ -2198,11 +2180,11 @@
         if (toast.parentNode) toast.parentNode.removeChild(toast);
       }, 300);
     }, 2700);
-  }
+  };
 
   // ── UI: Error ──────────────────────────────────────────────────────────
 
-  function showError(msg) {
+  const showError = (msg) => {
     const el = document.getElementById('error-msg');
     if (!el) return;
     el.classList.remove('hidden');
@@ -2220,9 +2202,9 @@
     card.appendChild(h3);
     card.appendChild(p);
     card.appendChild(a);
-  }
+  };
 
-  function showRoomFullBanner() {
+  const showRoomFullBanner = () => {
     const banner = document.createElement('div');
     banner.className = 'room-full-banner';
     banner.innerHTML = '<span>Game is full \u2014 you\u2019ve joined as a spectator</span>';
@@ -2233,11 +2215,11 @@
     banner.appendChild(closeBtn);
     document.body.appendChild(banner);
     setTimeout(() => { if (banner.parentNode) banner.remove(); }, 5000);
-  }
+  };
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
-  function copyLink() {
+  const copyLink = () => {
     const url = `${window.location.origin}/play.html?room=${roomCode}`;
     // navigator.clipboard requires HTTPS; use execCommand fallback for HTTP
     if (navigator.clipboard && window.isSecureContext) {
@@ -2255,11 +2237,11 @@
       document.body.removeChild(ta);
       showToast('Link copied!');
     }
-  }
+  };
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
 
-  function copyToClipboard(text, label) {
+  const copyToClipboard = (text, label) => {
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(() => {
         showToast(`${label} copied!`);
@@ -2275,9 +2257,9 @@
       document.body.removeChild(ta);
       showToast(`${label} copied!`);
     }
-  }
+  };
 
-  function toggleShareDropdown() {
+  const toggleShareDropdown = () => {
     const dd = document.getElementById('share-dropdown');
     const btn = document.getElementById('toolbar-share');
     if (!dd) return;
@@ -2289,28 +2271,28 @@
       dd.classList.remove('hidden');
       if (btn) btn.classList.add('active');
     }
-  }
+  };
 
-  function closeShareDropdown() {
+  const closeShareDropdown = () => {
     const dd = document.getElementById('share-dropdown');
     const btn = document.getElementById('toolbar-share');
     if (dd) dd.classList.add('hidden');
     if (btn) btn.classList.remove('active');
-  }
+  };
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
 
   // ── Input Type Detection ─────────────────────────────────────────────
 
-  function setInputType(type) {
+  const setInputType = (type) => {
     if (type === _currentInputType) return;
     _currentInputType = type;
-    if (socket && socket.connected) {
-      socket.emit('input-type', { type: type });
+    if (socket?.connected) {
+      socket.emit('input-type', { type });
     }
-  }
+  };
 
-  function setupInputTypeDetection() {
+  const setupInputTypeDetection = () => {
     // Mobile always uses gamepad (virtual touch or real) — no keyboard switching
     if (!_isMobile) {
       document.addEventListener('keydown', () => {
@@ -2321,17 +2303,17 @@
     // Gamepad → set to gamepad (checked via GamepadManager onUpdate)
     // The updateGamepadUI callback already fires on gamepad changes;
     // we piggyback on that in updateGamepadUI below.
-  }
+  };
 
-  function startGamepadManager() {
+  const startGamepadManager = () => {
     if (!window.GamepadManager) return;
     GamepadManager.start({
       playerSlot: mySlot || 0,
       onUpdate: updateGamepadUI,
     });
-  }
+  };
 
-  function updateGamepadSlot() {
+  const updateGamepadSlot = () => {
     // Re-start with correct slot when mySlot changes (after join/connect)
     if (window.GamepadManager && mySlot !== null) {
       GamepadManager.start({
@@ -2339,9 +2321,9 @@
         onUpdate: updateGamepadUI,
       });
     }
-  }
+  };
 
-  function updateGamepadUI() {
+  const updateGamepadUI = () => {
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const assignments = window.GamepadManager ? GamepadManager.getAssignments() : {};
     const statusEl = document.getElementById('gamepad-status');
@@ -2364,7 +2346,7 @@
 
     // Hide EJS virtual gamepad when a real gamepad is connected (and vice versa)
     const ejs = window.EJS_emulator;
-    if (ejs && ejs.virtualGamepad) {
+    if (ejs?.virtualGamepad) {
       if (detected.length > 0) {
         ejs.virtualGamepad.style.display = 'none';
       } else if (ejs.touch) {
@@ -2406,7 +2388,7 @@
         span.title = '';
       }
     }
-  }
+  };
 
   // ── Remap Wizard ──────────────────────────────────────────────────────
 
@@ -2445,7 +2427,7 @@
   let _wizardHadGamepad = false;
   let _wizardHotPlugCheck = 0;
 
-  function startWizard(inGame) {
+  const startWizard = (inGame) => {
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const gamepadId = detected.length > 0 ? detected[0].id : null;
 
@@ -2456,7 +2438,7 @@
         : GamepadManager.getDefaultProfile(gamepadId);
       _wizardGamepadProfile = {
         name: 'Custom',
-        buttons: Object.assign({}, current.buttons),
+        buttons: { ...current.buttons },
         axes: JSON.parse(JSON.stringify(current.axes)),
         axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
         deadzone: current.deadzone || 0.3,
@@ -2469,7 +2451,7 @@
     let savedKb = null;
     try { savedKb = JSON.parse(localStorage.getItem('keyboard-mapping')); } catch (_) {}
     if (savedKb && Object.keys(savedKb).length > 0) {
-      _wizardKeyMap = Object.assign({}, savedKb);
+      _wizardKeyMap = { ...savedKb };
     } else {
       _wizardKeyMap = {
         67: 0, 88: 1, 86: 3, 38: 4, 40: 5, 37: 6, 39: 7,
@@ -2535,9 +2517,9 @@
     // Start polling loop
     updateWizardPrompt();
     wizardPoll();
-  }
+  };
 
-  function cancelWizard() {
+  const cancelWizard = () => {
     const wasInGame = _wizardInGame;
     _wizardActive = false;
     KNState.remapActive = false;
@@ -2559,9 +2541,9 @@
       if (controlsEl) controlsEl.style.display = '';
       if (statusEl) statusEl.style.display = '';
     }
-  }
+  };
 
-  function saveWizard() {
+  const saveWizard = () => {
     // Save gamepad profile
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     if (detected.length > 0 && _wizardGamepadProfile) {
@@ -2584,36 +2566,36 @@
     } catch (_) {}
 
     cancelWizard();
-  }
+  };
 
-  function resetMappings() {
+  const resetMappings = () => {
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     if (detected.length > 0 && window.GamepadManager) {
       GamepadManager.clearGamepadProfile(detected[0].id);
     }
     try { localStorage.removeItem('keyboard-mapping'); } catch (_) {}
     updateGamepadUI();
-  }
+  };
 
-  function updateWizardPrompt() {
+  const updateWizardPrompt = () => {
     const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-    const promptEl = document.getElementById(prefix + '-prompt');
-    const progressEl = document.getElementById(prefix + '-progress');
-    const backBtn = document.getElementById(prefix + '-back');
+    const promptEl = document.getElementById(`${prefix}-prompt`);
+    const progressEl = document.getElementById(`${prefix}-progress`);
+    const backBtn = document.getElementById(`${prefix}-back`);
     if (promptEl) promptEl.textContent = `${WIZARD_STEPS[_wizardStep].prompt} (gamepad or key)`;
     if (progressEl) progressEl.textContent = `(${_wizardStep + 1}/${WIZARD_STEPS.length})`;
     if (backBtn) backBtn.disabled = (_wizardStep === 0);
-  }
+  };
 
-  function wizardSaveSnapshot() {
+  const wizardSaveSnapshot = () => {
     _wizardSnapshots.push({
       gamepadProfile: _wizardGamepadProfile ? JSON.parse(JSON.stringify(_wizardGamepadProfile)) : null,
-      keyMap: _wizardKeyMap ? Object.assign({}, _wizardKeyMap) : null,
+      keyMap: _wizardKeyMap ? { ..._wizardKeyMap } : null,
       axisCaptures: JSON.parse(JSON.stringify(_wizardAxisCaptures)),
     });
-  }
+  };
 
-  function wizardAdvance() {
+  const wizardAdvance = () => {
     _wizardDebounce = Date.now() + 150;
     _wizardStep++;
     if (_wizardStep >= WIZARD_STEPS.length) {
@@ -2631,9 +2613,9 @@
       }
     }
     updateWizardPrompt();
-  }
+  };
 
-  function wizardBack() {
+  const wizardBack = () => {
     if (!_wizardActive || _wizardStep === 0 || _wizardSnapshots.length === 0) return;
     const snap = _wizardSnapshots.pop();
     _wizardStep--;
@@ -2642,15 +2624,15 @@
     _wizardAxisCaptures = snap.axisCaptures;
     _wizardDebounce = Date.now() + 150;
     updateWizardPrompt();
-  }
+  };
 
-  function wizardSkip() {
+  const wizardSkip = () => {
     if (!_wizardActive) return;
     wizardSaveSnapshot();
     wizardAdvance();
-  }
+  };
 
-  function wizardPoll() {
+  const wizardPoll = () => {
     if (!_wizardActive) return;
     // Use setTimeout instead of rAF — lockstep overrides rAF and our
     // callback would replace the emulator's frame runner, freezing the game.
@@ -2704,16 +2686,16 @@
         }
       }
     }
-  }
+  };
 
-  function captureGamepadButton(buttonIndex, step) {
+  const captureGamepadButton = (buttonIndex, step) => {
     if (!_wizardGamepadProfile) return;
     wizardSaveSnapshot();
     _wizardGamepadProfile.buttons[buttonIndex] = (1 << step.bit);
     wizardAdvance();
-  }
+  };
 
-  function captureGamepadAxis(axisIndex, isPositive, step) {
+  const captureGamepadAxis = (axisIndex, isPositive, step) => {
     if (!_wizardGamepadProfile) return;
     wizardSaveSnapshot();
 
@@ -2727,7 +2709,7 @@
       // Check if partner direction was already captured on a different axis
       if (cap.index !== undefined && cap.index !== axisIndex) {
         const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-        const promptEl = document.getElementById(prefix + '-prompt');
+        const promptEl = document.getElementById(`${prefix}-prompt`);
         if (promptEl) {
           const pairName = group === 'stickY' ? 'UP' : 'LEFT';
           promptEl.textContent = `Must use same stick as ${pairName} — try again`;
@@ -2756,9 +2738,9 @@
       }
       wizardAdvance();
     }
-  }
+  };
 
-  function captureKeyboard(keyCode) {
+  const captureKeyboard = (keyCode) => {
     const step = WIZARD_STEPS[_wizardStep];
     wizardSaveSnapshot();
 
@@ -2772,16 +2754,16 @@
     // Add new entry
     _wizardKeyMap[keyCode] = step.bit;
     wizardAdvance();
-  }
+  };
 
   // ── Delay Preference ────────────────────────────────────────────────
 
   KNState.delayAutoValue = 2;
 
-  function getDelayPreference() {
+  const getDelayPreference = () => {
     const autoEl = document.getElementById('delay-auto');
     const selectEl = document.getElementById('delay-select');
-    if (autoEl && autoEl.checked) {
+    if (autoEl?.checked) {
       return KNState.delayAutoValue;
     }
     if (selectEl) {
@@ -2789,22 +2771,22 @@
       return v > 0 ? v : 2;
     }
     return 2;
-  }
+  };
 
   window.getDelayPreference = getDelayPreference;
 
-  function setAutoDelay(value) {
+  const setAutoDelay = (value) => {
     KNState.delayAutoValue = value;
     const selectEl = document.getElementById('delay-select');
     const autoEl = document.getElementById('delay-auto');
-    if (selectEl && autoEl && autoEl.checked) {
+    if (selectEl && autoEl?.checked) {
       selectEl.value = String(value);
     }
-  }
+  };
 
   window.setAutoDelay = setAutoDelay;
 
-  function showEffectiveDelay(own, room) {
+  const showEffectiveDelay = (own, room) => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
     if (room > own) {
@@ -2812,7 +2794,7 @@
     } else {
       el.textContent = '';
     }
-  }
+  };
 
   window.showEffectiveDelay = showEffectiveDelay;
 
@@ -2844,14 +2826,14 @@
     // Mobile: tap info overlay to expand/collapse details
     const infoOverlay = document.getElementById('info-overlay');
     if (infoOverlay && _isMobile) {
-      infoOverlay.addEventListener('click', function () {
+      infoOverlay.addEventListener('click', () => {
         infoOverlay.classList.toggle('expanded');
       });
     }
 
     const dumpLogsBtn = document.getElementById('dump-logs-btn');
-    if (dumpLogsBtn) dumpLogsBtn.addEventListener('click', function () {
-      if (engine && engine.dumpLogs) {
+    if (dumpLogsBtn) dumpLogsBtn.addEventListener('click', () => {
+      if (engine?.dumpLogs) {
         engine.dumpLogs();
         showToast('Debug logs sent to server');
       }
@@ -2906,7 +2888,7 @@
         // Auto-disable sharing when switching to streaming
         if (!isLockstep) {
           const cb = document.getElementById('opt-rom-sharing');
-          if (cb && cb.checked) {
+          if (cb?.checked) {
             cb.checked = false;
             socket.emit('rom-sharing-toggle', { enabled: false });
           }
@@ -2914,7 +2896,7 @@
         updateRomDeclarePrompt();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
         // Broadcast mode to guests so they can show/hide declaration prompt
-        if (socket && socket.connected) {
+        if (socket?.connected) {
           socket.emit('data-message', { type: 'mode-select', mode: modeSelect.value });
           // Also set on server for users-updated payload (requires server restart)
           socket.emit('set-mode', { mode: modeSelect.value });
@@ -2957,7 +2939,7 @@
       if (_romDeclared) romDeclareCb.checked = true;
       romDeclareCb.addEventListener('change', () => {
         _romDeclared = romDeclareCb.checked;
-        if (socket && socket.connected) {
+        if (socket?.connected) {
           socket.emit('rom-declare', { declared: _romDeclared });
         }
         updateRomDeclarePrompt();
@@ -3009,8 +2991,7 @@
 
     // Click .gamepad span to cycle through detected gamepads
     const gamepadSpans = document.querySelectorAll('.player-slot .gamepad');
-    for (let gi = 0; gi < gamepadSpans.length; gi++) {
-      const span = gamepadSpans[gi];
+    for (const span of gamepadSpans) {
       span.style.cursor = 'pointer';
       span.addEventListener('click', () => {
         if (!window.GamepadManager) return;
