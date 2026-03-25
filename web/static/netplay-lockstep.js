@@ -1191,6 +1191,16 @@
                   const guestCycleMs = mod._kn_get_cycle_time_ms();
                   _syncLog(`CYCLE-DRIFT host=${hostCycleMs.toFixed(1)}ms guest=${guestCycleMs.toFixed(1)}ms diff=${(guestCycleMs - hostCycleMs).toFixed(1)}ms`);
                 }
+                if (mod._kn_sync_hash_regions) {
+                  const hashBuf = mod._malloc(48);
+                  const regionCount = mod._kn_sync_hash_regions(hashBuf, 12);
+                  const hashes = new Uint32Array(regionCount);
+                  for (let ri = 0; ri < regionCount; ri++) {
+                    hashes[ri] = mod.HEAPU32[(hashBuf >> 2) + ri];
+                  }
+                  mod._free(hashBuf);
+                  _syncLog(`REGION-HASH ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`);
+                }
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
@@ -2694,6 +2704,16 @@
           if (guestHash !== _pendingSyncCheck.hash) {
             _syncLog(`DESYNC (deferred) at frame ${_pendingSyncCheck.frame}`);
             _recordDrift(null);
+            if (mod._kn_sync_hash_regions) {
+              const hashBuf = mod._malloc(48);
+              const regionCount = mod._kn_sync_hash_regions(hashBuf, 12);
+              const hashes = new Uint32Array(regionCount);
+              for (let ri = 0; ri < regionCount; ri++) {
+                hashes[ri] = mod.HEAPU32[(hashBuf >> 2) + ri];
+              }
+              mod._free(hashBuf);
+              _syncLog(`REGION-HASH deferred ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`);
+            }
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
