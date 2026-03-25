@@ -157,9 +157,6 @@
       window._playerSlot = _playerSlot;
     }
 
-    _syncLog(
-      `onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
-    );
     if (_playerSlot === 0) {
       // HOST: initiate connections to all non-host players and spectators
       const others = Object.values(players).filter((p) => p.socketId !== socket.id);
@@ -168,12 +165,14 @@
           _peers[p.socketId].slot = p.slot;
           continue;
         }
+        _syncLog(`new peer: ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
         createPeer(p.socketId, p.slot, true);
         sendOffer(p.socketId);
       }
       for (const s of Object.values(spectators)) {
         if (s.socketId === socket.id) continue;
         if (_peers[s.socketId]) continue;
+        _syncLog(`new spectator peer: ${s.socketId}`);
         createPeer(s.socketId, null, true);
         sendOffer(s.socketId);
       }
@@ -340,8 +339,9 @@
 
     try {
       if (data.offer) {
+        peer._offerCount = (peer._offerCount || 0) + 1;
         const hasVideo = data.offer.sdp?.includes('m=video') ?? false;
-        _syncLog(`received offer from ${senderSid} (hasVideo=${hasVideo} isRenegotiation=${!!peer.remoteDescSet})`);
+        _syncLog(`received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo})`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await drainCandidates(peer);
         const answer = await peer.pc.createAnswer();
@@ -383,8 +383,24 @@
         if (!_gameRunning) {
           _syncLog('DC open: starting host emulator');
           startHost();
+        } else if (_hostStream) {
+          // Late-joiner: host already streaming — add tracks if needed
+          const lateJoinPeer = _peers[remoteSid];
+          if (lateJoinPeer) {
+            const hasTracks = lateJoinPeer.pc.getSenders().some((s) => s.track);
+            if (!hasTracks) {
+              _syncLog('DC open: adding stream to late-join peer');
+              for (const track of _hostStream.getTracks()) {
+                lateJoinPeer.pc.addTrack(track, _hostStream);
+              }
+              optimizeVideoEncoding(lateJoinPeer.pc);
+              renegotiate(remoteSid);
+            } else {
+              _syncLog('DC open: late-join peer already has tracks');
+            }
+          }
         } else {
-          _syncLog('DC open: host already running');
+          _syncLog('DC open: host running but stream not ready');
         }
       } else if (!_isSpectator) {
         _syncLog('DC open: starting guest input loop');
