@@ -18,41 +18,41 @@
   'use strict';
 
   // Save native references at load time — before anything can override them.
-  var _nativeRAF = window.requestAnimationFrame.bind(window);
-  var _nativeCancelRAF = window.cancelAnimationFrame.bind(window);
-  var _nativePerfNow = performance.now.bind(performance);
-  var _nativeGetGamepads = navigator.getGamepads.bind(navigator);
+  const _nativeRAF = window.requestAnimationFrame.bind(window);
+  const _nativeCancelRAF = window.cancelAnimationFrame.bind(window);
+  const _nativePerfNow = performance.now.bind(performance);
+  const _nativeGetGamepads = navigator.getGamepads.bind(navigator);
 
   // Track which APIs are currently overridden
-  var _rafOverridden = false;
-  var _perfNowOverridden = false;
-  var _getGamepadsOverridden = false;
+  let _rafOverridden = false;
+  let _perfNowOverridden = false;
+  let _getGamepadsOverridden = false;
 
   window.APISandbox = {
     // ── Native references (always return real browser behavior) ──
-    nativeRAF: function (cb) { return _nativeRAF(cb); },
-    nativeCancelRAF: function (id) { return _nativeCancelRAF(id); },
-    nativePerfNow: function () { return _nativePerfNow(); },
-    nativeGetGamepads: function () { return _nativeGetGamepads(); },
+    nativeRAF: (cb) => _nativeRAF(cb),
+    nativeCancelRAF: (id) => _nativeCancelRAF(id),
+    nativePerfNow: () => _nativePerfNow(),
+    nativeGetGamepads: () => _nativeGetGamepads(),
 
     // ── Individual overrides (applied at different times by lockstep) ──
-    overrideRAF: function (fn) {
+    overrideRAF: (fn) => {
       window.requestAnimationFrame = fn;
       _rafOverridden = true;
     },
 
-    overridePerfNow: function (fn) {
+    overridePerfNow: (fn) => {
       performance.now = fn;
       _perfNowOverridden = true;
     },
 
-    overrideGetGamepads: function (fn) {
+    overrideGetGamepads: (fn) => {
       navigator.getGamepads = fn;
       _getGamepadsOverridden = true;
     },
 
     // ── Restore all overrides at once ──
-    restoreAll: function () {
+    restoreAll: () => {
       if (_rafOverridden) {
         window.requestAnimationFrame = _nativeRAF;
         _rafOverridden = false;
@@ -67,7 +67,7 @@
       }
     },
 
-    isOverridden: function (api) {
+    isOverridden: (api) => {
       if (api === 'raf') return _rafOverridden;
       if (api === 'perfNow') return _perfNowOverridden;
       if (api === 'getGamepads') return _getGamepadsOverridden;
