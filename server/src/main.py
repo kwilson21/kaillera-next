@@ -1,7 +1,7 @@
 """
 kaillera-next server entry point — V1 (browser-based EmulatorJS netplay).
 
-Starts a single HTTP server on :8000 that handles:
+Starts a single HTTP server on :27886 (the original Kaillera port) that handles:
   - Socket.IO signaling  (/socket.io/)
   - REST API             (/health, /list, /room)
   - Static web frontend  (/ → web/index.html, /static/roms/)
@@ -88,11 +88,12 @@ def run() -> None:
     except ImportError:
         pass
 
-    log.info("HTTP + Socket.IO listening on :8000 (loop=%s)", loop_setting)
+    log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
+    log.info("Listening on :27886 — the original Kaillera port (loop=%s)", loop_setting)
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
-        port=8000,
+        port=27886,
         log_level="info",
         loop=loop_setting,
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real

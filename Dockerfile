@@ -22,10 +22,10 @@ USER appuser
 # Default env — override ALLOWED_ORIGIN in production (e.g. "https://yourdomain.com")
 ENV ALLOWED_ORIGIN=""
 
-EXPOSE 8000
+EXPOSE 27886
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:27886/health')"
 
 WORKDIR /app/server
 CMD ["python", "-c", "from src.main import run; run()"]
