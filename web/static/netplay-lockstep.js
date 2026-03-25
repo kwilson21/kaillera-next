@@ -327,12 +327,33 @@
   // Resync cooldown: C-level path is <2ms so we can resync frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
   const _resyncCooldownMs = () => _hasKnSync ? 2000 : 10000;
-  const _streamSync = (msg) => {
-    // Disabled for production — re-enable for diagnostics
-    // if (socket && socket.connected) {
-    //   socket.emit('debug-sync', { slot: _playerSlot, msg: msg });
-    // }
+
+  // -- Sync log ring buffer (downloadable from toolbar) ----------------------
+  const SYNC_LOG_MAX = 5000;
+  const _syncLogRing = new Array(SYNC_LOG_MAX);
+  let _syncLogHead = 0;
+  let _syncLogCount = 0;
+  let _syncLogSeq = 0;
+
+  const _syncLog = (msg) => {
+    _syncLogRing[_syncLogHead] = { seq: _syncLogSeq++, t: performance.now(), f: _frameNum, msg };
+    _syncLogHead = (_syncLogHead + 1) % SYNC_LOG_MAX;
+    if (_syncLogCount < SYNC_LOG_MAX) _syncLogCount++;
+    console.log(`[lockstep] ${msg}`);
   };
+
+  const exportSyncLog = () => {
+    const lines = [];
+    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
+    for (let i = 0; i < _syncLogCount; i++) {
+      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
+      lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
+    }
+    return lines.join('\n');
+  };
+
+  // _streamSync redirects to _syncLog (re-enables the previously disabled stream)
+  const _streamSync = (msg) => { _syncLog(msg); };
 
   // -- Diagnostic logger functions -------------------------------------------
 
