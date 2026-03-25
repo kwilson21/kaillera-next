@@ -550,6 +550,8 @@
       `romBlobUrl=${!!_romBlobUrl}`,
     );
     gameRunning = false;
+    _lateJoin = false;
+    _pendingLateJoin = false;
     if (engine) {
       // Upload sync logs to server before stopping
       uploadSyncLogs('game-ended');
@@ -1873,6 +1875,13 @@
   };
 
   const initEngine = () => {
+    // Guard against double-init (e.g., race between game-started events).
+    // Stop the previous engine so its socket listeners are removed first.
+    if (engine) {
+      engine.stop();
+      engine = null;
+    }
+
     // Spectators and streaming guests receive video — don't boot emulator.
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)

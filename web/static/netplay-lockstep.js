@@ -338,6 +338,8 @@
   let _peers = {}; // remoteSid -> PeerState
   let _knownPlayers = {}; // socketId -> {slot, playerName}
   let _gameStarted = false;
+  let _sessionId = 0; // incremented on each init() to invalidate stale timers
+  let _romWaitInterval = null; // setInterval ID for guest ROM-wait polling
   let _selfEmuReady = false;
   let _p1KeyMap = null;
   const _heldKeys = new Set();
@@ -1762,9 +1764,10 @@
       } else {
         _syncLog('guest — ROM not loaded yet, deferring gesture prompt');
         setStatus('Waiting for ROM...');
-        const romWaitId = setInterval(() => {
+        _romWaitInterval = setInterval(() => {
           if (window.EJS_gameUrl) {
-            clearInterval(romWaitId);
+            clearInterval(_romWaitInterval);
+            _romWaitInterval = null;
             showGesturePrompt();
           }
         }, 200);
@@ -1953,7 +1956,10 @@
 
     // Timeout: if sync hasn't completed in 30s, reset sync state so a
     // reconnecting peer can re-trigger the sync flow instead of getting stuck.
+    // Capture _sessionId so the timer is invalidated if stop()/init() runs.
+    const sid = _sessionId;
     setTimeout(() => {
+      if (sid !== _sessionId) return; // stale timer from previous session
       if (!_running && _selfEmuReady && _gameStarted) {
         setStatus('Sync timed out — waiting for reconnect...');
         _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
@@ -3675,6 +3681,7 @@
   let _config = null;
 
   const init = (config) => {
+    _sessionId++; // invalidate stale timers from previous session
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
@@ -3697,8 +3704,11 @@
       onUsersUpdated(config.initialPlayers);
     }
 
-    // Connection timeout warning
+    // Connection timeout warning (guarded by session ID to avoid firing
+    // stale messages on quick restart)
+    const initSid = _sessionId;
     setTimeout(() => {
+      if (initSid !== _sessionId) return;
       if (!_gameStarted && _config) {
         const peerCount = Object.keys(_peers).length;
         if (peerCount === 0) {
@@ -3789,6 +3799,15 @@
     _pushingSyncState = false;
     _pendingResyncState = null;
     _hashRegion = null;
+    _awaitingResync = false;
+    _awaitingResyncAt = 0;
+    _lastResyncTime = 0;
+    _heldKeys.clear();
+    _p1KeyMap = null;
+    if (_romWaitInterval) {
+      clearInterval(_romWaitInterval);
+      _romWaitInterval = null;
+    }
     if (_syncWorker) {
       _syncWorker.terminate();
       _syncWorker = null;

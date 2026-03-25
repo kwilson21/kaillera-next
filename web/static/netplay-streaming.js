@@ -317,14 +317,11 @@
         // Measure actual display latency via requestVideoFrameCallback
         if (_guestVideo.requestVideoFrameCallback) {
           const measureLatency = (now, metadata) => {
-            // metadata.receiveTime = when the frame was received from network
-            // metadata.expectedDisplayTime = when browser plans to show it
-            // The difference is the decode + display pipeline delay
+            if (!_gameRunning) return; // stop loop when game ends
             if (metadata.receiveTime && metadata.expectedDisplayTime) {
               const pipelineDelay = metadata.expectedDisplayTime - metadata.receiveTime;
               window._videoPipelineDelay = pipelineDelay.toFixed(1);
             }
-            // metadata.captureTime is when the frame was captured (host side)
             if (metadata.captureTime) {
               const e2eDelay = now - metadata.captureTime;
               window._videoE2EDelay = e2eDelay.toFixed(1);
@@ -478,6 +475,16 @@
     if (_playerSlot === 0 && peer.slot !== null && peer.slot !== undefined) {
       applyInputForSlot(peer.slot, 0);
     }
+    // Close the RTCPeerConnection to release OS sockets and media resources.
+    // Without this, each disconnect leaks an open PC (DTLS, ICE agent, encoders).
+    if (peer.dc)
+      try {
+        peer.dc.close();
+      } catch (_) {}
+    if (peer.pc)
+      try {
+        peer.pc.close();
+      } catch (_) {}
     delete _peers[remoteSid];
     KNState.peers = _peers;
     _syncLog(`peer disconnected: ${remoteSid}`);
@@ -494,6 +501,7 @@
 
     // Wait for emulator to be running, then capture canvas stream
     const waitForEmu = () => {
+      if (!_gameRunning) return; // stop() was called during boot
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         setTimeout(waitForEmu, 100);
@@ -999,6 +1007,7 @@
     _heldKeys.clear();
     _knownPlayers = {};
     _prevSlotMasks = {};
+    _p1KeyMap = null;
 
     // Remove socket listeners (no data-message — streaming doesn't use it)
     if (socket) {
