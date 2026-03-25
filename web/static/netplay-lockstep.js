@@ -2550,6 +2550,47 @@
       applySyncState(pending.bytes, pending.frame);
     }
 
+    // ── Frame pacing (GGPO-style frame advantage cap) ────────────────────
+    // Prevents the faster machine from outrunning the slower one's input stream.
+    // Skip during warmup — connection is still stabilizing.
+    if (_frameNum >= FRAME_PACING_WARMUP) {
+      const inputPeersForPacing = getInputPeers();
+      if (inputPeersForPacing.length > 0) {
+        let minRemoteFrame = Infinity;
+        for (const p of inputPeersForPacing) {
+          const rf = _lastRemoteFramePerSlot[p.slot] ?? -1;
+          if (rf < minRemoteFrame) minRemoteFrame = rf;
+        }
+        if (minRemoteFrame >= 0) {
+          _frameAdvRaw = _frameNum - minRemoteFrame;
+          const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
+          _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
+
+          // Track stats for periodic summary
+          _pacingAdvSum += _frameAdvantage;
+          _pacingAdvCount++;
+          if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
+
+          if (_frameAdvantage > DELAY_FRAMES + 1) {
+            // Too far ahead — skip this tick entirely.
+            // Don't send input (adds to pile remote can't consume).
+            // Don't step emulator (diverges further).
+            _pacingCapsFrames++;
+            if (!_framePacingActive) {
+              _framePacingActive = true;
+              _pacingCapsCount++;
+              _syncLog(`FRAME-CAP start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`);
+            }
+            return;
+          }
+          if (_framePacingActive) {
+            _framePacingActive = false;
+            _syncLog(`FRAME-CAP end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
+          }
+        }
+      }
+    }
+
     const activePeers = getActivePeers();
 
     // FPS counter
