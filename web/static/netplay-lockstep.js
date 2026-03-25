@@ -2537,6 +2537,14 @@
       _syncBufPtr = 0;
     }
     _hasKnSync = false;
+    _frameAdvantage = 0;
+    _frameAdvRaw = 0;
+    _framePacingActive = false;
+    _pacingCapsCount = 0;
+    _pacingCapsFrames = 0;
+    _pacingMaxAdv = 0;
+    _pacingAdvSum = 0;
+    _pacingAdvCount = 0;
   };
 
   const tick = () => {
@@ -3625,6 +3633,14 @@
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
+    _frameAdvantage = 0;
+    _frameAdvRaw = 0;
+    _framePacingActive = false;
+    _pacingCapsCount = 0;
+    _pacingCapsFrames = 0;
+    _pacingMaxAdv = 0;
+    _pacingAdvSum = 0;
+    _pacingAdvCount = 0;
     _resyncCount = 0;
     _consecutiveResyncs = 0;
     _syncCheckInterval = _syncBaseInterval;
