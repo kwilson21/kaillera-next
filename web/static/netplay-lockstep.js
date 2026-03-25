@@ -567,6 +567,39 @@
   let _syncBufSize = 0;
   let _awaitingResync = false;  // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0;    // timestamp when pause started (safety timeout)
+
+  // Drift diagnostics
+  let _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
+  const _driftSummaryAt = [1, 5, 10, 20, 50, 100, 200, 500];  // exponential log intervals
+
+  const _recordDrift = (regionHashes) => {
+    const now = performance.now();
+    _driftStats.count++;
+    if (_driftStats.count === 1) _driftStats.firstAt = now;
+    _driftStats.lastAt = now;
+
+    // Tally per-region drifts if available
+    if (regionHashes) {
+      for (const [name, drifted] of Object.entries(regionHashes)) {
+        if (drifted) _driftStats.regions[name] = (_driftStats.regions[name] || 0) + 1;
+      }
+    }
+
+    // Log summary at exponential intervals
+    if (_driftSummaryAt.includes(_driftStats.count) || (_driftStats.count > 0 && _driftStats.count % 100 === 0)) {
+      const elapsed = (now - _driftStats.firstAt) / 1000;
+      const avgInterval = _driftStats.count > 1 ? Math.round(elapsed * 1000 / (_driftStats.count - 1)) : 0;
+      const regionStr = Object.entries(_driftStats.regions)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}:${v}`)
+        .join(' ');
+      _syncLog(`DRIFT-SUMMARY count=${_driftStats.count} over=${elapsed.toFixed(1)}s avgInterval=${avgInterval}ms regions=[${regionStr}]`);
+    }
+  };
+
+  const _resetDrift = () => {
+    _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
+  };
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null;     // stored for removal in stopSync()
