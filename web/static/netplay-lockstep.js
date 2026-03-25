@@ -2579,7 +2579,7 @@
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
-          if (_frameAdvantage > DELAY_FRAMES + 1) {
+          if (_frameAdvRaw > DELAY_FRAMES + 1) {
             // Too far ahead — skip this tick entirely.
             // Don't send input (adds to pile remote can't consume).
             // Don't step emulator (diverges further).
