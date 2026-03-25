@@ -653,12 +653,10 @@
       if (!_audioCtx || _audioCtx.state === 'closed') {
         _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
       } else {
-        // Stop keep-alive oscillator now that real audio is taking over
-        if (window._kn_keepAliveOsc) {
-          try { window._kn_keepAliveOsc.stop(); } catch (_) {}
-          window._kn_keepAliveOsc = null;
-        }
         _syncLog(`reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
+        // Keep the gesture oscillator alive until a real audio node is connected.
+        // Stopping it now would leave _audioCtx with no active sources during the
+        // async AudioWorklet probe, causing iOS to deactivate the audio session.
       }
 
       // Try AudioWorklet first (requires secure context), fall back to
@@ -720,12 +718,26 @@
           _audioDestNode = _audioCtx.createMediaStreamDestination();
           spNode.connect(_audioDestNode);
         }
-        // Always connect to AudioContext destination (gesture-unlocked).
-        // The <audio> element route (MediaStream → <audio>.play()) fails
-        // on FxiOS when .play() runs outside the gesture window.
-        spNode.connect(_audioCtx.destination);
+        // Route through the gesture-created <audio> element's MediaStream.
+        // iOS FxiOS ignores ScriptProcessorNode → destination but honors
+        // <audio>.play() started within a user gesture. Fall back to direct
+        // destination connection on desktop (no gesture audio element).
+        const gestureDest = window._kn_gestureAudioDest;
+        if (gestureDest) {
+          spNode.connect(gestureDest);
+          _syncLog(`audio using ScriptProcessorNode fallback via <audio> element (ring=${ringSize})`);
+        } else {
+          spNode.connect(_audioCtx.destination);
+          _syncLog(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
+        }
         window._kn_scriptProcessor = spNode;
-        _syncLog(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
+      }
+
+      // NOW stop the keep-alive oscillator — a real audio node is connected,
+      // so the iOS audio session stays alive across the handoff.
+      if (window._kn_keepAliveOsc) {
+        try { window._kn_keepAliveOsc.stop(); } catch (_) {}
+        window._kn_keepAliveOsc = null;
       }
 
       _audioReady = true;
@@ -1575,12 +1587,24 @@
                 _audioCtx = new AC(); // fallback to native rate
               }
               _audioCtx.resume().catch(() => {});
-              // Keep the iOS audio session alive with a silent oscillator.
+              // iOS FxiOS (WKWebView): ScriptProcessorNode → destination produces
+              // no audible output even though samples flow and ctx reports running.
+              // Route through <audio> element instead — iOS grants privileged audio
+              // output to <audio>.play() called within a gesture. We set it up HERE
+              // (in the gesture handler) so the .play() authorization persists.
+              const gestDest = _audioCtx.createMediaStreamDestination();
+              const gestAudio = document.createElement('audio');
+              gestAudio.srcObject = gestDest.stream;
+              gestAudio.play().catch(() => {});
+              window._kn_gestureAudioEl = gestAudio;
+              window._kn_gestureAudioDest = gestDest;
+              // Keep-alive: silent oscillator through the <audio> element so the
+              // iOS audio session stays active until real audio takes over.
               const _keepAliveGain = _audioCtx.createGain();
               _keepAliveGain.gain.value = 0;
               const _keepAliveOsc = _audioCtx.createOscillator();
               _keepAliveOsc.connect(_keepAliveGain);
-              _keepAliveGain.connect(_audioCtx.destination);
+              _keepAliveGain.connect(gestDest);
               _keepAliveOsc.start();
               window._kn_keepAliveOsc = _keepAliveOsc;
               _syncLog(`lockstep AudioContext pre-created in gesture (rate: ${_audioCtx.sampleRate})`);
@@ -2389,6 +2413,8 @@
     // Kill OpenAL's audio system. An active AudioContext + AL_PLAYING source
     // causes desyncs even with frozen _emscripten_get_now. Stop all sources
     // and suspend the AudioContext to eliminate all async audio activity.
+    // NOTE: use suspend(), not close() — close() can break the Emscripten
+    // OpenAL shim on WKWebView (FxiOS), stalling the WASM core on restart.
     const alMod = window.EJS_emulator?.gameManager?.Module;
     if (alMod?.AL?.contexts) {
       for (const [id, ctx] of Object.entries(alMod.AL.contexts)) {
@@ -3738,6 +3764,14 @@
 
     _onExtraDataChannel = null;
     _onUnhandledMessage = null;
+
+    // Clean up gesture audio element
+    if (window._kn_gestureAudioEl) {
+      window._kn_gestureAudioEl.pause();
+      window._kn_gestureAudioEl.srcObject = null;
+      window._kn_gestureAudioEl = null;
+    }
+    window._kn_gestureAudioDest = null;
 
     // Clean up custom virtual gamepad
     window._kn_ejsTouchDisabled = false;

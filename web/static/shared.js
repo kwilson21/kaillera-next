@@ -144,6 +144,9 @@
 
   function enableMobileTouch() {
     if (!('ontouchstart' in window)) return;
+    // Netplay engines disable EJS touch and use a custom virtual gamepad.
+    // Don't re-enable it on subsequent waitForEmulator() calls.
+    if (window._kn_ejsTouchDisabled) return;
     const ejs = window.EJS_emulator;
     if (!ejs || ejs.touch) return;
     ejs.touch = true;

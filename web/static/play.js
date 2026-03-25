@@ -273,7 +273,7 @@
             }
 
             // Verify ROM hash if available (skip when ROM came from host via sharing)
-            if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
+            if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
               showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
               return;
             }
@@ -418,7 +418,7 @@
     }
 
     // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
-    if (data.romHash && _romHash && data.romHash !== _romHash && _romSharingDecision !== 'accepted') {
+    if (romHashMismatch(data.romHash, _romHash) && _romSharingDecision !== 'accepted') {
       showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
       return;
     }
@@ -1617,7 +1617,9 @@
 
   const hashArrayBuffer = async (buf) => {
     // crypto.subtle requires a secure context (HTTPS or localhost).
-    // On LAN IPs over HTTP, fall back to a simple FNV-1a hash.
+    // On LAN IPs over HTTP, fall back to FNV-1a.
+    // Prefix with algorithm tag so cross-context comparisons can detect
+    // mismatched algorithms and skip the check instead of false-alarming.
     if (window.crypto?.subtle) {
       const digest = await crypto.subtle.digest('SHA-256', buf);
       const arr = new Uint8Array(digest);
@@ -1625,7 +1627,7 @@
       for (const byte of arr) {
         hex += (`0${byte.toString(16)}`).slice(-2);
       }
-      return hex;
+      return `S${hex}`;
     }
     // Fallback: FNV-1a 64-bit (good enough for mismatch detection)
     const bytes = new Uint8Array(buf);
@@ -1640,10 +1642,16 @@
         h2 = Math.imul(h2, 0x01000193) >>> 0;
       }
     }
-    let hex = `${'00000000'.concat(h1.toString(16)).slice(-8)}${'00000000'.concat(h2.toString(16)).slice(-8)}`;
-    // Pad to 64 chars to match SHA-256 length for server validation
-    while (hex.length < 64) hex += '0';
-    return hex;
+    return `F${'00000000'.concat(h1.toString(16)).slice(-8)}${'00000000'.concat(h2.toString(16)).slice(-8)}`;
+  };
+
+  // Compare ROM hashes: returns true if they definitely mismatch.
+  // Hashes are prefixed with 'S' (SHA-256) or 'F' (FNV-1a).
+  // If algorithms differ (host on localhost, guest on LAN HTTP), skip — can't compare.
+  const romHashMismatch = (a, b) => {
+    if (!a || !b) return false;
+    if (a[0] !== b[0]) return false; // different algorithms, can't compare
+    return a !== b;
   };
 
   // ── ROM IDB Cache ──────────────────────────────────────────────────────
@@ -1887,7 +1895,7 @@
     _pendingLateJoin = false;
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
-    if (_hostRomHash && _romHash && _hostRomHash !== _romHash && _romSharingDecision !== 'accepted') {
+    if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
       showError('ROM mismatch — your ROM doesn\'t match the host\'s. Please load the correct ROM and rejoin.');
       return;
     }
