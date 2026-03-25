@@ -130,14 +130,18 @@ echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 # ============================================================
 # Stage 4b: NaN canonicalization (deterministic floating point)
 # ============================================================
-echo "==> Stage 4b: wasm-opt --denan + fix-denan.py"
-# --denan replaces NaN-producing operations with helpers that return 0.0.
-# fix-denan.py patches those helpers to return canonical NaN (0x7FC00000)
-# instead of 0.0, preserving isnan() semantics while ensuring both
-# V8 (Chrome/desktop) and JSC (Safari/mobile) produce identical results.
-/opt/emsdk/upstream/bin/wasm-opt --denan --enable-bulk-memory --enable-simd --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int "${WASM_FILE}" -o "${WASM_FILE}"
-python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
-echo "==> WASM (post-denan): $(ls -lh ${WASM_FILE} | awk '{print $5}')"
+# ============================================================
+# Stage 4b: NaN canonicalization (DISABLED — breaks emulator boot)
+# ============================================================
+# wasm-opt --denan prevents the emulator from loading. Needs investigation.
+# The --denan pass worked on the wasm-determinism branch but fails here,
+# likely due to different Emscripten/wasm-opt versions or build flags.
+# TODO: investigate in a dedicated session
+#
+# /opt/emsdk/upstream/bin/wasm-opt --denan --enable-bulk-memory --enable-simd \
+#   --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int \
+#   "${WASM_FILE}" -o "${WASM_FILE}"
+# python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
 
 # ============================================================
 # Stage 5: Package into 7z .data archive
