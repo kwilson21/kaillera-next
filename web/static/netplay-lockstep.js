@@ -643,19 +643,10 @@
           _audioDestNode = _audioCtx.createMediaStreamDestination();
           spNode.connect(_audioDestNode);
         }
-        // Route through <audio> element via MediaStream if available
-        // (activates iOS playback session). Fall back to direct destination.
-        if (window._kn_audioEl) {
-          const mediaDest = _audioCtx.createMediaStreamDestination();
-          spNode.connect(mediaDest);
-          window._kn_audioEl.srcObject = mediaDest.stream;
-          window._kn_audioEl.play().catch((e) => {
-            console.log(`[lockstep] audio element play failed: ${e.message}`);
-          });
-          console.log('[lockstep] audio routed through <audio> element');
-        } else {
-          spNode.connect(_audioCtx.destination);
-        }
+        // Always connect to AudioContext destination (gesture-unlocked).
+        // The <audio> element route (MediaStream → <audio>.play()) fails
+        // on FxiOS when .play() runs outside the gesture window.
+        spNode.connect(_audioCtx.destination);
         window._kn_scriptProcessor = spNode;
         console.log(`[lockstep] audio using ScriptProcessorNode fallback (ring=${ringSize})`);
       }
@@ -1031,7 +1022,7 @@
       const peer = _peers[remoteSid];
       if (!peer) return;
       const known = _knownPlayers[remoteSid];
-      const peerName = known ? known.playerName : `P${(peer.slot || 0) + 1}`;
+      const peerName = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       console.log('[lockstep] DC open with', remoteSid, 'slot:', peer.slot, peerName);
       setStatus(`Connected to ${peerName}`);
       peer.ready = true;
@@ -1052,7 +1043,7 @@
         if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
         peer.reconnecting = false;
         const rKnown = _knownPlayers[remoteSid];
-        const rName = rKnown ? rKnown.playerName : `P${(peer.slot || 0) + 1}`;
+        const rName = rKnown ? rKnown.playerName : `P${(peer.slot ?? 0) + 1}`;
         setStatus(`${rName} reconnected`);
         _config?.onToast?.(`${rName} reconnected`);
         _config?.onReconnecting?.(remoteSid, false);
@@ -1103,7 +1094,7 @@
         }
         if (e.data === 'peer-resumed') {
           const known = _knownPlayers[remoteSid];
-          const name = known ? known.playerName : `P${(peer.slot || 0) + 1}`;
+          const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
           _config?.onToast?.(`${name} returned`);
           return;
         }
@@ -1246,7 +1237,7 @@
       peer.reconnectStart = Date.now();
 
       const known = _knownPlayers[remoteSid];
-      const name = known ? known.playerName : `P${(peer.slot || 0) + 1}`;
+      const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       setStatus(`${name} disconnected — reconnecting...`);
       _config?.onToast?.(`${name} disconnected — reconnecting...`);
       _config?.onReconnecting?.(remoteSid, true);
@@ -1286,7 +1277,7 @@
     console.log('[lockstep] peer hard-disconnected:', remoteSid, 'slot:', peer.slot);
 
     const known = _knownPlayers[remoteSid];
-    const name = known ? known.playerName : `P${(peer.slot || 0) + 1}`;
+    const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
 
     const remaining = getActivePeers();
     if (remaining.length === 0 && _running) {
@@ -1424,9 +1415,12 @@
       disableEJSInput();
     } else {
       // Guest: show full-screen gesture prompt (above EmulatorJS overlay)
-      console.log(`[lockstep] guest — showing gesture prompt (slot=${_playerSlot})`);
-      const promptEl = document.getElementById('gesture-prompt');
-      if (promptEl) {
+      // Defer until ROM is loaded — the prompt covers the entire screen
+      // (z-index 10000) and would hide the ROM download progress bar.
+      const showGesturePrompt = () => {
+        console.log(`[lockstep] guest — showing gesture prompt (slot=${_playerSlot})`);
+        const promptEl = document.getElementById('gesture-prompt');
+        if (!promptEl) return;
         promptEl.classList.remove('hidden');
         const onPromptClick = () => {
           if (_bootGestureReceived) return;
@@ -1461,14 +1455,6 @@
               _keepAliveGain.connect(_audioCtx.destination);
               _keepAliveOsc.start();
               window._kn_keepAliveOsc = _keepAliveOsc;
-              // Pre-create and play an <audio> element within this gesture.
-              // On iOS, <audio>.play() in a gesture activates the "playback"
-              // audio session, which may output sound even with the silent
-              // switch on. initAudioPlayback() sets srcObject later.
-              const audioEl = document.createElement('audio');
-              audioEl.setAttribute('playsinline', '');
-              audioEl.play().catch(() => {});
-              window._kn_audioEl = audioEl;
               console.log(`[lockstep] lockstep AudioContext pre-created in gesture (rate: ${_audioCtx.sampleRate})`);
             }
             const _RealAC = AC;
@@ -1501,6 +1487,19 @@
         };
         promptEl.addEventListener('click', onPromptClick);
         promptEl.addEventListener('touchend', onPromptClick);
+      };
+
+      if (window.EJS_gameUrl) {
+        showGesturePrompt();
+      } else {
+        console.log('[lockstep] guest — ROM not loaded yet, deferring gesture prompt');
+        setStatus('Waiting for ROM...');
+        const romWaitId = setInterval(() => {
+          if (window.EJS_gameUrl) {
+            clearInterval(romWaitId);
+            showGesturePrompt();
+          }
+        }, 200);
       }
     }
 
@@ -1535,11 +1534,6 @@
           console.log(`[lockstep] boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
         }
-        setTimeout(waitForEmu, 100);
-        return;
-      }
-      if (!mod._simulate_input) {
-        if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
       }
@@ -3350,14 +3344,6 @@
     if (window._kn_keepAliveOsc) {
       try { window._kn_keepAliveOsc.stop(); } catch (_) {}
       window._kn_keepAliveOsc = null;
-    }
-    // Clean up the <audio> element used for iOS audio routing — if left
-    // playing with a dead MediaStream source it loops glitchy audio on mobile.
-    if (window._kn_audioEl) {
-      try { window._kn_audioEl.pause(); } catch (_) {}
-      window._kn_audioEl.srcObject = null;
-      try { window._kn_audioEl.load(); } catch (_) {}
-      window._kn_audioEl = null;
     }
     window._kn_audioRing = null;
     window._kn_audioRingCount = 0;

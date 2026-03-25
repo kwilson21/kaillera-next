@@ -9,6 +9,7 @@ V1 endpoints:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -21,6 +22,15 @@ from src.ratelimit import check_ip
 
 log = logging.getLogger(__name__)
 
+
+def _client_ip(request: Request) -> str:
+    """Extract the real client IP from X-Forwarded-For or fall back to direct connection."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 # In-memory save state cache: rom_hash -> raw state bytes.
 # Eliminates host/guest asymmetry — all players load the same cached state.
 # Persists across games but not server restarts.
@@ -31,9 +41,6 @@ _STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 # ── Security headers middleware ───────────────────────────────────────────────
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    # Production mode when ALLOWED_ORIGIN is set to a real domain (not "*")
-    _production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
-
     async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[override]
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
@@ -54,9 +61,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Cache-Control"] = self._cache_control(request.url.path)
         return response
 
-    @classmethod
-    def _cache_control(cls, path: str) -> str:
-        if not cls._production:
+    @staticmethod
+    def _cache_control(path: str) -> str:
+        production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
+        if not production:
             return "no-store, no-cache, must-revalidate, max-age=0"
         # WASM core + data — versioned, cache aggressively (7 days)
         if path.startswith("/static/ejs/cores/"):
@@ -90,7 +98,6 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/ice-servers")
     def ice_servers() -> list:
-        import json, os
         custom = os.environ.get("ICE_SERVERS")
         if custom:
             try:
@@ -101,11 +108,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/room/{room_id}")
     def get_room(room_id: str, request: Request) -> dict:
-        client_ip = request.headers.get(
-            "x-forwarded-for",
-            request.client.host if request.client else "unknown",
-        ).split(",")[0].strip()
-        if not check_ip(client_ip, "room-lookup"):
+        if not check_ip(_client_ip(request), "room-lookup"):
             raise HTTPException(status_code=429, detail="Rate limited")
         room = rooms.get(room_id)
         if not room:
@@ -121,12 +124,8 @@ def create_app(lifespan=None) -> FastAPI:
         }
 
     @app.get("/list")
-    def list_rooms(game_id: str | None = None, request: Request = None) -> list:
-        client_ip = request.headers.get(
-            "x-forwarded-for",
-            request.client.host if request.client else "unknown",
-        ).split(",")[0].strip()
-        if not check_ip(client_ip, "room-lookup"):
+    def list_rooms(request: Request, game_id: str | None = None) -> list:
+        if not check_ip(_client_ip(request), "room-lookup"):
             raise HTTPException(status_code=429, detail="Rate limited")
         result = []
         for session_id, room in rooms.items():
@@ -157,11 +156,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.post("/api/cache-state/{rom_hash}")
     async def cache_state(rom_hash: str, request: Request) -> dict:
-        client_ip = request.headers.get(
-            "x-forwarded-for",
-            request.client.host if request.client else "unknown",
-        ).split(",")[0].strip()
-        if not check_ip(client_ip, "cache-state"):
+        if not check_ip(_client_ip(request), "cache-state"):
             raise HTTPException(status_code=429, detail="Rate limited")
         body = await request.body()
         if len(body) > _STATE_MAX_SIZE:

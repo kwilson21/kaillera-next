@@ -26,7 +26,12 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
       this._writePos = (this._writePos + 1) % this._bufSize;
     }
     this._count += len;
-    if (this._count > this._bufSize) this._count = this._bufSize;
+    if (this._count > this._bufSize) {
+      // Overflow: advance read position to discard oldest samples
+      const overflow = this._count - this._bufSize;
+      this._readPos = (this._readPos + overflow) % this._bufSize;
+      this._count = this._bufSize;
+    }
   }
 
   process(inputs, outputs) {

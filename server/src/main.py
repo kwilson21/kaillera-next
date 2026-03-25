@@ -23,7 +23,7 @@ import socketio
 import uvicorn
 
 from src.api.app import create_app
-from src.api.signaling import _cleanup_empty_rooms, configure_cors, sio
+from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, sio
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,17 @@ async def lifespan(_app):
     task = asyncio.create_task(_cleanup_empty_rooms())
     yield
     task.cancel()
+    # Notify all connected clients before shutdown
+    if rooms:
+        log.info("Shutting down: notifying %d active room(s)", len(rooms))
+        for session_id in list(rooms):
+            try:
+                await asyncio.wait_for(
+                    sio.emit("room-closed", {"reason": "server-shutdown"}, room=session_id),
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
 
 
 def run() -> None:
@@ -87,7 +98,6 @@ def run() -> None:
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real
         # client IPs and the app sees the correct scheme (https).
         proxy_headers=True,
-        forwarded_allow_ips="*",
         # Disable websocket-level keepalive pings — Socket.IO's Engine.IO
         # layer handles its own ping/pong. The websockets library's legacy
         # protocol has a race condition in _drain_helper that triggers

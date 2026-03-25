@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim-bookworm
 
 # Prevent .pyc files and enable unbuffered output for logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -24,8 +24,8 @@ ENV ALLOWED_ORIGIN=""
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
 WORKDIR /app/server
 CMD ["python", "-c", "from src.main import run; run()"]

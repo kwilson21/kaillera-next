@@ -54,11 +54,8 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false;       // true if we auto-joined as spectator due to full room
 
-  const escapeHtml = (s) => {
-    const div = document.createElement('div');
-    div.appendChild(document.createTextNode(s));
-    return div.innerHTML;
-  };
+  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => _escapeMap[c]);
 
   // ── URL Params ─────────────────────────────────────────────────────────
 

@@ -31,7 +31,6 @@ log = logging.getLogger(__name__)
 _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _VALID_MODES = {"lockstep", "streaming"}
-_MAX_RELAY_SIZE = 2 * 1024 * 1024  # 2MB
 MAX_ROOMS = 100
 MAX_SPECTATORS = 20
 
@@ -42,7 +41,7 @@ def _sanitize_str(value: str, max_len: int) -> str:
 
 
 def configure_cors(origin: str) -> None:
-    sio.cors_allowed_origins = origin if origin != "*" else "*"
+    sio.cors_allowed_origins = origin
 
 
 # ── Socket.IO server instance ─────────────────────────────────────────────────
@@ -184,13 +183,8 @@ async def _leave(sid: str) -> None:
 
     # Transfer ownership if the owner left (lobby only)
     if room.owner == sid and room.players:
-        new_owner_info = next(iter(room.players.values()))
+        new_owner_pid, new_owner_info = next(iter(room.players.items()))
         new_owner_sid = new_owner_info["socketId"]
-        new_owner_pid = None
-        for pid, info in room.players.items():
-            if info["socketId"] == new_owner_sid:
-                new_owner_pid = pid
-                break
         room.owner = new_owner_sid
         room.rom_sharing = False
         # Move new owner to slot 0 (P1) if they're not already there
@@ -242,6 +236,7 @@ async def open_room(sid: str, data: dict) -> str | None:
         return "Invalid data"
     if not check(sid, "open-room"):
         return "Rate limited"
+    await _leave(sid)  # clean up if already in another room
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
@@ -291,6 +286,7 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
         return ("Invalid data", None)
     if not check(sid, "join-room"):
         return ("Rate limited", None)
+    await _leave(sid)  # clean up if already in another room
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
@@ -545,11 +541,11 @@ async def device_type(sid: str, data: dict) -> str | None:
     return None
 
 
-@sio.on("webrtc-signal")
-async def webrtc_signal(sid: str, data: dict) -> None:
+async def _relay_signal(sid: str, data: dict, event: str, keys: tuple[str, ...]) -> None:
+    """Shared relay logic for WebRTC signaling events."""
     if not isinstance(data, dict):
         return
-    if not check(sid, "webrtc-signal"):
+    if not check(sid, event):
         return
     target: str | None = data.get("target")
     if not target:
@@ -560,42 +556,26 @@ async def webrtc_signal(sid: str, data: dict) -> None:
         return
     if sender_entry[0] != target_entry[0]:
         return
-    payload = {
-        "sender": sid,
-        "target": target,
-    }
-    for key in ("offer", "answer", "candidate", "reconnect", "requestRenegotiate"):
+    payload = {"sender": sid, "target": target}
+    for key in keys:
         value = data.get(key)
         if value is not None:
             payload[key] = value
-    await sio.emit("webrtc-signal", payload, to=target)
+    await sio.emit(event, payload, to=target)
+
+
+_WEBRTC_KEYS = ("offer", "answer", "candidate", "reconnect", "requestRenegotiate")
+_ROM_SIGNAL_KEYS = ("offer", "answer", "candidate")
+
+
+@sio.on("webrtc-signal")
+async def webrtc_signal(sid: str, data: dict) -> None:
+    await _relay_signal(sid, data, "webrtc-signal", _WEBRTC_KEYS)
 
 
 @sio.on("rom-signal")
 async def rom_signal(sid: str, data: dict) -> None:
-    """Pre-game WebRTC signaling for ROM preloading (same relay as webrtc-signal)."""
-    if not isinstance(data, dict):
-        return
-    if not check(sid, "rom-signal"):
-        return
-    target: str | None = data.get("target")
-    if not target:
-        return
-    sender_entry = _sid_to_room.get(sid)
-    target_entry = _sid_to_room.get(target)
-    if not sender_entry or not target_entry:
-        return
-    if sender_entry[0] != target_entry[0]:
-        return
-    payload = {
-        "sender": sid,
-        "target": target,
-    }
-    for key in ("offer", "answer", "candidate"):
-        value = data.get(key)
-        if value is not None:
-            payload[key] = value
-    await sio.emit("rom-signal", payload, to=target)
+    await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
 @sio.on("data-message")
@@ -606,8 +586,6 @@ async def data_message(sid: str, data: dict) -> None:
         return
     result = _get_room(sid)
     if result is None:
-        return
-    if len(str(data)) > _MAX_RELAY_SIZE:
         return
     session_id, room = result
     await sio.emit("data-message", data, room=session_id, skip_sid=sid)
@@ -622,8 +600,6 @@ async def snapshot(sid: str, data: dict) -> None:
     result = _get_room(sid)
     if result is None:
         return
-    if len(str(data)) > _MAX_RELAY_SIZE:
-        return
     session_id, room = result
     await sio.emit("snapshot", data, room=session_id, skip_sid=sid)
 
@@ -633,8 +609,6 @@ async def game_input(sid: str, data: dict) -> None:
     if not isinstance(data, dict):
         return
     if not check(sid, "input"):
-        return
-    if len(str(data)) > _MAX_RELAY_SIZE:
         return
     result = _get_room(sid)
     if result is None:

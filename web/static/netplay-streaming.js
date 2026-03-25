@@ -86,6 +86,7 @@
   let _heldKeys          = new Set();
   let _prevSlotMasks     = {};
   let _gameRunning       = false;
+  let _hostInputInterval = null;
   let _cachedInfo        = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest   = null;   // MediaStreamAudioDestinationNode (host only)
@@ -559,7 +560,6 @@
   const startHostInputLoop = () => {
     let _debugFrame = 0;
     const tick = () => {
-      requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
       applyInputForSlot(0, mask);
@@ -567,7 +567,9 @@
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
     };
-    tick();
+    // Use setInterval instead of rAF — rAF throttles to ~1fps in background tabs,
+    // which would starve all players if the host tabs away.
+    _hostInputInterval = setInterval(tick, 16);
   };
 
   // ── Guest: input sender ────────────────────────────────────────────────
@@ -581,6 +583,7 @@
     let _lastSentMask = -1;
     let _debugFrame = 0;
     const tick = () => {
+      if (!_guestLoopStarted) return;
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
       const mask = readLocalInput();
@@ -855,23 +858,28 @@
   };
 
   const applyInputForSlot = (slot, inputMask) => {
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._simulate_input) return;
     const prevMask = _prevSlotMasks[slot] || 0;
-    if (inputMask === prevMask) return;  // skip if unchanged — saves simulateInput calls
-    for (let i = 0; i < 16; i++) {
-      const wasPressed = (prevMask >> i) & 1;
-      const isPressed  = (inputMask >> i) & 1;
-      if (wasPressed !== isPressed) gm.simulateInput(slot, i, isPressed);
+    if (inputMask === prevMask) return;  // skip if unchanged
+
+    // Digital buttons (0-15) — same path as lockstep writeInputToMemory
+    for (let btn = 0; btn < 16; btn++) {
+      mod._simulate_input(slot, btn, (inputMask >> btn) & 1);
     }
-    for (let base = 16; base <= 22; base += 2) {
-      const posNow  = (inputMask >> base)       & 1;
-      const negNow  = (inputMask >> (base + 1)) & 1;
-      const posPrev = (prevMask >> base)         & 1;
-      const negPrev = (prevMask >> (base + 1))   & 1;
-      if (posNow !== posPrev || negNow !== negPrev) {
-        gm.simulateInput(slot, base, (posNow - negNow) * 32767);
-      }
+
+    // Analog axes (16-23): bit pairs → ±axis values
+    // Diagonal normalization: scale by 1/√2 so combined magnitude matches cardinal
+    const lxActive = ((inputMask >> 16) & 1) | ((inputMask >> 17) & 1);
+    const lyActive = ((inputMask >> 18) & 1) | ((inputMask >> 19) & 1);
+    const diagScale = (lxActive && lyActive) ? 23170 : 32767;  // 32767/√2 ≈ 23170
+    for (let base = 16; base < 24; base += 2) {
+      const posPressed = (inputMask >> base) & 1;
+      const negPressed = (inputMask >> (base + 1)) & 1;
+      const mag = (base < 20) ? diagScale : 32767;  // normalize left stick only
+      const axisVal = (posPressed - negPressed) * mag;
+      mod._simulate_input(slot, base, axisVal);
+      mod._simulate_input(slot, base + 1, 0);
     }
     _prevSlotMasks[slot] = inputMask;
   };
@@ -921,6 +929,7 @@
     _gameRunning = false;
     _guestLoopStarted = false;
     _cachedInfo = null;
+    if (_hostInputInterval) { clearInterval(_hostInputInterval); _hostInputInterval = null; }
 
     // Close all peer connections
     for (const sid of Object.keys(_peers)) {

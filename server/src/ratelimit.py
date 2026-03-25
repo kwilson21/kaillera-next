@@ -33,6 +33,8 @@ def unregister_sid(sid: str) -> None:
     ip = _sid_ip.pop(sid, None)
     if ip and _connections[ip] > 0:
         _connections[ip] -= 1
+        if _connections[ip] <= 0:
+            del _connections[ip]
 
 
 def _check_key(key: str, event: str) -> bool:
@@ -79,3 +81,7 @@ def cleanup() -> None:
             stale_ips.append(ip)
     for ip in stale_ips:
         del _counters[ip]
+    # Also clean stale connection entries (defensive — unregister_sid should handle this)
+    stale_conns = [ip for ip, count in _connections.items() if count <= 0]
+    for ip in stale_conns:
+        del _connections[ip]
