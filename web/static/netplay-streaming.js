@@ -161,17 +161,13 @@
       `onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
     );
     if (_playerSlot === 0) {
-      // HOST: initiate connections to all non-host players and spectators.
-      // Offers are sent immediately — if _hostStream isn't ready yet,
-      // the initial offer is DC-only and startHost() will send offers
-      // with tracks once the stream is ready.
+      // HOST: initiate connections to all non-host players and spectators
       const others = Object.values(players).filter((p) => p.socketId !== socket.id);
       for (const p of others) {
         if (_peers[p.socketId]) {
           _peers[p.socketId].slot = p.slot;
           continue;
         }
-        _syncLog(`host creating peer for ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
         createPeer(p.socketId, p.slot, true);
         sendOffer(p.socketId);
       }
@@ -225,31 +221,20 @@
     // Guest/spectator: listen for incoming video tracks
     if (_playerSlot !== 0 || _isSpectator) {
       peer.pc.ontrack = (event) => {
-        _syncLog(`received track: ${event.track.kind} streams=${event.streams?.length ?? 0}`);
+        _syncLog(`received track: ${event.track.kind}`);
         if (!_guestVideo) {
           _guestVideo = document.createElement('video');
           _guestVideo.id = 'guest-video';
           _guestVideo.autoplay = true;
           _guestVideo.playsInline = true;
-          _guestVideo.muted = true; // start muted so autoplay works without gesture
+          _guestVideo.muted = true;
 
-          // Minimize video decode/display latency:
-          // - disableRemotePlayback: don't add cast overlay
-          // - no buffering: play ASAP
           _guestVideo.disableRemotePlayback = true;
           _guestVideo.setAttribute('playsinline', '');
 
-          // Unmute after playback starts. On mobile, programmatic unmute
-          // requires a user gesture — show a banner if it fails.
           _guestVideo.addEventListener(
             'playing',
             () => {
-              _syncLog('video playing — adding audio track');
-              // Add the stashed audio track now that video is playing
-              const audioTrack = _guestVideo._knAudioTrack;
-              if (audioTrack && _guestVideo.srcObject) {
-                _guestVideo.srcObject.addTrack(audioTrack);
-              }
               _guestVideo.muted = false;
               if (_guestVideo.muted) {
                 const banner = document.getElementById('unmute-banner');
@@ -272,30 +257,9 @@
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           gameDiv.innerHTML = '';
           gameDiv.appendChild(_guestVideo);
-          _syncLog(
-            `video element appended to #game (gameDiv=${gameDiv.id}, display=${getComputedStyle(gameDiv).display}, h=${gameDiv.clientHeight})`,
-          );
         }
+        _guestVideo.srcObject = event.streams[0];
 
-        // iOS WebKit only autoplays videos with NO audio track (even when
-        // muted). Build a video-only stream for the <video> element.
-        // Audio is added after playback starts (via the playing event).
-        if (event.track.kind === 'audio') {
-          _guestVideo._knAudioTrack = event.track;
-          return;
-        }
-
-        // Video track — log track state for debugging
-        const vt = event.track;
-        _syncLog(`video track state: readyState=${vt.readyState} muted=${vt.muted} enabled=${vt.enabled}`);
-
-        // Create a video-only MediaStream
-        const videoOnlyStream = new MediaStream([vt]);
-        _guestVideo.srcObject = videoOnlyStream;
-
-        // Minimize jitter buffer: set minimum playout delay on the receiver.
-        // The default jitter buffer adds 50-150ms of latency for smooth
-        // playback on unreliable networks. For gaming we want minimum delay.
         try {
           for (const recv of peer.pc.getReceivers()) {
             if (recv.track?.kind === 'video') {
@@ -315,35 +279,9 @@
 
         setStatus('🟢 Connected — streaming!');
 
-        const src = _guestVideo.srcObject;
-        const trackInfo = src
-          ? `${src.getVideoTracks().length}v+${src.getAudioTracks().length}a (video-only for autoplay)`
-          : 'no-src';
-        _syncLog(`video state: readyState=${_guestVideo.readyState} paused=${_guestVideo.paused} tracks=${trackInfo}`);
-        _guestVideo.play()?.catch((e) => {
-          _syncLog(`video play() rejected: ${e.message} — will retry on loadeddata`);
-        });
-
-        // iOS WebKit may reject play() if no video data has arrived yet.
-        // Retry once the first frame is available.
-        if (!_guestVideo._knRetryBound) {
-          _guestVideo._knRetryBound = true;
-          _guestVideo.addEventListener(
-            'loadeddata',
-            () => {
-              if (_guestVideo.paused && _gameRunning) {
-                _syncLog('loadeddata fired — retrying play()');
-                _guestVideo.play()?.catch((e) => _syncLog(`retry play() rejected: ${e.message}`));
-              }
-            },
-            { once: true },
-          );
-        }
-
-        // Measure actual display latency via requestVideoFrameCallback
         if (_guestVideo.requestVideoFrameCallback) {
           const measureLatency = (now, metadata) => {
-            if (!_gameRunning) return; // stop loop when game ends
+            if (!_gameRunning) return;
             if (metadata.receiveTime && metadata.expectedDisplayTime) {
               const pipelineDelay = metadata.expectedDisplayTime - metadata.receiveTime;
               window._videoPipelineDelay = pipelineDelay.toFixed(1);
@@ -442,11 +380,13 @@
       );
 
       if (_playerSlot === 0) {
-        // Host: startHost() runs from init(), not from DC open.
-        // Tracks are included in the initial offer, so no action needed.
-        _syncLog('DC open: host (stream already initialized from init)');
+        if (!_gameRunning) {
+          _syncLog('DC open: starting host emulator');
+          startHost();
+        } else {
+          _syncLog('DC open: host already running');
+        }
       } else if (!_isSpectator) {
-        // Guest: start sending input
         _syncLog('DC open: starting guest input loop');
         startGuestInputLoop();
       } else {
@@ -504,25 +444,18 @@
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
-
     KNShared.bootWithCheats('streaming');
     setupKeyTracking();
 
-    // Wait for emulator to be running AND rendering, then capture canvas stream.
-    // Checking gameManager alone isn't enough — after a mode switch the emulator
-    // is rebooting and the canvas is blank for several seconds. Capturing blank
-    // frames sends black video to guests.
     const MIN_HOST_FRAMES = 10;
     const waitForEmu = () => {
-      if (!_gameRunning) return; // stop() was called during boot
+      if (!_gameRunning) return;
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         setTimeout(waitForEmu, 100);
         return;
       }
 
-      // Wait for actual rendering — canvas exists but may be blank until
-      // the emulator runs a few frames (especially on reboot after mode switch)
       const frames = gm.Module?._get_current_frame_count?.() ?? 0;
       if (frames < MIN_HOST_FRAMES) {
         setTimeout(waitForEmu, 100);
@@ -544,45 +477,34 @@
 
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
-      // Blit + capture: draw the first frame synchronously to unmute the
-      // captureStream track. A captureStream(0) track starts muted until
-      // the first requestFrame() — if the offer is sent before this,
-      // the guest receives a muted track that never delivers frames.
       _hostStream = captureCanvas.captureStream(0);
       const captureTrack = _hostStream.getVideoTracks()[0];
-      ctx.drawImage(srcCanvas, 0, 0, 640, 480); // first blit (sync)
-      captureTrack.requestFrame(); // unmute track
-      _syncLog(`first frame captured (track muted=${captureTrack.muted})`);
 
-      let _blitCount = 1;
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         captureTrack.requestFrame();
-        _blitCount++;
-        if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
       };
-      requestAnimationFrame(blitFrame);
+      blitFrame();
 
       _syncLog('capture stream started (640x480 2D blit)');
 
-      // Try to capture audio immediately (before adding tracks to peers).
-      // If AL contexts are ready, audio track joins video in the first offer.
       captureEmulatorAudio();
 
-      // Stream is ready — now process peers. createPeer adds tracks
-      // (checks _hostStream) so the first offer includes video.
-      // No renegotiation needed — avoids iOS WebKit renegotiation issues.
-      _syncLog(`stream ready (${_hostStream.getTracks().length} tracks) — processing peers`);
-      if (_config?.initialPlayers) {
-        onUsersUpdated(_config.initialPlayers);
+      // Add tracks to all existing peers and renegotiate so guests
+      // receive the video+audio stream.
+      for (const [sid, peer] of Object.entries(_peers)) {
+        for (const track of _hostStream.getTracks()) {
+          peer.pc.addTrack(track, _hostStream);
+        }
+        optimizeVideoEncoding(peer.pc);
+        renegotiate(sid);
       }
 
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
 
-      // If audio wasn't ready, poll and add to _hostStream for future peers
       if (!_audioStreamDest) {
         let audioAttempts = 0;
         const waitForAudio = () => {
@@ -595,6 +517,19 @@
       }
     };
     waitForEmu();
+  };
+
+  const renegotiate = async (remoteSid) => {
+    const peer = _peers[remoteSid];
+    if (!peer) return;
+    try {
+      const offer = await peer.pc.createOffer();
+      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
+      await peer.pc.setLocalDescription(offer);
+      socket.emit('webrtc-signal', { target: remoteSid, offer });
+    } catch (err) {
+      _syncLog(`renegotiate failed: ${err}`);
+    }
   };
 
   const setSDPBitrate = (sdp, bitrateKbps) => {
@@ -939,24 +874,20 @@
     socket.on('users-updated', onUsersUpdated);
     socket.on('webrtc-signal', onWebRTCSignal);
 
-    // Guest: set up keyboard tracking immediately
     if (!_isSpectator && _playerSlot !== 0) {
       setupKeyTracking();
     }
 
+    // Host: apply cheats + disable EJS input at boot (same as lockstep).
     if (_playerSlot === 0) {
-      // Host: boot emulator and create stream BEFORE processing peers.
-      // This ensures the first offer includes video tracks — avoids
-      // renegotiation which is unreliable on iOS WebKit.
-      startHost();
-      // Don't process initialPlayers yet — startHost's waitForEmu will
-      // call onUsersUpdated after the stream is ready.
-    } else {
-      // Guest/spectator: process current peers immediately
-      if (config.initialPlayers) {
-        onUsersUpdated(config.initialPlayers);
-      }
+      KNShared.bootWithCheats('streaming');
     }
+
+    // Process current peers immediately
+    if (config.initialPlayers) {
+      onUsersUpdated(config.initialPlayers);
+    }
+    // startHost() / startGuestInputLoop() triggered from ch.onopen
 
     // Virtual gamepad for mobile streaming guests
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
