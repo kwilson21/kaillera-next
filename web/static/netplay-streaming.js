@@ -102,7 +102,6 @@
   let _prevSlotMasks = {};
   let _gameRunning = false;
   let _hostInputInterval = null;
-  let _hostBlitInterval = null;
   let _cachedInfo = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
@@ -540,22 +539,23 @@
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
-      // Use setInterval instead of rAF — rAF can be in a bad state after
-      // lockstep→streaming switch (APISandbox overrides + EmulatorJS rAF
-      // interaction). setInterval is immune to this.
+      // Must use requestAnimationFrame (not setInterval) because drawImage
+      // from a WebGL canvas with preserveDrawingBuffer=false must run
+      // before the compositor clears the framebuffer. setInterval is not
+      // synchronized and reads blank frames intermittently.
+      // Use APISandbox.nativeRAF — the real browser rAF saved at page load,
+      // immune to lockstep APISandbox overrides.
       _hostStream = captureCanvas.captureStream(60);
 
       let _blitCount = 0;
-      _hostBlitInterval = setInterval(() => {
-        if (!_gameRunning) {
-          clearInterval(_hostBlitInterval);
-          _hostBlitInterval = null;
-          return;
-        }
+      const blitFrame = () => {
+        if (!_gameRunning) return;
+        APISandbox.nativeRAF(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         _blitCount++;
-        if (_blitCount === 30) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
-      }, 16); // ~60fps blit, captured at 30fps
+        if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
+      };
+      APISandbox.nativeRAF(blitFrame);
 
       _syncLog('capture stream started (640x480 2D blit)');
 
@@ -968,10 +968,6 @@
     if (_hostInputInterval) {
       clearInterval(_hostInputInterval);
       _hostInputInterval = null;
-    }
-    if (_hostBlitInterval) {
-      clearInterval(_hostBlitInterval);
-      _hostBlitInterval = null;
     }
 
     // Close all peer connections
