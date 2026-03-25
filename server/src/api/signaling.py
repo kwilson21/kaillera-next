@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -31,8 +32,8 @@ log = logging.getLogger(__name__)
 _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _VALID_MODES = {"lockstep", "streaming"}
-MAX_ROOMS = 100
-MAX_SPECTATORS = 20
+MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
+MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
 
 
 def _sanitize_str(value: str, max_len: int) -> str:
@@ -621,7 +622,6 @@ async def game_input(sid: str, data: dict) -> None:
 async def debug_sync(sid: str, data: dict) -> None:
     """Real-time sync status — appends to logs/live.log for live tailing.
     Only active when DEBUG_MODE=1 env var is set."""
-    import os
     if not os.environ.get("DEBUG_MODE"):
         return
     if not check(sid, "data-message"):
@@ -661,7 +661,6 @@ async def debug_logs(sid: str, data: dict) -> None:
         log.info("[P%s] %s", slot, str(line)[:500])
 
     # In DEBUG_MODE, also write to local file for convenience
-    import os
     if os.environ.get("DEBUG_MODE"):
         from datetime import datetime
         from pathlib import Path

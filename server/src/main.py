@@ -88,12 +88,13 @@ def run() -> None:
     except ImportError:
         pass
 
+    port = int(os.environ.get("PORT", "27888"))
     log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
-    log.info("Listening on :27888 — the original Kaillera port (loop=%s)", loop_setting)
+    log.info("Listening on :%d (loop=%s)", port, loop_setting)
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
-        port=27888,
+        port=port,
         log_level="info",
         loop=loop_setting,
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real
