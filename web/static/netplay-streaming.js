@@ -161,7 +161,10 @@
       `onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
     );
     if (_playerSlot === 0) {
-      // HOST: initiate connections to all non-host players and spectators
+      // HOST: initiate connections to all non-host players and spectators.
+      // Offers are sent immediately — if _hostStream isn't ready yet,
+      // the initial offer is DC-only and startHost() will send offers
+      // with tracks once the stream is ready.
       const others = Object.values(players).filter((p) => p.socketId !== socket.id);
       for (const p of others) {
         if (_peers[p.socketId]) {
@@ -394,12 +397,15 @@
 
     try {
       if (data.offer) {
+        const hasVideo = data.offer.sdp?.includes('m=video') ?? false;
+        _syncLog(`received offer from ${senderSid} (hasVideo=${hasVideo} isRenegotiation=${!!peer.remoteDescSet})`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await drainCandidates(peer);
         const answer = await peer.pc.createAnswer();
         await peer.pc.setLocalDescription(answer);
         socket.emit('webrtc-signal', { target: senderSid, answer });
       } else if (data.answer) {
+        _syncLog(`received answer from ${senderSid}`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await drainCandidates(peer);
       } else if (data.candidate) {
@@ -571,12 +577,22 @@
       // If AL contexts are ready, audio track joins video in the first offer.
       captureEmulatorAudio();
 
-      // Add all current stream tracks to existing peer connections
+      // Add stream tracks to existing peer connections and renegotiate.
+      // The initial offer was DC-only; this renegotiation adds video.
+      const trackCount = _hostStream.getTracks().length;
+      _syncLog(`adding ${trackCount} tracks to ${Object.keys(_peers).length} peers`);
       for (const [sid, peer] of Object.entries(_peers)) {
+        const senders = peer.pc.getSenders();
+        const hasTracks = senders.some((s) => s.track);
+        if (hasTracks) {
+          _syncLog(`peer ${sid} already has tracks — skipping addTrack`);
+          continue;
+        }
         for (const track of _hostStream.getTracks()) {
           peer.pc.addTrack(track, _hostStream);
         }
         optimizeVideoEncoding(peer.pc);
+        _syncLog(`renegotiating with ${sid} (senders=${peer.pc.getSenders().length})`);
         renegotiate(sid);
       }
 
@@ -607,6 +623,7 @@
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
+      _syncLog(`renegotiate sent to ${remoteSid} (sdp has video=${offer.sdp.includes('m=video')})`);
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
     }
