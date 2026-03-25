@@ -26,20 +26,20 @@
   // N64 A = JOYPAD_B = index 0, N64 B = JOYPAD_Y = index 1
   // Z = JOYPAD_L2 = index 12, L = JOYPAD_L = index 10, R = JOYPAD_R = index 11
   const BUTTONS = [
-    [0,  'A',      'vgp-a'],
-    [1,  'B',      'vgp-b'],
-    [3,  'Start',  'vgp-start'],
-    [10, 'L',      'vgp-l'],
-    [11, 'R',      'vgp-r'],
-    [12, 'Z',      'vgp-z'],
-    [4,  '\u25B2', 'vgp-du'],
-    [5,  '\u25BC', 'vgp-dd'],
-    [6,  '\u25C0\uFE0E', 'vgp-dl'],
-    [7,  '\u25B6\uFE0E', 'vgp-dr'],
-    [23, 'CU',     'vgp-cu'],
-    [22, 'CD',     'vgp-cd'],
-    [21, 'CL',     'vgp-cl'],
-    [20, 'CR',     'vgp-cr'],
+    [0, 'A', 'vgp-a'],
+    [1, 'B', 'vgp-b'],
+    [3, 'Start', 'vgp-start'],
+    [10, 'L', 'vgp-l'],
+    [11, 'R', 'vgp-r'],
+    [12, 'Z', 'vgp-z'],
+    [4, '\u25B2', 'vgp-du'],
+    [5, '\u25BC', 'vgp-dd'],
+    [6, '\u25C0\uFE0E', 'vgp-dl'],
+    [7, '\u25B6\uFE0E', 'vgp-dr'],
+    [23, 'CU', 'vgp-cu'],
+    [22, 'CD', 'vgp-cd'],
+    [21, 'CL', 'vgp-cl'],
+    [20, 'CR', 'vgp-cr'],
   ];
 
   const createOverlay = () => {
@@ -185,9 +185,9 @@
         shouldersEl.appendChild(btn);
       } else if (cls === 'vgp-start') {
         centerEl.appendChild(btn);
-      } else if (cls.indexOf('vgp-d') === 0) {
+      } else if (cls.startsWith('vgp-d')) {
         dpadEl.appendChild(btn);
-      } else if (cls === 'vgp-a' || cls === 'vgp-b' || cls.indexOf('vgp-c') === 0) {
+      } else if (cls === 'vgp-a' || cls === 'vgp-b' || cls.startsWith('vgp-c')) {
         rightEl.appendChild(btn);
       }
     }
@@ -231,7 +231,8 @@
         const idx = parseInt(btnEl.dataset.idx, 10);
         _buttonTouches[t.identifier] = idx;
         btnEl.classList.add('active');
-        const s = _state(); if (s) s[idx] = 1;
+        const s = _state();
+        if (s) s[idx] = 1;
       }
     }
   };
@@ -251,14 +252,21 @@
       if (t.identifier === _stickTouch) {
         _stickTouch = null;
         _stickCenter = null;
-        const s = _state(); if (s) { s[16] = 0; s[17] = 0; s[18] = 0; s[19] = 0; }
+        const s = _state();
+        if (s) {
+          s[16] = 0;
+          s[17] = 0;
+          s[18] = 0;
+          s[19] = 0;
+        }
         if (_stickEl) _stickEl.style.transform = 'translate(-50%, -50%)';
         continue;
       }
       const idx = _buttonTouches[t.identifier];
       if (idx !== undefined) {
         delete _buttonTouches[t.identifier];
-        const s = _state(); if (s) s[idx] = 0;
+        const s = _state();
+        if (s) s[idx] = 0;
         const btns = _overlay.querySelectorAll(`.vgp-btn[data-idx="${idx}"]`);
         for (const b of btns) b.classList.remove('active');
       }
@@ -272,8 +280,8 @@
     let dy = clientY - _stickCenter.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist > STICK_RADIUS) {
-      dx = dx / dist * STICK_RADIUS;
-      dy = dy / dist * STICK_RADIUS;
+      dx = (dx / dist) * STICK_RADIUS;
+      dy = (dy / dist) * STICK_RADIUS;
     }
     if (_stickEl) {
       _stickEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
@@ -293,7 +301,7 @@
   };
 
   window.VirtualGamepad = {
-    init: (container) => {
+    init: () => {
       createOverlay();
       // Shrink game to share space — gamepad is an in-flow sibling
       const gameEl = document.getElementById('game');
@@ -315,7 +323,9 @@
       _stickCenter = null;
       _buttonTouches = {};
       const gameEl = document.getElementById('game');
-      if (gameEl) { gameEl.style.margin = ''; }
+      if (gameEl) {
+        gameEl.style.margin = '';
+      }
       console.log('[virtual-gamepad] destroyed');
     },
 

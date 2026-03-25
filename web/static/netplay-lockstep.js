@@ -23,30 +23,36 @@
  *
  *   1. All players boot EmulatorJS independently and wait for the WASM
  *      core to be ready (host waits 120+ frames, guests wait ~10 frames).
- *   2. INPUT_BASE auto-discovery: calls _simulate_input(0, 0, 1) and scans
+ *   2. Standard online cheats applied automatically via KNShared
+ *      (SSB64 GameShark codes: all characters, items off, etc.).
+ *   3. INPUT_BASE auto-discovery: calls _simulate_input(0, 0, 1) and scans
  *      the first 4MB of HEAPU8 for the changed byte. This locates the core's
  *      internal input_state array, which varies per WASM compilation.
- *   3. Host captures a save state, gzip-compresses it, base64-encodes it,
+ *   4. Host captures a save state, gzip-compresses it, base64-encodes it,
  *      and sends it to all guests via Socket.IO (save states are ~1.5MB,
  *      too large for WebRTC DataChannels which have SCTP buffering limits).
- *   4. RTT measurement: 3 ping-pong rounds over each DataChannel. The
+ *      State may be fetched from server cache (by ROM hash) to skip host
+ *      boot entirely.
+ *   5. RTT measurement: 3 ping-pong rounds over each DataChannel. The
  *      median RTT determines auto frame delay: ceil(median_ms / 16.67),
  *      clamped to [1, 9]. Both sides exchange their delay preference and
  *      the maximum across all players becomes the effective DELAY_FRAMES.
- *   5. All players load the same save state (double-load: first restores
+ *   6. All players load the same save state (double-load: first restores
  *      CPU+RAM, then enterManualMode() captures rAF, second load fixes
  *      any free-frame drift between the loads). Frame counter resets to 0.
- *   6. Lockstep tick loop starts via setInterval(16).
+ *   7. Lockstep tick loop starts via setInterval(16).
  *
  * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
  *
  *   Emscripten's main loop is driven by requestAnimationFrame. To control
- *   frame timing, we intercept rAF via APISandbox:
- *     - APISandbox saves the real rAF at page load
- *     - We replace window.requestAnimationFrame with an interceptor that
- *       captures the callback (_pendingRunner) instead of scheduling it
- *     - Call Module.resumeMainLoop() so Emscripten registers its runner
- *       through our interceptor, giving us the callback
+ *   frame timing, we intercept rAF via APISandbox (api-sandbox.js):
+ *     - APISandbox saves native browser APIs (rAF, getGamepads,
+ *       performance.now) at page load before any scripts can override them
+ *     - overrideRAF() replaces window.requestAnimationFrame with an
+ *       interceptor that captures the callback (_pendingRunner) instead
+ *       of scheduling it
+ *     - Module.resumeMainLoop() registers Emscripten's runner through
+ *       our interceptor, giving us the callback
  *     - stepOneFrame() calls _pendingRunner(frameTimeMs), advancing the
  *       emulator by exactly one frame, then schedules a real rAF no-op
  *       to force GL compositing
@@ -57,22 +63,38 @@
  * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
  *
  *   Each tick at frame N:
- *     1. Read local input (keyboard via keyCode tracking + gamepad via
- *        GamepadManager) → 24-bit mask (16 digital buttons + 4 analog
- *        axis pairs encoded as bit pairs)
- *     2. Send Int32Array([frameN, inputMask]) (8 bytes) to all peer DCs
- *     3. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
+ *     1. Apply pending resync state if buffered (async from previous sync)
+ *     2. GGPO-style frame pacing check (see Frame Pacing below) — skip
+ *        tick entirely if too far ahead of slowest peer
+ *     3. Read local input (keyboard via keyCode tracking + gamepad via
+ *        GamepadManager + VirtualGamepad on mobile) → 24-bit mask
+ *     4. Send Int32Array([frameN, inputMask]) (8 bytes) to all peer DCs
+ *     5. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
  *        inputs are ready to apply)
- *     4. Check if all "input peers" have sent input for applyFrame.
+ *     6. Check if all "input peers" have sent input for applyFrame.
  *        Input peers = peers who have sent at least one input (excludes
- *        late-joiners still booting). If missing:
- *          - Stall: return early, retry via setTimeout(1) for sub-16ms
- *            retry. After MAX_STALL_MS (500ms), inject zero input to unstick.
- *     5. Write all players' inputs to WASM memory via _simulate_input()
+ *        late-joiners still booting). If missing, two-stage stall:
+ *          Stage 1 (0 – 3000ms): stall, retry via setTimeout(1).
+ *          Stage 2 (3000 – 5000ms): send "resend:<frame>" to the
+ *            missing peer requesting retransmission, keep stalling.
+ *          Timeout (5000ms+): inject zero input to unstick.
+ *     7. Write all players' inputs to WASM memory via _simulate_input()
  *        (iterates 16 digital buttons + 4 analog axis pairs per player)
- *     6. Reset audio buffer, step one frame, feed audio samples to
+ *     8. Reset audio buffer, step one frame, feed audio samples to
  *        AudioWorklet (or AudioBufferSourceNode fallback)
- *     7. Increment frame counter. Periodically update debug overlay.
+ *     9. Increment frame counter. Periodically update debug overlay.
+ *
+ * ── Frame Pacing (GGPO-Inspired) ────────────────────────────────────────
+ *
+ *   Prevents the faster machine from outrunning the slower one's input
+ *   stream. Tracks frame advantage (local frame - min remote frame) as
+ *   an exponential moving average with asymmetric alpha:
+ *     - Rising (falling behind): α = 0.1 (slow to trigger, avoids jitter)
+ *     - Falling (catching up):   α = 0.2 (fast to release throttle)
+ *   When raw frame advantage exceeds DELAY_FRAMES + 1, the tick is
+ *   skipped entirely — no input sent, no emulator stepped. This keeps
+ *   players within one delay window of each other.
+ *   Disabled during 120-frame warmup while connections stabilize.
  *
  * ── Input Encoding ────────────────────────────────────────────────────────
  *
@@ -90,8 +112,10 @@
  *   all AL sources stopped, AudioContext suspended, resume() overridden
  *   to prevent browser auto-resume on user gestures. Instead, audio is
  *   captured per-frame from WASM memory via custom core exports
- *   (_kn_get_audio_ptr, _kn_get_audio_samples, _kn_reset_audio) and
- *   fed to an AudioWorklet ring buffer. This ensures audio is frame-
+ *   (_kn_get_audio_ptr, _kn_get_audio_samples, _kn_reset_audio,
+ *   _kn_get_audio_rate) and fed to an AudioWorklet ring buffer
+ *   (audio-worklet-processor.js). Falls back to AudioBufferSourceNode
+ *   when AudioWorklet is unavailable. This ensures audio is frame-
  *   locked to the lockstep tick and identical across all players.
  *   Host also routes audio to a MediaStreamDestination for spectators.
  *
@@ -105,24 +129,27 @@
  *
  * ── Desync Detection & Resync (Star Topology) ────────────────────────────
  *
- *   Opt-in (rollbackEnabled flag). Star topology: only the host (slot 0)
- *   is the sync authority. The host hashes 64KB of RDRAM (direct HEAPU8
- *   access when available, falling back to getState()) every
- *   _syncCheckInterval frames using FNV-1a and broadcasts
- *   "sync-hash:frame:hash" to all peers. Guests hash the same HEAPU8
- *   region — no expensive getState() serialization needed.
+ *   Opt-in (rollbackEnabled flag). Star topology: host (slot 0) is the
+ *   sync authority. Two hashing paths:
  *
- *   If a guest's hash differs, it sends "sync-request" and the host
- *   captures + compresses the full state and sends it via DataChannel
- *   in 64KB chunks to the requesting peer only.
+ *   1. C-level (patched core): _kn_sync_hash() hashes game-specific
+ *      RDRAM regions directly in C — fast and deterministic. Uses
+ *      _kn_sync_hash_regions for per-region checksums. Resync via
+ *      _kn_sync_read() (host exports state) and _kn_sync_write()
+ *      (guest imports state).
+ *   2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access,
+ *      falling back to getState() serialization.
  *
- *   The guest decompresses the state and buffers it for async application
- *   at the next clean frame boundary (start of tick loop) — no mid-frame
- *   stall.
+ *   The host broadcasts "sync-hash:frame:hash:cycleMs" every
+ *   _syncCheckInterval frames (~120 frames / ~2s). Guests compare
+ *   their own hash — on mismatch, they send "sync-request" and the
+ *   host sends the full compressed state via DataChannel in 64KB
+ *   chunks. The guest buffers it for async application at the next
+ *   clean frame boundary — no mid-frame stall.
  *
  * ── Late Join ─────────────────────────────────────────────────────────────
  *
- *   When a player joins a game already in progress:
+ *   Pull model — the joiner requests state when ready:
  *     1. Joiner boots emulator minimally, enters manual mode
  *     2. Sends "request-late-join" via Socket.IO data-message
  *     3. Host captures + compresses state, sends "late-join-state" with
@@ -130,6 +157,8 @@
  *     4. Joiner loads state, syncs frame counter to max(hostFrame,
  *        lastRemoteFrame), pre-fills delay gap with zero input, starts
  *        lockstep tick loop
+ *   The late-joiner always initiates WebRTC connections to avoid the
+ *   offer-before-listener race condition.
  *
  * ── Drop Handling ─────────────────────────────────────────────────────────
  *
@@ -139,6 +168,22 @@
  *     - Remaining players continue — the tick loop handles zero active
  *       peers gracefully (single-player mode)
  *     - No reconnect attempt; the dropped player can re-join as late join
+ *
+ * ── Tab Visibility ──────────────────────────────────────────────────────
+ *
+ *   A visibilitychange listener pauses/resumes emulation when the tab
+ *   loses or regains focus, preventing runaway frame advancement in
+ *   background tabs and saving CPU/bandwidth.
+ *
+ * ── Diagnostics ─────────────────────────────────────────────────────────
+ *
+ *   _debugLog: timestamped log of [lockstep] and [play] console output
+ *   _syncLogRing: 32-entry circular buffer for sync events (hash mismatches,
+ *     resync triggers, frame caps), exportable as CSV via debug-sync
+ *   _diagEventLog: frame-level diagnostic events flushed to IndexedDB
+ *   debug-sync / debug-logs: Socket.IO events for remote log upload to server
+ *   Sync hash/resync operations run in a Web Worker to avoid blocking
+ *   the main thread during compression/decompression.
  */
 
 (function () {
@@ -158,8 +203,11 @@
       // Capture [lockstep] and [play] prefixed messages
       if (arguments.length > 0) {
         const first = String(arguments[0]);
-        if (first.indexOf('[lockstep]') === 0 || first.indexOf('[play]') === 0 ||
-            (arguments.length > 1 && String(arguments[1]).indexOf('[lockstep]') >= 0)) {
+        if (
+          first.startsWith('[lockstep]') ||
+          first.startsWith('[play]') ||
+          (arguments.length > 1 && String(arguments[1]).includes('[lockstep]'))
+        ) {
           const ts = ((Date.now() - _debugLogStart) / 1000).toFixed(3);
           const parts = [];
           for (let i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
@@ -177,7 +225,6 @@
 
   let _onExtraDataChannel = null;
   let _onUnhandledMessage = null;
-
 
   let _rttSamples = [];
   let _rttComplete = false;
@@ -198,7 +245,9 @@
       // Copy per-peer samples into peer.rttSamples for getInfo()
       peer.rttSamples = peer._rttSamples.slice().sort((a, b) => a - b);
       // Accumulate into global _rttSamples
-      for (const s of peer._rttSamples) { _rttSamples.push(s); }
+      for (const s of peer._rttSamples) {
+        _rttSamples.push(s);
+      }
       _rttPeersComplete++;
       // When all peers are done, compute auto delay from max median across peers
       if (_rttPeersComplete >= _rttPeersTotal) {
@@ -250,7 +299,7 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
-  const _lastKnownInput = {};  // slot -> last input mask received from that peer
+  const _lastKnownInput = {}; // slot -> last input mask received from that peer
 
   // -- Direct memory input layout -----------------------------------------------
   //
@@ -262,23 +311,23 @@
   // at startup by calling _simulate_input and detecting which byte changed.
   // Fallback: 715364 (CDN core address).
 
-  let INPUT_BASE       = 715364;  // auto-discovered at startup
+  let INPUT_BASE = 715364; // auto-discovered at startup
 
   // -- Diagnostics state (DIAG logger) ----------------------------------------
   let _diagPlayerAddrs = [null, null, null, null]; // per-player input base addresses
-  let _diagLastTickTime = 0;       // wall-clock time of previous tick() call
-  const _diagEventLog     = [];      // buffered async events [{t, type, detail}]
-  let _diagHookInstalled = false;  // true once async event hooks are set up
-  const DIAG_HASH_INTERVAL  = 300;   // frames between RDRAM hash+dump logs (~once per 5s)
-  const DIAG_INPUT_INTERVAL = 300;   // frames between input read logs
-  const DIAG_TIME_INTERVAL  = 60;    // frames between timing logs
-  const DIAG_EARLY_FRAMES   = 30;    // log everything for first N frames
+  let _diagLastTickTime = 0; // wall-clock time of previous tick() call
+  const _diagEventLog = []; // buffered async events [{t, type, detail}]
+  let _diagHookInstalled = false; // true once async event hooks are set up
+  const DIAG_HASH_INTERVAL = 300; // frames between RDRAM hash+dump logs (~once per 5s)
+  const DIAG_INPUT_INTERVAL = 300; // frames between input read logs
+  const DIAG_TIME_INTERVAL = 60; // frames between timing logs
+  const DIAG_EARLY_FRAMES = 30; // log everything for first N frames
 
   // -- State -----------------------------------------------------------------
 
-  let socket             = null;
-  let _playerSlot        = -1;      // 0-3 for players, null for spectators
-  let _isSpectator       = false;
+  let socket = null;
+  let _playerSlot = -1; // 0-3 for players, null for spectators
+  let _isSpectator = false;
   // -- Audio bypass state --
   let _audioCtx = null;
   let _audioWorklet = null;
@@ -286,47 +335,47 @@
   let _audioPtr = 0;
   let _audioRate = 0;
   let _audioReady = false;
-  let _peers             = {};      // remoteSid -> PeerState
-  let _knownPlayers      = {};      // socketId -> {slot, playerName}
-  let _gameStarted       = false;
-  let _selfEmuReady      = false;
-  let _p1KeyMap          = null;
-  const _heldKeys          = new Set();
+  let _peers = {}; // remoteSid -> PeerState
+  let _knownPlayers = {}; // socketId -> {slot, playerName}
+  let _gameStarted = false;
+  let _selfEmuReady = false;
+  let _p1KeyMap = null;
+  const _heldKeys = new Set();
 
   // Lockstep state
-  let _lockstepReadyPeers = {};     // remoteSid -> true when peer signals lockstep-ready
-  let _selfLockstepReady  = false;
-  let _guestStateBytes    = null;   // decompressed state bytes to load
-  let _frameNum           = 0;      // current logical frame number
-  let _localInputs        = {};     // frame -> inputMask
-  let _remoteInputs       = {};     // slot -> {frame -> mask} (nested for multi-peer)
-  let _peerInputStarted   = {};     // slot -> true once first input received (survives buffer drain)
-  let _running            = false;  // tick loop active
-  let _lateJoin           = false;  // true when joining a game already in progress
+  let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
+  let _selfLockstepReady = false;
+  let _guestStateBytes = null; // decompressed state bytes to load
+  let _frameNum = 0; // current logical frame number
+  let _localInputs = {}; // frame -> inputMask
+  let _remoteInputs = {}; // slot -> {frame -> mask} (nested for multi-peer)
+  let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
+  let _running = false; // tick loop active
+  let _lateJoin = false; // true when joining a game already in progress
 
   // Manual mode / rAF interception state (native refs managed by APISandbox)
-  let _pendingRunner     = null;    // captured Emscripten MainLoop_runner
-  let _manualMode        = false;   // true once enterManualMode() called
-  let _stallStart        = 0;       // timestamp when current stall began
-  let _resendSent        = false;   // true once resend request sent for current stall
-  let _syncStarted       = false;   // true once initial state sync begins (prevents re-entry)
-  let _tickInterval      = null;    // setInterval handle for tick loop
+  let _pendingRunner = null; // captured Emscripten MainLoop_runner
+  let _manualMode = false; // true once enterManualMode() called
+  let _stallStart = 0; // timestamp when current stall began
+  let _resendSent = false; // true once resend request sent for current stall
+  let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
+  let _tickInterval = null; // setInterval handle for tick loop
 
   // Saved originals of WASM speed-control functions — neutralized during lockstep
-  let _origToggleFF      = null;    // Module._toggle_fastforward
-  let _origToggleSM      = null;    // Module._toggle_slow_motion
+  let _origToggleFF = null; // Module._toggle_fastforward
+  let _origToggleSM = null; // Module._toggle_slow_motion
 
   // State sync — host checks game state hash and pushes only when desynced
-  let _syncEnabled       = false;   // off by default — opt-in via toolbar button
+  let _syncEnabled = false; // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 120;    // check hash every N frames (~2s at 60fps)
-  let _syncBaseInterval  = 120;    // direct RDRAM reads are ~0.1ms (no getState)
+  let _syncCheckInterval = 120; // check hash every N frames (~2s at 60fps)
+  let _syncBaseInterval = 120; // direct RDRAM reads are ~0.1ms (no getState)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
-  let _resyncCount       = 0;
-  let _consecutiveResyncs = 0;     // track consecutive resyncs for adaptive backoff
+  let _resyncCount = 0;
+  let _consecutiveResyncs = 0; // track consecutive resyncs for adaptive backoff
   // Resync cooldown: C-level path is <2ms so we can resync frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
-  const _resyncCooldownMs = () => _hasKnSync ? 2000 : 10000;
+  const _resyncCooldownMs = () => (_hasKnSync ? 2000 : 10000);
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
   const SYNC_LOG_MAX = 5000;
@@ -352,18 +401,12 @@
     return lines.join('\n');
   };
 
-  // _streamSync redirects to _syncLog (re-enables the previously disabled stream)
-  const _streamSync = (msg) => { _syncLog(msg); };
-
   // -- Diagnostic logger functions -------------------------------------------
 
-  const _diagShouldLog = (frameNum, interval) =>
-    frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
+  const _diagShouldLog = (frameNum, interval) => frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
 
   // DIAG-HASH: compute and stream per-region RDRAM hashes for this player
-  const _diagRegionNames = [
-    'cfg', 'ps0', 'ps1', 'ps2', 'ph1a', 'ph1b', 'ph1c', 'misc', 'ph2', 'ph3a', 'ph3b', 'ph3c'
-  ];
+  const _diagRegionNames = ['cfg', 'ps0', 'ps1', 'ps2', 'ph1a', 'ph1b', 'ph1c', 'misc', 'ph2', 'ph3a', 'ph3b', 'ph3c'];
   // Hex lookup table for byte-to-hex conversion
   const _hexLUT = [];
   for (let _hi = 0; _hi < 256; _hi++) _hexLUT[_hi] = (_hi < 16 ? '0' : '') + _hi.toString(16);
@@ -376,7 +419,9 @@
   const _diagGetRdram = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod) return null;
-    if (!_hashRegion) { getHashBytes(); }
+    if (!_hashRegion) {
+      getHashBytes();
+    }
     if (!_hashRegion?.ptr) return null;
     const buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
     if (!buf || buf.byteLength === 0) return null;
@@ -388,9 +433,8 @@
     const rd = _diagGetRdram();
     if (!rd) return;
     const gameRegions = [
-      0xA4000, 0xBA000, 0xBF000, 0xC4000,
-      0x262000, 0x266000, 0x26A000, 0x290000,
-      0x2F6000, 0x32B000, 0x330000, 0x335000
+      0xa4000, 0xba000, 0xbf000, 0xc4000, 0x262000, 0x266000, 0x26a000, 0x290000, 0x2f6000, 0x32b000, 0x330000,
+      0x335000,
     ];
     const SAMPLE = 256;
     const f = frameNum;
@@ -400,17 +444,21 @@
       ((idx) => {
         const gOff = rd.base + gameRegions[idx];
         const regionBytes = rd.live.slice(gOff, gOff + SAMPLE);
-        workerPost({ type: 'hash', data: regionBytes }).then((res) => {
-          regionHashes[idx] = res.hash;
-          pending--;
-          if (pending === 0) {
-            const parts = [];
-            for (let r = 0; r < regionHashes.length; r++) {
-              parts.push(`${_diagRegionNames[r]}=${regionHashes[r]}`);
+        workerPost({ type: 'hash', data: regionBytes })
+          .then((res) => {
+            regionHashes[idx] = res.hash;
+            pending--;
+            if (pending === 0) {
+              const parts = [];
+              for (let r = 0; r < regionHashes.length; r++) {
+                parts.push(`${_diagRegionNames[r]}=${regionHashes[r]}`);
+              }
+              _syncLog(`DIAG-HASH f=${f} ${parts.join(' ')}`);
             }
-            _streamSync(`DIAG-HASH f=${f} ${parts.join(' ')}`);
-          }
-        }).catch(() => { pending--; });
+          })
+          .catch(() => {
+            pending--;
+          });
       })(gi);
     }
   };
@@ -424,14 +472,14 @@
     if (!rd) return;
     // Dump 4 x 32-byte chunks from ps0 and ps1 (128 hex chars per chunk, manageable)
     const dumpRegions = [
-      { name: 'ps0', off: 0xBA000 },
-      { name: 'ps1', off: 0xBF000 }
+      { name: 'ps0', off: 0xba000 },
+      { name: 'ps1', off: 0xbf000 },
     ];
     for (let di = 0; di < dumpRegions.length; di++) {
       const addr = rd.base + dumpRegions[di].off;
       // 4 chunks of 64 bytes = full 256 byte sample
       const hex = _bytesToHex(rd.live, addr, 256);
-      _streamSync(`DIAG-DUMP f=${frameNum} ${dumpRegions[di].name} @0x${dumpRegions[di].off.toString(16)} ${hex}`);
+      _syncLog(`DIAG-DUMP f=${frameNum} ${dumpRegions[di].name} @0x${dumpRegions[di].off.toString(16)} ${hex}`);
     }
   };
 
@@ -444,16 +492,19 @@
     const vals = [];
     for (let p = 0; p < 4; p++) {
       const addr = _diagPlayerAddrs[p];
-      if (addr === null) { vals.push('?'); continue; }
+      if (addr === null) {
+        vals.push('?');
+        continue;
+      }
       // Read 4 bytes (32-bit LE) at the player's button 0 address
       if (addr + 3 < mem.length) {
-        const v = mem[addr] | (mem[addr+1] << 8) | (mem[addr+2] << 16) | (mem[addr+3] << 24);
+        const v = mem[addr] | (mem[addr + 1] << 8) | (mem[addr + 2] << 16) | (mem[addr + 3] << 24);
         vals.push(v);
       } else {
         vals.push('OOB');
       }
     }
-    _streamSync(`DIAG-INPUT f=${frameNum} apply=${applyFrame} p0=${vals[0]} p1=${vals[1]} p2=${vals[2]} p3=${vals[3]}`);
+    _syncLog(`DIAG-INPUT f=${frameNum} apply=${applyFrame} p0=${vals[0]} p1=${vals[1]} p2=${vals[2]} p3=${vals[3]}`);
   };
 
   // DIAG-TIME: timing values after frame step
@@ -462,16 +513,18 @@
     const mod = window.EJS_emulator?.gameManager?.Module;
     const cycleTime = mod?._kn_get_cycle_time_ms ? mod._kn_get_cycle_time_ms() : -1;
     const frameArg = window._kn_frameTime || -1;
-    const wallDelta = _diagLastTickTime > 0 ? (wallBefore - _diagLastTickTime) : 0;
+    const wallDelta = _diagLastTickTime > 0 ? wallBefore - _diagLastTickTime : 0;
     const stepDuration = wallAfter - wallBefore;
-    _streamSync(`DIAG-TIME f=${frameNum} cycle=${typeof cycleTime === 'number' ? cycleTime.toFixed(1) : cycleTime} frameArg=${typeof frameArg === 'number' ? frameArg.toFixed(1) : frameArg} wallDelta=${wallDelta.toFixed(1)} stepMs=${stepDuration.toFixed(1)}`);
+    _syncLog(
+      `DIAG-TIME f=${frameNum} cycle=${typeof cycleTime === 'number' ? cycleTime.toFixed(1) : cycleTime} frameArg=${typeof frameArg === 'number' ? frameArg.toFixed(1) : frameArg} wallDelta=${wallDelta.toFixed(1)} stepMs=${stepDuration.toFixed(1)}`,
+    );
   };
 
   // DIAG-EVENT: flush buffered async events
   const _diagFlushEvents = (frameNum) => {
     if (_diagEventLog.length === 0) return;
     for (const ev of _diagEventLog) {
-      _streamSync(`DIAG-EVENT f=${frameNum} type=${ev.type} detail=${ev.detail} t=${ev.t.toFixed(1)}`);
+      _syncLog(`DIAG-EVENT f=${frameNum} type=${ev.type} detail=${ev.detail} t=${ev.t.toFixed(1)}`);
     }
     _diagEventLog.length = 0;
   };
@@ -486,7 +539,7 @@
       _diagEventLog.push({
         t: performance.now(),
         type: 'visibility',
-        detail: document.visibilityState
+        detail: document.visibilityState,
       });
     });
 
@@ -502,13 +555,17 @@
     const canvas = document.querySelector('#game canvas, canvas');
     if (canvas) {
       for (const evName of ['touchstart', 'touchend', 'touchmove']) {
-        canvas.addEventListener(evName, (e) => {
-          _diagEventLog.push({
-            t: performance.now(),
-            type: 'touch',
-            detail: `${evName}:${e.touches.length}`
-          });
-        }, { passive: true });
+        canvas.addEventListener(
+          evName,
+          (e) => {
+            _diagEventLog.push({
+              t: performance.now(),
+              type: 'touch',
+              detail: `${evName}:${e.touches.length}`,
+            });
+          },
+          { passive: true },
+        );
       }
     }
 
@@ -516,14 +573,19 @@
     const observer = new MutationObserver((mutations) => {
       for (const mut of mutations) {
         for (const node of mut.addedNodes) {
-          if (node.nodeType === 1 && (node.classList.contains('ejs--settings') ||
-              (node.querySelector && node.querySelector('.ejs--settings')))) {
+          if (
+            node.nodeType === 1 &&
+            (node.classList.contains('ejs--settings') || (node.querySelector && node.querySelector('.ejs--settings')))
+          ) {
             _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'opened' });
           }
         }
         for (const rnode of mut.removedNodes) {
-          if (rnode.nodeType === 1 && (rnode.classList.contains('ejs--settings') ||
-              (rnode.querySelector && rnode.querySelector('.ejs--settings')))) {
+          if (
+            rnode.nodeType === 1 &&
+            (rnode.classList.contains('ejs--settings') ||
+              (rnode.querySelector && rnode.querySelector('.ejs--settings')))
+          ) {
             _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'closed' });
           }
         }
@@ -553,24 +615,24 @@
     _syncLog('DIAG hooks installed');
   };
 
-  let _syncChunks        = [];     // incoming chunks from host DC
-  let _syncExpected      = 0;      // expected chunk count
-  let _syncFrame         = 0;      // frame number of incoming sync
-  let _syncIsFull        = true;   // true=full state, false=XOR delta
-  let _lastResyncTime    = 0;      // timestamp of last resync request (10s cooldown)
-  let _pendingSyncCheck  = null;   // deferred sync check {frame, hash, peerSid}
-  let _pendingResyncState = null;  // {bytes, frame} buffered for async apply at frame boundary
-  let _hashRegion         = null;  // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
+  let _syncChunks = []; // incoming chunks from host DC
+  let _syncExpected = 0; // expected chunk count
+  let _syncFrame = 0; // frame number of incoming sync
+  let _syncIsFull = true; // true=full state, false=XOR delta
+  let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
+  let _pendingSyncCheck = null; // deferred sync check {frame, hash, peerSid}
+  let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
+  let _hashRegion = null; // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
   let _hasKnSync = false;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
-  let _awaitingResync = false;  // guest: pause emulator while waiting for resync data
-  let _awaitingResyncAt = 0;    // timestamp when pause started (safety timeout)
+  let _awaitingResync = false; // guest: pause emulator while waiting for resync data
+  let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
 
   // Drift diagnostics
   let _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
-  const _driftSummaryAt = [1, 5, 10, 20, 50, 100, 200, 500];  // exponential log intervals
+  const _driftSummaryAt = [1, 5, 10, 20, 50, 100, 200, 500]; // exponential log intervals
 
   const _recordDrift = (regionHashes) => {
     const now = performance.now();
@@ -588,12 +650,14 @@
     // Log summary at exponential intervals
     if (_driftSummaryAt.includes(_driftStats.count) || (_driftStats.count > 0 && _driftStats.count % 100 === 0)) {
       const elapsed = (now - _driftStats.firstAt) / 1000;
-      const avgInterval = _driftStats.count > 1 ? Math.round(elapsed * 1000 / (_driftStats.count - 1)) : 0;
+      const avgInterval = _driftStats.count > 1 ? Math.round((elapsed * 1000) / (_driftStats.count - 1)) : 0;
       const regionStr = Object.entries(_driftStats.regions)
         .sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${k}:${v}`)
         .join(' ');
-      _syncLog(`DRIFT-SUMMARY count=${_driftStats.count} over=${elapsed.toFixed(1)}s avgInterval=${avgInterval}ms regions=[${regionStr}]`);
+      _syncLog(
+        `DRIFT-SUMMARY count=${_driftStats.count} over=${elapsed.toFixed(1)}s avgInterval=${avgInterval}ms regions=[${regionStr}]`,
+      );
     }
   };
 
@@ -602,12 +666,12 @@
   };
 
   // Frame pacing (GGPO-style frame advantage cap)
-  const FRAME_ADV_ALPHA_UP = 0.1;    // EMA when advantage is rising (slow to trigger)
-  const FRAME_ADV_ALPHA_DOWN = 0.2;  // EMA when advantage is falling (fast to release)
-  const FRAME_PACING_WARMUP = 120;   // skip pacing during first 120 frames (~2s boot)
-  let _frameAdvantage = 0;            // smoothed frame advantage (EMA)
-  let _frameAdvRaw = 0;               // instantaneous frame advantage (for logging)
-  let _framePacingActive = false;     // true when cap is throttling
+  const FRAME_ADV_ALPHA_UP = 0.1; // EMA when advantage is rising (slow to trigger)
+  const FRAME_ADV_ALPHA_DOWN = 0.2; // EMA when advantage is falling (fast to release)
+  const FRAME_PACING_WARMUP = 120; // skip pacing during first 120 frames (~2s boot)
+  let _frameAdvantage = 0; // smoothed frame advantage (EMA)
+  let _frameAdvRaw = 0; // instantaneous frame advantage (for logging)
+  let _framePacingActive = false; // true when cap is throttling
   // Pacing summary stats (reset every 300 frames)
   let _pacingCapsCount = 0;
   let _pacingCapsFrames = 0;
@@ -617,25 +681,24 @@
 
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
-  let _visChangeHandler = null;     // stored for removal in stopSync()
-  let _syncWorkerUrl = null;        // Blob URL for sync worker (revoke on stop)
+  let _visChangeHandler = null; // stored for removal in stopSync()
+  let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
 
   // Spectator streaming state
-  let _hostStream        = null;    // MediaStream for spectator canvas streaming
-  let _guestVideo        = null;    // <video> element (spectator only)
+  let _hostStream = null; // MediaStream for spectator canvas streaming
+  let _guestVideo = null; // <video> element (spectator only)
 
   // Expose for Playwright
-  window._playerSlot  = _playerSlot;
+  window._playerSlot = _playerSlot;
   window._isSpectator = _isSpectator;
-  KNState.peers       = _peers;
-  KNState.frameNum    = 0;
+  KNState.peers = _peers;
+  KNState.frameNum = 0;
 
   async function initAudioPlayback() {
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod) return;
 
-    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples ||
-        !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
+    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples || !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
       _syncLog('audio capture exports not found — audio disabled');
       return;
     }
@@ -736,7 +799,9 @@
       // NOW stop the keep-alive oscillator — a real audio node is connected,
       // so the iOS audio session stays alive across the handoff.
       if (window._kn_keepAliveOsc) {
-        try { window._kn_keepAliveOsc.stop(); } catch (_) {}
+        try {
+          window._kn_keepAliveOsc.stop();
+        } catch (_) {}
         window._kn_keepAliveOsc = null;
       }
 
@@ -753,14 +818,17 @@
             document.removeEventListener('touchstart', resumeAudio, true);
             return;
           }
-          _audioCtx.resume().then(() => {
-            _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
-            document.removeEventListener('click', resumeAudio, true);
-            document.removeEventListener('keydown', resumeAudio, true);
-            document.removeEventListener('touchstart', resumeAudio, true);
-          }).catch((e) => {
-            _syncLog(`audio resume failed: ${e.message}`);
-          });
+          _audioCtx
+            .resume()
+            .then(() => {
+              _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
+              document.removeEventListener('click', resumeAudio, true);
+              document.removeEventListener('keydown', resumeAudio, true);
+              document.removeEventListener('touchstart', resumeAudio, true);
+            })
+            .catch((e) => {
+              _syncLog(`audio resume failed: ${e.message}`);
+            });
         };
         document.addEventListener('click', resumeAudio, true);
         document.addEventListener('keydown', resumeAudio, true);
@@ -787,7 +855,9 @@
       _audioEmptyCount++;
       // Log once after 300 consecutive empty frames (~5s) to detect silent audio
       if (_audioEmptyCount === 300) {
-        _syncLog(`audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state})`);
+        _syncLog(
+          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state})`,
+        );
       }
       return;
     }
@@ -801,7 +871,9 @@
       let rms = 0;
       for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
       rms = Math.sqrt(rms / pcmCheck.length);
-      _syncLog(`audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`);
+      _syncLog(
+        `audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`,
+      );
     }
 
     const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
@@ -834,9 +906,9 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
-    if (msg.type === 'save-state')          handleSaveStateMsg(msg);
-    if (msg.type === 'late-join-state')     handleLateJoinState(msg);
-    if (msg.type === 'request-late-join')   handleLateJoinRequest(msg);
+    if (msg.type === 'save-state') handleSaveStateMsg(msg);
+    if (msg.type === 'late-join-state') handleLateJoinState(msg);
+    if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
   };
 
   const handleLateJoinRequest = (msg) => {
@@ -885,11 +957,11 @@
 
       let shouldInitiate;
       if (_lateJoin && !_isSpectator) {
-        shouldInitiate = true;   // late-joiner always initiates
+        shouldInitiate = true; // late-joiner always initiates
       } else if (_running) {
-        shouldInitiate = false;  // running host waits for late-joiner's offer
+        shouldInitiate = false; // running host waits for late-joiner's offer
       } else if (_isSpectator) {
-        shouldInitiate = false;  // spectators never initiate
+        shouldInitiate = false; // spectators never initiate
       } else {
         shouldInitiate = _playerSlot < p.slot;
       }
@@ -953,7 +1025,10 @@
       }
       if (s === 'failed') {
         // Failed is terminal — disconnect immediately
-        if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
+        if (peer._disconnectTimer) {
+          clearTimeout(peer._disconnectTimer);
+          peer._disconnectTimer = null;
+        }
         if (_peers[remoteSid] !== peer) return;
         setStatus('Player dropped — connection failed');
         handlePeerDisconnect(remoteSid);
@@ -1051,7 +1126,9 @@
             existingPeer.pc.ondatachannel = null;
             existingPeer.pc.onicecandidate = null;
             existingPeer.pc.ontrack = null;
-            try { existingPeer.pc.close(); } catch (_) {}
+            try {
+              existingPeer.pc.close();
+            } catch (_) {}
           }
 
           // Create new PC on existing peer object (preserve slot, input state)
@@ -1086,14 +1163,14 @@
         const answer = await peer.pc.createAnswer();
         await peer.pc.setLocalDescription(answer);
         socket.emit('webrtc-signal', { target: senderSid, answer });
-
       } else if (data.answer) {
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await drainCandidates(peer);
-
       } else if (data.candidate) {
         if (peer.remoteDescSet) {
-          try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
+          try {
+            await peer.pc.addIceCandidate(data.candidate);
+          } catch (_) {}
         } else {
           peer.pendingCandidates.push(data.candidate);
         }
@@ -1107,7 +1184,9 @@
   async function drainCandidates(peer) {
     peer.remoteDescSet = true;
     for (const candidate of peer.pendingCandidates) {
-      try { await peer.pc.addIceCandidate(candidate); } catch (_) {}
+      try {
+        await peer.pc.addIceCandidate(candidate);
+      } catch (_) {}
     }
     peer.pendingCandidates = [];
   }
@@ -1139,7 +1218,10 @@
 
       // If this is a reconnect, clear reconnecting state and resync
       if (peer.reconnecting) {
-        if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
+        if (peer._reconnectTimeout) {
+          clearTimeout(peer._reconnectTimeout);
+          peer._reconnectTimeout = null;
+        }
         peer.reconnecting = false;
         // Only guests should null their delta base on reconnect.
         // Host needs its delta base to survive peer lifecycle events.
@@ -1154,7 +1236,9 @@
         _config?.onPeerReconnected?.(remoteSid);
         // Request resync
         if (_playerSlot !== 0) {
-          try { ch.send('sync-request'); } catch (_) {}
+          try {
+            ch.send('sync-request');
+          } catch (_) {}
         } else {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
@@ -1183,8 +1267,13 @@
 
       // String messages
       if (typeof e.data === 'string') {
-        if (e.data === 'ready')     { peer.ready = true; }
-        if (e.data === 'emu-ready') { peer.emuReady = true; checkAllEmuReady(); }
+        if (e.data === 'ready') {
+          peer.ready = true;
+        }
+        if (e.data === 'emu-ready') {
+          peer.emuReady = true;
+          checkAllEmuReady();
+        }
         if (e.data === 'leaving') {
           peer._intentionalLeave = true;
           return;
@@ -1193,7 +1282,9 @@
           const resendFrame = parseInt(e.data.split(':')[1], 10);
           const localMask = _localInputs[resendFrame];
           if (localMask !== undefined) {
-            try { peer.dc.send(new Int32Array([resendFrame, localMask]).buffer); } catch (_) {}
+            try {
+              peer.dc.send(new Int32Array([resendFrame, localMask]).buffer);
+            } catch (_) {}
           }
           return;
         }
@@ -1215,7 +1306,9 @@
           const hostCycleMs = parts[3] !== undefined ? parseFloat(parts[3]) : null;
           const frameDiff = _frameNum - syncFrame;
           if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
-            _syncLog(`sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`);
+            _syncLog(
+              `sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`,
+            );
             if (_hasKnSync) {
               // C-level hash — synchronous comparison
               const mod = window.EJS_emulator.gameManager.Module;
@@ -1225,7 +1318,9 @@
                 _recordDrift(null);
                 if (hostCycleMs !== null && mod._kn_get_cycle_time_ms) {
                   const guestCycleMs = mod._kn_get_cycle_time_ms();
-                  _syncLog(`CYCLE-DRIFT host=${hostCycleMs.toFixed(1)}ms guest=${guestCycleMs.toFixed(1)}ms diff=${(guestCycleMs - hostCycleMs).toFixed(1)}ms`);
+                  _syncLog(
+                    `CYCLE-DRIFT host=${hostCycleMs.toFixed(1)}ms guest=${guestCycleMs.toFixed(1)}ms diff=${(guestCycleMs - hostCycleMs).toFixed(1)}ms`,
+                  );
                 }
                 if (mod._kn_sync_hash_regions) {
                   const hashBuf = mod._malloc(48);
@@ -1242,7 +1337,11 @@
                 if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
                   _syncLog(`sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms)`);
-                  try { peer.dc.send('sync-request'); } catch (e) { _syncLog(`sync-request send failed: ${e}`); }
+                  try {
+                    peer.dc.send('sync-request');
+                  } catch (e) {
+                    _syncLog(`sync-request send failed: ${e}`);
+                  }
                 } else {
                   _syncLog(`DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
                 }
@@ -1258,31 +1357,36 @@
                 const guestBytes = getHashBytes();
                 if (!guestBytes) return;
                 const peerRef = peer;
-                workerPost({ type: 'hash', data: guestBytes }).then((res) => {
-                  if (res.hash !== hostHash) {
-                    _syncLog(`DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`);
-                    _recordDrift(null);
-                    const now2 = performance.now();
-                    if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
-                      _lastResyncTime = now2;
-                      try { peerRef.dc.send('sync-request'); } catch (_) {}
-                      _syncLog('sync-request sent');
+                workerPost({ type: 'hash', data: guestBytes })
+                  .then((res) => {
+                    if (res.hash !== hostHash) {
+                      _syncLog(`DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`);
+                      _recordDrift(null);
+                      const now2 = performance.now();
+                      if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
+                        _lastResyncTime = now2;
+                        try {
+                          peerRef.dc.send('sync-request');
+                        } catch (_) {}
+                        _syncLog('sync-request sent');
+                      }
+                    } else {
+                      _syncLog(`sync OK frame=${syncFrame} hash=${res.hash}`);
+                      _consecutiveResyncs = 0;
+                      _syncCheckInterval = _syncBaseInterval;
+                      _resetDrift();
                     }
-                  } else {
-                    _syncLog(`sync OK frame=${syncFrame} hash=${res.hash}`);
-                    _consecutiveResyncs = 0;
-                    _syncCheckInterval = _syncBaseInterval;
-                    _resetDrift();
-                  }
-                }).catch(() => {});
+                  })
+                  .catch(() => {});
               } catch (_) {}
             }
           } else if (_frameNum < syncFrame) {
-            _syncLog(`sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`);
+            _syncLog(
+              `sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`,
+            );
             _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
           } else {
             _syncLog(`sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
-
           }
         }
         // State sync: host received request, or chunked binary transfer header
@@ -1301,20 +1405,17 @@
         if (e.data.charAt(0) === '{') {
           try {
             const msg = JSON.parse(e.data);
-            if (msg.type === 'save-state')      handleSaveStateMsg(msg);
-            else if (msg.type === 'late-join-state')  handleLateJoinState(msg);
+            if (msg.type === 'save-state') handleSaveStateMsg(msg);
+            else if (msg.type === 'late-join-state') handleLateJoinState(msg);
             else if (msg.type === 'delay-ping') {
               peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
-            }
-            else if (msg.type === 'delay-pong') {
+            } else if (msg.type === 'delay-pong') {
               handleDelayPong(msg.ts, peer);
-            }
-            else if (msg.type === 'lockstep-ready') {
+            } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
-            }
-            else if (_onUnhandledMessage) {
+            } else if (_onUnhandledMessage) {
               _onUnhandledMessage(remoteSid, msg);
             }
           } catch (_) {}
@@ -1333,7 +1434,7 @@
       }
       // Binary: Int32Array [frame, inputMask] -- 8 bytes per input
       if (e.data instanceof ArrayBuffer && e.data.byteLength === 8) {
-        if (peer.slot === null || peer.slot === undefined) return;  // spectators don't send input
+        if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
         const arr = new Int32Array(e.data);
         const recvFrame = arr[0];
         const recvMask = arr[1];
@@ -1341,7 +1442,9 @@
         // Log if we receive input for a frame we already applied (too late)
         const currentApply = _frameNum - DELAY_FRAMES;
         if (_running && recvFrame < currentApply) {
-          _syncLog(`INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`);
+          _syncLog(
+            `INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`,
+          );
         }
         _remoteInputs[peer.slot][recvFrame] = recvMask;
         _lastKnownInput[peer.slot] = recvMask;
@@ -1363,7 +1466,10 @@
   const handlePeerDisconnect = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
-    if (peer._disconnectTimer) { clearTimeout(peer._disconnectTimer); peer._disconnectTimer = null; }
+    if (peer._disconnectTimer) {
+      clearTimeout(peer._disconnectTimer);
+      peer._disconnectTimer = null;
+    }
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_running && !peer._intentionalLeave) {
@@ -1371,7 +1477,9 @@
 
       // Zero their input but keep peer in _peers
       if (peer.slot !== null && peer.slot !== undefined) {
-        try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+        try {
+          writeInputToMemory(peer.slot, 0);
+        } catch (_) {}
       }
       peer.reconnecting = true;
       peer.reconnectStart = Date.now();
@@ -1403,10 +1511,15 @@
   const hardDisconnectPeer = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
-    if (peer._reconnectTimeout) { clearTimeout(peer._reconnectTimeout); peer._reconnectTimeout = null; }
+    if (peer._reconnectTimeout) {
+      clearTimeout(peer._reconnectTimeout);
+      peer._reconnectTimeout = null;
+    }
 
     if (peer.slot !== null && peer.slot !== undefined) {
-      try { writeInputToMemory(peer.slot, 0); } catch (_) {}
+      try {
+        writeInputToMemory(peer.slot, 0);
+      } catch (_) {}
       delete _remoteInputs[peer.slot];
       delete _peerInputStarted[peer.slot];
     }
@@ -1442,7 +1555,9 @@
       peer.pc.ondatachannel = null;
       peer.pc.onicecandidate = null;
       peer.pc.ontrack = null;
-      try { peer.pc.close(); } catch (_) {}
+      try {
+        peer.pc.close();
+      } catch (_) {}
     }
 
     // Create new PeerConnection
@@ -1479,28 +1594,27 @@
     peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
     setupDataChannel(remoteSid, peer.dc);
 
-    peer.pc.createOffer().then((offer) =>
-      peer.pc.setLocalDescription(offer)
-    ).then(() => {
-      socket.emit('webrtc-signal', {
-        target: remoteSid,
-        offer: peer.pc.localDescription,
-        reconnect: true,
+    peer.pc
+      .createOffer()
+      .then((offer) => peer.pc.setLocalDescription(offer))
+      .then(() => {
+        socket.emit('webrtc-signal', {
+          target: remoteSid,
+          offer: peer.pc.localDescription,
+          reconnect: true,
+        });
+      })
+      .catch((err) => {
+        _syncLog(`reconnect offer failed: ${err}`);
+        hardDisconnectPeer(remoteSid);
       });
-    }).catch((err) => {
-      _syncLog(`reconnect offer failed: ${err}`);
-      hardDisconnectPeer(remoteSid);
-    });
   };
 
   // -- Helper: get active player peers ---------------------------------------
 
   // All connected player peers (for sending input to)
   const getActivePeers = () =>
-    Object.values(_peers).filter((p) =>
-      p.slot !== null && p.slot !== undefined
-        && p.dc && p.dc.readyState === 'open'
-    );
+    Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined && p.dc && p.dc.readyState === 'open');
 
   // Wait for all active peers that have started sending input.
   // Peers with open data channels who haven't sent any input yet (e.g.
@@ -1510,15 +1624,12 @@
   // Uses _peerInputStarted (persistent flag) instead of checking buffer
   // length — prevents peers from dropping out when their buffer is
   // momentarily empty between frames (causes 3+ player desync).
-  const getInputPeers = () =>
-    getActivePeers().filter((p) =>
-      _peerInputStarted[p.slot] && !p.reconnecting
-    );
+  const getInputPeers = () => getActivePeers().filter((p) => _peerInputStarted[p.slot] && !p.reconnecting);
 
   // -- Game start sequence ---------------------------------------------------
 
   // Minimum frames the emulator must run before we consider it ready.
-  const MIN_BOOT_FRAMES = 120;  // ~2 seconds at 60fps
+  const MIN_BOOT_FRAMES = 120; // ~2 seconds at 60fps
 
   const startGameSequence = () => {
     if (_gameStarted) return;
@@ -1678,8 +1789,7 @@
       }
 
       const mod = gm.Module;
-      const frames = mod?._get_current_frame_count
-        ? mod._get_current_frame_count() : 0;
+      const frames = mod?._get_current_frame_count ? mod._get_current_frame_count() : 0;
 
       if (frames < MIN_BOOT_FRAMES) {
         if (_bootPollCount++ % 5 === 0) {
@@ -1739,7 +1849,7 @@
       _syncLog(`emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
 
       // Set up key tracking now that ejs.controls is available
-      _p1KeyMap = null;  // force re-read from EJS controls
+      _p1KeyMap = null; // force re-read from EJS controls
       setupKeyTracking();
 
       _selfEmuReady = true;
@@ -1780,13 +1890,15 @@
           type: 'request-late-join',
           requesterSid: socket.id,
         });
-        return;  // handleLateJoinState() will resume from here
+        return; // handleLateJoinState() will resume from here
       }
 
       // Notify all connected peers
       for (const p of Object.values(_peers)) {
         if (p.dc && p.dc.readyState === 'open') {
-          try { p.dc.send('emu-ready'); } catch (_) {}
+          try {
+            p.dc.send('emu-ready');
+          } catch (_) {}
         }
       }
 
@@ -1801,9 +1913,7 @@
     if (_running) return;
 
     // Wait for ALL player peers to be emu-ready (not just 1)
-    const playerPeers = Object.values(_peers).filter((p) =>
-      p.slot !== null && p.slot !== undefined
-    );
+    const playerPeers = Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined);
     if (playerPeers.length === 0) return;
 
     const readyPeers = playerPeers.filter((p) => p.emuReady);
@@ -1819,7 +1929,7 @@
       return;
     }
 
-    if (_syncStarted) return;  // guard against re-entrant calls
+    if (_syncStarted) return; // guard against re-entrant calls
     _syncStarted = true;
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
@@ -1936,10 +2046,14 @@
       // Host: also send cached bytes to guests via Socket.IO as fallback.
       // Guest cache fetch may hang/timeout on slow mobile connections.
       if (_playerSlot === 0) {
-        compressAndEncode(new Uint8Array(bytes)).then((encoded) => {
-          _syncLog(`sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`);
-          socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
-        }).catch(() => {});
+        compressAndEncode(new Uint8Array(bytes))
+          .then((encoded) => {
+            _syncLog(
+              `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
+            );
+            socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
+          })
+          .catch(() => {});
       }
 
       _selfLockstepReady = true;
@@ -1947,7 +2061,7 @@
       checkAllLockstepReady();
     } catch (e) {
       // No cached state or fetch timed out — fall back to host capture / guest wait
-      const reason = e?.name === 'AbortError' ? 'fetch timed out' : (e?.message || 'unknown');
+      const reason = e?.name === 'AbortError' ? 'fetch timed out' : e?.message || 'unknown';
       _syncLog(`no cached state — ${reason}, using live capture`);
       if (_playerSlot === 0) {
         sendInitialState();
@@ -1964,7 +2078,9 @@
       // Copy before compressAndEncode — worker transfer detaches the buffer
       const cacheBytes = new Uint8Array(bytes);
       const encoded = await compressAndEncode(bytes);
-      _syncLog(`sending initial state via Socket.IO (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip)`);
+      _syncLog(
+        `sending initial state via Socket.IO (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
+      );
 
       // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
       // data channels (SCTP limit with maxRetransmits).
@@ -1981,7 +2097,7 @@
         });
         _syncLog('state cached — host fetching from cache');
         fetchCachedState(romHash);
-        return;  // fetchCachedState handles _selfLockstepReady
+        return; // fetchCachedState handles _selfLockstepReady
       }
 
       // Fallback: no ROM hash, use direct bytes
@@ -2031,7 +2147,9 @@
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       const encoded = await compressAndEncode(bytes);
-      _syncLog(`sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`);
+      _syncLog(
+        `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
+      );
 
       // Send via Socket.IO since save states are too large for DC
       socket.emit('data-message', {
@@ -2047,7 +2165,7 @@
 
   const handleLateJoinState = async (msg) => {
     if (_isSpectator) return;
-    if (_running) return;  // already running, ignore duplicate
+    if (_running) return; // already running, ignore duplicate
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     setStatus('Loading late-join state...');
@@ -2086,7 +2204,9 @@
         }
       }
 
-      _syncLog(`late-join state loaded at frame ${msg.frame} synced to frame ${_frameNum} (lastRemote: ${_lastRemoteFrame})`);
+      _syncLog(
+        `late-join state loaded at frame ${msg.frame} synced to frame ${_frameNum} (lastRemote: ${_lastRemoteFrame})`,
+      );
       startLockstep();
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
@@ -2099,7 +2219,7 @@
 
   const startSpectatorStream = () => {
     if (_playerSlot !== 0) return;
-    if (_hostStream) return;  // already started
+    if (_hostStream) return; // already started
 
     const canvas = document.querySelector('#game canvas');
     if (!canvas) {
@@ -2114,7 +2234,7 @@
     captureCanvas.height = 480;
     const ctx = captureCanvas.getContext('2d');
 
-    _hostStream = captureCanvas.captureStream(0);  // manual frame control
+    _hostStream = captureCanvas.captureStream(0); // manual frame control
 
     // Add audio track from bypass playback (if available)
     if (_audioDestNode?.stream) {
@@ -2130,7 +2250,7 @@
     // Blit loop: copy emulator canvas to capture canvas every frame
     // Use native rAF (lockstep overrides the global)
     const blitFrame = () => {
-      if (!_running) return;  // stopped
+      if (!_running) return; // stopped
       APISandbox.nativeRAF(blitFrame);
       ctx.drawImage(canvas, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
@@ -2184,7 +2304,7 @@
       _guestVideo.id = 'guest-video';
       _guestVideo.autoplay = true;
       _guestVideo.playsInline = true;
-      _guestVideo.muted = true;  // start muted so autoplay works without gesture
+      _guestVideo.muted = true; // start muted so autoplay works without gesture
       _guestVideo.disableRemotePlayback = true;
       _guestVideo.setAttribute('playsinline', '');
 
@@ -2197,9 +2317,13 @@
       }
 
       // Unmute after playback starts (user can also click to unmute)
-      _guestVideo.addEventListener('playing', () => {
-        _guestVideo.muted = false;
-      }, { once: true });
+      _guestVideo.addEventListener(
+        'playing',
+        () => {
+          _guestVideo.muted = false;
+        },
+        { once: true },
+      );
     }
     _guestVideo.srcObject = event.streams[0];
 
@@ -2220,38 +2344,14 @@
   // -- Direct memory input ---------------------------------------------------
 
   const writeInputToMemory = (player, inputMask) => {
-    const mod = window.EJS_emulator.gameManager.Module;
-    if (!mod?._simulate_input) return;
-
-    // Digital buttons (0-15): use _simulate_input for correct address calc
-    // (BUTTON_STRIDE assumption only validated for button 0 — higher indices
-    // may have different offsets in the WASM core's input_state array)
-    for (let btn = 0; btn < 16; btn++) {
-      mod._simulate_input(player, btn, (inputMask >> btn) & 1);
-    }
-
-    // Analog axes (16-23): bit pairs → ±32767 axis values
-    // 16-19: left stick (N64 analog), 20-23: right stick (N64 C-buttons)
-    // When both X and Y are active (diagonal), scale each axis by 1/√2 so
-    // the combined magnitude matches cardinal (prevents diagonal speed boost).
-    const lxActive = ((inputMask >> 16) & 1) | ((inputMask >> 17) & 1);
-    const lyActive = ((inputMask >> 18) & 1) | ((inputMask >> 19) & 1);
-    const diagScale = (lxActive && lyActive) ? 23170 : 32767;  // 32767/√2 ≈ 23170
-    for (let base = 16; base < 24; base += 2) {
-      const posPressed = (inputMask >> base) & 1;
-      const negPressed = (inputMask >> (base + 1)) & 1;
-      const mag = (base < 20) ? diagScale : 32767;  // normalize left stick only
-      const axisVal = (posPressed - negPressed) * mag;
-      mod._simulate_input(player, base, axisVal);
-      mod._simulate_input(player, base + 1, 0);
-    }
+    KNShared.applyInputToWasm(player, inputMask);
   };
 
   // -- Frame stepping (rAF interception) -------------------------------------
 
   const enterManualMode = () => {
     if (_manualMode) return;
-    if (_isSpectator) return;  // spectators never enter manual mode
+    if (_isSpectator) return; // spectators never enter manual mode
 
     const mod = window.EJS_emulator.gameManager.Module;
 
@@ -2271,7 +2371,7 @@
     _syncLog('entered manual mode');
   };
 
-  let _hasForkedCore = false;  // true if Module exports kn_set_deterministic
+  let _hasForkedCore = false; // true if Module exports kn_set_deterministic
 
   const stepOneFrame = () => {
     if (!_pendingRunner) return false;
@@ -2320,14 +2420,14 @@
   //   6. Increment frame counter
 
   // FPS + debug tracking
-  let _fpsLastTime     = 0;
-  let _fpsFrameCount   = 0;
-  let _fpsCurrent      = 0;
-  let _remoteReceived  = 0;
-  let _remoteMissed    = 0;
-  let _remoteApplied   = 0;
+  let _fpsLastTime = 0;
+  let _fpsFrameCount = 0;
+  let _fpsCurrent = 0;
+  let _remoteReceived = 0;
+  let _remoteMissed = 0;
+  let _remoteApplied = 0;
   let _lastRemoteFrame = -1;
-  let _lastRemoteFramePerSlot = {};  // slot -> highest frame received from that peer
+  let _lastRemoteFramePerSlot = {}; // slot -> highest frame received from that peer
 
   const startLockstep = () => {
     if (_running) return;
@@ -2445,10 +2545,17 @@
 
     // DIAG: one-time startup banner for log self-description
     const ua = navigator.userAgent;
-    const engine = /Firefox/.test(ua) ? 'SpiderMonkey' : /Chrome/.test(ua) ? 'V8' :
-                 /Safari/.test(ua) ? 'JSC' : 'unknown';
+    const engine = /Firefox/.test(ua)
+      ? 'SpiderMonkey'
+      : /Chrome/.test(ua)
+        ? 'V8'
+        : /Safari/.test(ua)
+          ? 'JSC'
+          : 'unknown';
     const isMobile = /Mobile|Android|iPhone|iPad/.test(ua);
-    _streamSync(`DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} ua=${ua.substring(0, 120)}`);
+    _syncLog(
+      `DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} ua=${ua.substring(0, 120)}`,
+    );
 
     const activePeers = getActivePeers();
     const peerSlots = activePeers.map((p) => p.slot);
@@ -2460,8 +2567,7 @@
     // C-level sync: detect patched core with kn_sync exports.
     // Only allocate the WASM buffer when sync is enabled — the 8MB malloc
     // can trigger WASM memory growth which detaches HEAPU8.buffer.
-    var knMod = window.EJS_emulator && window.EJS_emulator.gameManager &&
-                window.EJS_emulator.gameManager.Module;
+    const knMod = window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
     if (_hasKnSync && _syncEnabled) {
       _syncBufSize = 8 * 1024 * 1024 + 16384;
@@ -2504,7 +2610,9 @@
         // Notify peers we returned (toast only, no gameplay effect)
         const activePeers2 = getActivePeers();
         for (const p of activePeers2) {
-          try { p.dc.send('peer-resumed'); } catch (_) {}
+          try {
+            p.dc.send('peer-resumed');
+          } catch (_) {}
         }
 
         // Fast-forward _frameNum to catch up with peers. Background throttling
@@ -2528,7 +2636,9 @@
         } else {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
-            try { hostPeer.dc.send('sync-request'); } catch (_) {}
+            try {
+              hostPeer.dc.send('sync-request');
+            } catch (_) {}
           }
         }
       }
@@ -2641,7 +2751,9 @@
             if (!_framePacingActive) {
               _framePacingActive = true;
               _pacingCapsCount++;
-              _syncLog(`FRAME-CAP start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`);
+              _syncLog(
+                `FRAME-CAP start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
+              );
             }
             return;
           }
@@ -2670,7 +2782,11 @@
     const buf = new Int32Array([_frameNum, mask]).buffer;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
-      try { activePeers[i].dc.send(buf); } catch (_) { _sendFails++; }
+      try {
+        activePeers[i].dc.send(buf);
+      } catch (_) {
+        _sendFails++;
+      }
     }
 
     // Check if all INPUT peers (peers who have sent at least 1 input)
@@ -2699,7 +2815,9 @@
           for (const s of Object.keys(_remoteInputs)) {
             rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
           }
-          _syncLog(`INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`);
+          _syncLog(
+            `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`,
+          );
         }
         const stallDuration = now - _stallStart;
         if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
@@ -2714,7 +2832,9 @@
               repeatInfo.push(`s${s}=0`);
             }
           }
-          _syncLog(`INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`);
+          _syncLog(
+            `INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
+          );
           _stallStart = 0;
         } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
           // Stage 2 — request resend from missing peers (once per stall)
@@ -2724,10 +2844,14 @@
             if (_remoteInputs[s2]?.[applyFrame] !== undefined) continue;
             const dc2 = inputPeers[k2].dc;
             if (dc2?.readyState === 'open') {
-              try { dc2.send(`resend:${applyFrame}`); } catch (_) {}
+              try {
+                dc2.send(`resend:${applyFrame}`);
+              } catch (_) {}
             }
           }
-          _syncLog(`INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`);
+          _syncLog(
+            `INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
+          );
           _remoteMissed++;
           // Don't re-enter full tick() — that causes burst frame processing
           // when buffered inputs resolve. Let setInterval(16) handle the
@@ -2767,12 +2891,16 @@
             dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
           }
         }
-        _syncLog(`INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`);
+        _syncLog(
+          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`,
+        );
       }
       // Periodic pacing summary (~5s)
       if (_frameNum % 300 === 0 && _pacingAdvCount > 0) {
         const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
-        _syncLog(`PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`);
+        _syncLog(
+          `PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`,
+        );
         // Reset window
         _pacingCapsCount = 0;
         _pacingCapsFrames = 0;
@@ -2785,7 +2913,10 @@
         if (zs === _playerSlot) continue;
         let hasInputPeer = false;
         for (let zi = 0; zi < inputPeers.length; zi++) {
-          if (inputPeers[zi].slot === zs) { hasInputPeer = true; break; }
+          if (inputPeers[zi].slot === zs) {
+            hasInputPeer = true;
+            break;
+          }
         }
         if (!hasInputPeer) writeInputToMemory(zs, 0);
       }
@@ -2841,7 +2972,9 @@
                 hashes[ri] = mod.HEAPU32[(hashBuf >> 2) + ri];
               }
               mod._free(hashBuf);
-              _syncLog(`REGION-HASH deferred ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`);
+              _syncLog(
+                `REGION-HASH deferred ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`,
+              );
             }
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
@@ -2849,9 +2982,17 @@
               _lastResyncTime = now3;
               _syncLog(`sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms)`);
               const sp = _peers[_pendingSyncCheck.peerSid];
-              if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (e) { _syncLog(`deferred sync-request failed: ${e}`); } }
+              if (sp?.dc) {
+                try {
+                  sp.dc.send('sync-request');
+                } catch (e) {
+                  _syncLog(`deferred sync-request failed: ${e}`);
+                }
+              }
             } else {
-              _syncLog(`DESYNC (deferred) but blocked: pending=${!!_pendingResyncState} cooldown=${Math.round(cooldownElapsed3)}ms`);
+              _syncLog(
+                `DESYNC (deferred) but blocked: pending=${!!_pendingResyncState} cooldown=${Math.round(cooldownElapsed3)}ms`,
+              );
             }
           } else {
             _consecutiveResyncs = 0;
@@ -2863,23 +3004,29 @@
           try {
             const deferBytes = getHashBytes();
             if (deferBytes) {
-              const deferCheck = _pendingSyncCheck;  // capture before nulling
-              workerPost({ type: 'hash', data: deferBytes }).then((res) => {
-                if (res.hash !== deferCheck.hash) {
-                  _syncLog(`DESYNC (deferred) at frame ${deferCheck.frame}`);
-                  _recordDrift(null);
-                  const now3 = performance.now();
-                  if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
-                    _lastResyncTime = now3;
-                    const sp = _peers[deferCheck.peerSid];
-                    if (sp?.dc) { try { sp.dc.send('sync-request'); } catch (_) {} }
+              const deferCheck = _pendingSyncCheck; // capture before nulling
+              workerPost({ type: 'hash', data: deferBytes })
+                .then((res) => {
+                  if (res.hash !== deferCheck.hash) {
+                    _syncLog(`DESYNC (deferred) at frame ${deferCheck.frame}`);
+                    _recordDrift(null);
+                    const now3 = performance.now();
+                    if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
+                      _lastResyncTime = now3;
+                      const sp = _peers[deferCheck.peerSid];
+                      if (sp?.dc) {
+                        try {
+                          sp.dc.send('sync-request');
+                        } catch (_) {}
+                      }
+                    }
+                  } else {
+                    _consecutiveResyncs = 0;
+                    _syncCheckInterval = _syncBaseInterval;
+                    _resetDrift();
                   }
-                } else {
-                  _consecutiveResyncs = 0;
-                  _syncCheckInterval = _syncBaseInterval;
-                  _resetDrift();
-                }
-              }).catch(() => {});
+                })
+                .catch(() => {});
             }
           } catch (_) {}
         }
@@ -2888,8 +3035,7 @@
     }
 
     // -- Periodic desync check (star topology: host-only) -----
-    if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 &&
-        _frameNum % _syncCheckInterval === 0) {
+    if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 && _frameNum % _syncCheckInterval === 0) {
       if (_hasKnSync) {
         // C-level hash — synchronous, no HEAPU8, no worker
         const mod = window.EJS_emulator.gameManager.Module;
@@ -2899,10 +3045,13 @@
         const peers = getActivePeers();
         let sent = 0;
         for (const p of peers) {
-          try { p.dc.send(syncMsg); sent++; } catch (_) {}
+          try {
+            p.dc.send(syncMsg);
+            sent++;
+          } catch (_) {}
         }
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
-          _streamSync(`sync-check frame=${_frameNum} hash=${hash} sent=${sent}`);
+          _syncLog(`sync-check frame=${_frameNum} hash=${hash} sent=${sent}`);
         }
       } else {
         // Fallback: async hash via HEAPU8 + worker
@@ -2910,15 +3059,20 @@
         if (hashBytes) {
           const checkFrame = _frameNum;
           const peers = getActivePeers();
-          workerPost({ type: 'hash', data: hashBytes }).then((res) => {
-            const syncMsg = `sync-hash:${checkFrame}:${res.hash}:0`;
-            let sent = 0;
-            for (const p of peers) {
-              try { p.dc.send(syncMsg); sent++; } catch (_) {}
-            }
-            const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
-            _syncLog(hostMsg);
-          }).catch(() => {});
+          workerPost({ type: 'hash', data: hashBytes })
+            .then((res) => {
+              const syncMsg = `sync-hash:${checkFrame}:${res.hash}:0`;
+              let sent = 0;
+              for (const p of peers) {
+                try {
+                  p.dc.send(syncMsg);
+                  sent++;
+                } catch (_) {}
+              }
+              const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
+              _syncLog(hostMsg);
+            })
+            .catch(() => {});
         }
       }
     }
@@ -2928,14 +3082,13 @@
       const dbg = document.getElementById('np-debug');
       if (dbg) {
         dbg.style.display = '';
-        const playerCount = activePeers.length + 1;  // +1 for self
+        const playerCount = activePeers.length + 1; // +1 for self
         const spectatorCount = Object.values(_peers).filter((p) => p.slot === null).length;
         let remoteBufTotal = 0;
         for (const slot of Object.keys(_remoteInputs)) {
           remoteBufTotal += Object.keys(_remoteInputs[slot] || {}).length;
         }
-        dbg.textContent =
-          `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} players:${playerCount}${spectatorCount > 0 ? ` spec:${spectatorCount}` : ''} delay:${DELAY_FRAMES} rBuf:${remoteBufTotal} rcv:${_remoteReceived} hit:${_remoteApplied} miss:${_remoteMissed} lastR:${_lastRemoteFrame}`;
+        dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} players:${playerCount}${spectatorCount > 0 ? ` spec:${spectatorCount}` : ''} delay:${DELAY_FRAMES} rBuf:${remoteBufTotal} rcv:${_remoteReceived} hit:${_remoteApplied} miss:${_remoteMissed} lastR:${_lastRemoteFrame}`;
       }
     }
   };
@@ -2964,8 +3117,7 @@
         if (ejs) {
           if (ejs.settingsMenuOpen) return;
           if (ejs.isPopupOpen?.()) return;
-          if (ejs.elements?.menu &&
-              !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')) return;
+          if (ejs.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')) return;
         }
         KNState.touchInput[index] = value;
       }
@@ -2976,90 +3128,7 @@
     _syncLog('hooked EJS simulateInput for touch capture');
   };
 
-  const readLocalInput = () => {
-    let mask = 0;
-
-    // Suppress all input while remap wizard is active (prevents desyncs)
-    if (KNState.remapActive) return 0;
-
-    // Gamepad via GamepadManager (profile-based mapping)
-    if (document.hasFocus() && window.GamepadManager) {
-      mask |= GamepadManager.readGamepad(_playerSlot);
-    }
-
-    // Keyboard
-    if (_p1KeyMap) {
-      _heldKeys.forEach((kc) => {
-        const btnIdx = _p1KeyMap[kc];
-        if (btnIdx !== undefined) mask |= (1 << btnIdx);
-      });
-    }
-
-    // Virtual gamepad (mobile touch controls)
-    // EJS simulateInput uses per-direction positive values:
-    //   indices 0-15: digital buttons (value 0 or 1)
-    //   indices 16-19: left stick (right/left/down/up, value 0 to 32767)
-    //   indices 20-23: C-buttons (right/left/down/up, value 0 or 1)
-    // Skip entirely if an EJS menu/popup is visible — stale touch state from
-    // before the menu opened would otherwise keep sending non-zero input.
-    const ejs = window.EJS_emulator;
-    const ejsMenuOpen = ejs && (
-      ejs.settingsMenuOpen ||
-      (ejs.isPopupOpen?.()) ||
-      (ejs.elements?.menu &&
-       !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden'))
-    );
-    if (ejsMenuOpen) {
-      // Clear in-place — VirtualGamepad reads KNState.touchInput via the
-      // same global, so this correctly zeroes both sides.
-      for (const ck in KNState.touchInput) {
-        if (KNState.touchInput.hasOwnProperty(ck)) KNState.touchInput[ck] = 0;
-      }
-    }
-
-    // Left stick (indices 16-19): apply absolute + relative deadzone.
-    // Absolute deadzone (~15% of max 32767) filters out the small spurious
-    // displacement that EJS's virtual joystick sends on initial finger
-    // placement — the touch point is typically slightly above the joystick
-    // center, causing a brief "up" input that triggers unwanted jumps.
-    // Relative deadzone (40% of major axis) suppresses near-cardinal
-    // diagonals, giving ~±22° cardinal zones around each direction.
-    const TOUCH_ABS_DEADZONE = 3500;
-    const stR = KNState.touchInput[16] || 0;
-    const stL = KNState.touchInput[17] || 0;
-    const stD = KNState.touchInput[18] || 0;
-    const stU = KNState.touchInput[19] || 0;
-    const stMajor = Math.max(stR, stL, stD, stU);
-    if (stMajor > TOUCH_ABS_DEADZONE) {
-      const stThresh = stMajor * 0.4;
-      if (stR > stThresh) mask |= (1 << 16);
-      if (stL > stThresh) mask |= (1 << 17);
-      if (stD > stThresh) mask |= (1 << 18);
-      if (stU > stThresh) mask |= (1 << 19);
-    }
-
-    // Digital buttons + C-buttons (non-stick indices)
-    for (const ti in KNState.touchInput) {
-      const idx = parseInt(ti, 10);
-      if (idx >= 16 && idx <= 19) continue;  // left stick handled above
-      const val = KNState.touchInput[idx];
-      if (!val) continue;
-      if (idx < 16) {
-        mask |= (1 << idx);
-      } else if (idx >= 20 && idx <= 23) {
-        if (val > 0) mask |= (1 << idx);
-      }
-    }
-
-    // Debug: call window.debugInput() to log input for 3 seconds
-    if (window._debugInputUntil && performance.now() < window._debugInputUntil && mask !== 0) {
-      const bits = [];
-      for (let b = 0; b < 20; b++) { if ((mask >> b) & 1) bits.push(b); }
-      console.log(`[input-debug] mask=${mask} bits=[${bits.join(',')}]`);
-    }
-
-    return mask;
-  };
+  const readLocalInput = () => KNShared.readLocalInput(_playerSlot, _p1KeyMap, _heldKeys);
 
   window.debugInput = () => {
     window._debugInputUntil = performance.now() + 3000;
@@ -3072,7 +3141,7 @@
   // to a dedicated thread so the main thread tick loop isn't blocked.
 
   let _syncWorker = null;
-  let _syncWorkerCallbacks = {};  // id -> callback
+  let _syncWorkerCallbacks = {}; // id -> callback
   let _syncWorkerNextId = 0;
 
   const getSyncWorker = () => {
@@ -3137,7 +3206,10 @@
     _syncWorker = new Worker(_syncWorkerUrl);
     _syncWorker.onmessage = (e) => {
       const cb = _syncWorkerCallbacks[e.data.id];
-      if (cb) { delete _syncWorkerCallbacks[e.data.id]; cb(e.data); }
+      if (cb) {
+        delete _syncWorkerCallbacks[e.data.id];
+        cb(e.data);
+      }
     };
     return _syncWorker;
   };
@@ -3267,38 +3339,7 @@
   };
 
   const disableEJSInput = () => {
-    let attempts = 0;
-    const attempt = () => {
-      const ejs = window.EJS_emulator;
-      const gm = ejs?.gameManager;
-      if (!gm) {
-        if (++attempts < 150) { setTimeout(attempt, 200); }
-        else { console.warn('[lockstep] disableEJSInput timed out'); }
-        return;
-      }
-
-      // Disable EJS keyboard handling
-      gm.setKeyboardEnabled(false);
-      const parent = ejs.elements?.parent;
-      if (parent) {
-        const block = (e) => { e.stopImmediatePropagation(); };
-        parent.addEventListener('keydown', block, true);
-        parent.addEventListener('keyup',   block, true);
-      }
-
-      // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
-      if (ejs.gamepad) {
-        if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
-        ejs.gamepad.loop = () => {};
-      }
-
-      // Block navigator.getGamepads globally so the WASM core's internal
-      // Emscripten SDL gamepad layer also gets no gamepads. The core has
-      // its own RetroArch button mapping that conflicts with our profiles.
-      // GamepadManager uses APISandbox.nativeGetGamepads() so it still works.
-      APISandbox.overrideGetGamepads(() => []);
-    };
-    attempt();
+    KNShared.disableEJSInput('lockstep');
   };
 
   // -- Direct memory hashing (avoids expensive getState() serialization) ------
@@ -3320,7 +3361,13 @@
           const rdramPtr = parseInt(parts[1], 10);
           if (rdramPtr > 0 && rdramSize > 0) {
             if (_hashRegion === null) {
-              const bufSrc = mod.wasmMemory ? 'wasmMemory' : mod.asm?.memory ? 'asm.memory' : mod.buffer ? 'mod.buffer' : 'HEAPU8.buffer';
+              const bufSrc = mod.wasmMemory
+                ? 'wasmMemory'
+                : mod.asm?.memory
+                  ? 'asm.memory'
+                  : mod.buffer
+                    ? 'mod.buffer'
+                    : 'HEAPU8.buffer';
               _syncLog(`hash: RDRAM at [${rdramPtr}], size=${rdramSize}, buf=${bufSrc}`);
             } else if (_hashRegion?.ptr !== rdramPtr) {
               _syncLog(`hash: RDRAM moved! old=${_hashRegion.ptr} new=${rdramPtr}`);
@@ -3335,8 +3382,7 @@
     // Buffer staleness: detect detached buffer and try re-acquisition.
     let buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
     if (!buf || buf.byteLength === 0) {
-      buf = (mod.wasmMemory?.buffer) ||
-            (mod.asm?.memory?.buffer) || null;
+      buf = mod.wasmMemory?.buffer || mod.asm?.memory?.buffer || null;
     }
     if (_hashRegion?.ptr && buf && buf.byteLength > 0) {
       try {
@@ -3354,18 +3400,18 @@
         //
         // Sample 256B from each match-only volatile block (lightweight).
         const gameRegions = [
-          0xA4000,   // player/match config
-          0xBA000,   // player state block start
-          0xBF000,   // player state block mid
-          0xC4000,   // player state block end
-          0x262000,  // physics block 1
-          0x266000,  // physics block 1 mid
-          0x26A000,  // physics block 1 end
-          0x290000,  // misc gameplay
-          0x2F6000,  // physics block 2
-          0x32B000,  // physics block 3 start
-          0x330000,  // physics block 3 mid
-          0x335000,  // physics block 3 end
+          0xa4000, // player/match config
+          0xba000, // player state block start
+          0xbf000, // player state block mid
+          0xc4000, // player state block end
+          0x262000, // physics block 1
+          0x266000, // physics block 1 mid
+          0x26a000, // physics block 1 end
+          0x290000, // misc gameplay
+          0x2f6000, // physics block 2
+          0x32b000, // physics block 3 start
+          0x330000, // physics block 3 mid
+          0x335000, // physics block 3 end
         ];
         const SAMPLE = 256;
         const combined = new Uint8Array(SAMPLE * gameRegions.length);
@@ -3385,21 +3431,21 @@
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
-    } catch (_) { return null; }
+    } catch (_) {
+      return null;
+    }
   };
 
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
-  let _pushingSyncState = false;  // debounce concurrent sync-request handling
+  let _pushingSyncState = false; // debounce concurrent sync-request handling
 
-  let _lastSyncState = null;  // host/guest: previous state for delta computation
-  let _lastSyncStateInfo = null;  // { frame, setBy, ts } for debugging
+  let _lastSyncState = null; // host/guest: previous state for delta computation
+  let _lastSyncStateInfo = null; // { frame, setBy, ts } for debugging
 
   const _setLastSyncState = (state, reason) => {
     _lastSyncState = state;
-    _lastSyncStateInfo = state
-      ? { frame: _frameNum, setBy: reason, ts: performance.now() }
-      : null;
+    _lastSyncStateInfo = state ? { frame: _frameNum, setBy: reason, ts: performance.now() } : null;
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
@@ -3438,7 +3484,9 @@
 
     // Delta sync: XOR against previous state
     const isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
-    _syncLog(`pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`);
+    _syncLog(
+      `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
+    );
     let toCompress;
     if (isFull) {
       toCompress = currentState;
@@ -3454,15 +3502,18 @@
     // on the next push and delta never fires.
     _setLastSyncState(currentState.slice(), 'pushSync');
 
-    compressState(toCompress).then((compressed) => {
-      const sizeKB = Math.round(compressed.length / 1024);
-      _streamSync(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-      sendSyncChunks(compressed, frame, isFull, targetSid);
-    }).catch((err) => {
-      _syncLog(`sync compress failed: ${err}`);
-    }).finally(() => {
-      _pushingSyncState = false;
-    });
+    compressState(toCompress)
+      .then((compressed) => {
+        const sizeKB = Math.round(compressed.length / 1024);
+        _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
+        sendSyncChunks(compressed, frame, isFull, targetSid);
+      })
+      .catch((err) => {
+        _syncLog(`sync compress failed: ${err}`);
+      })
+      .finally(() => {
+        _pushingSyncState = false;
+      });
   };
 
   const sendSyncChunks = (compressed, frame, isFull, targetSid) => {
@@ -3492,7 +3543,9 @@
         _syncLog(`sync send failed: ${err}`);
       }
     }
-    _syncLog(`pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`);
+    _syncLog(
+      `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`,
+    );
   };
 
   const handleSyncChunksComplete = async () => {
@@ -3527,7 +3580,7 @@
         }
         _pendingResyncState = { bytes: reconstructed, frame };
       }
-      _streamSync(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
+      _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
     } catch (err) {
       _syncLog(`sync decompress failed: ${err}`);
     }
@@ -3586,7 +3639,7 @@
 
       _resyncCount++;
       _consecutiveResyncs++;
-      _streamSync(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+      _syncLog(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     }
 
     // Purge stale remote inputs above the new frame
@@ -3612,7 +3665,7 @@
     _isSpectator = config.isSpectator;
 
     // Apply pre-game options
-    _syncEnabled = !!config.rollbackEnabled;        // default: false
+    _syncEnabled = !!config.rollbackEnabled; // default: false
     _lateJoin = !!config.lateJoin;
 
     window._playerSlot = _playerSlot;
@@ -3655,14 +3708,28 @@
 
     // Close all peer connections and clear reconnect timers
     for (const [sid, p] of Object.entries(_peers)) {
-      if (p._reconnectTimeout) { clearTimeout(p._reconnectTimeout); p._reconnectTimeout = null; }
-      if (p._disconnectTimer) { clearTimeout(p._disconnectTimer); p._disconnectTimer = null; }
-      if (p.dc) try { p.dc.close(); } catch (_) {}
-      if (p.pc) try { p.pc.close(); } catch (_) {}
+      if (p._reconnectTimeout) {
+        clearTimeout(p._reconnectTimeout);
+        p._reconnectTimeout = null;
+      }
+      if (p._disconnectTimer) {
+        clearTimeout(p._disconnectTimer);
+        p._disconnectTimer = null;
+      }
+      if (p.dc)
+        try {
+          p.dc.close();
+        } catch (_) {}
+      if (p.pc)
+        try {
+          p.pc.close();
+        } catch (_) {}
     }
     // Signal all reconnecting states cleared before nulling config
     if (_config?.onReconnecting) {
-      try { _config.onReconnecting(null, false); } catch (_) {}
+      try {
+        _config.onReconnecting(null, false);
+      } catch (_) {}
     }
     _peers = {};
     KNState.peers = _peers;
@@ -3706,8 +3773,14 @@
     _pushingSyncState = false;
     _pendingResyncState = null;
     _hashRegion = null;
-    if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
-    if (_syncWorkerUrl) { URL.revokeObjectURL(_syncWorkerUrl); _syncWorkerUrl = null; }
+    if (_syncWorker) {
+      _syncWorker.terminate();
+      _syncWorker = null;
+    }
+    if (_syncWorkerUrl) {
+      URL.revokeObjectURL(_syncWorkerUrl);
+      _syncWorkerUrl = null;
+    }
     _syncWorkerCallbacks = {};
     _syncLogHead = 0;
     _syncLogCount = 0;
@@ -3727,7 +3800,9 @@
       window._kn_audioEl = null;
     }
     if (window._kn_keepAliveOsc) {
-      try { window._kn_keepAliveOsc.stop(); } catch (_) {}
+      try {
+        window._kn_keepAliveOsc.stop();
+      } catch (_) {}
       window._kn_keepAliveOsc = null;
     }
     window._kn_audioRing = null;
@@ -3746,7 +3821,9 @@
 
     // Clean up spectator stream
     if (_hostStream) {
-      _hostStream.getTracks().forEach((t) => { t.stop(); });
+      _hostStream.getTracks().forEach((t) => {
+        t.stop();
+      });
       _hostStream = null;
     }
     if (_guestVideo) {
@@ -3793,26 +3870,30 @@
     init,
     stop,
     exportSyncLog,
-    _startSpectatorStream: startSpectatorStream,  // test hook
-    onExtraDataChannel: (cb) => { _onExtraDataChannel = cb; },
-    onUnhandledMessage: (cb) => { _onUnhandledMessage = cb; },
+    _startSpectatorStream: startSpectatorStream, // test hook
+    onExtraDataChannel: (cb) => {
+      _onExtraDataChannel = cb;
+    },
+    onUnhandledMessage: (cb) => {
+      _onUnhandledMessage = cb;
+    },
     getPeerConnection: (sid) => {
       const p = _peers[sid];
       return p ? p.pc : null;
     },
-    setSyncEnabled: (on) => { _syncEnabled = !!on; },
+    setSyncEnabled: (on) => {
+      _syncEnabled = !!on;
+    },
     isSyncEnabled: () => _syncEnabled,
-    setSyncInterval: (frames) => { _syncBaseInterval = _syncCheckInterval = Math.max(30, frames); },
+    setSyncInterval: (frames) => {
+      _syncBaseInterval = _syncCheckInterval = Math.max(30, frames);
+    },
     getInfo: () => {
       const peers = getActivePeers();
-      const rtt = _rttSamples.length > 0
-        ? _rttSamples[Math.floor(_rttSamples.length / 2)]
-        : null;
+      const rtt = _rttSamples.length > 0 ? _rttSamples[Math.floor(_rttSamples.length / 2)] : null;
       const peerInfo = peers.map((peer) => ({
         slot: peer.slot,
-        rtt: peer.rttSamples?.length > 0
-          ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)]
-          : null,
+        rtt: peer.rttSamples?.length > 0 ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)] : null,
         delayValue: peer.delayValue || null,
       }));
       return {
@@ -3846,5 +3927,4 @@
       }
     },
   };
-
 })();

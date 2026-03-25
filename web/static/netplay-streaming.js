@@ -2,9 +2,9 @@
  * kaillera-next — Streaming Netplay Engine
  *
  * Single-emulator streaming mode: the host (slot 0) runs the emulator and
- * streams the canvas video to all guests and spectators via WebRTC. Guests
- * send their controller input back to the host over a DataChannel. Zero
- * desync by design — only one emulator instance exists.
+ * streams canvas video + audio to all guests and spectators via WebRTC.
+ * Guests send their controller input back to the host over a DataChannel.
+ * Zero desync by design — only one emulator instance exists.
  *
  * ── Network Topology ──────────────────────────────────────────────────────
  *
@@ -13,22 +13,28 @@
  *   is the opposite of lockstep mode (where lower slot initiates).
  *
  *   Host (slot 0):
- *     - Runs EmulatorJS, applies game cheats
+ *     - Runs EmulatorJS, applies standard online cheats via KNShared
  *     - Captures the emulator's WebGL canvas by blitting it onto a
  *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
  *       canvas is captured via captureStream(0) with manual frame
  *       control (requestFrame()). This avoids expensive GPU readback
  *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
- *     - Adds the MediaStream video track to each peer's RTCPeerConnection
- *     - Reads its own input locally and applies via simulateInput()
- *     - Receives guest input via DataChannel and applies via simulateInput()
+ *     - Captures emulator audio via AudioContext → MediaStreamDestination,
+ *       adds the audio track to the host MediaStream so guests/spectators
+ *       receive video + audio over the same RTCPeerConnection
+ *     - Adds the MediaStream tracks to each peer's RTCPeerConnection
+ *     - Reads its own input locally and applies via applyInputForSlot()
+ *       which calls _simulate_input() on the WASM core
+ *     - Receives guest input via DataChannel and applies the same way
  *
  *   Guest (slot 1-3):
  *     - Does NOT start the emulator — no WASM core loaded
- *     - Receives the host's video stream and displays it in a <video>
- *       element inserted into the game container
- *     - Reads keyboard/gamepad input and sends Int32Array([inputMask])
- *       (4 bytes) to the host over the DataChannel
+ *     - Receives the host's video+audio stream and displays it in a
+ *       <video> element inserted into the game container
+ *     - Video starts muted for autoplay compliance; attempts programmatic
+ *       unmute, falls back to a "tap to unmute" banner (iOS workaround)
+ *     - Reads keyboard/gamepad input (or VirtualGamepad on mobile) and
+ *       sends Int32Array([inputMask]) (4 bytes) to the host over DC
  *     - Only sends when input changes (delta encoding) to minimize
  *       DataChannel overhead
  *
@@ -49,16 +55,25 @@
  *
  * ── Input Path ────────────────────────────────────────────────────────────
  *
- *   Host reads input via rAF-driven tick loop using the same readLocalInput()
- *   as lockstep (keyboard keyCode tracking + GamepadManager profiles). Guest
- *   input is applied via simulateInput() which is the EmulatorJS API for
- *   setting button/axis state per player slot. Only changed bits are written
- *   (diff against previous mask per slot).
+ *   Host reads input via setInterval(16) tick loop (not rAF — rAF throttles
+ *   to ~1fps in background tabs). Uses readLocalInput() shared with lockstep
+ *   (keyboard keyCode tracking + GamepadManager profiles + VirtualGamepad
+ *   on mobile). All input is applied via applyInputForSlot() which calls
+ *   _simulate_input() per button/axis. Only changed bits are written (diff
+ *   against previous mask per slot). Guest input tick uses rAF since guests
+ *   have no emulator to drive.
  *
  *   DataChannel config: { ordered: false, maxRetransmits: 0 } — unreliable
  *   delivery is acceptable for input since each message contains the full
  *   current state, not a delta. Dropped packets just mean one frame of stale
  *   input, which the next packet corrects.
+ *
+ * ── Connection Recovery ─────────────────────────────────────────────────
+ *
+ *   When a peer's ICE connection degrades (failed/disconnected state),
+ *   renegotiate() performs a full SDP re-exchange with the same peer —
+ *   new offer/answer with codec preferences and bitrate settings reapplied.
+ *   onconnectionstatechange handles cleanup when a peer fully disconnects.
  *
  * ── Debug Overlay ─────────────────────────────────────────────────────────
  *
@@ -75,26 +90,26 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
 
-  let socket             = null;
-  let _playerSlot        = -1;
-  let _isSpectator       = false;
-  let _peers             = {};     // remoteSid → {pc, dc, slot}
-  let _knownPlayers      = {};
-  let _hostStream        = null;   // MediaStream from canvas (host only)
-  let _guestVideo        = null;   // <video> element (guest only)
-  let _p1KeyMap          = null;
-  let _heldKeys          = new Set();
-  let _prevSlotMasks     = {};
-  let _gameRunning       = false;
+  let socket = null;
+  let _playerSlot = -1;
+  let _isSpectator = false;
+  let _peers = {}; // remoteSid → {pc, dc, slot}
+  let _knownPlayers = {};
+  let _hostStream = null; // MediaStream from canvas (host only)
+  let _guestVideo = null; // <video> element (guest only)
+  let _p1KeyMap = null;
+  let _heldKeys = new Set();
+  let _prevSlotMasks = {};
+  let _gameRunning = false;
   let _hostInputInterval = null;
-  let _cachedInfo        = null;
+  let _cachedInfo = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
-  let _audioStreamDest   = null;   // MediaStreamAudioDestinationNode (host only)
+  let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
 
   // Expose for Playwright
-  window._playerSlot  = _playerSlot;
+  window._playerSlot = _playerSlot;
   window._isSpectator = _isSpectator;
-  KNState.peers       = _peers;
+  KNState.peers = _peers;
 
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
@@ -104,7 +119,7 @@
   // ── users-updated (star topology) ──────────────────────────────────────
 
   const onUsersUpdated = (data) => {
-    const players    = data.players    || {};
+    const players = data.players || {};
     const spectators = data.spectators || {};
 
     _knownPlayers = {};
@@ -112,14 +127,20 @@
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     }
 
-    const myPlayerEntry = Object.values(players).find(p => p.socketId === socket.id);
-    if (myPlayerEntry) { _playerSlot = myPlayerEntry.slot; window._playerSlot = _playerSlot; }
+    const myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
+    if (myPlayerEntry) {
+      _playerSlot = myPlayerEntry.slot;
+      window._playerSlot = _playerSlot;
+    }
 
     if (_playerSlot === 0) {
       // HOST: initiate connections to all non-host players and spectators
-      const others = Object.values(players).filter(p => p.socketId !== socket.id);
+      const others = Object.values(players).filter((p) => p.socketId !== socket.id);
       for (const p of others) {
-        if (_peers[p.socketId]) { _peers[p.socketId].slot = p.slot; continue; }
+        if (_peers[p.socketId]) {
+          _peers[p.socketId].slot = p.slot;
+          continue;
+        }
         createPeer(p.socketId, p.slot, true);
         sendOffer(p.socketId);
       }
@@ -179,7 +200,7 @@
           _guestVideo.id = 'guest-video';
           _guestVideo.autoplay = true;
           _guestVideo.playsInline = true;
-          _guestVideo.muted = true;  // start muted so autoplay works without gesture
+          _guestVideo.muted = true; // start muted so autoplay works without gesture
 
           // Minimize video decode/display latency:
           // - disableRemotePlayback: don't add cast overlay
@@ -189,23 +210,27 @@
 
           // Unmute after playback starts. On mobile, programmatic unmute
           // requires a user gesture — show a banner if it fails.
-          _guestVideo.addEventListener('playing', () => {
-            _guestVideo.muted = false;
-            if (_guestVideo.muted) {
-              const banner = document.getElementById('unmute-banner');
-              if (banner) {
-                banner.classList.remove('hidden');
-                const doUnmute = () => {
-                  _guestVideo.muted = false;
-                  banner.classList.add('hidden');
-                  banner.removeEventListener('click', doUnmute);
-                  document.removeEventListener('touchstart', doUnmute, true);
-                };
-                banner.addEventListener('click', doUnmute);
-                document.addEventListener('touchstart', doUnmute, true);
+          _guestVideo.addEventListener(
+            'playing',
+            () => {
+              _guestVideo.muted = false;
+              if (_guestVideo.muted) {
+                const banner = document.getElementById('unmute-banner');
+                if (banner) {
+                  banner.classList.remove('hidden');
+                  const doUnmute = () => {
+                    _guestVideo.muted = false;
+                    banner.classList.add('hidden');
+                    banner.removeEventListener('click', doUnmute);
+                    document.removeEventListener('touchstart', doUnmute, true);
+                  };
+                  banner.addEventListener('click', doUnmute);
+                  document.addEventListener('touchstart', doUnmute, true);
+                }
               }
-            }
-          }, { once: true });
+            },
+            { once: true },
+          );
 
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           gameDiv.innerHTML = '';
@@ -265,7 +290,8 @@
 
     if (isInitiator) {
       peer.dc = peer.pc.createDataChannel('inputs', {
-        ordered: false, maxRetransmits: 0,
+        ordered: false,
+        maxRetransmits: 0,
       });
       setupDataChannel(remoteSid, peer.dc);
     } else {
@@ -312,7 +338,9 @@
         await drainCandidates(peer);
       } else if (data.candidate) {
         if (peer.remoteDescSet) {
-          try { await peer.pc.addIceCandidate(data.candidate); } catch (_) {}
+          try {
+            await peer.pc.addIceCandidate(data.candidate);
+          } catch (_) {}
         } else {
           if (!peer.pendingCandidates) peer.pendingCandidates = [];
           peer.pendingCandidates.push(data.candidate);
@@ -327,7 +355,9 @@
     peer.remoteDescSet = true;
     if (peer.pendingCandidates) {
       for (const c of peer.pendingCandidates) {
-        try { await peer.pc.addIceCandidate(c); } catch (_) {}
+        try {
+          await peer.pc.addIceCandidate(c);
+        } catch (_) {}
       }
       peer.pendingCandidates = [];
     }
@@ -361,7 +391,7 @@
     ch.onerror = (e) => console.log('[netplay] DC error:', remoteSid, e);
 
     ch.onmessage = (e) => {
-      if (_playerSlot !== 0) return;  // only host processes input
+      if (_playerSlot !== 0) return; // only host processes input
       const peer = _peers[remoteSid];
       if (!peer || peer.slot === null || peer.slot === undefined) return;
 
@@ -399,7 +429,10 @@
     // Wait for emulator to be running, then capture canvas stream
     const waitForEmu = () => {
       const gm = window.EJS_emulator?.gameManager;
-      if (!gm) { setTimeout(waitForEmu, 100); return; }
+      if (!gm) {
+        setTimeout(waitForEmu, 100);
+        return;
+      }
       console.log('[netplay] emulator running — capturing stream');
 
       // The emulator canvas is WebGL at 1280x960. Capturing it directly
@@ -407,7 +440,11 @@
       // small 2D canvas (640x480) and capture THAT. The drawImage blit is
       // GPU-accelerated and the 2D canvas readback is much cheaper.
       const srcCanvas = document.querySelector('#game canvas');
-      if (!srcCanvas) { console.log('[netplay] canvas not found, retrying…'); setTimeout(waitForEmu, 200); return; }
+      if (!srcCanvas) {
+        console.log('[netplay] canvas not found, retrying…');
+        setTimeout(waitForEmu, 200);
+        return;
+      }
 
       const captureCanvas = document.createElement('canvas');
       captureCanvas.width = 640;
@@ -417,14 +454,14 @@
       console.log(`[netplay] source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator canvas to capture canvas every frame
-      _hostStream = captureCanvas.captureStream(0);  // manual frame control
+      _hostStream = captureCanvas.captureStream(0); // manual frame control
       const captureTrack = _hostStream.getVideoTracks()[0];
 
       const blitFrame = () => {
-        if (!_gameRunning) return;  // stop loop when game ends
+        if (!_gameRunning) return; // stop loop when game ends
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
-        captureTrack.requestFrame();  // signal new frame to captureStream
+        captureTrack.requestFrame(); // signal new frame to captureStream
       };
       blitFrame();
 
@@ -502,34 +539,36 @@
     const lines = sdp.split('\r\n');
 
     // Collect all video codec payload types from a=rtpmap lines
-    const codecPts = {};  // codec name → payload type
+    const codecPts = {}; // codec name → payload type
     for (const line of lines) {
       const m = line.match(/^a=rtpmap:(\d+) (VP9|H264|VP8)\//i);
       if (m) {
         const name = m[2].toUpperCase();
-        if (!codecPts[name]) codecPts[name] = m[1];  // keep first match
+        if (!codecPts[name]) codecPts[name] = m[1]; // keep first match
       }
     }
 
     // Build preferred order: VP9 first, then H264, then everything else
     const preferred = [];
-    if (codecPts['VP9'])  preferred.push(codecPts['VP9']);
+    if (codecPts['VP9']) preferred.push(codecPts['VP9']);
     if (codecPts['H264']) preferred.push(codecPts['H264']);
 
-    if (preferred.length === 0) return sdp;  // no preferred codecs found
+    if (preferred.length === 0) return sdp; // no preferred codecs found
 
-    return lines.map(line => {
-      if (line.startsWith('m=video')) {
-        const parts = line.split(' ');
-        const header = parts.slice(0, 3);
-        const pts = parts.slice(3);
-        // Put preferred codecs first, then the rest in original order
-        const prefSet = new Set(preferred);
-        const rest = pts.filter(p => !prefSet.has(p));
-        return [...header, ...preferred, ...rest].join(' ');
-      }
-      return line;
-    }).join('\r\n');
+    return lines
+      .map((line) => {
+        if (line.startsWith('m=video')) {
+          const parts = line.split(' ');
+          const header = parts.slice(0, 3);
+          const pts = parts.slice(3);
+          // Put preferred codecs first, then the rest in original order
+          const prefSet = new Set(preferred);
+          const rest = pts.filter((p) => !prefSet.has(p));
+          return [...header, ...preferred, ...rest].join(' ');
+        }
+        return line;
+      })
+      .join('\r\n');
   };
 
   const optimizeVideoEncoding = (pc) => {
@@ -544,15 +583,18 @@
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
         }
-        params.encodings[0].maxBitrate = 5_000_000;  // 5 Mbps (640x480 needs less)
+        params.encodings[0].maxBitrate = 5_000_000; // 5 Mbps (640x480 needs less)
         params.encodings[0].maxFramerate = 60;
         // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
-        sender.setParameters(params).then(() => {
-          console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
-        }).catch(err => {
-          console.log('[netplay] setParameters failed:', err);
-        });
+        sender
+          .setParameters(params)
+          .then(() => {
+            console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
+          })
+          .catch((err) => {
+            console.log('[netplay] setParameters failed:', err);
+          });
       }
     }
   };
@@ -590,9 +632,11 @@
 
       // Only send when input changes — reduces DC overhead
       if (mask !== _lastSentMask) {
-        const hostPeer = Object.values(_peers).find(p => p.slot === 0);
+        const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
-          try { hostPeer.dc.send(new Int32Array([mask]).buffer); } catch (_) {}
+          try {
+            hostPeer.dc.send(new Int32Array([mask]).buffer);
+          } catch (_) {}
           _lastSentMask = mask;
         }
       }
@@ -629,17 +673,24 @@
 
     try {
       const stats = await pc.getStats();
-      let fps = 0, codec = null, res = null, ping = null;
-      let jitterVal = null, pktLost = 0, pktRecv = 0, dropped = null;
+      let fps = 0,
+        codec = null,
+        res = null,
+        ping = null;
+      let jitterVal = null,
+        pktLost = 0,
+        pktRecv = 0,
+        dropped = null;
       let bitrate = null;
-      let encodeTime = null, qualLimit = null;
+      let encodeTime = null,
+        qualLimit = null;
 
       stats.forEach((s) => {
         if (s.type === 'outbound-rtp' && s.kind === 'video') {
           fps = s.framesPerSecond || 0;
           res = `${s.frameWidth || '?'}x${s.frameHeight || '?'}`;
           if (s.totalEncodeTime && s.framesEncoded && s.framesEncoded > 0) {
-            encodeTime = parseFloat((s.totalEncodeTime / s.framesEncoded * 1000).toFixed(1));
+            encodeTime = parseFloat(((s.totalEncodeTime / s.framesEncoded) * 1000).toFixed(1));
           }
           if (s.qualityLimitationReason && s.qualityLimitationReason !== 'none') {
             qualLimit = s.qualityLimitationReason;
@@ -654,8 +705,7 @@
           dropped = s.framesDropped || 0;
         }
         if (s.type === 'candidate-pair' && s.state === 'succeeded') {
-          ping = s.currentRoundTripTime !== undefined
-            ? Math.round(s.currentRoundTripTime * 1000) : null;
+          ping = s.currentRoundTripTime !== undefined ? Math.round(s.currentRoundTripTime * 1000) : null;
           if (s.availableOutgoingBitrate) {
             bitrate = parseFloat((s.availableOutgoingBitrate / 1_000_000).toFixed(1));
           }
@@ -665,7 +715,7 @@
         }
       });
 
-      const lossRate = pktRecv > 0 ? parseFloat((pktLost / pktRecv * 100).toFixed(1)) : 0;
+      const lossRate = pktRecv > 0 ? parseFloat(((pktLost / pktRecv) * 100).toFixed(1)) : 0;
 
       return {
         mode: 'streaming',
@@ -747,32 +797,7 @@
   };
 
   const disableEJSInput = () => {
-    let attempts = 0;
-    const attempt = () => {
-      const ejs = window.EJS_emulator;
-      const gm = ejs?.gameManager;
-      if (!gm) {
-        if (++attempts < 150) { setTimeout(attempt, 200); }
-        else { console.warn('[streaming] disableEJSInput timed out'); }
-        return;
-      }
-
-      // Disable EJS keyboard handling
-      gm.setKeyboardEnabled(false);
-      const parent = ejs.elements?.parent;
-      if (parent) {
-        const block = e => e.stopImmediatePropagation();
-        parent.addEventListener('keydown', block, true);
-        parent.addEventListener('keyup',   block, true);
-      }
-
-      // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
-      if (ejs.gamepad) {
-        if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
-        ejs.gamepad.loop = () => {};
-      }
-    };
-    attempt();
+    KNShared.disableEJSInput('streaming');
   };
 
   // ── Audio capture for streaming ──────────────────────────────────────
@@ -810,78 +835,10 @@
     return false;
   };
 
-  const readLocalInput = () => {
-    let mask = 0;
-
-    // Suppress all input while remap wizard is active (prevents desyncs)
-    if (KNState.remapActive) return 0;
-
-    if (window.GamepadManager) {
-      mask |= GamepadManager.readGamepad(_playerSlot);
-    }
-    if (_p1KeyMap) {
-      _heldKeys.forEach(kc => {
-        const btnIdx = _p1KeyMap[kc];
-        if (btnIdx !== undefined) mask |= (1 << btnIdx);
-      });
-    }
-
-    // Virtual gamepad touch input (same logic as lockstep readLocalInput)
-    // Left stick (indices 16-19): apply absolute + relative deadzone
-    const TOUCH_ABS_DEADZONE = 3500;
-    const stR = KNState.touchInput[16] || 0;
-    const stL = KNState.touchInput[17] || 0;
-    const stD = KNState.touchInput[18] || 0;
-    const stU = KNState.touchInput[19] || 0;
-    const stMajor = Math.max(stR, stL, stD, stU);
-    if (stMajor > TOUCH_ABS_DEADZONE) {
-      const stThresh = stMajor * 0.4;
-      if (stR > stThresh) mask |= (1 << 16);
-      if (stL > stThresh) mask |= (1 << 17);
-      if (stD > stThresh) mask |= (1 << 18);
-      if (stU > stThresh) mask |= (1 << 19);
-    }
-    // Digital buttons + C-buttons
-    for (const ti in KNState.touchInput) {
-      const idx = parseInt(ti, 10);
-      if (idx >= 16 && idx <= 19) continue;
-      const val = KNState.touchInput[idx];
-      if (!val) continue;
-      if (idx < 16) {
-        mask |= (1 << idx);
-      } else if (idx >= 20 && idx <= 23) {
-        if (val > 0) mask |= (1 << idx);
-      }
-    }
-
-    return mask;
-  };
+  const readLocalInput = () => KNShared.readLocalInput(_playerSlot, _p1KeyMap, _heldKeys);
 
   const applyInputForSlot = (slot, inputMask) => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?._simulate_input) return;
-    const prevMask = _prevSlotMasks[slot] || 0;
-    if (inputMask === prevMask) return;  // skip if unchanged
-
-    // Digital buttons (0-15) — same path as lockstep writeInputToMemory
-    for (let btn = 0; btn < 16; btn++) {
-      mod._simulate_input(slot, btn, (inputMask >> btn) & 1);
-    }
-
-    // Analog axes (16-23): bit pairs → ±axis values
-    // Diagonal normalization: scale by 1/√2 so combined magnitude matches cardinal
-    const lxActive = ((inputMask >> 16) & 1) | ((inputMask >> 17) & 1);
-    const lyActive = ((inputMask >> 18) & 1) | ((inputMask >> 19) & 1);
-    const diagScale = (lxActive && lyActive) ? 23170 : 32767;  // 32767/√2 ≈ 23170
-    for (let base = 16; base < 24; base += 2) {
-      const posPressed = (inputMask >> base) & 1;
-      const negPressed = (inputMask >> (base + 1)) & 1;
-      const mag = (base < 20) ? diagScale : 32767;  // normalize left stick only
-      const axisVal = (posPressed - negPressed) * mag;
-      mod._simulate_input(slot, base, axisVal);
-      mod._simulate_input(slot, base + 1, 0);
-    }
-    _prevSlotMasks[slot] = inputMask;
+    KNShared.applyInputToWasm(slot, inputMask, _prevSlotMasks);
   };
 
   // -- Init / Stop API -------------------------------------------------------
@@ -929,26 +886,39 @@
     _gameRunning = false;
     _guestLoopStarted = false;
     _cachedInfo = null;
-    if (_hostInputInterval) { clearInterval(_hostInputInterval); _hostInputInterval = null; }
+    if (_hostInputInterval) {
+      clearInterval(_hostInputInterval);
+      _hostInputInterval = null;
+    }
 
     // Close all peer connections
     for (const sid of Object.keys(_peers)) {
       const p = _peers[sid];
-      if (p.dc) try { p.dc.close(); } catch (_) {}
-      if (p.pc) try { p.pc.close(); } catch (_) {}
+      if (p.dc)
+        try {
+          p.dc.close();
+        } catch (_) {}
+      if (p.pc)
+        try {
+          p.pc.close();
+        } catch (_) {}
     }
     _peers = {};
     KNState.peers = _peers;
 
     // Clean up audio capture
     if (_audioStreamDest) {
-      try { _audioStreamDest.disconnect(); } catch (_) {}
+      try {
+        _audioStreamDest.disconnect();
+      } catch (_) {}
       _audioStreamDest = null;
     }
 
     // Clean up streams
     if (_hostStream) {
-      for (const t of _hostStream.getTracks()) { t.stop(); }
+      for (const t of _hostStream.getTracks()) {
+        t.stop();
+      }
       _hostStream = null;
     }
     if (_guestVideo) {
@@ -959,6 +929,7 @@
     const unmuteBanner = document.getElementById('unmute-banner');
     if (unmuteBanner) unmuteBanner.classList.add('hidden');
 
+    _heldKeys.clear();
     _knownPlayers = {};
     _prevSlotMasks = {};
 
@@ -988,5 +959,4 @@
       return p ? p.pc : null;
     },
   };
-
 })();

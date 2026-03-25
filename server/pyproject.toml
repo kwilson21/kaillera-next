@@ -1,13 +1,12 @@
 [project]
 name = "kaillera-next-server"
-version = "0.1.0"
+version = "0.6.0"
 description = "kaillera-next matchmaking and relay server"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "python-socketio>=5.11.0",
-    "uvloop>=0.19.0",
     "python-dotenv>=1.0.0",
 ]
 
@@ -16,6 +15,7 @@ dev = [
     "pytest>=8.0",
     "requests>=2.31",
     "pytest-playwright>=0.5",
+    "ruff>=0.8.0",
 ]
 
 [project.scripts]
@@ -27,3 +27,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC", "C4", "PERF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"

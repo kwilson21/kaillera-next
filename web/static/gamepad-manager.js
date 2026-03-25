@@ -23,24 +23,24 @@
 
   const _STANDARD_MAPPING = {
     buttons: {
-      0: (1 << 0),   // face bottom (A/Cross) → N64 A (JOYPAD_B)
-      1: (1 << 1),   // face right (B/Circle) → N64 B (JOYPAD_Y)
-      9: (1 << 3),   // start → Start
-      12: (1 << 4),  // dpad up → D-Up
-      13: (1 << 5),  // dpad down → D-Down
-      14: (1 << 6),  // dpad left → D-Left
-      15: (1 << 7),  // dpad right → D-Right
-      4: (1 << 10),  // LB → L (JOYPAD_L)
-      5: (1 << 11),  // RB → R (JOYPAD_R)
-      6: (1 << 12),  // LT → Z (JOYPAD_L2)
+      0: 1 << 0, // face bottom (A/Cross) → N64 A (JOYPAD_B)
+      1: 1 << 1, // face right (B/Circle) → N64 B (JOYPAD_Y)
+      9: 1 << 3, // start → Start
+      12: 1 << 4, // dpad up → D-Up
+      13: 1 << 5, // dpad down → D-Down
+      14: 1 << 6, // dpad left → D-Left
+      15: 1 << 7, // dpad right → D-Right
+      4: 1 << 10, // LB → L (JOYPAD_L)
+      5: 1 << 11, // RB → R (JOYPAD_R)
+      6: 1 << 12, // LT → Z (JOYPAD_L2)
     },
     axes: {
-      stickX: { index: 0, bits: [16, 17] },  // X+→right(16), X-→left(17)
-      stickY: { index: 1, bits: [18, 19] },  // Y+→down(18), Y-→up(19)
+      stickX: { index: 0, bits: [16, 17] }, // X+→right(16), X-→left(17)
+      stickY: { index: 1, bits: [18, 19] }, // Y+→down(18), Y-→up(19)
     },
     axisButtons: {
-      2: { pos: (1 << 21), neg: (1 << 20) },  // R stick X: pos(right)→CRight(21), neg(left)→CLeft(20) — core inverts X
-      3: { pos: (1 << 22), neg: (1 << 23) },  // R stick Y: pos→CDown(22), neg→CUp(23)
+      2: { pos: 1 << 21, neg: 1 << 20 }, // R stick X: pos(right)→CRight(21), neg(left)→CLeft(20) — core inverts X
+      3: { pos: 1 << 22, neg: 1 << 23 }, // R stick Y: pos→CDown(22), neg→CUp(23)
     },
     deadzone: 0.3,
   };
@@ -167,8 +167,8 @@
     for (const axisCfg of Object.values(profile.axes)) {
       if (axisCfg.index < gp.axes.length) {
         const val = gp.axes[axisCfg.index];
-        if (val > dz)  mask |= (1 << axisCfg.bits[0]);  // positive
-        if (val < -dz) mask |= (1 << axisCfg.bits[1]);  // negative
+        if (val > dz) mask |= 1 << axisCfg.bits[0]; // positive
+        if (val < -dz) mask |= 1 << axisCfg.bits[1]; // negative
       }
     }
 
@@ -179,7 +179,7 @@
         const ai = parseInt(axIdx, 10);
         if (ai < gp.axes.length) {
           const v = gp.axes[ai];
-          if (v > dz)  mask |= cfg.pos;
+          if (v > dz) mask |= cfg.pos;
           if (v < -dz) mask |= cfg.neg;
         }
       }
@@ -290,7 +290,9 @@
     hasCustomProfile: (gamepadId) => {
       try {
         return localStorage.getItem(`gamepad-profile:${gamepadId}`) !== null;
-      } catch (_) { return false; }
+      } catch (_) {
+        return false;
+      }
     },
 
     // Expose the real getGamepads (before lockstep overrides it)

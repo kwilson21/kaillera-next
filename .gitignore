@@ -19,6 +19,10 @@ web/static/roms/
 # Environment
 .env
 
+# Node (prettier dev dependency)
+node_modules/
+package-lock.json
+
 # OS
 .DS_Store
 

@@ -28,8 +28,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from fastapi.responses import Response
 
 from src.api.signaling import MAX_ROOMS, rooms
 from src.ratelimit import check_ip
@@ -97,31 +96,51 @@ _STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 
 # ── Security headers middleware ───────────────────────────────────────────────
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[override]
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline' blob:; "
-            "style-src 'self' 'unsafe-inline' https://cdn.emulatorjs.org; "
-            "connect-src 'self' wss: ws: https://cdn.emulatorjs.org https://cdn.socket.io blob:; "
-            "img-src 'self' data: blob:; "
-            "media-src 'self' blob:; "
-            "worker-src 'self' blob: https://cdn.emulatorjs.org; "
-            "font-src 'self' https://cdn.emulatorjs.org data:"
-        )
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["Cache-Control"] = self._cache_control(request.url.path)
-        return response
 
-    @staticmethod
-    def _cache_control(path: str) -> str:
-        production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
-        if not production:
+class SecurityHeadersMiddleware:
+    """Pure ASGI middleware that injects security and cache-control headers."""
+
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline' blob:; "
+        "style-src 'self' 'unsafe-inline' https://cdn.emulatorjs.org; "
+        "connect-src 'self' wss: ws: https://cdn.emulatorjs.org https://cdn.socket.io blob:; "
+        "img-src 'self' data: blob:; "
+        "media-src 'self' blob:; "
+        "worker-src 'self' blob: https://cdn.emulatorjs.org; "
+        "font-src 'self' https://cdn.emulatorjs.org data:"
+    )
+
+    def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
+        self.app = app
+        self._allow_cache = allow_cache
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Extract the request path for cache-control decisions.
+        path: str = scope.get("path", "/")
+
+        async def send_with_headers(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                extra: list[tuple[bytes, bytes]] = [
+                    (b"content-security-policy", self._CSP.encode()),
+                    (b"x-frame-options", b"SAMEORIGIN"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
+                    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+                    (b"cache-control", self._cache_control(path).encode()),
+                ]
+                message["headers"] = list(message.get("headers", [])) + extra
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+    def _cache_control(self, path: str) -> str:
+        if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
         # WASM core + data — versioned, cache aggressively (7 days)
         if path.startswith("/static/ejs/cores/"):
@@ -138,6 +157,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 # ── App factory ───────────────────────────────────────────────────────────────
 
+
 def create_app(lifespan=None) -> FastAPI:
     """Create and return the FastAPI app."""
     app = FastAPI(
@@ -147,7 +167,8 @@ def create_app(lifespan=None) -> FastAPI:
         openapi_url=None,
         lifespan=lifespan,
     )
-    app.add_middleware(SecurityHeadersMiddleware)
+    production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
+    app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
 
     @app.get("/health")
     def health() -> dict:
@@ -160,7 +181,7 @@ def create_app(lifespan=None) -> FastAPI:
             try:
                 return json.loads(custom)
             except json.JSONDecodeError:
-                pass
+                log.warning("ICE_SERVERS env var contains invalid JSON, using default STUN server")
         return [{"urls": "stun:stun.cloudflare.com:3478"}]
 
     @app.get("/room/{room_id}")
@@ -185,19 +206,21 @@ def create_app(lifespan=None) -> FastAPI:
         if not check_ip(_client_ip(request), "room-lookup"):
             raise HTTPException(status_code=429, detail="Rate limited")
         result = []
-        for session_id, room in rooms.items():
+        for room in rooms.values():
             if game_id and room.game_id != game_id:
                 continue
             first_player = next(iter(room.players.values()), {})
-            result.append({
-                "room_name": room.room_name,
-                "host_name": first_player.get("playerName", ""),
-                "game_id": room.game_id,
-                "player_count": len(room.players),
-                "max_players": room.max_players,
-                "status": room.status,
-                "has_password": room.password is not None,
-            })
+            result.append(
+                {
+                    "room_name": room.room_name,
+                    "host_name": first_player.get("playerName", ""),
+                    "game_id": room.game_id,
+                    "player_count": len(room.players),
+                    "max_players": room.max_players,
+                    "status": room.status,
+                    "has_password": room.password is not None,
+                }
+            )
         return result
 
     @app.get("/api/cached-state/{rom_hash}")
@@ -303,17 +326,18 @@ def create_app(lifespan=None) -> FastAPI:
             parts = f.stem.split("-")
             slot = parts[1][1:] if len(parts) > 1 and parts[1].startswith("p") else "?"
             room_code = parts[2] if len(parts) > 2 else "?"
-            ts = parts[3] if len(parts) > 3 else "0"
             src = parts[4] if len(parts) > 4 else "normal"
-            result.append({
-                "filename": f.name,
-                "size": stat.st_size,
-                "created": int(stat.st_mtime),
-                "slot": slot,
-                "room": room_code,
-                "source": src,
-                "pinned": f.name in pinned,
-            })
+            result.append(
+                {
+                    "filename": f.name,
+                    "size": stat.st_size,
+                    "created": int(stat.st_mtime),
+                    "slot": slot,
+                    "room": room_code,
+                    "source": src,
+                    "pinned": f.name in pinned,
+                }
+            )
         return result
 
     @app.get("/admin/api/logs/{filename}")

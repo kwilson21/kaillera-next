@@ -70,11 +70,22 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 
 ## Phase 5: Desync Detection + Auto-Resync [done]
 
-**Detection:** Hash 4KB slice of Wasm RDRAM every 60 frames; exchange hashes on data channel.
-Mismatch -> trigger resync.
+**Detection (star topology, host-authoritative):** Two hashing paths:
+1. C-level (patched core): `_kn_sync_hash()` hashes game-specific RDRAM regions directly
+   in C. Per-region checksums via `_kn_sync_hash_regions` for targeted desync diagnosis.
+2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access, falling back to
+   `getState()` serialization.
 
-**Resync (host-authoritative):** Desynced client sends `resync-request` -> host saves state ->
-sends `resync-state` to all peers -> all clients load it at frame F+N simultaneously. Input queues
-reset. Transparent to players (brief 1-frame glitch, then play continues).
+Host broadcasts `sync-hash:frame:hash:cycleMs` every ~120 frames (~2s). Guests compare
+their own hash — mismatch triggers resync.
 
-**Files:** `web/static/netplay-lockstep.js`.
+**Resync (host-authoritative):** Desynced client sends `sync-request` -> host exports state
+via `_kn_sync_read()` (C-level) or `getState()` (JS fallback), compresses and sends via
+DataChannel in 64KB chunks -> guest buffers state for async application at next clean frame
+boundary via `_kn_sync_write()`. No mid-frame stall — gameplay continues during transfer.
+
+**Diagnostics:** Sync log ring buffer, per-region hash logging on mismatch, drift rate
+tracking, exportable CSV logs via `debug-sync` Socket.IO event.
+
+**Files:** `web/static/netplay-lockstep.js`, `server/src/api/signaling.py` (debug-sync,
+debug-logs events), `server/src/api/app.py` (POST /api/sync-logs).

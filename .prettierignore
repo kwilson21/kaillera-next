@@ -1,0 +1,6 @@
+build/src/
+web/static/ejs/
+server/.venv/
+node_modules/
+*.wasm
+*.data

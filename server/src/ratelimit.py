@@ -1,5 +1,4 @@
 """In-memory per-IP rate limiting with rolling window."""
-from __future__ import annotations
 
 import time
 from collections import defaultdict, deque

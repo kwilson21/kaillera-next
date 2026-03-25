@@ -22,27 +22,31 @@ host-controlled start flow, responsive layout, and gamepad support are all done.
 
 ## Architecture Decision: Unified Play Page
 
-Rather than two separate JS files with duplicated UI code, the MVP should have:
+Rather than two separate JS files with duplicated UI code, the MVP has:
 
 ```
 web/
-  index.html          -- Landing / lobby page (create or join a room)
-  play.html           -- Game page (emulator + netplay, entered from lobby)
+  index.html            -- Landing / lobby page (create or join a room)
+  play.html             -- Game page (emulator + netplay, entered from lobby)
   static/
-    lobby.js          -- Lobby logic (room creation, invite links, player list)
-    lobby.css         -- Lobby styles
-    play.js           -- Unified play page controller (loads the right netplay engine)
-    play.css          -- Play page styles (responsive, mobile-friendly)
-    controller.js     -- Controller setup / mapping UI
-    touch-controls.js -- Mobile touch overlay
-    chat.js           -- Chat module (lobby + in-game)
-    netplay-lockstep.js  -- (existing, refactored to export an init function)
-    netplay-streaming.js    -- (existing, refactored to export an init function)
+    lobby.js            -- Lobby logic (room creation, invite links, player list)
+    lobby.css           -- Lobby styles
+    play.js             -- Unified play page controller (loads the right netplay engine)
+    play.css            -- Play page styles (responsive, mobile-friendly)
+    gamepad-manager.js  -- Profile-based gamepad detection, mapping, slot assignment
+    virtual-gamepad.js  -- On-screen touch controls for mobile
+    api-sandbox.js      -- Browser API interception (rAF, getGamepads) for manual frame stepping
+    kn-state.js         -- Shared state module
+    shared.js           -- Shared utilities (cheats, escaping)
+    core-redirector.js  -- Redirect EJS core download to patched WASM
+    audio-worklet-processor.js -- AudioWorklet ring buffer for lockstep audio
+    netplay-lockstep.js -- Deterministic lockstep engine (4P mesh WebRTC)
+    netplay-streaming.js -- Streaming engine (host video → guests via WebRTC MediaStream)
 ```
 
 The key refactor: extract the `buildUI()` / room management code out of the
-netplay scripts. The netplay scripts should only handle the WebRTC + game sync
-logic. The new `play.js` handles the UI shell and delegates to the right engine.
+netplay scripts. The netplay scripts only handle WebRTC + game sync logic.
+`play.js` handles the UI shell and delegates to the right engine.
 
 ---
 
@@ -54,7 +58,7 @@ These items are the minimum needed so that a friend can click a link, land on a
 page that makes sense, and start playing. Without any one of these, the friend
 test fails.
 
-#### P0.1: Lobby Page with Invite Links
+#### P0.1: Lobby Page with Invite Links [done]
 **Effort: M (2-3 days)**
 **Dependencies: None**
 
@@ -74,7 +78,7 @@ Create `web/index.html` as a proper landing page and `web/play.html` as the game
 - Friend opens link, lands in lobby, sees host's name
 - Manual code entry also works from the landing page
 
-#### P0.2: Host-Controlled Start Flow
+#### P0.2: Host-Controlled Start Flow [done]
 **Effort: M (2-3 days)**
 **Dependencies: P0.1**
 
@@ -93,7 +97,7 @@ Replace the current auto-start-on-connection behavior with an explicit flow.
 - All players see each other in the player list before start
 - Mode selection works (lockstep vs streaming)
 
-#### P0.3: Refactor Netplay Scripts for MVP Integration
+#### P0.3: Refactor Netplay Scripts for MVP Integration [done]
 **Effort: M (2-3 days)**
 **Dependencies: P0.1, P0.2**
 
@@ -118,7 +122,7 @@ This is the riskiest item because it touches working, tested code. Approach:
 - Streaming mode works end-to-end through the new UI
 - Existing Playwright tests still pass (or are updated to match new flow)
 
-#### P0.4: Basic Responsive Layout
+#### P0.4: Basic Responsive Layout [done]
 **Effort: S (1 day)**
 **Dependencies: P0.1**
 
@@ -135,7 +139,7 @@ Make the play page work on mobile screens.
 - Game canvas fills available width without overflow
 - All buttons are tappable
 
-#### P0.5: Minimal Gamepad Support
+#### P0.5: Minimal Gamepad Support [done]
 **Effort: S (1-2 days)**
 **Dependencies: P0.3**
 
@@ -160,7 +164,7 @@ Make USB/Bluetooth controllers work out of the box.
 These items significantly improve the experience but are not blockers for the
 first friend test. A friend can play without these, but they will ask "how do I..."
 
-#### P1.1: Touch Controls for Mobile
+#### P1.1: Touch Controls for Mobile [done]
 **Effort: L (3-4 days)**
 **Dependencies: P0.4**
 
@@ -179,7 +183,7 @@ On-screen touch controls for phones/tablets.
 - Controls are responsive and correctly mapped
 - Overlay does not cover critical game elements
 
-#### P1.2: Controller Mapping UI
+#### P1.2: Controller Mapping UI [done]
 **Effort: M (2-3 days)**
 **Dependencies: P0.5**
 
@@ -198,7 +202,7 @@ Let users customize their button mappings.
 - Mappings persist across sessions
 - Works for both keyboard and gamepad
 
-#### P1.3: In-Game Chat
+#### P1.3: In-Game Chat [cut — not needed for friend test]
 **Effort: M (2 days)**
 **Dependencies: P0.3**
 
@@ -217,7 +221,7 @@ Text chat in the lobby and during gameplay.
 - Players can chat during gameplay
 - Chat works on mobile
 
-#### P1.4: Connection Status and Error Handling
+#### P1.4: Connection Status and Error Handling [done]
 **Effort: S (1-2 days)**
 **Dependencies: P0.3**
 
@@ -236,7 +240,7 @@ Users need to know what is happening, especially when things go wrong.
 - Errors produce human-readable messages with suggested actions
 - No silent failures
 
-#### P1.5: End Game / Rematch Flow
+#### P1.5: End Game / Rematch Flow [done]
 **Effort: S (1 day)**
 **Dependencies: P0.2**
 

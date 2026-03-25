@@ -1,259 +1,294 @@
-<!DOCTYPE html>
+<!doctype html>
 <!-- Netplay powered by the spirit of EmuLinker and SupraClient -->
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>kaillera-next</title>
-  <link rel="stylesheet" href="/static/play.css">
-</head>
-<body>
-  <!-- Pre-game overlay -->
-  <div id="overlay" class="hidden">
-    <div class="overlay-card">
-      <div class="card-header">
-        <h2>Room: <span id="room-display"></span></h2>
-        <button id="copy-link" class="copy-btn" title="Copy invite link">Copy Link</button>
-      </div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>kaillera-next</title>
+    <link rel="stylesheet" href="/static/play.css" />
+  </head>
+  <body>
+    <!-- Pre-game overlay -->
+    <div id="overlay" class="hidden">
+      <div class="overlay-card">
+        <div class="card-header">
+          <h2>Room: <span id="room-display"></span></h2>
+          <button id="copy-link" class="copy-btn" title="Copy invite link">Copy Link</button>
+        </div>
 
-      <div class="card-section">
-        <div id="player-list">
-          <div class="player-slot" data-slot="0">
-            <span class="slot-num">P1</span>
-            <span class="name empty">Open</span>
-            <span class="gamepad"></span>
-            <span class="device"></span>
+        <div class="card-section">
+          <div id="player-list">
+            <div class="player-slot" data-slot="0">
+              <span class="slot-num">P1</span>
+              <span class="name empty">Open</span>
+              <span class="gamepad"></span>
+              <span class="device"></span>
+            </div>
+            <div class="player-slot" data-slot="1">
+              <span class="slot-num">P2</span>
+              <span class="name empty">Open</span>
+              <span class="gamepad"></span>
+              <span class="device"></span>
+            </div>
+            <div class="player-slot" data-slot="2">
+              <span class="slot-num">P3</span>
+              <span class="name empty">Open</span>
+              <span class="gamepad"></span>
+              <span class="device"></span>
+            </div>
+            <div class="player-slot" data-slot="3">
+              <span class="slot-num">P4</span>
+              <span class="name empty">Open</span>
+              <span class="gamepad"></span>
+              <span class="device"></span>
+            </div>
           </div>
-          <div class="player-slot" data-slot="1">
-            <span class="slot-num">P2</span>
-            <span class="name empty">Open</span>
-            <span class="gamepad"></span>
-            <span class="device"></span>
-          </div>
-          <div class="player-slot" data-slot="2">
-            <span class="slot-num">P3</span>
-            <span class="name empty">Open</span>
-            <span class="gamepad"></span>
-            <span class="device"></span>
-          </div>
-          <div class="player-slot" data-slot="3">
-            <span class="slot-num">P4</span>
-            <span class="name empty">Open</span>
-            <span class="gamepad"></span>
-            <span class="device"></span>
-          </div>
+          <div id="spectator-list"></div>
         </div>
-        <div id="spectator-list"></div>
-      </div>
 
-      <div class="card-section">
-        <div id="rom-drop" class="rom-drop">
-          <p>Tap or drop ROM file here</p>
-          <p class="rom-hint">.z64 / .n64 / .v64 / .zip</p>
-          <p id="rom-status" class="rom-status"></p>
-        </div>
-        <div id="rom-sharing-prompt" style="display:none">
-          <p class="rom-sharing-prompt-text">The host is offering to share their ROM file with you.</p>
-          <p class="rom-sharing-prompt-legal">By accepting, you confirm you own a legal copy of this game. The file is transferred directly from the host — not through any server.</p>
-          <div class="rom-sharing-prompt-buttons">
-            <button id="rom-accept-btn" class="small-btn">Accept</button>
-            <button id="rom-decline-btn" class="small-btn">Decline — I'll load my own</button>
+        <div class="card-section">
+          <div id="rom-drop" class="rom-drop">
+            <p>Tap or drop ROM file here</p>
+            <p class="rom-hint">.z64 / .n64 / .v64 / .zip</p>
+            <p id="rom-status" class="rom-status"></p>
+          </div>
+          <div id="rom-sharing-prompt" style="display: none">
+            <p class="rom-sharing-prompt-text">The host is offering to share their ROM file with you.</p>
+            <p class="rom-sharing-prompt-legal">
+              By accepting, you confirm you own a legal copy of this game. The file is transferred directly from the
+              host — not through any server.
+            </p>
+            <div class="rom-sharing-prompt-buttons">
+              <button id="rom-accept-btn" class="small-btn">Accept</button>
+              <button id="rom-decline-btn" class="small-btn">Decline — I'll load my own</button>
+            </div>
+          </div>
+          <div id="rom-transfer-progress" style="display: none">
+            <div class="rom-progress-bar-container">
+              <div id="rom-progress-bar" class="rom-progress-bar"></div>
+            </div>
+            <p id="rom-progress-text" class="rom-status">Waiting for ROM from host...</p>
+            <button id="rom-transfer-retry" class="small-btn" style="display: none">Retry</button>
+            <button id="rom-transfer-cancel" class="small-btn">Cancel</button>
           </div>
         </div>
-        <div id="rom-transfer-progress" style="display:none">
-          <div class="rom-progress-bar-container">
-            <div id="rom-progress-bar" class="rom-progress-bar"></div>
+
+        <div class="card-section" id="gamepad-area">
+          <div id="gamepad-status">No controller detected</div>
+          <div id="gamepad-controls">
+            <button id="remap-btn" class="small-btn">Remap</button>
+            <button id="reset-mapping-btn" class="small-btn">Reset</button>
           </div>
-          <p id="rom-progress-text" class="rom-status">Waiting for ROM from host...</p>
-          <button id="rom-transfer-retry" class="small-btn" style="display:none">Retry</button>
-          <button id="rom-transfer-cancel" class="small-btn">Cancel</button>
+          <div id="remap-wizard" style="display: none">
+            <span id="remap-prompt"></span>
+            <span id="remap-progress"></span>
+            <button id="remap-back" class="small-btn" disabled>Back</button>
+            <button id="remap-skip" class="small-btn">Skip</button>
+            <button id="remap-cancel" class="small-btn">Cancel</button>
+          </div>
         </div>
-      </div>
 
-      <div class="card-section" id="gamepad-area">
-        <div id="gamepad-status">No controller detected</div>
-        <div id="gamepad-controls">
-          <button id="remap-btn" class="small-btn">Remap</button>
-          <button id="reset-mapping-btn" class="small-btn">Reset</button>
-        </div>
-        <div id="remap-wizard" style="display:none">
-          <span id="remap-prompt"></span>
-          <span id="remap-progress"></span>
-          <button id="remap-back" class="small-btn" disabled>Back</button>
-          <button id="remap-skip" class="small-btn">Skip</button>
-          <button id="remap-cancel" class="small-btn">Cancel</button>
-        </div>
-      </div>
-
-      <div class="card-section" id="host-controls" style="display:none">
-        <div class="host-options-row">
-          <label for="mode-select" class="mode-label">Mode:</label>
-          <select id="mode-select" title="Lockstep: all players run the emulator in sync. Streaming: host runs the emulator, guests watch a video stream.">
-            <option value="lockstep">Lockstep</option>
-            <option value="streaming">Streaming</option>
-          </select>
-        </div>
-        <div id="lockstep-options">
+        <div class="card-section" id="host-controls" style="display: none">
           <div class="host-options-row">
-            <label><input type="checkbox" id="opt-rollback"> Rollback <span class="opt-hint">(experimental)</span></label>
+            <label for="mode-select" class="mode-label">Mode:</label>
+            <select
+              id="mode-select"
+              title="Lockstep: all players run the emulator in sync. Streaming: host runs the emulator, guests watch a video stream."
+            >
+              <option value="lockstep">Lockstep</option>
+              <option value="streaming">Streaming</option>
+            </select>
+          </div>
+          <div id="lockstep-options">
+            <div class="host-options-row">
+              <label
+                ><input type="checkbox" id="opt-rollback" /> Rollback
+                <span class="opt-hint">(experimental)</span></label
+              >
+            </div>
+          </div>
+          <div id="rom-sharing-options" class="host-options-row">
+            <label><input type="checkbox" id="opt-rom-sharing" disabled /> Share ROM with players</label>
+          </div>
+          <p id="rom-sharing-disclaimer" class="opt-hint rom-sharing-disclaimer" style="display: none">
+            By sharing, you confirm you have the legal right to distribute this file. Recipients must own a legal copy
+            of this game.
+          </p>
+          <button id="start-btn" disabled>Start Game (need 2+)</button>
+        </div>
+
+        <div class="card-section" id="player-controls" style="display: none">
+          <div class="host-options-row" id="delay-picker">
+            <label>Frame Delay:</label>
+            <label><input type="checkbox" id="delay-auto" checked /> Auto</label>
+            <select id="delay-select" disabled>
+              <option value="0">--</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+            </select>
+            <span id="delay-effective" class="opt-hint"></span>
           </div>
         </div>
-        <div id="rom-sharing-options" class="host-options-row">
-          <label><input type="checkbox" id="opt-rom-sharing" disabled> Share ROM with players</label>
+
+        <!-- ROM ownership declaration (streaming mode guests) -->
+        <div id="rom-declare-prompt" style="display: none" class="card-section">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
+            <input type="checkbox" id="rom-declare-cb" />
+            <span style="font-size: 13px">I own a legal copy of this game and accept all liability</span>
+          </label>
         </div>
-        <p id="rom-sharing-disclaimer" class="opt-hint rom-sharing-disclaimer" style="display:none">
-          By sharing, you confirm you have the legal right to distribute this file. Recipients must own a legal copy of this game.
-        </p>
-        <button id="start-btn" disabled>Start Game (need 2+)</button>
-      </div>
 
-      <div class="card-section" id="player-controls" style="display:none">
-        <div class="host-options-row" id="delay-picker">
-          <label>Frame Delay:</label>
-          <label><input type="checkbox" id="delay-auto" checked> Auto</label>
-          <select id="delay-select" disabled>
-            <option value="0">--</option>
-            <option value="1">1</option><option value="2">2</option>
-            <option value="3">3</option><option value="4">4</option>
-            <option value="5">5</option><option value="6">6</option>
-            <option value="7">7</option><option value="8">8</option>
-            <option value="9">9</option>
-          </select>
-          <span id="delay-effective" class="opt-hint"></span>
+        <p id="guest-status" style="display: none">Waiting for players...</p>
+        <div id="engine-status"></div>
+
+        <button id="leave-btn">Leave</button>
+      </div>
+    </div>
+
+    <!-- In-game toolbar -->
+    <div id="toolbar" class="hidden">
+      <span id="toolbar-room"></span>
+      <span id="toolbar-status"></span>
+      <div class="toolbar-spacer"></div>
+      <div id="share-wrapper" style="position: relative">
+        <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
+        <div id="share-dropdown" class="share-dropdown hidden">
+          <button id="share-play" class="share-option">Copy Play Link</button>
+          <button id="share-watch" class="share-option">Copy Watch Link</button>
         </div>
       </div>
-
-      <!-- ROM ownership declaration (streaming mode guests) -->
-      <div id="rom-declare-prompt" style="display:none" class="card-section">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-          <input type="checkbox" id="rom-declare-cb">
-          <span style="font-size:13px;">I own a legal copy of this game and accept all liability</span>
-        </label>
-      </div>
-
-      <p id="guest-status" style="display:none">Waiting for players...</p>
-      <div id="engine-status"></div>
-
-      <button id="leave-btn">Leave</button>
+      <button id="toolbar-info" class="toolbar-toggle" title="Toggle info overlay">Info</button>
+      <button id="toolbar-remap" class="toolbar-toggle" title="Remap controls">Remap</button>
+      <button id="toolbar-logs" class="toolbar-toggle" title="Dump sync logs to server">Dump Logs</button>
+      <button id="toolbar-leave">Leave Game</button>
+      <button id="toolbar-end" style="display: none">End Game</button>
     </div>
-  </div>
 
-  <!-- In-game toolbar -->
-  <div id="toolbar" class="hidden">
-    <span id="toolbar-room"></span>
-    <span id="toolbar-status"></span>
-    <div class="toolbar-spacer"></div>
-    <div id="share-wrapper" style="position:relative">
-      <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
-      <div id="share-dropdown" class="share-dropdown hidden">
-        <button id="share-play" class="share-option">Copy Play Link</button>
-        <button id="share-watch" class="share-option">Copy Watch Link</button>
+    <!-- In-game remap overlay -->
+    <div id="ingame-remap" class="hidden">
+      <div class="ingame-remap-card">
+        <div id="ingame-remap-prompt"></div>
+        <div id="ingame-remap-progress"></div>
+        <div class="ingame-remap-buttons">
+          <button id="ingame-remap-back" class="small-btn" disabled>Back</button>
+          <button id="ingame-remap-skip" class="small-btn">Skip</button>
+          <button id="ingame-remap-cancel" class="small-btn">Cancel</button>
+        </div>
       </div>
     </div>
-    <button id="toolbar-info" class="toolbar-toggle" title="Toggle info overlay">Info</button>
-    <button id="toolbar-remap" class="toolbar-toggle" title="Remap controls">Remap</button>
-    <button id="toolbar-logs" class="toolbar-toggle" title="Dump sync logs to server">Dump Logs</button>
-    <button id="toolbar-leave">Leave Game</button>
-    <button id="toolbar-end" style="display:none">End Game</button>
-  </div>
 
-  <!-- In-game remap overlay -->
-  <div id="ingame-remap" class="hidden">
-    <div class="ingame-remap-card">
-      <div id="ingame-remap-prompt"></div>
-      <div id="ingame-remap-progress"></div>
-      <div class="ingame-remap-buttons">
-        <button id="ingame-remap-back" class="small-btn" disabled>Back</button>
-        <button id="ingame-remap-skip" class="small-btn">Skip</button>
-        <button id="ingame-remap-cancel" class="small-btn">Cancel</button>
+    <!-- In-game info overlay -->
+    <div id="info-overlay" class="hidden">
+      <div id="info-header"></div>
+      <div id="info-stats"></div>
+      <div id="info-peers"></div>
+      <button
+        id="dump-logs-btn"
+        style="
+          margin-top: 8px;
+          padding: 4px 10px;
+          font-size: 11px;
+          cursor: pointer;
+          background: #444;
+          color: #ccc;
+          border: 1px solid #666;
+          border-radius: 4px;
+        "
+      >
+        Dump Logs
+      </button>
+    </div>
+
+    <!-- Gamepad connected indicator (mobile) -->
+    <div id="gamepad-indicator" class="hidden">Gamepad connected</div>
+
+    <!-- Tap-to-unmute banner for streaming guests on mobile -->
+    <div id="unmute-banner" class="hidden">Tap to unmute</div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container"></div>
+
+    <!-- Error overlay -->
+    <div id="error-msg" class="hidden">
+      <div class="error-card"></div>
+    </div>
+
+    <!-- Fetch ICE server config from server (before netplay scripts load) -->
+    <script>
+      fetch('/ice-servers')
+        .then((r) => r.json())
+        .then((s) => {
+          window._iceServers = s;
+        })
+        .catch(() => {
+          window._iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+        });
+    </script>
+
+    <!-- Native API reference management (must load before everything) -->
+    <script src="/static/api-sandbox.js"></script>
+
+    <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
+    <script src="/static/core-redirector.js"></script>
+
+    <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
+    <div id="game"></div>
+
+    <!-- Loading overlay — covers game area during boot/sync -->
+    <div id="game-loading" class="hidden">
+      <div class="game-loading-content">
+        <div class="game-loading-spinner"></div>
+        <span id="game-loading-text">Loading...</span>
       </div>
     </div>
-  </div>
 
-  <!-- In-game info overlay -->
-  <div id="info-overlay" class="hidden">
-    <div id="info-header"></div>
-    <div id="info-stats"></div>
-    <div id="info-peers"></div>
-    <button id="dump-logs-btn" style="margin-top:8px;padding:4px 10px;font-size:11px;cursor:pointer;background:#444;color:#ccc;border:1px solid #666;border-radius:4px;">Dump Logs</button>
-  </div>
-
-  <!-- Gamepad connected indicator (mobile) -->
-  <div id="gamepad-indicator" class="hidden">Gamepad connected</div>
-
-  <!-- Tap-to-unmute banner for streaming guests on mobile -->
-  <div id="unmute-banner" class="hidden">Tap to unmute</div>
-
-  <!-- Toast notifications -->
-  <div id="toast-container"></div>
-
-  <!-- Error overlay -->
-  <div id="error-msg" class="hidden">
-    <div class="error-card"></div>
-  </div>
-
-  <!-- Fetch ICE server config from server (before netplay scripts load) -->
-  <script>
-    fetch('/ice-servers').then(r => r.json()).then(s => { window._iceServers = s; }).catch(() => {
-      window._iceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
-    });
-  </script>
-
-  <!-- Native API reference management (must load before everything) -->
-  <script src="/static/api-sandbox.js"></script>
-
-  <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
-  <script src="/static/core-redirector.js"></script>
-
-  <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
-  <div id="game"></div>
-
-  <!-- Loading overlay — covers game area during boot/sync -->
-  <div id="game-loading" class="hidden">
-    <div class="game-loading-content">
-      <div class="game-loading-spinner"></div>
-      <span id="game-loading-text">Loading...</span>
+    <!-- Gesture prompt — shown for guests who need a click/tap before emulator starts -->
+    <div id="gesture-prompt" class="hidden">
+      <div class="gesture-prompt-content">
+        <div class="gesture-prompt-icon"></div>
+        <span class="gesture-prompt-text">Tap to start</span>
+      </div>
     </div>
-  </div>
 
-  <!-- Gesture prompt — shown for guests who need a click/tap before emulator starts -->
-  <div id="gesture-prompt" class="hidden">
-    <div class="gesture-prompt-content">
-      <div class="gesture-prompt-icon"></div>
-      <span class="gesture-prompt-text">Tap to start</span>
-    </div>
-  </div>
+    <script>
+      var EJS_player = '#game';
+      var EJS_core = 'n64';
+      var EJS_startOnLoaded = true; // auto-start: skip "press start" overlay (critical for mobile)
+      // EJS_gameUrl set by play.js when user drops a ROM file
+      var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+    </script>
 
-  <script>
-    var EJS_player       = '#game';
-    var EJS_core         = 'n64';
-    var EJS_startOnLoaded = true;  // auto-start: skip "press start" overlay (critical for mobile)
-    // EJS_gameUrl set by play.js when user drops a ROM file
-    var EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
-  </script>
+    <!-- Socket.IO -->
+    <script
+      src="https://cdn.socket.io/4.8.3/socket.io.min.js"
+      integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"
+      crossorigin="anonymous"
+    ></script>
 
-  <!-- Socket.IO -->
-  <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"
-          integrity="sha384-kzavj5fiMwLKzzD1f8S7TeoVIEi7uKHvbTA3ueZkrzYq75pNQUiUi6Dy98Q3fxb0"
-          crossorigin="anonymous"></script>
+    <!-- Centralized cross-module state -->
+    <script src="/static/kn-state.js"></script>
 
-  <!-- Centralized cross-module state -->
-  <script src="/static/kn-state.js"></script>
+    <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
+    <script src="/static/gamepad-manager.js"></script>
 
-  <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
-  <script src="/static/gamepad-manager.js"></script>
+    <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
+    <script src="/static/shared.js"></script>
 
-  <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
-  <script src="/static/shared.js"></script>
+    <!-- Virtual gamepad for mobile streaming guests -->
+    <script src="/static/virtual-gamepad.js"></script>
 
-  <!-- Virtual gamepad for mobile streaming guests -->
-  <script src="/static/virtual-gamepad.js"></script>
+    <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
+    <script src="/static/netplay-lockstep.js?v=2"></script>
+    <script src="/static/netplay-streaming.js"></script>
 
-  <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
-  <script src="/static/netplay-lockstep.js?v=2"></script>
-  <script src="/static/netplay-streaming.js"></script>
-
-  <!-- Play page controller -->
-  <script src="/static/play.js"></script>
-</body>
+    <!-- Play page controller -->
+    <script src="/static/play.js"></script>
+  </body>
 </html>

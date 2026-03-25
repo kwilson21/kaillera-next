@@ -37,22 +37,33 @@
     if (localStorage.getItem('kn-core-version') === CORE_VERSION) {
       idbClearPromise = Promise.resolve();
     } else if (indexedDB.databases) {
-      idbClearPromise = indexedDB.databases().then((databases) => {
-        const deletes = databases
-          .filter((db) => db.name && (db.name.includes('emulator') ||
-              db.name.includes('EJS') || db.name.includes('ejs') ||
-              db.name.includes('/data/')))
-          .map((db) => new Promise((resolve) => {
-            const req = indexedDB.deleteDatabase(db.name);
-            req.onsuccess = resolve;
-            req.onerror = resolve;
-            req.onblocked = resolve;
-          }));
-        return Promise.all(deletes);
-      }).then(() => {
-        localStorage.setItem('kn-core-version', CORE_VERSION);
-        console.log('[core-redirector] IDB cache cleared');
-      });
+      idbClearPromise = indexedDB
+        .databases()
+        .then((databases) => {
+          const deletes = databases
+            .filter(
+              (db) =>
+                db.name &&
+                (db.name.includes('emulator') ||
+                  db.name.includes('EJS') ||
+                  db.name.includes('ejs') ||
+                  db.name.includes('/data/')),
+            )
+            .map(
+              (db) =>
+                new Promise((resolve) => {
+                  const req = indexedDB.deleteDatabase(db.name);
+                  req.onsuccess = resolve;
+                  req.onerror = resolve;
+                  req.onblocked = resolve;
+                }),
+            );
+          return Promise.all(deletes);
+        })
+        .then(() => {
+          localStorage.setItem('kn-core-version', CORE_VERSION);
+          console.log('[core-redirector] IDB cache cleared');
+        });
     } else {
       idbClearPromise = Promise.resolve();
     }
@@ -68,7 +79,7 @@
   const origXHROpen = XMLHttpRequest.prototype.open;
 
   // NOTE: kept as function — uses `this` and `arguments`
-  window.fetch = function(url, opts) {
+  window.fetch = function (url, opts) {
     const u = typeof url === 'string' ? url : (url?.url ?? '');
     if (u.includes(CORE_FILENAME)) {
       console.log('[core-redirector] Redirecting core fetch to:', LOCAL_CORE_URL);
@@ -78,7 +89,7 @@
   };
 
   // NOTE: kept as function — uses `this` and `arguments`
-  XMLHttpRequest.prototype.open = function(method, url) {
+  XMLHttpRequest.prototype.open = function (method, url) {
     if (typeof url === 'string' && url.includes(CORE_FILENAME)) {
       console.log('[core-redirector] Redirecting XHR core to:', LOCAL_CORE_URL);
       arguments[1] = LOCAL_CORE_URL;

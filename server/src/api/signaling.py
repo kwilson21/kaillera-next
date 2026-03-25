@@ -1,20 +1,40 @@
 """
-Socket.IO signaling server — EmulatorJS-Netplay compatible.
+Socket.IO signaling server for kaillera-next netplay.
 
-EmulatorJS's built-in netplay UI connects to {EJS_netplayServer}/socket.io/
-and fires these events:
+Handles room lifecycle, WebRTC signaling, ROM sharing coordination,
+and game data relay. All events use the default Socket.IO namespace (/).
 
-  open-room   — host creates a room
-  join-room   — player joins an existing room
-  leave-room  — player leaves (also fired on disconnect)
-  webrtc-signal — ICE candidate / SDP offer / answer forwarding
-  data-message / snapshot / input — broadcast to all peers in room
+Client → Server events:
+  open-room        — host creates a room
+  join-room        — player joins an existing room (or as spectator)
+  leave-room       — player leaves (also fired on disconnect)
+  claim-slot       — spectator claims a vacated player slot
+  start-game       — host starts the game (broadcasts mode + settings)
+  end-game         — host ends the game (returns room to lobby)
+  set-mode         — host changes netplay mode (lockstep/streaming)
+  rom-sharing-toggle — host enables/disables P2P ROM sharing
+  rom-ready        — player signals ROM is loaded
+  rom-declare      — player declares ROM ownership (streaming mode)
+  input-type       — player reports input type (keyboard/gamepad)
+  device-type      — player reports device type (desktop/mobile)
+  webrtc-signal    — ICE candidate / SDP offer / answer forwarding
+  rom-signal       — WebRTC signaling for pre-game ROM transfer
+  data-message     — broadcast to all peers in room (save states, late-join)
+  snapshot         — game snapshot relay (broadcast to room)
+  input            — input relay for streaming mode (broadcast to room)
+  debug-sync       — upload sync diagnostic log
+  debug-logs       — upload debug console log
+
+Server → Room broadcasts:
+  users-updated    — room state (players, spectators, owner)
+  game-started     — game started with mode and settings
+  game-ended       — game ended, back to lobby
+  room-closed      — room force-closed (host left, server shutdown)
+  rom-sharing-updated — ROM sharing toggle state changed
 
 Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 (see api/app.py — it imports `rooms` from here)
 """
-
-from __future__ import annotations
 
 import asyncio
 import hmac
@@ -25,7 +45,7 @@ from dataclasses import dataclass, field
 
 import socketio
 
-from src.ratelimit import check, check_ip, register_sid, connection_allowed, unregister_sid, cleanup
+from src.ratelimit import check, check_ip, cleanup, connection_allowed, register_sid, unregister_sid
 
 log = logging.getLogger(__name__)
 
@@ -56,9 +76,10 @@ sio = socketio.AsyncServer(
 
 # ── Room state ────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class Room:
-    owner: str                        # sid of creator
+    owner: str  # sid of creator
     room_name: str
     game_id: str
     password: str | None
@@ -69,10 +90,10 @@ class Room:
     # slots: slot_index (0-3) -> playerId
     spectators: dict[str, dict] = field(default_factory=dict)
     # spectators: playerId -> {"socketId": sid, "playerName": ...}
-    status: str = "lobby"       # "lobby" or "playing"
-    mode: str | None = None     # "lockstep" or "streaming", set on start-game
-    rom_hash: str | None = None # SHA-256 of ROM, set on start-game
-    rom_sharing: bool = False     # whether host is sharing ROM via P2P
+    status: str = "lobby"  # "lobby" or "playing"
+    mode: str | None = None  # "lockstep" or "streaming", set on start-game
+    rom_hash: str | None = None  # SHA-256 of ROM, set on start-game
+    rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
     rom_declared: set[str] = field(default_factory=set)  # sids that declared ROM ownership (streaming)
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
@@ -95,6 +116,7 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _players_payload(room: Room) -> dict:
     """Return the payload emitted in users-updated."""
     pid_to_slot = {pid: slot for slot, pid in room.slots.items()}
@@ -110,10 +132,7 @@ def _players_payload(room: Room) -> dict:
             }
             for pid, info in room.players.items()
         },
-        "spectators": {
-            pid: info
-            for pid, info in room.spectators.items()
-        },
+        "spectators": dict(room.spectators.items()),
         "owner": room.owner,
         "romSharing": room.rom_sharing,
         "mode": room.mode,
@@ -207,6 +226,7 @@ async def _leave(sid: str) -> None:
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
+
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
     forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
@@ -230,6 +250,7 @@ async def _cleanup_empty_rooms() -> None:
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
+
 
 @sio.on("open-room")
 async def open_room(sid: str, data: dict) -> str | None:
@@ -388,13 +409,13 @@ async def start_game(sid: str, data: dict) -> str | None:
     # Streaming: check all players declared ROM ownership
     # Lockstep: check all players have ROMs (or host is sharing)
     if mode == "streaming":
-        for pid, info in room.players.items():
+        for info in room.players.values():
             if info["socketId"] == room.owner:
                 continue  # host has the ROM
             if info["socketId"] not in room.rom_declared:
                 return "Not all players have declared ROM ownership"
     elif not room.rom_sharing:
-        for pid, info in room.players.items():
+        for info in room.players.values():
             if info["socketId"] not in room.rom_ready:
                 return "Not all players have a ROM loaded"
 
@@ -403,11 +424,15 @@ async def start_game(sid: str, data: dict) -> str | None:
     rom_hash = data.get("romHash")
     if rom_hash and isinstance(rom_hash, str) and len(rom_hash) == 64:
         room.rom_hash = rom_hash
-    await sio.emit("game-started", {
-        "mode": room.mode,
-        "rollbackEnabled": data.get("rollbackEnabled", False),
-        "romHash": room.rom_hash,
-    }, room=session_id)
+    await sio.emit(
+        "game-started",
+        {
+            "mode": room.mode,
+            "rollbackEnabled": data.get("rollbackEnabled", False),
+            "romHash": room.rom_hash,
+        },
+        room=session_id,
+    )
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
     return None
 
@@ -579,43 +604,32 @@ async def rom_signal(sid: str, data: dict) -> None:
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
-@sio.on("data-message")
-async def data_message(sid: str, data: dict) -> None:
+async def _relay(sid: str, data: dict, event: str, rate_key: str) -> None:
+    """Validate, rate-check, and broadcast *data* to all peers in the sender's room."""
     if not isinstance(data, dict):
         return
-    if not check(sid, "data-message"):
+    if not check(sid, rate_key):
         return
     result = _get_room(sid)
     if result is None:
         return
-    session_id, room = result
-    await sio.emit("data-message", data, room=session_id, skip_sid=sid)
+    session_id, _room = result
+    await sio.emit(event, data, room=session_id, skip_sid=sid)
+
+
+@sio.on("data-message")
+async def data_message(sid: str, data: dict) -> None:
+    await _relay(sid, data, "data-message", "data-message")
 
 
 @sio.on("snapshot")
 async def snapshot(sid: str, data: dict) -> None:
-    if not isinstance(data, dict):
-        return
-    if not check(sid, "snapshot"):
-        return
-    result = _get_room(sid)
-    if result is None:
-        return
-    session_id, room = result
-    await sio.emit("snapshot", data, room=session_id, skip_sid=sid)
+    await _relay(sid, data, "snapshot", "snapshot")
 
 
 @sio.on("input")
 async def game_input(sid: str, data: dict) -> None:
-    if not isinstance(data, dict):
-        return
-    if not check(sid, "input"):
-        return
-    result = _get_room(sid)
-    if result is None:
-        return
-    session_id, room = result
-    await sio.emit("input", data, room=session_id, skip_sid=sid)
+    await _relay(sid, data, "input", "input")
 
 
 @sio.on("debug-sync")
@@ -627,13 +641,12 @@ async def debug_sync(sid: str, data: dict) -> None:
     if not check(sid, "debug-sync"):
         return
     from pathlib import Path
-    entry = _sid_to_room.get(sid)
-    room_id = entry[0] if entry else "?"
+
     slot = data.get("slot", "?")
     msg = str(data.get("msg", ""))[:1000]  # cap message size
     log_dir = Path(__file__).parent.parent.parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
-    with open(log_dir / "live.log", "a") as f:
+    with open(log_dir / "live.log", "a") as f:  # noqa: ASYNC230 — debug-only, gated behind DEBUG_MODE
         f.write(f"[P{slot}] {msg}\n")
         f.flush()
 
@@ -655,8 +668,7 @@ async def debug_logs(sid: str, data: dict) -> None:
 
     # Always log summary + entries to stdout (captured by docker logs)
     slot = info.get("slot", "?")
-    log.info("DEBUG-DUMP room=%s slot=%s entries=%d info=%s",
-             room_id, slot, len(logs), json.dumps(info))
+    log.info("DEBUG-DUMP room=%s slot=%s entries=%d info=%s", room_id, slot, len(logs), json.dumps(info))
     for line in logs[:5000]:
         log.info("[P%s] %s", slot, str(line)[:500])
 
@@ -664,11 +676,12 @@ async def debug_logs(sid: str, data: dict) -> None:
     if os.environ.get("DEBUG_MODE"):
         from datetime import datetime
         from pathlib import Path
+
         filename = f"debug-{room_id}-slot{slot}-{datetime.now().strftime('%H%M%S')}.log"
         log_dir = Path(__file__).parent.parent.parent.parent / "logs"
         log_dir.mkdir(exist_ok=True)
         out = log_dir / filename
-        with open(out, "w") as f:
+        with open(out, "w") as f:  # noqa: ASYNC230 — debug-only, gated behind DEBUG_MODE
             f.write(f"Room: {room_id}  SID: {sid}\n")
             f.write(f"Info: {json.dumps(info, indent=2)}\n")
             f.write(f"Entries: {len(logs)}\n---\n")

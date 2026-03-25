@@ -1,0 +1,17 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.1
+    hooks:
+      - id: ruff
+        args: [--fix, --config, server/pyproject.toml]
+        files: ^server/
+      - id: ruff-format
+        args: [--config, server/pyproject.toml]
+        files: ^server/
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        types_or: [javascript, css, json, yaml, html]
+        exclude: ^(build/src/|web/static/ejs/|node_modules/)

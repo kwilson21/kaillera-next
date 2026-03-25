@@ -11,9 +11,8 @@ V2 will re-add TCP :45000 + UDP :45000 for Mupen64Plus native netplay.
 Entry point: kaillera-server  (see pyproject.toml)
 """
 
-from __future__ import annotations
-
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -42,18 +41,17 @@ async def lifespan(_app):
     if rooms:
         log.info("Shutting down: notifying %d active room(s)", len(rooms))
         for session_id in list(rooms):
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(
                     sio.emit("room-closed", {"reason": "server-shutdown"}, room=session_id),
                     timeout=2.0,
                 )
-            except Exception:
-                pass
 
 
 def run() -> None:
     """Entry point called by `kaillera-server` CLI command."""
     from dotenv import load_dotenv
+
     load_dotenv()  # loads .env from cwd (server/) if it exists
 
     logging.basicConfig(
@@ -63,7 +61,9 @@ def run() -> None:
 
     allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
     if not allowed_origin:
-        log.error("ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development.")
+        log.error(
+            "ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development."
+        )
         sys.exit(1)
     if allowed_origin == "*":
         log.warning("CORS allowed origin is '*' — set ALLOWED_ORIGIN for production")
@@ -74,6 +74,7 @@ def run() -> None:
 
     # Serve web/ as static files — must be mounted BEFORE Socket.IO wraps the app
     from fastapi.staticfiles import StaticFiles
+
     web_dir = os.path.abspath(_WEB_DIR)
     if os.path.isdir(web_dir):
         app.mount("/static", StaticFiles(directory=os.path.join(web_dir, "static")), name="static")
@@ -85,23 +86,14 @@ def run() -> None:
     # Wrap FastAPI with Socket.IO ASGI middleware
     socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
-    # Use uvloop if available (not on all platforms)
-    loop_setting = "auto"
-    try:
-        import uvloop  # noqa: F401
-        loop_setting = "uvloop"
-    except ImportError:
-        pass
-
     port = int(os.environ.get("PORT", "27888"))
     log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
-    log.info("Listening on :%d (loop=%s)", port, loop_setting)
+    log.info("Listening on :%d", port)
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
         port=port,
         log_level="info",
-        loop=loop_setting,
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real
         # client IPs and the app sees the correct scheme (https).
         proxy_headers=True,

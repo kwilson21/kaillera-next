@@ -26,10 +26,13 @@ Both modes support:
 
 ## Quick start
 
+Requires Python 3.11+.
+
 ```bash
-# Clone and install
-git clone <repo-url>
-cd kaillera-next
+# Install with uv (recommended)
+uv pip install server/
+
+# Or with pip
 pip install server/
 
 # Run (serves both API and web frontend on :27888)
@@ -37,7 +40,7 @@ kaillera-server
 # → http://localhost:27888
 ```
 
-Or run directly:
+For development without installing:
 
 ```bash
 cd server && python -c "from src.main import run; run()"
@@ -103,6 +106,42 @@ tests/               E2E tests (pytest + Playwright)
 docs/                Roadmap, MVP plan, design specs
 ```
 
+## Building the WASM core
+
+The pre-built patched core is included at `web/static/ejs/cores/`. You only need to rebuild if you modify the C patches.
+
+The build compiles a patched mupen64plus-next core with:
+- Deterministic timing exports (`_kn_set_deterministic`, `_kn_set_frame_time`)
+- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_sync_hash_regions`)
+- Frame-locked audio exports (`_kn_get_audio_ptr`, `_kn_get_audio_samples`, `_kn_reset_audio`, `_kn_get_audio_rate`)
+- Strict IEEE 754 floating-point (`-fno-fast-math`, `-ffp-contract=off`)
+- NaN canonicalization via `wasm-opt --denan` (injected before `--asyncify`)
+- Deterministic RNG (`srand(0)`) and RTC
+
+### Build steps
+
+```bash
+# 1. Build the Docker image with Emscripten SDK (one-time, ~10 min)
+docker build -t emulatorjs-builder build/
+
+# 2. Compile the patched core (~5-15 min depending on CPU)
+docker run --rm -v $(pwd)/build:/build emulatorjs-builder bash /build/build.sh
+
+# 3. Deploy to web/static/ejs/cores/
+cp build/output/mupen64plus_next-wasm.data web/static/ejs/cores/
+```
+
+The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, applies patches from `build/patches/`, compiles to LLVM bitcode, links through RetroArch with asyncify, and packages into a 7z `.data` archive that EmulatorJS loads at runtime.
+
+### Patches
+
+| Patch | Description |
+|---|---|
+| `mupen64plus-kn-all.patch` | Core exports: deterministic timing, resync hash/read/write, audio capture |
+| `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
+| `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
+| `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override for frame-based timing |
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -119,6 +158,7 @@ docs/                Roadmap, MVP plan, design specs
 | `GET /ice-servers` | ICE/TURN server configuration |
 | `GET /api/cached-state/{rom_hash}` | Retrieve cached save state |
 | `POST /api/cache-state/{rom_hash}` | Upload save state to cache |
+| `POST /api/sync-logs` | Upload sync diagnostic logs |
 
 ## Current status
 

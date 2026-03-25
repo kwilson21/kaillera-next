@@ -2,6 +2,46 @@
 
 All notable changes to kaillera-next netplay are documented here.
 
+## [0.6.0] - 2026-03-25
+
+### Added
+- C-level resync: `_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write` WASM exports for
+  fast in-core state hashing and transfer (replaces JS-level RDRAM reads)
+- Per-region RDRAM hashing via `_kn_sync_hash_regions` for targeted desync diagnosis
+- GGPO-inspired frame pacing: frame advantage cap prevents faster machine from outrunning
+  slower peer's input stream (asymmetric EMA, skip tick when ahead by DELAY_FRAMES + 1)
+- Two-stage input stall recovery: Stage 1 (0–3s) stalls waiting, Stage 2 (3–5s) sends
+  "resend:<frame>" requesting retransmission, timeout (5s+) injects zero input
+- Sync diagnostics: `_syncLogRing` circular buffer, per-frame `_diagEventLog`,
+  exportable CSV logs, `debug-sync`/`debug-logs` Socket.IO events for remote upload
+- `POST /api/sync-logs` endpoint for sync log collection
+- Drift rate tracker with exponential summary logging and cycle time in sync-hash protocol
+- Logs toolbar button for mobile sync log download
+- Kaillera Easter eggs across frontend
+- iOS audio routing workaround and mobile touch guard
+- ROM hash algorithm tagging for state cache compatibility
+
+### Changed
+- Default port changed to 27888 (Kaillera client port)
+- Refactored all JS modules to ES2022+ (const/let, arrow functions, template literals,
+  async/await, optional chaining): audio-worklet-processor.js, play.js,
+  netplay-lockstep.js, netplay-streaming.js, virtual-gamepad.js, gamepad-manager.js
+- Minimum frame delay floor raised to 2 for frame pacing headroom
+- Sync hash interval uses `_syncBaseInterval` (120 frames / ~2s) with C-level fast path
+- Guest no longer freezes during resync — gameplay continues while state is buffered
+
+### Fixed
+- Frame cap threshold: use `>=` instead of `>` to actually trigger at boundary
+- Use raw frame advantage (not smoothed EMA) for cap decision
+- Delta base buffer detached by Web Worker transfer
+- Guard `_lastSyncState` mutations — host delta base survives peer reconnects
+- Slice fallback `getState()` result to prevent buffer aliasing
+- Streaming mode bugs + defer gesture prompt during ROM download
+- `--denan` build pipeline: strict IEEE 754 + kn_sync exports
+- Consolidate mupen64plus patches for reliable build
+- Defer 8MB WASM buffer allocation until sync is enabled
+- Reduce resync cooldown for C-level path
+
 ## [0.5.0] - 2026-03-20
 
 ### Changed

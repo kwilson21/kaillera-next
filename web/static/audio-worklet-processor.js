@@ -43,7 +43,7 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
     for (let i = 0; i < frames; i++) {
       if (this._count >= 2) {
         outL[i] = this._buf[this._readPos];
-        outR[i] = this._buf[this._readPos + 1];
+        outR[i] = this._buf[(this._readPos + 1) % this._bufSize];
         this._readPos = (this._readPos + 2) % this._bufSize;
         this._count -= 2;
       } else {
