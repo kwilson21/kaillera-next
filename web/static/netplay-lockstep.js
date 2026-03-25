@@ -204,7 +204,7 @@
       if (_rttPeersComplete >= _rttPeersTotal) {
         _rttSamples.sort((a, b) => a - b);
         const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        const delay = Math.min(9, Math.max(1, Math.ceil(median / 16.67)));
+        const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
         _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
