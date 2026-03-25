@@ -133,6 +133,9 @@
       window._playerSlot = _playerSlot;
     }
 
+    console.log(
+      `[streaming] onUsersUpdated: mySlot=${_playerSlot} players=${Object.keys(players).length} specs=${Object.keys(spectators).length} hostStream=${!!_hostStream} gameRunning=${_gameRunning}`,
+    );
     if (_playerSlot === 0) {
       // HOST: initiate connections to all non-host players and spectators
       const others = Object.values(players).filter((p) => p.socketId !== socket.id);
@@ -141,6 +144,7 @@
           _peers[p.socketId].slot = p.slot;
           continue;
         }
+        console.log(`[streaming] host creating peer for ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
         createPeer(p.socketId, p.slot, true);
         sendOffer(p.socketId);
       }
@@ -351,17 +355,7 @@
     }
   };
 
-  const drainCandidates = async (peer) => {
-    peer.remoteDescSet = true;
-    if (peer.pendingCandidates) {
-      for (const c of peer.pendingCandidates) {
-        try {
-          await peer.pc.addIceCandidate(c);
-        } catch (_) {}
-      }
-      peer.pendingCandidates = [];
-    }
-  };
+  const drainCandidates = (peer) => KNShared.drainCandidates(peer);
 
   // ── Data channel ───────────────────────────────────────────────────────
 
@@ -370,14 +364,35 @@
 
     ch.onopen = () => {
       const peer = _peers[remoteSid];
-      console.log('[netplay] DC open with', remoteSid, `slot: ${peer ? peer.slot : '?'}`);
+      console.log(
+        `[streaming] DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
+      );
 
       if (_playerSlot === 0) {
         // Host: if emulator isn't started yet, start it now
-        if (!_gameRunning) startHost();
+        if (!_gameRunning) {
+          console.log('[streaming] DC open: starting host emulator');
+          startHost();
+        } else if (_hostStream) {
+          // Late-joiner: host already streaming — add tracks to new peer
+          console.log('[streaming] DC open: host already running, adding stream to late peer');
+          const peer = _peers[remoteSid];
+          if (peer) {
+            for (const track of _hostStream.getTracks()) {
+              peer.pc.addTrack(track, _hostStream);
+            }
+            optimizeVideoEncoding(peer.pc);
+            renegotiate(remoteSid);
+          }
+        } else {
+          console.log('[streaming] DC open: host running but stream not ready yet');
+        }
       } else if (!_isSpectator) {
         // Guest: start sending input
+        console.log('[streaming] DC open: starting guest input loop');
         startGuestInputLoop();
+      } else {
+        console.log('[streaming] DC open: spectator, no input loop');
       }
     };
 
@@ -421,10 +436,8 @@
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
-    KNShared.triggerEmulatorStart();
-    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+    KNShared.bootWithCheats('streaming');
     setupKeyTracking();
-    disableEJSInput();
 
     // Wait for emulator to be running, then capture canvas stream
     const waitForEmu = () => {
@@ -796,10 +809,6 @@
     _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   };
 
-  const disableEJSInput = () => {
-    KNShared.disableEJSInput('streaming');
-  };
-
   // ── Audio capture for streaming ──────────────────────────────────────
   // Connects the emulator's OpenAL master gain node to a MediaStreamDestination
   // so audio is included in the WebRTC stream to guests.
@@ -863,11 +872,18 @@
       setupKeyTracking();
     }
 
+    // Host: apply cheats + disable EJS input at boot (same as lockstep).
+    // startHost() also applies cheats on DC open, but if the WebRTC handshake
+    // is delayed the emulator would run uncheatted until then.
+    if (_playerSlot === 0) {
+      KNShared.bootWithCheats('streaming');
+    }
+
     // Process current peers immediately
     if (config.initialPlayers) {
       onUsersUpdated(config.initialPlayers);
     }
-    // startHost() / startGuestInputLoop() triggered from ch.onopen (same as before)
+    // startHost() / startGuestInputLoop() triggered from ch.onopen
 
     // Virtual gamepad for mobile streaming guests
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {

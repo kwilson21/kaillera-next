@@ -423,9 +423,13 @@
     previousPlayers = structuredClone(players);
     previousSpectators = structuredClone(spectators);
 
+    // Always keep the player list current (fixes stale input/device type
+    // indicators when a mobile player late-joins — the corrected users-updated
+    // arrives after gameRunning is set to true)
+    updatePlayerList(players, spectators, ownerSid);
+
     // Update overlay UI if in pre-game
     if (!gameRunning) {
-      updatePlayerList(players, spectators, ownerSid);
       updateRomDeclarePrompt();
       updateStartButton(players);
       updateGamepadSlot();
@@ -555,6 +559,13 @@
     dismissGameLoading();
     hideToolbar();
     showOverlay();
+    // Refresh player list with latest data (device/input types may have
+    // been updated during gameplay while updatePlayerList was skipped)
+    if (lastUsersData) {
+      const p = lastUsersData.players || {};
+      const s = lastUsersData.spectators || {};
+      updatePlayerList(p, s, lastUsersData.owner ?? null);
+    }
     // Clear reconnect overlay (may persist from mid-game reconnect)
     const reconnectOverlay = document.getElementById('reconnect-overlay');
     if (reconnectOverlay) reconnectOverlay.classList.add('hidden');

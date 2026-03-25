@@ -156,6 +156,28 @@
     }
   }
 
+  // Common boot sequence: wait for emulator, apply cheats, disable EJS input.
+  // Used by both lockstep and streaming engines at host/guest boot time.
+  function bootWithCheats(label) {
+    triggerEmulatorStart();
+    applyStandardCheats(SSB64_ONLINE_CHEATS);
+    disableEJSInput(label);
+  }
+
+  // Drain buffered ICE candidates after setting remote description.
+  // Shared by lockstep and streaming WebRTC signal handlers.
+  async function drainCandidates(peer) {
+    peer.remoteDescSet = true;
+    if (peer.pendingCandidates) {
+      for (const c of peer.pendingCandidates) {
+        try {
+          await peer.pc.addIceCandidate(c);
+        } catch (_) {}
+      }
+      peer.pendingCandidates = [];
+    }
+  }
+
   function enableMobileTouch() {
     if (!('ontouchstart' in window)) return;
     // Netplay engines disable EJS touch and use a custom virtual gamepad.
@@ -357,6 +379,8 @@
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     DEFAULT_N64_KEYMAP: DEFAULT_N64_KEYMAP,
     applyStandardCheats: applyStandardCheats,
+    bootWithCheats: bootWithCheats,
+    drainCandidates: drainCandidates,
     setupKeyTracking: setupKeyTracking,
     triggerEmulatorStart: triggerEmulatorStart,
     waitForEmulator: waitForEmulator,

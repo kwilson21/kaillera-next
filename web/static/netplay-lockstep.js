@@ -627,6 +627,18 @@
   let _hasKnSync = false;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
+
+  // Lazy-allocate the WASM sync buffer. Called before any kn_sync_read/write.
+  // Deferred from startup because the 8MB malloc can trigger WASM memory growth
+  // which detaches HEAPU8.buffer. Safe to call multiple times (no-op if already allocated).
+  const ensureSyncBuffer = () => {
+    if (_syncBufPtr) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._malloc) return;
+    _syncBufSize = 8 * 1024 * 1024 + 16384;
+    _syncBufPtr = mod._malloc(_syncBufSize);
+    _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
+  };
   let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
 
@@ -1181,15 +1193,7 @@
     }
   }
 
-  async function drainCandidates(peer) {
-    peer.remoteDescSet = true;
-    for (const candidate of peer.pendingCandidates) {
-      try {
-        await peer.pc.addIceCandidate(candidate);
-      } catch (_) {}
-    }
-    peer.pendingCandidates = [];
-  }
+  const drainCandidates = (peer) => KNShared.drainCandidates(peer);
 
   // -- Data channel ----------------------------------------------------------
 
@@ -1400,6 +1404,7 @@
           _syncExpected = parseInt(parts[2], 10);
           _syncIsFull = parts[3] === '1';
           _syncChunks = [];
+          _syncLog(`sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull}`);
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -1425,11 +1430,17 @@
 
       // Binary: sync state chunk or input (8 bytes).
       // Sync chunks only arrive between sync-start and completion (_syncExpected > 0).
-      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8 && _syncExpected > 0) {
-        _syncChunks.push(new Uint8Array(e.data));
-        if (_syncChunks.length >= _syncExpected) {
-          handleSyncChunksComplete();
+      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8) {
+        if (_syncExpected > 0) {
+          _syncChunks.push(new Uint8Array(e.data));
+          if (_syncChunks.length >= _syncExpected) {
+            _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
+            handleSyncChunksComplete();
+          }
+          return;
         }
+        // Binary data arrived but no sync-start header received — log and drop
+        _syncLog(`WARN: binary data (${e.data.byteLength}B) arrived but _syncExpected=0 — dropped`);
         return;
       }
       // Binary: Int32Array [frame, inputMask] -- 8 bytes per input
@@ -1661,9 +1672,7 @@
       _bootGestureReceived = true;
       _syncLog('host auto-boot (slot=0)');
       setStatus('Loading emulator...');
-      KNShared.triggerEmulatorStart();
-      KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
-      disableEJSInput();
+      KNShared.bootWithCheats('lockstep');
     } else {
       // Guest: show full-screen gesture prompt (above EmulatorJS overlay)
       // Defer until ROM is loaded — the prompt covers the entire screen
@@ -1740,9 +1749,7 @@
             if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
           // Start emulator within gesture context so audio works
-          KNShared.triggerEmulatorStart();
-          KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
-          disableEJSInput();
+          KNShared.bootWithCheats('lockstep');
           setStatus('Loading emulator...');
           _syncLog('gesture received — emulator starting');
           promptEl.removeEventListener('click', onPromptClick);
@@ -2565,16 +2572,16 @@
     window._lockstepActive = true;
 
     // C-level sync: detect patched core with kn_sync exports.
-    // Only allocate the WASM buffer when sync is enabled — the 8MB malloc
-    // can trigger WASM memory growth which detaches HEAPU8.buffer.
+    // Detect patched core with kn_sync exports. Buffer is allocated lazily
+    // on first use (see ensureSyncBuffer) to avoid triggering WASM memory
+    // growth at startup when sync may never be needed.
     const knMod = window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
-    if (_hasKnSync && _syncEnabled) {
-      _syncBufSize = 8 * 1024 * 1024 + 16384;
-      _syncBufPtr = knMod._malloc(_syncBufSize);
-      _syncLog(`C-level sync available, buf at ${_syncBufPtr}`);
-    } else if (_hasKnSync) {
-      _syncLog('C-level sync available (buffer deferred — sync disabled)');
+    if (_hasKnSync) {
+      if (_syncEnabled) {
+        ensureSyncBuffer();
+      }
+      _syncLog(`C-level sync available${_syncBufPtr ? `, buf at ${_syncBufPtr}` : ' (buffer deferred)'}`);
     } else {
       _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
@@ -3338,10 +3345,6 @@
     _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   };
 
-  const disableEJSInput = () => {
-    KNShared.disableEJSInput('lockstep');
-  };
-
   // -- Direct memory hashing (avoids expensive getState() serialization) ------
 
   const getHashBytes = () => {
@@ -3462,6 +3465,7 @@
 
     if (_hasKnSync) {
       // C-level: read state directly from g_dev — no getState(), no memory growth
+      ensureSyncBuffer();
       const mod = gm.Module;
       const ps0 = performance.now();
       const bytesWritten = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
@@ -3531,7 +3535,10 @@
     const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}`;
     for (const target of targets) {
       const dc = target.dc;
-      if (!dc || dc.readyState !== 'open') continue;
+      if (!dc || dc.readyState !== 'open') {
+        _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
+        continue;
+      }
       try {
         dc.send(header);
         for (let i = 0; i < numChunks; i++) {
@@ -3539,8 +3546,9 @@
           const end = Math.min(start + CHUNK_SIZE, compressed.length);
           dc.send(compressed.slice(start, end));
         }
+        _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
       } catch (err) {
-        _syncLog(`sync send failed: ${err}`);
+        _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
       }
     }
     _syncLog(
@@ -3599,13 +3607,22 @@
     if (_hasKnSync) {
       // C-level write: copy into WASM buffer, call kn_sync_write
       const mod = gm.Module;
+      ensureSyncBuffer();
+      if (!_syncBufPtr) {
+        _syncLog(`FATAL: sync buffer allocation failed`);
+        return;
+      }
+      if (bytes.length > _syncBufSize) {
+        _syncLog(`FATAL: state (${bytes.length}) exceeds buffer (${_syncBufSize})`);
+        return;
+      }
       mod.HEAPU8.set(bytes, _syncBufPtr);
       const lt0 = performance.now();
       const result = mod._kn_sync_write(_syncBufPtr, bytes.length);
       const lt1 = performance.now();
 
       if (result !== 0) {
-        _syncLog(`kn_sync_write failed: ${result}`);
+        _syncLog(`kn_sync_write failed: ${result} (bytes=${bytes.length} ptr=${_syncBufPtr})`);
         return;
       }
 

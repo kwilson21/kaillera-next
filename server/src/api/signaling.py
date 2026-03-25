@@ -451,6 +451,9 @@ async def end_game(sid: str, data: dict) -> str | None:
     room.status = "lobby"
     # mode persists for rematch convenience
     await sio.emit("game-ended", {}, room=session_id)
+    # Broadcast fresh state so player list reflects current device/input types
+    # (late-joiners' corrected types may not have been seen by all clients)
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
     log.info("Game ended in room %s", session_id)
     return None
 
