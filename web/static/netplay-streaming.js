@@ -271,7 +271,11 @@
 
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           gameDiv.innerHTML = '';
+          gameDiv.style.background = '#300'; // debug: should be visible if #game is in layout
           gameDiv.appendChild(_guestVideo);
+          _syncLog(
+            `video element appended to #game (gameDiv=${gameDiv.id}, display=${getComputedStyle(gameDiv).display}, h=${gameDiv.clientHeight})`,
+          );
         }
 
         // iOS WebKit only autoplays videos with NO audio track (even when
