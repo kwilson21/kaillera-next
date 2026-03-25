@@ -16,8 +16,8 @@
  *     - Runs EmulatorJS, applies standard online cheats via KNShared
  *     - Captures the emulator's WebGL canvas by blitting it onto a
  *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
- *       canvas is captured via captureStream(0) with manual frame
- *       control (requestFrame()). This avoids expensive GPU readback
+ *       canvas is captured via captureStream(60) for automatic 60fps
+ *       frame generation. This avoids expensive GPU readback
  *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
  *     - Captures emulator audio via AudioContext → MediaStreamDestination,
  *       adds the audio track to the host MediaStream so guests/spectators
@@ -543,7 +543,7 @@
       // Use setInterval instead of rAF — rAF can be in a bad state after
       // lockstep→streaming switch (APISandbox overrides + EmulatorJS rAF
       // interaction). setInterval is immune to this.
-      _hostStream = captureCanvas.captureStream(30);
+      _hostStream = captureCanvas.captureStream(60);
 
       let _blitCount = 0;
       _hostBlitInterval = setInterval(() => {
