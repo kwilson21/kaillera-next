@@ -16,8 +16,8 @@
  *     - Runs EmulatorJS, applies standard online cheats via KNShared
  *     - Captures the emulator's WebGL canvas by blitting it onto a
  *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
- *       canvas is captured via captureStream(60) for automatic 60fps
- *       frame generation. This avoids expensive GPU readback
+ *       canvas is captured via captureStream(0) with manual frame
+ *       control (requestFrame() per blit). This avoids expensive GPU readback
  *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
  *     - Captures emulator audio via AudioContext → MediaStreamDestination,
  *       adds the audio track to the host MediaStream so guests/spectators
@@ -539,19 +539,20 @@
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
-      // Must use requestAnimationFrame (not setInterval) because drawImage
-      // from a WebGL canvas with preserveDrawingBuffer=false must run
-      // before the compositor clears the framebuffer. setInterval is not
-      // synchronized and reads blank frames intermittently.
-      // Use APISandbox.nativeRAF — the real browser rAF saved at page load,
-      // immune to lockstep APISandbox overrides.
-      _hostStream = captureCanvas.captureStream(60);
+      // Uses manual frame control — captureStream(0) only captures when
+      // requestFrame() is called, synchronized with the blit.
+      // APISandbox.nativeRAF is the real browser rAF saved at page load,
+      // immune to lockstep APISandbox overrides. rAF timing ensures
+      // drawImage reads the WebGL canvas before preserveDrawingBuffer clears.
+      _hostStream = captureCanvas.captureStream(0);
+      const captureTrack = _hostStream.getVideoTracks()[0];
 
       let _blitCount = 0;
       const blitFrame = () => {
         if (!_gameRunning) return;
         APISandbox.nativeRAF(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
+        captureTrack.requestFrame();
         _blitCount++;
         if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
       };
@@ -625,10 +626,12 @@
       }
     }
 
-    // Build preferred order: VP9 first, then H264, then everything else
+    // Build preferred order: H264 first for mobile compatibility.
+    // iOS WebKit (FxiOS/Safari) has guaranteed H264 HW decode but
+    // spotty VP9 WebRTC support — VP9 tracks may never deliver frames.
     const preferred = [];
-    if (codecPts['VP9']) preferred.push(codecPts['VP9']);
     if (codecPts['H264']) preferred.push(codecPts['H264']);
+    if (codecPts['VP9']) preferred.push(codecPts['VP9']);
 
     if (preferred.length === 0) return sdp; // no preferred codecs found
 
