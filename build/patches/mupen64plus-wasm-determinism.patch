@@ -1,37 +1,108 @@
-diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
---- a/mupen64plus-core/src/main/main.c
-+++ b/mupen64plus-core/src/main/main.c
-@@ -139,6 +139,33 @@ EMSCRIPTEN_KEEPALIVE double kn_get_cycle_time_ms(void)
-     uint32_t cycles = g_dev.r4300.cp0.regs[CP0_COUNT_REG];
-     return (double)cycles / 93750.0;
+  Kept: a/GLideN64/src/GraphicsDrawer.cpp
+  Kept: a/GLideN64/src/uCodes/F5Indi_Naboo.cpp
+  Kept: a/Makefile
+  Kept: a/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
+  Stripped: a/mupen64plus-core/src/device/r4300/fpu.h
+  Stripped: a/mupen64plus-core/src/device/r4300/mips_instructions.def
+  Stripped: a/mupen64plus-core/src/device/r4300/r4300_core.c
+  Kept: a/mupen64plus-core/subprojects/minizip/crypt.h
+diff --git a/GLideN64/src/GraphicsDrawer.cpp b/GLideN64/src/GraphicsDrawer.cpp
+index a2fb0af..a15c5fb 100644
+--- a/GLideN64/src/GraphicsDrawer.cpp
++++ b/GLideN64/src/GraphicsDrawer.cpp
+@@ -1825,7 +1825,11 @@ void GraphicsDrawer::_initStates()
+ 
+ 	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+ 
++#ifdef __EMSCRIPTEN__
++	srand(0);
++#else
+ 	srand(static_cast<u32>(time(nullptr)));
++#endif
+ 
+ 	wnd.swapBuffers();
  }
-+
-+/* kaillera-next: Reset CP0_COUNT to zero and realign the interrupt queue.
-+ * Called at lockstep start on all players after state sync to eliminate
-+ * the cycle count offset between host (more boot frames) and guests.
-+ * Without this, CP0_COUNT bit-31 wrap triggers SPECIAL_INT at different
-+ * frames on host vs guests, causing desync ~45s into gameplay. */
-+EMSCRIPTEN_KEEPALIVE void kn_reset_cycle_count(void)
-+{
-+    extern void translate_event_queue(struct cp0*, unsigned int);
-+    translate_event_queue(&g_dev.r4300.cp0, UINT32_C(0));
-+}
-+
-+/* kaillera-next: Canonicalize NaN in all 32 FPU registers.
-+ * Called once per frame from JS before stepOneFrame(). */
-+#include "../device/r4300/cp1.h"
-+#include <string.h>
-+#include <math.h>
-+EMSCRIPTEN_KEEPALIVE void kn_canon_fpu_regs(void)
-+{
-+    static const uint32_t canon_nan_f = 0x7FC00000;
-+    cp1_reg* regs = r4300_cp1_regs(&g_dev.r4300.cp1);
-+    int i;
-+    for (i = 0; i < 32; i++) {
-+        if (isnan(regs[i].float32[0]))
-+            memcpy(&regs[i].float32[0], &canon_nan_f, sizeof(float));
-+        if (isnan(regs[i].float32[1]))
-+            memcpy(&regs[i].float32[1], &canon_nan_f, sizeof(float));
-+    }
-+}
- #endif
+diff --git a/GLideN64/src/uCodes/F5Indi_Naboo.cpp b/GLideN64/src/uCodes/F5Indi_Naboo.cpp
+index b661ea9..f6e6c0a 100644
+--- a/GLideN64/src/uCodes/F5Indi_Naboo.cpp
++++ b/GLideN64/src/uCodes/F5Indi_Naboo.cpp
+@@ -2329,7 +2329,11 @@ void F5INDI_Texture(u32 w0, u32 w1)
+ 
+ void F5Indi_Naboo_Init()
+ {
++#ifdef __EMSCRIPTEN__
++	srand(0);
++#else
+ 	srand((unsigned int)time(NULL));
++#endif
+ 
+ 	gSPSetupFunctions();
+ 	// Set GeometryMode flags
+diff --git a/Makefile b/Makefile
+index 2c28955..a5c2110 100644
+--- a/Makefile
++++ b/Makefile
+@@ -563,7 +563,10 @@ else ifeq ($(platform), emscripten)
+       PLATCFLAGS += -pthread
+    endif
+ 
+-   CPUFLAGS += -msimd128 -ftree-vectorize
++   # kaillera-next: disable auto-vectorization for cross-engine WASM determinism.
++   # WASM SIMD FP operations share NaN non-determinism with scalar ops.
++   # Auto-vectorized loops bypass the FPU NaN canonicalization in fpu.h.
++   CPUFLAGS += -msimd128 -fno-tree-vectorize
+    #CPUFLAGS += -msimd128 -mfloat-abi=hard -mfpu=neon
+    HAVE_NEON = 0
+ 
+@@ -627,8 +630,16 @@ COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE
+ ifeq ($(DEBUG), 1)
+    CPUOPTS += -O0 -g
+    CPUOPTS += -DOPENGL_DEBUG
++else
++ifeq ($(platform), emscripten)
++   # kaillera-next: strict IEEE 754 for cross-engine WASM determinism.
++   CPUOPTS += -DNDEBUG -fsigned-char -fno-fast-math -ffp-contract=off \
++              -fno-associative-math -fno-reciprocal-math \
++              -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden \
++              -ftrivial-auto-var-init=zero
+ else
+    CPUOPTS += -DNDEBUG -fsigned-char -ffast-math -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden
++endif
+ ifneq ($(platform), libnx)
+    CPUOPTS := -O3 $(CPUOPTS)
+ endif
+diff --git a/mupen64plus-core/src/backends/clock_ctime_plus_delta.c b/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
+index f4b1492..6579c51 100644
+--- a/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
++++ b/mupen64plus-core/src/backends/clock_ctime_plus_delta.c
+@@ -30,7 +30,14 @@ time_t ctime_plus_delta_get_time(void* clock)
+         ? 0
+         : *(time_t*)clock;
+ 
++#ifdef __EMSCRIPTEN__
++    /* kaillera-next: deterministic RTC for cross-instance sync.
++     * Return fixed epoch so all instances see the same N64 clock. */
++    (void)user_delta;
++    return (time_t)0;
++#else
+     return user_delta + time(NULL);
++#endif
+ }
+ 
+ const struct clock_backend_interface g_iclock_ctime_plus_delta =
+diff --git a/mupen64plus-core/subprojects/minizip/crypt.h b/mupen64plus-core/subprojects/minizip/crypt.h
+index f4b93b7..858e560 100644
+--- a/mupen64plus-core/subprojects/minizip/crypt.h
++++ b/mupen64plus-core/subprojects/minizip/crypt.h
+@@ -106,7 +106,11 @@ static unsigned crypthead(const char* passwd,       /* password string */
+      */
+     if (++calls == 1)
+     {
++#ifdef __EMSCRIPTEN__
++        srand(0);
++#else
+         srand((unsigned)(time(NULL) ^ ZCR_SEED2));
++#endif
+     }
+     init_keys(passwd, pkeys, pcrc_32_tab);
+     for (n = 0; n < RAND_HEAD_LEN-2; n++)

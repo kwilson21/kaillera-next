@@ -37,37 +37,73 @@ fi
 echo "==> Source repos ready"
 
 # ============================================================
+# Stage 1b: Inject --denan before --asyncify in emscripten
+# ============================================================
+# wasm-opt --denan MUST run before --asyncify. If it runs after,
+# the denan helper functions break asyncify's stack unwinding.
+# We patch emscripten's link.py to insert --denan into the pass
+# pipeline right before the asyncify pass.
+LINK_PY="/opt/emsdk/upstream/emscripten/tools/link.py"
+if [ -f "${LINK_PY}" ]; then
+    if ! grep -q "'--denan'" "${LINK_PY}"; then
+        python3 -c "
+with open('${LINK_PY}') as f:
+    content = f.read()
+content = content.replace(
+    \"passes += ['--asyncify']\",
+    \"passes += ['--denan']\\n    passes += ['--asyncify']\"
+)
+with open('${LINK_PY}', 'w') as f:
+    f.write(content)
+print('    Injected --denan before --asyncify in link.py')
+"
+    else
+        echo "    --denan already injected in link.py"
+    fi
+fi
+
+# ============================================================
 # Stage 2: Apply patches
 # ============================================================
 if [ -d "${PATCHES_DIR}" ]; then
     echo "==> Applying kaillera-next patches..."
 
+    # RetroArch: full reset + apply patch
+    cd "${SRC_DIR}/RetroArch"
+    git checkout -- . 2>/dev/null || true
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
-        cd "${SRC_DIR}/RetroArch"
-        git checkout -- . 2>/dev/null || true
         git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
             echo "    RetroArch patch already applied or failed"
     fi
 
-    # mupen64plus patches: apply only if not already present.
-    # Patches may fail on non-main.c files due to repo version drift;
-    # the critical main.c changes are checked explicitly.
+    # mupen64plus: full reset + apply patches.
+    # kn-all.patch handles main.c (superset of timing + wasm-determinism patches).
+    # deterministic-timing.patch handles features_cpu.c and profile.c (excluded main.c).
     cd "${SRC_DIR}/mupen64plus-libretro-nx"
+    git checkout -- . 2>/dev/null || true
 
-    if ! grep -q 'kn_sync_hash' mupen64plus-core/src/main/main.c 2>/dev/null; then
-        git checkout -- mupen64plus-core/src/main/main.c 2>/dev/null || true
-        if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
-            git apply --include='mupen64plus-core/src/main/*' "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" 2>/dev/null && \
-                echo "    Applied mupen64plus timing patch (main.c)" || true
-        fi
-        if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
-            git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
-                echo "    Applied mupen64plus kn-all patch" || \
-                echo "    WARN: kn-all patch failed"
-        fi
-    else
-        echo "    mupen64plus main.c already patched (kn_sync_hash present)"
+    if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
+            echo "    Applied mupen64plus kn-all patch (main.c)" || \
+            echo "    WARN: kn-all patch failed"
+    fi
+
+    if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
+        git apply --exclude='mupen64plus-core/src/main/main.c' \
+            "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" 2>/dev/null && \
+            echo "    Applied mupen64plus timing patch (features_cpu.c, profile.c)" || true
+    fi
+
+    # wasm-determinism patch: strict IEEE 754 compile flags (-fno-fast-math,
+    # -fno-tree-vectorize, -ffp-contract=off), FPU instruction NaN canon
+    # (fpu.h, mips_instructions.def, r4300_core.c), srand(0), deterministic RTC.
+    # Excludes main.c (handled by kn-all above).
+    if [ -f "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" ]; then
+        git apply --exclude='mupen64plus-core/src/main/main.c' \
+            "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" 2>/dev/null && \
+            echo "    Applied mupen64plus wasm-determinism patch (strict FP, FPU canon, srand)" || \
+            echo "    WARN: wasm-determinism patch failed"
     fi
 fi
 
@@ -128,20 +164,13 @@ echo "==> JS glue: $(ls -lh ${JS_FILE} | awk '{print $5}')"
 echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 
 # ============================================================
-# Stage 4b: NaN canonicalization (deterministic floating point)
+# Stage 4b: NaN canonicalization (fix-denan.py only)
 # ============================================================
-# ============================================================
-# Stage 4b: NaN canonicalization (DISABLED — breaks emulator boot)
-# ============================================================
-# wasm-opt --denan prevents the emulator from loading. Needs investigation.
-# The --denan pass worked on the wasm-determinism branch but fails here,
-# likely due to different Emscripten/wasm-opt versions or build flags.
-# TODO: investigate in a dedicated session
-#
-# /opt/emsdk/upstream/bin/wasm-opt --denan --enable-bulk-memory --enable-simd \
-#   --enable-mutable-globals --enable-sign-ext --enable-nontrapping-float-to-int \
-#   "${WASM_FILE}" -o "${WASM_FILE}"
-# python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
+# The --denan pass is injected BEFORE asyncify in emscripten's link.py
+# (see Stage 1b below). Here we only run fix-denan.py to change
+# NaN→0 replacements to NaN→canonical NaN (preserving isnan() semantics).
+echo "==> Stage 4b: Patching denan sites (NaN→0 → NaN→canonical)"
+python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
 
 # ============================================================
 # Stage 5: Package into 7z .data archive
