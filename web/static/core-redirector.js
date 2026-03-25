@@ -31,7 +31,7 @@
   // ── IDB cache clear (awaitable) ────────────────────────────────────
   // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL.
   // Tracked via localStorage to avoid deadlocking multi-tab scenarios.
-  const CORE_VERSION = '7';
+  const CORE_VERSION = '9';
   let idbClearPromise;
   try {
     if (localStorage.getItem('kn-core-version') === CORE_VERSION) {
