@@ -912,6 +912,7 @@
           // (connection hiccup likely caused a desync — don't wait 30s)
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
+          _resetDrift();
         }
       }
       if (s === 'failed') {
@@ -1121,6 +1122,7 @@
         } else {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
+          _resetDrift();
         }
       }
 
@@ -1183,6 +1185,7 @@
               const guestHash = mod._kn_sync_hash();
               if (guestHash !== hostHash) {
                 _syncLog(`DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`);
+                _recordDrift(null);
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
@@ -1197,6 +1200,7 @@
                 _syncLog(`sync OK frame=${syncFrame} hash=${guestHash}`);
                 _consecutiveResyncs = 0;
                 _syncCheckInterval = _syncBaseInterval;
+                _resetDrift();
               }
             } else {
               // Fallback: async hash via HEAPU8 (RDRAM) — avoids expensive getState()
@@ -1207,6 +1211,7 @@
                 workerPost({ type: 'hash', data: guestBytes }).then((res) => {
                   if (res.hash !== hostHash) {
                     _syncLog(`DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`);
+                    _recordDrift(null);
                     const now2 = performance.now();
                     if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
                       _lastResyncTime = now2;
@@ -1217,6 +1222,7 @@
                     _syncLog(`sync OK frame=${syncFrame} hash=${res.hash}`);
                     _consecutiveResyncs = 0;
                     _syncCheckInterval = _syncBaseInterval;
+                    _resetDrift();
                   }
                 }).catch(() => {});
               } catch (_) {}
@@ -2434,6 +2440,7 @@
         if (_playerSlot === 0) {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
+          _resetDrift();
         } else {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
@@ -2681,6 +2688,7 @@
           const guestHash = mod._kn_sync_hash();
           if (guestHash !== _pendingSyncCheck.hash) {
             _syncLog(`DESYNC (deferred) at frame ${_pendingSyncCheck.frame}`);
+            _recordDrift(null);
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
@@ -2695,6 +2703,7 @@
           } else {
             _consecutiveResyncs = 0;
             _syncCheckInterval = _syncBaseInterval;
+            _resetDrift();
           }
         } else {
           // Fallback: async hash via HEAPU8 (RDRAM)
@@ -2705,6 +2714,7 @@
               workerPost({ type: 'hash', data: deferBytes }).then((res) => {
                 if (res.hash !== deferCheck.hash) {
                   _syncLog(`DESYNC (deferred) at frame ${deferCheck.frame}`);
+                  _recordDrift(null);
                   const now3 = performance.now();
                   if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
                     _lastResyncTime = now3;
@@ -2714,6 +2724,7 @@
                 } else {
                   _consecutiveResyncs = 0;
                   _syncCheckInterval = _syncBaseInterval;
+                  _resetDrift();
                 }
               }).catch(() => {});
             }
@@ -3524,6 +3535,7 @@
     _resyncCount = 0;
     _consecutiveResyncs = 0;
     _syncCheckInterval = _syncBaseInterval;
+    _resetDrift();
     _syncChunks = [];
     _syncExpected = 0;
     _pushingSyncState = false;
