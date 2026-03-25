@@ -17,7 +17,7 @@
  *     - Captures the emulator's WebGL canvas by blitting it onto a
  *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
  *       canvas is captured via captureStream(0) with manual frame
- *       control (requestFrame() per blit). This avoids expensive GPU readback
+ *       control (requestFrame()). This avoids expensive GPU readback
  *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
  *     - Captures emulator audio via AudioContext → MediaStreamDestination,
  *       adds the audio track to the host MediaStream so guests/spectators
@@ -539,24 +539,24 @@
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
       // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
-      // Uses manual frame control — captureStream(0) only captures when
-      // requestFrame() is called, synchronized with the blit.
-      // APISandbox.nativeRAF is the real browser rAF saved at page load,
-      // immune to lockstep APISandbox overrides. rAF timing ensures
-      // drawImage reads the WebGL canvas before preserveDrawingBuffer clears.
+      // MUST use window.requestAnimationFrame (not APISandbox.nativeRAF)
+      // because EmulatorJS overrides rAF to synchronize with its WASM
+      // render loop. The EJS rAF timing ensures drawImage reads the WebGL
+      // canvas while it has content (before preserveDrawingBuffer clears).
+      // The native rAF runs at a different phase and reads blank frames.
       _hostStream = captureCanvas.captureStream(0);
       const captureTrack = _hostStream.getVideoTracks()[0];
 
       let _blitCount = 0;
       const blitFrame = () => {
         if (!_gameRunning) return;
-        APISandbox.nativeRAF(blitFrame);
+        requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         captureTrack.requestFrame();
         _blitCount++;
         if (_blitCount === 60) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
       };
-      APISandbox.nativeRAF(blitFrame);
+      requestAnimationFrame(blitFrame);
 
       _syncLog('capture stream started (640x480 2D blit)');
 
