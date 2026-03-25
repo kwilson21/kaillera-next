@@ -600,6 +600,21 @@
   const _resetDrift = () => {
     _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
   };
+
+  // Frame pacing (GGPO-style frame advantage cap)
+  const FRAME_ADV_ALPHA_UP = 0.1;    // EMA when advantage is rising (slow to trigger)
+  const FRAME_ADV_ALPHA_DOWN = 0.2;  // EMA when advantage is falling (fast to release)
+  const FRAME_PACING_WARMUP = 120;   // skip pacing during first 120 frames (~2s boot)
+  let _frameAdvantage = 0;            // smoothed frame advantage (EMA)
+  let _frameAdvRaw = 0;               // instantaneous frame advantage (for logging)
+  let _framePacingActive = false;     // true when cap is throttling
+  // Pacing summary stats (reset every 300 frames)
+  let _pacingCapsCount = 0;
+  let _pacingCapsFrames = 0;
+  let _pacingMaxAdv = 0;
+  let _pacingAdvSum = 0;
+  let _pacingAdvCount = 0;
+
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null;     // stored for removal in stopSync()
