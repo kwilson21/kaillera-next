@@ -53,6 +53,9 @@ async def lifespan(_app):
 
 def run() -> None:
     """Entry point called by `kaillera-server` CLI command."""
+    from dotenv import load_dotenv
+    load_dotenv()  # loads .env from cwd (server/) if it exists
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
