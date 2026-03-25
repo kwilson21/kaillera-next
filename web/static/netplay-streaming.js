@@ -312,7 +312,25 @@
         const src = _guestVideo.srcObject;
         const trackInfo = src ? `${src.getVideoTracks().length}v+${src.getAudioTracks().length}a` : 'no-src';
         _syncLog(`video state: readyState=${_guestVideo.readyState} paused=${_guestVideo.paused} tracks=${trackInfo}`);
-        _guestVideo.play()?.catch((e) => _syncLog(`video play() rejected: ${e.message}`));
+        _guestVideo.play()?.catch((e) => {
+          _syncLog(`video play() rejected: ${e.message} — will retry on loadeddata`);
+        });
+
+        // iOS WebKit may reject play() if no video data has arrived yet.
+        // Retry once the first frame is available.
+        if (!_guestVideo._knRetryBound) {
+          _guestVideo._knRetryBound = true;
+          _guestVideo.addEventListener(
+            'loadeddata',
+            () => {
+              if (_guestVideo.paused && _gameRunning) {
+                _syncLog('loadeddata fired — retrying play()');
+                _guestVideo.play()?.catch((e) => _syncLog(`retry play() rejected: ${e.message}`));
+              }
+            },
+            { once: true },
+          );
+        }
 
         // Measure actual display latency via requestVideoFrameCallback
         if (_guestVideo.requestVideoFrameCallback) {
@@ -499,7 +517,11 @@
     KNShared.bootWithCheats('streaming');
     setupKeyTracking();
 
-    // Wait for emulator to be running, then capture canvas stream
+    // Wait for emulator to be running AND rendering, then capture canvas stream.
+    // Checking gameManager alone isn't enough — after a mode switch the emulator
+    // is rebooting and the canvas is blank for several seconds. Capturing blank
+    // frames sends black video to guests.
+    const MIN_HOST_FRAMES = 10;
     const waitForEmu = () => {
       if (!_gameRunning) return; // stop() was called during boot
       const gm = window.EJS_emulator?.gameManager;
@@ -507,12 +529,16 @@
         setTimeout(waitForEmu, 100);
         return;
       }
-      _syncLog('emulator running — capturing stream');
 
-      // The emulator canvas is WebGL at 1280x960. Capturing it directly
-      // requires expensive GPU readback (~5MB/frame). Instead, blit onto a
-      // small 2D canvas (640x480) and capture THAT. The drawImage blit is
-      // GPU-accelerated and the 2D canvas readback is much cheaper.
+      // Wait for actual rendering — canvas exists but may be blank until
+      // the emulator runs a few frames (especially on reboot after mode switch)
+      const frames = gm.Module?._get_current_frame_count?.() ?? 0;
+      if (frames < MIN_HOST_FRAMES) {
+        setTimeout(waitForEmu, 100);
+        return;
+      }
+      _syncLog(`emulator running (${frames} frames) — capturing stream`);
+
       const srcCanvas = document.querySelector('#game canvas');
       if (!srcCanvas) {
         _syncLog('canvas not found, retrying…');
