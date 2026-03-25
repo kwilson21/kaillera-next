@@ -244,6 +244,12 @@
           _guestVideo.addEventListener(
             'playing',
             () => {
+              _syncLog('video playing — adding audio track');
+              // Add the stashed audio track now that video is playing
+              const audioTrack = _guestVideo._knAudioTrack;
+              if (audioTrack && _guestVideo.srcObject) {
+                _guestVideo.srcObject.addTrack(audioTrack);
+              }
               _guestVideo.muted = false;
               if (_guestVideo.muted) {
                 const banner = document.getElementById('unmute-banner');
@@ -268,27 +274,18 @@
           gameDiv.appendChild(_guestVideo);
         }
 
-        // Set srcObject only once — re-setting the same stream aborts any
-        // pending play() on iOS WebKit, causing "The operation was aborted".
-        // ontrack fires per-track (audio then video ~20ms apart) but they
-        // share the same MediaStream, so we only need to set it once.
-        const stream = event.streams?.[0];
-        if (stream) {
-          if (_guestVideo.srcObject !== stream) {
-            _guestVideo.srcObject = stream;
-          }
-        } else {
-          // Safari may not populate event.streams during renegotiation
-          _syncLog('event.streams empty — building MediaStream from track');
-          if (!_guestVideo.srcObject) {
-            _guestVideo.srcObject = new MediaStream();
-          }
-          _guestVideo.srcObject.addTrack(event.track);
+        // iOS WebKit only autoplays videos with NO audio track (even when
+        // muted). Build a video-only stream for the <video> element.
+        // Audio is added after playback starts (via the playing event).
+        if (event.track.kind === 'audio') {
+          // Stash audio track — will add after video starts playing
+          _guestVideo._knAudioTrack = event.track;
+          return;
         }
 
-        // Only start playback and configure after the video track arrives —
-        // starting on the audio track alone triggers a load that gets aborted.
-        if (event.track.kind !== 'video') return;
+        // Video track — create a video-only MediaStream
+        const videoOnlyStream = new MediaStream([event.track]);
+        _guestVideo.srcObject = videoOnlyStream;
 
         // Minimize jitter buffer: set minimum playout delay on the receiver.
         // The default jitter buffer adds 50-150ms of latency for smooth
@@ -313,7 +310,9 @@
         setStatus('🟢 Connected — streaming!');
 
         const src = _guestVideo.srcObject;
-        const trackInfo = src ? `${src.getVideoTracks().length}v+${src.getAudioTracks().length}a` : 'no-src';
+        const trackInfo = src
+          ? `${src.getVideoTracks().length}v+${src.getAudioTracks().length}a (video-only for autoplay)`
+          : 'no-src';
         _syncLog(`video state: readyState=${_guestVideo.readyState} paused=${_guestVideo.paused} tracks=${trackInfo}`);
         _guestVideo.play()?.catch((e) => {
           _syncLog(`video play() rejected: ${e.message} — will retry on loadeddata`);
