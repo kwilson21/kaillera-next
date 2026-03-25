@@ -374,15 +374,21 @@
           console.log('[streaming] DC open: starting host emulator');
           startHost();
         } else if (_hostStream) {
-          // Late-joiner: host already streaming — add tracks to new peer
-          console.log('[streaming] DC open: host already running, adding stream to late peer');
+          // Late-joiner: add stream tracks if createPeer didn't already
           const peer = _peers[remoteSid];
           if (peer) {
-            for (const track of _hostStream.getTracks()) {
-              peer.pc.addTrack(track, _hostStream);
+            const existingSenders = peer.pc.getSenders();
+            const alreadyHasTracks = existingSenders.some((s) => s.track);
+            if (!alreadyHasTracks) {
+              console.log('[streaming] DC open: adding stream to late peer');
+              for (const track of _hostStream.getTracks()) {
+                peer.pc.addTrack(track, _hostStream);
+              }
+              optimizeVideoEncoding(peer.pc);
+              renegotiate(remoteSid);
+            } else {
+              console.log('[streaming] DC open: peer already has tracks from createPeer');
             }
-            optimizeVideoEncoding(peer.pc);
-            renegotiate(remoteSid);
           }
         } else {
           console.log('[streaming] DC open: host running but stream not ready yet');

@@ -56,6 +56,7 @@ kaillera-next/
 ├── web/             # Static frontend
 │   ├── index.html           # lobby: create/join rooms
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
+│   ├── admin.html           # sync log management page
 │   └── static/
 │       ├── lobby.js             # lobby controller
 │       ├── play.js              # play page orchestrator
@@ -136,3 +137,5 @@ All events go through the default Socket.IO namespace (`/`).
 - `uv` or `pip install .` for dependency management
 - Docker for production builds
 - `ALLOWED_ORIGIN` env var controls CORS (default `*`, set to your domain in production)
+- `PORT` (default 27888), `MAX_ROOMS` (default 50), `MAX_SPECTATORS` (default 10)
+- `.env` file supported via python-dotenv

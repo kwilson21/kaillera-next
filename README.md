@@ -88,6 +88,7 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
   play.html            Game page — overlay, EmulatorJS embed, toolbar
+  admin.html           Sync log management (pin, delete, download)
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     lobby.js           Lobby controller (room creation, invite links, player list)
@@ -147,6 +148,9 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | Variable | Default | Description |
 |---|---|---|
 | `ALLOWED_ORIGIN` | `*` | CORS origin — set to your domain in production |
+| `PORT` | `27888` | Server listen port |
+| `MAX_ROOMS` | `50` | Maximum concurrent rooms |
+| `MAX_SPECTATORS` | `10` | Maximum spectators per room |
 
 ## REST endpoints
 
@@ -159,6 +163,9 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /api/cached-state/{rom_hash}` | Retrieve cached save state |
 | `POST /api/cache-state/{rom_hash}` | Upload save state to cache |
 | `POST /api/sync-logs` | Upload sync diagnostic logs |
+| `GET /api/admin/logs` | List sync logs (admin) |
+| `DELETE /api/admin/logs/{name}` | Delete a sync log (admin) |
+| `POST /api/admin/logs/{name}/pin` | Pin/unpin a sync log (admin) |
 
 ## Current status
 

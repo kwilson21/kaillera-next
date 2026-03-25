@@ -15,8 +15,15 @@ All notable changes to kaillera-next netplay are documented here.
 - Sync diagnostics: `_syncLogRing` circular buffer, per-frame `_diagEventLog`,
   exportable CSV logs, `debug-sync`/`debug-logs` Socket.IO events for remote upload
 - `POST /api/sync-logs` endpoint for sync log collection
+- Admin page (`/admin.html`) for sync log management with pin/cleanup controls
+- Admin API endpoints: `GET /api/admin/logs`, `DELETE /api/admin/logs/{name}`,
+  `POST /api/admin/logs/{name}/pin`
+- Sync log recovery: pending logs captured via `sendBeacon` + `localStorage` on browser
+  close, uploaded automatically on next page load
 - Drift rate tracker with exponential summary logging and cycle time in sync-hash protocol
 - Logs toolbar button for mobile sync log download
+- Configurable server env vars: `PORT`, `MAX_ROOMS`, `MAX_SPECTATORS` with defaults
+- python-dotenv for `.env` file support
 - Kaillera Easter eggs across frontend
 - iOS audio routing workaround and mobile touch guard
 - ROM hash algorithm tagging for state cache compatibility
@@ -26,11 +33,16 @@ All notable changes to kaillera-next netplay are documented here.
 - Refactored all JS modules to ES2022+ (const/let, arrow functions, template literals,
   async/await, optional chaining): audio-worklet-processor.js, play.js,
   netplay-lockstep.js, netplay-streaming.js, virtual-gamepad.js, gamepad-manager.js
+- Converted remaining `.then()` chains to async/await across frontend
+- Dockerfile updated with configurable env vars and logs directory
 - Minimum frame delay floor raised to 2 for frame pacing headroom
 - Sync hash interval uses `_syncBaseInterval` (120 frames / ~2s) with C-level fast path
 - Guest no longer freezes during resync — gameplay continues while state is buffered
 
 ### Fixed
+- Virtual gamepad alignment: D-pad centered (was 3px off), A/B diagonal layout
+  (Gameboy-style), C-buttons pushed right, landscape D-pad no longer overlaps L shoulder
+- Late-join bugs: cheat application timing, shared engine code DRY-up
 - Frame cap threshold: use `>=` instead of `>` to actually trigger at boundary
 - Use raw frame advantage (not smoothed EMA) for cap decision
 - Delta base buffer detached by Web Worker transfer
@@ -41,6 +53,8 @@ All notable changes to kaillera-next netplay are documented here.
 - Consolidate mupen64plus patches for reliable build
 - Defer 8MB WASM buffer allocation until sync is enabled
 - Reduce resync cooldown for C-level path
+- TDZ error in admin.js from function ordering
+- Kaillera credit footer pinned to bottom of lobby page
 
 ## [0.5.0] - 2026-03-20
 
