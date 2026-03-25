@@ -1176,6 +1176,7 @@
           const parts = e.data.split(':');
           const syncFrame = parseInt(parts[1], 10);
           const hostHash = parseInt(parts[2], 10);
+          const hostCycleMs = parts[3] !== undefined ? parseFloat(parts[3]) : null;
           const frameDiff = _frameNum - syncFrame;
           if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
             _syncLog(`sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`);
@@ -1186,6 +1187,10 @@
               if (guestHash !== hostHash) {
                 _syncLog(`DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`);
                 _recordDrift(null);
+                if (hostCycleMs !== null && mod._kn_get_cycle_time_ms) {
+                  const guestCycleMs = mod._kn_get_cycle_time_ms();
+                  _syncLog(`CYCLE-DRIFT host=${hostCycleMs.toFixed(1)}ms guest=${guestCycleMs.toFixed(1)}ms diff=${(guestCycleMs - hostCycleMs).toFixed(1)}ms`);
+                }
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
@@ -2741,7 +2746,8 @@
         // C-level hash — synchronous, no HEAPU8, no worker
         const mod = window.EJS_emulator.gameManager.Module;
         const hash = mod._kn_sync_hash();
-        const syncMsg = `sync-hash:${_frameNum}:${hash}`;
+        const cycleMs = mod._kn_get_cycle_time_ms ? mod._kn_get_cycle_time_ms() : 0;
+        const syncMsg = `sync-hash:${_frameNum}:${hash}:${cycleMs.toFixed(1)}`;
         const peers = getActivePeers();
         let sent = 0;
         for (const p of peers) {
@@ -2757,7 +2763,7 @@
           const checkFrame = _frameNum;
           const peers = getActivePeers();
           workerPost({ type: 'hash', data: hashBytes }).then((res) => {
-            const syncMsg = `sync-hash:${checkFrame}:${res.hash}`;
+            const syncMsg = `sync-hash:${checkFrame}:${res.hash}:0`;
             let sent = 0;
             for (const p of peers) {
               try { p.dc.send(syncMsg); sent++; } catch (_) {}
