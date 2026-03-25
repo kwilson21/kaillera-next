@@ -559,15 +559,16 @@
 
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
-      // Blit loop: copy emulator canvas to capture canvas every frame
-      _hostStream = captureCanvas.captureStream(0); // manual frame control
-      const captureTrack = _hostStream.getVideoTracks()[0];
+      // Blit loop: copy emulator canvas to capture canvas every frame.
+      // Use captureStream(30) for automatic 30fps capture instead of manual
+      // requestFrame() — manual mode fails after lockstep→streaming switch
+      // because APISandbox rAF overrides may not be fully restored.
+      _hostStream = captureCanvas.captureStream(30);
 
       const blitFrame = () => {
         if (!_gameRunning) return; // stop loop when game ends
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
-        captureTrack.requestFrame(); // signal new frame to captureStream
       };
       blitFrame();
 
