@@ -552,6 +552,7 @@
     gameRunning = false;
     _lateJoin = false;
     _pendingLateJoin = false;
+    showToast('The host has ended the game');
     if (engine) {
       // Upload sync logs to server before stopping
       uploadSyncLogs('game-ended');
@@ -1963,6 +1964,17 @@
     });
     _lateJoin = false;
 
+    // Connection timeout: if the game-loading overlay is still visible after
+    // 30 seconds, the WebRTC handshake likely failed (NAT/firewall).
+    setTimeout(() => {
+      const loadingEl = document.getElementById('game-loading');
+      if (loadingEl && !loadingEl.classList.contains('hidden') && gameRunning) {
+        const text = document.getElementById('game-loading-text');
+        if (text) text.textContent = 'Connection timed out — check your network or firewall';
+        showToast('Could not connect to other players');
+      }
+    }, 30000);
+
     // Register ROM sharing delegation hooks
     if (engine.onExtraDataChannel) {
       engine.onExtraDataChannel((remoteSid, channel) => {
@@ -2269,14 +2281,28 @@
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
 
+  let _loadingTimeoutId = null;
+
   const showGameLoading = () => {
     const el = document.getElementById('game-loading');
     if (el) {
       el.classList.remove('hidden', 'fade-out');
     }
+    // Show a reassurance message if loading takes more than 15 seconds
+    if (_loadingTimeoutId) clearTimeout(_loadingTimeoutId);
+    _loadingTimeoutId = setTimeout(() => {
+      const text = document.getElementById('game-loading-text');
+      if (text && !el?.classList.contains('hidden')) {
+        text.textContent = 'Still loading — this can take a moment on first boot...';
+      }
+    }, 15000);
   };
 
   const dismissGameLoading = () => {
+    if (_loadingTimeoutId) {
+      clearTimeout(_loadingTimeoutId);
+      _loadingTimeoutId = null;
+    }
     const el = document.getElementById('game-loading');
     if (!el || el.classList.contains('hidden')) return;
     el.classList.add('fade-out');
