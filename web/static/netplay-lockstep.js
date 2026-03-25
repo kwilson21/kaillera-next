@@ -1475,7 +1475,7 @@
             let _hijacked = false;
             // CONSTRUCTOR — called with `new` by EmulatorJS. Must remain a
             // `function` declaration (arrow functions cannot be constructors).
-            var _HijackAC = function () {
+            const _HijackAC = function () {
               if (!_hijacked) {
                 _hijacked = true;
                 // Restore original constructors
