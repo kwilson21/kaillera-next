@@ -16,7 +16,7 @@
   'use strict';
 
   // Use APISandbox for native getGamepads (lockstep overrides the global).
-  var _nativeGetGamepads = function () { return APISandbox.nativeGetGamepads(); };
+  const _nativeGetGamepads = () => APISandbox.nativeGetGamepads();
 
   // ── Profile Registry ─────────────────────────────────────────────────
   // Ordered array. First match wins. Raphnet before Standard (fallback).
@@ -95,7 +95,7 @@
   function resolveProfile(id) {
     // Check localStorage for custom profile
     try {
-      const saved = localStorage.getItem('gamepad-profile:' + id);
+      const saved = localStorage.getItem(`gamepad-profile:${id}`);
       if (saved) {
         const profile = JSON.parse(saved);
         profile.name = 'Custom';
@@ -105,10 +105,7 @@
     } catch (_) {}
 
     // Fall through to built-in profiles
-    for (let i = 0; i < PROFILES.length; i++) {
-      if (PROFILES[i].match(id)) return PROFILES[i];
-    }
-    return PROFILES[PROFILES.length - 1];
+    return PROFILES.find((p) => p.match(id)) ?? PROFILES[PROFILES.length - 1];
   }
 
   // ── Polling / Scanning ───────────────────────────────────────────────
@@ -174,19 +171,16 @@
     let mask = 0;
 
     // Map buttons
-    const btnMap = profile.buttons;
-    for (const btnIdx in btnMap) {
+    for (const [btnIdx, bitmask] of Object.entries(profile.buttons)) {
       const idx = parseInt(btnIdx, 10);
       if (idx < gp.buttons.length && gp.buttons[idx].pressed) {
-        mask |= btnMap[btnIdx];
+        mask |= bitmask;
       }
     }
 
     // Map axes → analog direction bits (bits 16-19)
-    const axes = profile.axes;
     const dz = profile.deadzone;
-    for (const axisName in axes) {
-      const axisCfg = axes[axisName];
+    for (const axisCfg of Object.values(profile.axes)) {
       if (axisCfg.index < gp.axes.length) {
         const val = gp.axes[axisCfg.index];
         if (val > dz)  mask |= (1 << axisCfg.bits[0]);  // positive
@@ -197,12 +191,12 @@
     // Map axes → digital button bits (C-buttons from right stick)
     const axBtn = profile.axisButtons;
     if (axBtn) {
-      for (const axIdx in axBtn) {
+      for (const [axIdx, cfg] of Object.entries(axBtn)) {
         const ai = parseInt(axIdx, 10);
         if (ai < gp.axes.length) {
           const v = gp.axes[ai];
-          if (v > dz)  mask |= axBtn[axIdx].pos;
-          if (v < -dz) mask |= axBtn[axIdx].neg;
+          if (v > dz)  mask |= cfg.pos;
+          if (v < -dz) mask |= cfg.neg;
         }
       }
     }
@@ -214,9 +208,9 @@
 
   window.GamepadManager = {
     start: (opts) => {
-      opts = opts || {};
-      _playerSlot = opts.playerSlot || 0;
-      _onUpdate = opts.onUpdate || null;
+      opts = opts ?? {};
+      _playerSlot = opts.playerSlot ?? 0;
+      _onUpdate = opts.onUpdate ?? null;
 
       // Immediate first poll
       poll();
@@ -248,8 +242,7 @@
 
     getAssignments: () => {
       const result = {};
-      for (const slot in _assignments) {
-        const gpIndex = _assignments[slot];
+      for (const [slot, gpIndex] of Object.entries(_assignments)) {
         const entry = _detected[gpIndex];
         if (entry) {
           result[slot] = {
@@ -270,27 +263,23 @@
     },
 
     getDetected: () => {
-      const result = [];
-      for (const idx in _detected) {
-        result.push({
-          index: parseInt(idx, 10),
-          id: _detected[idx].id,
-          profileName: _detected[idx].profileName,
-        });
-      }
-      return result;
+      return Object.entries(_detected).map(([idx, entry]) => ({
+        index: parseInt(idx, 10),
+        id: entry.id,
+        profileName: entry.profileName,
+      }));
     },
 
     saveGamepadProfile: (gamepadId, profile) => {
       try {
-        localStorage.setItem('gamepad-profile:' + gamepadId, JSON.stringify(profile));
+        localStorage.setItem(`gamepad-profile:${gamepadId}`, JSON.stringify(profile));
       } catch (_) {}
       // Re-resolve profile for this gamepad
-      for (const idx in _detected) {
-        if (_detected[idx].id === gamepadId) {
+      for (const entry of Object.values(_detected)) {
+        if (entry.id === gamepadId) {
           const resolved = resolveProfile(gamepadId);
-          _detected[idx].profile = resolved;
-          _detected[idx].profileName = resolved.name;
+          entry.profile = resolved;
+          entry.profileName = resolved.name;
         }
       }
       if (_onUpdate) _onUpdate();
@@ -298,28 +287,25 @@
 
     clearGamepadProfile: (gamepadId) => {
       try {
-        localStorage.removeItem('gamepad-profile:' + gamepadId);
+        localStorage.removeItem(`gamepad-profile:${gamepadId}`);
       } catch (_) {}
-      for (const idx in _detected) {
-        if (_detected[idx].id === gamepadId) {
+      for (const entry of Object.values(_detected)) {
+        if (entry.id === gamepadId) {
           const resolved = resolveProfile(gamepadId);
-          _detected[idx].profile = resolved;
-          _detected[idx].profileName = resolved.name;
+          entry.profile = resolved;
+          entry.profileName = resolved.name;
         }
       }
       if (_onUpdate) _onUpdate();
     },
 
     getDefaultProfile: (gamepadId) => {
-      for (let i = 0; i < PROFILES.length; i++) {
-        if (PROFILES[i].match(gamepadId)) return PROFILES[i];
-      }
-      return PROFILES[PROFILES.length - 1];
+      return PROFILES.find((p) => p.match(gamepadId)) ?? PROFILES[PROFILES.length - 1];
     },
 
     hasCustomProfile: (gamepadId) => {
       try {
-        return localStorage.getItem('gamepad-profile:' + gamepadId) !== null;
+        return localStorage.getItem(`gamepad-profile:${gamepadId}`) !== null;
       } catch (_) { return false; }
     },
 
