@@ -37,6 +37,7 @@
     if (localStorage.getItem('kn-core-version') === CORE_VERSION) {
       idbClearPromise = Promise.resolve();
     } else if (indexedDB.databases) {
+      // NOTE: intentionally .then() chain — result IS the promise assigned to window._knCoreReady
       idbClearPromise = indexedDB
         .databases()
         .then((databases) => {

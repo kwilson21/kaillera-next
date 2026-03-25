@@ -8,9 +8,13 @@
       localStorage.removeItem('kn-pending-log');
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
+        // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
         fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
-          method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' },
-        }).then(() => console.log('[lobby] recovered pending sync log'))
+          method: 'POST',
+          body: logs,
+          headers: { 'Content-Type': 'text/plain' },
+        })
+          .then(() => console.log('[lobby] recovered pending sync log'))
           .catch(() => {});
       }
     }

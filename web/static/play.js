@@ -76,6 +76,7 @@
       localStorage.removeItem('kn-pending-log');
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
+        // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
         fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
           method: 'POST',
           body: logs,
@@ -1559,6 +1560,7 @@
       document.body.appendChild(script);
     };
     if (window._knCoreReady) {
+      // NOTE: intentionally .then() — dual resolve/reject handler, cleaner than try/finally
       window._knCoreReady.then(injectLoader, injectLoader);
     } else {
       injectLoader();
@@ -1987,29 +1989,28 @@
   };
 
   // ── Sync log upload ──────────────────────────────────────────────────
-  const uploadSyncLogs = (trigger) => {
+  const uploadSyncLogs = async (trigger) => {
     const logs = engine?.exportSyncLog?.();
     if (!logs) return;
     const slot = window._playerSlot ?? 'x';
     const room = roomCode ?? 'unknown';
     const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}`;
-    fetch(url, { method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' } })
-      .then((res) => {
-        if (res.ok) {
-          console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
-          showToast?.('Logs uploaded');
-          try {
-            localStorage.removeItem('kn-pending-log');
-          } catch (_) {}
-        } else {
-          console.log(`[play] sync log upload failed: ${res.status}`);
-          showToast?.(`Log upload failed: ${res.status}`);
-        }
-      })
-      .catch((err) => {
-        console.log('[play] sync log upload error:', err);
-        showToast?.('Log upload failed');
-      });
+    try {
+      const res = await fetch(url, { method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' } });
+      if (res.ok) {
+        console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
+        showToast?.('Logs uploaded');
+        try {
+          localStorage.removeItem('kn-pending-log');
+        } catch (_) {}
+      } else {
+        console.log(`[play] sync log upload failed: ${res.status}`);
+        showToast?.(`Log upload failed: ${res.status}`);
+      }
+    } catch (err) {
+      console.log('[play] sync log upload error:', err);
+      showToast?.('Log upload failed');
+    }
   };
 
   const endGame = () => {
@@ -2447,11 +2448,10 @@
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
 
-  const copyToClipboard = (text, label) => {
+  const copyToClipboard = async (text, label) => {
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(() => {
-        showToast(`${label} copied!`);
-      });
+      await navigator.clipboard.writeText(text);
+      showToast(`${label} copied!`);
     } else {
       const ta = document.createElement('textarea');
       ta.value = text;

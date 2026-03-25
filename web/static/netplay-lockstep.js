@@ -444,6 +444,7 @@
       ((idx) => {
         const gOff = rd.base + gameRegions[idx];
         const regionBytes = rd.live.slice(gOff, gOff + SAMPLE);
+        // NOTE: intentionally fire-and-forget .then() — runs in frame loop, must not block
         workerPost({ type: 'hash', data: regionBytes })
           .then((res) => {
             regionHashes[idx] = res.hash;
@@ -823,24 +824,22 @@
       // Use capture phase so EmulatorJS virtual controls can't block via
       // stopPropagation. Retry on every interaction until actually running.
       if (_audioCtx.state !== 'running') {
-        const resumeAudio = () => {
+        const resumeAudio = async () => {
           if (!_audioCtx || _audioCtx.state === 'running') {
             document.removeEventListener('click', resumeAudio, true);
             document.removeEventListener('keydown', resumeAudio, true);
             document.removeEventListener('touchstart', resumeAudio, true);
             return;
           }
-          _audioCtx
-            .resume()
-            .then(() => {
-              _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
-              document.removeEventListener('click', resumeAudio, true);
-              document.removeEventListener('keydown', resumeAudio, true);
-              document.removeEventListener('touchstart', resumeAudio, true);
-            })
-            .catch((e) => {
-              _syncLog(`audio resume failed: ${e.message}`);
-            });
+          try {
+            await _audioCtx.resume();
+            _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
+            document.removeEventListener('click', resumeAudio, true);
+            document.removeEventListener('keydown', resumeAudio, true);
+            document.removeEventListener('touchstart', resumeAudio, true);
+          } catch (e) {
+            _syncLog(`audio resume failed: ${e.message}`);
+          }
         };
         document.addEventListener('click', resumeAudio, true);
         document.addEventListener('keydown', resumeAudio, true);
@@ -1361,6 +1360,7 @@
                 const guestBytes = getHashBytes();
                 if (!guestBytes) return;
                 const peerRef = peer;
+                // NOTE: intentionally fire-and-forget .then() — runs in frame loop, must not block
                 workerPost({ type: 'hash', data: guestBytes })
                   .then((res) => {
                     if (res.hash !== hostHash) {
@@ -1554,7 +1554,7 @@
     _config?.onReconnecting?.(remoteSid, false);
   };
 
-  const attemptReconnect = (remoteSid) => {
+  const attemptReconnect = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer || !peer.reconnecting) return;
 
@@ -1605,20 +1605,18 @@
     peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
     setupDataChannel(remoteSid, peer.dc);
 
-    peer.pc
-      .createOffer()
-      .then((offer) => peer.pc.setLocalDescription(offer))
-      .then(() => {
-        socket.emit('webrtc-signal', {
-          target: remoteSid,
-          offer: peer.pc.localDescription,
-          reconnect: true,
-        });
-      })
-      .catch((err) => {
-        _syncLog(`reconnect offer failed: ${err}`);
-        hardDisconnectPeer(remoteSid);
+    try {
+      const offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      socket.emit('webrtc-signal', {
+        target: remoteSid,
+        offer: peer.pc.localDescription,
+        reconnect: true,
       });
+    } catch (err) {
+      _syncLog(`reconnect offer failed: ${err}`);
+      hardDisconnectPeer(remoteSid);
+    }
   };
 
   // -- Helper: get active player peers ---------------------------------------
@@ -2053,6 +2051,7 @@
       // Host: also send cached bytes to guests via Socket.IO as fallback.
       // Guest cache fetch may hang/timeout on slow mobile connections.
       if (_playerSlot === 0) {
+        // NOTE: intentionally fire-and-forget .then() — non-blocking Socket.IO relay
         compressAndEncode(new Uint8Array(bytes))
           .then((encoded) => {
             _syncLog(
@@ -3012,6 +3011,7 @@
             const deferBytes = getHashBytes();
             if (deferBytes) {
               const deferCheck = _pendingSyncCheck; // capture before nulling
+              // NOTE: intentionally fire-and-forget .then() — runs in frame loop, must not block
               workerPost({ type: 'hash', data: deferBytes })
                 .then((res) => {
                   if (res.hash !== deferCheck.hash) {
@@ -3066,6 +3066,7 @@
         if (hashBytes) {
           const checkFrame = _frameNum;
           const peers = getActivePeers();
+          // NOTE: intentionally fire-and-forget .then() — runs in frame loop, must not block
           workerPost({ type: 'hash', data: hashBytes })
             .then((res) => {
               const syncMsg = `sync-hash:${checkFrame}:${res.hash}:0`;
@@ -3452,7 +3453,7 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
-  const pushSyncState = (targetSid) => {
+  const pushSyncState = async (targetSid) => {
     // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
     if (_pushingSyncState) return;
@@ -3506,18 +3507,16 @@
     // on the next push and delta never fires.
     _setLastSyncState(currentState.slice(), 'pushSync');
 
-    compressState(toCompress)
-      .then((compressed) => {
-        const sizeKB = Math.round(compressed.length / 1024);
-        _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-        sendSyncChunks(compressed, frame, isFull, targetSid);
-      })
-      .catch((err) => {
-        _syncLog(`sync compress failed: ${err}`);
-      })
-      .finally(() => {
-        _pushingSyncState = false;
-      });
+    try {
+      const compressed = await compressState(toCompress);
+      const sizeKB = Math.round(compressed.length / 1024);
+      _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
+      sendSyncChunks(compressed, frame, isFull, targetSid);
+    } catch (err) {
+      _syncLog(`sync compress failed: ${err}`);
+    } finally {
+      _pushingSyncState = false;
+    }
   };
 
   const sendSyncChunks = (compressed, frame, isFull, targetSid) => {

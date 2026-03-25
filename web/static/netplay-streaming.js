@@ -584,7 +584,7 @@
       .join('\r\n');
   };
 
-  const optimizeVideoEncoding = (pc) => {
+  const optimizeVideoEncoding = async (pc) => {
     // Force high bitrate and 60fps for low-latency game streaming.
     // WebRTC defaults are conservative and cap at ~40fps. We override:
     // - minBitrate prevents the bandwidth estimator from throttling too low
@@ -600,14 +600,12 @@
         params.encodings[0].maxFramerate = 60;
         // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
-        sender
-          .setParameters(params)
-          .then(() => {
-            console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
-          })
-          .catch((err) => {
-            console.log('[netplay] setParameters failed:', err);
-          });
+        try {
+          await sender.setParameters(params);
+          console.log('[netplay] video encoding optimized: 60fps, 5Mbps max');
+        } catch (err) {
+          console.log('[netplay] setParameters failed:', err);
+        }
       }
     }
   };
