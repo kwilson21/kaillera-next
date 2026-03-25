@@ -2247,15 +2247,14 @@
 
   const copyLink = () => {
     const url = `${window.location.origin}/play.html?room=${roomCode}`;
-    const shareText = `Join my kaillera-next room: ${url}`;
     // navigator.clipboard requires HTTPS; use execCommand fallback for HTTP
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(shareText).then(() => {
+      navigator.clipboard.writeText(url).then(() => {
         showToast('Link copied!');
       });
     } else {
       const ta = document.createElement('textarea');
-      ta.value = shareText;
+      ta.value = url;
       ta.style.position = 'fixed';
       ta.style.opacity = '0';
       document.body.appendChild(ta);
@@ -2876,14 +2875,14 @@
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) sharePlay.addEventListener('click', () => {
       const url = `${window.location.origin}/play.html?room=${roomCode}`;
-      copyToClipboard(`Join my kaillera-next room: ${url}`, 'Play link');
+      copyToClipboard(url, 'Play link');
       closeShareDropdown();
     });
 
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch) shareWatch.addEventListener('click', () => {
       const url = `${window.location.origin}/play.html?room=${roomCode}&spectate=1`;
-      copyToClipboard(`Watch my kaillera-next room: ${url}`, 'Watch link');
+      copyToClipboard(url, 'Watch link');
       closeShareDropdown();
     });
 
