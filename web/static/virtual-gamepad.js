@@ -96,10 +96,10 @@
       // D-pad — inside .vgp-left, TOP area (above stick)
       '.vgp-dpad { position: absolute; top: 4px; left: 10px; width: 96px; height: 96px; }',
       '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 13px; width: 34px; height: 34px; }',
-      '.vgp-du { left: 28px; top: 0; }',
-      '.vgp-dd { left: 28px; bottom: 0; top: auto; }',
-      '.vgp-dl { left: 0; top: 28px; }',
-      '.vgp-dr { right: 0; top: 28px; }',
+      '.vgp-du { left: 31px; top: 0; }',
+      '.vgp-dd { left: 31px; bottom: 0; top: auto; }',
+      '.vgp-dl { left: 0; top: 31px; }',
+      '.vgp-dr { right: 0; top: 31px; }',
 
       // Stick zone — inside .vgp-left, BELOW dpad
       '.vgp-stick-zone {',
@@ -114,15 +114,15 @@
       '  transition: none; will-change: transform;',
       '}',
 
-      // C-buttons diamond — inside .vgp-right, TOP area
-      '.vgp-cu { width: 38px; height: 38px; left: 30px; top: 4px; font-size: 11px; }',
-      '.vgp-cd { width: 38px; height: 38px; left: 30px; top: 74px; font-size: 11px; }',
-      '.vgp-cl { width: 38px; height: 38px; left: 0; top: 39px; font-size: 11px; }',
-      '.vgp-cr { width: 38px; height: 38px; left: 64px; top: 39px; font-size: 11px; }',
+      // C-buttons diamond — inside .vgp-right, TOP area, pushed right
+      '.vgp-cu { width: 38px; height: 38px; right: 40px; left: auto; top: 4px; font-size: 11px; }',
+      '.vgp-cd { width: 38px; height: 38px; right: 40px; left: auto; top: 74px; font-size: 11px; }',
+      '.vgp-cl { width: 38px; height: 38px; right: 74px; left: auto; top: 39px; font-size: 11px; }',
+      '.vgp-cr { width: 38px; height: 38px; right: 10px; left: auto; top: 39px; font-size: 11px; }',
 
-      // A + B — same size, inside .vgp-right, BELOW C-buttons
+      // A + B — diagonal layout (Gameboy style: A lower-right, B upper-left)
       '.vgp-a { width: 52px; height: 52px; right: 8px; bottom: 8px; top: auto; font-size: 17px; }',
-      '.vgp-b { width: 52px; height: 52px; right: 66px; bottom: 8px; top: auto; font-size: 17px; }',
+      '.vgp-b { width: 52px; height: 52px; right: 66px; bottom: 44px; top: auto; font-size: 17px; }',
 
       // Start — in flow inside .vgp-center
       '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
@@ -141,8 +141,8 @@
       '  .vgp-shoulders { position: fixed; top: 20px; left: 0; right: 0; padding: 0 8px; z-index: 56; }',
       // Start on right side, above A/B with gap
       '  .vgp-center { position: fixed; bottom: 80px; right: 80px; left: auto; transform: none; z-index: 56; }',
-      // Dpad at top of left panel (below shoulders)
-      '  .vgp-dpad { top: 30px; left: 8px; bottom: auto; }',
+      // Dpad in left panel, below shoulders with clearance
+      '  .vgp-dpad { top: 70px; left: 8px; bottom: auto; }',
       // Stick below dpad in left panel
       '  .vgp-stick-zone { left: 8px; bottom: 4px; top: auto; transform: none; width: 100px; height: 100px; }',
       '  .vgp-stick-knob { width: 42px; height: 42px; }',
@@ -151,9 +151,9 @@
       '  .vgp-cd { right: 60px; left: auto; top: 120px; }',
       '  .vgp-cl { right: 94px; left: auto; top: 88px; }',
       '  .vgp-cr { right: 26px; left: auto; top: 88px; }',
-      // A/B bottom-right, same size, with gap above Start
-      '  .vgp-a { right: 12px; bottom: 40px; top: auto; }',
-      '  .vgp-b { right: 70px; bottom: 40px; top: auto; }',
+      // A/B bottom-right, diagonal layout (Gameboy style)
+      '  .vgp-a { right: 12px; bottom: 30px; top: auto; }',
+      '  .vgp-b { right: 70px; bottom: 66px; top: auto; }',
       '}',
 
       '</style>',
