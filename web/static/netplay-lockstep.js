@@ -3570,6 +3570,8 @@
     if (_syncWorker) { _syncWorker.terminate(); _syncWorker = null; }
     if (_syncWorkerUrl) { URL.revokeObjectURL(_syncWorkerUrl); _syncWorkerUrl = null; }
     _syncWorkerCallbacks = {};
+    _syncLogHead = 0;
+    _syncLogCount = 0;
 
     // Clean up audio bypass
     if (_audioWorklet) {
