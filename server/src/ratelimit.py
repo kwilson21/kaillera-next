@@ -19,6 +19,9 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "input": (120, 1),
     "rom-signal": (60, 1),
     "cache-state": (5, 60),
+    "sync-logs": (10, 60),
+    "debug-sync": (5, 1),
+    "debug-logs": (5, 60),
 }
 
 MAX_CONNECTIONS_PER_IP = 20

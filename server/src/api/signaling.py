@@ -624,7 +624,7 @@ async def debug_sync(sid: str, data: dict) -> None:
     Only active when DEBUG_MODE=1 env var is set."""
     if not os.environ.get("DEBUG_MODE"):
         return
-    if not check(sid, "data-message"):
+    if not check(sid, "debug-sync"):
         return
     from pathlib import Path
     entry = _sid_to_room.get(sid)
@@ -642,7 +642,7 @@ async def debug_sync(sid: str, data: dict) -> None:
 async def debug_logs(sid: str, data: dict) -> None:
     """Receive debug logs from a client and log to stdout.
     In DEBUG_MODE, also writes to local file."""
-    if not check(sid, "data-message"):
+    if not check(sid, "debug-logs"):
         return
     import json
 
