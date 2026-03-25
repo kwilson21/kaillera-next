@@ -32,9 +32,9 @@ git clone <repo-url>
 cd kaillera-next
 pip install server/
 
-# Run (serves both API and web frontend on :8000)
+# Run (serves both API and web frontend on :27886)
 kaillera-server
-# → http://localhost:8000
+# → http://localhost:27886
 ```
 
 Or run directly:
@@ -47,7 +47,7 @@ cd server && python -c "from src.main import run; run()"
 
 ```bash
 docker build -t kaillera-next .
-docker run -p 8000:8000 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next
+docker run -p 27886:27886 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-next
 ```
 
 The Docker image runs as a non-root user with a health check on `/health`.
@@ -66,7 +66,7 @@ The Docker image runs as a non-root user with a health check on `/health`.
            ┌─────────────────────┐
            │ kaillera-next       │
            │ FastAPI + Socket.IO │
-           │ :8000               │
+           │ :27886              │
            └─────────────────────┘
 ```
 

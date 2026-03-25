@@ -34,7 +34,7 @@ V1 — Browser-based
               - Room management (create/join/leave)
               - WebRTC offer/answer/ICE relay
               - Game data relay (save states, input)
-              HTTP/WS :8000
+              HTTP/WS :27886
 
   Lockstep mode: all players run the emulator in sync via WebRTC DataChannels.
   Streaming mode: host runs the emulator and streams video via WebRTC MediaStream.
