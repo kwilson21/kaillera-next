@@ -102,6 +102,7 @@
   let _prevSlotMasks = {};
   let _gameRunning = false;
   let _hostInputInterval = null;
+  let _hostBlitInterval = null;
   let _cachedInfo = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
@@ -559,18 +560,23 @@
 
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
-      // Blit loop: copy emulator canvas to capture canvas every frame.
-      // Use captureStream(30) for automatic 30fps capture instead of manual
-      // requestFrame() — manual mode fails after lockstep→streaming switch
-      // because APISandbox rAF overrides may not be fully restored.
+      // Blit loop: copy emulator WebGL canvas to 2D capture canvas.
+      // Use setInterval instead of rAF — rAF can be in a bad state after
+      // lockstep→streaming switch (APISandbox overrides + EmulatorJS rAF
+      // interaction). setInterval is immune to this.
       _hostStream = captureCanvas.captureStream(30);
 
-      const blitFrame = () => {
-        if (!_gameRunning) return; // stop loop when game ends
-        requestAnimationFrame(blitFrame);
+      let _blitCount = 0;
+      _hostBlitInterval = setInterval(() => {
+        if (!_gameRunning) {
+          clearInterval(_hostBlitInterval);
+          _hostBlitInterval = null;
+          return;
+        }
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
-      };
-      blitFrame();
+        _blitCount++;
+        if (_blitCount === 30) _syncLog(`blit loop running: ${_blitCount} frames blitted`);
+      }, 16); // ~60fps blit, captured at 30fps
 
       _syncLog('capture stream started (640x480 2D blit)');
 
@@ -1008,6 +1014,10 @@
     if (_hostInputInterval) {
       clearInterval(_hostInputInterval);
       _hostInputInterval = null;
+    }
+    if (_hostBlitInterval) {
+      clearInterval(_hostBlitInterval);
+      _hostBlitInterval = null;
     }
 
     // Close all peer connections
