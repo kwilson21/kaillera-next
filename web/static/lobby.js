@@ -1,6 +1,21 @@
 (function () {
   'use strict';
 
+  // Recover pending sync logs from a previous game session that closed unexpectedly
+  try {
+    const pending = localStorage.getItem('kn-pending-log');
+    if (pending) {
+      localStorage.removeItem('kn-pending-log');
+      const { room, slot, logs } = JSON.parse(pending);
+      if (logs) {
+        fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
+          method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' },
+        }).then(() => console.log('[lobby] recovered pending sync log'))
+          .catch(() => {});
+      }
+    }
+  } catch (_) {}
+
   const nameInput = document.getElementById('player-name');
   const codeInput = document.getElementById('room-code');
 

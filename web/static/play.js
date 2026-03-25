@@ -68,6 +68,21 @@
     isSpectator = params.get('spectate') === '1';
   };
 
+  // ── Recover pending logs from previous session ───────────────────────
+  try {
+    const pending = localStorage.getItem('kn-pending-log');
+    if (pending) {
+      localStorage.removeItem('kn-pending-log');
+      const { room, slot, logs } = JSON.parse(pending);
+      if (logs) {
+        fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
+          method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' },
+        }).then(() => console.log('[play] recovered pending sync log'))
+          .catch(() => {});
+      }
+    }
+  } catch (_) {}
+
   // ── Global error handler ───────────────────────────────────────────────
 
   window.addEventListener('unhandledrejection', (e) => {
@@ -1851,6 +1866,7 @@
         if (res.ok) {
           console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
           showToast?.('Logs uploaded');
+          try { localStorage.removeItem('kn-pending-log'); } catch (_) {}
         } else {
           console.log(`[play] sync log upload failed: ${res.status}`);
           showToast?.(`Log upload failed: ${res.status}`);
