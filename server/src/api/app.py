@@ -6,10 +6,21 @@ V1 endpoints:
   GET  /list?game_id=...  EmulatorJS-Netplay room listing
   GET  /room/{room_id}    minimal room info (rate-limited)
   POST /api/sync-logs     upload sync diagnostic logs
+
+Admin endpoints (auth via ADMIN_KEY env var):
+  GET    /admin/api/stats              server stats
+  GET    /admin/api/logs               list sync log files
+  GET    /admin/api/logs/{filename}    view log content
+  POST   /admin/api/logs/{filename}/pin    pin log
+  DELETE /admin/api/logs/{filename}/pin    unpin log
+  DELETE /admin/api/logs/{filename}    delete log
+  POST   /admin/api/cleanup            run manual log cleanup
 """
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import json
 import logging
 import os
@@ -20,10 +31,53 @@ from fastapi import FastAPI, HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-from src.api.signaling import rooms
+from src.api.signaling import MAX_ROOMS, rooms
 from src.ratelimit import check_ip
 
 log = logging.getLogger(__name__)
+
+_SYNC_LOG_DIR = Path(os.environ.get("SYNC_LOG_DIR", "logs/sync"))
+_SYNC_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB max per upload
+
+
+def _pinned_set() -> set[str]:
+    """Read pinned log filenames from disk."""
+    pinned_file = _SYNC_LOG_DIR / ".pinned.json"
+    if pinned_file.exists():
+        try:
+            return set(json.loads(pinned_file.read_text()))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return set()
+
+
+def _save_pinned(pinned: set[str]) -> None:
+    """Write pinned log filenames to disk."""
+    _SYNC_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    (_SYNC_LOG_DIR / ".pinned.json").write_text(json.dumps(sorted(pinned)))
+
+
+async def cleanup_old_logs() -> None:
+    """Background task: delete non-pinned logs older than LOG_RETENTION_DAYS."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            retention = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
+            if not _SYNC_LOG_DIR.exists():
+                continue
+            pinned = _pinned_set()
+            cutoff = time.time() - (retention * 86400)
+            cleaned = 0
+            for f in _SYNC_LOG_DIR.glob("sync-*.log"):
+                if f.name in pinned:
+                    continue
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    cleaned += 1
+            if cleaned:
+                log.info("Log cleanup: removed %d expired log(s)", cleaned)
+        except Exception as e:
+            log.warning("Log cleanup error: %s", e)
 
 
 def _client_ip(request: Request) -> str:
@@ -171,8 +225,6 @@ def create_app(lifespan=None) -> FastAPI:
         return {"status": "cached", "size": len(body)}
 
     # ── Sync log upload ────────────────────────────────────────────────────
-    _SYNC_LOG_DIR = Path(os.environ.get("SYNC_LOG_DIR", "logs/sync"))
-    _SYNC_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB max per upload
 
     @app.post("/api/sync-logs")
     async def upload_sync_logs(request: Request) -> dict:
@@ -186,14 +238,135 @@ def create_app(lifespan=None) -> FastAPI:
         # Extract metadata from query params
         room = request.query_params.get("room", "unknown")[:32]
         slot = request.query_params.get("slot", "x")[:4]
+        src = request.query_params.get("src", "")
         ts = int(time.time())
         # Sanitize room name for filename
         safe_room = "".join(c if c.isalnum() or c in "-_" else "_" for c in room)
-        filename = f"sync-p{slot}-{safe_room}-{ts}.log"
+        src_suffix = f"-{src}" if src in ("beacon", "recovery") else ""
+        filename = f"sync-p{slot}-{safe_room}-{ts}{src_suffix}.log"
         _SYNC_LOG_DIR.mkdir(parents=True, exist_ok=True)
         path = _SYNC_LOG_DIR / filename
         path.write_bytes(body)
         log.info("Sync log saved: %s (%d KB)", filename, len(body) // 1024)
         return {"status": "saved", "filename": filename, "size": len(body)}
+
+    # ── Admin API ─────────────────────────────────────────────────────────
+
+    def _admin_auth(request: Request) -> None:
+        """Check admin key if ADMIN_KEY is set. Empty/unset = no auth required."""
+        admin_key = os.environ.get("ADMIN_KEY")
+        if not admin_key:
+            return
+        key = request.headers.get("x-admin-key") or request.query_params.get("key")
+        if not key or not hmac.compare_digest(admin_key, key):
+            raise HTTPException(status_code=401, detail="Invalid admin key")
+
+    def _safe_log_filename(filename: str) -> Path:
+        """Validate filename to prevent directory traversal."""
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        if not filename.startswith("sync-") or not filename.endswith(".log"):
+            raise HTTPException(status_code=400, detail="Invalid log filename")
+        path = _SYNC_LOG_DIR / filename
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Log not found")
+        return path
+
+    @app.get("/admin/api/stats")
+    def admin_stats(request: Request) -> dict:
+        _admin_auth(request)
+        total_players = sum(len(r.players) for r in rooms.values())
+        total_spectators = sum(len(r.spectators) for r in rooms.values())
+        log_files = list(_SYNC_LOG_DIR.glob("sync-*.log")) if _SYNC_LOG_DIR.exists() else []
+        total_size = sum(f.stat().st_size for f in log_files)
+        return {
+            "rooms": len(rooms),
+            "players": total_players,
+            "spectators": total_spectators,
+            "max_rooms": MAX_ROOMS,
+            "log_count": len(log_files),
+            "log_size_bytes": total_size,
+            "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "14")),
+            "auth_required": bool(os.environ.get("ADMIN_KEY")),
+        }
+
+    @app.get("/admin/api/logs")
+    def admin_list_logs(request: Request) -> list:
+        _admin_auth(request)
+        if not _SYNC_LOG_DIR.exists():
+            return []
+        pinned = _pinned_set()
+        result = []
+        for f in sorted(_SYNC_LOG_DIR.glob("sync-*.log"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = f.stat()
+            # Parse filename: sync-p{slot}-{room}-{ts}[-{src}].log
+            parts = f.stem.split("-")
+            slot = parts[1][1:] if len(parts) > 1 and parts[1].startswith("p") else "?"
+            room_code = parts[2] if len(parts) > 2 else "?"
+            ts = parts[3] if len(parts) > 3 else "0"
+            src = parts[4] if len(parts) > 4 else "normal"
+            result.append({
+                "filename": f.name,
+                "size": stat.st_size,
+                "created": int(stat.st_mtime),
+                "slot": slot,
+                "room": room_code,
+                "source": src,
+                "pinned": f.name in pinned,
+            })
+        return result
+
+    @app.get("/admin/api/logs/{filename}")
+    def admin_get_log(filename: str, request: Request) -> Response:
+        _admin_auth(request)
+        path = _safe_log_filename(filename)
+        return Response(content=path.read_text(errors="replace"), media_type="text/plain")
+
+    @app.post("/admin/api/logs/{filename}/pin")
+    def admin_pin_log(filename: str, request: Request) -> dict:
+        _admin_auth(request)
+        _safe_log_filename(filename)
+        pinned = _pinned_set()
+        pinned.add(filename)
+        _save_pinned(pinned)
+        return {"status": "pinned"}
+
+    @app.delete("/admin/api/logs/{filename}/pin")
+    def admin_unpin_log(filename: str, request: Request) -> dict:
+        _admin_auth(request)
+        _safe_log_filename(filename)
+        pinned = _pinned_set()
+        pinned.discard(filename)
+        _save_pinned(pinned)
+        return {"status": "unpinned"}
+
+    @app.delete("/admin/api/logs/{filename}")
+    def admin_delete_log(filename: str, request: Request) -> dict:
+        _admin_auth(request)
+        path = _safe_log_filename(filename)
+        pinned = _pinned_set()
+        pinned.discard(filename)
+        _save_pinned(pinned)
+        path.unlink()
+        return {"status": "deleted"}
+
+    @app.post("/admin/api/cleanup")
+    def admin_run_cleanup(request: Request) -> dict:
+        _admin_auth(request)
+        retention = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
+        if not _SYNC_LOG_DIR.exists():
+            return {"deleted": 0}
+        pinned = _pinned_set()
+        cutoff = time.time() - (retention * 86400)
+        deleted = 0
+        for f in _SYNC_LOG_DIR.glob("sync-*.log"):
+            if f.name in pinned:
+                continue
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        if deleted:
+            log.info("Manual cleanup: removed %d expired log(s)", deleted)
+        return {"deleted": deleted}
 
     return app

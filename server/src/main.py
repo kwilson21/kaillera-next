@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 import socketio
 import uvicorn
 
-from src.api.app import create_app
+from src.api.app import cleanup_old_logs, create_app
 from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, sio
 
 log = logging.getLogger(__name__)
@@ -34,8 +34,10 @@ _WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web")
 @asynccontextmanager
 async def lifespan(_app):
     task = asyncio.create_task(_cleanup_empty_rooms())
+    log_task = asyncio.create_task(cleanup_old_logs())
     yield
     task.cancel()
+    log_task.cancel()
     # Notify all connected clients before shutdown
     if rooms:
         log.info("Shutting down: notifying %d active room(s)", len(rooms))
