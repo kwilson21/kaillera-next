@@ -55,4 +55,4 @@ redis-stop:
 # Run the server with Redis (for testing deploy resilience)
 serve-redis:
     docker compose -f docker-compose.dev.yml up -d
-    cd server && REDIS_URL=redis://localhost:6379/0 python -c "from src.main import run; run()"
+    REDIS_URL=redis://localhost:6379/0 uv run kaillera-server
