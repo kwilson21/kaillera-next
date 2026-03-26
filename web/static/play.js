@@ -146,15 +146,28 @@
     window._isSpectator = isSpectator;
 
     let _reconnectErrorTimer = null;
+    let _reconnectDowngradeTimer = null;
     const _reconnectBanner = document.getElementById('reconnecting-banner');
+    const _reconnectText = document.getElementById('reconnecting-text');
     const _showReconnecting = () => {
       if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
+      if (_reconnectText) _reconnectText.textContent = 'Reconnecting to server\u2026';
+    };
+    const _showServerDown = () => {
+      if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
+      if (_reconnectText)
+        _reconnectText.textContent =
+          'Server is unreachable \u2014 your game is unaffected. New players cannot join until the server returns.';
     };
     const _hideReconnecting = () => {
       if (_reconnectBanner) _reconnectBanner.classList.add('hidden');
       if (_reconnectErrorTimer) {
         clearTimeout(_reconnectErrorTimer);
         _reconnectErrorTimer = null;
+      }
+      if (_reconnectDowngradeTimer) {
+        clearTimeout(_reconnectDowngradeTimer);
+        _reconnectDowngradeTimer = null;
       }
     };
     socket.on('connect', () => {
@@ -167,11 +180,20 @@
       setTimeout(() => {
         if (!socket.connected) _showReconnecting();
       }, 2000);
-      // Hard error only in lobby after 30s
-      if (!gameRunning && !_reconnectErrorTimer) {
-        _reconnectErrorTimer = setTimeout(() => {
-          if (!socket.connected) showError('Unable to reach server');
-        }, 30000);
+      if (gameRunning) {
+        // In-game: swap spinner text to info message after 15s (game still works P2P)
+        if (!_reconnectDowngradeTimer) {
+          _reconnectDowngradeTimer = setTimeout(() => {
+            if (!socket.connected) _showServerDown();
+          }, 15000);
+        }
+      } else {
+        // Lobby: hard error after 30s (can't do anything without server)
+        if (!_reconnectErrorTimer) {
+          _reconnectErrorTimer = setTimeout(() => {
+            if (!socket.connected) showError('Unable to reach server');
+          }, 30000);
+        }
       }
     });
     socket.on('reconnect', (attempt) => {
