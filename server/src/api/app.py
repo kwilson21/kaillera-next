@@ -159,9 +159,9 @@ class SecurityHeadersMiddleware:
         # WASM core + data — versioned, cache aggressively (7 days)
         if path.startswith("/static/ejs/cores/"):
             return "public, max-age=604800, immutable"
-        # JS/CSS — cache 1 hour, revalidate via ETag after that
+        # JS/CSS — always revalidate via ETag (304 if unchanged)
         if path.endswith((".js", ".css")):
-            return "public, max-age=3600, must-revalidate"
+            return "no-cache"
         # HTML pages — always revalidate (ETag still avoids re-download)
         if path.endswith(".html") or path == "/":
             return "no-cache"
