@@ -14,8 +14,6 @@ import logging
 import os
 from dataclasses import asdict
 
-from src.api.signaling import Room
-
 log = logging.getLogger(__name__)
 
 _KEY_PREFIX = "kn:room:"
@@ -24,7 +22,7 @@ _TTL_SECONDS = 12 * 60 * 60  # 12 hours
 _redis = None  # redis.asyncio.Redis instance or None
 
 
-def _serialize_room(room: Room) -> str:
+def _serialize_room(room) -> str:
     """Convert Room dataclass to JSON string."""
     d = asdict(room)
     # Sets are not JSON-serializable — convert to lists
@@ -35,8 +33,10 @@ def _serialize_room(room: Room) -> str:
     return json.dumps(d)
 
 
-def _deserialize_room(d: dict) -> Room:
+def _deserialize_room(d: dict):
     """Reconstruct Room from a parsed JSON dict."""
+    from src.api.signaling import Room
+
     return Room(
         owner=d["owner"],
         room_name=d["room_name"],
@@ -83,7 +83,7 @@ async def close() -> None:
         _redis = None
 
 
-async def save_room(session_id: str, room: Room) -> None:
+async def save_room(session_id: str, room) -> None:
     """Persist room to Redis with 12h TTL. No-op if Redis is unavailable."""
     if not _redis:
         return
@@ -104,7 +104,7 @@ async def delete_room(session_id: str) -> None:
         log.exception("Failed to delete room %s from Redis", session_id)
 
 
-async def load_all_rooms() -> dict[str, Room]:
+async def load_all_rooms() -> dict:
     """Load all rooms from Redis. Returns empty dict if Redis is unavailable."""
     if not _redis:
         return {}
