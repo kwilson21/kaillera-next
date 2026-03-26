@@ -65,6 +65,11 @@ def configure_cors(origin: str) -> None:
     sio.cors_allowed_origins = origin
 
 
+def set_shutting_down() -> None:
+    global _shutting_down
+    _shutting_down = True
+
+
 # ── Socket.IO server instance ─────────────────────────────────────────────────
 
 sio = socketio.AsyncServer(
@@ -112,6 +117,8 @@ rooms: dict[str, Room] = {}
 
 # sid -> (sessionId, playerId, is_spectator)
 _sid_to_room: dict[str, tuple[str, str, bool]] = {}
+
+_shutting_down = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -721,4 +728,5 @@ async def debug_logs(sid: str, data: dict) -> None:
 async def disconnect(sid: str) -> None:
     log.info("SIO disconnect %s", sid)
     unregister_sid(sid)
-    await _leave(sid)
+    if not _shutting_down:
+        await _leave(sid)

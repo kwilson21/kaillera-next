@@ -12,7 +12,6 @@ Entry point: kaillera-server  (see pyproject.toml)
 """
 
 import asyncio
-import contextlib
 import logging
 import os
 import sys
@@ -21,8 +20,9 @@ from contextlib import asynccontextmanager
 import socketio
 import uvicorn
 
+from src import state
 from src.api.app import cleanup_old_logs, create_app
-from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, sio
+from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, set_shutting_down, sio
 
 log = logging.getLogger(__name__)
 
@@ -32,20 +32,20 @@ _WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web")
 
 @asynccontextmanager
 async def lifespan(_app):
+    await state.init()
+    restored = await state.load_all_rooms()
+    if restored:
+        rooms.update(restored)
+        log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
     log_task = asyncio.create_task(cleanup_old_logs())
     yield
+    set_shutting_down()
     task.cancel()
     log_task.cancel()
-    # Notify all connected clients before shutdown
     if rooms:
-        log.info("Shutting down: notifying %d active room(s)", len(rooms))
-        for session_id in list(rooms):
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    sio.emit("room-closed", {"reason": "server-shutdown"}, room=session_id),
-                    timeout=2.0,
-                )
+        log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+    await state.close()
 
 
 def run() -> None:
