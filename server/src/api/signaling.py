@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 
 import socketio
 
+from src import state
 from src.ratelimit import check, check_ip, cleanup, connection_allowed, register_sid, unregister_sid
 
 log = logging.getLogger(__name__)
@@ -193,6 +194,7 @@ async def _leave(sid: str) -> None:
 
     if not room.players and not room.spectators:
         del rooms[session_id]
+        await state.delete_room(session_id)
         log.info("Room %s deleted (empty)", session_id)
         return
 
@@ -205,6 +207,7 @@ async def _leave(sid: str) -> None:
                 del _sid_to_room[remaining_sid]
                 await sio.leave_room(remaining_sid, session_id)
         del rooms[session_id]
+        await state.delete_room(session_id)
         log.info("Room %s closed (host left mid-game)", session_id)
         return
 
@@ -228,6 +231,7 @@ async def _leave(sid: str) -> None:
         log.info("Room %s ownership transferred to %s (slot 0)", session_id, new_owner_sid)
         await sio.emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
 
+    await state.save_room(session_id, room)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
 
 
@@ -252,6 +256,7 @@ async def _cleanup_empty_rooms() -> None:
         empty = [sid for sid, r in list(rooms.items()) if not r.players and not r.spectators]
         for sid in empty:
             del rooms[sid]
+            await state.delete_room(sid)
             log.debug("Cleanup: deleted empty room %s", sid)
         cleanup()
 
@@ -302,6 +307,7 @@ async def open_room(sid: str, data: dict) -> str | None:
     room.slots[0] = player_id
     rooms[session_id] = room
     _sid_to_room[sid] = (session_id, player_id, False)
+    await state.save_room(session_id, room)
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
@@ -350,6 +356,7 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     log.info("SIO %s %s room %s (playerId=%s)", sid, "spectating" if spectate else "joined", session_id, player_id)
     return (None, _players_payload(room))
 
@@ -394,6 +401,7 @@ async def claim_slot(sid: str, data: dict) -> str | None:
     _sid_to_room[sid] = (session_id, player_id, False)
 
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     log.info("SIO %s claimed slot %d in room %s", sid, slot, session_id)
     return None
 
@@ -464,6 +472,7 @@ async def start_game(sid: str, data: dict) -> str | None:
         },
         room=session_id,
     )
+    await state.save_room(session_id, room)
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
     return None
 
@@ -485,6 +494,7 @@ async def end_game(sid: str, data: dict) -> str | None:
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     log.info("Game ended in room %s", session_id)
     return None
 
@@ -508,6 +518,7 @@ async def set_mode(sid: str, data: dict) -> str | None:
         mode = "lockstep"
     room.mode = mode
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     log.info("Mode set to %s in room %s", mode, session_id)
     return None
 
@@ -526,6 +537,7 @@ async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
     enabled = bool(data.get("enabled", False))
     room.rom_sharing = enabled
     await sio.emit("rom-sharing-updated", {"romSharing": enabled}, room=session_id)
+    await state.save_room(session_id, room)
     log.info("ROM sharing %s in room %s", "enabled" if enabled else "disabled", session_id)
     return None
 
@@ -545,6 +557,7 @@ async def rom_ready(sid: str, data: dict) -> str | None:
     else:
         room.rom_ready.discard(sid)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     return None
 
 
@@ -564,6 +577,7 @@ async def rom_declare(sid: str, data: dict) -> str | None:
     else:
         room.rom_declared.discard(sid)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
     return None
 
 
