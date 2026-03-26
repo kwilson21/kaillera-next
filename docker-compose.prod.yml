@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
@@ -46,6 +44,7 @@ services:
         parallelism: 1
         delay: 10s
         order: start-first
+        failure_action: rollback
     healthcheck:
       test:
         [
