@@ -43,3 +43,16 @@ check:
 # Run the server
 serve:
     cd server && python -c "from src.main import run; run()"
+
+# Start local Redis for dev (run once, stays running in background)
+redis:
+    docker compose -f docker-compose.dev.yml up -d
+
+# Stop local Redis
+redis-stop:
+    docker compose -f docker-compose.dev.yml down
+
+# Run the server with Redis (for testing deploy resilience)
+serve-redis:
+    docker compose -f docker-compose.dev.yml up -d
+    cd server && REDIS_URL=redis://localhost:6379/0 python -c "from src.main import run; run()"
