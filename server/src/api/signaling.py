@@ -160,6 +160,26 @@ def _get_room(sid: str) -> tuple[str, Room] | None:
     return (session_id, room)
 
 
+def _swap_sid(room: Room, persistent_id: str, old_sid: str, new_sid: str) -> None:
+    """Update all SID-keyed fields when a player reconnects with a new socket."""
+    if room.owner == old_sid:
+        room.owner = new_sid
+    if persistent_id in room.players:
+        room.players[persistent_id]["socketId"] = new_sid
+    if persistent_id in room.spectators:
+        room.spectators[persistent_id]["socketId"] = new_sid
+    if old_sid in room.rom_ready:
+        room.rom_ready.discard(old_sid)
+        room.rom_ready.add(new_sid)
+    if old_sid in room.rom_declared:
+        room.rom_declared.discard(old_sid)
+        room.rom_declared.add(new_sid)
+    if old_sid in room.input_types:
+        room.input_types[new_sid] = room.input_types.pop(old_sid)
+    if old_sid in room.device_types:
+        room.device_types[new_sid] = room.device_types.pop(old_sid)
+
+
 async def _leave(sid: str) -> None:
     """Remove sid from its room; handle ownership transfer and cleanup."""
     entry = _sid_to_room.pop(sid, None)
@@ -270,11 +290,10 @@ async def open_room(sid: str, data: dict) -> str | None:
         return "Invalid data"
     if not check(sid, "open-room"):
         return "Rate limited"
-    await _leave(sid)  # clean up if already in another room
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
-    player_id = sid
+    persistent_id: str = extra.get("persistentId", "") or sid
     player_name: str = extra.get("player_name", "Player")
     room_name: str = extra.get("room_name", "Room")
     game_id: str = extra.get("game_id", "")
@@ -285,8 +304,25 @@ async def open_room(sid: str, data: dict) -> str | None:
         return "Missing sessionid"
     if not _ALNUM_RE.match(session_id) or not (3 <= len(session_id) <= 16):
         return "Invalid room code"
+
+    # Reconnect detection — BEFORE _leave
+    existing = rooms.get(session_id)
+    if existing and persistent_id in existing.players:
+        old_sid = existing.players[persistent_id]["socketId"]
+        _swap_sid(existing, persistent_id, old_sid, sid)
+        _sid_to_room.pop(old_sid, None)
+        _sid_to_room[sid] = (session_id, persistent_id, False)
+        await sio.enter_room(sid, session_id)
+        await sio.emit("users-updated", _players_payload(existing), room=session_id)
+        await state.save_room(session_id, existing)
+        log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
+        return None
+
     if session_id in rooms:
         return "Room already exists"
+
+    await _leave(sid)  # clean up if already in another room
+
     if len(rooms) >= MAX_ROOMS:
         return "Server is full"
 
@@ -303,15 +339,15 @@ async def open_room(sid: str, data: dict) -> str | None:
         password=password,
         max_players=max_players,
     )
-    room.players[player_id] = {"socketId": sid, "playerName": player_name}
-    room.slots[0] = player_id
+    room.players[persistent_id] = {"socketId": sid, "playerName": player_name}
+    room.slots[0] = persistent_id
     rooms[session_id] = room
-    _sid_to_room[sid] = (session_id, player_id, False)
+    _sid_to_room[sid] = (session_id, persistent_id, False)
     await state.save_room(session_id, room)
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
-    log.info("SIO %s opened room %s (game=%s)", sid, session_id, game_id)
+    log.info("SIO %s opened room %s (game=%s, persistentId=%s)", sid, session_id, game_id, persistent_id)
     return None  # success
 
 
@@ -321,11 +357,10 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
         return ("Invalid data", None)
     if not check(sid, "join-room"):
         return ("Rate limited", None)
-    await _leave(sid)  # clean up if already in another room
 
     extra = data.get("extra", {})
     session_id: str = extra.get("sessionid", "")
-    player_id = sid
+    persistent_id: str = extra.get("persistentId", "") or sid
     player_name: str = extra.get("player_name", "Player")
     password: str | None = data.get("password") or None
     spectate: bool = extra.get("spectate", False)
@@ -338,26 +373,46 @@ async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
     room = rooms.get(session_id)
     if room is None:
         return ("Room not found", None)
+
+    # Reconnect detection — BEFORE _leave
+    is_returning_player = persistent_id in room.players
+    is_returning_spectator = persistent_id in room.spectators
+    if is_returning_player or is_returning_spectator:
+        entry = room.players.get(persistent_id) or room.spectators.get(persistent_id)
+        old_sid = entry["socketId"]
+        _swap_sid(room, persistent_id, old_sid, sid)
+        _sid_to_room.pop(old_sid, None)
+        _sid_to_room[sid] = (session_id, persistent_id, is_returning_spectator)
+        await sio.enter_room(sid, session_id)
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+        log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
+        return (None, _players_payload(room))
+
+    await _leave(sid)  # clean up if already in another room
+
     if room.password and not hmac.compare_digest(room.password, password or ""):
         return ("Wrong password", None)
 
     if spectate:
         if len(room.spectators) >= MAX_SPECTATORS:
             return ("Room spectator limit reached", None)
-        room.spectators[player_id] = {"socketId": sid, "playerName": player_name}
-        _sid_to_room[sid] = (session_id, player_id, True)
+        room.spectators[persistent_id] = {"socketId": sid, "playerName": player_name}
+        _sid_to_room[sid] = (session_id, persistent_id, True)
     else:
         slot = room.next_slot()
         if slot is None:
             return ("Room is full", None)
-        room.players[player_id] = {"socketId": sid, "playerName": player_name}
-        room.slots[slot] = player_id
-        _sid_to_room[sid] = (session_id, player_id, False)
+        room.players[persistent_id] = {"socketId": sid, "playerName": player_name}
+        room.slots[slot] = persistent_id
+        _sid_to_room[sid] = (session_id, persistent_id, False)
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
-    log.info("SIO %s %s room %s (playerId=%s)", sid, "spectating" if spectate else "joined", session_id, player_id)
+    log.info(
+        "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
+    )
     return (None, _players_payload(room))
 
 
