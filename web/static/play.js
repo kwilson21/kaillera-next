@@ -148,7 +148,13 @@
     socket.on('connect', onConnect);
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
-      if (!gameRunning) showToast('Connection lost — reconnecting...');
+      // During games: silent — Socket.IO reconnects automatically
+      // During lobby: show subtle message only after a delay
+      if (!gameRunning) {
+        setTimeout(() => {
+          if (!socket.connected) showToast('Reconnecting to server...');
+        }, 5000);
+      }
     });
     socket.on('reconnect', (attempt) => {
       console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
@@ -198,13 +204,11 @@
       });
     });
     socket.on('connect_error', (e) => {
-      if (!gameRunning) {
+      console.log('[play] connect_error:', e.message);
+      // During games: silent — Socket.IO keeps retrying
+      // During lobby: show error only if not yet connected
+      if (!gameRunning && !socket.connected) {
         showError(`Connection error: ${e.message}`);
-      } else {
-        showToast('Connection lost — returning to lobby...');
-        setTimeout(() => {
-          window.location.href = '/';
-        }, 2000);
       }
     });
     socket.on('users-updated', onUsersUpdated);
