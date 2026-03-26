@@ -213,7 +213,7 @@ async def _leave(sid: str) -> None:
     log.info("SIO %s left room %s (playerId=%s, spectator=%s)", sid, session_id, player_id, is_spectator)
 
     if not room.players and not room.spectators:
-        del rooms[session_id]
+        rooms.pop(session_id, None)
         await state.delete_room(session_id)
         log.info("Room %s deleted (empty)", session_id)
         return
@@ -226,7 +226,7 @@ async def _leave(sid: str) -> None:
             if rsess == session_id:
                 del _sid_to_room[remaining_sid]
                 await sio.leave_room(remaining_sid, session_id)
-        del rooms[session_id]
+        rooms.pop(session_id, None)
         await state.delete_room(session_id)
         log.info("Room %s closed (host left mid-game)", session_id)
         return

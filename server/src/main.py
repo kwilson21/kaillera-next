@@ -14,6 +14,7 @@ Entry point: kaillera-server  (see pyproject.toml)
 import asyncio
 import logging
 import os
+import signal
 import sys
 from contextlib import asynccontextmanager
 
@@ -85,6 +86,23 @@ def run() -> None:
 
     # Wrap FastAPI with Socket.IO ASGI middleware
     socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+
+    # Set shutdown flag immediately on signal, before uvicorn closes connections.
+    # This prevents disconnect handlers from corrupting Redis state.
+    _original_sigint = signal.getsignal(signal.SIGINT)
+    _original_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _on_shutdown_signal(sig, frame):
+        set_shutting_down()
+        log.info("Shutdown signal received, preserving room state")
+        handler = _original_sigint if sig == signal.SIGINT else _original_sigterm
+        if callable(handler):
+            handler(sig, frame)
+        elif handler == signal.SIG_DFL:
+            raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _on_shutdown_signal)
+    signal.signal(signal.SIGTERM, _on_shutdown_signal)
 
     port = int(os.environ.get("PORT", "27888"))
     log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
