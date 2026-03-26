@@ -145,7 +145,6 @@
     window._socket = socket; // expose for E2E tests
     window._isSpectator = isSpectator;
 
-    socket.on('connect', onConnect);
     let _reconnectErrorTimer = null;
     const _reconnectBanner = document.getElementById('reconnecting-banner');
     const _showReconnecting = () => {
@@ -158,6 +157,10 @@
         _reconnectErrorTimer = null;
       }
     };
+    socket.on('connect', () => {
+      _hideReconnecting();
+      onConnect();
+    });
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       // During games: silent — Socket.IO reconnects automatically
