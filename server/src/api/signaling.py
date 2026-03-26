@@ -271,13 +271,32 @@ async def connect(sid: str, environ: dict) -> None:
 
 
 async def _cleanup_empty_rooms() -> None:
+    """Periodically remove empty rooms and zombie rooms (no live sockets)."""
+    _zombie_ages: dict[str, int] = {}  # session_id -> consecutive zombie ticks
     while True:
         await asyncio.sleep(60)
-        empty = [sid for sid, r in list(rooms.items()) if not r.players and not r.spectators]
-        for sid in empty:
-            del rooms[sid]
-            await state.delete_room(sid)
-            log.debug("Cleanup: deleted empty room %s", sid)
+        to_delete = []
+        for session_id, r in list(rooms.items()):
+            if not r.players and not r.spectators:
+                to_delete.append(session_id)
+                continue
+            # Zombie check: room has entries but no live sockets
+            has_live = False
+            for info in list(r.players.values()) + list(r.spectators.values()):
+                if info["socketId"] in _sid_to_room:
+                    has_live = True
+                    break
+            if not has_live:
+                _zombie_ages[session_id] = _zombie_ages.get(session_id, 0) + 1
+                if _zombie_ages[session_id] >= 5:  # 5 minutes grace period
+                    to_delete.append(session_id)
+            else:
+                _zombie_ages.pop(session_id, None)
+        for session_id in to_delete:
+            del rooms[session_id]
+            _zombie_ages.pop(session_id, None)
+            await state.delete_room(session_id)
+            log.info("Cleanup: deleted room %s", session_id)
         cleanup()
 
 
