@@ -229,6 +229,8 @@
           }
           mySlot = 0;
           sendDeviceType();
+          // If ROM was already loaded from cache, notify server immediately
+          if (_romBlob || _romBlobUrl) notifyRomReady();
           showOverlay();
         },
       );
@@ -306,6 +308,8 @@
             }
 
             sendDeviceType();
+            // If ROM was already loaded from cache, notify server immediately
+            if (_romBlob || _romBlobUrl) notifyRomReady();
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
