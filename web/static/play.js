@@ -146,18 +146,34 @@
     window._isSpectator = isSpectator;
 
     socket.on('connect', onConnect);
+    let _reconnectErrorTimer = null;
+    const _reconnectBanner = document.getElementById('reconnecting-banner');
+    const _showReconnecting = () => {
+      if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
+    };
+    const _hideReconnecting = () => {
+      if (_reconnectBanner) _reconnectBanner.classList.add('hidden');
+      if (_reconnectErrorTimer) {
+        clearTimeout(_reconnectErrorTimer);
+        _reconnectErrorTimer = null;
+      }
+    };
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       // During games: silent — Socket.IO reconnects automatically
-      // During lobby: show subtle message only after a delay
+      // During lobby: show spinner banner after brief delay
       if (!gameRunning) {
         setTimeout(() => {
-          if (!socket.connected) showToast('Reconnecting to server...');
-        }, 5000);
+          if (!socket.connected) _showReconnecting();
+        }, 2000);
+        _reconnectErrorTimer = setTimeout(() => {
+          if (!socket.connected) showError('Unable to reach server');
+        }, 30000);
       }
     });
     socket.on('reconnect', (attempt) => {
       console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
+      _hideReconnecting();
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
       const payload = isHost
         ? {
@@ -206,14 +222,16 @@
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
       // During games: silent — Socket.IO keeps retrying
-      // During lobby: subtle toast after 5s, blocking error only after 30s
+      // During lobby: banner handles visibility, just set 30s hard error
       if (!gameRunning) {
         setTimeout(() => {
-          if (!socket.connected) showToast('Reconnecting to server...');
-        }, 5000);
-        setTimeout(() => {
-          if (!socket.connected) showError(`Unable to reach server`);
-        }, 30000);
+          if (!socket.connected) _showReconnecting();
+        }, 2000);
+        if (!_reconnectErrorTimer) {
+          _reconnectErrorTimer = setTimeout(() => {
+            if (!socket.connected) showError('Unable to reach server');
+          }, 30000);
+        }
       }
     });
     socket.on('users-updated', onUsersUpdated);
