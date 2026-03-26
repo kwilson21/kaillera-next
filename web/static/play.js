@@ -55,6 +55,9 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
 
+  const _persistentId = sessionStorage.getItem('kn-player-id') || crypto.randomUUID();
+  sessionStorage.setItem('kn-player-id', _persistentId);
+
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
 
@@ -149,39 +152,50 @@
     });
     socket.on('reconnect', (attempt) => {
       console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
-      showToast('Reconnected — rejoining room...');
-      // Re-join the room — server lost our SID-to-room mapping on disconnect
-      socket.emit(
-        'join-room',
-        {
-          extra: {
-            sessionid: roomCode,
-            userid: socket.id,
-            player_name: playerName,
-            spectate: isSpectator,
-          },
-        },
-        (err, joinData) => {
-          if (err) {
-            console.log('[play] rejoin failed:', err);
-            showToast('Rejoin failed — returning to lobby...');
+      const rejoinEvent = isHost ? 'open-room' : 'join-room';
+      const payload = isHost
+        ? {
+            extra: {
+              sessionid: roomCode,
+              player_name: playerName,
+              room_name: `${playerName}'s room`,
+              game_id: 'ssb64',
+              persistentId: _persistentId,
+            },
+            maxPlayers: 4,
+          }
+        : {
+            extra: {
+              sessionid: roomCode,
+              userid: socket.id,
+              player_name: playerName,
+              spectate: isSpectator,
+              persistentId: _persistentId,
+            },
+          };
+      socket.emit(rejoinEvent, payload, (err, joinData) => {
+        const data = isHost ? undefined : joinData;
+        if (err) {
+          console.log('[play] rejoin failed:', err);
+          if (!gameRunning) {
+            showToast('Room is no longer available');
             setTimeout(() => {
               window.location.href = '/';
             }, 2000);
-            return;
           }
-          console.log('[play] rejoined room after reconnect');
-          if (joinData?.players) {
-            for (const entry of Object.values(joinData.players)) {
-              if (entry.socketId === socket.id) {
-                mySlot = entry.slot;
-                break;
-              }
+          return;
+        }
+        console.log('[play] rejoined room after reconnect');
+        if (data?.players) {
+          for (const entry of Object.values(data.players)) {
+            if (entry.socketId === socket.id) {
+              mySlot = entry.slot;
+              break;
             }
           }
-          sendDeviceType();
-        },
-      );
+        }
+        sendDeviceType();
+      });
     });
     socket.on('connect_error', (e) => {
       if (!gameRunning) {
@@ -219,6 +233,7 @@
             player_name: playerName,
             room_name: `${playerName}'s room`,
             game_id: 'ssb64',
+            persistentId: _persistentId,
           },
           maxPlayers: 4,
         },
@@ -259,6 +274,7 @@
               userid: socket.id,
               player_name: playerName,
               spectate: isSpectator,
+              persistentId: _persistentId,
             },
           },
           (err, joinData) => {
@@ -275,6 +291,7 @@
                       userid: socket.id,
                       player_name: playerName,
                       spectate: true,
+                      persistentId: _persistentId,
                     },
                   },
                   (err2, joinData2) => {
