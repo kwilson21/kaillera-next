@@ -166,9 +166,11 @@
         setTimeout(() => {
           if (!socket.connected) _showReconnecting();
         }, 2000);
-        _reconnectErrorTimer = setTimeout(() => {
-          if (!socket.connected) showError('Unable to reach server');
-        }, 30000);
+        if (!_reconnectErrorTimer) {
+          _reconnectErrorTimer = setTimeout(() => {
+            if (!socket.connected) showError('Unable to reach server');
+          }, 30000);
+        }
       }
     });
     socket.on('reconnect', (attempt) => {
