@@ -1867,6 +1867,9 @@
         _romHash = hash;
         localStorage.setItem('kaillera-rom-hash', hash);
         notifyRomReady();
+        // Enable ROM sharing checkbox for cached ROM (same as loadRomData)
+        const romShareCb = document.getElementById('opt-rom-sharing');
+        if (romShareCb && isHost) romShareCb.disabled = false;
         cb(name);
       };
       req.onerror = () => {

@@ -1396,8 +1396,10 @@
           }
         }
         // State sync: host received request, or chunked binary transfer header
-        if (e.data === 'sync-request' && _playerSlot === 0) {
-          _syncLog(`received sync-request from ${remoteSid}`);
+        if ((e.data === 'sync-request' || e.data === 'sync-request-full') && _playerSlot === 0) {
+          const forceFull = e.data === 'sync-request-full';
+          _syncLog(`received ${e.data} from ${remoteSid}`);
+          if (forceFull) _setLastSyncState(null, 'guest-requested-full');
           pushSyncState(remoteSid);
         }
         if (e.data.startsWith('sync-start:')) {
@@ -3584,7 +3586,16 @@
         // Delta: XOR against _lastSyncState (the state from the last completed
         // resync). Both host and guest cached this, so the XOR base matches.
         if (!_lastSyncState || _lastSyncState.length !== decompressed.length) {
-          _syncLog(`delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length}`);
+          _syncLog(
+            `delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length} — requesting full`,
+          );
+          // Request a full resync from the host since we have no delta base
+          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+          if (hostPeer?.dc?.readyState === 'open') {
+            try {
+              hostPeer.dc.send('sync-request-full');
+            } catch (_) {}
+          }
           return;
         }
         const reconstructed = new Uint8Array(_lastSyncState.length);
