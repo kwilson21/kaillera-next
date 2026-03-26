@@ -114,6 +114,16 @@
       const maxAttempts = Math.ceil(timeoutMs / 200);
 
       const attempt = () => {
+        // Always try clicking the EJS start button first — with startOnLoaded=false
+        // (guests), Module may exist before the game loop starts. If we resolve
+        // on Module alone, the start button never gets clicked and frames stay at 0.
+        const btn = document.querySelector('.ejs_start_button');
+        if (btn) {
+          console.log('[netplay] triggerEmulatorStart: clicking start button');
+          if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
+          btn.click();
+        }
+
         const gm = window.EJS_emulator?.gameManager;
         if (gm?.Module) {
           const frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
@@ -122,13 +132,6 @@
           enableMobileTouch();
           resolve(gm);
           return;
-        }
-
-        const btn = document.querySelector('.ejs_start_button');
-        if (btn) {
-          console.log('[netplay] triggerEmulatorStart: clicking start button');
-          if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
-          btn.click();
         }
 
         if (attempts === 0) {

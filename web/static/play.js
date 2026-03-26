@@ -2266,7 +2266,10 @@
     const playerCount = Object.keys(players).length;
     const entries = Object.values(players);
 
-    if (playerCount < 2) {
+    if (playerCount < 1) {
+      btn.disabled = true;
+      btn.textContent = 'Start Game';
+    } else if (selectedMode === 'streaming' && playerCount < 2) {
       btn.disabled = true;
       btn.textContent = 'Start Game (need 2+)';
     } else if (selectedMode === 'streaming') {

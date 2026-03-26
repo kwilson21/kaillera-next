@@ -1783,10 +1783,11 @@
         return;
       }
 
-      // Timeout after 60 seconds of polling (600 polls at 100ms)
-      if (_bootPollCount > 600) {
-        setStatus('Emulator failed to load — try reloading the page');
-        _config?.onStatus?.('Emulator failed to load — try reloading');
+      // Timeout after 30 seconds of polling (300 polls at 100ms)
+      if (_bootPollCount > 300) {
+        _syncLog(`boot timed out after ${_bootPollCount} polls`);
+        setStatus('Emulator failed to start — try reloading the page');
+        _config?.onStatus?.('Emulator failed to start — try reloading');
         return;
       }
 
@@ -1799,12 +1800,24 @@
       }
 
       const mod = gm.Module;
-      const frames = mod?._get_current_frame_count ? mod._get_current_frame_count() : 0;
+      const hasFrameCount = typeof mod?._get_current_frame_count === 'function';
+      const frames = hasFrameCount ? mod._get_current_frame_count() : 0;
 
       if (frames < MIN_BOOT_FRAMES) {
         if (_bootPollCount++ % 5 === 0) {
           _syncLog(`boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
+        }
+        // Stuck at frame 0: try clicking the EJS start button (may not have been
+        // clicked by waitForEmulator if Module loaded before the button appeared)
+        if (frames === 0 && _bootPollCount % 20 === 0) {
+          const btn = document.querySelector('.ejs_start_button');
+          if (btn) {
+            _syncLog('boot stuck at f=0 — clicking EJS start button');
+            btn.click();
+          } else if (!hasFrameCount) {
+            _syncLog('boot stuck at f=0 — _get_current_frame_count missing (stock core?)');
+          }
         }
         setTimeout(waitForEmu, 100);
         return;
@@ -1924,7 +1937,6 @@
 
     // Wait for ALL player peers to be emu-ready (not just 1)
     const playerPeers = Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined);
-    if (playerPeers.length === 0) return;
 
     const readyPeers = playerPeers.filter((p) => p.emuReady);
     const notReady = playerPeers.filter((p) => !p.emuReady);
@@ -3715,6 +3727,16 @@
       onUsersUpdated(config.initialPlayers);
     }
 
+    // Solo mode: no other players — start game sequence directly
+    const otherPlayers = config.initialPlayers
+      ? Object.values(config.initialPlayers.players || {}).filter((p) => p.socketId !== socket.id)
+      : [];
+    if (otherPlayers.length === 0 && _playerSlot === 0) {
+      _syncLog('solo mode — no peers, starting game sequence');
+      _rttComplete = true; // no peers to measure RTT with
+      startGameSequence();
+    }
+
     // Connection timeout warning (guarded by session ID to avoid firing
     // stale messages on quick restart)
     const initSid = _sessionId;
@@ -3722,15 +3744,15 @@
       if (initSid !== _sessionId) return;
       if (!_gameStarted && _config) {
         const peerCount = Object.keys(_peers).length;
-        if (peerCount === 0) {
+        if (peerCount === 0 && _playerSlot !== 0) {
           setStatus('No peer connection — check network');
-        } else {
+        } else if (peerCount > 0) {
           const anyOpen = Object.values(_peers).some((p) => p.ready);
           if (!anyOpen) setStatus('Peer found but data channel not open');
         }
       }
     }, 15000);
-    // startGameSequence() is triggered from ch.onopen (same as before)
+    // startGameSequence() is triggered from ch.onopen (or solo mode above)
   };
 
   const stop = () => {
