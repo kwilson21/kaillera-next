@@ -417,7 +417,7 @@
       handlePeerDisconnect(remoteSid);
     };
 
-    ch.onerror = (e) => _syncLog(`DC error: ${remoteSid} ${e}`);
+    ch.onerror = (e) => _syncLog(`DC error: ${remoteSid} ${e?.error?.message || e?.error || e}`);
 
     ch.onmessage = (e) => {
       if (_playerSlot !== 0) return; // only host processes input
@@ -493,18 +493,22 @@
 
       _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
 
-      _hostStream = captureCanvas.captureStream(0);
+      // Safari's captureStream(0) + requestFrame() is broken in some versions —
+      // frames never get pushed. Use auto-capture as primary, with requestFrame
+      // as a bonus hint when available.
+      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+      _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
       const captureTrack = _hostStream.getVideoTracks()[0];
 
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
-        captureTrack.requestFrame();
+        if (captureTrack.requestFrame) captureTrack.requestFrame();
       };
       blitFrame();
 
-      _syncLog('capture stream started (640x480 2D blit)');
+      _syncLog(`capture stream started (640x480 ${isSafari ? 'auto' : 'manual'} capture)`);
 
       captureEmulatorAudio();
 
