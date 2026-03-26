@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  kaillera-next:
+    image: ghcr.io/kwilson21/kaillera-next:latest
+    environment:
+      - ALLOWED_ORIGIN=${ALLOWED_ORIGIN}
+      - ICE_SERVERS=${ICE_SERVERS}
+      - PORT=${PORT}
+      - MAX_ROOMS=${MAX_ROOMS}
+      - MAX_SPECTATORS=${MAX_SPECTATORS}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
+      - LOG_MAX_FILES=${LOG_MAX_FILES}
+      - SYNC_LOG_DIR=${SYNC_LOG_DIR}
+      - ADMIN_KEY=${ADMIN_KEY}
+      - DEBUG_MODE=${DEBUG_MODE}
+    ports:
+      - "27888:27888"
+    volumes:
+      - kaillera-logs:/app/server/logs
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','27888')+'/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  kaillera-logs:
