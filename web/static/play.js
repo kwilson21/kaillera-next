@@ -206,9 +206,11 @@
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
       // During games: silent — Socket.IO keeps retrying
-      // During lobby: show error only if not yet connected
-      if (!gameRunning && !socket.connected) {
-        showError(`Connection error: ${e.message}`);
+      // During lobby: only show error after retries have had time to succeed
+      if (!gameRunning) {
+        setTimeout(() => {
+          if (!socket.connected) showError(`Connection error: ${e.message}`);
+        }, 5000);
       }
     });
     socket.on('users-updated', onUsersUpdated);
