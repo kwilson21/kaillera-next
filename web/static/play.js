@@ -163,17 +163,15 @@
     });
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
-      // During games: silent — Socket.IO reconnects automatically
-      // During lobby: show spinner banner after brief delay
-      if (!gameRunning) {
-        setTimeout(() => {
-          if (!socket.connected) _showReconnecting();
-        }, 2000);
-        if (!_reconnectErrorTimer) {
-          _reconnectErrorTimer = setTimeout(() => {
-            if (!socket.connected) showError('Unable to reach server');
-          }, 30000);
-        }
+      // Show spinner banner after brief delay (lobby and in-game)
+      setTimeout(() => {
+        if (!socket.connected) _showReconnecting();
+      }, 2000);
+      // Hard error only in lobby after 30s
+      if (!gameRunning && !_reconnectErrorTimer) {
+        _reconnectErrorTimer = setTimeout(() => {
+          if (!socket.connected) showError('Unable to reach server');
+        }, 30000);
       }
     });
     socket.on('reconnect', (attempt) => {
@@ -255,6 +253,37 @@
   };
 
   const onConnect = async () => {
+    // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
+    if (gameRunning) {
+      const rejoinEvent = isHost ? 'open-room' : 'join-room';
+      const payload = isHost
+        ? {
+            extra: {
+              sessionid: roomCode,
+              player_name: playerName,
+              room_name: `${playerName}'s room`,
+              game_id: 'ssb64',
+              persistentId: _persistentId,
+            },
+            maxPlayers: 4,
+          }
+        : {
+            extra: {
+              sessionid: roomCode,
+              userid: socket.id,
+              player_name: playerName,
+              spectate: isSpectator,
+              persistentId: _persistentId,
+            },
+          };
+      socket.emit(rejoinEvent, payload, (err) => {
+        if (err) console.log('[play] mid-game rejoin failed:', err);
+        else console.log('[play] mid-game rejoin succeeded');
+        sendDeviceType();
+      });
+      return;
+    }
+
     if (isHost) {
       socket.emit(
         'open-room',
