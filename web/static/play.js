@@ -1863,14 +1863,18 @@
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
-        // Compute hash from cached data
-        const hash = await hashArrayBuffer(req.result);
-        _romHash = hash;
-        localStorage.setItem('kaillera-rom-hash', hash);
-        notifyRomReady();
-        // Enable ROM sharing checkbox for cached ROM (same as loadRomData)
+        // Enable ROM sharing checkbox immediately (don't gate on hash)
         const romShareCb = document.getElementById('opt-rom-sharing');
         if (romShareCb && isHost) romShareCb.disabled = false;
+        // Compute hash from cached data (best-effort — don't block ROM load)
+        try {
+          const hash = await hashArrayBuffer(req.result);
+          _romHash = hash;
+          localStorage.setItem('kaillera-rom-hash', hash);
+        } catch (err) {
+          console.log('[play] cached ROM hash failed:', err);
+        }
+        notifyRomReady();
         cb(name);
       };
       req.onerror = () => {
