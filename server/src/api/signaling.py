@@ -391,6 +391,30 @@ async def claim_slot(sid: str, data: dict) -> str | None:
     return None
 
 
+@sio.on("set-name")
+async def set_name(sid: str, data: dict) -> str | None:
+    if not isinstance(data, dict):
+        return "Invalid data"
+    name = data.get("name", "").strip()[:24]
+    if not name:
+        return "Empty name"
+    result = _get_room(sid)
+    if result is None:
+        return "Not in a room"
+    session_id, room = result
+    # Update name in players or spectators
+    for info in room.players.values():
+        if info["socketId"] == sid:
+            info["playerName"] = name
+            break
+    for info in room.spectators.values():
+        if info["socketId"] == sid:
+            info["playerName"] = name
+            break
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    return None
+
+
 @sio.on("start-game")
 async def start_game(sid: str, data: dict) -> str | None:
     if not isinstance(data, dict):

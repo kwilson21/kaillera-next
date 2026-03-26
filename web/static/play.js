@@ -65,6 +65,7 @@
     roomCode = params.get('room');
     isHost = params.get('host') === '1';
     playerName = params.get('name') || localStorage.getItem('kaillera-name') || 'Player';
+    localStorage.setItem('kaillera-name', playerName);
     mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
   };
@@ -3100,6 +3101,24 @@
     if (!roomCode) {
       window.location.href = '/';
       return;
+    }
+
+    // Name input — populate from current name, save + notify on change
+    const nameInput = document.getElementById('player-name-input');
+    if (nameInput) {
+      nameInput.value = playerName;
+      nameInput.addEventListener('change', () => {
+        const val = nameInput.value.trim();
+        if (val && val !== playerName) {
+          playerName = val;
+          localStorage.setItem('kaillera-name', playerName);
+          if (socket?.connected) {
+            socket.emit('set-name', { name: playerName });
+          }
+        } else if (!val) {
+          nameInput.value = playerName;
+        }
+      });
     }
 
     // Wire up buttons

@@ -137,6 +137,34 @@ body {
   color: #6af;
 }
 
+.name-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.name-label {
+  font-size: 13px;
+  color: #888;
+  white-space: nowrap;
+}
+
+.name-input {
+  flex: 1;
+  background: #12121e;
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  color: #e0e0e0;
+  padding: 6px 10px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+.name-input:focus {
+  border-color: #6af;
+}
+
 .copy-btn {
   padding: 6px 14px !important;
   font-size: 12px !important;
