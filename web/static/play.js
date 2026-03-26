@@ -206,11 +206,14 @@
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
       // During games: silent — Socket.IO keeps retrying
-      // During lobby: only show error after retries have had time to succeed
+      // During lobby: subtle toast after 5s, blocking error only after 30s
       if (!gameRunning) {
         setTimeout(() => {
-          if (!socket.connected) showError(`Connection error: ${e.message}`);
+          if (!socket.connected) showToast('Reconnecting to server...');
         }, 5000);
+        setTimeout(() => {
+          if (!socket.connected) showError(`Unable to reach server`);
+        }, 30000);
       }
     });
     socket.on('users-updated', onUsersUpdated);
