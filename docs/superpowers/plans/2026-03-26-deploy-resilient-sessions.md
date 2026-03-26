@@ -968,7 +968,6 @@ version: "3.8"
 services:
   redis:
     image: redis:7-alpine
-    restart: always
     volumes:
       - redis-data:/data
     command: redis-server --save 60 1 --loglevel warning
@@ -977,6 +976,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
 
   kaillera-next:
     image: ghcr.io/kwilson21/kaillera-next:latest
@@ -996,9 +1000,7 @@ services:
       - "27888:27888"
     volumes:
       - kaillera-logs:/app/server/logs
-    depends_on:
-      redis:
-        condition: service_healthy
+    stop_grace_period: 30s
     deploy:
       replicas: 1
       restart_policy:
@@ -1009,7 +1011,6 @@ services:
         parallelism: 1
         delay: 10s
         order: start-first
-    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','27888')+'/health')"]
       interval: 30s
@@ -1021,6 +1022,8 @@ volumes:
   kaillera-logs:
   redis-data:
 ```
+
+**Swarm notes:** `depends_on` is removed (ignored in Swarm — services start independently). `restart: always` replaced with `deploy.restart_policy` for the Redis service. The server's graceful degradation handles Redis not being ready yet — it retries on first connection and falls back to in-memory if unavailable.
 
 - [ ] **Step 3: Commit**
 
