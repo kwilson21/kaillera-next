@@ -37,30 +37,12 @@ fi
 echo "==> Source repos ready"
 
 # ============================================================
-# Stage 1b: Inject --denan before --asyncify in emscripten
+# Stage 1b: --denan injection
 # ============================================================
-# wasm-opt --denan MUST run before --asyncify. If it runs after,
-# the denan helper functions break asyncify's stack unwinding.
-# We patch emscripten's link.py to insert --denan into the pass
-# pipeline right before the asyncify pass.
-LINK_PY="/opt/emsdk/upstream/emscripten/tools/link.py"
-if [ -f "${LINK_PY}" ]; then
-    if ! grep -q "'--denan'" "${LINK_PY}"; then
-        python3 -c "
-with open('${LINK_PY}') as f:
-    content = f.read()
-content = content.replace(
-    \"passes += ['--asyncify']\",
-    \"passes += ['--denan']\\n    passes += ['--asyncify']\"
-)
-with open('${LINK_PY}', 'w') as f:
-    f.write(content)
-print('    Injected --denan before --asyncify in link.py')
-"
-    else
-        echo "    --denan already injected in link.py"
-    fi
-fi
+# With PROXY_TO_PTHREAD (no asyncify), --denan runs as a post-link
+# wasm-opt pass in Stage 4b instead of being injected into the
+# emscripten link pipeline. Nothing to patch here.
+echo "==> Stage 1b: --denan will run as post-link pass (no asyncify)"
 
 # ============================================================
 # Stage 2: Apply patches
@@ -137,15 +119,13 @@ cd "${SRC_DIR}/RetroArch"
 # Clean previous link artifacts
 rm -f mupen64plus_next_libretro.js mupen64plus_next_libretro.wasm 2>/dev/null || true
 
-# Build with same flags as EmulatorJS's build-emulatorjs.sh uses for mupen64plus_next:
-# - ASYNC=1 (full asyncify)
-# - HAVE_OPENGLES3=1 (WebGL2)
-# - STACK_SIZE=128MB (largeStack for mupen64plus_next)
-# - INITIAL_HEAP=512MB (largeHeap for mupen64plus_next)
-# - HAVE_7ZIP=1, HAVE_CHD=1
+# Build with PROXY_TO_PTHREAD: moves entire RetroArch main loop to a
+# Web Worker. Requires crossOriginIsolated (COOP/COEP headers on server).
+# PROXY_TO_PTHREAD implies HAVE_THREADS=1 and uses OffscreenCanvas for GL.
+# ASYNC=0 because the worker thread can block natively (no asyncify needed).
 emmake make -f Makefile.emulatorjs \
     HAVE_OPENGLES3=1 \
-    ASYNC=1 \
+    PROXY_TO_PTHREAD=1 \
     HAVE_7ZIP=1 \
     HAVE_CHD=1 \
     STACK_SIZE=134217728 \
@@ -164,12 +144,18 @@ echo "==> JS glue: $(ls -lh ${JS_FILE} | awk '{print $5}')"
 echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 
 # ============================================================
-# Stage 4b: NaN canonicalization (fix-denan.py only)
+# Stage 4b: NaN canonicalization (wasm-opt --denan + fix-denan.py)
 # ============================================================
-# The --denan pass is injected BEFORE asyncify in emscripten's link.py
-# (see Stage 1b below). Here we only run fix-denan.py to change
-# NaN→0 replacements to NaN→canonical NaN (preserving isnan() semantics).
-echo "==> Stage 4b: Patching denan sites (NaN→0 → NaN→canonical)"
+# Without asyncify, --denan runs as a standalone post-link pass.
+# Then fix-denan.py patches NaN→0 replacements to NaN→canonical NaN.
+echo "==> Stage 4b: Running wasm-opt --denan + fix-denan.py"
+WASM_OPT="/opt/emsdk/upstream/bin/wasm-opt"
+if [ -f "${WASM_OPT}" ]; then
+    "${WASM_OPT}" --denan "${WASM_FILE}" -o "${WASM_FILE}"
+    echo "    wasm-opt --denan applied"
+else
+    echo "    WARNING: wasm-opt not found, skipping --denan pass"
+fi
 python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
 
 # ============================================================
