@@ -541,7 +541,29 @@
       captureCanvas.height = 480;
       const ctx = captureCanvas.getContext('2d');
 
-      _syncLog(`source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480`);
+      // Compute crop region: extract the 4:3 game area from the source canvas
+      // (source may be wider due to widescreen displays / Retina scaling)
+      const TARGET_ASPECT = 4 / 3;
+      const computeCrop = () => {
+        const sw = srcCanvas.width;
+        const sh = srcCanvas.height;
+        const srcAspect = sw / sh;
+        if (srcAspect > TARGET_ASPECT + 0.01) {
+          // Source wider than 4:3 — crop sides
+          const cropW = Math.round(sh * TARGET_ASPECT);
+          return { sx: Math.round((sw - cropW) / 2), sy: 0, sw: cropW, sh };
+        } else if (srcAspect < TARGET_ASPECT - 0.01) {
+          // Source taller than 4:3 — crop top/bottom
+          const cropH = Math.round(sw / TARGET_ASPECT);
+          return { sx: 0, sy: Math.round((sh - cropH) / 2), sw, sh: cropH };
+        }
+        return { sx: 0, sy: 0, sw, sh };
+      };
+      let crop = computeCrop();
+
+      _syncLog(
+        `source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480 (crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`,
+      );
 
       // Safari's captureStream(0) + requestFrame() is broken in some versions —
       // frames never get pushed. Use auto-capture as primary, with requestFrame
@@ -551,10 +573,18 @@
       const captureTrack = _hostStream.getVideoTracks()[0];
 
       let _blitCount = 0;
+      let _lastSrcW = srcCanvas.width;
+      let _lastSrcH = srcCanvas.height;
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
-        ctx.drawImage(srcCanvas, 0, 0, 640, 480);
+        // Recompute crop if source canvas resized (e.g. window resize)
+        if (srcCanvas.width !== _lastSrcW || srcCanvas.height !== _lastSrcH) {
+          _lastSrcW = srcCanvas.width;
+          _lastSrcH = srcCanvas.height;
+          crop = computeCrop();
+        }
+        ctx.drawImage(srcCanvas, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 640, 480);
         if (captureTrack.requestFrame) captureTrack.requestFrame();
         if (++_blitCount === 60) {
           _syncLog(

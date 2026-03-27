@@ -2206,6 +2206,23 @@
     captureCanvas.height = 480;
     const ctx = captureCanvas.getContext('2d');
 
+    // Crop source to 4:3 game area (source may be wider on widescreen displays)
+    const TARGET_ASPECT = 4 / 3;
+    const computeCrop = () => {
+      const sw = canvas.width;
+      const sh = canvas.height;
+      const srcAspect = sw / sh;
+      if (srcAspect > TARGET_ASPECT + 0.01) {
+        const cropW = Math.round(sh * TARGET_ASPECT);
+        return { sx: Math.round((sw - cropW) / 2), sy: 0, sw: cropW, sh };
+      } else if (srcAspect < TARGET_ASPECT - 0.01) {
+        const cropH = Math.round(sw / TARGET_ASPECT);
+        return { sx: 0, sy: Math.round((sh - cropH) / 2), sw, sh: cropH };
+      }
+      return { sx: 0, sy: 0, sw, sh };
+    };
+    let crop = computeCrop();
+
     _hostStream = captureCanvas.captureStream(0); // manual frame control
 
     // Add audio track from bypass playback (if available)
@@ -2221,15 +2238,22 @@
 
     // Blit loop: copy emulator canvas to capture canvas every frame
     // Use native rAF (lockstep overrides the global)
+    let _lastSrcW = canvas.width;
+    let _lastSrcH = canvas.height;
     const blitFrame = () => {
       if (!_running) return; // stopped
       APISandbox.nativeRAF(blitFrame);
-      ctx.drawImage(canvas, 0, 0, 640, 480);
+      if (canvas.width !== _lastSrcW || canvas.height !== _lastSrcH) {
+        _lastSrcW = canvas.width;
+        _lastSrcH = canvas.height;
+        crop = computeCrop();
+      }
+      ctx.drawImage(canvas, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
     };
     blitFrame();
 
-    _syncLog('spectator capture stream started (640x480)');
+    _syncLog(`spectator capture stream started (640x480, crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`);
 
     // Add tracks to all existing spectator peer connections
     for (const [sid, peer] of Object.entries(_peers)) {

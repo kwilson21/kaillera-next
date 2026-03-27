@@ -25,13 +25,21 @@
   window._kn_usePatchedCore = true;
   console.log('[core-redirector] Lockstep mode: loading patched core');
 
-  const CORE_FILENAME = 'mupen64plus_next-wasm.data';
-  const LOCAL_CORE_URL = `/static/ejs/cores/${CORE_FILENAME}`;
+  // EJS on mobile Safari reverses the N64 core list, picking parallel_n64 instead
+  // of mupen64plus_next. Match all N64 core filenames to ensure the patched binary.
+  const N64_CORE_NAMES = [
+    'mupen64plus_next-wasm.data',
+    'mupen64plus_next-legacy-wasm.data',
+    'parallel_n64-wasm.data',
+    'parallel_n64-legacy-wasm.data',
+  ];
+  const LOCAL_CORE_URL = '/static/ejs/cores/mupen64plus_next-wasm.data';
+  const isN64Core = (url) => N64_CORE_NAMES.some((name) => url.includes(name));
 
   // ── IDB cache clear (awaitable) ────────────────────────────────────
   // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL.
   // Tracked via localStorage to avoid deadlocking multi-tab scenarios.
-  const CORE_VERSION = '12'; // v12: self-hosted EJS + require-corp
+  const CORE_VERSION = '13'; // v13: fix parallel_n64 core redirect for mobile Safari
   let idbClearPromise;
   try {
     if (localStorage.getItem('kn-core-version') === CORE_VERSION) {
@@ -82,7 +90,7 @@
   // NOTE: kept as function — uses `this` and `arguments`
   window.fetch = function (url, opts) {
     const u = typeof url === 'string' ? url : (url?.url ?? '');
-    if (u.includes(CORE_FILENAME)) {
+    if (isN64Core(u)) {
       console.log('[core-redirector] Redirecting core fetch to:', LOCAL_CORE_URL);
       return origFetch.call(this, LOCAL_CORE_URL, opts);
     }
@@ -95,7 +103,7 @@
 
   // NOTE: kept as function — uses `this` and `arguments`
   XMLHttpRequest.prototype.open = function (method, url) {
-    if (typeof url === 'string' && url.includes(CORE_FILENAME)) {
+    if (typeof url === 'string' && isN64Core(url)) {
       console.log('[core-redirector] Redirecting XHR core to:', LOCAL_CORE_URL);
       arguments[1] = LOCAL_CORE_URL;
     }
