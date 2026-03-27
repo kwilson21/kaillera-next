@@ -86,3 +86,23 @@ button:hover {
   flex: 1;
   margin-bottom: 0;
 }
+
+/* Ko-fi support link */
+.kofi-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #777;
+  text-decoration: none;
+  font-size: 12px;
+  margin-top: 4px;
+  transition: color 0.2s;
+}
+.kofi-link:hover {
+  color: #ff5e5b;
+}
+.kofi-icon {
+  width: 16px;
+  height: 16px;
+  vertical-align: middle;
+}
