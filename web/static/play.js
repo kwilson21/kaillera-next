@@ -1489,12 +1489,14 @@
     // uses SHA-256 (HTTPS/localhost) while the guest uses FNV-1a (HTTP LAN IP).
     if (expectedHash) {
       _romHash = expectedHash;
+      KNState.romHash = expectedHash;
       afterRomTransferComplete(displayName);
     } else {
       const reader = new FileReader();
       reader.onload = async () => {
         try {
           _romHash = await hashArrayBuffer(reader.result);
+          KNState.romHash = _romHash;
         } catch (_) {}
         afterRomTransferComplete(displayName);
       };
@@ -1788,6 +1790,7 @@
       try {
         const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
+        KNState.romHash = hash;
         localStorage.setItem('kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
       } catch (err) {
@@ -1974,6 +1977,7 @@
         try {
           const hash = await hashArrayBuffer(req.result);
           _romHash = hash;
+          KNState.romHash = hash;
           localStorage.setItem('kaillera-rom-hash', hash);
         } catch (err) {
           console.log('[play] cached ROM hash failed:', err);

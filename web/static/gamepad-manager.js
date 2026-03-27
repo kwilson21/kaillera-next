@@ -42,7 +42,7 @@
       2: { pos: 1 << 21, neg: 1 << 20 }, // R stick X: pos(right)→CRight(21), neg(left)→CLeft(20) — core inverts X
       3: { pos: 1 << 22, neg: 1 << 23 }, // R stick Y: pos→CDown(22), neg→CUp(23)
     },
-    deadzone: 0.3,
+    deadzone: 0.15,
   };
 
   const PROFILES = [
@@ -58,6 +58,58 @@
       ..._STANDARD_MAPPING,
     },
   ];
+
+  // ── Analog Pipeline ────────────────────────────────────────────────
+  const _DEFAULT_DEADZONE = 0.15;
+  const _DEFAULT_RANGE = 66; // percentage — community standard matching N-Rage/RMG-K
+
+  function _gameKey(key) {
+    const hash = window.KNState?.romHash;
+    return hash ? `kn-gamepad:${hash}:${key}` : null;
+  }
+
+  function _getSetting(key, parse, validate, fallback) {
+    try {
+      // Per-game override first
+      const gk = _gameKey(key);
+      if (gk) {
+        const gv = parse(localStorage.getItem(gk));
+        if (validate(gv)) return gv;
+      }
+      // Global setting
+      const v = parse(localStorage.getItem(key));
+      if (validate(v)) return v;
+    } catch (_) {}
+    return fallback;
+  }
+
+  function _getRange() {
+    return _getSetting(
+      'kn-analog-range',
+      (s) => parseInt(s, 10),
+      (v) => v >= 0 && v <= 100,
+      _DEFAULT_RANGE,
+    );
+  }
+
+  function _getDeadzone(key) {
+    return _getSetting(key, parseFloat, (v) => v >= 0 && v <= 1, _DEFAULT_DEADZONE);
+  }
+
+  function _analogScale(value, dz) {
+    const sign = Math.sign(value);
+    const abs = Math.abs(value);
+    if (abs < dz) return 0;
+    const n64Max = Math.floor(127 * (_getRange() / 100));
+    const scaled = (abs - dz) / (1 - dz);
+    return sign * Math.min(Math.round(scaled * n64Max), n64Max);
+  }
+
+  function _digitalSnap(value, dz) {
+    const abs = Math.abs(value);
+    if (abs < dz) return 0;
+    return Math.sign(value) * Math.floor(127 * (_getRange() / 100));
+  }
 
   // ── State ────────────────────────────────────────────────────────────
 
@@ -143,49 +195,45 @@
 
   function readGamepad(slot) {
     const gpIndex = _assignments[slot];
-    if (gpIndex === undefined) return 0;
+    if (gpIndex === undefined) return null;
 
     const gp = _nativeGetGamepads()[gpIndex];
-    if (!gp) return 0;
+    if (!gp) return null;
 
     const entry = _detected[gpIndex];
-    if (!entry) return 0;
+    if (!entry) return null;
 
     const profile = entry.profile;
-    let mask = 0;
+    let buttons = 0;
 
-    // Map buttons
+    // Map buttons (digital — unchanged)
     for (const [btnIdx, bitmask] of Object.entries(profile.buttons)) {
       const idx = parseInt(btnIdx, 10);
       if (idx < gp.buttons.length && gp.buttons[idx].pressed) {
-        mask |= bitmask;
+        buttons |= bitmask;
       }
     }
 
-    // Map axes → analog direction bits (bits 16-19)
-    const dz = profile.deadzone;
-    for (const axisCfg of Object.values(profile.axes)) {
-      if (axisCfg.index < gp.axes.length) {
-        const val = gp.axes[axisCfg.index];
-        if (val > dz) mask |= 1 << axisCfg.bits[0]; // positive
-        if (val < -dz) mask |= 1 << axisCfg.bits[1]; // negative
-      }
+    // Left stick — true analog via three-stage pipeline (per-axis deadzone)
+    let lx = 0,
+      ly = 0;
+    if (profile.axes) {
+      const axX = profile.axes.stickX;
+      const axY = profile.axes.stickY;
+      if (axX && axX.index < gp.axes.length) lx = _analogScale(gp.axes[axX.index], _getDeadzone('kn-deadzone-lx'));
+      if (axY && axY.index < gp.axes.length) ly = _analogScale(gp.axes[axY.index], _getDeadzone('kn-deadzone-ly'));
     }
 
-    // Map axes → digital button bits (C-buttons from right stick)
+    // C-stick — digital snap (N64 C-buttons are on/off, per-axis deadzone)
+    let cx = 0,
+      cy = 0;
     const axBtn = profile.axisButtons;
     if (axBtn) {
-      for (const [axIdx, cfg] of Object.entries(axBtn)) {
-        const ai = parseInt(axIdx, 10);
-        if (ai < gp.axes.length) {
-          const v = gp.axes[ai];
-          if (v > dz) mask |= cfg.pos;
-          if (v < -dz) mask |= cfg.neg;
-        }
-      }
+      if (axBtn[2] && 2 < gp.axes.length) cx = _digitalSnap(gp.axes[2], _getDeadzone('kn-deadzone-cx'));
+      if (axBtn[3] && 3 < gp.axes.length) cy = _digitalSnap(gp.axes[3], _getDeadzone('kn-deadzone-cy'));
     }
 
-    return mask;
+    return { buttons, lx, ly, cx, cy };
   }
 
   // ── Public API ───────────────────────────────────────────────────────

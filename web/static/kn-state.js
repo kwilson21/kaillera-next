@@ -17,5 +17,6 @@
     peers: {}, // lockstep/streaming.js → play.js
     frameNum: 0, // lockstep.js → play.js info overlay
     delayAutoValue: 2, // play.js → lockstep.js
+    romHash: null, // play.js → gamepad-manager.js (per-game profiles)
   };
 })();

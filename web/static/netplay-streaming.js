@@ -34,7 +34,7 @@
  *     - Video starts muted for autoplay compliance; attempts programmatic
  *       unmute, falls back to a "tap to unmute" banner (iOS workaround)
  *     - Reads keyboard/gamepad input (or VirtualGamepad on mobile) and
- *       sends Int32Array([inputMask]) (4 bytes) to the host over DC
+ *       sends encoded input object (16 bytes) to the host over DC
  *     - Only sends when input changes (delta encoding) to minimize
  *       DataChannel overhead
  *
@@ -99,7 +99,7 @@
   let _guestVideo = null; // <video> element (guest only)
   let _p1KeyMap = null;
   let _heldKeys = new Set();
-  let _prevSlotMasks = {};
+  let _prevSlotInputs = {};
   let _gameRunning = false;
   let _hostInputInterval = null;
   let _cachedInfo = null;
@@ -424,10 +424,16 @@
       const peer = _peers[remoteSid];
       if (!peer || peer.slot === null || peer.slot === undefined) return;
 
-      // Guest sends Int32Array([inputMask]) — 4 bytes
-      if (e.data instanceof ArrayBuffer && e.data.byteLength === 4) {
-        const mask = new Int32Array(e.data)[0];
-        applyInputForSlot(peer.slot, mask);
+      // Guest sends encoded input object — 16 bytes
+      if (e.data instanceof ArrayBuffer && e.data.byteLength === 16) {
+        const decoded = KNShared.decodeInput(e.data);
+        applyInputForSlot(peer.slot, {
+          buttons: decoded.buttons,
+          lx: decoded.lx,
+          ly: decoded.ly,
+          cx: decoded.cx,
+          cy: decoded.cy,
+        });
       }
     };
   };
@@ -437,7 +443,7 @@
     if (!peer) return;
     // Zero their input if they were a player
     if (_playerSlot === 0 && peer.slot !== null && peer.slot !== undefined) {
-      applyInputForSlot(peer.slot, 0);
+      applyInputForSlot(peer.slot, KNShared.ZERO_INPUT);
     }
     // Close the RTCPeerConnection to release OS sockets and media resources.
     // Without this, each disconnect leaks an open PC (DTLS, ICE agent, encoders).
@@ -643,8 +649,8 @@
     let _debugFrame = 0;
     const tick = () => {
       if (!_p1KeyMap) setupKeyTracking();
-      const mask = readLocalInput();
-      applyInputForSlot(0, mask);
+      const localInput = readLocalInput();
+      applyInputForSlot(0, localInput);
 
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
@@ -662,22 +668,22 @@
     if (_guestLoopStarted) return;
     _guestLoopStarted = true;
 
-    let _lastSentMask = -1;
+    let _lastSentInput = KNShared.ZERO_INPUT;
     let _debugFrame = 0;
     const tick = () => {
       if (!_guestLoopStarted) return;
       requestAnimationFrame(tick);
       if (!_p1KeyMap) setupKeyTracking();
-      const mask = readLocalInput();
+      const localInput = readLocalInput();
 
       // Only send when input changes — reduces DC overhead
-      if (mask !== _lastSentMask) {
+      if (!KNShared.inputEqual(localInput, _lastSentInput)) {
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
           try {
-            hostPeer.dc.send(new Int32Array([mask]).buffer);
+            hostPeer.dc.send(KNShared.encodeInput(0, localInput).buffer);
           } catch (_) {}
-          _lastSentMask = mask;
+          _lastSentInput = localInput;
         }
       }
 
@@ -873,8 +879,8 @@
 
   const readLocalInput = () => KNShared.readLocalInput(_playerSlot, _p1KeyMap, _heldKeys);
 
-  const applyInputForSlot = (slot, inputMask) => {
-    KNShared.applyInputToWasm(slot, inputMask, _prevSlotMasks);
+  const applyInputForSlot = (slot, input) => {
+    KNShared.applyInputToWasm(slot, input, _prevSlotInputs);
   };
 
   // -- Init / Stop API -------------------------------------------------------
@@ -971,7 +977,7 @@
 
     _heldKeys.clear();
     _knownPlayers = {};
-    _prevSlotMasks = {};
+    _prevSlotInputs = {};
     _p1KeyMap = null;
 
     // Remove socket listeners (no data-message — streaming doesn't use it)

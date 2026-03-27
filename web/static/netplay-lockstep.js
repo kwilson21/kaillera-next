@@ -68,7 +68,7 @@
  *        tick entirely if too far ahead of slowest peer
  *     3. Read local input (keyboard via keyCode tracking + gamepad via
  *        GamepadManager + VirtualGamepad on mobile) → 24-bit mask
- *     4. Send Int32Array([frameN, inputMask]) (8 bytes) to all peer DCs
+ *     4. Send encoded input (16 bytes) to all peer DCs
  *     5. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
  *        inputs are ready to apply)
  *     6. Check if all "input peers" have sent input for applyFrame.
@@ -349,8 +349,8 @@
   let _selfLockstepReady = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _frameNum = 0; // current logical frame number
-  let _localInputs = {}; // frame -> inputMask
-  let _remoteInputs = {}; // slot -> {frame -> mask} (nested for multi-peer)
+  let _localInputs = {}; // frame -> input object
+  let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
@@ -1285,10 +1285,10 @@
         }
         if (e.data.startsWith('resend:')) {
           const resendFrame = parseInt(e.data.split(':')[1], 10);
-          const localMask = _localInputs[resendFrame];
-          if (localMask !== undefined) {
+          const localInput = _localInputs[resendFrame];
+          if (localInput !== undefined) {
             try {
-              peer.dc.send(new Int32Array([resendFrame, localMask]).buffer);
+              peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
             } catch (_) {}
           }
           return;
@@ -1432,9 +1432,9 @@
         return;
       }
 
-      // Binary: sync state chunk or input (8 bytes).
+      // Binary: sync state chunk or input (16 bytes).
       // Sync chunks only arrive between sync-start and completion (_syncExpected > 0).
-      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 8) {
+      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 16) {
         if (_syncExpected > 0) {
           _syncChunks.push(new Uint8Array(e.data));
           if (_syncChunks.length >= _syncExpected) {
@@ -1447,12 +1447,12 @@
         _syncLog(`WARN: binary data (${e.data.byteLength}B) arrived but _syncExpected=0 — dropped`);
         return;
       }
-      // Binary: Int32Array [frame, inputMask] -- 8 bytes per input
-      if (e.data instanceof ArrayBuffer && e.data.byteLength === 8) {
+      // Binary: encoded input -- 16 bytes per input
+      if (e.data instanceof ArrayBuffer && e.data.byteLength === 16) {
         if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
-        const arr = new Int32Array(e.data);
-        const recvFrame = arr[0];
-        const recvMask = arr[1];
+        const decoded = KNShared.decodeInput(e.data);
+        const recvFrame = decoded.frame;
+        const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
         if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
         // Log if we receive input for a frame we already applied (too late)
         const currentApply = _frameNum - DELAY_FRAMES;
@@ -1461,8 +1461,8 @@
             `INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`,
           );
         }
-        _remoteInputs[peer.slot][recvFrame] = recvMask;
-        _lastKnownInput[peer.slot] = recvMask;
+        _remoteInputs[peer.slot][recvFrame] = recvInput;
+        _lastKnownInput[peer.slot] = recvInput;
         if (!_peerInputStarted[peer.slot]) {
           _peerInputStarted[peer.slot] = true;
           _syncLog(`INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
@@ -2221,11 +2221,11 @@
       _frameNum = startFrame;
 
       for (let f = Math.max(0, startFrame - DELAY_FRAMES); f <= startFrame + DELAY_FRAMES; f++) {
-        if (!_localInputs[f]) _localInputs[f] = 0;
+        if (!_localInputs[f]) _localInputs[f] = KNShared.ZERO_INPUT;
         for (const p of Object.values(_peers)) {
           if (p.slot !== null && p.slot !== undefined) {
             if (!_remoteInputs[p.slot]) _remoteInputs[p.slot] = {};
-            if (!_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = 0;
+            if (!_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = KNShared.ZERO_INPUT;
           }
         }
       }
@@ -2369,8 +2369,8 @@
 
   // -- Direct memory input ---------------------------------------------------
 
-  const writeInputToMemory = (player, inputMask) => {
-    KNShared.applyInputToWasm(player, inputMask);
+  const writeInputToMemory = (player, input) => {
+    KNShared.applyInputToWasm(player, input);
   };
 
   // -- Frame stepping (rAF interception) -------------------------------------
@@ -2650,7 +2650,7 @@
           _localInputs = {};
           _remoteInputs = {};
           for (let d = 0; d < DELAY_FRAMES; d++) {
-            _localInputs[_frameNum + d] = 0;
+            _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
           }
         }
 
@@ -2803,9 +2803,9 @@
     }
 
     // Send local input for current frame to ALL open peer DCs
-    const mask = readLocalInput();
-    _localInputs[_frameNum] = mask;
-    const buf = new Int32Array([_frameNum, mask]).buffer;
+    const localInput = readLocalInput();
+    _localInputs[_frameNum] = localInput;
+    const buf = KNShared.encodeInput(_frameNum, localInput).buffer;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
       try {
@@ -2847,14 +2847,14 @@
         }
         const stallDuration = now - _stallStart;
         if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-          // Hard timeout — fabricate 0 for all missing slots.
-          // Always 0 (never _lastKnownInput) so all players agree.
+          // Hard timeout — fabricate ZERO_INPUT for all missing slots.
+          // Always ZERO_INPUT (never _lastKnownInput) so all players agree.
           const repeatInfo = [];
           for (let k = 0; k < inputPeers.length; k++) {
             const s = inputPeers[k].slot;
             if (!_remoteInputs[s]) _remoteInputs[s] = {};
             if (_remoteInputs[s][applyFrame] === undefined) {
-              _remoteInputs[s][applyFrame] = 0;
+              _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
               repeatInfo.push(`s${s}=0`);
             }
           }
@@ -2893,12 +2893,12 @@
 
       // Write ALL inputs to Wasm memory — use inputPeers for peers
       // we're synced with, activePeers for all connected
-      const localMask = _localInputs[applyFrame] || 0;
-      writeInputToMemory(_playerSlot, localMask);
+      const localInput = _localInputs[applyFrame] || KNShared.ZERO_INPUT;
+      writeInputToMemory(_playerSlot, localInput);
       for (let m = 0; m < inputPeers.length; m++) {
         const peerSlot = inputPeers[m].slot;
-        const remoteMask = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || 0;
-        writeInputToMemory(peerSlot, remoteMask);
+        const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
+        writeInputToMemory(peerSlot, remoteInput);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
       }
 
@@ -2918,7 +2918,7 @@
           }
         }
         _syncLog(
-          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${localMask} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`,
+          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${JSON.stringify(localInput)} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`,
         );
       }
       // Periodic pacing summary (~5s)

@@ -193,39 +193,75 @@
     console.log('[netplay] enabled mobile touch controls');
   }
 
+  // ── Keyboard input helpers ─────────────────────────────────────────────
+
+  const readKeyboardAxes = (keyMap, heldKeys) => {
+    const hasKey = (bit) => {
+      for (const kc of heldKeys) {
+        if (keyMap[kc] === bit) return true;
+      }
+      return false;
+    };
+    const axis = (posBit, negBit) => {
+      const pos = hasKey(posBit);
+      const neg = hasKey(negBit);
+      if (pos && neg) return 0; // opposing cancellation
+      if (pos) return N64_MAX;
+      if (neg) return -N64_MAX;
+      return 0;
+    };
+    return {
+      lx: axis(16, 17),
+      ly: axis(18, 19),
+      cx: axis(20, 21),
+      cy: axis(22, 23),
+    };
+  };
+
   // ── readLocalInput(playerSlot, keyMap, heldKeys) ───────────────────────
   // Reads keyboard, gamepad, and virtual-gamepad (touch) state and returns
-  // a 24-bit input mask.  Shared by lockstep and streaming engines.
+  // an input object { buttons, lx, ly, cx, cy }.
   //   playerSlot: 0-3, the local player's slot index
   //   keyMap:     keyboard keyCode→button-index map (from setupKeyTracking)
   //   heldKeys:   Set of currently-held keyCodes
 
   const readLocalInput = (playerSlot, keyMap, heldKeys) => {
-    let mask = 0;
+    const input = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
 
-    // Suppress all input while remap wizard is active (prevents desyncs)
-    if (KNState.remapActive) return 0;
+    // Suppress all input while remap wizard is active
+    if (KNState.remapActive) return { ...ZERO_INPUT };
 
-    // Gamepad via GamepadManager (profile-based mapping)
+    // 1. Gamepad (analog pipeline, highest fidelity for axes)
     if (document.hasFocus() && window.GamepadManager) {
-      mask |= GamepadManager.readGamepad(playerSlot);
+      const gp = GamepadManager.readGamepad(playerSlot);
+      if (gp) {
+        input.buttons |= gp.buttons;
+        input.lx = gp.lx;
+        input.ly = gp.ly;
+        input.cx = gp.cx;
+        input.cy = gp.cy;
+      }
     }
 
-    // Keyboard
+    // 2. Keyboard (digital, with opposing cancellation)
+    //    Buttons always merge; axes only if gamepad didn't provide them
     if (keyMap) {
       heldKeys.forEach((kc) => {
         const btnIdx = keyMap[kc];
-        if (btnIdx !== undefined) mask |= 1 << btnIdx;
+        if (btnIdx !== undefined && btnIdx < 16) input.buttons |= 1 << btnIdx;
       });
+      const kb = readKeyboardAxes(keyMap, heldKeys);
+      if (input.lx === 0 && input.ly === 0) {
+        input.lx = kb.lx;
+        input.ly = kb.ly;
+      }
+      if (input.cx === 0 && input.cy === 0) {
+        input.cx = kb.cx;
+        input.cy = kb.cy;
+      }
     }
 
-    // Virtual gamepad (mobile touch controls)
-    // EJS simulateInput uses per-direction positive values:
-    //   indices 0-15: digital buttons (value 0 or 1)
-    //   indices 16-19: left stick (right/left/down/up, value 0 to 32767)
-    //   indices 20-23: C-buttons (right/left/down/up, value 0 or 1)
-    // Skip entirely if an EJS menu/popup is visible — stale touch state from
-    // before the menu opened would otherwise keep sending non-zero input.
+    // 3. Touch/virtual gamepad (mobile)
     const ejs = window.EJS_emulator;
     const ejsMenuOpen =
       ejs &&
@@ -233,57 +269,60 @@
         ejs.isPopupOpen?.() ||
         (ejs.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')));
     if (ejsMenuOpen) {
-      // Clear in-place — VirtualGamepad reads KNState.touchInput via the
-      // same global, so this correctly zeroes both sides.
       for (const ck in KNState.touchInput) {
         if (KNState.touchInput.hasOwnProperty(ck)) KNState.touchInput[ck] = 0;
       }
     }
 
-    // Left stick (indices 16-19): apply absolute + relative deadzone.
-    // Absolute deadzone (~15% of max 32767) filters out the small spurious
-    // displacement that EJS's virtual joystick sends on initial finger
-    // placement — the touch point is typically slightly above the joystick
-    // center, causing a brief "up" input that triggers unwanted jumps.
-    // Relative deadzone (40% of major axis) suppresses near-cardinal
-    // diagonals, giving ~+/-22deg cardinal zones around each direction.
+    // Touch left stick: only if no gamepad/keyboard axis input
     const TOUCH_ABS_DEADZONE = 3500;
+    const TOUCH_MAX = 32767;
     const stR = KNState.touchInput[16] || 0;
     const stL = KNState.touchInput[17] || 0;
     const stD = KNState.touchInput[18] || 0;
     const stU = KNState.touchInput[19] || 0;
     const stMajor = Math.max(stR, stL, stD, stU);
-    if (stMajor > TOUCH_ABS_DEADZONE) {
+    if (input.lx === 0 && input.ly === 0 && stMajor > TOUCH_ABS_DEADZONE) {
       const stThresh = stMajor * 0.4;
-      if (stR > stThresh) mask |= 1 << 16;
-      if (stL > stThresh) mask |= 1 << 17;
-      if (stD > stThresh) mask |= 1 << 18;
-      if (stU > stThresh) mask |= 1 << 19;
+      // Convert per-direction magnitudes to signed N64 range
+      const touchScale = (pos, neg, thresh) => {
+        const p = pos > thresh ? pos : 0;
+        const n = neg > thresh ? neg : 0;
+        return Math.trunc(((p - n) / TOUCH_MAX) * N64_MAX);
+      };
+      input.lx = touchScale(stR, stL, stThresh);
+      input.ly = touchScale(stD, stU, stThresh);
     }
 
-    // Digital buttons + C-buttons (non-stick indices)
+    // Touch digital buttons + C-buttons
     for (const ti in KNState.touchInput) {
       const idx = parseInt(ti, 10);
       if (idx >= 16 && idx <= 19) continue; // left stick handled above
       const val = KNState.touchInput[idx];
       if (!val) continue;
       if (idx < 16) {
-        mask |= 1 << idx;
+        input.buttons |= 1 << idx;
       } else if (idx >= 20 && idx <= 23) {
-        if (val > 0) mask |= 1 << idx;
+        // C-buttons from touch: snap to ±N64_MAX
+        if (input.cx === 0 && input.cy === 0) {
+          if (idx === 20 && val > 0) input.cx = N64_MAX; // C-Right
+          if (idx === 21 && val > 0) input.cx = -N64_MAX; // C-Left
+          if (idx === 22 && val > 0) input.cy = N64_MAX; // C-Down
+          if (idx === 23 && val > 0) input.cy = -N64_MAX; // C-Up
+        }
       }
     }
 
-    // Debug: call window.debugInput() to log input for 3 seconds
-    if (window._debugInputUntil && performance.now() < window._debugInputUntil && mask !== 0) {
-      const bits = [];
-      for (let b = 0; b < 20; b++) {
-        if ((mask >> b) & 1) bits.push(b);
+    // Debug input logging
+    if (window._debugInputUntil && performance.now() < window._debugInputUntil) {
+      if (input.buttons || input.lx || input.ly || input.cx || input.cy) {
+        console.log(
+          `[input-debug] buttons=${input.buttons} lx=${input.lx} ly=${input.ly} cx=${input.cx} cy=${input.cy}`,
+        );
       }
-      console.log(`[input-debug] mask=${mask} bits=[${bits.join(',')}]`);
     }
 
-    return mask;
+    return input;
   };
 
   // ── disableEJSInput(label) ────────────────────────────────────────────
@@ -341,41 +380,68 @@
   //   prevMasks: optional object mapping slot→previous mask; when provided,
   //              skips the write if the mask is unchanged (streaming optimization)
 
-  const applyInputToWasm = (slot, inputMask, prevMasks) => {
+  const applyInputToWasm = (slot, input, prevInputs) => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._simulate_input) return;
 
     // Optional skip-if-unchanged optimization
-    if (prevMasks) {
-      const prevMask = prevMasks[slot] || 0;
-      if (inputMask === prevMask) return;
+    if (prevInputs) {
+      const prev = prevInputs[slot];
+      if (prev && inputEqual(input, prev)) return;
     }
 
-    // Digital buttons (0-15): use _simulate_input for correct address calc
+    // Digital buttons (0-15)
     for (let btn = 0; btn < 16; btn++) {
-      mod._simulate_input(slot, btn, (inputMask >> btn) & 1);
+      mod._simulate_input(slot, btn, (input.buttons >> btn) & 1);
     }
 
-    // Analog axes (16-23): bit pairs -> +/-axis values
-    // 16-19: left stick (N64 analog), 20-23: right stick (N64 C-buttons)
-    // When both X and Y are active (diagonal), scale each axis by 1/sqrt(2)
-    // so the combined magnitude matches cardinal (prevents diagonal speed boost).
-    const lxActive = ((inputMask >> 16) & 1) | ((inputMask >> 17) & 1);
-    const lyActive = ((inputMask >> 18) & 1) | ((inputMask >> 19) & 1);
-    const diagScale = lxActive && lyActive ? 23170 : 32767; // 32767/sqrt(2) ~ 23170
-    for (let base = 16; base < 24; base += 2) {
-      const posPressed = (inputMask >> base) & 1;
-      const negPressed = (inputMask >> (base + 1)) & 1;
-      const mag = base < 20 ? diagScale : 32767; // normalize left stick only
-      const axisVal = (posPressed - negPressed) * mag;
-      mod._simulate_input(slot, base, axisVal);
-      mod._simulate_input(slot, base + 1, 0);
-    }
+    // Left stick — scale N64 range (±83) to WASM range (±32767)
+    const scale = 32767 / N64_MAX;
+    const clamp = (v) => Math.max(-32767, Math.min(32767, Math.trunc(v * scale)));
+    // Bit 16 = X positive (right), 17 = X negative (left)
+    mod._simulate_input(slot, 16, input.lx > 0 ? clamp(input.lx) : 0);
+    mod._simulate_input(slot, 17, input.lx < 0 ? clamp(-input.lx) : 0);
+    // Bit 18 = Y positive (down), 19 = Y negative (up)
+    mod._simulate_input(slot, 18, input.ly > 0 ? clamp(input.ly) : 0);
+    mod._simulate_input(slot, 19, input.ly < 0 ? clamp(-input.ly) : 0);
 
-    // Update previous mask tracker if provided
-    if (prevMasks) {
-      prevMasks[slot] = inputMask;
+    // C-stick (bits 20-23) — same approach, digital values (0 or ±83)
+    mod._simulate_input(slot, 20, input.cx > 0 ? clamp(input.cx) : 0);
+    mod._simulate_input(slot, 21, input.cx < 0 ? clamp(-input.cx) : 0);
+    mod._simulate_input(slot, 22, input.cy > 0 ? clamp(input.cy) : 0);
+    mod._simulate_input(slot, 23, input.cy < 0 ? clamp(-input.cy) : 0);
+
+    // Update previous input tracker
+    if (prevInputs) {
+      prevInputs[slot] = input;
     }
+  };
+
+  // ── Input encoding (shared by lockstep + streaming engines) ──────────
+  const N64_MAX = 83; // floor(127 * 0.66) — community standard analog range
+
+  const ZERO_INPUT = Object.freeze({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
+
+  const inputEqual = (a, b) =>
+    a.buttons === b.buttons && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy;
+
+  const packStick = (x, y) => (x & 0xffff) | ((y & 0xffff) << 16);
+  const unpackX = (packed) => (packed << 16) >> 16;
+  const unpackY = (packed) => packed >> 16;
+
+  const encodeInput = (frame, input) =>
+    new Int32Array([frame, input.buttons, packStick(input.lx, input.ly), packStick(input.cx, input.cy)]);
+
+  const decodeInput = (buf) => {
+    const arr = new Int32Array(buf);
+    return {
+      frame: arr[0],
+      buttons: arr[1],
+      lx: unpackX(arr[2]),
+      ly: unpackY(arr[2]),
+      cx: unpackX(arr[3]),
+      cy: unpackY(arr[3]),
+    };
   };
 
   window.KNShared = {
@@ -390,5 +456,10 @@
     readLocalInput: readLocalInput,
     disableEJSInput: disableEJSInput,
     applyInputToWasm: applyInputToWasm,
+    N64_MAX,
+    ZERO_INPUT,
+    inputEqual,
+    encodeInput,
+    decodeInput,
   };
 })();
