@@ -117,7 +117,9 @@ echo "==> Stage 4: Link through RetroArch -> .js + .wasm"
 cp "${BC_FILE}" "${SRC_DIR}/RetroArch/libretro_emscripten.a"
 cd "${SRC_DIR}/RetroArch"
 
-# Clean previous link artifacts
+# Clean ALL previous RetroArch build artifacts (stale .o files from non-threaded
+# builds will fail to link with -pthread / --shared-memory).
+emmake make -f Makefile.emulatorjs clean 2>/dev/null || true
 rm -f mupen64plus_next_libretro.js mupen64plus_next_libretro.wasm 2>/dev/null || true
 
 # Build with PROXY_TO_PTHREAD: moves entire RetroArch main loop to a
