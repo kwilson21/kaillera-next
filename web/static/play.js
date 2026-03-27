@@ -55,7 +55,11 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
 
-  const _persistentId = sessionStorage.getItem('kn-player-id') || crypto.randomUUID();
+  const _persistentId =
+    sessionStorage.getItem('kn-player-id') ||
+    (crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   sessionStorage.setItem('kn-player-id', _persistentId);
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
