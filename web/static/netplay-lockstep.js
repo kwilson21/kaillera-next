@@ -370,14 +370,14 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled = false; // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 30; // check hash every N frames (~500ms at 60fps)
-  let _syncBaseInterval = 30; // direct RDRAM reads are ~0.1ms (no getState)
+  let _syncCheckInterval = 10; // check hash every N frames (~166ms at 60fps)
+  let _syncBaseInterval = 10; // direct RDRAM reads are ~0.1ms (no getState)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount = 0;
   let _consecutiveResyncs = 0; // track consecutive resyncs for adaptive backoff
   // Resync cooldown: C-level path is <2ms so we can resync very frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
-  const _resyncCooldownMs = () => (_hasKnSync ? 500 : 10000);
+  const _resyncCooldownMs = () => (_hasKnSync ? 200 : 10000);
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
   const SYNC_LOG_MAX = 5000;
@@ -2068,7 +2068,9 @@
       }
 
       // Fallback: no ROM hash, use direct bytes
-      _guestStateBytes = bytes;
+      // NOTE: `bytes` is detached after compressAndEncode (worker transfer).
+      // Use `cacheBytes` (the pre-transfer copy) to avoid loading an empty buffer.
+      _guestStateBytes = cacheBytes;
       _selfLockstepReady = true;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -2960,6 +2962,7 @@
               );
             }
           } else {
+            _syncLog(`sync OK (deferred) frame=${_pendingSyncCheck.frame} hash=${guestHash}`);
             _consecutiveResyncs = 0;
             _syncCheckInterval = _syncBaseInterval;
             _resetDrift();
@@ -3893,7 +3896,7 @@
     },
     isSyncEnabled: () => _syncEnabled,
     setSyncInterval: (frames) => {
-      _syncBaseInterval = _syncCheckInterval = Math.max(30, frames);
+      _syncBaseInterval = _syncCheckInterval = Math.max(10, frames);
     },
     getInfo: () => {
       const peers = getActivePeers();

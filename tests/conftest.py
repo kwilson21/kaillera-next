@@ -13,25 +13,38 @@ SERVER_DIR = str(Path(__file__).parent.parent / "server")
 
 
 @pytest.fixture(scope="session")
+def browser_context_args(browser_context_args):
+    """Accept self-signed certs (Tailscale HTTPS dev server)."""
+    return {**browser_context_args, "ignore_https_errors": True}
+
+
+@pytest.fixture(scope="session")
 def server_url():
     """Start the kaillera-next server and return its URL."""
-    env = {**os.environ, "DISABLE_RATE_LIMIT": "1"}
+    env = {**os.environ, "DISABLE_RATE_LIMIT": "1", "DISABLE_HTTPS": "1"}
     proc = subprocess.Popen(
         ["python", "-c", "from src.main import run; run()"],
         cwd=SERVER_DIR,
         env=env,
     )
+    # Server may start in HTTPS mode (Tailscale certs auto-detected)
+    actual_url = SERVER_URL
     for _ in range(30):
-        try:
-            r = requests.get(f"{SERVER_URL}/health", timeout=1)
-            if r.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(0.5)
+        for url in [SERVER_URL, SERVER_URL.replace("http://", "https://")]:
+            try:
+                r = requests.get(f"{url}/health", timeout=1, verify=False)
+                if r.status_code == 200:
+                    actual_url = url
+                    break
+            except Exception:
+                pass
+        else:
+            time.sleep(0.5)
+            continue
+        break
     else:
         proc.terminate()
         pytest.fail("Server did not start within 15 seconds")
-    yield SERVER_URL
+    yield actual_url
     proc.terminate()
     proc.wait()

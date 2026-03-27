@@ -86,6 +86,10 @@
       console.log('[core-redirector] Redirecting core fetch to:', LOCAL_CORE_URL);
       return origFetch.call(this, LOCAL_CORE_URL, opts);
     }
+    // Redirect EmulatorJS CDN version check to local file
+    if (u.includes('cdn.emulatorjs.org') && u.includes('version.json')) {
+      return origFetch.call(this, '/static/ejs/version.json', opts);
+    }
     return origFetch.apply(this, arguments);
   };
 

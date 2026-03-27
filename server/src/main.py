@@ -112,7 +112,7 @@ def run() -> None:
     cert_file = os.path.join(cert_dir, "cert.pem")
     key_file = os.path.join(cert_dir, "key.pem")
     ssl_kwargs = {}
-    if os.path.exists(cert_file) and os.path.exists(key_file):
+    if os.path.exists(cert_file) and os.path.exists(key_file) and not os.environ.get("DISABLE_HTTPS"):
         ssl_kwargs["ssl_certfile"] = cert_file
         ssl_kwargs["ssl_keyfile"] = key_file
         log.info("Listening on :%d (HTTPS)", port)
