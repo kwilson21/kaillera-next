@@ -26,40 +26,60 @@ Both modes support:
 
 ## Quick start
 
-Requires Python 3.11+ and Redis.
+Requires Python 3.11+, Redis, [Tailscale](https://tailscale.com), and [just](https://github.com/casey/just).
 
 ```bash
-# Install with uv (recommended)
-uv pip install server/
+# Install dependencies
+just setup
 
-# Start Redis (required for session persistence)
-docker compose -f docker-compose.dev.yml up -d
+# One-time: generate HTTPS certs (see Tailscale setup below)
+just certs
 
-# Run (serves both API and web frontend on :27888)
-REDIS_URL=redis://localhost:6379/0 kaillera-server
-# → http://localhost:27888
+# Start dev server (Redis + HTTPS)
+just dev
+# → https://<your-hostname>.ts.net:27888/
 ```
 
-For development without installing:
+### Tailscale setup (required)
+
+HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. Tailscale provides real Let's Encrypt certificates trusted by all devices including mobile — no CA installation needed.
+
+#### 1. Install Tailscale
+
+Install on your dev machine and any test devices (phone, tablet). All devices must be on the same Tailnet.
+
+- **macOS:** [Mac App Store](https://apps.apple.com/app/tailscale/id1475387142) or `brew install tailscale`
+- **iOS/Android:** Install from your device's app store
+- **Linux:** [tailscale.com/download/linux](https://tailscale.com/download/linux)
+
+#### 2. Enable HTTPS certificates
+
+In the [Tailscale admin console](https://login.tailscale.com/admin/dns), enable **DNS → HTTPS Certificates** for your Tailnet.
+
+#### 3. Configure and generate certs
+
+Add your Tailscale hostname to `.env` (find it at [login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines)):
 
 ```bash
-cd server && python -c "from src.main import run; run()"
+# .env
+TAILSCALE_HOSTNAME=your-machine.tail1234.ts.net
 ```
 
-### HTTPS for mobile testing
-
-Mobile browsers require HTTPS for `crossOriginIsolated` (SharedArrayBuffer, high-res timers). Use [mkcert](https://github.com/FiloSottile/mkcert) for LAN development:
+Then generate certs:
 
 ```bash
-brew install mkcert
-mkcert -install
-mkcert <your-lan-ip> localhost 127.0.0.1
-mkdir -p certs
-mv <your-lan-ip>+2.pem certs/cert.pem
-mv <your-lan-ip>+2-key.pem certs/key.pem
+just certs
 ```
 
-The server auto-detects certs in `certs/` and switches to HTTPS. Install the mkcert CA on mobile devices for trusted connections.
+This handles the platform-specific cert generation (macOS sandbox, Linux) and copies them to `certs/`. Certs expire every ~90 days — just re-run `just certs` to renew.
+
+#### 4. (Optional) ACL for cross-device access
+
+If testing from a phone, ensure your Tailscale ACL allows traffic to port 27888. The default "allow all" ACL works; if customized, add a rule for `tcp:27888`.
+
+#### Alternative: mkcert (localhost only)
+
+[mkcert](https://github.com/FiloSottile/mkcert) works for localhost but requires installing its CA on every mobile device. Prefer Tailscale for cross-device testing.
 
 ### Docker
 

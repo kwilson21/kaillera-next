@@ -240,11 +240,11 @@ def create_app(lifespan=None) -> FastAPI:
             )
         return result
 
-    _ROM_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+    _ROM_HASH_RE = re.compile(r"^[SF]?[0-9a-fA-F]{16,64}$")
     _MAX_CACHE_ENTRIES = 50
 
     def _validate_rom_hash(rom_hash: str) -> None:
-        """Ensure rom_hash is a valid 64-char hex string (SHA-256)."""
+        """Ensure rom_hash is a valid hex string, optionally prefixed with S (SHA-256) or F (FNV)."""
         if not _ROM_HASH_RE.match(rom_hash):
             raise HTTPException(status_code=400, detail="Invalid ROM hash format")
 

@@ -1993,6 +1993,8 @@
     }
   };
 
+  let _cacheAttempted = false;
+
   const fetchCachedState = async (romHash) => {
     const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
@@ -2030,7 +2032,8 @@
       // No cached state or fetch timed out — fall back to host capture / guest wait
       const reason = e?.name === 'AbortError' ? 'fetch timed out' : e?.message || 'unknown';
       _syncLog(`no cached state — ${reason}, using live capture`);
-      if (_playerSlot === 0) {
+      if (_playerSlot === 0 && !_cacheAttempted) {
+        _cacheAttempted = true;
         sendInitialState();
       }
       // Guests: wait for save state via handleSaveStateMsg
@@ -3752,6 +3755,7 @@
     _selfEmuReady = false;
     _selfLockstepReady = false;
     _syncStarted = false;
+    _cacheAttempted = false;
     _lockstepReadyPeers = {};
     _guestStateBytes = null;
     _knownPlayers = {};

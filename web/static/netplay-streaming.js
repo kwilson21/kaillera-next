@@ -45,8 +45,8 @@
  *
  *   SDP is munged before offer/answer to optimize for low-latency gaming:
  *     - Codec preference: VP9 → H264 → VP8 (reorders m-line payload types)
- *     - Bitrate floor: b=AS:10000 added after video c= line
- *     - RTCRtpSender parameters: maxBitrate=5Mbps, maxFramerate=60,
+ *     - Bitrate cap: b=AS:3000 added after video c= line
+ *     - RTCRtpSender parameters: maxBitrate=2.5Mbps, maxFramerate=60,
  *       degradationPreference='maintain-framerate' (drop resolution, not FPS)
  *
  *   On the receiving side, jitter buffer is minimized:
@@ -212,7 +212,14 @@
     // Guest/spectator: listen for incoming video tracks
     if (_playerSlot !== 0 || _isSpectator) {
       peer.pc.ontrack = (event) => {
-        _syncLog(`received track: ${event.track.kind}`);
+        _syncLog(
+          `received track: ${event.track.kind} streams=${event.streams.length} stream0tracks=${
+            event.streams[0]
+              ?.getTracks()
+              .map((t) => t.kind + ':' + t.readyState)
+              .join(',') ?? 'none'
+          }`,
+        );
         if (!_guestVideo) {
           _guestVideo = document.createElement('video');
           _guestVideo.id = 'guest-video';
@@ -223,23 +230,52 @@
           _guestVideo.disableRemotePlayback = true;
           _guestVideo.setAttribute('playsinline', '');
 
+          _guestVideo.addEventListener('loadedmetadata', () => {
+            _syncLog(`video loadedmetadata: ${_guestVideo.videoWidth}x${_guestVideo.videoHeight}`);
+          });
+          _guestVideo.addEventListener('canplay', () => {
+            _syncLog(`video canplay: paused=${_guestVideo.paused} readyState=${_guestVideo.readyState}`);
+            const rect = _guestVideo.getBoundingClientRect();
+            const cs = getComputedStyle(_guestVideo);
+            _syncLog(
+              `video layout: rect=${Math.round(rect.width)}x${Math.round(rect.height)} at (${Math.round(rect.left)},${Math.round(rect.top)}) display=${cs.display} visibility=${cs.visibility} opacity=${cs.opacity} zIndex=${cs.zIndex}`,
+            );
+            const gameDiv = _guestVideo.parentElement;
+            if (gameDiv) {
+              const gr = gameDiv.getBoundingClientRect();
+              const gcs = getComputedStyle(gameDiv);
+              _syncLog(
+                `gameDiv layout: rect=${Math.round(gr.width)}x${Math.round(gr.height)} overflow=${gcs.overflow} display=${gcs.display} children=${gameDiv.children.length} childTags=${[...gameDiv.children].map((c) => c.tagName + (c.id ? '#' + c.id : '')).join(',')}`,
+              );
+            }
+          });
+          _guestVideo.addEventListener('stalled', () => {
+            _syncLog('video stalled');
+          });
+          _guestVideo.addEventListener('error', () => {
+            _syncLog(`video error: ${_guestVideo.error?.message ?? _guestVideo.error?.code ?? 'unknown'}`);
+          });
+
           _guestVideo.addEventListener(
             'playing',
             () => {
-              _guestVideo.muted = false;
-              if (_guestVideo.muted) {
-                const banner = document.getElementById('unmute-banner');
-                if (banner) {
-                  banner.classList.remove('hidden');
-                  const doUnmute = () => {
-                    _guestVideo.muted = false;
-                    banner.classList.add('hidden');
-                    banner.removeEventListener('click', doUnmute);
-                    document.removeEventListener('touchstart', doUnmute, true);
-                  };
-                  banner.addEventListener('click', doUnmute);
-                  document.addEventListener('touchstart', doUnmute, true);
-                }
+              _syncLog(`video playing: ${_guestVideo.videoWidth}x${_guestVideo.videoHeight}`);
+              // Don't programmatically unmute — on mobile this pauses the
+              // video (autoplay policy: muted autoplay OK, unmute needs gesture).
+              // Always show the banner and let the user tap to unmute.
+              const banner = document.getElementById('unmute-banner');
+              if (banner) {
+                banner.classList.remove('hidden');
+                const doUnmute = () => {
+                  _guestVideo.muted = false;
+                  // If unmuting paused the video (iOS), restart it
+                  if (_guestVideo.paused) _guestVideo.play().catch(() => {});
+                  banner.classList.add('hidden');
+                  banner.removeEventListener('click', doUnmute);
+                  document.removeEventListener('touchstart', doUnmute, true);
+                };
+                banner.addEventListener('click', doUnmute);
+                document.addEventListener('touchstart', doUnmute, true);
               }
             },
             { once: true },
@@ -249,7 +285,17 @@
           gameDiv.innerHTML = '';
           gameDiv.appendChild(_guestVideo);
         }
-        _guestVideo.srcObject = event.streams[0];
+        const stream = event.streams[0];
+        _syncLog(
+          `setting srcObject: tracks=${stream
+            .getTracks()
+            .map((t) => t.kind + ':' + t.readyState + ':' + t.enabled)
+            .join(',')}`,
+        );
+        _guestVideo.srcObject = stream;
+        _syncLog(
+          `video after srcObject: paused=${_guestVideo.paused} readyState=${_guestVideo.readyState} networkState=${_guestVideo.networkState}`,
+        );
 
         try {
           for (const recv of peer.pc.getReceivers()) {
@@ -269,6 +315,15 @@
         }
 
         setStatus('🟢 Connected — streaming!');
+
+        // Delayed diagnostic — check video state 2s after track arrives
+        setTimeout(() => {
+          if (!_guestVideo) return;
+          const r = _guestVideo.getBoundingClientRect();
+          _syncLog(
+            `video 2s check: paused=${_guestVideo.paused} readyState=${_guestVideo.readyState} videoW=${_guestVideo.videoWidth} videoH=${_guestVideo.videoHeight} rectW=${Math.round(r.width)} rectH=${Math.round(r.height)} currentTime=${_guestVideo.currentTime.toFixed(2)} inDOM=${!!_guestVideo.parentElement}`,
+          );
+        }, 2000);
 
         if (_guestVideo.requestVideoFrameCallback) {
           const measureLatency = (now, metadata) => {
@@ -311,7 +366,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     const offer = await peer.pc.createOffer();
-    offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
+    offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
     await peer.pc.setLocalDescription(offer);
     socket.emit('webrtc-signal', { target: remoteSid, offer });
   };
@@ -487,11 +542,17 @@
       _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
       const captureTrack = _hostStream.getVideoTracks()[0];
 
+      let _blitCount = 0;
       const blitFrame = () => {
         if (!_gameRunning) return;
         requestAnimationFrame(blitFrame);
         ctx.drawImage(srcCanvas, 0, 0, 640, 480);
         if (captureTrack.requestFrame) captureTrack.requestFrame();
+        if (++_blitCount === 60) {
+          _syncLog(
+            `blit 60 frames, captureTrack: ${captureTrack.readyState} enabled=${captureTrack.enabled} muted=${captureTrack.muted}`,
+          );
+        }
       };
       blitFrame();
 
@@ -531,7 +592,7 @@
     if (!peer) return;
     try {
       const offer = await peer.pc.createOffer();
-      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 10000));
+      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
@@ -601,7 +662,7 @@
   };
 
   const optimizeVideoEncoding = async (pc) => {
-    // Force high bitrate and 60fps for low-latency game streaming.
+    // Set bitrate cap and 60fps for low-latency game streaming.
     // WebRTC defaults are conservative and cap at ~40fps. We override:
     // - minBitrate prevents the bandwidth estimator from throttling too low
     // - maxFramerate = 60 is non-negotiable for game feel
@@ -612,13 +673,13 @@
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
         }
-        params.encodings[0].maxBitrate = 5_000_000; // 5 Mbps (640x480 needs less)
+        params.encodings[0].maxBitrate = 2_500_000; // 2.5 Mbps (ample for 640x480 N64)
         params.encodings[0].maxFramerate = 60;
         // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
         try {
           await sender.setParameters(params);
-          _syncLog('video encoding optimized: 60fps, 5Mbps max');
+          _syncLog('video encoding optimized: 60fps, 2.5Mbps max');
         } catch (err) {
           _syncLog(`setParameters failed: ${err}`);
         }

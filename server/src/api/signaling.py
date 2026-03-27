@@ -541,7 +541,7 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
 
     room.status = "playing"
     room.mode = mode
-    if payload.romHash and len(payload.romHash) == 64:
+    if payload.romHash and len(payload.romHash) >= 16:
         room.rom_hash = payload.romHash
     await sio.emit(
         "game-started",

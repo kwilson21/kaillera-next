@@ -91,6 +91,14 @@ body {
   object-fit: contain;
   display: block;
 }
+/* Streaming video: force 4:3 so iOS doesn't stretch WebRTC srcObject.
+   Not applied to canvas — EJS manages canvas sizing directly. */
+#game video {
+  height: auto;
+  max-height: 100%;
+  aspect-ratio: 4 / 3;
+  margin: auto;
+}
 
 /* Pre-game overlay */
 #overlay {

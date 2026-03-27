@@ -1555,6 +1555,12 @@
     console.log('[play] destroyEmulator:', `EJS=${!!window.EJS_emulator}`);
     const emu = window.EJS_emulator;
     if (emu) {
+      // Stop the Emscripten main loop to prevent stale rAF callbacks
+      // from interfering with the next EmulatorJS instance.
+      try {
+        const mod = emu.gameManager?.Module;
+        if (mod?.pauseMainLoop) mod.pauseMainLoop();
+      } catch (_) {}
       // Close ALL emulator AudioContexts to stop lingering audio.
       // The netplay engine's stop() handles its custom audio pipeline;
       // this catches the EJS/SDL2 and OpenAL AudioContexts.
