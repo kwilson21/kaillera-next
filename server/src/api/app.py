@@ -20,6 +20,7 @@ Admin endpoints (auth via ADMIN_KEY env var):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -176,9 +177,15 @@ class SecurityHeadersMiddleware:
 # ── Cache busting middleware ──────────────────────────────────────────────────
 
 
-def _git_version() -> str:
-    """Get short git commit hash for cache busting static assets."""
-    # Explicit env var (set in Docker builds or CI)
+def _asset_version() -> str:
+    """Derive a version string for cache busting static assets.
+
+    Resolution order:
+      1. GIT_VERSION env var (explicit override)
+      2. git rev-parse --short HEAD (local dev with .git)
+      3. SHA-256 of static JS/CSS file contents (Docker without .git)
+      4. "dev" fallback
+    """
     v = os.environ.get("GIT_VERSION", "").strip()
     if v:
         return v
@@ -192,6 +199,18 @@ def _git_version() -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
+    except Exception:
+        pass
+    # Hash static file contents — works in Docker without .git
+    static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", "static")
+    try:
+        h = hashlib.sha256()
+        for root, _, files in sorted(os.walk(static_dir)):
+            for f in sorted(files):
+                if f.endswith((".js", ".css")):
+                    with open(os.path.join(root, f), "rb") as fh:
+                        h.update(fh.read())
+        return h.hexdigest()[:8]
     except Exception:
         pass
     return "dev"
@@ -264,7 +283,7 @@ def create_app(lifespan=None) -> FastAPI:
         lifespan=lifespan,
     )
     production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
-    version = _git_version()
+    version = _asset_version()
     app.add_middleware(CacheBustMiddleware, version=version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
     log.info("Cache bust version: %s", version)

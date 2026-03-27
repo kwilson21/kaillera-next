@@ -20,15 +20,11 @@ RUN groupadd -r appuser && useradd -r -g appuser -s /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-# Git version for cache busting (pass --build-arg GIT_VERSION=$(git rev-parse --short HEAD))
-ARG GIT_VERSION=dev
-
 # Default env — override in production
 # ALLOWED_ORIGIN: empty defaults to "*" at runtime; set "REQUIRED" to force explicit config
 # ADMIN_KEY: required — server refuses to start if unset (no open admin by default)
 # Mount /app/server/logs as a volume to persist logs across restarts
-ENV GIT_VERSION=${GIT_VERSION} \
-    ALLOWED_ORIGIN="" \
+ENV ALLOWED_ORIGIN="" \
     PORT=27888 \
     MAX_ROOMS=100 \
     MAX_SPECTATORS=20 \
