@@ -370,14 +370,14 @@
   // State sync — host checks game state hash and pushes only when desynced
   let _syncEnabled = false; // off by default — opt-in via toolbar button
   // (sync compression uses CompressionStream/DecompressionStream directly)
-  let _syncCheckInterval = 120; // check hash every N frames (~2s at 60fps)
-  let _syncBaseInterval = 120; // direct RDRAM reads are ~0.1ms (no getState)
+  let _syncCheckInterval = 30; // check hash every N frames (~500ms at 60fps)
+  let _syncBaseInterval = 30; // direct RDRAM reads are ~0.1ms (no getState)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount = 0;
   let _consecutiveResyncs = 0; // track consecutive resyncs for adaptive backoff
-  // Resync cooldown: C-level path is <2ms so we can resync frequently.
+  // Resync cooldown: C-level path is <2ms so we can resync very frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
-  const _resyncCooldownMs = () => (_hasKnSync ? 2000 : 10000);
+  const _resyncCooldownMs = () => (_hasKnSync ? 500 : 10000);
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
   const SYNC_LOG_MAX = 5000;

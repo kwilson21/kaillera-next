@@ -141,6 +141,8 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 extra: list[tuple[bytes, bytes]] = [
                     (b"content-security-policy", self._CSP.encode()),
+                    (b"cross-origin-opener-policy", b"same-origin"),
+                    (b"cross-origin-embedder-policy", b"credentialless"),
                     (b"x-frame-options", b"SAMEORIGIN"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
