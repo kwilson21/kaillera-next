@@ -26,17 +26,17 @@ Both modes support:
 
 ## Quick start
 
-Requires Python 3.11+.
+Requires Python 3.11+ and Redis.
 
 ```bash
 # Install with uv (recommended)
 uv pip install server/
 
-# Or with pip
-pip install server/
+# Start Redis (required for session persistence)
+docker compose -f docker-compose.dev.yml up -d
 
 # Run (serves both API and web frontend on :27888)
-kaillera-server
+REDIS_URL=redis://localhost:6379/0 kaillera-server
 # → http://localhost:27888
 ```
 
@@ -46,6 +46,21 @@ For development without installing:
 cd server && python -c "from src.main import run; run()"
 ```
 
+### HTTPS for mobile testing
+
+Mobile browsers require HTTPS for `crossOriginIsolated` (SharedArrayBuffer, high-res timers). Use [mkcert](https://github.com/FiloSottile/mkcert) for LAN development:
+
+```bash
+brew install mkcert
+mkcert -install
+mkcert <your-lan-ip> localhost 127.0.0.1
+mkdir -p certs
+mv <your-lan-ip>+2.pem certs/cert.pem
+mv <your-lan-ip>+2-key.pem certs/key.pem
+```
+
+The server auto-detects certs in `certs/` and switches to HTTPS. Install the mkcert CA on mobile devices for trusted connections.
+
 ### Docker
 
 ```bash
@@ -54,6 +69,14 @@ docker run -p 27888:27888 -e ALLOWED_ORIGIN="https://yourdomain.com" kaillera-ne
 ```
 
 The Docker image runs as a non-root user with a health check on `/health`.
+
+### Production (Docker Swarm / Portainer)
+
+```bash
+docker stack deploy -c docker-compose.prod.yml kaillera-next
+```
+
+Includes Redis for session persistence (blue-green deploys, reconnect survival) and persistent log volumes.
 
 ## Architecture
 
@@ -69,11 +92,14 @@ The Docker image runs as a non-root user with a health check on `/health`.
            ┌─────────────────────┐
            │ kaillera-next       │
            │ FastAPI + Socket.IO │
+           │ + Redis             │
            │ :27888              │
            └─────────────────────┘
 ```
 
-The server handles room creation, player coordination, and WebRTC signaling. Once peers are connected, game data flows directly between browsers — the server is idle during lockstep gameplay. For late join, compressed save states are relayed via Socket.IO (too large for WebRTC SCTP).
+The server handles room creation, player coordination, and WebRTC signaling. Once peers are connected, game data flows directly between browsers — the server is idle during lockstep gameplay. Redis persists room state across deploys and reconnects.
+
+All frontend assets are self-hosted (EmulatorJS, Socket.IO) — zero CDN dependencies. The server sends `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers to enable `crossOriginIsolated` on all browsers, unlocking SharedArrayBuffer and high-resolution `performance.now()`.
 
 ## Project structure
 
@@ -81,9 +107,10 @@ The server handles room creation, player coordination, and WebRTC signaling. Onc
 server/              Python signaling server (FastAPI + Socket.IO + uvloop)
   src/
     main.py            Entry point — serves API, Socket.IO, and static frontend
+    state.py           Redis-backed room persistence
     ratelimit.py       Per-IP rolling-window rate limiting
     api/
-      app.py           REST endpoints (/health, /list, /room, /ice-servers, state cache)
+      app.py           REST endpoints, security headers (COOP/COEP/CSP)
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
@@ -91,20 +118,24 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   admin.html           Sync log management (pin, delete, download)
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    lobby.js           Lobby controller (room creation, invite links, player list)
+    lobby.js           Lobby controller (room creation, invite links)
     netplay-lockstep.js    Deterministic lockstep engine (4P mesh WebRTC)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
-    gamepad-manager.js     Profile-based gamepad detection, mapping, slot assignment
+    gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     virtual-gamepad.js     On-screen touch controls for mobile
+    shared.js              Input encoding/decoding, wire format, input application to WASM
     audio-worklet-processor.js  AudioWorklet ring buffer for lockstep audio
-    core-redirector.js     Redirect EJS core download to patched WASM
-    api-sandbox.js         Browser API interception (rAF, getGamepads) for manual frame stepping
-    kn-state.js            Shared state module
-    shared.js              Shared utilities
+    core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
+    api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
+    kn-state.js            Shared cross-module state
+    socket.io.min.js       Self-hosted Socket.IO client (v4.8.3)
+    ejs-loader.js          Self-hosted EmulatorJS loader (v4.2.3)
+    ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)
 tests/               E2E tests (pytest + Playwright)
 docs/                Roadmap, MVP plan, design specs
+certs/               TLS certificates for HTTPS dev (gitignored)
 ```
 
 ## Building the WASM core
@@ -151,6 +182,10 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `PORT` | `27888` | Server listen port |
 | `MAX_ROOMS` | `50` | Maximum concurrent rooms |
 | `MAX_SPECTATORS` | `10` | Maximum spectators per room |
+| `REDIS_URL` | — | Redis connection URL (required for session persistence) |
+| `ADMIN_KEY` | — | Admin API key for sync log management |
+| `LOG_RETENTION_DAYS` | `7` | Auto-delete unpinned sync logs after N days |
+| `LOG_MAX_FILES` | `500` | Maximum sync log files before oldest are pruned |
 
 ## REST endpoints
 
@@ -177,10 +212,13 @@ V1 is feature-complete and deployment-ready:
 - Spectators and late join (mid-game state sync)
 - Desync detection with opt-in star-topology resync
 - P2P ROM sharing with legal consent flow
-- Profile-based gamepad support with remapping wizard
+- True analog gamepad input (3-stage pipeline matching RMG-K/N-Rage)
 - Virtual gamepad for mobile/touch devices
+- Cross-origin isolation (COOP/COEP) for high-res timers on all browsers
 - Per-IP rate limiting and security hardening (CSP, non-root Docker)
 - Save state caching to eliminate host/guest boot asymmetry
+- Redis-backed session persistence for zero-downtime deploys
+- Self-hosted EmulatorJS and Socket.IO (zero CDN dependencies)
 
 ## License
 
