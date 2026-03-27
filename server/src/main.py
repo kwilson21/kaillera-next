@@ -115,7 +115,24 @@ def run() -> None:
     if os.path.exists(cert_file) and os.path.exists(key_file) and not os.environ.get("DISABLE_HTTPS"):
         ssl_kwargs["ssl_certfile"] = cert_file
         ssl_kwargs["ssl_keyfile"] = key_file
-        log.info("Listening on :%d (HTTPS)", port)
+        # Extract hostname from cert for dev convenience (Tailscale HTTPS)
+        try:
+            import subprocess as _sp
+
+            result = _sp.run(
+                ["openssl", "x509", "-in", cert_file, "-noout", "-subject"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            cn = result.stdout.strip().split("CN=")[-1] if "CN=" in result.stdout else None
+            if cn and cn != "localhost":
+                log.info("Listening on :%d (HTTPS)", port)
+                log.info("  https://%s:%d/", cn, port)
+            else:
+                log.info("Listening on :%d (HTTPS)", port)
+        except Exception:
+            log.info("Listening on :%d (HTTPS)", port)
     else:
         log.info("Listening on :%d", port)
 
