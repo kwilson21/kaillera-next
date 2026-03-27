@@ -1653,7 +1653,7 @@
       window.EJS_gameUrl = _romBlobUrl;
       window.EJS_emulator = new EmulatorJS(window.EJS_player || '#game', {
         gameUrl: _romBlobUrl,
-        dataPath: window.EJS_pathtodata || 'https://cdn.emulatorjs.org/stable/data/',
+        dataPath: window.EJS_pathtodata || '/static/ejs/',
         system: window.EJS_core || 'n64',
         startOnLoad: isHost,
       });
@@ -1664,7 +1664,7 @@
     // If the clear hasn't finished, EJS might use stale cached core data.
     const injectLoader = () => {
       const script = document.createElement('script');
-      script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
+      script.src = '/static/ejs-loader.js';
       script.onload = () => {
         console.log('[play] loader.js loaded');
       };

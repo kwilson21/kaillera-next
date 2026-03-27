@@ -106,7 +106,19 @@ def run() -> None:
 
     port = int(os.environ.get("PORT", "27888"))
     log.info("kaillera-next · continuing the legacy of Kaillera by Christophe Thibault")
-    log.info("Listening on :%d", port)
+
+    # HTTPS if certs are present (enables crossOriginIsolated on all browsers)
+    cert_dir = os.path.join(os.path.dirname(__file__), "..", "..", "certs")
+    cert_file = os.path.join(cert_dir, "cert.pem")
+    key_file = os.path.join(cert_dir, "key.pem")
+    ssl_kwargs = {}
+    if os.path.exists(cert_file) and os.path.exists(key_file):
+        ssl_kwargs["ssl_certfile"] = cert_file
+        ssl_kwargs["ssl_keyfile"] = key_file
+        log.info("Listening on :%d (HTTPS)", port)
+    else:
+        log.info("Listening on :%d", port)
+
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
@@ -121,4 +133,5 @@ def run() -> None:
         # AssertionError when a connection closes mid-ping.
         ws_ping_interval=None,
         ws_ping_timeout=None,
+        **ssl_kwargs,
     )

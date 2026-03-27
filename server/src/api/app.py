@@ -116,13 +116,13 @@ class SecurityHeadersMiddleware:
 
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' https://cdn.emulatorjs.org https://cdn.socket.io 'unsafe-eval' 'unsafe-inline' blob:; "
-        "style-src 'self' 'unsafe-inline' https://cdn.emulatorjs.org; "
-        "connect-src 'self' wss: ws: https://cdn.emulatorjs.org https://cdn.socket.io blob:; "
+        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self' wss: ws: blob:; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
-        "worker-src 'self' blob: https://cdn.emulatorjs.org; "
-        "font-src 'self' https://cdn.emulatorjs.org data:"
+        "worker-src 'self' blob:; "
+        "font-src 'self' data:"
     )
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
@@ -142,7 +142,7 @@ class SecurityHeadersMiddleware:
                 extra: list[tuple[bytes, bytes]] = [
                     (b"content-security-policy", self._CSP.encode()),
                     (b"cross-origin-opener-policy", b"same-origin"),
-                    (b"cross-origin-embedder-policy", b"credentialless"),
+                    (b"cross-origin-embedder-policy", b"require-corp"),
                     (b"x-frame-options", b"SAMEORIGIN"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
