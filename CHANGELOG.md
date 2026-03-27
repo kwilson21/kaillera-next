@@ -2,6 +2,21 @@
 
 All notable changes to kaillera-next netplay are documented here.
 
+## [0.7.0] - 2026-03-27
+
+### Added
+- Emulator hibernate: WASM module stays alive between games, eliminating Emscripten
+  main loop corruption on 3rd+ instance and skipping 120-frame re-boot on restart
+- Mode switching: lockstep ↔ streaming without page reload
+- CSS-based EJS overlay suppression (`#game.kn-playing`) prevents built-in EJS menus
+  from leaking through during gameplay
+- Streaming guest video uses sibling `#stream-overlay` div instead of modifying `#game`
+  children, preserving the hibernated EJS canvas
+
+### Fixed
+- Guest black screen after streaming → lockstep (EJS canvas destroyed by innerHTML clear)
+- EJS netplay/cheats menus appearing during gameplay after hibernate/wake cycles
+
 ## [0.6.0] - 2026-03-25
 
 ### Added

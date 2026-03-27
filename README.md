@@ -23,6 +23,7 @@ Both modes support:
 - Late join (mid-game state sync via compressed save state)
 - Desync detection and opt-in resync (lockstep)
 - Virtual gamepad for mobile/touch devices
+- Mode switching between games without page reload (WASM module hibernates between sessions)
 
 ## Quick start
 

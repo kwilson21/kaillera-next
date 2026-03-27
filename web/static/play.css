@@ -83,8 +83,17 @@ body {
   display: none;
 }
 
+/* During lockstep, force-hide all EJS overlays (cheats, netplay, toolbar menus).
+   Only the canvas matters — our lockstep engine handles all UI.
+   CSS !important overrides EJS inline styles regardless of EJS internal state. */
+#game.kn-playing > div > *:not(canvas) {
+  display: none !important;
+  pointer-events: none !important;
+}
+
 #game canvas,
-#game video {
+#game video,
+#stream-overlay video {
   max-width: 100%;
   width: 100%;
   height: 100%;
@@ -93,7 +102,8 @@ body {
 }
 /* Streaming video: force 4:3 so iOS doesn't stretch WebRTC srcObject.
    Not applied to canvas — EJS manages canvas sizing directly. */
-#game video {
+#game video,
+#stream-overlay video {
   height: auto;
   max-height: 100%;
   aspect-ratio: 4 / 3;

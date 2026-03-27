@@ -30,7 +30,8 @@
  *   Guest (slot 1-3):
  *     - Does NOT start the emulator — no WASM core loaded
  *     - Receives the host's video+audio stream and displays it in a
- *       <video> element inserted into the game container
+ *       <video> element inside a #stream-overlay sibling of #game
+ *       (avoids touching EJS DOM so the hibernated canvas survives)
  *     - Video starts muted for autoplay compliance; attempts programmatic
  *       unmute, falls back to a "tap to unmute" banner (iOS workaround)
  *     - Reads keyboard/gamepad input (or VirtualGamepad on mobile) and
@@ -281,9 +282,16 @@
             { once: true },
           );
 
+          // Place guest video in a sibling overlay instead of inside #game.
+          // This avoids touching EJS DOM at all — no innerHTML clear, no
+          // display:none on EJS children, no EJS menu state leakage on wake.
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
-          gameDiv.innerHTML = '';
-          gameDiv.appendChild(_guestVideo);
+          const overlay = document.createElement('div');
+          overlay.id = 'stream-overlay';
+          // Take the same flex slot as #game (which is hidden during streaming guest)
+          overlay.style.cssText = 'width:100%;max-width:100vw;flex:1 1 0;overflow:hidden;';
+          overlay.appendChild(_guestVideo);
+          gameDiv.parentNode.insertBefore(overlay, gameDiv.nextSibling);
         }
         const stream = event.streams[0];
         _syncLog(
@@ -1011,7 +1019,10 @@
     }
     if (_guestVideo) {
       _guestVideo.srcObject = null;
-      if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
+      // Remove the stream overlay container (sibling of #game)
+      const streamOverlay = document.getElementById('stream-overlay');
+      if (streamOverlay) streamOverlay.remove();
+      else if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
       _guestVideo = null;
     }
     const unmuteBanner = document.getElementById('unmute-banner');

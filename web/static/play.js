@@ -3,6 +3,10 @@
  *
  * Owns the Socket.IO connection, pre-game overlay, notifications,
  * in-game toolbar. Orchestrates: lobby → playing → end/leave.
+ *
+ * Emulator lifecycle: the WASM module is kept alive between games
+ * (hibernate/wake) to avoid Emscripten main loop corruption on the
+ * 3rd EmulatorJS instance. See hibernateEmulator() / wakeEmulator().
  */
 (function () {
   'use strict';
@@ -27,6 +31,8 @@
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
   let _hostRomHash = null; // host's ROM hash for late-join verification
+  let _hibernated = false; // true when emulator is hibernated between games
+  let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _pendingLateJoin = false; // waiting for ROM before late-join init
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
@@ -668,7 +674,9 @@
       engine.stop();
       engine = null;
     }
-    destroyEmulator();
+    hibernateEmulator();
+    const gameEl = document.getElementById('game');
+    if (gameEl) gameEl.classList.remove('kn-playing');
     dismissGameLoading();
     hideToolbar();
     showOverlay();
@@ -1623,6 +1631,97 @@
     }
   };
 
+  const hibernateEmulator = () => {
+    const emu = window.EJS_emulator;
+    if (!emu) return;
+    console.log('[play] hibernateEmulator: pausing + hiding');
+
+    const mod = emu.gameManager?.Module;
+    if (mod) {
+      // Establish a known paused state. stopSync() restores native rAF but
+      // never resumes the Emscripten main loop — it's left in limbo (not
+      // paused, not running). Calling pauseMainLoop() here guarantees that
+      // resumeMainLoop() in wakeEmulator() will schedule a fresh rAF callback.
+      try {
+        mod.pauseMainLoop();
+      } catch (_) {}
+
+      // Suspend (not close) OpenAL AudioContexts — lockstep monkey-patches
+      // resume() to a no-op, so just suspend without touching resume here.
+      // wakeEmulator() will restore native resume() and call it.
+      if (mod.AL?.contexts) {
+        for (const ctx of Object.values(mod.AL.contexts)) {
+          if (ctx?.audioCtx && ctx.audioCtx.state !== 'closed') {
+            try {
+              ctx.audioCtx.suspend();
+            } catch (_) {}
+          }
+        }
+      }
+
+      // Suspend SDL2 AudioContext if present
+      if (mod.SDL2?.audioContext && mod.SDL2.audioContext.state !== 'closed') {
+        try {
+          mod.SDL2.audioContext.suspend();
+        } catch (_) {}
+      }
+    }
+
+    // Hide the game div contents
+    const gameEl = document.getElementById('game');
+    if (gameEl) gameEl.style.display = 'none';
+
+    _hibernated = true;
+    _hibernatedRomHash = _romHash;
+  };
+
+  const wakeEmulator = () => {
+    const emu = window.EJS_emulator;
+    if (!emu) return;
+    console.log('[play] wakeEmulator: resuming + showing');
+
+    const mod = emu.gameManager?.Module;
+    if (mod) {
+      // Clear EJS_PAUSED C flag — without this, emscripten_mainloop() bails
+      // at the top (retroarch.c:6126) and retro_run never executes.
+      if (mod._toggleMainLoop) mod._toggleMainLoop(1);
+
+      // Don't resume the main loop here — let each engine handle it:
+      // - Lockstep: enterManualMode() does pause+overrideRAF+resume, capturing
+      //   the runner without EJS ever getting free frames to show its UI menus.
+      // - Streaming host: initEngine() resumes explicitly after wake.
+
+      // Restore OpenAL AudioContexts — undo lockstep's resume() monkey-patch
+      // and unsuspend them so streaming's captureEmulatorAudio() finds live contexts.
+      const proto = AudioContext.prototype || webkitAudioContext.prototype;
+      if (mod.AL?.contexts) {
+        for (const ctx of Object.values(mod.AL.contexts)) {
+          if (ctx?.audioCtx && ctx.audioCtx.state !== 'closed') {
+            try {
+              if (proto.resume) ctx.audioCtx.resume = proto.resume;
+              ctx.audioCtx.resume();
+            } catch (_) {}
+          }
+        }
+      }
+
+      // Resume SDL2 AudioContext if present
+      if (mod.SDL2?.audioContext && mod.SDL2.audioContext.state !== 'closed') {
+        try {
+          mod.SDL2.audioContext.resume();
+        } catch (_) {}
+      }
+    }
+
+    // Show the game div (streaming guests use #stream-overlay instead,
+    // so #game stays hidden for them — see initEngine).
+    const gameEl = document.getElementById('game');
+    if (gameEl) gameEl.style.display = '';
+
+    _hibernated = false;
+    _hibernatedRomHash = null;
+  };
+
   const bootEmulator = () => {
     if (window.__test_skipBoot) return;
     // Re-initialize EmulatorJS if it was destroyed
@@ -1956,12 +2055,38 @@
       engine = null;
     }
 
-    // Spectators and streaming guests receive video — don't boot emulator.
+    // Spectators and streaming guests receive video via #stream-overlay —
+    // keep #game hidden so the EJS canvas doesn't bleed through.
+    // Only show #game when the emulator is needed (lockstep or streaming host).
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
     const needsEmulator = !isSpectator && !(mode === 'streaming' && !isHost);
     if (needsEmulator && (_romBlob || _romBlobUrl)) {
-      bootEmulator();
+      // Show #game and suppress EJS overlays via CSS
+      const gameEl = document.getElementById('game');
+      if (gameEl) {
+        gameEl.style.display = '';
+        gameEl.classList.add('kn-playing');
+      }
+      if (_hibernated && _hibernatedRomHash === _romHash) {
+        wakeEmulator();
+        // Streaming host needs the emulator free-running for canvas capture.
+        // Lockstep doesn't — enterManualMode() captures the runner via rAF
+        // override without ever giving EJS free frames to show its UI menus.
+        if (mode === 'streaming') {
+          const wakeMod = window.EJS_emulator?.gameManager?.Module;
+          if (wakeMod?.resumeMainLoop) wakeMod.resumeMainLoop();
+        }
+      } else {
+        if (_hibernated) {
+          // ROM changed — can't reuse hibernated emulator
+          console.log('[play] initEngine: ROM changed, full restart');
+          destroyEmulator();
+          _hibernated = false;
+          _hibernatedRomHash = null;
+        }
+        bootEmulator();
+      }
     } else {
       console.log('[play] initEngine: connect-only mode (spectator or no ROM)');
     }
