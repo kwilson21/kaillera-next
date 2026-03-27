@@ -1,60 +1,55 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>kaillera-next admin</title>
-  <link rel="stylesheet" href="/static/admin.css">
-</head>
-<body>
-  <div id="auth-prompt" class="card hidden">
-    <h1>kaillera-next admin</h1>
-    <input id="admin-key-input" type="password" placeholder="Admin key" autocomplete="off">
-    <button id="auth-btn">Authenticate</button>
-    <p id="auth-error" class="error hidden">Invalid key</p>
-  </div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kaillera-next admin</title>
+    <link rel="stylesheet" href="/static/admin.css" />
+  </head>
+  <body>
+    <div id="auth-prompt" class="card hidden">
+      <h1>kaillera-next admin</h1>
+      <input id="admin-key-input" type="password" placeholder="Admin key" autocomplete="off" />
+      <button id="auth-btn">Authenticate</button>
+      <p id="auth-error" class="error hidden">Invalid key</p>
+    </div>
 
-  <div id="admin-panel" class="hidden">
-    <header>
-      <h1><a href="/">kaillera-next</a> <span class="dim">admin</span></h1>
-      <button id="refresh-btn" title="Refresh">Refresh</button>
-    </header>
+    <div id="admin-panel" class="hidden">
+      <header>
+        <h1><a href="/">kaillera-next</a> <span class="dim">admin</span></h1>
+        <button id="refresh-btn" title="Refresh">Refresh</button>
+      </header>
 
-    <div class="stats-row" id="stats-row"></div>
+      <div class="stats-row" id="stats-row"></div>
 
-    <div class="log-section">
-      <div class="log-header">
-        <h2>Sync Logs</h2>
-        <div class="log-actions">
-          <button id="cleanup-btn" class="btn-danger" title="Delete all unpinned logs past retention">Run Cleanup Now</button>
+      <div class="log-section">
+        <div class="log-header">
+          <h2>Sync Logs</h2>
+          <div class="log-actions">
+            <button id="cleanup-btn" class="btn-danger" title="Delete all unpinned logs past retention">
+              Run Cleanup Now
+            </button>
+          </div>
         </div>
+        <div id="log-groups"></div>
+        <p id="no-logs" class="dim hidden">No sync logs found.</p>
       </div>
-      <table id="log-table">
-        <thead>
-          <tr>
-            <th>Pin</th>
-            <th>Room</th>
-            <th>Slot</th>
-            <th>Source</th>
-            <th>Size</th>
-            <th>Date</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="log-body"></tbody>
-      </table>
-      <p id="no-logs" class="dim hidden">No sync logs found.</p>
+
+      <div id="log-viewer" class="hidden">
+        <div class="viewer-header">
+          <div>
+            <h3 id="viewer-title"></h3>
+            <div id="viewer-meta" class="viewer-meta"></div>
+          </div>
+          <div class="viewer-actions">
+            <button id="viewer-copy" title="Copy log content">Copy</button>
+            <button id="viewer-close">Close</button>
+          </div>
+        </div>
+        <pre id="viewer-content"></pre>
+      </div>
     </div>
 
-    <div id="log-viewer" class="hidden">
-      <div class="viewer-header">
-        <h3 id="viewer-title"></h3>
-        <button id="viewer-close">Close</button>
-      </div>
-      <pre id="viewer-content"></pre>
-    </div>
-  </div>
-
-  <script src="/static/admin.js"></script>
-</body>
+    <script src="/static/admin.js"></script>
+  </body>
 </html>

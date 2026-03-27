@@ -1,4 +1,8 @@
-* { margin: 0; padding: 0; box-sizing: border-box; }
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
 
 body {
   background: #111;
@@ -9,9 +13,17 @@ body {
   margin: 0 auto;
 }
 
-.hidden { display: none !important; }
-.dim { color: #666; }
-.error { color: #e55; font-size: 13px; margin-top: 8px; }
+.hidden {
+  display: none !important;
+}
+.dim {
+  color: #666;
+}
+.error {
+  color: #e55;
+  font-size: 13px;
+  margin-top: 8px;
+}
 
 /* Auth prompt */
 .card {
@@ -43,7 +55,10 @@ body {
   font-size: 14px;
 }
 
-.card input:focus { outline: none; border-color: #4a6fa5; }
+.card input:focus {
+  outline: none;
+  border-color: #4a6fa5;
+}
 
 /* Header */
 header {
@@ -55,9 +70,17 @@ header {
   border-bottom: 1px solid #2a2a40;
 }
 
-header h1 { font-size: 1.3rem; letter-spacing: 0.05em; }
-header h1 a { color: #6af; text-decoration: none; }
-header h1 .dim { font-weight: normal; }
+header h1 {
+  font-size: 1.3rem;
+  letter-spacing: 0.05em;
+}
+header h1 a {
+  color: #6af;
+  text-decoration: none;
+}
+header h1 .dim {
+  font-weight: normal;
+}
 
 /* Buttons */
 button {
@@ -70,12 +93,29 @@ button {
   cursor: pointer;
 }
 
-button:hover { background: #4a6fa5; }
-button.btn-danger { background: #6a2a2a; }
-button.btn-danger:hover { background: #8a3a3a; }
-button.btn-small { padding: 4px 10px; font-size: 12px; }
-button.btn-pin { background: transparent; border: 1px solid #555; font-size: 16px; padding: 2px 8px; }
-button.btn-pin.pinned { border-color: #fa0; color: #fa0; }
+button:hover {
+  background: #4a6fa5;
+}
+button.btn-danger {
+  background: #6a2a2a;
+}
+button.btn-danger:hover {
+  background: #8a3a3a;
+}
+button.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+button.btn-pin {
+  background: transparent;
+  border: 1px solid #555;
+  font-size: 16px;
+  padding: 2px 8px;
+}
+button.btn-pin.pinned {
+  border-color: #fa0;
+  color: #fa0;
+}
 
 /* Stats */
 .stats-row {
@@ -94,20 +134,106 @@ button.btn-pin.pinned { border-color: #fa0; color: #fa0; }
   min-width: 120px;
 }
 
-.stat-card .label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
-.stat-card .value { font-size: 1.4rem; font-weight: bold; color: #6af; margin-top: 4px; }
+.stat-card .label {
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.stat-card .value {
+  font-size: 1.4rem;
+  font-weight: bold;
+  color: #6af;
+  margin-top: 4px;
+}
 
-/* Log table */
-.log-section { background: #1a1a2e; border: 1px solid #2a2a40; border-radius: 8px; padding: 16px; }
-.log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.log-header h2 { font-size: 1rem; }
-.log-actions { display: flex; gap: 8px; }
+/* Log section */
+.log-section {
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  padding: 16px;
+}
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.log-header h2 {
+  font-size: 1rem;
+}
+.log-actions {
+  display: flex;
+  gap: 8px;
+}
 
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-thead th { text-align: left; padding: 8px; border-bottom: 1px solid #333; color: #888; font-weight: normal; font-size: 11px; text-transform: uppercase; }
-tbody td { padding: 8px; border-bottom: 1px solid #1e1e30; }
-tbody tr:hover { background: #222240; }
-tbody tr { cursor: pointer; }
+/* Room groups */
+.room-group {
+  margin-bottom: 16px;
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.room-group:last-child {
+  margin-bottom: 0;
+}
+
+.room-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: #16162a;
+  border-bottom: 1px solid #2a2a40;
+}
+
+.room-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.room-code {
+  font-weight: bold;
+  color: #6af;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+}
+.room-meta {
+  font-size: 11px;
+  color: #888;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+thead th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2a2a40;
+  color: #666;
+  font-weight: normal;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+tbody td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1e1e30;
+}
+tbody tr:hover {
+  background: #222240;
+}
+tbody tr {
+  cursor: pointer;
+}
+.action-cell {
+  white-space: nowrap;
+}
+.action-cell button {
+  margin-left: 4px;
+}
 
 .source-badge {
   font-size: 10px;
@@ -115,8 +241,14 @@ tbody tr { cursor: pointer; }
   border-radius: 3px;
   background: #2a2a40;
 }
-.source-badge.beacon { background: #3a3a20; color: #fa0; }
-.source-badge.recovery { background: #2a3a2a; color: #6f6; }
+.source-badge.beacon {
+  background: #3a3a20;
+  color: #fa0;
+}
+.source-badge.recovery {
+  background: #2a3a2a;
+  color: #6f6;
+}
 
 /* Log viewer */
 #log-viewer {
@@ -134,9 +266,46 @@ tbody tr { cursor: pointer; }
   padding: 12px 16px;
   background: #1a1a2e;
   border-bottom: 1px solid #2a2a40;
+  gap: 12px;
 }
 
-.viewer-header h3 { font-size: 13px; font-weight: normal; }
+.viewer-header h3 {
+  font-size: 13px;
+  font-weight: normal;
+}
+.viewer-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.viewer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.meta-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: #2a2a40;
+  color: #aaa;
+}
+.meta-ok {
+  background: #1a3a1a;
+  color: #6d6;
+}
+.meta-warn {
+  background: #3a2a1a;
+  color: #fa0;
+}
+.meta-events {
+  font-size: 10px;
+  color: #888;
+  line-height: 1.6;
+}
 
 #viewer-content {
   padding: 16px;
@@ -147,4 +316,27 @@ tbody tr { cursor: pointer; }
   white-space: pre;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   tab-size: 4;
+}
+
+/* Toast */
+#toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(60px);
+  background: #3a5a8a;
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  opacity: 0;
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+  pointer-events: none;
+  z-index: 1000;
+}
+#toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
 }
