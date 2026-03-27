@@ -1,7 +1,10 @@
 """In-memory per-IP rate limiting with rolling window."""
 
+import os
 import time
 from collections import defaultdict, deque
+
+_disabled = os.environ.get("DISABLE_RATE_LIMIT") == "1"
 
 _counters: dict[str, dict[str, deque[float]]] = defaultdict(lambda: defaultdict(deque))
 _connections: dict[str, int] = defaultdict(int)
@@ -57,15 +60,21 @@ def _check_key(key: str, event: str) -> bool:
 
 
 def check(sid: str, event: str) -> bool:
+    if _disabled:
+        return True
     ip = _sid_ip.get(sid, "unknown")
     return _check_key(ip, event)
 
 
 def check_ip(ip: str, event: str) -> bool:
+    if _disabled:
+        return True
     return _check_key(ip, event)
 
 
 def connection_allowed(ip: str) -> bool:
+    if _disabled:
+        return True
     return _connections.get(ip, 0) < MAX_CONNECTIONS_PER_IP
 
 

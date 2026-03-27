@@ -7,7 +7,11 @@ from playwright.sync_api import expect
 
 
 def _mark_rom_ready(page):
-    page.evaluate("window._socket.emit('rom-ready', { ready: true })")
+    """Simulate a player having loaded a ROM (client state + server signal)."""
+    page.evaluate("""
+        if (window.__test_setRomLoaded) window.__test_setRomLoaded();
+        window._socket.emit('rom-ready', { ready: true });
+    """)
 
 
 def test_game_ended_toast_appears(browser, server_url):

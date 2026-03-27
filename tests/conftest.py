@@ -1,5 +1,6 @@
 """Shared fixtures for all tests (REST and Playwright E2E)."""
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -14,9 +15,11 @@ SERVER_DIR = str(Path(__file__).parent.parent / "server")
 @pytest.fixture(scope="session")
 def server_url():
     """Start the kaillera-next server and return its URL."""
+    env = {**os.environ, "DISABLE_RATE_LIMIT": "1"}
     proc = subprocess.Popen(
         ["python", "-c", "from src.main import run; run()"],
         cwd=SERVER_DIR,
+        env=env,
     )
     for _ in range(30):
         try:

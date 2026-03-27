@@ -1618,6 +1618,7 @@
   };
 
   const bootEmulator = () => {
+    if (window.__test_skipBoot) return;
     // Re-initialize EmulatorJS if it was destroyed
     if (window.EJS_emulator) {
       console.log('[play] bootEmulator: EJS already exists, skipping');
@@ -3411,4 +3412,11 @@
       showToast('Rotate to landscape for best experience');
     }
   });
+
+  // E2E test hook — simulate ROM-loaded state without drag-and-drop
+  window.__test_setRomLoaded = () => {
+    _romBlob = new Uint8Array([0]);
+    _romBlobUrl = 'blob:test';
+    window.__test_skipBoot = true;
+  };
 })();

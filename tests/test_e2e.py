@@ -9,8 +9,11 @@ from playwright.sync_api import expect
 
 
 def _mark_rom_ready(page):
-    """Simulate a player having loaded a ROM by emitting rom-ready."""
-    page.evaluate("window._socket.emit('rom-ready', { ready: true })")
+    """Simulate a player having loaded a ROM (client state + server signal)."""
+    page.evaluate("""
+        if (window.__test_setRomLoaded) window.__test_setRomLoaded();
+        window._socket.emit('rom-ready', { ready: true });
+    """)
 
 
 
@@ -24,10 +27,10 @@ def test_lobby_to_play_redirect(page, server_url):
     ))
 
 
-def test_host_guest_start_end(browser, server_url):
+def test_host_guest_start_end(context, server_url):
     """Full flow: host creates, guest joins, start game, end game."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         # Host creates room
@@ -62,10 +65,10 @@ def test_host_guest_start_end(browser, server_url):
         guest.close()
 
 
-def test_host_leave_midgame_closes_room(browser, server_url):
+def test_host_leave_midgame_closes_room(context, server_url):
     """When host leaves mid-game, guest gets room-closed and redirects to lobby."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=E2E02&host=1&name=Host")
@@ -93,10 +96,10 @@ def test_host_leave_midgame_closes_room(browser, server_url):
         guest.close()
 
 
-def test_host_leave_lobby_transfers_ownership(browser, server_url):
+def test_host_leave_lobby_transfers_ownership(context, server_url):
     """When host leaves in lobby, room stays open for remaining players."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=E2E03&host=1&name=Host")
@@ -127,10 +130,10 @@ def test_guest_nonexistent_room(page, server_url):
 # ── ROM Sharing Tests ──────────────────────────────────────────────────
 
 
-def test_rom_sharing_prompt_appears(browser, server_url):
+def test_rom_sharing_prompt_appears(context, server_url):
     """When host enables ROM sharing, joiners see accept/decline prompt."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS01&host=1&name=Host")
@@ -159,10 +162,10 @@ def test_rom_sharing_prompt_appears(browser, server_url):
         guest.close()
 
 
-def test_rom_sharing_decline_shows_drop_zone(browser, server_url):
+def test_rom_sharing_decline_shows_drop_zone(context, server_url):
     """When joiner declines ROM sharing, ROM drop zone reappears."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS02&host=1&name=Host")
@@ -192,10 +195,10 @@ def test_rom_sharing_decline_shows_drop_zone(browser, server_url):
         guest.close()
 
 
-def test_rom_sharing_start_gated_without_roms(browser, server_url):
+def test_rom_sharing_start_gated_without_roms(context, server_url):
     """Host cannot start game when not all players have ROMs and sharing is off."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS03&host=1&name=Host")
@@ -222,10 +225,10 @@ def test_rom_sharing_start_gated_without_roms(browser, server_url):
         guest.close()
 
 
-def test_rom_sharing_bypasses_rom_requirement(browser, server_url):
+def test_rom_sharing_bypasses_rom_requirement(context, server_url):
     """When host enables sharing, start game is allowed even if guests have no ROM."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS04&host=1&name=Host")
@@ -253,9 +256,9 @@ def test_rom_sharing_bypasses_rom_requirement(browser, server_url):
         guest.close()
 
 
-def test_rom_sharing_joiner_after_toggle(browser, server_url):
+def test_rom_sharing_joiner_after_toggle(context, server_url):
     """Joiner who connects after host enables sharing sees the prompt immediately."""
-    host = browser.new_page()
+    host = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS05&host=1&name=Host")
@@ -269,7 +272,7 @@ def test_rom_sharing_joiner_after_toggle(browser, server_url):
         """)
 
         # Now guest joins
-        guest = browser.new_page()
+        guest = context.new_page()
         try:
             guest.goto(f"{server_url}/play.html?room=ROMS05&name=Guest")
             expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
@@ -283,9 +286,9 @@ def test_rom_sharing_joiner_after_toggle(browser, server_url):
         host.close()
 
 
-def test_host_disclaimer_visible(browser, server_url):
+def test_host_disclaimer_visible(context, server_url):
     """Host sees legal disclaimer when sharing checkbox is checked."""
-    host = browser.new_page()
+    host = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS06&host=1&name=Host")
@@ -313,9 +316,9 @@ def test_host_disclaimer_visible(browser, server_url):
 # ── Info Overlay Tests ────────────────────────────────────────────────
 
 
-def test_info_overlay_elements_exist(browser, server_url):
+def test_info_overlay_elements_exist(context, server_url):
     """Info overlay has structured layout (header, stats, peers sections)."""
-    host = browser.new_page()
+    host = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=INFO01&host=1&name=Host")
@@ -517,10 +520,10 @@ def test_worker_compress_and_encode(page, server_url):
     assert result.get("hasPeers") is True, "getInfo should have peers array"
 
 
-def test_share_dropdown_copies_links(browser, server_url):
+def test_share_dropdown_copies_links(context, server_url):
     """In-game share button shows dropdown with play and watch links."""
-    host = browser.new_page()
-    guest = browser.new_page()
+    host = context.new_page()
+    guest = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SHR01&host=1&name=Host")
@@ -555,13 +558,13 @@ def test_share_dropdown_copies_links(browser, server_url):
         guest.close()
 
 
-def test_auto_spectate_when_room_full(browser, server_url):
+def test_auto_spectate_when_room_full(context, server_url):
     """Joining a full room auto-spectates with a banner."""
-    host = browser.new_page()
-    p2 = browser.new_page()
-    p3 = browser.new_page()
-    p4 = browser.new_page()
-    joiner = browser.new_page()
+    host = context.new_page()
+    p2 = context.new_page()
+    p3 = context.new_page()
+    p4 = context.new_page()
+    joiner = context.new_page()
 
     try:
         # Fill room to 4 players
