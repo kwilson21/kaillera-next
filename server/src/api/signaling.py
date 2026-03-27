@@ -46,6 +46,21 @@ from dataclasses import dataclass, field
 import socketio
 
 from src import state
+from src.api.payloads import (
+    ClaimSlotPayload,
+    DeviceTypePayload,
+    EndGamePayload,
+    InputTypePayload,
+    JoinRoomPayload,
+    OpenRoomPayload,
+    RomDeclarePayload,
+    RomReadyPayload,
+    RomSharingTogglePayload,
+    SetModePayload,
+    SetNamePayload,
+    StartGamePayload,
+    validated,
+)
 from src.ratelimit import check, check_ip, cleanup, connection_allowed, register_sid, unregister_sid
 
 log = logging.getLogger(__name__)
@@ -311,20 +326,18 @@ async def _cleanup_empty_rooms() -> None:
 
 
 @sio.on("open-room")
-async def open_room(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(OpenRoomPayload)
+async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     if not check(sid, "open-room"):
         return "Rate limited"
 
-    extra = data.get("extra", {})
-    session_id: str = extra.get("sessionid", "")
-    persistent_id: str = extra.get("persistentId", "") or sid
-    player_name: str = extra.get("player_name", "Player")
-    room_name: str = extra.get("room_name", "Room")
-    game_id: str = extra.get("game_id", "")
-    password: str | None = data.get("password") or extra.get("room_password") or None
-    max_players: int = int(data.get("maxPlayers", 4))
+    session_id = payload.extra.sessionid
+    persistent_id = payload.extra.persistentId or sid
+    player_name = payload.extra.player_name
+    room_name = payload.extra.room_name
+    game_id = payload.extra.game_id
+    password = payload.password or payload.extra.room_password or None
+    max_players = payload.maxPlayers
 
     if not session_id:
         return "Missing sessionid"
@@ -356,7 +369,6 @@ async def open_room(sid: str, data: dict) -> str | None:
     room_name = _sanitize_str(room_name, 64)
     if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
         game_id = "unknown"
-    max_players = max(1, min(4, max_players))
 
     room = Room(
         owner=sid,
@@ -378,20 +390,16 @@ async def open_room(sid: str, data: dict) -> str | None:
 
 
 @sio.on("join-room")
-async def join_room(sid: str, data: dict) -> tuple[str | None, dict | None]:
-    if not isinstance(data, dict):
-        return ("Invalid data", None)
+@validated(JoinRoomPayload, error_response=("Invalid data", None))
+async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dict | None]:
     if not check(sid, "join-room"):
         return ("Rate limited", None)
 
-    extra = data.get("extra", {})
-    session_id: str = extra.get("sessionid", "")
-    persistent_id: str = extra.get("persistentId", "") or sid
-    player_name: str = extra.get("player_name", "Player")
-    password: str | None = data.get("password") or None
-    spectate: bool = extra.get("spectate", False)
-
-    player_name = _sanitize_str(player_name, 32)
+    session_id = payload.extra.sessionid
+    persistent_id = payload.extra.persistentId or sid
+    player_name = _sanitize_str(payload.extra.player_name, 32)
+    password = payload.password or None
+    spectate = payload.extra.spectate
 
     if not session_id or not _ALNUM_RE.match(session_id) or not (3 <= len(session_id) <= 16):
         return ("Invalid room code", None)
@@ -448,10 +456,9 @@ async def leave_room(sid: str, data: dict | None = None) -> None:
 
 
 @sio.on("claim-slot")
-async def claim_slot(sid: str, data: dict) -> str | None:
+@validated(ClaimSlotPayload)
+async def claim_slot(sid: str, payload: ClaimSlotPayload) -> str | None:
     """Spectator claims a vacated player slot."""
-    if not isinstance(data, dict):
-        return "Invalid data"
     entry = _sid_to_room.get(sid)
     if entry is None:
         return "Not in a room"
@@ -462,13 +469,10 @@ async def claim_slot(sid: str, data: dict) -> str | None:
     if room is None:
         return "Room not found"
 
-    requested_slot = data.get("slot")
-    if requested_slot is not None:
-        if not isinstance(requested_slot, int) or requested_slot < 0 or requested_slot > 3:
-            return "Invalid slot"
-        if requested_slot in room.slots:
+    if payload.slot is not None:
+        if payload.slot in room.slots:
             return "Slot already taken"
-        slot = requested_slot
+        slot = payload.slot
     else:
         slot = room.next_slot()
     if slot is None:
@@ -488,10 +492,9 @@ async def claim_slot(sid: str, data: dict) -> str | None:
 
 
 @sio.on("set-name")
-async def set_name(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
-    name = data.get("name", "").strip()[:24]
+@validated(SetNamePayload)
+async def set_name(sid: str, payload: SetNamePayload) -> str | None:
+    name = _sanitize_str(payload.name, 24).strip()
     if not name:
         return "Empty name"
     result = _get_room(sid)
@@ -512,9 +515,8 @@ async def set_name(sid: str, data: dict) -> str | None:
 
 
 @sio.on("start-game")
-async def start_game(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(StartGamePayload)
+async def start_game(sid: str, payload: StartGamePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -522,9 +524,7 @@ async def start_game(sid: str, data: dict) -> str | None:
     if room.owner != sid:
         return "Only the host can start the game"
 
-    mode = data.get("mode", "lockstep")
-    if mode not in _VALID_MODES:
-        mode = "lockstep"
+    mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
 
     # Streaming: check all players declared ROM ownership
     # Lockstep: check all players have ROMs (or host is sharing)
@@ -541,14 +541,13 @@ async def start_game(sid: str, data: dict) -> str | None:
 
     room.status = "playing"
     room.mode = mode
-    rom_hash = data.get("romHash")
-    if rom_hash and isinstance(rom_hash, str) and len(rom_hash) == 64:
-        room.rom_hash = rom_hash
+    if payload.romHash and len(payload.romHash) == 64:
+        room.rom_hash = payload.romHash
     await sio.emit(
         "game-started",
         {
             "mode": room.mode,
-            "rollbackEnabled": data.get("rollbackEnabled", False),
+            "rollbackEnabled": payload.rollbackEnabled,
             "romHash": room.rom_hash,
         },
         room=session_id,
@@ -559,9 +558,8 @@ async def start_game(sid: str, data: dict) -> str | None:
 
 
 @sio.on("end-game")
-async def end_game(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(EndGamePayload)
+async def end_game(sid: str, payload: EndGamePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -581,10 +579,9 @@ async def end_game(sid: str, data: dict) -> str | None:
 
 
 @sio.on("set-mode")
-async def set_mode(sid: str, data: dict) -> str | None:
+@validated(SetModePayload)
+async def set_mode(sid: str, payload: SetModePayload) -> str | None:
     """Host sets the game mode pre-game so guests can update their UI."""
-    if not isinstance(data, dict):
-        return "Invalid data"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -594,9 +591,7 @@ async def set_mode(sid: str, data: dict) -> str | None:
     if room.status != "lobby":
         return "Cannot change mode during game"
 
-    mode = data.get("mode", "lockstep")
-    if mode not in _VALID_MODES:
-        mode = "lockstep"
+    mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
     room.mode = mode
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
@@ -605,9 +600,8 @@ async def set_mode(sid: str, data: dict) -> str | None:
 
 
 @sio.on("rom-sharing-toggle")
-async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(RomSharingTogglePayload)
+async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -615,25 +609,22 @@ async def rom_sharing_toggle(sid: str, data: dict) -> str | None:
     if room.owner != sid:
         return "Only the host can toggle ROM sharing"
 
-    enabled = bool(data.get("enabled", False))
-    room.rom_sharing = enabled
-    await sio.emit("rom-sharing-updated", {"romSharing": enabled}, room=session_id)
+    room.rom_sharing = payload.enabled
+    await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
     await state.save_room(session_id, room)
-    log.info("ROM sharing %s in room %s", "enabled" if enabled else "disabled", session_id)
+    log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
     return None
 
 
 @sio.on("rom-ready")
-async def rom_ready(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(RomReadyPayload)
+async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
     session_id, room = result
 
-    ready = bool(data.get("ready", True))
-    if ready:
+    if payload.ready:
         room.rom_ready.add(sid)
     else:
         room.rom_ready.discard(sid)
@@ -643,17 +634,15 @@ async def rom_ready(sid: str, data: dict) -> str | None:
 
 
 @sio.on("rom-declare")
-async def rom_declare(sid: str, data: dict) -> str | None:
+@validated(RomDeclarePayload)
+async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
     """Player declares they own a legal copy of the ROM (streaming mode)."""
-    if not isinstance(data, dict):
-        return "Invalid data"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
     session_id, room = result
 
-    declared = bool(data.get("declared", True))
-    if declared:
+    if payload.declared:
         room.rom_declared.add(sid)
     else:
         room.rom_declared.discard(sid)
@@ -663,34 +652,28 @@ async def rom_declare(sid: str, data: dict) -> str | None:
 
 
 @sio.on("input-type")
-async def input_type(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(InputTypePayload)
+async def input_type(sid: str, payload: InputTypePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
     session_id, room = result
 
-    itype = data.get("type", "keyboard")
-    if itype not in ("keyboard", "gamepad"):
-        itype = "keyboard"
+    itype = payload.type if payload.type in ("keyboard", "gamepad") else "keyboard"
     room.input_types[sid] = itype
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
 @sio.on("device-type")
-async def device_type(sid: str, data: dict) -> str | None:
-    if not isinstance(data, dict):
-        return "Invalid data"
+@validated(DeviceTypePayload)
+async def device_type(sid: str, payload: DeviceTypePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
     session_id, room = result
 
-    dtype = data.get("type", "desktop")
-    if dtype not in ("desktop", "mobile"):
-        dtype = "desktop"
+    dtype = payload.type if payload.type in ("desktop", "mobile") else "desktop"
     room.device_types[sid] = dtype
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None

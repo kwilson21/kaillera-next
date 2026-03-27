@@ -3,14 +3,20 @@ services:
     image: redis:7-alpine
     volumes:
       - redis-data:/data
-    command: redis-server --save 60 1 --loglevel warning
+    command: redis-server --save 60 1 --loglevel warning --requirepass ${REDIS_PASSWORD:-changeme}
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD:-changeme}', '--no-auth-warning', 'ping']
       interval: 10s
       timeout: 3s
       retries: 3
     deploy:
       replicas: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
       placement:
         constraints:
           - node.role == manager
@@ -19,7 +25,10 @@ services:
         delay: 5s
 
   kaillera-next:
-    image: ghcr.io/kwilson21/kaillera-next:latest
+    image: ghcr.io/kwilson21/kaillera-next:${APP_VERSION:-latest}
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       - ALLOWED_ORIGIN=${ALLOWED_ORIGIN}
       - ICE_SERVERS=${ICE_SERVERS}
@@ -31,7 +40,7 @@ services:
       - SYNC_LOG_DIR=${SYNC_LOG_DIR}
       - ADMIN_KEY=${ADMIN_KEY}
       - DEBUG_MODE=${DEBUG_MODE}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
     ports:
       - '27888:27888'
     volumes:
@@ -39,6 +48,12 @@ services:
     stop_grace_period: 30s
     deploy:
       replicas: 1
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 256M
       restart_policy:
         condition: on-failure
         delay: 5s

@@ -21,8 +21,8 @@ RUN groupadd -r appuser && useradd -r -g appuser -s /usr/sbin/nologin appuser \
 USER appuser
 
 # Default env — override in production
-# ALLOWED_ORIGIN: set to your domain (e.g. "https://yourdomain.com")
-# ADMIN_KEY: set to enable admin page auth (empty = open)
+# ALLOWED_ORIGIN: empty defaults to "*" at runtime; set "REQUIRED" to force explicit config
+# ADMIN_KEY: required — server refuses to start if unset (no open admin by default)
 # Mount /app/server/logs as a volume to persist logs across restarts
 ENV ALLOWED_ORIGIN="" \
     PORT=27888 \

@@ -181,6 +181,86 @@
     }
   }
 
+  // ── WebRTC peer helpers ─────────────────────────────────────────────
+  // Shared boilerplate for RTCPeerConnection creation, ICE candidate
+  // buffering, and offer/answer exchange. Used by both lockstep and
+  // streaming engines to avoid duplicating identical WebRTC plumbing.
+
+  // Create a base peer object with RTCPeerConnection and ICE candidate relay.
+  //   iceServers:  array of ICE server configs
+  //   remoteSid:   socket ID of the remote peer
+  //   socket:      Socket.IO client instance for emitting signals
+  //   peerGuard:   () => boolean, called before emitting candidates;
+  //                returns false if the peer has been replaced/removed
+  const createBasePeer = (iceServers, remoteSid, socket, peerGuard) => {
+    const peer = {
+      pc: new RTCPeerConnection({ iceServers }),
+      dc: null,
+      slot: null,
+      pendingCandidates: [],
+      remoteDescSet: false,
+    };
+    peer.pc.onicecandidate = (e) => {
+      if (e.candidate && (!peerGuard || peerGuard(peer))) {
+        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
+      }
+    };
+    return peer;
+  };
+
+  // Buffer or immediately add an ICE candidate depending on whether the
+  // remote description has been set yet.
+  const addBufferedCandidate = async (peer, candidate) => {
+    if (peer.remoteDescSet) {
+      try {
+        await peer.pc.addIceCandidate(candidate);
+      } catch (_) {}
+    } else {
+      if (!peer.pendingCandidates) peer.pendingCandidates = [];
+      peer.pendingCandidates.push(candidate);
+    }
+  };
+
+  // Create an offer, set local description, and emit via socket.
+  // Returns the offer for callers that need to inspect/modify it.
+  const createAndSendOffer = async (pc, socket, targetSid) => {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('webrtc-signal', { target: targetSid, offer });
+    return offer;
+  };
+
+  // Create an answer, set local description, and emit via socket.
+  const createAndSendAnswer = async (pc, socket, targetSid) => {
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('webrtc-signal', { target: targetSid, answer });
+  };
+
+  // Detach handlers from an existing RTCPeerConnection, close it, and
+  // create a fresh one with ICE candidate relay on the same peer object.
+  // Used by lockstep reconnect flows that need to replace the PC while
+  // preserving the peer's slot, input state, etc.
+  const resetPeerConnection = (peer, iceServers, remoteSid, socket, peerGuard) => {
+    if (peer.pc) {
+      peer.pc.onconnectionstatechange = null;
+      peer.pc.ondatachannel = null;
+      peer.pc.onicecandidate = null;
+      peer.pc.ontrack = null;
+      try {
+        peer.pc.close();
+      } catch (_) {}
+    }
+    peer.pc = new RTCPeerConnection({ iceServers });
+    peer.pendingCandidates = [];
+    peer.remoteDescSet = false;
+    peer.pc.onicecandidate = (e) => {
+      if (e.candidate && (!peerGuard || peerGuard(peer))) {
+        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
+      }
+    };
+  };
+
   function enableMobileTouch() {
     if (!('ontouchstart' in window)) return;
     // Netplay engines disable EJS touch and use a custom virtual gamepad.
@@ -450,6 +530,11 @@
     applyStandardCheats: applyStandardCheats,
     bootWithCheats: bootWithCheats,
     drainCandidates: drainCandidates,
+    createBasePeer: createBasePeer,
+    addBufferedCandidate: addBufferedCandidate,
+    createAndSendOffer: createAndSendOffer,
+    createAndSendAnswer: createAndSendAnswer,
+    resetPeerConnection: resetPeerConnection,
     setupKeyTracking: setupKeyTracking,
     triggerEmulatorStart: triggerEmulatorStart,
     waitForEmulator: waitForEmulator,

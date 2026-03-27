@@ -60,8 +60,8 @@ def run() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
-    allowed_origin = os.environ.get("ALLOWED_ORIGIN", "*")
-    if not allowed_origin:
+    allowed_origin = os.environ.get("ALLOWED_ORIGIN", "").strip() or "*"
+    if allowed_origin == "REQUIRED":
         log.error(
             "ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development."
         )
@@ -119,6 +119,10 @@ def run() -> None:
     else:
         log.info("Listening on :%d", port)
 
+    # Trust proxy headers only from specified IPs (comma-separated).
+    # Default "*" trusts all — set TRUSTED_PROXY_IPS in production.
+    trusted_proxies = os.environ.get("TRUSTED_PROXY_IPS", "*").strip()
+
     uvicorn.run(
         socket_app,
         host="0.0.0.0",
@@ -127,6 +131,7 @@ def run() -> None:
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real
         # client IPs and the app sees the correct scheme (https).
         proxy_headers=True,
+        forwarded_allow_ips=trusted_proxies,
         # Disable websocket-level keepalive pings — Socket.IO's Engine.IO
         # layer handles its own ping/pong. The websockets library's legacy
         # protocol has a race condition in _drain_helper that triggers

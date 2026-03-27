@@ -188,17 +188,9 @@
   // ── WebRTC ─────────────────────────────────────────────────────────────
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
-    const peer = {
-      pc: new RTCPeerConnection({ iceServers: ICE_SERVERS }),
-      dc: null,
-      slot: remoteSlot,
-    };
-
-    peer.pc.onicecandidate = (e) => {
-      if (e.candidate && _peers[remoteSid] === peer) {
-        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
-      }
-    };
+    const peerGuard = (p) => _peers[remoteSid] === p;
+    const peer = KNShared.createBasePeer(ICE_SERVERS, remoteSid, socket, peerGuard);
+    peer.slot = remoteSlot;
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
@@ -343,30 +335,19 @@
         const hasVideo = data.offer.sdp?.includes('m=video') ?? false;
         _syncLog(`received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo})`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-        await drainCandidates(peer);
-        const answer = await peer.pc.createAnswer();
-        await peer.pc.setLocalDescription(answer);
-        socket.emit('webrtc-signal', { target: senderSid, answer });
+        await KNShared.drainCandidates(peer);
+        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
       } else if (data.answer) {
         _syncLog(`received answer from ${senderSid}`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-        await drainCandidates(peer);
+        await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
-        if (peer.remoteDescSet) {
-          try {
-            await peer.pc.addIceCandidate(data.candidate);
-          } catch (_) {}
-        } else {
-          if (!peer.pendingCandidates) peer.pendingCandidates = [];
-          peer.pendingCandidates.push(data.candidate);
-        }
+        await KNShared.addBufferedCandidate(peer, data.candidate);
       }
     } catch (err) {
       _syncLog(`WebRTC signal error: ${err.message || err}`);
     }
   };
-
-  const drainCandidates = (peer) => KNShared.drainCandidates(peer);
 
   // ── Data channel ───────────────────────────────────────────────────────
 

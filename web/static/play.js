@@ -1814,69 +1814,15 @@
   const _ROM_EXTS = ['.z64', '.n64', '.v64', '.ndd'];
 
   const extractRomFromZip = async (arrayBuffer) => {
-    // Minimal ZIP parser using the central directory (reliable sizes).
-    // Supports STORED (0) and DEFLATE (8) compression methods.
-    const view = new DataView(arrayBuffer);
-    const bytes = new Uint8Array(arrayBuffer);
-    const len = bytes.length;
+    const data = new Uint8Array(arrayBuffer);
+    const entries = fflate.unzipSync(data);
 
-    // Find End of Central Directory record (last 22+ bytes of file)
-    let eocdOffset = -1;
-    for (let i = len - 22; i >= Math.max(0, len - 65557); i--) {
-      if (view.getUint32(i, true) === 0x06054b50) {
-        eocdOffset = i;
-        break;
-      }
-    }
-    if (eocdOffset === -1) return null;
-
-    const cdOffset = view.getUint32(eocdOffset + 16, true);
-    const cdEntries = view.getUint16(eocdOffset + 10, true);
-
-    // Walk central directory entries
-    let pos = cdOffset;
-    for (let e = 0; e < cdEntries && pos + 46 <= len; e++) {
-      if (view.getUint32(pos, true) !== 0x02014b50) break;
-
-      const method = view.getUint16(pos + 10, true);
-      const compSize = view.getUint32(pos + 20, true);
-      const nameLen = view.getUint16(pos + 28, true);
-      const extraLen = view.getUint16(pos + 30, true);
-      const commentLen = view.getUint16(pos + 32, true);
-      const localHeaderOffset = view.getUint32(pos + 42, true);
-
-      const nameBytes = bytes.subarray(pos + 46, pos + 46 + nameLen);
-      const fileName = new TextDecoder().decode(nameBytes);
-
+    for (const [fileName, fileData] of Object.entries(entries)) {
       const lower = fileName.toLowerCase();
-      let isRom = false;
-      for (const ext of _ROM_EXTS) {
-        if (lower.endsWith(ext)) {
-          isRom = true;
-          break;
-        }
-      }
-
-      if (isRom && compSize > 0) {
-        // Read local file header to find data start
-        const lNameLen = view.getUint16(localHeaderOffset + 26, true);
-        const lExtraLen = view.getUint16(localHeaderOffset + 28, true);
-        const dataStart = localHeaderOffset + 30 + lNameLen + lExtraLen;
-        const compData = bytes.subarray(dataStart, dataStart + compSize);
+      if (_ROM_EXTS.some((ext) => lower.endsWith(ext)) && fileData.length > 0) {
         const baseName = fileName.split('/').pop();
-
-        if (method === 0) {
-          return { name: baseName, data: compData.slice() };
-        } else if (method === 8) {
-          const blob = new Blob([compData]);
-          const ds = new DecompressionStream('deflate-raw');
-          const decompressed = blob.stream().pipeThrough(ds);
-          const buf = await new Response(decompressed).arrayBuffer();
-          return { name: baseName, data: new Uint8Array(buf) };
-        }
+        return { name: baseName, data: fileData };
       }
-
-      pos += 46 + nameLen + extraLen + commentLen;
     }
 
     return null;

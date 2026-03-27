@@ -1001,22 +1001,12 @@
   // -- WebRTC multi-peer mesh ------------------------------------------------
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
-    const peer = {
-      pc: new RTCPeerConnection({ iceServers: ICE_SERVERS }),
-      dc: null,
-      slot: remoteSlot,
-      pendingCandidates: [],
-      remoteDescSet: false,
-      ready: false,
-      emuReady: false,
-      rttSamples: [],
-    };
-
-    peer.pc.onicecandidate = (e) => {
-      if (e.candidate && _peers[remoteSid] === peer) {
-        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
-      }
-    };
+    const peerGuard = (p) => _peers[remoteSid] === p;
+    const peer = KNShared.createBasePeer(ICE_SERVERS, remoteSid, socket, peerGuard);
+    peer.slot = remoteSlot;
+    peer.ready = false;
+    peer.emuReady = false;
+    peer.rttSamples = [];
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
@@ -1107,9 +1097,7 @@
   async function sendOffer(remoteSid) {
     const peer = _peers[remoteSid];
     if (!peer) return;
-    const offer = await peer.pc.createOffer();
-    await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer });
+    await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
   }
 
   async function onWebRTCSignal(data) {
@@ -1133,28 +1121,10 @@
           const existingPeer = _peers[senderSid];
           _syncLog(`received reconnect offer from ${senderSid}`);
 
-          // Detach old PC
-          if (existingPeer.pc) {
-            existingPeer.pc.onconnectionstatechange = null;
-            existingPeer.pc.ondatachannel = null;
-            existingPeer.pc.onicecandidate = null;
-            existingPeer.pc.ontrack = null;
-            try {
-              existingPeer.pc.close();
-            } catch (_) {}
-          }
-
-          // Create new PC on existing peer object (preserve slot, input state)
-          existingPeer.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-          existingPeer.pendingCandidates = [];
-          existingPeer.remoteDescSet = false;
+          const peerGuard = (p) => _peers[senderSid] === p;
+          KNShared.resetPeerConnection(existingPeer, ICE_SERVERS, senderSid, socket, peerGuard);
           existingPeer.ready = false;
 
-          existingPeer.pc.onicecandidate = (e) => {
-            if (e.candidate && _peers[senderSid] === existingPeer) {
-              socket.emit('webrtc-signal', { target: senderSid, candidate: e.candidate });
-            }
-          };
           existingPeer.pc.onconnectionstatechange = () => {
             const s = existingPeer.pc.connectionState;
             _syncLog(`reconnect peer ${senderSid} connection-state: ${s}`);
@@ -1172,29 +1142,19 @@
         }
 
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-        await drainCandidates(peer);
-        const answer = await peer.pc.createAnswer();
-        await peer.pc.setLocalDescription(answer);
-        socket.emit('webrtc-signal', { target: senderSid, answer });
+        await KNShared.drainCandidates(peer);
+        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
       } else if (data.answer) {
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-        await drainCandidates(peer);
+        await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
-        if (peer.remoteDescSet) {
-          try {
-            await peer.pc.addIceCandidate(data.candidate);
-          } catch (_) {}
-        } else {
-          peer.pendingCandidates.push(data.candidate);
-        }
+        await KNShared.addBufferedCandidate(peer, data.candidate);
       }
     } catch (err) {
       _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
   }
-
-  const drainCandidates = (peer) => KNShared.drainCandidates(peer);
 
   // -- Data channel ----------------------------------------------------------
 
@@ -1564,28 +1524,9 @@
 
     _syncLog(`initiating reconnect to ${remoteSid}`);
 
-    // Detach old PC handlers to prevent stale events
-    if (peer.pc) {
-      peer.pc.onconnectionstatechange = null;
-      peer.pc.ondatachannel = null;
-      peer.pc.onicecandidate = null;
-      peer.pc.ontrack = null;
-      try {
-        peer.pc.close();
-      } catch (_) {}
-    }
-
-    // Create new PeerConnection
-    peer.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    peer.pendingCandidates = [];
-    peer.remoteDescSet = false;
+    const peerGuard = (p) => _peers[remoteSid] === p;
+    KNShared.resetPeerConnection(peer, ICE_SERVERS, remoteSid, socket, peerGuard);
     peer.ready = false;
-
-    peer.pc.onicecandidate = (e) => {
-      if (e.candidate && _peers[remoteSid] === peer) {
-        socket.emit('webrtc-signal', { target: remoteSid, candidate: e.candidate });
-      }
-    };
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
@@ -1605,7 +1546,7 @@
       }
     };
 
-    // Create new DC and send offer
+    // Create new DC and send offer with reconnect flag
     peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
     setupDataChannel(remoteSid, peer.dc);
 
@@ -2316,9 +2257,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     try {
-      const offer = await peer.pc.createOffer();
-      await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', { target: remoteSid, offer });
+      await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
     }

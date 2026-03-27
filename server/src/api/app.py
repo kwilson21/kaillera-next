@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -239,8 +240,23 @@ def create_app(lifespan=None) -> FastAPI:
             )
         return result
 
+    _ROM_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+    _MAX_CACHE_ENTRIES = 50
+
+    def _validate_rom_hash(rom_hash: str) -> None:
+        """Ensure rom_hash is a valid 64-char hex string (SHA-256)."""
+        if not _ROM_HASH_RE.match(rom_hash):
+            raise HTTPException(status_code=400, detail="Invalid ROM hash format")
+
+    def _rom_hash_in_active_room(rom_hash: str) -> bool:
+        """Check if any active room references this ROM hash."""
+        return any(r.rom_hash == rom_hash for r in rooms.values())
+
     @app.get("/api/cached-state/{rom_hash}")
-    async def get_cached_state(rom_hash: str) -> Response:
+    async def get_cached_state(rom_hash: str, request: Request) -> Response:
+        if not check_ip(_client_ip(request), "cache-state"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        _validate_rom_hash(rom_hash)
         if rom_hash not in _state_cache:
             raise HTTPException(status_code=404, detail="No cached state")
         return Response(
@@ -248,12 +264,13 @@ def create_app(lifespan=None) -> FastAPI:
             media_type="application/octet-stream",
         )
 
-    _MAX_CACHE_ENTRIES = 50
-
     @app.post("/api/cache-state/{rom_hash}")
     async def cache_state(rom_hash: str, request: Request) -> dict:
         if not check_ip(_client_ip(request), "cache-state"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        _validate_rom_hash(rom_hash)
+        if not _rom_hash_in_active_room(rom_hash):
+            raise HTTPException(status_code=403, detail="ROM hash not associated with any active room")
         body = await request.body()
         if len(body) > _STATE_MAX_SIZE:
             raise HTTPException(status_code=413, detail="State too large")
@@ -292,11 +309,11 @@ def create_app(lifespan=None) -> FastAPI:
     # ── Admin API ─────────────────────────────────────────────────────────
 
     def _admin_auth(request: Request) -> None:
-        """Check admin key if ADMIN_KEY is set. Empty/unset = no auth required."""
+        """Check admin key. ADMIN_KEY must be set — blocks all access if unset."""
         admin_key = os.environ.get("ADMIN_KEY")
         if not admin_key:
-            return
-        key = request.headers.get("x-admin-key") or request.query_params.get("key")
+            raise HTTPException(status_code=403, detail="Admin access disabled (ADMIN_KEY not configured)")
+        key = request.headers.get("x-admin-key")
         if not key or not hmac.compare_digest(admin_key, key):
             raise HTTPException(status_code=401, detail="Invalid admin key")
 
