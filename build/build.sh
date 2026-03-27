@@ -98,8 +98,9 @@ cd "${SRC_DIR}/mupen64plus-libretro-nx"
 # Clean previous build artifacts
 emmake make -f Makefile platform=emscripten clean 2>/dev/null || true
 
-# Build
-emmake make -j$(nproc) -f Makefile platform=emscripten
+# Build with EMULATORJS_THREADS=1 so .bc is compiled with -pthread,
+# required for PROXY_TO_PTHREAD linking (SharedArrayBuffer/atomics).
+emmake make -j$(nproc) -f Makefile platform=emscripten EMULATORJS_THREADS=1
 
 BC_FILE="${SRC_DIR}/mupen64plus-libretro-nx/mupen64plus_next_libretro_emscripten.bc"
 if [ ! -f "${BC_FILE}" ]; then
