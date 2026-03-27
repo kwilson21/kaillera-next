@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from dataclasses import asdict
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +21,21 @@ _KEY_PREFIX = "kn:room:"
 _TTL_SECONDS = 12 * 60 * 60  # 12 hours
 
 _redis = None  # redis.asyncio.Redis instance or None
+
+
+def get_redis_url() -> str:
+    """Build Redis URL from env vars, URL-encoding the password to handle special chars."""
+    url = os.environ.get("REDIS_URL", "")
+    if url:
+        return url
+    password = os.environ.get("REDIS_PASSWORD", "")
+    if not password:
+        return ""
+    host = os.environ.get("REDIS_HOST", "redis")
+    port = os.environ.get("REDIS_PORT", "6379")
+    db = os.environ.get("REDIS_DB", "0")
+    encoded_pw = quote(password, safe="")
+    return f"redis://:{encoded_pw}@{host}:{port}/{db}"
 
 
 def _serialize_room(room) -> str:
@@ -60,7 +76,7 @@ def _deserialize_room(d: dict):
 async def init() -> None:
     """Connect to Redis if REDIS_URL is configured."""
     global _redis
-    url = os.environ.get("REDIS_URL", "")
+    url = get_redis_url()
     if not url:
         log.warning("REDIS_URL not configured — rooms will not survive restarts")
         return

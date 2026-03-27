@@ -88,10 +88,10 @@ def set_shutting_down() -> None:
 
 # ── Socket.IO server instance ─────────────────────────────────────────────────
 
-# Use Redis pub/sub adapter when REDIS_URL is set. This enables cross-instance
+# Use Redis pub/sub adapter when Redis is configured. This enables cross-instance
 # event routing during blue-green deploys (both old and new containers share
 # the same pub/sub channel) and is required for multi-replica scaling.
-_redis_url = os.environ.get("REDIS_URL")
+_redis_url = state.get_redis_url()
 _client_manager = socketio.AsyncRedisManager(_redis_url) if _redis_url else None
 
 sio = socketio.AsyncServer(

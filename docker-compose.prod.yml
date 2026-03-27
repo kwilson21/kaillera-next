@@ -39,7 +39,7 @@ services:
       - SYNC_LOG_DIR=${SYNC_LOG_DIR}
       - ADMIN_KEY=${ADMIN_KEY}
       - DEBUG_MODE=${DEBUG_MODE}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme}
     ports:
       - '27888:27888'
     volumes:
