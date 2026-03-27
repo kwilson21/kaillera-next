@@ -27,8 +27,7 @@ services:
   kaillera-next:
     image: ghcr.io/kwilson21/kaillera-next:${APP_VERSION:-latest}
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
     environment:
       - ALLOWED_ORIGIN=${ALLOWED_ORIGIN}
       - ICE_SERVERS=${ICE_SERVERS}
