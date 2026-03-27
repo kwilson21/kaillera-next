@@ -87,22 +87,21 @@ button:hover {
   margin-bottom: 0;
 }
 
-/* Ko-fi support link */
-.kofi-link {
+/* Footer links */
+.footer-link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   color: #777;
   text-decoration: none;
   font-size: 12px;
-  margin-top: 4px;
   transition: color 0.2s;
 }
-.kofi-link:hover {
-  color: #ff5e5b;
+.footer-link:hover {
+  color: #aaa;
 }
-.kofi-icon {
-  width: 16px;
-  height: 16px;
+.footer-icon {
+  width: 14px;
+  height: 14px;
   vertical-align: middle;
 }
