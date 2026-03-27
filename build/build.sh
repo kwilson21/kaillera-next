@@ -154,7 +154,7 @@ echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 echo "==> Stage 4b: Running wasm-opt --denan + fix-denan.py"
 WASM_OPT="/opt/emsdk/upstream/bin/wasm-opt"
 if [ -f "${WASM_OPT}" ]; then
-    "${WASM_OPT}" --denan "${WASM_FILE}" -o "${WASM_FILE}"
+    "${WASM_OPT}" --enable-threads --enable-bulk-memory --enable-mutable-globals --enable-sign-ext --denan "${WASM_FILE}" -o "${WASM_FILE}"
     echo "    wasm-opt --denan applied"
 else
     echo "    WARNING: wasm-opt not found, skipping --denan pass"
