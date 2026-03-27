@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import subprocess as _sp
 import time
 from pathlib import Path
 
@@ -172,6 +173,84 @@ class SecurityHeadersMiddleware:
         return "no-store"
 
 
+# ── Cache busting middleware ──────────────────────────────────────────────────
+
+
+def _git_version() -> str:
+    """Get short git commit hash for cache busting static assets."""
+    # Explicit env var (set in Docker builds or CI)
+    v = os.environ.get("GIT_VERSION", "").strip()
+    if v:
+        return v
+    try:
+        result = _sp.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=os.path.dirname(__file__),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
+class CacheBustMiddleware:
+    """Appends ?v=<git-hash> to /static/ asset references in HTML responses."""
+
+    _STATIC_REF = re.compile(rb'((?:src|href)=["\'])(/static/[^"\'?\s]+)(["\'])')
+
+    def __init__(self, app, version: str) -> None:  # noqa: ANN001
+        self.app = app
+        self._version = version.encode()
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "/")
+        if path.startswith(("/static/", "/api/", "/socket.io/", "/admin/api/")):
+            await self.app(scope, receive, send)
+            return
+
+        start_message = None
+        body_chunks: list[bytes] = []
+        is_html = False
+
+        async def capture_send(message: dict) -> None:
+            nonlocal start_message, is_html
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers", []))
+                is_html = b"text/html" in headers.get(b"content-type", b"")
+                if is_html:
+                    start_message = message
+                else:
+                    await send(message)
+            elif message["type"] == "http.response.body":
+                if not is_html:
+                    await send(message)
+                else:
+                    body_chunks.append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        body = b"".join(body_chunks)
+                        body = self._STATIC_REF.sub(
+                            lambda m: m.group(1) + m.group(2) + b"?v=" + self._version + m.group(3),
+                            body,
+                        )
+                        new_headers = [
+                            (k, str(len(body)).encode()) if k == b"content-length" else (k, v)
+                            for k, v in start_message.get("headers", [])
+                        ]
+                        start_message["headers"] = new_headers
+                        await send(start_message)
+                        await send({"type": "http.response.body", "body": body})
+
+        await self.app(scope, receive, capture_send)
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
@@ -185,7 +264,10 @@ def create_app(lifespan=None) -> FastAPI:
         lifespan=lifespan,
     )
     production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
+    version = _git_version()
+    app.add_middleware(CacheBustMiddleware, version=version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
+    log.info("Cache bust version: %s", version)
 
     @app.get("/health")
     def health() -> dict:
