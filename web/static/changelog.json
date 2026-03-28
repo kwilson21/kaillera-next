@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.17.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "finalize OG cards with Playwright HTML screenshots"
+      }
+    ]
+  },
+  {
     "version": "0.16.0",
     "date": "2026-03-28",
     "changes": [
@@ -278,16 +288,6 @@
       {
         "type": "feat",
         "message": "configurable DELAY_FRAMES input buffer"
-      }
-    ]
-  },
-  {
-    "version": "0.2.0",
-    "date": "2026-03-12",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "Emscripten pauseMainLoop/resumeMainLoop for frame stepping"
       }
     ]
   }
