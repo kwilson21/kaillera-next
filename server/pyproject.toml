@@ -9,7 +9,7 @@ dependencies = [
     "python-socketio>=5.11.0",
     "python-dotenv>=1.0.0",
     "redis[hiredis]>=5.0.0",
-    "Pillow>=10.0.0",
+    "playwright>=1.40.0",
 ]
 
 [project.optional-dependencies]
@@ -17,6 +17,7 @@ dev = [
     "pytest>=8.0",
     "requests>=2.31",
     "pytest-playwright>=0.5",
+    "Pillow>=10.0.0",
     "ruff>=0.8.0",
 ]
 

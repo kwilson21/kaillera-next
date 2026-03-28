@@ -10,7 +10,7 @@ from pathlib import Path
 # Ensure server src is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
 
-from PIL import Image
+from PIL import Image  # still used for PNG validation in tests
 
 
 def test_generate_og_image_with_game():

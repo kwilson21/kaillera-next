@@ -1,16 +1,16 @@
 """Open Graph image generation and HTML meta tag injection.
 
-Generates 1200x630 PNG preview cards for shared links using Pillow.
+Generates 1200x630 PNG preview cards by screenshotting HTML templates via Playwright.
 """
 
 from __future__ import annotations
 
-import io
+import logging
 import os
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+log = logging.getLogger(__name__)
 
 # ── Game registry ─────────────────────────────────────────────────────────────
 # Community contributors: add an image file to web/static/og/ and one entry here.
@@ -23,129 +23,257 @@ GAME_INFO: dict[str, dict[str, str]] = {
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
-_FONT_PATH = _OG_DIR / "Inter-Bold.ttf"
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Playwright browser singleton ──────────────────────────────────────────────
 
-WIDTH, HEIGHT = 1200, 630
-_LEFT_PAD = 72
-
-# Colors
-_WHITE = (255, 255, 255)
-_LIGHT_GRAY = (204, 204, 204)
-_GRAY = (153, 153, 153)
-_DARK_BG = (26, 26, 46)  # #1a1a2e
-_MID_BG = (22, 33, 62)  # #16213e
-_DEEP_BG = (15, 52, 96)  # #0f3460
-_BLUE_ACCENT = (102, 170, 255)  # #6af
-_ORANGE_ACCENT = (255, 170, 102)  # #fa6
-
-# Badge backgrounds (color with alpha simulated on dark bg)
-_BLUE_BADGE_BG = (26 + int(102 * 0.25), 26 + int(170 * 0.25), 46 + int(255 * 0.25))
-_ORANGE_BADGE_BG = (26 + int(255 * 0.25), 26 + int(170 * 0.25), 46 + int(102 * 0.25))
+_browser = None
+_playwright = None
 
 
-def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load Inter Bold at the given size, falling back to default."""
-    try:
-        return ImageFont.truetype(str(_FONT_PATH), size)
-    except (OSError, IOError):
-        return ImageFont.load_default()
+def _get_browser():
+    """Lazy-init a headless Chromium browser."""
+    global _browser, _playwright
+    if _browser is None:
+        from playwright.sync_api import sync_playwright
+
+        _playwright = sync_playwright().start()
+        _browser = _playwright.chromium.launch(headless=True)
+        log.info("OG image renderer: Playwright browser started")
+    return _browser
 
 
-def _draw_dark_gradient(img: Image.Image) -> None:
-    """Draw the dark gradient background onto img."""
-    draw = ImageDraw.Draw(img)
-    for x in range(WIDTH):
-        t = x / WIDTH
-        if t < 0.5:
-            s = t / 0.5
-            r = int(_DARK_BG[0] + (_MID_BG[0] - _DARK_BG[0]) * s)
-            g = int(_DARK_BG[1] + (_MID_BG[1] - _DARK_BG[1]) * s)
-            b = int(_DARK_BG[2] + (_DEEP_BG[2] - _DARK_BG[2]) * s)
-        else:
-            s = (t - 0.5) / 0.5
-            r = int(_MID_BG[0] + (_DEEP_BG[0] - _MID_BG[0]) * s)
-            g = int(_MID_BG[1] + (_DEEP_BG[1] - _MID_BG[1]) * s)
-            b = int(_MID_BG[2] + (_DEEP_BG[2] - _MID_BG[2]) * s)
-        draw.line([(x, 0), (x, HEIGHT)], fill=(r, g, b))
+def _html_escape(s: str) -> str:
+    """Escape HTML special characters."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def _draw_gradient_overlay(img: Image.Image) -> Image.Image:
-    """Draw semi-transparent dark gradient overlay for text legibility over game images."""
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    for x in range(WIDTH):
-        t = x / WIDTH
-        alpha = int(217 - 140 * t)
-        draw.line([(x, 0), (x, HEIGHT)], fill=(10, 10, 30, alpha))
-    return Image.alpha_composite(img, overlay)
+def _build_card_html(
+    room_name: str | None,
+    game_id: str | None,
+    spectate: bool,
+    player_names: list[str] | None = None,
+) -> str:
+    """Build a self-contained HTML page for the OG card."""
+    game_info = GAME_INFO.get(game_id) if game_id else None
+    has_game_bg = game_info is not None and (_OG_DIR / game_info["image"]).exists()
+    is_homepage = room_name is None
 
+    # Background image as base64 data URI for self-contained HTML
+    bg_css = ""
+    if has_game_bg:
+        import base64
 
-def _draw_text_with_shadow(
-    draw: ImageDraw.ImageDraw,
-    pos: tuple[int, int],
-    text: str,
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    fill: tuple[int, int, int],
-    shadow: bool = False,
-) -> None:
-    """Draw text, optionally with a heavy drop shadow."""
-    x, y = pos
-    if shadow:
-        for dx, dy in [(0, 4), (0, 0)]:
-            draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
-    draw.text(pos, text, font=font, fill=fill)
+        bg_path = _OG_DIR / game_info["image"]
+        b64 = base64.b64encode(bg_path.read_bytes()).decode()
+        ext = bg_path.suffix.lstrip(".")
+        bg_css = f'background-image: url("data:image/{ext};base64,{b64}"); background-size: cover; background-position: center;'
 
+    # Overlay class
+    overlay_class = "overlay-game" if has_game_bg else "overlay-generic"
+    text_shadow_class = "text-shadowed" if has_game_bg else ""
 
-def _draw_kn_watermark(img: Image.Image, large: bool = False) -> Image.Image:
-    """Draw the kn watermark in the bottom-right."""
-    watermark = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(watermark)
-    if large:
-        font = _load_font(220)
-        opacity = int(255 * 0.06)
-        x, y = WIDTH - 30, HEIGHT - 20
+    # kn watermark
+    if has_game_bg:
+        kn_html = '<div class="kn-bg">kn</div>'
     else:
-        font = _load_font(160)
-        opacity = int(255 * 0.30)
-        x, y = WIDTH - 20, HEIGHT - 10
-    bbox = draw.textbbox((0, 0), "kn", font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    draw.text((x - tw, y - th), "kn", font=font, fill=(*_BLUE_ACCENT, opacity))
-    return Image.alpha_composite(img, watermark)
+        kn_html = '<div class="kn-bg-generic">kn</div>'
 
+    # Badge
+    badge_html = ""
+    if not is_homepage:
+        if spectate:
+            badge_html = '<div class="badge badge-watch">WATCH GAME</div>'
+        else:
+            badge_html = '<div class="badge badge-play">JOIN GAME</div>'
 
-def _draw_badge(
-    draw: ImageDraw.ImageDraw,
-    y: int,
-    text: str,
-    color: tuple[int, int, int],
-    bg: tuple[int, int, int],
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-) -> int:
-    """Draw a colored badge pill. Returns the height consumed."""
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    pad_x, pad_y = 20, 10
-    draw.rounded_rectangle(
-        [_LEFT_PAD, y, _LEFT_PAD + tw + pad_x * 2, y + th + pad_y * 2],
-        radius=8,
-        fill=bg,
-    )
-    draw.text((_LEFT_PAD + pad_x, y + pad_y), text, font=font, fill=color)
-    return th + pad_y * 2 + 16
+    # Headline
+    if is_homepage:
+        headline = "kaillera-next"
+    elif spectate:
+        headline = "Come watch!"
+    else:
+        headline = "Ready to fight?"
 
-
-def _format_players(player_names: list[str], host_name: str) -> str:
-    """Format player names for spectate card subtitle."""
-    if len(player_names) >= 2:
+    # Subtitle
+    if is_homepage:
+        subtitle = "Play retro games online with friends"
+        subtitle_class = "subtitle-default"
+    elif spectate and player_names and len(player_names) >= 2:
         if len(player_names) == 2:
-            return f"{player_names[0]} vs {player_names[1]}"
-        return f"{player_names[0]}, {player_names[1]} & {len(player_names) - 2} more"
-    return f"{host_name} is playing"
+            subtitle = f"{_html_escape(player_names[0])} vs {_html_escape(player_names[1])}"
+        else:
+            subtitle = f"{_html_escape(player_names[0])}, {_html_escape(player_names[1])} & {len(player_names) - 2} more"
+        subtitle_class = "subtitle-blue"
+    elif spectate:
+        subtitle = f"{_html_escape(room_name)} is playing"
+        subtitle_class = "subtitle-blue"
+    else:
+        subtitle = f"{_html_escape(room_name)} is waiting"
+        subtitle_class = "subtitle-blue"
+
+    # Game name
+    if is_homepage:
+        game_text = "no install needed &middot; up to 4 players"
+    elif game_info:
+        game_text = _html_escape(game_info["name"])
+    else:
+        game_text = _html_escape(game_id or "Unknown Game")
+
+    # Tagline
+    tagline = "kaillera-next"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  @font-face {{
+    font-family: 'Inter';
+    src: url('file://{_OG_DIR / "Inter-Bold.ttf"}') format('truetype');
+    font-weight: 700;
+  }}
+  body {{
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: #1a1a2e;
+  }}
+  .card {{
+    width: 1200px;
+    height: 630px;
+    position: relative;
+    overflow: hidden;
+    {bg_css}
+  }}
+  .bg-blur {{
+    position: absolute;
+    top: -4px; left: -4px; right: -4px; bottom: -4px;
+    {bg_css}
+    filter: blur(1px);
+    transform: scale(1.03);
+  }}
+  .overlay {{
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 60px 80px;
+    gap: 10px;
+  }}
+  .overlay-game {{
+    background: linear-gradient(135deg, rgba(10,10,30,0.88) 0%, rgba(10,10,30,0.55) 50%, rgba(10,10,30,0.3) 100%);
+  }}
+  .overlay-generic {{
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  }}
+  .kn-bg {{
+    position: absolute;
+    right: 20px;
+    bottom: -10px;
+    font-weight: 900;
+    font-size: 260px;
+    color: rgba(102, 170, 255, 0.30);
+    letter-spacing: -10px;
+    z-index: 2;
+  }}
+  .kn-bg-generic {{
+    position: absolute;
+    right: 20px;
+    bottom: -10px;
+    font-weight: 900;
+    font-size: 300px;
+    color: rgba(102, 170, 255, 0.06);
+    letter-spacing: -12px;
+  }}
+  .text-shadowed .headline {{
+    text-shadow: 0 3px 16px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,1);
+  }}
+  .text-shadowed .subtitle-blue,
+  .text-shadowed .subtitle-default {{
+    text-shadow: 0 2px 12px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,1);
+  }}
+  .text-shadowed .game-name {{
+    text-shadow: 0 2px 10px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,1);
+  }}
+  .text-shadowed .tagline {{
+    text-shadow: 0 1px 8px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,1);
+  }}
+  .badge {{
+    display: inline-block;
+    font-weight: 700;
+    font-size: 32px;
+    letter-spacing: 1.5px;
+    padding: 10px 20px;
+    border-radius: 6px;
+    z-index: 3;
+    position: relative;
+    width: fit-content;
+    margin-bottom: 4px;
+  }}
+  .badge-play {{
+    background: rgba(102, 170, 255, 0.25);
+    color: #6af;
+  }}
+  .badge-watch {{
+    background: rgba(255, 170, 102, 0.25);
+    color: #fa6;
+  }}
+  .headline {{
+    font-weight: 800;
+    font-size: 96px;
+    color: #fff;
+    z-index: 3;
+    position: relative;
+    line-height: 1.15;
+  }}
+  .subtitle-blue {{
+    font-weight: 600;
+    font-size: 54px;
+    color: #6af;
+    z-index: 3;
+    position: relative;
+  }}
+  .subtitle-default {{
+    font-weight: 600;
+    font-size: 54px;
+    color: #ccc;
+    z-index: 3;
+    position: relative;
+  }}
+  .game-name {{
+    font-weight: 500;
+    font-size: 42px;
+    color: #ccc;
+    z-index: 3;
+    position: relative;
+  }}
+  .tagline {{
+    font-weight: 400;
+    font-size: 34px;
+    color: #999;
+    margin-top: 8px;
+    z-index: 3;
+    position: relative;
+  }}
+</style>
+</head>
+<body>
+<div class="card">
+  {"<div class='bg-blur'></div>" if has_game_bg else ""}
+  <div class="overlay {overlay_class} {text_shadow_class}">
+    {kn_html}
+    {badge_html}
+    <div class="headline">{headline}</div>
+    <div class="{subtitle_class}">{subtitle}</div>
+    <div class="game-name">{game_text}</div>
+    <div class="tagline">{tagline}</div>
+  </div>
+</div>
+</body>
+</html>"""
 
 
 def generate_og_image(
@@ -154,7 +282,7 @@ def generate_og_image(
     spectate: bool,
     player_names: list[str] | None = None,
 ) -> bytes:
-    """Generate a 1200x630 OG card image.
+    """Generate a 1200x630 OG card image by screenshotting HTML.
 
     Args:
         room_name: Room owner's display name (None for homepage).
@@ -165,101 +293,14 @@ def generate_og_image(
     Returns:
         PNG image as bytes.
     """
-    game_info = GAME_INFO.get(game_id) if game_id else None
-    has_game_bg = False
-
-    img = Image.new("RGBA", (WIDTH, HEIGHT), _DARK_BG)
-
-    # Try to load game background
-    if game_info:
-        bg_path = _OG_DIR / game_info["image"]
-        if bg_path.exists():
-            try:
-                bg = Image.open(bg_path).convert("RGBA")
-                bg = bg.resize((WIDTH, HEIGHT), Image.LANCZOS)
-                bg = bg.filter(ImageFilter.GaussianBlur(radius=1))
-                img.paste(bg, (0, 0))
-                has_game_bg = True
-            except Exception:
-                pass
-
-    if has_game_bg:
-        img = _draw_gradient_overlay(img)
-    else:
-        _draw_dark_gradient(img)
-
-    # Watermark
-    img = _draw_kn_watermark(img, large=not has_game_bg)
-
-    draw = ImageDraw.Draw(img, "RGBA")
-
-    # Fonts — large for OG card readability (cards render ~300px wide on mobile)
-    font_badge = _load_font(32)
-    font_headline = _load_font(72)
-    font_subtitle = _load_font(44)
-    font_game = _load_font(36)
-    font_tagline = _load_font(28)
-
-    shadow = has_game_bg
-    is_homepage = room_name is None
-
-    # Calculate total block height to vertically center
-    # Badge ~55, headline ~85, subtitle ~60, game ~50, tagline ~40, gaps ~40
-    block_h = 330 if not is_homepage else 275
-    y = (HEIGHT - block_h) // 2
-
-    # Badge
-    if not is_homepage:
-        badge_text = "WATCH GAME" if spectate else "JOIN GAME"
-        badge_color = _ORANGE_ACCENT if spectate else _BLUE_ACCENT
-        badge_bg = _ORANGE_BADGE_BG if spectate else _BLUE_BADGE_BG
-        y += _draw_badge(draw, y, badge_text, badge_color, badge_bg, font_badge)
-
-    # Headline
-    if is_homepage:
-        headline = "kaillera-next"
-    elif spectate:
-        headline = "Come watch!"
-    else:
-        headline = "Ready to fight?"
-    _draw_text_with_shadow(draw, (_LEFT_PAD, y), headline, font_headline, _WHITE, shadow=shadow)
-    y += 88
-
-    # Subtitle (host info / player matchup)
-    if is_homepage:
-        subtitle = "Play retro games online with friends"
-        subtitle_color = _LIGHT_GRAY
-    elif spectate and player_names:
-        subtitle = _format_players(player_names, room_name or "")
-        subtitle_color = _BLUE_ACCENT
-    elif spectate:
-        subtitle = f"{room_name} is playing"
-        subtitle_color = _BLUE_ACCENT
-    else:
-        subtitle = f"{room_name} is waiting"
-        subtitle_color = _BLUE_ACCENT
-    _draw_text_with_shadow(draw, (_LEFT_PAD, y), subtitle, font_subtitle, subtitle_color, shadow=shadow)
-    y += 60
-
-    # Game name
-    if is_homepage:
-        game_text = "no install needed \u00b7 up to 4 players"
-    elif game_info:
-        game_text = game_info["name"]
-    else:
-        game_text = game_id or "Unknown Game"
-    _draw_text_with_shadow(draw, (_LEFT_PAD, y), game_text, font_game, _LIGHT_GRAY, shadow=shadow)
-    y += 52
-
-    # Tagline
-    tagline = "kaillera-next"
-    _draw_text_with_shadow(draw, (_LEFT_PAD, y), tagline, font_tagline, _GRAY, shadow=shadow)
-
-    # Output as PNG
-    img = img.convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
+    html = _build_card_html(room_name, game_id, spectate, player_names)
+    browser = _get_browser()
+    page = browser.new_page(viewport={"width": 1200, "height": 630})
+    try:
+        page.set_content(html, wait_until="networkidle")
+        return page.screenshot(type="png")
+    finally:
+        page.close()
 
 
 # ── HTML meta tag injection ───────────────────────────────────────────────────
