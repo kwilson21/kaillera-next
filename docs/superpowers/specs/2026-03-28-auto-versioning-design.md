@@ -14,29 +14,36 @@ Automatic semver bumping via conventional commit prefixes, with version displaye
 
 ```
 Developer commits with "feat: ..." or "fix: ..."
-  → pre-commit hook (commit-msg stage) runs scripts/bump-version.sh
+  → post-commit hook runs scripts/bump-version.sh
+    → Reads the just-completed commit message via git log -1 --format=%s
+    → If prefix is feat: → minor bump; fix: → patch bump
+    → If prefix is anything else (docs:, chore:, refactor:, etc.) → skip, no bump
     → Reads current version from web/static/version.json
-    → Parses commit message: feat: → minor, fix: → patch, else → patch
     → Bumps version, writes web/static/version.json
     → Generates web/static/changelog.json from git log + tags
-    → Auto-stages both files into the commit
-  → After commit: hook creates git tag (v0.7.1)
+    → Creates follow-up commit: git commit --no-verify -m "chore(version): vX.Y.Z"
+    → Creates lightweight git tag: git tag vX.Y.Z
 ```
+
+This produces two commits per qualifying change: the developer's commit, then an automatic version bump commit. Non-qualifying commits (docs, chore, etc.) produce a single commit with no bump.
 
 ### Files
 
 | File | Purpose |
 |------|---------|
-| `web/static/version.json` | `{"version": "0.7.1"}` — single source of truth |
+| `web/static/version.json` | `{"version": "0.7.1", "commit": "abc1234"}` — single source of truth |
 | `web/static/changelog.json` | `[{version, date, changes: [{type, message}]}]` |
 | `scripts/bump-version.sh` | Bump logic + changelog generation |
-| `.pre-commit-config.yaml` | New `commit-msg` stage hook entry |
+| `.pre-commit-config.yaml` | New `post-commit` stage hook entry |
+| `web/static/version.js` | Shared frontend: version badge + changelog modal |
 
 ### version.json Format
 
 ```json
-{"version": "0.7.1"}
+{"version": "0.7.1", "commit": "cc1d283"}
 ```
+
+The `commit` field is the short SHA of the developer's commit (not the version bump commit). This helps verify exact deployments.
 
 ### changelog.json Format
 
@@ -60,44 +67,75 @@ Developer commits with "feat: ..." or "fix: ..."
 ]
 ```
 
+Only `feat:` and `fix:` commits appear in the changelog. Other prefixes are excluded.
+
 ### bump-version.sh Logic
 
-1. Read `.git/COMMIT_EDITMSG` for the commit message
-2. Skip if message starts with `chore(version):` (prevents self-trigger on version bump commits)
-3. Parse prefix: `feat:` → minor bump, `fix:` → patch, everything else → patch
-4. Read current version from `web/static/version.json`
-5. Bump the appropriate component, write back
-6. Generate `changelog.json` from `git log --oneline` grouped by tags
-7. `git add web/static/version.json web/static/changelog.json`
+1. Read the last commit message: `git log -1 --format=%s`
+2. Skip if message starts with `chore(version):` (prevents infinite loop)
+3. Skip if prefix is not `feat:` or `fix:` (no bump for docs/chore/refactor/etc.)
+4. Parse prefix: `feat:` → minor bump, `fix:` → patch bump
+5. Read current version from `web/static/version.json`
+6. Bump the appropriate component (minor resets patch to 0), write back
+7. Include short commit SHA: `git rev-parse --short HEAD`
+8. Generate `changelog.json` from git tags and log
+9. Stage and commit: `git add web/static/version.json web/static/changelog.json && git commit --no-verify -m "chore(version): vX.Y.Z"`
+10. Create lightweight tag: `git tag vX.Y.Z`
+
+The `--no-verify` flag on the auto-commit is intentional — it prevents the post-commit hook from re-triggering on the version bump commit. The `chore(version):` prefix guard is a secondary safety net.
 
 ### Changelog Generation
 
-The script reads git tags (v0.1.0, v0.2.0, etc.) and groups commits between tags. For each version:
-- Parse commit messages, strip conventional commit prefixes
-- Categorize: `feat:` → "feat", `fix:` → "fix", `docs:` → "docs", else → "chore"
-- Only include feat/fix in the displayed changelog (skip docs/chore/refactor)
+Commits between consecutive version tags form each version's changelog entry:
+
+- `git log v0.7.0..v0.7.1 --oneline` gives all commits in v0.7.1
+- For the new version being created: commits from the last tag to HEAD (inclusive of the current commit)
+- The tag for the new version is created AFTER the changelog is generated
+- Parse commit messages, strip conventional commit prefix
+- Categorize: `feat:` → "feat", `fix:` → "fix"
+- Skip all other prefixes (docs, chore, refactor, style, test, etc.)
 - Limit to last 20 versions to keep the file small
+- Output prettier-compatible JSON (2-space indent) since prettier runs on JSON files in pre-commit
+
+### Bootstrapping (One-Time Setup)
+
+The repo currently has no git tags. A one-time bootstrap script (`scripts/seed-versions.sh`) will:
+
+1. Read dates from CHANGELOG.md (e.g., `[0.7.0] - 2026-03-27`)
+2. Find the nearest commit to each date: `git log --before="2026-03-28" --after="2026-03-26" -1 --format=%H`
+3. Create lightweight tags: `git tag v0.7.0 <sha>`
+4. Generate the initial `changelog.json` from the existing CHANGELOG.md content (richer descriptions than commit messages alone)
+5. Create initial `version.json` with current version
+
+After seeding, all future versions are auto-generated from git history.
 
 ### Frontend Display
 
-Both `index.html` and `play.html` get:
+Both `index.html` and `play.html` include `<script src="/static/version.js"></script>`.
 
-1. **Version badge** — appended to existing footer, styled as a clickable link:
-   ```
-   by Kazon Wilson · GitHub · Support · v0.7.1
-   ```
+**version.js** (IIFE, no dependencies):
+1. Fetches `/static/version.json?_t={timestamp}` (cache bust via query param)
+2. Fetches `/static/changelog.json?_t={timestamp}` on demand (first click only)
+3. Finds and injects into `<span id="kn-version">` placeholder elements
 
-2. **Changelog modal** — simple overlay that appears on click:
-   - Latest version expanded with full change list
-   - Older versions collapsed (click to expand)
-   - Close via X button, Escape key, or clicking backdrop
-   - Styled consistently with existing lobby-card aesthetic
+**index.html** — version badge added to the existing `<p>` footer after the Ko-fi link:
+```
+by Kazon Wilson (Agent 21) · GitHub · Support · v0.7.1
+```
+The `<span id="kn-version">` is placed inside the footer `<p>`, styled as a clickable link matching `footer-link` class.
 
-3. **Implementation** — a shared `web/static/version.js` script included on both pages:
-   - Fetches `version.json` and `changelog.json` on load
-   - Injects version text into a `<span id="kn-version">` placeholder in the footer
-   - Creates the modal DOM on first click
-   - No dependencies, vanilla JS, IIFE pattern (consistent with codebase)
+**play.html** — version badge added to the `<div class="overlay-footer">` after the Support link:
+```
+GitHub · Support · v0.7.1
+```
+Same `<span id="kn-version-play">` pattern, different container selector. The `version.js` script handles both by checking which element exists on the page.
+
+**Changelog modal** — created dynamically on first click:
+- Overlay backdrop with centered card (matches lobby-card aesthetic)
+- Latest version expanded showing all changes
+- Older versions collapsed, click to expand
+- Close via X button, Escape key, or clicking backdrop
+- Minimal inline styles injected by JS (no separate CSS file needed)
 
 ### pre-commit-config.yaml Addition
 
@@ -108,24 +146,27 @@ Both `index.html` and `play.html` get:
         name: bump-version
         entry: scripts/bump-version.sh
         language: script
-        stages: [commit-msg]
+        stages: [post-commit]
         always_run: true
 ```
 
-### Seeding
+### Escape Hatch
 
-The current v0.7.0 changelog entries are seeded into the initial `changelog.json` from the existing CHANGELOG.md content. Going forward, the script generates from git history. A one-time `git tag` pass tags existing versions (v0.1.0 through v0.7.0) to establish the version boundary markers.
+To commit without triggering a version bump (e.g., fixing the bump script itself):
+- Use any non-feat/fix prefix: `chore:`, `docs:`, `refactor:` — these are already skipped
+- Or: `SKIP=bump-version git commit -m "..."` to bypass the hook entirely
 
 ### Edge Cases
 
-- **Merge commits**: Treated as patch (no prefix match)
-- **Multiple feat: in one commit**: Still one minor bump per commit
-- **Amend/rebase**: Tag is on the final commit SHA; old tags become orphaned (harmless)
-- **BREAKING CHANGE**: Not automated (manual tag for v1.0.0 when ready)
-- **No conventional prefix**: Defaults to patch bump
+- **Non-conventional commits** (no prefix): Skipped, no bump
+- **Merge commits**: Skipped (no feat:/fix: prefix typically)
+- **Amend**: The post-commit hook fires again; if the message hasn't changed and the tag already exists, the script detects the existing tag and skips
+- **BREAKING CHANGE**: Not automated — manually tag v1.0.0 when ready
+- **Tag already exists**: Script checks `git tag -l vX.Y.Z` before creating; skips if exists
 
 ### Not Included
 
-- CI/CD integration (not needed — hook runs locally before push)
+- CI/CD integration (hook runs locally before push)
 - npm/pypi publishing (not a library)
-- CHANGELOG.md auto-update (version.json + changelog.json are the source of truth now; CHANGELOG.md stays as historical reference but is no longer maintained)
+- CHANGELOG.md auto-update (version.json + changelog.json replace it as source of truth; CHANGELOG.md stays as historical reference)
+- admin.html version display (low-traffic page, not worth the complexity)
