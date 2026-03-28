@@ -15,6 +15,12 @@ if [ -f "$LOCKFILE" ]; then
   exit 0
 fi
 
+# Only bump on main branch
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$BRANCH" != "main" ]; then
+  exit 0
+fi
+
 # Read last commit message
 MSG=$(git log -1 --format=%s)
 
