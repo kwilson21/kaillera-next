@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.15.1",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "scale OG card fonts larger, fix version footer alignment"
+      }
+    ]
+  },
+  {
     "version": "0.15.0",
     "date": "2026-03-28",
     "changes": [
