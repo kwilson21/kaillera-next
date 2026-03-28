@@ -38,7 +38,7 @@ Injected into HTML responses before serving:
 <!-- Homepage -->
 <meta property="og:title" content="kaillera-next" />
 <meta property="og:description" content="Play retro games online with friends — no install needed" />
-<meta property="og:image" content="https://{host}/og-image/home.png" />
+<meta property="og:image" content="https://{host}/static/og/home.png" />
 ```
 
 ## Image Generation
@@ -46,8 +46,6 @@ Injected into HTML responses before serving:
 ### Endpoint
 
 `GET /og-image/{room_id}.png` — generates a 1200x630 PNG on the fly using Pillow.
-
-`GET /og-image/home.png` — static homepage card (generated once, cached).
 
 ### Composition (game image background)
 
@@ -89,8 +87,7 @@ Bundle Inter Bold (`.ttf`) for consistent rendering across environments.
 ### Caching
 
 - `Cache-Control: public, max-age=300` (5 min) for room images
-- `Cache-Control: public, max-age=86400` (1 day) for homepage image
-- In-memory LRU cache (128 entries) to avoid regenerating the same image on rapid crawler hits
+- Homepage image is a pre-generated static file served by `StaticFiles` (normal static caching applies)
 
 ## Game Registry
 
@@ -98,17 +95,16 @@ Combined mapping from `game_id` to background image and display name:
 
 ```
 web/static/og/
-├── backgrounds/
-│   └── ssb64.jpg          # SSB64 NA box art
-└── fonts/
-    └── Inter-Bold.ttf     # bundled font
+├── ssb64.jpg          # SSB64 NA box art
+├── home.png           # pre-generated homepage card
+└── Inter-Bold.ttf     # bundled font
 ```
 
 Mapping lives in the OG module as a dict:
 
 ```python
 GAME_INFO = {
-    "ssb64": {"background": "ssb64.jpg", "name": "Super Smash Bros. 64"},
+    "ssb64": {"image": "ssb64.jpg", "name": "Super Smash Bros. 64"},
 }
 ```
 
@@ -125,16 +121,15 @@ Community contributors add an image file + one entry in the dict. No match found
 `server/src/api/og.py` — contains:
 - `generate_og_image()` — Pillow image composition
 - `inject_og_tags()` — HTML meta tag injection
-- Game background registry
+- Game registry dict
 
 ### Route changes
 
 Routes registered in `app.py` **before** the `StaticFiles` catch-all mount:
 
 1. `GET /og-image/{room_id}.png` — image generation endpoint
-2. `GET /og-image/home.png` — homepage image (cached)
-3. `GET /play.html` — intercepts static file, injects dynamic OG tags, serves modified HTML
-4. `GET /` — intercepts index, injects static OG tags
+2. `GET /play.html` — intercepts static file, injects dynamic OG tags, serves modified HTML
+3. `GET /` — intercepts index, injects static OG tags (points to pre-generated `home.png`)
 
 ### How HTML interception works
 
@@ -163,4 +158,5 @@ The `/og-image/` endpoint must be excluded from `Cross-Origin-Embedder-Policy` a
 ## Assets to Source
 
 - SSB64 NA box art image (cropped/optimized for 1200x630)
+- Pre-generated `home.png` homepage card (1200x630, generic dark gradient layout)
 - Inter Bold TTF font file
