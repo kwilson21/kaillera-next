@@ -555,12 +555,17 @@ def create_app(lifespan=None) -> FastAPI:
                 return p.get("playerName", room.room_name)
         return room.room_name
 
+    def _player_names(room) -> list[str]:  # noqa: ANN001
+        """Get list of player display names in the room."""
+        return [p.get("playerName", "?") for p in room.players.values()]
+
     @app.get("/og-image/{room_id}.png")
     def og_image(room_id: str, request: Request) -> Response:
         room = rooms.get(room_id)
         spectate = request.query_params.get("spectate") == "1"
         if room:
-            img = generate_og_image(_owner_name(room), room.game_id, spectate)
+            names = _player_names(room) if spectate else None
+            img = generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
         else:
             img = generate_og_image(room_id, None, spectate)
         return Response(

@@ -23,7 +23,7 @@ def test_play_invite_og_tags(page, server_url):
     """Play invite link has dynamic OG meta tags."""
     page.goto(f"{server_url}/play.html?room=TESTROOM")
     og_title = page.locator('meta[property="og:title"]')
-    expect(og_title).to_have_attribute("content", re.compile(r"Join"))
+    expect(og_title).to_have_attribute("content", re.compile(r"Ready to fight"))
     og_image = page.locator('meta[property="og:image"]')
     expect(og_image).to_have_attribute("content", re.compile(r"/og-image/TESTROOM\.png"))
     twitter = page.locator('meta[name="twitter:card"]')
@@ -34,7 +34,7 @@ def test_watch_invite_og_tags(page, server_url):
     """Watch invite has WATCH in title and spectate param in image URL."""
     page.goto(f"{server_url}/play.html?room=TESTROOM&spectate=1")
     og_title = page.locator('meta[property="og:title"]')
-    expect(og_title).to_have_attribute("content", re.compile(r"Watch"))
+    expect(og_title).to_have_attribute("content", re.compile(r"Come watch"))
     og_image = page.locator('meta[property="og:image"]')
     expect(og_image).to_have_attribute("content", re.compile(r"spectate=1"))
 

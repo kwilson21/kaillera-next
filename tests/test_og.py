@@ -34,9 +34,24 @@ def test_generate_og_image_spectate():
     from src.api.og import generate_og_image
 
     img_bytes = generate_og_image(
-        room_name="Agent 21's room",
+        room_name="Agent 21",
         game_id="ssb64",
         spectate=True,
+    )
+    assert isinstance(img_bytes, bytes)
+    img = Image.open(io.BytesIO(img_bytes))
+    assert img.size == (1200, 630)
+
+
+def test_generate_og_image_spectate_with_players():
+    """Generate a watch card showing player matchup."""
+    from src.api.og import generate_og_image
+
+    img_bytes = generate_og_image(
+        room_name="Agent 21",
+        game_id="ssb64",
+        spectate=True,
+        player_names=["Agent 21", "Player2"],
     )
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))

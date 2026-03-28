@@ -28,6 +28,7 @@ _FONT_PATH = _OG_DIR / "Inter-Bold.ttf"
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 WIDTH, HEIGHT = 1200, 630
+_LEFT_PAD = 72
 
 # Colors
 _WHITE = (255, 255, 255)
@@ -61,7 +62,7 @@ def _draw_dark_gradient(img: Image.Image) -> None:
             s = t / 0.5
             r = int(_DARK_BG[0] + (_MID_BG[0] - _DARK_BG[0]) * s)
             g = int(_DARK_BG[1] + (_MID_BG[1] - _DARK_BG[1]) * s)
-            b = int(_DARK_BG[2] + (_MID_BG[2] - _DARK_BG[2]) * s)
+            b = int(_DARK_BG[2] + (_DEEP_BG[2] - _DARK_BG[2]) * s)
         else:
             s = (t - 0.5) / 0.5
             r = int(_MID_BG[0] + (_DEEP_BG[0] - _MID_BG[0]) * s)
@@ -70,17 +71,15 @@ def _draw_dark_gradient(img: Image.Image) -> None:
         draw.line([(x, 0), (x, HEIGHT)], fill=(r, g, b))
 
 
-def _draw_gradient_overlay(img: Image.Image) -> None:
+def _draw_gradient_overlay(img: Image.Image) -> Image.Image:
     """Draw semi-transparent dark gradient overlay for text legibility over game images."""
     overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     for x in range(WIDTH):
         t = x / WIDTH
-        # Left side darker (alpha ~217), right side lighter (alpha ~77)
         alpha = int(217 - 140 * t)
         draw.line([(x, 0), (x, HEIGHT)], fill=(10, 10, 30, alpha))
-    img = Image.alpha_composite(img, overlay)
-    return img
+    return Image.alpha_composite(img, overlay)
 
 
 def _draw_text_with_shadow(
@@ -94,7 +93,7 @@ def _draw_text_with_shadow(
     """Draw text, optionally with a heavy drop shadow."""
     x, y = pos
     if shadow:
-        for dx, dy in [(0, 2), (0, 0)]:
+        for dx, dy in [(0, 4), (0, 0)]:
             draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
     draw.text(pos, text, font=font, fill=fill)
 
@@ -104,13 +103,13 @@ def _draw_kn_watermark(img: Image.Image, large: bool = False) -> Image.Image:
     watermark = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(watermark)
     if large:
-        font = _load_font(180)
+        font = _load_font(220)
         opacity = int(255 * 0.06)
-        x, y = WIDTH - 20, HEIGHT - 30
+        x, y = WIDTH - 30, HEIGHT - 20
     else:
-        font = _load_font(140)
+        font = _load_font(160)
         opacity = int(255 * 0.30)
-        x, y = WIDTH + 10, HEIGHT - 15
+        x, y = WIDTH - 20, HEIGHT - 10
     bbox = draw.textbbox((0, 0), "kn", font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
@@ -130,21 +129,30 @@ def _draw_badge(
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    pad_x, pad_y = 10, 4
-    x = 40
+    pad_x, pad_y = 16, 8
     draw.rounded_rectangle(
-        [x, y, x + tw + pad_x * 2, y + th + pad_y * 2],
-        radius=4,
+        [_LEFT_PAD, y, _LEFT_PAD + tw + pad_x * 2, y + th + pad_y * 2],
+        radius=6,
         fill=bg,
     )
-    draw.text((x + pad_x, y + pad_y), text, font=font, fill=color)
-    return th + pad_y * 2 + 8
+    draw.text((_LEFT_PAD + pad_x, y + pad_y), text, font=font, fill=color)
+    return th + pad_y * 2 + 16
+
+
+def _format_players(player_names: list[str], host_name: str) -> str:
+    """Format player names for spectate card subtitle."""
+    if len(player_names) >= 2:
+        if len(player_names) == 2:
+            return f"{player_names[0]} vs {player_names[1]}"
+        return f"{player_names[0]}, {player_names[1]} & {len(player_names) - 2} more"
+    return f"{host_name} is playing"
 
 
 def generate_og_image(
     room_name: str | None,
     game_id: str | None,
     spectate: bool,
+    player_names: list[str] | None = None,
 ) -> bytes:
     """Generate a 1200x630 OG card image.
 
@@ -152,6 +160,7 @@ def generate_og_image(
         room_name: Room owner's display name (None for homepage).
         game_id: Game identifier for background lookup (None for homepage).
         spectate: True for "WATCH GAME" badge, False for "JOIN GAME".
+        player_names: List of player names in room (for spectate cards).
 
     Returns:
         PNG image as bytes.
@@ -184,44 +193,63 @@ def generate_og_image(
 
     draw = ImageDraw.Draw(img, "RGBA")
 
-    # Fonts
-    font_badge = _load_font(12)
-    font_title = _load_font(24)
-    font_game = _load_font(16)
-    font_tagline = _load_font(13)
+    # Fonts — scaled up for OG card readability
+    font_badge = _load_font(24)
+    font_headline = _load_font(56)
+    font_subtitle = _load_font(36)
+    font_game = _load_font(30)
+    font_tagline = _load_font(24)
 
-    y = HEIGHT // 2 - 60
+    y = HEIGHT // 2 - 100
     shadow = has_game_bg
+    is_homepage = room_name is None
 
     # Badge
-    is_homepage = room_name is None
     if not is_homepage:
         badge_text = "WATCH GAME" if spectate else "JOIN GAME"
         badge_color = _ORANGE_ACCENT if spectate else _BLUE_ACCENT
         badge_bg = _ORANGE_BADGE_BG if spectate else _BLUE_BADGE_BG
         y += _draw_badge(draw, y, badge_text, badge_color, badge_bg, font_badge)
 
-    # Room name / title
-    title = "kaillera-next" if is_homepage else room_name
-    _draw_text_with_shadow(draw, (40, y), title, font_title, _WHITE, shadow=shadow)
-    y += 34
+    # Headline
+    if is_homepage:
+        headline = "kaillera-next"
+    elif spectate:
+        headline = "Come watch!"
+    else:
+        headline = "Ready to fight?"
+    _draw_text_with_shadow(draw, (_LEFT_PAD, y), headline, font_headline, _WHITE, shadow=shadow)
+    y += 68
+
+    # Subtitle (host info / player matchup)
+    if is_homepage:
+        subtitle = "Play retro games online with friends"
+        subtitle_color = _LIGHT_GRAY
+    elif spectate and player_names:
+        subtitle = _format_players(player_names, room_name or "")
+        subtitle_color = _BLUE_ACCENT
+    elif spectate:
+        subtitle = f"{room_name} is playing"
+        subtitle_color = _BLUE_ACCENT
+    else:
+        subtitle = f"{room_name} is waiting"
+        subtitle_color = _BLUE_ACCENT
+    _draw_text_with_shadow(draw, (_LEFT_PAD, y), subtitle, font_subtitle, subtitle_color, shadow=shadow)
+    y += 52
 
     # Game name
     if is_homepage:
-        game_text = "Play retro games online with friends \u2014 no install needed"
+        game_text = "no install needed \u00b7 up to 4 players"
     elif game_info:
         game_text = game_info["name"]
     else:
         game_text = game_id or "Unknown Game"
-    _draw_text_with_shadow(draw, (40, y), game_text, font_game, _LIGHT_GRAY, shadow=shadow)
-    y += 40
+    _draw_text_with_shadow(draw, (_LEFT_PAD, y), game_text, font_game, _LIGHT_GRAY, shadow=shadow)
+    y += 50
 
     # Tagline
-    if is_homepage:
-        tagline = "browser-based N64 netplay \u00b7 up to 4 players"
-    else:
-        tagline = "kaillera-next \u00b7 play retro games online with friends"
-    _draw_text_with_shadow(draw, (40, y), tagline, font_tagline, _GRAY, shadow=shadow)
+    tagline = "kaillera-next"
+    _draw_text_with_shadow(draw, (_LEFT_PAD, y), tagline, font_tagline, _GRAY, shadow=shadow)
 
     # Output as PNG
     img = img.convert("RGB")
@@ -246,9 +274,11 @@ def build_og_tags(
     game_info = GAME_INFO.get(game_id) if game_id else None
 
     if room_id and room_name:
-        action = "Watch" if spectate else "Join"
         game_label = game_info["name"] if game_info else (game_id or "")
-        title = f"{action} {room_name}"
+        if spectate:
+            title = f"Come watch! {room_name} is playing"
+        else:
+            title = f"Ready to fight? {room_name} is waiting"
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
