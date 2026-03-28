@@ -15,3 +15,12 @@ repos:
       - id: prettier
         types_or: [javascript, css, json, yaml, html]
         exclude: ^(build/src/|web/static/ejs/|node_modules/)
+
+  - repo: local
+    hooks:
+      - id: bump-version
+        name: bump-version
+        entry: scripts/bump-version.sh
+        language: script
+        stages: [post-commit]
+        always_run: true

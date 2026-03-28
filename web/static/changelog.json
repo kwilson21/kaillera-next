@@ -1,0 +1,160 @@
+[
+  {
+    "version": "0.7.0",
+    "date": "2026-03-27",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "emulator hibernate — WASM module stays alive between games"
+      },
+      {
+        "type": "feat",
+        "message": "mode switching: lockstep ↔ streaming without page reload"
+      },
+      {
+        "type": "fix",
+        "message": "guest black screen after streaming → lockstep"
+      },
+      {
+        "type": "fix",
+        "message": "EJS menus appearing during gameplay after hibernate/wake"
+      }
+    ]
+  },
+  {
+    "version": "0.6.0",
+    "date": "2026-03-25",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "C-level resync via WASM exports for fast in-core state hashing and transfer"
+      },
+      {
+        "type": "feat",
+        "message": "GGPO-inspired frame pacing — frame advantage cap prevents faster machine from outrunning slower peer"
+      },
+      {
+        "type": "feat",
+        "message": "two-stage input stall recovery with resend protocol"
+      },
+      {
+        "type": "feat",
+        "message": "sync diagnostics — log ring buffer, per-frame event log, exportable CSV"
+      },
+      {
+        "type": "feat",
+        "message": "admin page for sync log management"
+      },
+      {
+        "type": "feat",
+        "message": "iOS audio routing workaround and mobile touch guard"
+      },
+      {
+        "type": "fix",
+        "message": "virtual gamepad alignment — D-pad centered, diagonal A/B layout"
+      },
+      {
+        "type": "fix",
+        "message": "frame cap threshold: use >= instead of > to trigger at boundary"
+      },
+      {
+        "type": "fix",
+        "message": "delta base buffer detached by Web Worker transfer"
+      }
+    ]
+  },
+  {
+    "version": "0.5.0",
+    "date": "2026-03-20",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "late-join pull model — joiner requests state when emulator is ready"
+      },
+      {
+        "type": "feat",
+        "message": "room auto-closes when host leaves mid-game"
+      },
+      {
+        "type": "fix",
+        "message": "frozen frame ghosting on game end"
+      },
+      {
+        "type": "fix",
+        "message": "late-joiner lastUsersData race condition"
+      },
+      {
+        "type": "fix",
+        "message": "WebRTC offer-before-listener race on late-join"
+      }
+    ]
+  },
+  {
+    "version": "0.4.0",
+    "date": "2026-03-19",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "4-player mesh networking (up to 6 bidirectional WebRTC connections)"
+      },
+      {
+        "type": "feat",
+        "message": "spectator support via host canvas MediaStream"
+      },
+      {
+        "type": "feat",
+        "message": "audio bypass — AudioWorklet with fallback for non-secure contexts"
+      },
+      {
+        "type": "feat",
+        "message": "C-level deterministic timing via forked mupen64plus-next core"
+      },
+      {
+        "type": "feat",
+        "message": "late-join infrastructure — host sends compressed save state"
+      },
+      {
+        "type": "feat",
+        "message": "desync detection with deferred hash checks"
+      }
+    ]
+  },
+  {
+    "version": "0.3.0",
+    "date": "2026-03-15",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "free-running input sync — both emulators at 60fps independently"
+      },
+      {
+        "type": "feat",
+        "message": "configurable DELAY_FRAMES input buffer"
+      }
+    ]
+  },
+  {
+    "version": "0.2.0",
+    "date": "2026-03-12",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "Emscripten pauseMainLoop/resumeMainLoop for frame stepping"
+      }
+    ]
+  },
+  {
+    "version": "0.1.0",
+    "date": "2026-03-08",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "initial lockstep prototype using rAF interception"
+      },
+      {
+        "type": "feat",
+        "message": "streaming mode — host streams canvas video via WebRTC MediaStream"
+      }
+    ]
+  }
+]
