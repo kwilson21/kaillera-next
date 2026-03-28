@@ -129,10 +129,10 @@ def _draw_badge(
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    pad_x, pad_y = 16, 8
+    pad_x, pad_y = 20, 10
     draw.rounded_rectangle(
         [_LEFT_PAD, y, _LEFT_PAD + tw + pad_x * 2, y + th + pad_y * 2],
-        radius=6,
+        radius=8,
         fill=bg,
     )
     draw.text((_LEFT_PAD + pad_x, y + pad_y), text, font=font, fill=color)
@@ -193,16 +193,20 @@ def generate_og_image(
 
     draw = ImageDraw.Draw(img, "RGBA")
 
-    # Fonts — scaled up for OG card readability
-    font_badge = _load_font(24)
-    font_headline = _load_font(56)
-    font_subtitle = _load_font(36)
-    font_game = _load_font(30)
-    font_tagline = _load_font(24)
+    # Fonts — large for OG card readability (cards render ~300px wide on mobile)
+    font_badge = _load_font(32)
+    font_headline = _load_font(72)
+    font_subtitle = _load_font(44)
+    font_game = _load_font(36)
+    font_tagline = _load_font(28)
 
-    y = HEIGHT // 2 - 100
     shadow = has_game_bg
     is_homepage = room_name is None
+
+    # Calculate total block height to vertically center
+    # Badge ~55, headline ~85, subtitle ~60, game ~50, tagline ~40, gaps ~40
+    block_h = 330 if not is_homepage else 275
+    y = (HEIGHT - block_h) // 2
 
     # Badge
     if not is_homepage:
@@ -219,7 +223,7 @@ def generate_og_image(
     else:
         headline = "Ready to fight?"
     _draw_text_with_shadow(draw, (_LEFT_PAD, y), headline, font_headline, _WHITE, shadow=shadow)
-    y += 68
+    y += 88
 
     # Subtitle (host info / player matchup)
     if is_homepage:
@@ -235,7 +239,7 @@ def generate_og_image(
         subtitle = f"{room_name} is waiting"
         subtitle_color = _BLUE_ACCENT
     _draw_text_with_shadow(draw, (_LEFT_PAD, y), subtitle, font_subtitle, subtitle_color, shadow=shadow)
-    y += 52
+    y += 60
 
     # Game name
     if is_homepage:
@@ -245,7 +249,7 @@ def generate_og_image(
     else:
         game_text = game_id or "Unknown Game"
     _draw_text_with_shadow(draw, (_LEFT_PAD, y), game_text, font_game, _LIGHT_GRAY, shadow=shadow)
-    y += 50
+    y += 52
 
     # Tagline
     tagline = "kaillera-next"
