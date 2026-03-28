@@ -8,7 +8,8 @@ WORKDIR /app
 
 # Install dependencies first (layer caching)
 COPY server/pyproject.toml server/
-RUN pip install --no-cache-dir server/
+RUN pip install --no-cache-dir server/ \
+    && playwright install chromium --with-deps
 
 # Copy application code
 COPY server/ server/

@@ -3,9 +3,15 @@ FastAPI application — frontend WebSocket protocol + REST matchmaking API.
 
 V1 endpoints:
   GET  /health
-  GET  /list?game_id=...  EmulatorJS-Netplay room listing
-  GET  /room/{room_id}    minimal room info (rate-limited)
-  POST /api/sync-logs     upload sync diagnostic logs
+  GET  /list?game_id=...        EmulatorJS-Netplay room listing
+  GET  /room/{room_id}          minimal room info (rate-limited)
+  GET  /ice-servers             WebRTC ICE server config
+  GET  /og-image/{room_id}.png  dynamic OG card image (Playwright screenshot)
+  GET  /play.html               play page with injected OG meta tags
+  GET  /                        homepage with injected OG meta tags
+  GET  /api/cached-state/{h}    download cached save state
+  POST /api/cache-state/{h}     upload save state to cache
+  POST /api/sync-logs           upload sync diagnostic logs
 
 Admin endpoints (auth via ADMIN_KEY env var):
   GET    /admin/api/stats              server stats

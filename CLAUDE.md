@@ -53,6 +53,7 @@ kaillera-next/
 │       ├── ratelimit.py     # per-IP rate limiting
 │       └── api/
 │           ├── app.py       # FastAPI app (REST + security middleware)
+│           ├── og.py        # OG card image generation (Playwright HTML screenshots)
 │           └── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
 ├── web/             # Static frontend
 │   ├── index.html           # lobby: create/join rooms
