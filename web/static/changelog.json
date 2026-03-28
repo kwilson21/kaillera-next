@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.9.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "Konami Code easter egg — HELLOD00D protocol tribute"
+      }
+    ]
+  },
+  {
     "version": "0.8.1",
     "date": "2026-03-28",
     "changes": [
