@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.10.1",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "add knitephox, near, and firo to admin easter egg names"
+      }
+    ]
+  },
+  {
     "version": "0.10.0",
     "date": "2026-03-28",
     "changes": [
