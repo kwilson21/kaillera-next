@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.10.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "EmuLinker easter eggs — admin welcome + MOTD console log"
+      }
+    ]
+  },
+  {
     "version": "0.9.1",
     "date": "2026-03-28",
     "changes": [
