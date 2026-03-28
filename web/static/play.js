@@ -3358,6 +3358,8 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     console.log('kaillera-next — v0.9 forever');
+    console.log('Welcome to a new EmuLinker Server!');
+    console.log('Edit language.properties to setup your login announcements');
     parseParams();
     if (!roomCode) {
       window.location.href = '/';

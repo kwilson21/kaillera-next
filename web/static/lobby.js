@@ -76,6 +76,39 @@
     window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}&spectate=1`;
   });
 
+  // EmuLinker admin welcome — enter as "Moosehead"
+  const ADMIN_NAMES = ['moosehead', 'suprafast', 'agent 21', 'agent21'];
+  const showLobbyToast = (msg) => {
+    const t = document.createElement('div');
+    Object.assign(t.style, {
+      position: 'fixed',
+      bottom: '60px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      background: '#1a1a2e',
+      border: '1px solid #333',
+      borderRadius: '8px',
+      padding: '10px 20px',
+      color: '#0f8',
+      fontFamily: "'Courier New', monospace",
+      fontSize: '13px',
+      zIndex: '99999',
+      whiteSpace: 'nowrap',
+      transition: 'opacity 0.3s',
+    });
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => {
+      t.style.opacity = '0';
+      setTimeout(() => t.remove(), 300);
+    }, 3000);
+  };
+  nameInput.addEventListener('change', () => {
+    if (ADMIN_NAMES.includes(nameInput.value.trim().toLowerCase())) {
+      showLobbyToast('Welcome admin. Type /help for commands.');
+    }
+  });
+
   // HELLO → HELLOD00D: type "HELLO" in the room code field (Kaillera protocol handshake)
   (() => {
     codeInput.addEventListener('input', () => {
