@@ -69,3 +69,46 @@ def test_generate_og_image_homepage():
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))
     assert img.size == (1200, 630)
+
+
+# ── Server route tests (require running server) ──────────────────────────────
+
+
+def test_og_image_endpoint_no_room(server_url):
+    """OG image endpoint returns a PNG even when room doesn't exist (generic card)."""
+    import requests
+
+    r = requests.get(f"{server_url}/og-image/NONEXIST.png", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    img = Image.open(io.BytesIO(r.content))
+    assert img.size == (1200, 630)
+
+
+def test_play_html_has_og_tags(server_url):
+    """play.html served with OG meta tags injected."""
+    import requests
+
+    r = requests.get(f"{server_url}/play.html?room=TESTROOM", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert 'og:title' in r.text
+    assert 'og:image' in r.text
+    assert 'twitter:card' in r.text
+
+
+def test_homepage_has_og_tags(server_url):
+    """Homepage served with static OG meta tags."""
+    import requests
+
+    r = requests.get(f"{server_url}/", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert 'og:title' in r.text
+    assert 'kaillera-next' in r.text
+
+
+def test_og_image_no_coep_header(server_url):
+    """OG image endpoint must not have COEP header (blocks crawler fetches)."""
+    import requests
+
+    r = requests.get(f"{server_url}/og-image/TEST.png", timeout=5, verify=False)
+    assert "cross-origin-embedder-policy" not in r.headers

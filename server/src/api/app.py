@@ -33,6 +33,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
+from src.api.og import build_og_tags, generate_og_image, inject_og_tags
 from src.api.signaling import MAX_ROOMS, rooms
 from src.ratelimit import check_ip
 
@@ -144,8 +145,6 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 extra: list[tuple[bytes, bytes]] = [
                     (b"content-security-policy", self._CSP.encode()),
-                    (b"cross-origin-opener-policy", b"same-origin"),
-                    (b"cross-origin-embedder-policy", b"require-corp"),
                     (b"x-frame-options", b"SAMEORIGIN"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
@@ -153,6 +152,10 @@ class SecurityHeadersMiddleware:
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     (b"cache-control", self._cache_control(path).encode()),
                 ]
+                # COOP/COEP breaks OG image fetches by crawlers
+                if not path.startswith("/og-image/"):
+                    extra.append((b"cross-origin-opener-policy", b"same-origin"))
+                    extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
             await send(message)
 
@@ -231,7 +234,7 @@ class CacheBustMiddleware:
             return
 
         path: str = scope.get("path", "/")
-        if path.startswith(("/static/", "/api/", "/socket.io/", "/admin/api/")):
+        if path.startswith(("/static/", "/api/", "/socket.io/", "/admin/api/", "/og-image/")):
             await self.app(scope, receive, send)
             return
 
@@ -526,5 +529,66 @@ def create_app(lifespan=None) -> FastAPI:
         if deleted:
             log.info("Manual cleanup: removed %d expired log(s)", deleted)
         return {"deleted": deleted}
+
+    # ── OG card routes ────────────────────────────────────────────────────
+
+    _web_dir = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
+    _play_html: str | None = None
+    _index_html: str | None = None
+
+    def _get_play_html() -> str:
+        nonlocal _play_html
+        if _play_html is None:
+            _play_html = (_web_dir / "play.html").read_text()
+        return _play_html
+
+    def _get_index_html() -> str:
+        nonlocal _index_html
+        if _index_html is None:
+            _index_html = (_web_dir / "index.html").read_text()
+        return _index_html
+
+    def _owner_name(room) -> str:  # noqa: ANN001
+        """Get room owner's display name."""
+        for p in room.players.values():
+            if p.get("socketId") == room.owner:
+                return p.get("playerName", room.room_name)
+        return room.room_name
+
+    @app.get("/og-image/{room_id}.png")
+    def og_image(room_id: str, request: Request) -> Response:
+        room = rooms.get(room_id)
+        spectate = request.query_params.get("spectate") == "1"
+        if room:
+            img = generate_og_image(_owner_name(room), room.game_id, spectate)
+        else:
+            img = generate_og_image(room_id, None, spectate)
+        return Response(
+            content=img,
+            media_type="image/png",
+            headers={"cache-control": "public, max-age=300"},
+        )
+
+    @app.get("/play.html")
+    def play_page(request: Request) -> Response:
+        room_id = request.query_params.get("room")
+        spectate = request.query_params.get("spectate") == "1"
+        host = request.headers.get("host", "localhost")
+        room = rooms.get(room_id) if room_id else None
+        if room:
+            tags = build_og_tags(host, room_id, _owner_name(room), room.game_id, spectate)
+        elif room_id:
+            tags = build_og_tags(host, room_id, room_id, None, spectate)
+        else:
+            tags = build_og_tags(host)
+        html = inject_og_tags(_get_play_html(), tags)
+        return Response(content=html, media_type="text/html")
+
+    @app.get("/")
+    def index_page(request: Request) -> Response:
+        host = request.headers.get("host", "localhost")
+        tags = build_og_tags(host)
+        html = inject_og_tags(_get_index_html(), tags)
+        return Response(content=html, media_type="text/html")
 
     return app
