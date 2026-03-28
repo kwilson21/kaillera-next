@@ -49,6 +49,7 @@ kaillera-next/
 │   ├── pyproject.toml
 │   └── src/
 │       ├── main.py          # entry point (FastAPI + Socket.IO + uvloop)
+│       ├── state.py         # Redis-backed room persistence
 │       ├── ratelimit.py     # per-IP rate limiting
 │       └── api/
 │           ├── app.py       # FastAPI app (REST + security middleware)
@@ -62,7 +63,11 @@ kaillera-next/
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-lockstep.js  # deterministic lockstep engine (4P mesh)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
+│       ├── shared.js            # input encoding/decoding, cheats, wire format
 │       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
+│       ├── virtual-gamepad.js   # on-screen touch controls for mobile
+│       ├── kn-state.js          # cross-module shared state (KNState)
+│       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
@@ -104,15 +109,23 @@ All events go through the default Socket.IO namespace (`/`).
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `start-game` | client→server | `{mode, rollbackEnabled}` | Host starts game |
 | `end-game` | client→server | `{}` | Host ends game |
+| `set-name` | client→server | `{name}` | Update player display name |
+| `set-mode` | client→server | `{mode}` | Host sets game mode |
 | `webrtc-signal` | bidirectional | `{target, offer/answer/candidate}` | WebRTC relay |
+| `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
 | `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
 | `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
+| `rom-declare` | client→server | `{...}` | Declare ROM file info to room |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
+| `device-type` | client→server | `{type}` | Player reports device type |
+| `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
+| `debug-logs` | client→server | `{...}` | Upload debug console log |
 | `users-updated` | server→room | `{players, spectators, owner}` | Room state broadcast |
-| `game-started` | server→room | `{mode, rollbackEnabled}` | Game started |
+| `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
+| `game-started` | server→room | `{mode, rollbackEnabled, romHash}` | Game started |
 | `game-ended` | server→room | `{}` | Back to lobby |
 | `room-closed` | server→room | `{reason}` | Room force-closed |
 
@@ -125,7 +138,8 @@ All events go through the default Socket.IO namespace (`/`).
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel.
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
-- **Rooms are ephemeral:** No database. Rooms exist in memory while players are connected.
+- **Rooms are ephemeral:** No persistent database. Rooms live in memory (with optional
+  Redis persistence for zero-downtime deploys and reconnect survival).
 - **Patched WASM core:** mupen64plus-next compiled with deterministic timing patches
   (kn_set_deterministic, kn_set_frame_time) for lockstep sync. Falls back to stock
   CDN core with JS-level timing shim.
@@ -137,5 +151,5 @@ All events go through the default Socket.IO namespace (`/`).
 - `uv` or `pip install .` for dependency management
 - Docker for production builds
 - `ALLOWED_ORIGIN` env var controls CORS (default `*`, set to your domain in production)
-- `PORT` (default 27888), `MAX_ROOMS` (default 50), `MAX_SPECTATORS` (default 10)
+- `PORT` (default 27888), `MAX_ROOMS` (default 100), `MAX_SPECTATORS` (default 20)
 - `.env` file supported via python-dotenv

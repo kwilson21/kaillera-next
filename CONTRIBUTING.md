@@ -8,9 +8,9 @@ Thanks for your interest in contributing! This project is open to contributions 
 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
-- Redis
-- [Tailscale](https://tailscale.com) (for HTTPS dev — browsers require a secure context for the performance features the emulator depends on)
 - [just](https://github.com/casey/just) (command runner)
+- Node.js (for Prettier formatting)
+- Optionally: Docker (for Redis), [Tailscale](https://tailscale.com) (for HTTPS dev)
 
 ### Setup
 
@@ -18,14 +18,14 @@ Thanks for your interest in contributing! This project is open to contributions 
 # Install dependencies
 just setup
 
-# Generate HTTPS certs (one-time, requires Tailscale)
-just certs
-
-# Start dev server
-just dev
+# Simplest path — HTTP, no Redis, no HTTPS
+just serve
+# → http://localhost:27888/
 ```
 
-See [README.md](README.md) for full setup details including Tailscale configuration.
+This gets you a running server for exploring the lobby, streaming mode, and the
+codebase. See [README.md](README.md) for HTTPS setup (required for lockstep mode)
+and Docker deployment.
 
 ## Ways to contribute
 
@@ -56,29 +56,141 @@ If you have a controller that doesn't work well or has wrong mappings, open an i
 4. Run the pre-commit hooks (`pre-commit run --all-files`)
 5. Open a PR with a clear description of what you changed and why
 
-#### Code style
-
-- **Python:** Formatted by ruff, type hints encouraged
-- **JavaScript:** Modern ECMAScript (const/let, arrow functions, async/await, optional chaining). No ES modules — the frontend uses IIFEs + window globals for EmulatorJS interop.
-- **HTML/CSS:** Formatted by prettier
-
-Pre-commit hooks handle formatting automatically.
-
 ### Ideas and suggestions
 
 Have an idea for a feature? Open an issue tagged with your suggestion. Even rough ideas are welcome — we can figure out scope together.
 
-## Project structure
+---
+
+## Developer guide
+
+### Code architecture
+
+#### Pattern: IIFEs + window globals
+
+All frontend JS uses **immediately-invoked function expressions** (IIFEs) with
+`window.*` exports. This is intentional — EmulatorJS patches and overrides
+browser globals extensively, and ES modules would break interop with its runtime.
+Do not convert to ES modules.
+
+```js
+// Every module follows this pattern:
+(function () {
+  'use strict';
+  // ... private state and functions ...
+  window.ModuleName = { /* public API */ };
+})();
+```
+
+#### Cross-module communication: KNState
+
+Modules communicate through `window.KNState` (defined in `kn-state.js`). Each
+property documents its writer and readers inline:
+
+```js
+window.KNState = {
+  remapActive: false,    // play.js → lockstep.js, streaming.js
+  touchInput: {},        // virtual-gamepad.js → lockstep.js, streaming.js
+  peers: {},             // lockstep/streaming.js → play.js
+  frameNum: 0,           // lockstep.js → play.js info overlay
+  delayAutoValue: 2,     // play.js → lockstep.js
+  romHash: null,         // play.js → gamepad-manager.js
+};
+```
+
+To trace data flow between modules, grep for the `KNState` property name.
+
+#### Script load order
+
+Scripts are loaded in `play.html` in dependency order. Later scripts expect
+earlier ones to have set up their `window.*` exports:
+
+1. `kn-state.js` — shared state namespace
+2. `api-sandbox.js` — saves native browser APIs before anything overrides them
+3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
+4. `shared.js` — input encoding/decoding, cheats, wire format
+5. `gamepad-manager.js` — gamepad profiles and mapping
+6. `virtual-gamepad.js` — touch controls for mobile
+7. `netplay-lockstep.js` — lockstep engine (exposes `window.LockstepEngine`)
+8. `netplay-streaming.js` — streaming engine (exposes `window.StreamingEngine`)
+9. `play.js` — page orchestrator (connects everything)
+
+#### Server structure
+
+The Python server is small (~1,700 lines across 5 files):
+
+| File | Purpose |
+|---|---|
+| `main.py` | Entry point — mounts FastAPI, Socket.IO, static files, HTTPS |
+| `api/app.py` | REST endpoints, security headers (COOP/COEP/CSP), admin API |
+| `api/signaling.py` | Socket.IO event handlers — rooms, WebRTC relay, game data |
+| `state.py` | Redis-backed room persistence for zero-downtime deploys |
+| `ratelimit.py` | Per-IP rolling-window rate limiting |
+
+#### Frontend file map
+
+| File | Lines | What it does | Talks to |
+|---|---|---|---|
+| `play.js` | ~3,500 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
+| `netplay-lockstep.js` | ~4,000 | Deterministic lockstep engine (4P mesh WebRTC, frame stepping, desync/resync) | play.js, KNState, shared.js |
+| `netplay-streaming.js` | ~1,100 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
+| `shared.js` | ~570 | Input encoding/decoding, N64 button map, cheat codes, wire format | lockstep, streaming |
+| `gamepad-manager.js` | ~350 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
+| `virtual-gamepad.js` | — | On-screen touch controls for mobile | KNState |
+| `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | lockstep, core-redirector |
+| `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
+| `kn-state.js` | ~22 | Cross-module shared state namespace | all modules |
+| `lobby.js` | ~90 | Room creation and join form on index.html | — |
+
+### Conventions
+
+- **Modern ECMAScript** — `const`/`let` (never `var`), arrow functions, template
+  literals, `async`/`await`, optional chaining. No ES modules (see above).
+- **Python** — formatted by ruff, type hints encouraged.
+- **HTML/CSS** — formatted by prettier.
+- **No unnecessary comments** — code should be self-evident. Add comments only
+  where the *why* isn't obvious from the *what*.
+- Pre-commit hooks handle formatting automatically.
+
+### Docs layout
 
 ```
-server/     Python signaling server (FastAPI + Socket.IO)
-web/        Static frontend (HTML + JS)
-build/      WASM core build system (Docker + C patches)
-tests/      E2E tests (pytest + Playwright)
-docs/       Roadmap and design specs
+docs/
+  roadmap.md                 — V1 feature roadmap (all phases complete)
+  mvp-plan.md                — MVP implementation plan (all items shipped or cut)
+  superpowers/
+    specs/YYYY-MM-DD-*.md    — Design specs
+    plans/YYYY-MM-DD-*.md    — Implementation plans
 ```
 
-The server handles room management and WebRTC signaling. Once peers connect, game data flows directly between browsers via WebRTC — the server is idle during gameplay.
+Design specs and plans are **historical snapshots** — they reflect decisions and
+code state at the time they were written. The source of truth is always the code
+itself. Use these docs for context on *why* something was built a certain way, not
+as a reference for current behavior.
+
+### Running the server
+
+```bash
+just serve          # HTTP, no Redis — simplest path
+just dev            # HTTPS + Redis — full stack (needs Tailscale certs + Docker)
+just redis          # Start just Redis in background
+just redis-stop     # Stop Redis
+```
+
+### Formatting and linting
+
+```bash
+just fmt            # Auto-format everything
+just lint           # Check without fixing
+just check          # Run pre-commit on all files
+```
+
+### Tests
+
+```bash
+cd server && uv run pytest          # Unit tests
+cd server && uv run pytest tests/   # E2E (needs Playwright browsers)
+```
 
 ## License
 

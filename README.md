@@ -27,12 +27,36 @@ Both modes support:
 
 ## Quick start
 
-Requires Python 3.11+, Redis, [Tailscale](https://tailscale.com), and [just](https://github.com/casey/just).
+Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just).
 
 ```bash
 # Install dependencies
 just setup
 
+# Start the server (HTTP, no Redis)
+just serve
+# → http://localhost:27888/
+```
+
+This is the fastest path to a running server. Over plain HTTP you can explore the lobby, create rooms, and use **streaming mode**. Lockstep mode requires HTTPS — see below.
+
+### What works without HTTPS
+
+| Feature | HTTP | HTTPS |
+|---|---|---|
+| Lobby, rooms, Socket.IO | works | works |
+| Streaming mode | works | works |
+| Lockstep mode | broken (needs SharedArrayBuffer) | works |
+| High-res frame timing | degraded (~1ms vs ~5μs) | works |
+
+Browsers gate `SharedArrayBuffer` and `performance.now()` precision behind
+[cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated),
+which requires a secure context (HTTPS). The server sends the required
+`COOP`/`COEP` headers automatically — you just need HTTPS.
+
+### Full setup (HTTPS + Redis)
+
+```bash
 # One-time: generate HTTPS certs (see Tailscale setup below)
 just certs
 
@@ -41,7 +65,7 @@ just dev
 # → https://<your-hostname>.ts.net:27888/
 ```
 
-### Tailscale setup (required)
+### Tailscale setup (required for lockstep)
 
 HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. Tailscale provides real Let's Encrypt certificates trusted by all devices including mobile — no CA installation needed.
 
@@ -201,11 +225,11 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 |---|---|---|
 | `ALLOWED_ORIGIN` | `*` | CORS origin — set to your domain in production |
 | `PORT` | `27888` | Server listen port |
-| `MAX_ROOMS` | `50` | Maximum concurrent rooms |
-| `MAX_SPECTATORS` | `10` | Maximum spectators per room |
+| `MAX_ROOMS` | `100` | Maximum concurrent rooms |
+| `MAX_SPECTATORS` | `20` | Maximum spectators per room |
 | `REDIS_URL` | — | Redis connection URL (required for session persistence) |
 | `ADMIN_KEY` | — | Admin API key for sync log management |
-| `LOG_RETENTION_DAYS` | `7` | Auto-delete unpinned sync logs after N days |
+| `LOG_RETENTION_DAYS` | `14` | Auto-delete unpinned sync logs after N days |
 | `LOG_MAX_FILES` | `500` | Maximum sync log files before oldest are pruned |
 
 ## REST endpoints
@@ -219,9 +243,13 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /api/cached-state/{rom_hash}` | Retrieve cached save state |
 | `POST /api/cache-state/{rom_hash}` | Upload save state to cache |
 | `POST /api/sync-logs` | Upload sync diagnostic logs |
-| `GET /api/admin/logs` | List sync logs (admin) |
-| `DELETE /api/admin/logs/{name}` | Delete a sync log (admin) |
-| `POST /api/admin/logs/{name}/pin` | Pin/unpin a sync log (admin) |
+| `GET /admin/api/logs` | List sync logs (admin) |
+| `GET /admin/api/logs/{name}` | Download a sync log (admin) |
+| `DELETE /admin/api/logs/{name}` | Delete a sync log (admin) |
+| `POST /admin/api/logs/{name}/pin` | Pin a sync log (admin) |
+| `DELETE /admin/api/logs/{name}/pin` | Unpin a sync log (admin) |
+| `GET /admin/api/stats` | Server statistics (admin) |
+| `POST /admin/api/cleanup` | Trigger manual log cleanup (admin) |
 
 ## Current status
 

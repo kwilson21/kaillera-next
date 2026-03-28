@@ -1,12 +1,59 @@
 /**
  * play.js — Play Page Controller
  *
- * Owns the Socket.IO connection, pre-game overlay, notifications,
- * in-game toolbar. Orchestrates: lobby → playing → end/leave.
+ * The main orchestrator for the game page. Owns the Socket.IO connection,
+ * pre-game overlay, in-game toolbar, and all UI outside the emulator canvas.
+ * Delegates actual netplay logic to LockstepEngine or StreamingEngine.
  *
- * Emulator lifecycle: the WASM module is kept alive between games
- * (hibernate/wake) to avoid Emscripten main loop corruption on the
- * 3rd EmulatorJS instance. See hibernateEmulator() / wakeEmulator().
+ * ── Page Lifecycle ──────────────────────────────────────────────────────
+ *
+ *   1. Parse URL params (?room=, &host=1, &name=, &mode=)
+ *   2. Connect Socket.IO → on connect, open-room (host) or join-room (guest)
+ *   3. Show pre-game overlay: player list, mode select, ROM drop zone
+ *   4. Host clicks "Start Game" → server broadcasts game-started
+ *   5. onGameStarted(): boot EmulatorJS, create engine (lockstep or streaming)
+ *   6. Engine runs the game; play.js updates toolbar, info overlay, toasts
+ *   7. Host clicks "End Game" → server broadcasts game-ended
+ *   8. onGameEnded(): hibernate emulator (keep WASM alive), return to overlay
+ *   9. Next game: wake emulator, create new engine — no page reload needed
+ *
+ * ── Emulator Lifecycle ──────────────────────────────────────────────────
+ *
+ *   The WASM module is kept alive between games via hibernateEmulator() /
+ *   wakeEmulator(). Emscripten's main loop corrupts on the 3rd
+ *   EmulatorJS destroy/recreate cycle, so we never destroy — we pause
+ *   the emulator, hide the canvas, and suppress EJS UI via CSS. Mode
+ *   switching (lockstep ↔ streaming) works without page reload.
+ *
+ * ── Major Sections ──────────────────────────────────────────────────────
+ *
+ *   State & URL params .............. ~line 14
+ *   Socket.IO connection ............ ~line 151
+ *   Users updated handler ........... ~line 484
+ *   Game lifecycle (start/end) ...... ~line 591
+ *   ROM sharing UI + consent ........ ~line 715
+ *   Pre-game ROM preloading ......... ~line 1010
+ *   ROM transfer (host sending) ..... ~line 1148
+ *   ROM transfer (guest receiving) .. ~line 1303
+ *   ZIP extraction .................. ~line 1918
+ *   ROM IDB cache ................... ~line 1976
+ *   Sync log upload ................. ~line 2210
+ *   Late-join ROM prompt ............ ~line 2264
+ *   UI: Overlay ..................... ~line 2324
+ *   UI: Toolbar ..................... ~line 2495
+ *   UI: Info overlay ................ ~line 2545
+ *   UI: Toasts / errors / share ..... ~line 2632
+ *   Gamepad detection + remap wizard  ~line 2737
+ *   Delay preference ................ ~line 3245
+ *   Init ............................ ~line 3290
+ *
+ * ── Cross-Module Communication ──────────────────────────────────────────
+ *
+ *   Reads:  KNState.peers, KNState.frameNum (from engines, for info overlay)
+ *   Writes: KNState.remapActive, KNState.delayAutoValue, KNState.romHash
+ *   Exposes: window.play_notifyPeerStatus, window.play_notifyDesync,
+ *            window.play_notifyResync (engine → play.js callbacks for toasts)
+ *   Creates: window.LockstepEngine.init() or window.StreamingEngine.init()
  */
 (function () {
   'use strict';
