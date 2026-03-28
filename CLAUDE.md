@@ -144,6 +144,14 @@ All events go through the default Socket.IO namespace (`/`).
   (kn_set_deterministic, kn_set_frame_time) for lockstep sync. Falls back to stock
   CDN core with JS-level timing shim.
 
+## Versioning
+
+- **Auto-versioning** via post-commit hook (`scripts/bump-version.sh`)
+- Commit messages use **conventional commits**: `feat:` → minor bump, `fix:` → patch bump, anything else → no bump
+- Only runs on the `main` branch
+- Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
+- PRs are squash-merged; PR title becomes the commit message
+
 ## Dev environment
 
 - macOS (primary dev machine)

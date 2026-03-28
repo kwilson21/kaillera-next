@@ -54,7 +54,22 @@ If you have a controller that doesn't work well or has wrong mappings, open an i
 2. Create a branch (`git checkout -b my-fix`)
 3. Make your changes
 4. Run the pre-commit hooks (`pre-commit run --all-files`)
-5. Open a PR with a clear description of what you changed and why
+5. Open a PR — **the title must use a conventional commit prefix**:
+
+| Prefix | When to use | Version bump |
+|--------|-------------|-------------|
+| `feat:` | New feature | minor (0.X.0) |
+| `fix:` | Bug fix | patch (0.0.X) |
+| `docs:` | Documentation only | none |
+| `chore:` | Maintenance, deps | none |
+| `refactor:` | Code restructuring | none |
+| `test:` | Adding/fixing tests | none |
+
+Examples: `feat: add multiplayer chat`, `fix: resolve audio crackling on iOS`
+
+PRs are **squash merged** — the PR title becomes the commit message on main. If the
+title starts with `feat:` or `fix:`, a version bump and changelog entry are created
+automatically. Other prefixes are valid but won't trigger a release.
 
 ### Ideas and suggestions
 
@@ -150,7 +165,10 @@ The Python server is small (~1,700 lines across 5 files):
 - **HTML/CSS** — formatted by prettier.
 - **No unnecessary comments** — code should be self-evident. Add comments only
   where the *why* isn't obvious from the *what*.
+- **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):
+  `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. This drives auto-versioning.
 - Pre-commit hooks handle formatting automatically.
+- A **post-commit hook** auto-bumps the version on `feat:`/`fix:` commits to main.
 
 ### Docs layout
 

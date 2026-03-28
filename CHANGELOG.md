@@ -1,6 +1,8 @@
 # Changelog
 
-All notable changes to kaillera-next netplay are documented here.
+> **Note:** As of v0.8.0, versioning is automated. The live changelog is at
+> `/static/changelog.json` (click the version badge in the page footer).
+> This file is a historical record of the pre-automation era (v0.1.0–v0.7.0).
 
 ## [0.7.0] - 2026-03-27
 
