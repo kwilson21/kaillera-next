@@ -1,47 +1,42 @@
-"""Playwright E2E tests for OG card meta tags.
+"""E2E tests for OG card meta tags and image endpoint.
 
 Run: pytest tests/test_og_e2e.py -v
 """
 
 import re
 
-from playwright.sync_api import expect
+import requests
 
 
-def test_homepage_og_tags(page, server_url):
+def test_homepage_og_tags(server_url):
     """Homepage has OG meta tags."""
-    page.goto(f"{server_url}/")
-    og_title = page.locator('meta[property="og:title"]')
-    expect(og_title).to_have_attribute("content", "kaillera-next")
-    og_desc = page.locator('meta[property="og:description"]')
-    expect(og_desc).to_have_attribute("content", re.compile(r"Play retro games online"))
-    og_image = page.locator('meta[property="og:image"]')
-    expect(og_image).to_have_attribute("content", re.compile(r"/static/og/home\.png"))
+    r = requests.get(f"{server_url}/", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert 'property="og:title" content="kaillera-next"' in r.text
+    assert re.search(r'property="og:description" content=".*Play retro games online', r.text)
+    assert re.search(r'property="og:image" content=".*?/static/og/home\.png"', r.text)
 
 
-def test_play_invite_og_tags(page, server_url):
+def test_play_invite_og_tags(server_url):
     """Play invite link has dynamic OG meta tags."""
-    page.goto(f"{server_url}/play.html?room=TESTROOM")
-    og_title = page.locator('meta[property="og:title"]')
-    expect(og_title).to_have_attribute("content", re.compile(r"Ready to fight"))
-    og_image = page.locator('meta[property="og:image"]')
-    expect(og_image).to_have_attribute("content", re.compile(r"/og-image/TESTROOM\.png"))
-    twitter = page.locator('meta[name="twitter:card"]')
-    expect(twitter).to_have_attribute("content", "summary_large_image")
+    r = requests.get(f"{server_url}/play.html?room=TESTROOM", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert re.search(r'property="og:title" content=".*Ready to fight', r.text)
+    assert re.search(r'property="og:image" content=".*?/og-image/TESTROOM\.png"', r.text)
+    assert 'name="twitter:card" content="summary_large_image"' in r.text
 
 
-def test_watch_invite_og_tags(page, server_url):
-    """Watch invite has WATCH in title and spectate param in image URL."""
-    page.goto(f"{server_url}/play.html?room=TESTROOM&spectate=1")
-    og_title = page.locator('meta[property="og:title"]')
-    expect(og_title).to_have_attribute("content", re.compile(r"Come watch"))
-    og_image = page.locator('meta[property="og:image"]')
-    expect(og_image).to_have_attribute("content", re.compile(r"spectate=1"))
+def test_watch_invite_og_tags(server_url):
+    """Watch invite has watch text in title and spectate param in image URL."""
+    r = requests.get(f"{server_url}/play.html?room=TESTROOM&spectate=1", timeout=5, verify=False)
+    assert r.status_code == 200
+    assert re.search(r'property="og:title" content=".*Come watch', r.text)
+    assert re.search(r'property="og:image" content=".*spectate=1"', r.text)
 
 
-def test_og_image_loads(page, server_url):
-    """OG image endpoint returns a loadable image."""
-    response = page.request.get(f"{server_url}/og-image/ANYROOM.png")
-    assert response.status == 200
-    assert response.headers["content-type"] == "image/png"
-    assert len(response.body()) > 1000
+def test_og_image_loads(server_url):
+    """OG image endpoint returns a loadable PNG image."""
+    r = requests.get(f"{server_url}/og-image/ANYROOM.png", timeout=10, verify=False)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert len(r.content) > 1000

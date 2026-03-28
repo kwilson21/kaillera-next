@@ -172,21 +172,21 @@ def _build_card_html(
   .kn-bg {{
     position: absolute;
     right: 20px;
-    bottom: -10px;
+    bottom: -20px;
     font-weight: 900;
-    font-size: 260px;
+    font-size: 380px;
     color: rgba(102, 170, 255, 0.30);
-    letter-spacing: -10px;
+    letter-spacing: -14px;
     z-index: 2;
   }}
   .kn-bg-generic {{
     position: absolute;
     right: 20px;
-    bottom: -10px;
+    bottom: -20px;
     font-weight: 900;
-    font-size: 300px;
+    font-size: 420px;
     color: rgba(102, 170, 255, 0.06);
-    letter-spacing: -12px;
+    letter-spacing: -16px;
   }}
   .text-shadowed .headline {{
     text-shadow: 0 3px 16px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,1);
@@ -204,10 +204,10 @@ def _build_card_html(
   .badge {{
     display: inline-block;
     font-weight: 700;
-    font-size: 32px;
-    letter-spacing: 1.5px;
-    padding: 10px 20px;
-    border-radius: 6px;
+    font-size: 44px;
+    letter-spacing: 2px;
+    padding: 14px 28px;
+    border-radius: 8px;
     z-index: 3;
     position: relative;
     width: fit-content;
@@ -223,7 +223,7 @@ def _build_card_html(
   }}
   .headline {{
     font-weight: 800;
-    font-size: 96px;
+    font-size: 130px;
     color: #fff;
     z-index: 3;
     position: relative;
@@ -231,28 +231,28 @@ def _build_card_html(
   }}
   .subtitle-blue {{
     font-weight: 600;
-    font-size: 54px;
+    font-size: 72px;
     color: #6af;
     z-index: 3;
     position: relative;
   }}
   .subtitle-default {{
     font-weight: 600;
-    font-size: 54px;
+    font-size: 72px;
     color: #ccc;
     z-index: 3;
     position: relative;
   }}
   .game-name {{
     font-weight: 500;
-    font-size: 42px;
+    font-size: 56px;
     color: #ccc;
     z-index: 3;
     position: relative;
   }}
   .tagline {{
     font-weight: 400;
-    font-size: 34px;
+    font-size: 48px;
     color: #999;
     margin-top: 8px;
     z-index: 3;
