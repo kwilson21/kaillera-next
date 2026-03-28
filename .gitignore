@@ -34,6 +34,7 @@ package-lock.json
 
 # Screenshots (dev artifacts)
 *.png
+!web/static/og/*.png
 logs/*.log
 logs/*.json
 logs/sync/
