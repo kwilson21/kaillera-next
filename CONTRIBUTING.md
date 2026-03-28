@@ -9,7 +9,7 @@ Thanks for your interest in contributing! This project is open to contributions 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
 - Redis
-- [Tailscale](https://tailscale.com) (for HTTPS dev — required by browsers for SharedArrayBuffer)
+- [Tailscale](https://tailscale.com) (for HTTPS dev — browsers require a secure context for the performance features the emulator depends on)
 - [just](https://github.com/casey/just) (command runner)
 
 ### Setup
