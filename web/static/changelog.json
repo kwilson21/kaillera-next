@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.8.1",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "vertical alignment of version badge in lobby footer"
+      }
+    ]
+  },
+  {
     "version": "0.8.0",
     "date": "2026-03-28",
     "changes": [
