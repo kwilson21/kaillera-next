@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.8.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "auto-versioning with changelog display"
+      },
+      {
+        "type": "fix",
+        "message": "prevent permanent freeze when a peer stops advancing in lockstep"
+      },
+      {
+        "type": "feat",
+        "message": "support multiple CORS origins via comma-separated ALLOWED_ORIGIN"
+      }
+    ]
+  },
+  {
     "version": "0.7.0",
     "date": "2026-03-27",
     "changes": [
