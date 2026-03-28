@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.9.1",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "swap Konami Code for HELLO protocol trigger, enhance CRT effect"
+      }
+    ]
+  },
+  {
     "version": "0.9.0",
     "date": "2026-03-28",
     "changes": [
