@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.16.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "switch OG image generation from Pillow to Playwright HTML screenshots"
+      }
+    ]
+  },
+  {
     "version": "0.15.1",
     "date": "2026-03-28",
     "changes": [
@@ -278,20 +288,6 @@
       {
         "type": "feat",
         "message": "Emscripten pauseMainLoop/resumeMainLoop for frame stepping"
-      }
-    ]
-  },
-  {
-    "version": "0.1.0",
-    "date": "2026-03-08",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "initial lockstep prototype using rAF interception"
-      },
-      {
-        "type": "feat",
-        "message": "streaming mode — host streams canvas video via WebRTC MediaStream"
       }
     ]
   }
