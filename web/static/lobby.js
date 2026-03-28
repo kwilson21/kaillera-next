@@ -76,19 +76,12 @@
     window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}&spectate=1`;
   });
 
-  // Konami Code: ↑↑↓↓←→←→BA
+  // HELLO → HELLOD00D: type "HELLO" in the room code field (Kaillera protocol handshake)
   (() => {
-    const SEQ = [38, 38, 40, 40, 37, 39, 37, 39, 66, 65];
-    let pos = 0;
-    document.addEventListener('keydown', (e) => {
-      if (e.keyCode === SEQ[pos]) {
-        pos++;
-        if (pos === SEQ.length) {
-          pos = 0;
-          showHELLOD00D();
-        }
-      } else {
-        pos = e.keyCode === SEQ[0] ? 1 : 0;
+    codeInput.addEventListener('input', () => {
+      if (codeInput.value.toUpperCase() === 'HELLO') {
+        codeInput.value = '';
+        showHELLOD00D();
       }
     });
     const showHELLOD00D = () => {
@@ -97,8 +90,9 @@
       el.innerHTML = `
         <style>
           #kn-konami{position:fixed;inset:0;background:rgba(0,0,0,.95);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:99999;animation:kn-flick .3s ease-out;cursor:pointer}
-          #kn-konami::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,136,.03) 2px,rgba(0,255,136,.03) 4px);pointer-events:none;animation:kn-scan .1s linear infinite}
-          @keyframes kn-flick{0%{opacity:1}5%{opacity:.8}10%{opacity:1}15%{opacity:.9}20%{opacity:1}}
+          #kn-konami::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,136,.06) 2px,rgba(0,255,136,.06) 4px);pointer-events:none;animation:kn-scan .1s linear infinite}
+          #kn-konami::after{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at center,transparent 60%,rgba(0,0,0,.7) 100%);pointer-events:none}
+          @keyframes kn-flick{0%{opacity:1}3%{opacity:.7}6%{opacity:1}9%{opacity:.85}12%{opacity:1}50%{opacity:1}52%{opacity:.9}54%{opacity:1}}
           @keyframes kn-scan{to{background-position:0 4px}}
           @keyframes kn-pop{0%{transform:scale(.5);opacity:0}50%{transform:scale(1.1)}100%{transform:scale(1);opacity:1}}
           @keyframes kn-glow{0%,100%{text-shadow:0 0 10px #0f8,0 0 20px #0f8,0 0 40px #0f8}50%{text-shadow:0 0 20px #0f8,0 0 40px #0f8,0 0 80px #0f8}}
