@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.11.0",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add Pillow dependency and OG card assets"
+      }
+    ]
+  },
+  {
     "version": "0.10.2",
     "date": "2026-03-28",
     "changes": [
