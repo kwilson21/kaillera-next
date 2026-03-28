@@ -77,7 +77,7 @@ def _sanitize_str(value: str, max_len: int) -> str:
     return re.sub(r"[<>]", "", str(value))[:max_len]
 
 
-def configure_cors(origin: str) -> None:
+def configure_cors(origin: str | list[str]) -> None:
     sio.cors_allowed_origins = origin
 
 

@@ -60,12 +60,19 @@ def run() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
-    allowed_origin = os.environ.get("ALLOWED_ORIGIN", "").strip() or "*"
-    if allowed_origin == "REQUIRED":
+    raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip() or "*"
+    if raw_origin == "REQUIRED":
         log.error(
             "ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development."
         )
         sys.exit(1)
+    # Support comma-separated origins: "https://a.com,https://b.com"
+    if raw_origin == "*":
+        allowed_origin = "*"
+    elif "," in raw_origin:
+        allowed_origin = [o.strip() for o in raw_origin.split(",") if o.strip()]
+    else:
+        allowed_origin = raw_origin
     if allowed_origin == "*":
         log.warning("CORS allowed origin is '*' — set ALLOWED_ORIGIN for production")
     log.info("CORS allowed origin: %s", allowed_origin)
