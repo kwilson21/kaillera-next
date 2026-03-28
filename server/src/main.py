@@ -40,6 +40,13 @@ async def lifespan(_app):
         log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
     log_task = asyncio.create_task(cleanup_old_logs())
+    # Warm up Playwright browser so the first OG image request isn't slow
+    try:
+        from src.api.og import _get_browser
+
+        await asyncio.to_thread(_get_browser)
+    except Exception as e:
+        log.warning("OG image warmup failed (non-fatal): %s", e)
     yield
     set_shutting_down()
     task.cancel()
