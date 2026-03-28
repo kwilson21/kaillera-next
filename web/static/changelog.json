@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.17.1",
+    "date": "2026-03-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "warm up Playwright browser on startup for fast first OG image"
+      }
+    ]
+  },
+  {
     "version": "0.17.0",
     "date": "2026-03-28",
     "changes": [
@@ -274,20 +284,6 @@
       {
         "type": "feat",
         "message": "desync detection with deferred hash checks"
-      }
-    ]
-  },
-  {
-    "version": "0.3.0",
-    "date": "2026-03-15",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "free-running input sync — both emulators at 60fps independently"
-      },
-      {
-        "type": "feat",
-        "message": "configurable DELAY_FRAMES input buffer"
       }
     ]
   }
