@@ -1417,9 +1417,13 @@
         // Log if we receive input for a frame we already applied (too late)
         const currentApply = _frameNum - DELAY_FRAMES;
         if (_running && recvFrame < currentApply) {
-          _syncLog(
-            `INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`,
-          );
+          const now = performance.now();
+          if (!_inputLateLogTime[peer.slot] || now - _inputLateLogTime[peer.slot] >= 1000) {
+            _inputLateLogTime[peer.slot] = now;
+            _syncLog(
+              `INPUT-LATE slot=${peer.slot} recvF=${recvFrame} applyF=${currentApply} behind=${currentApply - recvFrame}`,
+            );
+          }
         }
         _remoteInputs[peer.slot][recvFrame] = recvInput;
         _lastKnownInput[peer.slot] = recvInput;
@@ -1431,6 +1435,14 @@
         if (recvFrame > _lastRemoteFrame) _lastRemoteFrame = recvFrame;
         if (!_lastRemoteFramePerSlot[peer.slot] || recvFrame > _lastRemoteFramePerSlot[peer.slot]) {
           _lastRemoteFramePerSlot[peer.slot] = recvFrame;
+          _peerLastAdvanceTime[peer.slot] = performance.now();
+          // Peer recovered from phantom — clear phantom state
+          if (_peerPhantom[peer.slot]) {
+            _syncLog(`PEER-RECOVERED slot=${peer.slot} f=${recvFrame} — resuming normal pacing`);
+            _peerPhantom[peer.slot] = false;
+            _consecutiveFabrications[peer.slot] = 0;
+            window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
+          }
         }
       }
     };
@@ -2422,6 +2434,12 @@
   let _remoteApplied = 0;
   let _lastRemoteFrame = -1;
   let _lastRemoteFramePerSlot = {}; // slot -> highest frame received from that peer
+  let _peerLastAdvanceTime = {}; // slot -> performance.now() when peer last sent a NEW frame
+  let _peerPhantom = {}; // slot -> true when peer is detected as unresponsive
+  const PEER_DEAD_MS = 5000; // 5s without frame advance → peer is dead
+  let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
+  const RAPID_FABRICATION_THRESHOLD = 2; // after N consecutive fabrications, skip stall wait
+  let _inputLateLogTime = {}; // slot -> last time INPUT-LATE was logged (rate-limiting)
 
   const startLockstep = () => {
     if (_running) return;
@@ -2452,6 +2470,10 @@
     _remoteApplied = 0;
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
+    _peerLastAdvanceTime = {};
+    _peerPhantom = {};
+    _consecutiveFabrications = {};
+    _inputLateLogTime = {};
     _stallStart = 0;
     window._netplayFrameLog = [];
 
@@ -2722,12 +2744,35 @@
     if (_frameNum >= FRAME_PACING_WARMUP) {
       const inputPeersForPacing = getInputPeers();
       if (inputPeersForPacing.length > 0) {
-        let minRemoteFrame = Infinity;
+        // Detect phantom peers — those that haven't advanced for PEER_DEAD_MS
+        const nowPacing = performance.now();
         for (const p of inputPeersForPacing) {
+          if (!_peerPhantom[p.slot] && _peerLastAdvanceTime[p.slot] !== undefined) {
+            if (nowPacing - _peerLastAdvanceTime[p.slot] >= PEER_DEAD_MS) {
+              _peerPhantom[p.slot] = true;
+              _syncLog(
+                `PEER-PHANTOM slot=${p.slot} lastAdvance=${_peerLastAdvanceTime[p.slot].toFixed(0)} staleSec=${((nowPacing - _peerLastAdvanceTime[p.slot]) / 1000).toFixed(1)} — excluded from pacing`,
+              );
+              // Notify UI that a peer has been dropped
+              window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: p.slot } }));
+            }
+          }
+        }
+        // Exclude phantom peers from frame pacing — they're dead and shouldn't throttle us
+        let minRemoteFrame = Infinity;
+        let activePacingPeers = 0;
+        for (const p of inputPeersForPacing) {
+          if (_peerPhantom[p.slot]) continue; // skip dead peers
           const rf = _lastRemoteFramePerSlot[p.slot] ?? -1;
           if (rf < minRemoteFrame) minRemoteFrame = rf;
+          activePacingPeers++;
         }
-        if (minRemoteFrame >= 0) {
+        // If no active pacing peers remain, release any active cap
+        if (activePacingPeers === 0 && _framePacingActive) {
+          _framePacingActive = false;
+          _syncLog('FRAME-CAP released — all peers phantom');
+        }
+        if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
@@ -2800,63 +2845,93 @@
       }
 
       if (!allArrived) {
-        // STALL -- remote input not here yet
-        if (_stallStart === 0) {
-          _stallStart = now;
-          _resendSent = false;
-          // Log first stall occurrence with full state
-          const rBufSizes = {};
-          for (const s of Object.keys(_remoteInputs)) {
-            rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
-          }
-          _syncLog(
-            `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`,
-          );
-        }
-        const stallDuration = now - _stallStart;
-        if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-          // Hard timeout — fabricate ZERO_INPUT for all missing slots.
-          // Always ZERO_INPUT (never _lastKnownInput) so all players agree.
+        // Check if ALL missing peers are phantom (dead) or in rapid-fabrication mode
+        const allMissingArePhantom = _missingSlots.every(
+          (s) => _peerPhantom[s] || (_consecutiveFabrications[s] || 0) >= RAPID_FABRICATION_THRESHOLD,
+        );
+
+        if (allMissingArePhantom) {
+          // Rapid fabrication — peer(s) confirmed dead, no wait
           const repeatInfo = [];
-          for (let k = 0; k < inputPeers.length; k++) {
-            const s = inputPeers[k].slot;
+          for (const s of _missingSlots) {
             if (!_remoteInputs[s]) _remoteInputs[s] = {};
             if (_remoteInputs[s][applyFrame] === undefined) {
               _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
+              _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
               repeatInfo.push(`s${s}=0`);
             }
           }
-          _syncLog(
-            `INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
-          );
-          _stallStart = 0;
-        } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-          // Stage 2 — request resend from missing peers (once per stall)
-          _resendSent = true;
-          for (let k2 = 0; k2 < inputPeers.length; k2++) {
-            const s2 = inputPeers[k2].slot;
-            if (_remoteInputs[s2]?.[applyFrame] !== undefined) continue;
-            const dc2 = inputPeers[k2].dc;
-            if (dc2?.readyState === 'open') {
-              try {
-                dc2.send(`resend:${applyFrame}`);
-              } catch (_) {}
-            }
+          // Log once per second to avoid flooding
+          if (_stallStart === 0 || now - _stallStart >= 1000) {
+            _stallStart = now;
+            _syncLog(
+              `INPUT-FABRICATE f=${_frameNum} apply=${applyFrame} phantom=[${_missingSlots.join(',')}] fabricated=[${repeatInfo.join(',')}]`,
+            );
           }
-          _syncLog(
-            `INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
-          );
-          _remoteMissed++;
-          // Don't re-enter full tick() — that causes burst frame processing
-          // when buffered inputs resolve. Let setInterval(16) handle the
-          // next frame step at the natural 60fps cadence.
-          return;
         } else {
-          _remoteMissed++;
-          return;
-        }
+          // STALL -- remote input not here yet (normal path for live peers)
+          if (_stallStart === 0) {
+            _stallStart = now;
+            _resendSent = false;
+            // Log first stall occurrence with full state
+            const rBufSizes = {};
+            for (const s of Object.keys(_remoteInputs)) {
+              rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
+            }
+            _syncLog(
+              `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`,
+            );
+          }
+          const stallDuration = now - _stallStart;
+          if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+            // Hard timeout — fabricate ZERO_INPUT for all missing slots.
+            // Always ZERO_INPUT (never _lastKnownInput) so all players agree.
+            const repeatInfo = [];
+            for (let k = 0; k < inputPeers.length; k++) {
+              const s = inputPeers[k].slot;
+              if (!_remoteInputs[s]) _remoteInputs[s] = {};
+              if (_remoteInputs[s][applyFrame] === undefined) {
+                _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
+                _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
+                repeatInfo.push(`s${s}=0`);
+              }
+            }
+            _syncLog(
+              `INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
+            );
+            _stallStart = 0;
+          } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
+            // Stage 2 — request resend from missing peers (once per stall)
+            _resendSent = true;
+            for (let k2 = 0; k2 < inputPeers.length; k2++) {
+              const s2 = inputPeers[k2].slot;
+              if (_remoteInputs[s2]?.[applyFrame] !== undefined) continue;
+              const dc2 = inputPeers[k2].dc;
+              if (dc2?.readyState === 'open') {
+                try {
+                  dc2.send(`resend:${applyFrame}`);
+                } catch (_) {}
+              }
+            }
+            _syncLog(
+              `INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
+            );
+            _remoteMissed++;
+            // Don't re-enter full tick() — that causes burst frame processing
+            // when buffered inputs resolve. Let setInterval(16) handle the
+            // next frame step at the natural 60fps cadence.
+            return;
+          } else {
+            _remoteMissed++;
+            return;
+          }
+        } // end normal stall path (else of allMissingArePhantom)
       } else {
         _stallStart = 0;
+        // Reset consecutive fabrication counts for peers whose input arrived
+        for (const p of inputPeers) {
+          if (_consecutiveFabrications[p.slot]) _consecutiveFabrications[p.slot] = 0;
+        }
       }
 
       // Write ALL inputs to Wasm memory — use inputPeers for peers
@@ -3785,6 +3860,10 @@
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
+    _peerLastAdvanceTime = {};
+    _peerPhantom = {};
+    _consecutiveFabrications = {};
+    _inputLateLogTime = {};
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;

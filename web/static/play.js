@@ -118,6 +118,14 @@
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
 
+  const getPlayerNameBySlot = (slot) => {
+    if (!lastUsersData?.players) return null;
+    for (const p of Object.values(lastUsersData.players)) {
+      if (p.slot === slot) return escapeHtml(p.playerName);
+    }
+    return null;
+  };
+
   // ── URL Params ─────────────────────────────────────────────────────────
 
   const parseParams = () => {
@@ -322,6 +330,18 @@
     socket.on('room-closed', onRoomClosed);
     socket.on('rom-sharing-updated', onRomSharingUpdated);
     socket.on('data-message', onDataMessage);
+
+    // Lockstep peer-phantom notifications
+    window.addEventListener('kn-peer-phantom', (e) => {
+      const slot = e.detail?.slot;
+      const name = getPlayerNameBySlot(slot) || `Player ${slot + 1}`;
+      showToast(`${name} is unresponsive — continuing without them`);
+    });
+    window.addEventListener('kn-peer-recovered', (e) => {
+      const slot = e.detail?.slot;
+      const name = getPlayerNameBySlot(slot) || `Player ${slot + 1}`;
+      showToast(`${name} reconnected`);
+    });
   };
 
   const sendDeviceType = () => {
