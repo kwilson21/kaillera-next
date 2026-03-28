@@ -1,0 +1,20 @@
+name: PR Title Check
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate conventional commit prefix
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          if echo "$TITLE" | grep -qE '^(feat|fix|docs|chore|refactor|test|style|perf|ci|build)(\(.*\))?: .+'; then
+            echo "✅ PR title is valid: $TITLE"
+          else
+            echo "❌ PR title must start with a conventional commit prefix:"
+            echo "   feat: / fix: / docs: / chore: / refactor: / test: / style: / perf: / ci: / build:"
+            echo "   Got: $TITLE"
+            exit 1
+          fi
