@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.18.1",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "exempt /static/og/ from COEP, add og:image dimensions"
+      }
+    ]
+  },
+  {
     "version": "0.18.0",
     "date": "2026-03-29",
     "changes": [
@@ -238,32 +248,6 @@
       {
         "type": "fix",
         "message": "delta base buffer detached by Web Worker transfer"
-      }
-    ]
-  },
-  {
-    "version": "0.5.0",
-    "date": "2026-03-20",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "late-join pull model — joiner requests state when emulator is ready"
-      },
-      {
-        "type": "feat",
-        "message": "room auto-closes when host leaves mid-game"
-      },
-      {
-        "type": "fix",
-        "message": "frozen frame ghosting on game end"
-      },
-      {
-        "type": "fix",
-        "message": "late-joiner lastUsersData race condition"
-      },
-      {
-        "type": "fix",
-        "message": "WebRTC offer-before-listener race on late-join"
       }
     ]
   }
