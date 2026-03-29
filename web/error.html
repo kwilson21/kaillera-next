@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Error — kaillera-next</title>
+  </head>
+  <body data-error-code="{{CODE}}">
+    <div id="root"></div>
+    <noscript
+      ><h1>Error {{CODE}}</h1>
+      <p>Something went wrong.</p>
+      <a href="/">Back to lobby</a></noscript
+    >
+    <script>
+      (() => {
+        const code = document.body.dataset.errorCode;
+        document.title = `Error ${code} — kaillera-next`;
+
+        // Theme selection: ?theme=N override or random
+        const params = new URLSearchParams(location.search);
+        const override = parseInt(params.get('theme'), 10);
+        const themeIndex = override >= 1 && override <= 4 ? override : Math.floor(Math.random() * 4) + 1;
+
+        const tpl = document.getElementById(`theme-${themeIndex}`);
+        if (tpl) {
+          document.getElementById('root').appendChild(tpl.content.cloneNode(true));
+        }
+
+        // Replace all {{CODE}} placeholders in the activated theme
+        document.getElementById('root').innerHTML = document
+          .getElementById('root')
+          .innerHTML.replaceAll('{{CODE}}', code);
+
+        // Run theme-specific init if defined
+        const initFn = window[`initTheme${themeIndex}`];
+        if (typeof initFn === 'function') initFn(code);
+      })();
+    </script>
+
+    <!-- Theme templates added in subsequent tasks -->
+    <template id="theme-1"></template>
+    <template id="theme-2"></template>
+    <template id="theme-3"></template>
+    <template id="theme-4"></template>
+  </body>
+</html>

@@ -279,6 +279,71 @@ class CacheBustMiddleware:
         await self.app(scope, receive, capture_send)
 
 
+# ── Error page middleware ─────────────────────────────────────────────────────
+
+
+class ErrorPageMiddleware:
+    """ASGI middleware that serves custom HTML error pages for browser requests.
+
+    Intercepts 404/500/429 responses for requests that accept text/html and
+    are not on API paths. Injects the status code into the HTML template.
+    """
+
+    _API_PREFIXES = ("/api/", "/admin/api/", "/socket.io/", "/health", "/list", "/room/", "/ice-servers", "/og-image/")
+
+    def __init__(self, app, error_html: str) -> None:  # noqa: ANN001
+        self.app = app
+        self._error_html = error_html
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+        # Skip API paths — they return JSON
+        if any(path.startswith(p) for p in self._API_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        # Only intercept browser navigation (Accept: text/html)
+        headers = dict(scope.get("headers", []))
+        accept = headers.get(b"accept", b"").decode()
+        if "text/html" not in accept:
+            await self.app(scope, receive, send)
+            return
+
+        # Capture response; replace error status with custom page
+        intercepted = False
+
+        async def capture_send(message: dict) -> None:
+            nonlocal intercepted
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                if status in (404, 500, 429):
+                    intercepted = True
+                    html = self._error_html.replace("{{CODE}}", str(status))
+                    body = html.encode()
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": status,
+                            "headers": [
+                                (b"content-type", b"text/html; charset=utf-8"),
+                                (b"content-length", str(len(body)).encode()),
+                            ],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+                await send(message)
+            elif message["type"] == "http.response.body":
+                if not intercepted:
+                    await send(message)
+
+        await self.app(scope, receive, capture_send)
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
@@ -295,6 +360,16 @@ def create_app(lifespan=None) -> FastAPI:
     version = _asset_version()
     app.add_middleware(CacheBustMiddleware, version=version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
+
+    # Load error page template
+    _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
+    if _error_html_path.exists():
+        _error_html = _error_html_path.read_text()
+        app.add_middleware(ErrorPageMiddleware, error_html=_error_html)
+        log.info("Custom error pages loaded")
+    else:
+        log.warning("web/error.html not found — using default error responses")
+
     log.info("Cache bust version: %s", version)
 
     @app.get("/health")
