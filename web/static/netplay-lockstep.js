@@ -760,6 +760,7 @@
           _syncLog('audio using AudioWorklet');
         } catch (wErr) {
           _syncLog(`AudioWorklet failed, using fallback: ${wErr.message}`);
+          KNEvent('audio-fail', `AudioWorklet failed: ${wErr.message}`, { error: wErr.message });
         }
       }
 
@@ -1028,6 +1029,7 @@
       }
       if (s === 'failed') {
         // Failed is terminal — disconnect immediately
+        KNEvent('webrtc-fail', 'Peer connection failed', { slot: peer.slot, remoteSid });
         if (peer._disconnectTimer) {
           clearTimeout(peer._disconnectTimer);
           peer._disconnectTimer = null;
@@ -1276,10 +1278,17 @@
             );
             if (_hasKnSync) {
               // C-level hash — synchronous comparison
-              const mod = window.EJS_emulator.gameManager.Module;
+              const mod = window.EJS_emulator?.gameManager?.Module;
+              if (!mod) return;
               const guestHash = mod._kn_sync_hash();
               if (guestHash !== hostHash) {
                 _syncLog(`DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`);
+                KNEvent('desync', `Desync at frame ${syncFrame}`, {
+                  frame: syncFrame,
+                  local: guestHash,
+                  host: hostHash,
+                });
+                KNState.sessionStats.desyncs++;
                 _recordDrift(null);
                 if (hostCycleMs !== null && mod._kn_get_cycle_time_ms) {
                   const guestCycleMs = mod._kn_get_cycle_time_ms();
@@ -1343,7 +1352,7 @@
                       _resetDrift();
                     }
                   })
-                  .catch(() => {});
+                  .catch((e) => _syncLog(`sync hash worker failed: ${e.message || e}`));
               } catch (_) {}
             }
           } else if (_frameNum < syncFrame) {
@@ -1961,7 +1970,8 @@
 
     _syncLog(`${readyCount + 1} players lockstep-ready -- GO`);
 
-    const gm = window.EJS_emulator.gameManager;
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm) return;
 
     // If no state bytes (host fallback), capture current state
     if (!_guestStateBytes) {
@@ -2034,7 +2044,7 @@
             );
             socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
           })
-          .catch(() => {});
+          .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
       }
 
       _selfLockstepReady = true;
@@ -2053,7 +2063,8 @@
   };
 
   async function sendInitialState() {
-    const gm = window.EJS_emulator.gameManager;
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm) return;
     try {
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
@@ -2360,7 +2371,8 @@
     if (_manualMode) return;
     if (_isSpectator) return; // spectators never enter manual mode
 
-    const mod = window.EJS_emulator.gameManager.Module;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod) return;
 
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
@@ -2585,7 +2597,7 @@
     // Detect patched core with kn_sync exports. Buffer is allocated lazily
     // on first use (see ensureSyncBuffer) to avoid triggering WASM memory
     // growth at startup when sync may never be needed.
-    const knMod = window.EJS_emulator && window.EJS_emulator.gameManager && window.EJS_emulator.gameManager.Module;
+    const knMod = window.EJS_emulator?.gameManager?.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
     if (_hasKnSync) {
       if (_syncEnabled) {
@@ -2900,6 +2912,12 @@
             _syncLog(
               `INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
             );
+            KNEvent('stall', `Input stall at frame ${_frameNum}`, {
+              frame: _frameNum,
+              stallMs: Math.round(stallDuration),
+              missing: [..._missingSlots],
+            });
+            KNState.sessionStats.stalls++;
             _stallStart = 0;
           } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
             // Stage 2 — request resend from missing peers (once per stall)
@@ -3027,7 +3045,7 @@
     // Deferred sync check: guest was behind when sync-hash arrived, now caught up.
     if (_pendingSyncCheck && _frameNum >= _pendingSyncCheck.frame) {
       if (_frameNum - _pendingSyncCheck.frame <= 2) {
-        if (_hasKnSync) {
+        if (_hasKnSync && window.EJS_emulator?.gameManager?.Module) {
           // C-level hash — synchronous comparison
           const mod = window.EJS_emulator.gameManager.Module;
           const guestHash = mod._kn_sync_hash();
@@ -3098,7 +3116,7 @@
                     _resetDrift();
                   }
                 })
-                .catch(() => {});
+                .catch((e) => _syncLog(`deferred sync hash worker failed: ${e.message || e}`));
             }
           } catch (_) {}
         }
@@ -3108,7 +3126,7 @@
 
     // -- Periodic desync check (star topology: host-only) -----
     if (_syncEnabled && _playerSlot === 0 && _frameNum > 0 && _frameNum % _syncCheckInterval === 0) {
-      if (_hasKnSync) {
+      if (_hasKnSync && window.EJS_emulator?.gameManager?.Module) {
         // C-level hash — synchronous, no HEAPU8, no worker
         const mod = window.EJS_emulator.gameManager.Module;
         const hash = mod._kn_sync_hash();
@@ -3145,7 +3163,7 @@
               const hostMsg = `sync-check frame=${checkFrame} hash=${res.hash} sent=${sent}/${peers.length}`;
               _syncLog(hostMsg);
             })
-            .catch(() => {});
+            .catch((e) => _syncLog(`periodic sync hash worker failed: ${e.message || e}`));
         }
       }
     }
@@ -3496,7 +3514,8 @@
 
     // Fallback: getState() — expensive but always correct
     try {
-      const gm = window.EJS_emulator.gameManager;
+      const gm = window.EJS_emulator?.gameManager;
+      if (!gm) return null;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       return bytes.slice(0x100000, Math.min(0x300000, bytes.length));

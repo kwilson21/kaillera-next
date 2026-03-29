@@ -373,10 +373,14 @@
   const sendOffer = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
-    const offer = await peer.pc.createOffer();
-    offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
-    await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer });
+    try {
+      const offer = await peer.pc.createOffer();
+      offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
+      await peer.pc.setLocalDescription(offer);
+      socket.emit('webrtc-signal', { target: remoteSid, offer });
+    } catch (err) {
+      _syncLog(`sendOffer failed for ${remoteSid}: ${err.message || err}`);
+    }
   };
 
   const onWebRTCSignal = async (data) => {
@@ -999,11 +1003,15 @@
     if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
       const gameEl = config.gameElement || document.getElementById('game');
       if (gameEl) {
-        VirtualGamepad.init(gameEl);
-        gameEl.style.margin = '0';
-        // If a physical gamepad is already connected, hide virtual controls immediately
-        const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-        if (detected.length > 0) VirtualGamepad.setVisible(false);
+        try {
+          VirtualGamepad.init(gameEl);
+          gameEl.style.margin = '0';
+          // If a physical gamepad is already connected, hide virtual controls immediately
+          const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+          if (detected.length > 0) VirtualGamepad.setVisible(false);
+        } catch (err) {
+          _syncLog(`VirtualGamepad init failed: ${err.message || err}`);
+        }
       }
     }
   };

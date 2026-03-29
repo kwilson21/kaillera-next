@@ -1,9 +1,19 @@
 (function () {
   'use strict';
 
-  let adminKey = KNStorage.get("localStorage", 'kn-admin-key') || '';
+  let adminKey = KNStorage.get('localStorage', 'kn-admin-key') || '';
 
   const $ = (sel) => document.querySelector(sel);
+
+  const copyText = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      showToast('Clipboard unavailable');
+      return false;
+    }
+  };
 
   // ── Auth ──────────────────────────────────────────────────────────────
 
@@ -27,11 +37,11 @@
 
   $('#auth-btn').addEventListener('click', async () => {
     adminKey = $('#admin-key-input').value.trim();
-    KNStorage.set("localStorage", 'kn-admin-key', adminKey);
+    KNStorage.set('localStorage', 'kn-admin-key', adminKey);
     const ok = await checkAuth();
     if (!ok) {
       $('#auth-error').classList.remove('hidden');
-      KNStorage.remove("localStorage", 'kn-admin-key');
+      KNStorage.remove('localStorage', 'kn-admin-key');
       adminKey = '';
     } else {
       $('#auth-error').classList.add('hidden');
@@ -41,6 +51,19 @@
 
   $('#admin-key-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#auth-btn').click();
+  });
+
+  // ── Tabs ──────────────────────────────────────────────────────────────
+
+  document.querySelectorAll('.tab-bar .tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab-bar .tab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      const target = tab.dataset.tab;
+      document.querySelectorAll('[id^="tab-"]').forEach((el) => {
+        el.classList.toggle('hidden', el.id !== `tab-${target}`);
+      });
+    });
   });
 
   // ── Stats ─────────────────────────────────────────────────────────────
@@ -61,6 +84,7 @@
       { label: 'Spectators', value: s.spectators },
       { label: 'Log Files', value: s.log_count },
       { label: 'Log Size', value: formatBytes(s.log_size_bytes) },
+      { label: 'Client Events', value: s.error_count ?? 0 },
       { label: 'Retention', value: `${s.retention_days}d` },
     ]
       .map((c) => `<div class="stat-card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`)
@@ -276,10 +300,9 @@
     _currentViewerFilename = null;
   });
 
-  $('#viewer-copy').addEventListener('click', () => {
+  $('#viewer-copy').addEventListener('click', async () => {
     const content = $('#viewer-content').textContent;
-    if (content) {
-      navigator.clipboard.writeText(content);
+    if (content && (await copyText(content))) {
       showToast('Log copied');
     }
   });
@@ -300,8 +323,7 @@
 
   const copyOneLog = async (filename) => {
     const text = await fetchLogContent(filename);
-    if (text) {
-      navigator.clipboard.writeText(text);
+    if (text && (await copyText(text))) {
       showToast('Log copied');
     }
   };
@@ -339,8 +361,9 @@
     entries.sort((a, b) => a.slot - b.slot);
 
     const json = JSON.stringify({ room, timestamp: new Date().toISOString(), logs: entries }, null, 2);
-    navigator.clipboard.writeText(json);
-    showToast(`Copied ${entries.length} log${entries.length > 1 ? 's' : ''} as JSON`);
+    if (await copyText(json)) {
+      showToast(`Copied ${entries.length} log${entries.length > 1 ? 's' : ''} as JSON`);
+    }
   };
 
   // ── Actions ─────────────────────────────────────────────────────────
@@ -368,11 +391,180 @@
     await loadLogs();
   };
 
+  // ── Client Events ──────────────────────────────────────────────────────
+
+  let currentErrors = [];
+  const errorContentCache = {};
+
+  const loadErrors = async () => {
+    const res = await fetch('/admin/api/errors', { headers: headers() });
+    if (!res.ok) return;
+    currentErrors = await res.json();
+    renderErrors();
+  };
+
+  const _typeColors = {
+    'webrtc-fail': '#e74c3c',
+    'wasm-fail': '#e74c3c',
+    desync: '#f39c12',
+    stall: '#f39c12',
+    reconnect: '#3498db',
+    'audio-fail': '#e67e22',
+    unhandled: '#e74c3c',
+    compat: '#9b59b6',
+    'session-end': '#2ecc71',
+  };
+
+  const renderErrors = () => {
+    const container = $('#error-list');
+    const noErrors = $('#no-errors');
+    const filterType = $('#error-type-filter')?.value || '';
+
+    const filtered = filterType ? currentErrors.filter((e) => e.type === filterType) : currentErrors;
+
+    if (filtered.length === 0) {
+      container.innerHTML = '';
+      noErrors.classList.remove('hidden');
+      return;
+    }
+    noErrors.classList.add('hidden');
+
+    const groups = groupByRoom(filtered);
+    container.innerHTML = groups
+      .map(([room, events]) => {
+        const newest = Math.max(...events.map((e) => e.created));
+        const types = [...new Set(events.map((e) => e.type))].sort();
+
+        const rows = events
+          .map((e) => {
+            const fn = escapeHtml(e.filename);
+            const color = _typeColors[e.type] || '#999';
+            return `<tr data-error-file="${fn}">
+          <td><span class="source-badge" style="border-color:${color};color:${color}">${escapeHtml(e.type)}</span></td>
+          <td>${formatBytes(e.size)}</td>
+          <td title="${new Date(e.created * 1000).toLocaleString()}">${timeAgo(e.created)}</td>
+          <td class="action-cell">
+            <button class="btn-small" data-action="copy-error" data-file="${fn}" title="Copy JSON">Copy</button>
+            <button class="btn-small btn-danger" data-action="delete-error" data-file="${fn}">Del</button>
+          </td>
+        </tr>`;
+          })
+          .join('');
+
+        return `<div class="room-group" data-room="${escapeHtml(room)}">
+        <div class="room-header">
+          <div class="room-info">
+            <span class="room-code">${escapeHtml(room)}</span>
+            <span class="room-meta">${events.length} event${events.length > 1 ? 's' : ''} &middot; ${types.join(', ')} &middot; ${timeAgo(newest)}</span>
+          </div>
+          <button class="btn-small" data-action="copy-room-errors" data-room="${escapeHtml(room)}" title="Copy all events for this room as JSON">Copy Room JSON</button>
+        </div>
+        <table>
+          <thead><tr><th>Type</th><th>Size</th><th>Date</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+      })
+      .join('');
+  };
+
+  const viewError = async (filename) => {
+    const viewer = $('#log-viewer');
+    const content = $('#viewer-content');
+    const title = $('#viewer-title');
+    const meta = $('#viewer-meta');
+
+    _currentViewerFilename = filename;
+    title.textContent = filename;
+    meta.innerHTML = '';
+    content.textContent = 'Loading...';
+    viewer.classList.remove('hidden');
+
+    if (!errorContentCache[filename]) {
+      const res = await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { headers: headers() });
+      if (!res.ok) {
+        content.textContent = 'Error loading event';
+        return;
+      }
+      errorContentCache[filename] = await res.text();
+    }
+    const text = errorContentCache[filename];
+    try {
+      content.textContent = JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      content.textContent = text;
+    }
+
+    // Show meta from parsed JSON
+    try {
+      const data = JSON.parse(text);
+      const parts = [];
+      if (data.ua) parts.push(`<span class="meta-tag">${formatUserAgent(data.ua)}</span>`);
+      if (data.msg) parts.push(`<span class="meta-events">${escapeHtml(String(data.msg).slice(0, 200))}</span>`);
+      meta.innerHTML = parts.join('');
+    } catch {}
+
+    viewer.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const deleteError = async (filename) => {
+    if (!confirm(`Delete ${filename}?`)) return;
+    await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { method: 'DELETE', headers: headers() });
+    if (_currentViewerFilename === filename) {
+      $('#log-viewer').classList.add('hidden');
+      _currentViewerFilename = null;
+    }
+    delete errorContentCache[filename];
+    await loadErrors();
+  };
+
+  const copyError = async (filename) => {
+    if (!errorContentCache[filename]) {
+      const res = await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { headers: headers() });
+      if (!res.ok) return;
+      errorContentCache[filename] = await res.text();
+    }
+    if (await copyText(errorContentCache[filename])) {
+      showToast('Event JSON copied');
+    }
+  };
+
+  const copyRoomErrors = async (room) => {
+    const roomEvents = currentErrors.filter((e) => e.room === room);
+    if (!roomEvents.length) return;
+
+    showToast('Fetching events...');
+
+    const entries = await Promise.all(
+      roomEvents.map(async (e) => {
+        if (!errorContentCache[e.filename]) {
+          const res = await fetch(`/admin/api/errors/${encodeURIComponent(e.filename)}`, { headers: headers() });
+          if (res.ok) errorContentCache[e.filename] = await res.text();
+        }
+        try {
+          return JSON.parse(errorContentCache[e.filename] || '{}');
+        } catch {
+          return { filename: e.filename, error: 'parse failed' };
+        }
+      }),
+    );
+
+    const json = JSON.stringify({ room, timestamp: new Date().toISOString(), events: entries }, null, 2);
+    if (await copyText(json)) {
+      showToast(`Copied ${entries.length} event${entries.length > 1 ? 's' : ''} as JSON`);
+    }
+  };
+
+  if ($('#error-type-filter')) {
+    $('#error-type-filter').addEventListener('change', renderErrors);
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────
 
   const loadAll = async () => {
     await loadStats();
     await loadLogs();
+    await loadErrors();
   };
 
   const init = async () => {
@@ -402,6 +594,21 @@
     }
     const row = e.target.closest('tr[data-filename]');
     if (row) viewLog(row.dataset.filename);
+  });
+
+  $('#error-list')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (btn) {
+      e.stopPropagation();
+      const file = btn.dataset.file;
+      const action = btn.dataset.action;
+      if (action === 'delete-error') deleteError(file);
+      else if (action === 'copy-error') copyError(file);
+      else if (action === 'copy-room-errors') copyRoomErrors(btn.dataset.room);
+      return;
+    }
+    const row = e.target.closest('tr[data-error-file]');
+    if (row) viewError(row.dataset.errorFile);
   });
 
   $('#refresh-btn').addEventListener('click', () => loadAll());

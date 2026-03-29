@@ -110,6 +110,7 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
   let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
+  const _sessionStart = Date.now();
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -134,18 +135,19 @@
   const parseParams = () => {
     const params = new URLSearchParams(window.location.search);
     roomCode = params.get('room');
+    KNState.room = roomCode;
     isHost = params.get('host') === '1';
-    playerName = params.get('name') || _safeGet('localStorage','kaillera-name') || 'Player';
-    _safeSet('localStorage','kaillera-name', playerName);
+    playerName = params.get('name') || _safeGet('localStorage', 'kaillera-name') || 'Player';
+    _safeSet('localStorage', 'kaillera-name', playerName);
     mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
   };
 
   // ── Recover pending logs from previous session ───────────────────────
   try {
-    const pending = _safeGet('localStorage','kn-pending-log');
+    const pending = _safeGet('localStorage', 'kn-pending-log');
     if (pending) {
-      _safeRemove('localStorage','kn-pending-log');
+      _safeRemove('localStorage', 'kn-pending-log');
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
         // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
@@ -168,6 +170,7 @@
   window.addEventListener('unhandledrejection', (e) => {
     console.error('[play] unhandled rejection:', e.reason);
     showToast('Something went wrong — check console');
+    KNEvent('unhandled', String(e.reason)?.slice(0, 500), { stack: e.reason?.stack?.slice(0, 500) });
   });
 
   // ── Clean tab close ───────────────────────────────────────────────────
@@ -193,7 +196,7 @@
 
     // Store full log in localStorage for reliable recovery on next visit
     try {
-      _safeSet('localStorage','kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
+      _safeSet('localStorage', 'kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
     } catch (_) {}
 
     // Also fire sendBeacon with truncated log (browsers cap at ~64KB)
@@ -207,6 +210,16 @@
     try {
       navigator.sendBeacon(url, new Blob([beaconLog], { type: 'text/plain' }));
     } catch (_) {}
+
+    // Session summary event
+    KNEvent('session-end', 'session complete', {
+      duration: Math.round((Date.now() - _sessionStart) / 1000),
+      reconnects: KNState.sessionStats.reconnects,
+      desyncs: KNState.sessionStats.desyncs,
+      stalls: KNState.sessionStats.stalls,
+      mode: engine?.mode || 'unknown',
+      players: Object.keys(KNState.peers || {}).length + 1,
+    });
   });
 
   // ── Socket.IO ──────────────────────────────────────────────────────────
@@ -269,6 +282,8 @@
     });
     socket.on('reconnect', (attempt) => {
       console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
+      KNEvent('reconnect', `Reconnected after ${attempt} attempt(s)`, { attempts: attempt });
+      KNState.sessionStats.reconnects++;
       _hideReconnecting();
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
       const payload = isHost
@@ -333,8 +348,9 @@
     socket.on('users-updated', onUsersUpdated);
     socket.on('upload-token', (data) => {
       _uploadToken = data?.token || '';
+      KNState.uploadToken = _uploadToken;
       try {
-        _safeSet('localStorage','kn-upload-token', _uploadToken);
+        _safeSet('localStorage', 'kn-upload-token', _uploadToken);
       } catch (_) {}
     });
     socket.on('game-started', onGameStarted);
@@ -591,6 +607,7 @@
     for (const entry of Object.values(players)) {
       if (entry.socketId === socket.id) {
         mySlot = entry.slot;
+        KNState.slot = mySlot;
         break;
       }
     }
@@ -1269,7 +1286,7 @@
   };
 
   const sendRomOverChannel = (dc, peerSid, startOffset) => {
-    const romName = _safeGet('localStorage','kaillera-rom-name') || 'rom.z64';
+    const romName = _safeGet('localStorage', 'kaillera-rom-name') || 'rom.z64';
 
     if (!startOffset) {
       // Fresh transfer: send header first
@@ -1870,7 +1887,7 @@
     const drop = document.getElementById('rom-drop');
     if (!drop) return;
 
-    const savedRom = _safeGet('localStorage','kaillera-rom-name');
+    const savedRom = _safeGet('localStorage', 'kaillera-rom-name');
     const statusEl = document.getElementById('rom-status');
 
     // Prevent browser from navigating to dropped files anywhere on the page
@@ -1961,7 +1978,7 @@
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
-    _safeSet('localStorage','kaillera-rom-name', displayName);
+    _safeSet('localStorage', 'kaillera-rom-name', displayName);
     cacheRom(file);
 
     const drop = document.getElementById('rom-drop');
@@ -1980,7 +1997,7 @@
         const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
         KNState.romHash = hash;
-        _safeSet('localStorage','kaillera-rom-hash', hash);
+        _safeSet('localStorage', 'kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
       } catch (err) {
         console.log('[play] hash failed:', err);
@@ -2058,7 +2075,10 @@
   const _ROM_STORE = 'roms';
 
   const openRomDB = (cb) => {
-    if (typeof indexedDB === 'undefined') { cb(null); return; }
+    if (typeof indexedDB === 'undefined') {
+      cb(null);
+      return;
+    }
     const req = indexedDB.open(_ROM_DB, 1);
     req.onupgradeneeded = () => {
       req.result.createObjectStore(_ROM_STORE);
@@ -2084,7 +2104,7 @@
   };
 
   const loadCachedRom = (cb) => {
-    const name = _safeGet('localStorage','kaillera-rom-name');
+    const name = _safeGet('localStorage', 'kaillera-rom-name');
     if (!name) {
       cb(null);
       return;
@@ -2114,7 +2134,7 @@
           const hash = await hashArrayBuffer(req.result);
           _romHash = hash;
           KNState.romHash = hash;
-          _safeSet('localStorage','kaillera-rom-hash', hash);
+          _safeSet('localStorage', 'kaillera-rom-hash', hash);
         } catch (err) {
           console.log('[play] cached ROM hash failed:', err);
         }
@@ -2301,7 +2321,7 @@
         console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
         showToast?.('Logs uploaded');
         try {
-          _safeRemove('localStorage','kn-pending-log');
+          _safeRemove('localStorage', 'kn-pending-log');
         } catch (_) {}
       } else {
         console.log(`[play] sync log upload failed: ${res.status}`);
@@ -2779,19 +2799,23 @@
 
   const copyToClipboard = async (text, label) => {
     if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      showToast(`${label} copied!`);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      showToast(`${label} copied!`);
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(`${label} copied!`);
+        return;
+      } catch (_) {
+        /* fall through to execCommand fallback */
+      }
     }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    showToast(`${label} copied!`);
   };
 
   const toggleShareDropdown = () => {
@@ -2969,7 +2993,7 @@
     // Initialize gamepad profile from current (default or saved)
     if (gamepadId && window.GamepadManager) {
       const current = GamepadManager.hasCustomProfile(gamepadId)
-        ? JSON.parse(_safeGet('localStorage',`gamepad-profile:${gamepadId}`))
+        ? JSON.parse(_safeGet('localStorage', `gamepad-profile:${gamepadId}`))
         : GamepadManager.getDefaultProfile(gamepadId);
       _wizardGamepadProfile = {
         name: 'Custom',
@@ -2985,7 +3009,7 @@
     // Initialize keyboard map from current (saved or DEFAULT_N64_KEYMAP)
     let savedKb = null;
     try {
-      savedKb = JSON.parse(_safeGet('localStorage','keyboard-mapping'));
+      savedKb = JSON.parse(_safeGet('localStorage', 'keyboard-mapping'));
     } catch (_) {}
     if (savedKb && Object.keys(savedKb).length > 0) {
       _wizardKeyMap = { ...savedKb };
@@ -3122,7 +3146,7 @@
 
     // Save keyboard mapping
     try {
-      _safeSet('localStorage','keyboard-mapping', JSON.stringify(_wizardKeyMap));
+      _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizardKeyMap));
     } catch (_) {}
 
     cancelWizard();
@@ -3134,7 +3158,7 @@
       GamepadManager.clearGamepadProfile(detected[0].id);
     }
     try {
-      _safeRemove('localStorage','keyboard-mapping');
+      _safeRemove('localStorage', 'keyboard-mapping');
     } catch (_) {}
     updateGamepadUI();
   };
@@ -3380,6 +3404,15 @@
       return;
     }
 
+    // Feature detection — report missing capabilities
+    const missing = [];
+    if (typeof RTCPeerConnection === 'undefined') missing.push('RTCPeerConnection');
+    if (typeof WebAssembly === 'undefined') missing.push('WebAssembly');
+    if (!self.crossOriginIsolated) missing.push('crossOriginIsolated');
+    if (missing.length) {
+      KNEvent('compat', `Missing: ${missing.join(', ')}`, { missing });
+    }
+
     // Name input — populate from current name, save + notify on change
     const nameInput = document.getElementById('player-name-input');
     if (nameInput) {
@@ -3388,7 +3421,7 @@
         const val = nameInput.value.trim();
         if (val && val !== playerName) {
           playerName = val;
-          _safeSet('localStorage','kaillera-name', playerName);
+          _safeSet('localStorage', 'kaillera-name', playerName);
           if (socket?.connected) {
             socket.emit('set-name', { name: playerName });
           }
