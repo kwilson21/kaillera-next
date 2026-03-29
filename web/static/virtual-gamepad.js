@@ -144,7 +144,7 @@
       '.vgp-ab { position: relative; width: clamp(110px, 24dvh, 160px); height: clamp(84px, 18dvh, 116px); flex-shrink: 1; }',
       '.vgp-spacer { display: none; pointer-events: none; }',
       // Portrait: Z sits at bottom of right column (near B/A), Start centered at bottom
-      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-40px); }',
+      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-40px); pointer-events: none !important; }',
       '.vgp-start-portrait {',
       '  grid-area: start; display: flex; align-items: center; justify-content: center;',
       '  padding: 4px 0;',
