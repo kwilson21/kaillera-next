@@ -40,7 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
 from src.api.og import build_og_tags, generate_og_image, inject_og_tags
-from src.api.signaling import MAX_ROOMS, rooms
+from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
 from src.ratelimit import check_ip
 
 log = logging.getLogger(__name__)
@@ -127,12 +127,12 @@ class SecurityHeadersMiddleware:
     _CSP = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "connect-src 'self' wss: ws: blob:; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
-        "font-src 'self' data:"
+        "font-src 'self' data: https://fonts.gstatic.com"
     )
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
@@ -454,6 +454,10 @@ def create_app(lifespan=None) -> FastAPI:
         if not check_ip(_client_ip(request), "cache-state"):
             raise HTTPException(status_code=429, detail="Rate limited")
         _validate_rom_hash(rom_hash)
+        token = request.query_params.get("token", "")
+        room_id = request.query_params.get("room", "")
+        if not room_id or not verify_upload_token(room_id, token):
+            raise HTTPException(status_code=403, detail="Invalid upload token")
         if not _rom_hash_in_active_room(rom_hash):
             raise HTTPException(status_code=403, detail="ROM hash not associated with any active room")
         body = await request.body()
@@ -477,7 +481,10 @@ def create_app(lifespan=None) -> FastAPI:
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="Empty log")
         # Extract metadata from query params
-        room = request.query_params.get("room", "unknown")[:32]
+        room = request.query_params.get("room", "")[:32]
+        token = request.query_params.get("token", "")
+        if not room or not verify_upload_token(room, token):
+            raise HTTPException(status_code=403, detail="Invalid upload token")
         slot = request.query_params.get("slot", "x")[:4]
         src = request.query_params.get("src", "")
         ts = int(time.time())
