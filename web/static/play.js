@@ -58,6 +58,8 @@
 (function () {
   'use strict';
 
+  const { safeGet: _safeGet, safeSet: _safeSet, safeRemove: _safeRemove } = KNState;
+
   // ── State ──────────────────────────────────────────────────────────────
 
   let socket = null;
@@ -107,14 +109,14 @@
   let _romSignalHandler = null; // pre-game rom-signal Socket.IO listener
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
-  let _uploadToken = localStorage.getItem('kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
+  let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
 
   const _persistentId =
-    sessionStorage.getItem('kn-player-id') ||
+    _safeGet('sessionStorage', 'kn-player-id') ||
     (crypto.randomUUID
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
-  sessionStorage.setItem('kn-player-id', _persistentId);
+  _safeSet('sessionStorage', 'kn-player-id', _persistentId);
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
@@ -133,17 +135,17 @@
     const params = new URLSearchParams(window.location.search);
     roomCode = params.get('room');
     isHost = params.get('host') === '1';
-    playerName = params.get('name') || localStorage.getItem('kaillera-name') || 'Player';
-    localStorage.setItem('kaillera-name', playerName);
+    playerName = params.get('name') || _safeGet('localStorage','kaillera-name') || 'Player';
+    _safeSet('localStorage','kaillera-name', playerName);
     mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
   };
 
   // ── Recover pending logs from previous session ───────────────────────
   try {
-    const pending = localStorage.getItem('kn-pending-log');
+    const pending = _safeGet('localStorage','kn-pending-log');
     if (pending) {
-      localStorage.removeItem('kn-pending-log');
+      _safeRemove('localStorage','kn-pending-log');
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
         // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
@@ -191,7 +193,7 @@
 
     // Store full log in localStorage for reliable recovery on next visit
     try {
-      localStorage.setItem('kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
+      _safeSet('localStorage','kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
     } catch (_) {}
 
     // Also fire sendBeacon with truncated log (browsers cap at ~64KB)
@@ -332,7 +334,7 @@
     socket.on('upload-token', (data) => {
       _uploadToken = data?.token || '';
       try {
-        localStorage.setItem('kn-upload-token', _uploadToken);
+        _safeSet('localStorage','kn-upload-token', _uploadToken);
       } catch (_) {}
     });
     socket.on('game-started', onGameStarted);
@@ -1267,7 +1269,7 @@
   };
 
   const sendRomOverChannel = (dc, peerSid, startOffset) => {
-    const romName = localStorage.getItem('kaillera-rom-name') || 'rom.z64';
+    const romName = _safeGet('localStorage','kaillera-rom-name') || 'rom.z64';
 
     if (!startOffset) {
       // Fresh transfer: send header first
@@ -1868,7 +1870,7 @@
     const drop = document.getElementById('rom-drop');
     if (!drop) return;
 
-    const savedRom = localStorage.getItem('kaillera-rom-name');
+    const savedRom = _safeGet('localStorage','kaillera-rom-name');
     const statusEl = document.getElementById('rom-status');
 
     // Prevent browser from navigating to dropped files anywhere on the page
@@ -1959,7 +1961,7 @@
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
-    localStorage.setItem('kaillera-rom-name', displayName);
+    _safeSet('localStorage','kaillera-rom-name', displayName);
     cacheRom(file);
 
     const drop = document.getElementById('rom-drop');
@@ -1978,7 +1980,7 @@
         const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
         KNState.romHash = hash;
-        localStorage.setItem('kaillera-rom-hash', hash);
+        _safeSet('localStorage','kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
       } catch (err) {
         console.log('[play] hash failed:', err);
@@ -2056,6 +2058,7 @@
   const _ROM_STORE = 'roms';
 
   const openRomDB = (cb) => {
+    if (typeof indexedDB === 'undefined') { cb(null); return; }
     const req = indexedDB.open(_ROM_DB, 1);
     req.onupgradeneeded = () => {
       req.result.createObjectStore(_ROM_STORE);
@@ -2081,7 +2084,7 @@
   };
 
   const loadCachedRom = (cb) => {
-    const name = localStorage.getItem('kaillera-rom-name');
+    const name = _safeGet('localStorage','kaillera-rom-name');
     if (!name) {
       cb(null);
       return;
@@ -2111,7 +2114,7 @@
           const hash = await hashArrayBuffer(req.result);
           _romHash = hash;
           KNState.romHash = hash;
-          localStorage.setItem('kaillera-rom-hash', hash);
+          _safeSet('localStorage','kaillera-rom-hash', hash);
         } catch (err) {
           console.log('[play] cached ROM hash failed:', err);
         }
@@ -2298,7 +2301,7 @@
         console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
         showToast?.('Logs uploaded');
         try {
-          localStorage.removeItem('kn-pending-log');
+          _safeRemove('localStorage','kn-pending-log');
         } catch (_) {}
       } else {
         console.log(`[play] sync log upload failed: ${res.status}`);
@@ -2966,7 +2969,7 @@
     // Initialize gamepad profile from current (default or saved)
     if (gamepadId && window.GamepadManager) {
       const current = GamepadManager.hasCustomProfile(gamepadId)
-        ? JSON.parse(localStorage.getItem(`gamepad-profile:${gamepadId}`))
+        ? JSON.parse(_safeGet('localStorage',`gamepad-profile:${gamepadId}`))
         : GamepadManager.getDefaultProfile(gamepadId);
       _wizardGamepadProfile = {
         name: 'Custom',
@@ -2982,7 +2985,7 @@
     // Initialize keyboard map from current (saved or DEFAULT_N64_KEYMAP)
     let savedKb = null;
     try {
-      savedKb = JSON.parse(localStorage.getItem('keyboard-mapping'));
+      savedKb = JSON.parse(_safeGet('localStorage','keyboard-mapping'));
     } catch (_) {}
     if (savedKb && Object.keys(savedKb).length > 0) {
       _wizardKeyMap = { ...savedKb };
@@ -3119,7 +3122,7 @@
 
     // Save keyboard mapping
     try {
-      localStorage.setItem('keyboard-mapping', JSON.stringify(_wizardKeyMap));
+      _safeSet('localStorage','keyboard-mapping', JSON.stringify(_wizardKeyMap));
     } catch (_) {}
 
     cancelWizard();
@@ -3131,7 +3134,7 @@
       GamepadManager.clearGamepadProfile(detected[0].id);
     }
     try {
-      localStorage.removeItem('keyboard-mapping');
+      _safeRemove('localStorage','keyboard-mapping');
     } catch (_) {}
     updateGamepadUI();
   };
@@ -3385,7 +3388,7 @@
         const val = nameInput.value.trim();
         if (val && val !== playerName) {
           playerName = val;
-          localStorage.setItem('kaillera-name', playerName);
+          _safeSet('localStorage','kaillera-name', playerName);
           if (socket?.connected) {
             socket.emit('set-name', { name: playerName });
           }

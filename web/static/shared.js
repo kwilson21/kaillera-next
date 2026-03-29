@@ -67,7 +67,7 @@
 
     // Check localStorage for custom keyboard mapping first
     try {
-      const saved = localStorage.getItem('keyboard-mapping');
+      const saved = KNState.safeGet("localStorage", 'keyboard-mapping');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && Object.keys(parsed).length > 0) {

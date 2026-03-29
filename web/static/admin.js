@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  let adminKey = localStorage.getItem('kn-admin-key') || '';
+  let adminKey = KNStorage.get("localStorage", 'kn-admin-key') || '';
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -27,11 +27,11 @@
 
   $('#auth-btn').addEventListener('click', async () => {
     adminKey = $('#admin-key-input').value.trim();
-    localStorage.setItem('kn-admin-key', adminKey);
+    KNStorage.set("localStorage", 'kn-admin-key', adminKey);
     const ok = await checkAuth();
     if (!ok) {
       $('#auth-error').classList.remove('hidden');
-      localStorage.removeItem('kn-admin-key');
+      KNStorage.remove("localStorage", 'kn-admin-key');
       adminKey = '';
     } else {
       $('#auth-error').classList.add('hidden');

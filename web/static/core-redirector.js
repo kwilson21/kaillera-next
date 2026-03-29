@@ -42,9 +42,9 @@
   const CORE_VERSION = '13'; // v13: fix parallel_n64 core redirect for mobile Safari
   let idbClearPromise;
   try {
-    if (localStorage.getItem('kn-core-version') === CORE_VERSION) {
+    if (KNState.safeGet("localStorage", 'kn-core-version') === CORE_VERSION) {
       idbClearPromise = Promise.resolve();
-    } else if (indexedDB.databases) {
+    } else if (typeof indexedDB !== 'undefined' && indexedDB.databases) {
       // NOTE: intentionally .then() chain — result IS the promise assigned to window._knCoreReady
       idbClearPromise = indexedDB
         .databases()
@@ -70,7 +70,7 @@
           return Promise.all(deletes);
         })
         .then(() => {
-          localStorage.setItem('kn-core-version', CORE_VERSION);
+          KNState.safeSet("localStorage", 'kn-core-version', CORE_VERSION);
           console.log('[core-redirector] IDB cache cleared');
         });
     } else {

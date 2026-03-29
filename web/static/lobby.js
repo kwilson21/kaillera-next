@@ -1,15 +1,17 @@
 (function () {
   'use strict';
 
+  const { get: _sg, set: _ss, remove: _sr } = KNStorage;
+
   // Recover pending sync logs from a previous game session that closed unexpectedly
   try {
-    const pending = localStorage.getItem('kn-pending-log');
+    const pending = _sg('localStorage', 'kn-pending-log');
     if (pending) {
-      localStorage.removeItem('kn-pending-log');
+      _sr('localStorage', 'kn-pending-log');
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
         // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
-        const token = localStorage.getItem('kn-upload-token') || '';
+        const token = _sg('localStorage', 'kn-upload-token') || '';
         fetch(
           `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery&token=${encodeURIComponent(token)}`,
           {
@@ -28,7 +30,7 @@
   const codeInput = document.getElementById('room-code');
 
   // Restore saved name
-  const savedName = localStorage.getItem('kaillera-name');
+  const savedName = _sg('localStorage', 'kaillera-name');
   if (savedName) nameInput.value = savedName;
 
   const getName = () => nameInput.value.trim() || 'Player';
@@ -51,7 +53,7 @@
   };
 
   const saveName = () => {
-    localStorage.setItem('kaillera-name', getName());
+    _ss('localStorage', 'kaillera-name', getName());
   };
 
   document.getElementById('create-btn').addEventListener('click', () => {

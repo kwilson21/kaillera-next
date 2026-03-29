@@ -73,11 +73,11 @@
       // Per-game override first
       const gk = _gameKey(key);
       if (gk) {
-        const gv = parse(localStorage.getItem(gk));
+        const gv = parse(KNState.safeGet("localStorage", gk));
         if (validate(gv)) return gv;
       }
       // Global setting
-      const v = parse(localStorage.getItem(key));
+      const v = parse(KNState.safeGet("localStorage", key));
       if (validate(v)) return v;
     } catch (_) {}
     return fallback;
@@ -131,7 +131,7 @@
   function resolveProfile(id) {
     // Check localStorage for custom profile
     try {
-      const saved = localStorage.getItem(`gamepad-profile:${id}`);
+      const saved = KNState.safeGet("localStorage", `gamepad-profile:${id}`);
       if (saved) {
         const profile = JSON.parse(saved);
         profile.name = 'Custom';
@@ -304,7 +304,7 @@
 
     saveGamepadProfile: (gamepadId, profile) => {
       try {
-        localStorage.setItem(`gamepad-profile:${gamepadId}`, JSON.stringify(profile));
+        KNState.safeSet("localStorage", `gamepad-profile:${gamepadId}`, JSON.stringify(profile));
       } catch (_) {}
       // Re-resolve profile for this gamepad
       for (const entry of Object.values(_detected)) {
@@ -319,7 +319,7 @@
 
     clearGamepadProfile: (gamepadId) => {
       try {
-        localStorage.removeItem(`gamepad-profile:${gamepadId}`);
+        KNState.safeRemove("localStorage", `gamepad-profile:${gamepadId}`);
       } catch (_) {}
       for (const entry of Object.values(_detected)) {
         if (entry.id === gamepadId) {
@@ -337,7 +337,7 @@
 
     hasCustomProfile: (gamepadId) => {
       try {
-        return localStorage.getItem(`gamepad-profile:${gamepadId}`) !== null;
+        return KNState.safeGet("localStorage", `gamepad-profile:${gamepadId}`) !== null;
       } catch (_) {
         return false;
       }

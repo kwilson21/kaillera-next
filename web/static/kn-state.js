@@ -7,6 +7,8 @@
 (function () {
   'use strict';
 
+  const { get: safeGet, set: safeSet, remove: safeRemove } = KNStorage;
+
   window.KNState = {
     // ── Cross-module state ──
     // Each property replaces a former window.* global.
@@ -18,5 +20,10 @@
     frameNum: 0, // lockstep.js → play.js info overlay
     delayAutoValue: 2, // play.js → lockstep.js
     romHash: null, // play.js → gamepad-manager.js (per-game profiles)
+
+    // ── Safe storage helpers ──
+    safeGet,
+    safeSet,
+    safeRemove,
   };
 })();
