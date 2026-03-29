@@ -37,10 +37,12 @@ Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 """
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
 import re
+import secrets
 from dataclasses import dataclass, field
 
 import socketio
@@ -70,6 +72,21 @@ _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _VALID_MODES = {"lockstep", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
+
+# Per-instance signing key for HMAC upload tokens.
+# Tokens prove the client was in a real room without requiring the room to still exist.
+_UPLOAD_KEY = secrets.token_bytes(32)
+
+
+def make_upload_token(room_id: str) -> str:
+    """HMAC-SHA256 token that authorizes sync-log and cache-state uploads for a room."""
+    return hmac.new(_UPLOAD_KEY, room_id.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_upload_token(room_id: str, token: str) -> bool:
+    """Verify an upload token for a given room_id."""
+    expected = make_upload_token(room_id)
+    return hmac.compare_digest(expected, token)
 
 
 def _sanitize_str(value: str, max_len: int) -> str:
@@ -353,6 +370,7 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
         _sid_to_room[sid] = (session_id, persistent_id, False)
         await sio.enter_room(sid, session_id)
         await sio.emit("users-updated", _players_payload(existing), room=session_id)
+        await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
         await state.save_room(session_id, existing)
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
@@ -385,6 +403,7 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
     log.info("SIO %s opened room %s (game=%s, persistentId=%s)", sid, session_id, game_id, persistent_id)
     return None  # success
 
@@ -419,6 +438,7 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
         _sid_to_room[sid] = (session_id, persistent_id, is_returning_spectator)
         await sio.enter_room(sid, session_id)
         await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
         return (None, _players_payload(room))
@@ -443,6 +463,7 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
 
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
     await state.save_room(session_id, room)
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id

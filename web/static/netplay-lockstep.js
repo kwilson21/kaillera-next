@@ -2073,7 +2073,8 @@
       // bytes directly causes host-only desync (residual internal state).
       const romHash = _config?.romHash;
       if (romHash) {
-        await fetch(`/api/cache-state/${encodeURIComponent(romHash)}`, {
+        const cacheParams = new URLSearchParams({ room: _config.sessionId, token: _config.uploadToken || '' });
+        await fetch(`/api/cache-state/${encodeURIComponent(romHash)}?${cacheParams}`, {
           method: 'POST',
           body: cacheBytes,
         });

@@ -46,3 +46,35 @@ def test_health_still_works(server_url):
     r = requests.get(f"{server_url}/health", timeout=5)
     assert r.status_code == 200
     assert r.json()["status"] == "ok"
+
+
+def test_sync_logs_rejected_with_bad_token(server_url):
+    """Sync log upload with invalid HMAC token is rejected."""
+    r = requests.post(
+        f"{server_url}/api/sync-logs?room=FAKROOM&slot=0&token=forged",
+        data=b"test log data",
+        headers={"Content-Type": "text/plain"},
+        timeout=5,
+    )
+    assert r.status_code == 403
+
+
+def test_sync_logs_rejected_without_token(server_url):
+    """Sync log upload with no token is rejected."""
+    r = requests.post(
+        f"{server_url}/api/sync-logs?room=FAKROOM&slot=0",
+        data=b"test log data",
+        headers={"Content-Type": "text/plain"},
+        timeout=5,
+    )
+    assert r.status_code == 403
+
+
+def test_cache_state_rejected_with_bad_token(server_url):
+    """Cache state upload with invalid HMAC token is rejected."""
+    r = requests.post(
+        f"{server_url}/api/cache-state/abcdef1234567890?room=FAKROOM&token=forged",
+        data=b"fake state data",
+        timeout=5,
+    )
+    assert r.status_code == 403
