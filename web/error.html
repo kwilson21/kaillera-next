@@ -1,0 +1,2254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Error — kaillera-next</title>
+  </head>
+  <body data-error-code="{{CODE}}">
+    <div id="root"></div>
+    <noscript
+      ><h1>Error {{CODE}}</h1>
+      <p>Something went wrong.</p>
+      <a href="/">Back to lobby</a></noscript
+    >
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const code = document.body.dataset.errorCode;
+        document.title = `Error ${code} — kaillera-next`;
+
+        // Theme selection: ?theme=N override or random
+        const params = new URLSearchParams(location.search);
+        const override = parseInt(params.get('theme'), 10);
+        const themeIndex = override >= 1 && override <= 4 ? override : Math.floor(Math.random() * 4) + 1;
+
+        const tpl = document.getElementById(`theme-${themeIndex}`);
+        if (tpl) {
+          document.getElementById('root').appendChild(tpl.content.cloneNode(true));
+        }
+
+        // Replace all {{CODE}} placeholders in the activated theme
+        document.getElementById('root').innerHTML = document
+          .getElementById('root')
+          .innerHTML.replaceAll('{{CODE}}', code);
+
+        // Run theme-specific init if defined
+        const initFn = window[`initTheme${themeIndex}`];
+        if (typeof initFn === 'function') initFn(code);
+      });
+    </script>
+
+    <!-- Theme templates added in subsequent tasks -->
+    <template id="theme-1">
+      <style>
+        .t1-body {
+          background: #000;
+          color: #fff;
+          font-family: 'Courier New', monospace;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          overflow: hidden;
+          position: fixed;
+          inset: 0;
+        }
+        .cabinet {
+          position: relative;
+          width: 100%;
+          max-width: 520px;
+          padding: 24px;
+          background: #0a0a0a;
+          border: 3px solid #222;
+          border-radius: 16px;
+          box-shadow:
+            0 0 60px rgba(0, 0, 0, 0.8),
+            inset 0 0 80px rgba(0, 0, 0, 0.5);
+        }
+        .cabinet::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          border-radius: 16px;
+          pointer-events: none;
+          background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(0, 0, 0, 0.12) 2px,
+            rgba(0, 0, 0, 0.12) 4px
+          );
+          z-index: 20;
+        }
+        .screen {
+          background: #0a0a18;
+          border: 2px solid #333;
+          border-radius: 4px;
+          padding: 20px;
+          position: relative;
+          overflow: hidden;
+        }
+        .screen::before {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: radial-gradient(ellipse at center, rgba(40, 40, 80, 0.15) 0%, transparent 70%);
+          pointer-events: none;
+          z-index: 1;
+        }
+        .hud {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 16px;
+          position: relative;
+          z-index: 2;
+        }
+        .hud-col {
+          text-align: center;
+        }
+        .hud-label {
+          font-size: 11px;
+          color: #f44;
+          letter-spacing: 2px;
+        }
+        .hud-label.p2 {
+          color: #4af;
+        }
+        .hud-value {
+          font-size: 14px;
+          color: #fff;
+          margin-top: 2px;
+          letter-spacing: 1px;
+        }
+        .game-over {
+          text-align: center;
+          margin: 20px 0;
+          position: relative;
+          z-index: 2;
+        }
+        .game-over h1 {
+          font-size: 42px;
+          color: #f33;
+          letter-spacing: 6px;
+          text-shadow: 0 0 20px rgba(255, 50, 50, 0.4);
+          animation: t1pulse 1.5s ease-in-out infinite alternate;
+        }
+        @keyframes t1pulse {
+          from {
+            text-shadow: 0 0 20px rgba(255, 50, 50, 0.4);
+          }
+          to {
+            text-shadow:
+              0 0 40px rgba(255, 50, 50, 0.6),
+              0 0 80px rgba(255, 50, 50, 0.2);
+          }
+        }
+        .round {
+          text-align: center;
+          font-size: 14px;
+          color: #ff0;
+          letter-spacing: 3px;
+          margin: 8px 0 20px;
+          position: relative;
+          z-index: 2;
+        }
+        .t1-scene {
+          position: relative;
+          height: 140px;
+          margin: 10px 0;
+          z-index: 2;
+        }
+        .ground {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          right: 0;
+          height: 16px;
+          background: repeating-linear-gradient(90deg, #2a4a2a 0px, #2a4a2a 8px, #1a3a1a 8px, #1a3a1a 16px);
+          border-top: 2px solid #4a8a4a;
+        }
+        .char-down {
+          position: absolute;
+          bottom: 18px;
+          left: 50%;
+          transform: translateX(-50%) rotate(90deg);
+          opacity: 0.9;
+        }
+        .dizzy {
+          position: absolute;
+          bottom: 50px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 40px;
+          height: 20px;
+        }
+        .dizzy-star {
+          position: absolute;
+          font-size: 10px;
+          color: #ff0;
+          animation: t1orbit 1.5s linear infinite;
+        }
+        .dizzy-star:nth-child(2) {
+          animation-delay: -0.5s;
+        }
+        .dizzy-star:nth-child(3) {
+          animation-delay: -1s;
+        }
+        @keyframes t1orbit {
+          from {
+            transform: rotate(0deg) translateX(18px);
+          }
+          to {
+            transform: rotate(360deg) translateX(18px);
+          }
+        }
+        .ghost {
+          position: absolute;
+          bottom: 70px;
+          left: 52%;
+          animation: t1float 3s ease-out infinite;
+          z-index: 3;
+        }
+        @keyframes t1float {
+          0% {
+            transform: translateY(0);
+            opacity: 0.8;
+          }
+          100% {
+            transform: translateY(-120px);
+            opacity: 0;
+          }
+        }
+        .ghost-body {
+          width: 18px;
+          height: 22px;
+          background: rgba(255, 255, 255, 0.3);
+          border-radius: 9px 9px 0 0;
+          position: relative;
+        }
+        .ghost-body::after {
+          content: '';
+          position: absolute;
+          bottom: -4px;
+          left: 0;
+          width: 18px;
+          height: 8px;
+          background: rgba(255, 255, 255, 0.3);
+          clip-path: polygon(0 0, 33% 100%, 66% 0, 100% 100%);
+        }
+        .ghost-eyes {
+          display: flex;
+          gap: 4px;
+          justify-content: center;
+          padding-top: 6px;
+        }
+        .ghost-eye {
+          width: 4px;
+          height: 5px;
+          background: #000;
+          border-radius: 50%;
+        }
+        .t1-continue {
+          text-align: center;
+          margin: 20px 0 8px;
+          position: relative;
+          z-index: 2;
+        }
+        .continue-text {
+          font-size: 16px;
+          color: #fff;
+          letter-spacing: 3px;
+        }
+        .countdown {
+          font-size: 48px;
+          color: #ff0;
+          margin: 8px 0;
+          animation: t1count 0.5s ease-in-out infinite alternate;
+          text-shadow: 0 0 15px rgba(255, 255, 0, 0.4);
+        }
+        @keyframes t1count {
+          from {
+            transform: scale(1);
+          }
+          to {
+            transform: scale(1.1);
+          }
+        }
+        .insert-coin {
+          text-align: center;
+          font-size: 14px;
+          color: #0ff;
+          letter-spacing: 4px;
+          animation: t1blink 1s step-end infinite;
+          margin: 12px 0;
+          position: relative;
+          z-index: 2;
+        }
+        @keyframes t1blink {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0;
+          }
+        }
+        .t1-credits {
+          text-align: center;
+          font-size: 11px;
+          color: #555;
+          position: relative;
+          z-index: 2;
+          margin-top: 8px;
+          letter-spacing: 1px;
+        }
+        .hiscore-table {
+          margin: 16px auto 0;
+          position: relative;
+          z-index: 2;
+          text-align: center;
+        }
+        .hiscore-title {
+          font-size: 13px;
+          color: #f44;
+          letter-spacing: 3px;
+          margin-bottom: 6px;
+        }
+        .hiscore-row {
+          font-size: 12px;
+          color: #ff0;
+          letter-spacing: 2px;
+          line-height: 1.8;
+        }
+        .hiscore-row .rank {
+          color: #fff;
+        }
+        .hiscore-row .initials {
+          color: #0f0;
+        }
+        .hiscore-row .pts {
+          color: #ff0;
+        }
+        .action-row {
+          text-align: center;
+          margin-top: 16px;
+          position: relative;
+          z-index: 2;
+        }
+        .t1-btn {
+          padding: 10px 24px;
+          background: transparent;
+          color: #0ff;
+          border: 2px solid #0ff;
+          font-family: 'Courier New', monospace;
+          font-size: 13px;
+          cursor: pointer;
+          text-decoration: none;
+          display: inline-block;
+          letter-spacing: 2px;
+          transition: all 0.2s;
+        }
+        .t1-btn:hover {
+          background: #0ff;
+          color: #000;
+        }
+        @media (max-width: 768px) {
+          .cabinet {
+            max-width: 95vw;
+            padding: 12px;
+          }
+          .game-over h1 {
+            font-size: 28px;
+          }
+          .countdown {
+            font-size: 36px;
+          }
+        }
+      </style>
+      <div class="t1-body">
+        <div class="cabinet">
+          <div class="screen">
+            <div class="hud">
+              <div class="hud-col">
+                <div class="hud-label">1UP</div>
+                <div class="hud-value" id="t1-score">0040400</div>
+              </div>
+              <div class="hud-col">
+                <div class="hud-label" style="color: #fff">HI-SCORE</div>
+                <div class="hud-value">0099900</div>
+              </div>
+              <div class="hud-col">
+                <div class="hud-label p2">2UP</div>
+                <div class="hud-value">0050000</div>
+              </div>
+            </div>
+            <div class="game-over" role="alert"><h1>GAME OVER</h1></div>
+            <div class="round">ROUND {{CODE}}</div>
+            <div class="t1-scene">
+              <div class="char-down">
+                <svg width="48" height="24" viewBox="0 0 48 24" style="image-rendering: pixelated">
+                  <rect x="0" y="4" width="10" height="10" rx="2" fill="#6af" />
+                  <rect x="10" y="6" width="16" height="8" rx="1" fill="#6af" />
+                  <rect x="14" y="0" width="4" height="6" rx="1" fill="#6af" />
+                  <rect x="20" y="14" width="4" height="6" rx="1" fill="#6af" />
+                  <rect x="26" y="6" width="10" height="4" rx="1" fill="#6af" />
+                  <rect x="26" y="12" width="10" height="4" rx="1" fill="#6af" />
+                  <text x="3" y="11" font-size="6" fill="#000" font-family="monospace">x</text>
+                </svg>
+              </div>
+              <div class="dizzy">
+                <div class="dizzy-star">★</div>
+                <div class="dizzy-star">★</div>
+                <div class="dizzy-star">★</div>
+              </div>
+              <div class="ghost">
+                <div class="ghost-body">
+                  <div class="ghost-eyes">
+                    <div class="ghost-eye"></div>
+                    <div class="ghost-eye"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="ground"></div>
+            </div>
+            <div class="t1-continue">
+              <div class="continue-text">CONTINUE?</div>
+              <div class="countdown" id="t1-countdown">9</div>
+            </div>
+            <div class="insert-coin" id="t1-coin">INSERT COIN</div>
+            <div class="hiscore-table">
+              <div class="hiscore-title">- BEST PLAYERS -</div>
+              <div class="hiscore-row">
+                <span class="rank">1ST</span> <span class="pts">099900</span> <span class="initials">ASH</span>
+              </div>
+              <div class="hiscore-row">
+                <span class="rank">2ND</span> <span class="pts">088800</span> <span class="initials">KAZ</span>
+              </div>
+              <div class="hiscore-row">
+                <span class="rank">3RD</span> <span class="pts" id="t1-yourscore">040400</span>
+                <span class="initials">YOU</span>
+              </div>
+            </div>
+            <div class="t1-credits">CREDIT 00</div>
+            <div class="action-row"><a href="/" class="t1-btn" aria-label="Return to lobby">INSERT COIN</a></div>
+          </div>
+        </div>
+      </div>
+    </template>
+    <template id="theme-2">
+      <style>
+        .t2-body {
+          background: #0a0a0a;
+          color: #0f0;
+          font-family: 'Courier New', monospace;
+          min-height: 100vh;
+          overflow: hidden;
+          position: fixed;
+          inset: 0;
+        }
+        .t2-scanlines {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 10;
+          background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(0, 0, 0, 0.15) 2px,
+            rgba(0, 0, 0, 0.15) 4px
+          );
+        }
+        .t2-scan-bar {
+          position: fixed;
+          left: 0;
+          right: 0;
+          height: 6px;
+          z-index: 11;
+          pointer-events: none;
+          animation: t2scanDown 4s linear infinite;
+        }
+        .t2-scan-bar::before {
+          content: '';
+          display: block;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(
+            90deg,
+            rgba(255, 0, 0, 0.4),
+            rgba(0, 255, 0, 0.4),
+            rgba(0, 0, 255, 0.4),
+            rgba(255, 0, 255, 0.4)
+          );
+        }
+        @keyframes t2scanDown {
+          from {
+            top: -6px;
+          }
+          to {
+            top: 100vh;
+          }
+        }
+        .t2-gb {
+          position: fixed;
+          left: 0;
+          right: 0;
+          height: 3px;
+          pointer-events: none;
+          z-index: 5;
+          opacity: 0.5;
+        }
+        .t2-gb1 {
+          top: 15%;
+          background: linear-gradient(90deg, #f00, #0f0, #00f, #f0f, #ff0);
+          animation: t2drift 3s ease-in-out infinite alternate;
+        }
+        .t2-gb2 {
+          top: 35%;
+          background: linear-gradient(90deg, #0ff, #f0f, #ff0, #0f0);
+          animation: t2drift 4s ease-in-out infinite alternate-reverse;
+          height: 6px;
+        }
+        .t2-gb3 {
+          top: 65%;
+          background: linear-gradient(90deg, #f55, #5f5, #55f);
+          animation: t2drift 2.5s ease-in-out infinite alternate;
+          height: 2px;
+        }
+        .t2-gb4 {
+          top: 82%;
+          background: linear-gradient(90deg, #ff0, #f0f, #0ff, #f00);
+          animation: t2drift 3.5s ease-in-out infinite alternate-reverse;
+          height: 4px;
+        }
+        @keyframes t2drift {
+          from {
+            transform: translateX(-20px);
+          }
+          to {
+            transform: translateX(20px);
+          }
+        }
+        .t2-crt {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 12;
+          background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.5) 100%);
+        }
+        .t2-content {
+          position: relative;
+          z-index: 8;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          padding: 40px 20px;
+        }
+        .t2-glitch {
+          font-size: 64px;
+          font-weight: bold;
+          color: #0f0;
+          position: relative;
+          text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+        }
+        .t2-glitch::before,
+        .t2-glitch::after {
+          content: attr(data-text);
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+        }
+        .t2-glitch::before {
+          color: #f00;
+          animation: t2g1 2s infinite;
+          clip-path: polygon(0 0, 100% 0, 100% 35%, 0 35%);
+        }
+        .t2-glitch::after {
+          color: #00f;
+          animation: t2g2 2s infinite;
+          clip-path: polygon(0 65%, 100% 65%, 100% 100%, 0 100%);
+        }
+        @keyframes t2g1 {
+          0%,
+          95% {
+            transform: none;
+          }
+          96% {
+            transform: translate(-4px, -2px);
+          }
+          97% {
+            transform: translate(4px, 2px);
+          }
+          98% {
+            transform: translate(-2px, 4px);
+          }
+          100% {
+            transform: none;
+          }
+        }
+        @keyframes t2g2 {
+          0%,
+          95% {
+            transform: none;
+          }
+          96% {
+            transform: translate(4px, 2px);
+          }
+          97% {
+            transform: translate(-4px, -2px);
+          }
+          98% {
+            transform: translate(2px, -4px);
+          }
+          100% {
+            transform: none;
+          }
+        }
+        .t2-dump {
+          margin: 20px 0;
+          text-align: left;
+          font-size: 12px;
+          color: #0a0;
+          line-height: 1.8;
+          opacity: 0.8;
+        }
+        .t2-addr {
+          color: #0f0;
+        }
+        .t2-err {
+          color: #f44;
+        }
+        .t2-warn {
+          color: #ff0;
+        }
+        .t2-cart-area {
+          margin: 30px 0;
+          position: relative;
+        }
+        .t2-cart {
+          width: 100px;
+          height: 130px;
+          background: linear-gradient(180deg, #444, #333, #3a3a3a);
+          border-radius: 8px 8px 0 0;
+          margin: 0 auto;
+          position: relative;
+          transform: rotate(12deg);
+          animation: t2wobble 3s ease-in-out infinite;
+          border: 2px solid #555;
+          box-shadow: 4px 4px 15px rgba(0, 0, 0, 0.5);
+        }
+        @keyframes t2wobble {
+          0%,
+          100% {
+            transform: rotate(12deg);
+          }
+          50% {
+            transform: rotate(15deg);
+          }
+        }
+        .t2-cart-label {
+          position: absolute;
+          top: 15px;
+          left: 10px;
+          right: 10px;
+          height: 60px;
+          background: #1a1a2e;
+          border-radius: 3px;
+          border: 1px solid #555;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          padding: 4px;
+        }
+        .t2-cart-text {
+          color: #6af;
+          font-size: 7px;
+          font-family: sans-serif;
+          font-weight: bold;
+          text-align: center;
+          line-height: 1.3;
+        }
+        .t2-cart-slot {
+          position: absolute;
+          bottom: 0;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 50px;
+          height: 14px;
+          background: #222;
+          border-radius: 0 0 4px 4px;
+          border: 1px solid #444;
+          border-top: none;
+        }
+        .t2-cart-chip {
+          position: absolute;
+          bottom: 20px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 30px;
+          height: 8px;
+          background: #2a2a2a;
+          border-radius: 2px;
+          border: 1px solid #444;
+        }
+        .t2-blow {
+          text-align: center;
+          margin-top: 12px;
+          font-size: 14px;
+          color: #888;
+          font-style: italic;
+          animation: t2blink 2s infinite;
+        }
+        @keyframes t2blink {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.3;
+          }
+        }
+        .t2-details {
+          margin-top: 20px;
+          text-align: center;
+        }
+        .t2-title {
+          font-size: 20px;
+          color: #0f0;
+          margin-bottom: 8px;
+          text-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
+        }
+        .t2-sub {
+          font-size: 13px;
+          color: #555;
+          margin-bottom: 20px;
+        }
+        .t2-btn {
+          padding: 10px 20px;
+          background: transparent;
+          color: #0f0;
+          border: 1px solid #0f0;
+          font-family: 'Courier New', monospace;
+          font-size: 14px;
+          cursor: pointer;
+          text-decoration: none;
+          display: inline-block;
+          transition: all 0.2s;
+        }
+        .t2-btn:hover {
+          background: #0f0;
+          color: #000;
+        }
+        #t2-noise {
+          position: fixed;
+          inset: 0;
+          z-index: 1;
+          opacity: 0.04;
+          pointer-events: none;
+        }
+        @media (max-width: 768px) {
+          .t2-glitch {
+            font-size: 36px;
+          }
+          .t2-dump {
+            font-size: 10px;
+          }
+        }
+      </style>
+      <div class="t2-body">
+        <canvas id="t2-noise"></canvas>
+        <div class="t2-scanlines"></div>
+        <div class="t2-scan-bar"></div>
+        <div class="t2-crt"></div>
+        <div class="t2-gb t2-gb1"></div>
+        <div class="t2-gb t2-gb2"></div>
+        <div class="t2-gb t2-gb3"></div>
+        <div class="t2-gb t2-gb4"></div>
+        <div class="t2-content">
+          <div class="t2-glitch" data-text="ERR {{CODE}}" role="alert">ERR {{CODE}}</div>
+          <div class="t2-dump">
+            <span class="t2-err" id="t2-errmsg">FATAL EXCEPTION: CARTRIDGE NOT FOUND</span><br />
+            <span class="t2-addr">ADDR 0x00FF{{CODE}}F</span> · <span class="t2-warn">SEGMENT VIOLATION</span><br />
+            <span class="t2-addr">ADDR 0x80246010</span> · RSP STATUS: <span class="t2-err">HALTED</span><br />
+            <span class="t2-addr">ADDR 0x04001000</span> · RDRAM: <span class="t2-warn">CORRUPTED</span><br />
+            <span style="color: #555">PC: 0x800{{CODE}} · RA: 0xDEADBEEF · SP: 0x00000000</span><br />
+            <span style="color: #555"
+              >CAUSE: PAGE_NOT_FOUND · BADVADDR: <span class="t2-err" id="t2-scramble">0x????????</span></span
+            >
+          </div>
+          <div class="t2-cart-area">
+            <div class="t2-cart">
+              <div class="t2-cart-label">
+                <div class="t2-cart-text">SUPER<br />SMASH BROS.<br />kaillera-next</div>
+              </div>
+              <div class="t2-cart-chip"></div>
+              <div class="t2-cart-slot"></div>
+            </div>
+            <div class="t2-blow">[ blow on it? ]</div>
+          </div>
+          <div class="t2-details">
+            <div class="t2-title" id="t2-title">CARTRIDGE NOT FOUND</div>
+            <div class="t2-sub">The page could not be read from memory</div>
+            <a href="/" class="t2-btn" aria-label="Return to lobby">&gt; REBOOT SYSTEM _</a>
+          </div>
+        </div>
+      </div>
+    </template>
+    <template id="theme-3">
+      <style>
+        .t3-body {
+          background: #111;
+          color: #eee;
+          font-family: sans-serif;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          overflow: hidden;
+          position: fixed;
+          inset: 0;
+        }
+        .t3-gc {
+          position: relative;
+          border: 2px solid #2a2a40;
+          border-radius: 8px;
+          overflow: hidden;
+          background: #0d0d1a;
+        }
+        .t3-hud {
+          display: flex;
+          justify-content: space-between;
+          padding: 6px 12px;
+          background: #0a0a15;
+          font-family: monospace;
+          font-size: 13px;
+          border-bottom: 1px solid #2a2a40;
+        }
+        .t3-hud-score {
+          color: #6af;
+        }
+        .t3-hud-high {
+          color: #888;
+        }
+        .t3-hud-code {
+          color: #f66;
+        }
+        .t3-info {
+          margin-top: 16px;
+          text-align: center;
+        }
+        .t3-info p {
+          font-size: 13px;
+          color: #555;
+          margin-bottom: 6px;
+        }
+        .t3-keys {
+          display: flex;
+          gap: 6px;
+          justify-content: center;
+          margin-top: 8px;
+        }
+        .t3-key {
+          width: 36px;
+          height: 36px;
+          background: #1a1a2e;
+          border: 1px solid #2a2a40;
+          border-radius: 4px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 14px;
+          color: #6af;
+        }
+        .t3-error {
+          margin-top: 20px;
+          text-align: center;
+        }
+        .t3-ecode {
+          font-size: 12px;
+          color: #555;
+          letter-spacing: 2px;
+        }
+        .t3-emsg {
+          font-size: 15px;
+          color: #888;
+          margin: 6px 0 16px;
+        }
+        .t3-btn {
+          padding: 10px 20px;
+          background: #3a5a8a;
+          color: #fff;
+          border: none;
+          border-radius: 6px;
+          font-size: 13px;
+          cursor: pointer;
+          text-decoration: none;
+          display: inline-block;
+        }
+        .t3-btn:hover {
+          background: #4a6fa5;
+        }
+        .t3-win {
+          display: none;
+          position: absolute;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.8);
+          z-index: 10;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .t3-win.show {
+          display: flex;
+        }
+        .t3-win h2 {
+          color: #6af;
+          font-size: 24px;
+        }
+        .t3-win p {
+          color: #888;
+          font-size: 14px;
+        }
+        @media (max-width: 768px) {
+          .t3-keys {
+            display: none;
+          }
+          .t3-info p:first-child {
+            display: none;
+          }
+        }
+      </style>
+      <div class="t3-body">
+        <div class="t3-gc" id="t3-gc">
+          <div class="t3-hud">
+            <span class="t3-hud-score">SCORE: <span id="t3-score">0</span></span>
+            <span class="t3-hud-code" role="alert">ERROR {{CODE}}</span>
+            <span class="t3-hud-high">HI: <span id="t3-hiscore">0</span></span>
+          </div>
+          <canvas id="t3-game" width="480" height="360"></canvas>
+          <div class="t3-win" id="t3-win">
+            <h2>ALL DIGITS COLLECTED!</h2>
+            <p>Redirecting to lobby...</p>
+          </div>
+        </div>
+        <div class="t3-info">
+          <p>Collect the error code digits to escape</p>
+          <div class="t3-keys">
+            <div class="t3-key">←</div>
+            <div class="t3-key">→</div>
+            <div class="t3-key" style="width: 80px">SPACE</div>
+          </div>
+        </div>
+        <div class="t3-error">
+          <div class="t3-ecode">ERROR {{CODE}}</div>
+          <div class="t3-emsg">Page not found — but you can play while you're here</div>
+          <a href="/" class="t3-btn" aria-label="Return to lobby">Skip to Lobby</a>
+        </div>
+      </div>
+    </template>
+    <template id="theme-4">
+      <style>
+        .t4-body {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+          font-family: Tahoma, sans-serif;
+          overflow: hidden;
+          cursor: default;
+          user-select: none;
+          position: fixed;
+          inset: 0;
+        }
+        .t4-body * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+        }
+
+        /* XP Desktop - Bliss wallpaper */
+        .t4-xp-desktop {
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(
+            180deg,
+            #3a6bc5 0%,
+            #5ba3e8 25%,
+            #87ceeb 40%,
+            #6ab04c 42%,
+            #5ca841 50%,
+            #4e9a36 70%,
+            #3d8b2c 100%
+          );
+          position: relative;
+          display: flex;
+          flex-direction: column;
+        }
+
+        /* Desktop icons */
+        .t4-desktop-icons {
+          flex: 1;
+          padding: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          align-items: flex-start;
+        }
+        .t4-desktop-icon {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          width: 70px;
+          padding: 4px;
+          cursor: pointer;
+          border-radius: 2px;
+        }
+        .t4-desktop-icon:hover {
+          background: rgba(0, 0, 200, 0.15);
+        }
+        .t4-desktop-icon .t4-ico {
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 2px;
+        }
+        .t4-desktop-icon .t4-lbl {
+          font-size: 11px;
+          color: #fff;
+          text-align: center;
+          text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+          line-height: 1.2;
+        }
+
+        /* IE icon */
+        .t4-ie-icon {
+          width: 28px;
+          height: 28px;
+          background: linear-gradient(135deg, #00a2ed 0%, #0078d4 50%, #005a9e 100%);
+          border-radius: 50%;
+          position: relative;
+          border: 2px solid #ffd700;
+        }
+        .t4-ie-icon::after {
+          content: 'e';
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+          font-size: 18px;
+          font-weight: bold;
+          font-style: italic;
+          font-family: Georgia, serif;
+        }
+
+        /* AIM icon */
+        .t4-aim-icon {
+          width: 28px;
+          height: 28px;
+          position: relative;
+        }
+        .t4-aim-icon .t4-head {
+          width: 14px;
+          height: 14px;
+          background: #ffd700;
+          border-radius: 50%;
+          position: absolute;
+          top: 0;
+          left: 7px;
+        }
+        .t4-aim-icon .t4-body-shape {
+          width: 20px;
+          height: 10px;
+          background: #ffd700;
+          border-radius: 10px 10px 0 0;
+          position: absolute;
+          bottom: 2px;
+          left: 4px;
+        }
+
+        /* PJ64 icon */
+        .t4-pj64-icon {
+          width: 28px;
+          height: 28px;
+          background: #1a1a2e;
+          border-radius: 4px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #444;
+        }
+        .t4-pj64-icon span {
+          color: #6af;
+          font-size: 9px;
+          font-weight: bold;
+          font-family: monospace;
+        }
+
+        /* My Computer icon */
+        .t4-mc-icon {
+          width: 28px;
+          height: 24px;
+          position: relative;
+        }
+        .t4-mc-icon .t4-screen {
+          width: 24px;
+          height: 16px;
+          background: #000080;
+          border: 2px solid #c0c0c0;
+          border-radius: 2px;
+          margin: 0 auto;
+        }
+        .t4-mc-icon .t4-base {
+          width: 20px;
+          height: 3px;
+          background: #c0c0c0;
+          margin: 1px auto 0;
+          border-radius: 0 0 2px 2px;
+        }
+
+        /* Recycle bin */
+        .t4-rb-icon {
+          width: 26px;
+          height: 28px;
+          position: relative;
+        }
+        .t4-rb-icon .t4-lid {
+          width: 20px;
+          height: 4px;
+          background: #c0c0c0;
+          border-radius: 2px 2px 0 0;
+          margin: 0 auto;
+          border: 1px solid #888;
+        }
+        .t4-rb-icon .t4-bin {
+          width: 18px;
+          height: 18px;
+          background: linear-gradient(180deg, #e8e8e8, #c0c0c0);
+          margin: 0 auto;
+          border: 1px solid #888;
+          border-radius: 0 0 3px 3px;
+        }
+
+        /* XP Taskbar */
+        .t4-xp-taskbar {
+          height: 30px;
+          background: linear-gradient(
+            180deg,
+            #3168d5 0%,
+            #1f48a0 3%,
+            #2c5cc7 4%,
+            #245dbd 50%,
+            #1941a5 97%,
+            #163b9c 100%
+          );
+          display: flex;
+          align-items: center;
+          padding: 0 2px;
+          z-index: 100;
+        }
+        .t4-start-btn {
+          height: 26px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 0 10px 0 6px;
+          background: linear-gradient(180deg, #3b9c3b 0%, #2d8e2d 40%, #1a6e1a 100%);
+          border: none;
+          border-radius: 0 8px 8px 0;
+          color: #fff;
+          font-size: 12px;
+          font-weight: bold;
+          font-family: 'Franklin Gothic Medium', Tahoma, sans-serif;
+          cursor: pointer;
+          letter-spacing: 0.5px;
+          text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+        }
+        .t4-win-flag {
+          display: grid;
+          grid-template-columns: 7px 7px;
+          grid-template-rows: 7px 7px;
+          gap: 1px;
+          transform: rotate(-5deg);
+        }
+        .t4-win-flag .t4-r {
+          background: #ff0000;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-g {
+          background: #00aa00;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-b {
+          background: #0066ff;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-y {
+          background: #ffbb00;
+          border-radius: 1px;
+        }
+        .t4-taskbar-items {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          padding: 0 8px;
+          gap: 2px;
+        }
+        .t4-taskbar-item {
+          height: 22px;
+          background: linear-gradient(180deg, #3c7fdb, #2862b8);
+          border: 1px solid #1a4a90;
+          border-radius: 2px;
+          padding: 0 8px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 11px;
+          color: #fff;
+          min-width: 100px;
+          max-width: 180px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .t4-taskbar-item.t4-active {
+          background: linear-gradient(180deg, #e8f0fb, #b8d0eb);
+          border-color: #8ba5c5;
+          color: #000;
+        }
+        .t4-tray {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 0 8px;
+          height: 100%;
+          background: linear-gradient(180deg, #1290e9, #0f5fb5);
+          border-left: 1px solid #1050a0;
+          font-size: 11px;
+          color: #fff;
+        }
+
+        /* Kaillera Window */
+        .t4-k-win {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -52%);
+          width: 640px;
+          background: #ece9d8;
+          border: 1px solid #0054e3;
+          border-radius: 8px 8px 0 0;
+          box-shadow: 2px 4px 20px rgba(0, 0, 0, 0.5);
+          z-index: 50;
+        }
+        .t4-k-titlebar {
+          background: linear-gradient(180deg, #0997ff 0%, #0561d2 8%, #0654c4 88%, #0347a8 100%);
+          color: #fff;
+          padding: 4px 6px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-radius: 7px 7px 0 0;
+          height: 26px;
+        }
+        .t4-k-titlebar .t4-title {
+          font-size: 12px;
+          font-weight: bold;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .t4-title-ico {
+          width: 16px;
+          height: 16px;
+          background: #ffd700;
+          border-radius: 2px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 10px;
+          font-weight: bold;
+          color: #333;
+        }
+        .t4-win-btns {
+          display: flex;
+          gap: 2px;
+        }
+        .t4-wbtn {
+          width: 21px;
+          height: 21px;
+          border: 1px solid rgba(255, 255, 255, 0.4);
+          border-radius: 3px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          font-weight: bold;
+          color: #fff;
+          cursor: pointer;
+        }
+        .t4-wbtn.t4-min {
+          background: linear-gradient(180deg, #3c8ee6, #2570c0);
+        }
+        .t4-wbtn.t4-max {
+          background: linear-gradient(180deg, #3c8ee6, #2570c0);
+        }
+        .t4-wbtn.t4-cls {
+          background: linear-gradient(180deg, #e87461, #c9362c);
+        }
+
+        .t4-k-body {
+          padding: 0;
+          font-size: 11px;
+          color: #000;
+        }
+
+        /* Top panels */
+        .t4-k-top {
+          display: flex;
+          height: 180px;
+          margin: 4px;
+          gap: 4px;
+        }
+        .t4-k-chat-panel {
+          flex: 1;
+          background: #fff;
+          border: 1px inset #aca899;
+          overflow-y: auto;
+          padding: 3px;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .t4-k-user-panel {
+          width: 240px;
+          background: #fff;
+          border: 1px inset #aca899;
+          overflow-y: auto;
+        }
+        .t4-k-user-header,
+        .t4-k-game-header {
+          display: grid;
+          background: #ece9d8;
+          border-bottom: 1px solid #aca899;
+          font-weight: bold;
+          padding: 1px 0;
+          position: sticky;
+          top: 0;
+          font-size: 10px;
+        }
+        .t4-k-user-header {
+          grid-template-columns: 40px 70px 40px 40px 50px;
+        }
+        .t4-k-user-header span,
+        .t4-k-user-row span,
+        .t4-k-game-header span,
+        .t4-k-game-row span {
+          padding: 1px 3px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .t4-k-user-row {
+          display: grid;
+          grid-template-columns: 40px 70px 40px 40px 50px;
+          border-bottom: 1px solid #f0f0f0;
+          font-size: 10px;
+        }
+
+        /* Chat input bar */
+        .t4-k-chatbar {
+          display: flex;
+          margin: 0 4px;
+          gap: 2px;
+          padding: 2px 0;
+        }
+        .t4-k-chatbar input {
+          flex: 1;
+          height: 20px;
+          border: 1px inset #aca899;
+          padding: 1px 4px;
+          font-size: 11px;
+          font-family: Tahoma, sans-serif;
+          background: #fff;
+        }
+        .t4-xp-btn {
+          height: 22px;
+          padding: 0 10px;
+          background: linear-gradient(180deg, #fff, #ece9d8 45%, #d6d0c4);
+          border: 1px solid #003c74;
+          border-radius: 3px;
+          font-size: 11px;
+          font-family: Tahoma, sans-serif;
+          cursor: pointer;
+        }
+        .t4-xp-btn:hover {
+          background: linear-gradient(180deg, #fff, #e8e0d0 45%, #d0c8b8);
+        }
+
+        /* Game list */
+        .t4-k-games {
+          margin: 4px;
+          background: #fff;
+          border: 1px inset #aca899;
+          height: 70px;
+          overflow-y: auto;
+        }
+        .t4-k-game-header {
+          grid-template-columns: 45px 200px 180px 90px;
+        }
+        .t4-k-game-row {
+          display: grid;
+          grid-template-columns: 45px 200px 180px 90px;
+          border-bottom: 1px solid #f0f0f0;
+          font-size: 10px;
+          cursor: pointer;
+        }
+        .t4-k-game-row:hover {
+          background: #e8e8ff;
+        }
+        .t4-k-game-row.t4-err {
+          color: #cc0000;
+        }
+
+        /* Bottom tabs */
+        .t4-k-tabs {
+          display: flex;
+          background: #ece9d8;
+          border-bottom: 1px solid #aca899;
+          padding: 2px 4px 0;
+        }
+        .t4-k-tab {
+          padding: 3px 8px;
+          font-size: 10px;
+          border: 1px solid #aca899;
+          border-bottom: none;
+          background: #ece9d8;
+          border-radius: 3px 3px 0 0;
+          cursor: pointer;
+          margin-right: 1px;
+        }
+        .t4-k-tab.t4-active {
+          background: #fff;
+          font-weight: bold;
+          position: relative;
+          top: 1px;
+          border-bottom: 1px solid #fff;
+        }
+
+        /* Login bar */
+        .t4-k-login {
+          display: flex;
+          align-items: center;
+          padding: 4px;
+          gap: 4px;
+          flex-wrap: wrap;
+          background: #ece9d8;
+          font-size: 10px;
+        }
+        .t4-k-login label {
+          font-weight: bold;
+          color: #333;
+        }
+        .t4-k-login input {
+          height: 18px;
+          border: 1px inset #aca899;
+          padding: 0 3px;
+          font-size: 10px;
+          font-family: Tahoma, sans-serif;
+          background: #fff;
+        }
+        .t4-k-login select {
+          height: 18px;
+          border: 1px solid #7f9db9;
+          background: #fff;
+          font-size: 10px;
+          font-family: Tahoma, sans-serif;
+          padding: 0 2px;
+        }
+        .t4-k-status {
+          background: #ece9d8;
+          border-top: 1px solid #fff;
+          padding: 2px 6px;
+          font-size: 9px;
+          color: #555;
+          display: flex;
+          justify-content: space-between;
+        }
+
+        /* Chat message types */
+        .t4-sys {
+          color: #888;
+        }
+        .t4-err {
+          color: #cc0000;
+          font-weight: bold;
+        }
+        .t4-usr {
+          color: #000080;
+        }
+        .t4-join {
+          color: #008800;
+        }
+        .t4-leave {
+          color: #cc6600;
+        }
+        .t4-srv {
+          color: #cc8800;
+        }
+        .t4-ts {
+          color: #888;
+          font-size: 10px;
+        }
+
+        /* Error Dialog */
+        .t4-err-dialog {
+          position: absolute;
+          top: 32%;
+          left: 55%;
+          width: 380px;
+          background: #ece9d8;
+          border: 1px solid #0054e3;
+          border-radius: 8px 8px 0 0;
+          box-shadow: 3px 5px 15px rgba(0, 0, 0, 0.5);
+          z-index: 60;
+          animation: t4pop 0.15s ease-out;
+        }
+        @keyframes t4pop {
+          from {
+            transform: scale(0.95);
+            opacity: 0;
+          }
+          to {
+            transform: scale(1);
+            opacity: 1;
+          }
+        }
+        .t4-err-dialog .t4-k-titlebar {
+          height: 24px;
+        }
+        .t4-dlg-body {
+          padding: 16px;
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+        }
+        .t4-err-ico {
+          width: 32px;
+          height: 32px;
+          flex-shrink: 0;
+          background: radial-gradient(circle, #ff4444 40%, #cc0000 70%, #990000);
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+          font-size: 20px;
+          font-weight: bold;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        }
+        .t4-err-txt {
+          font-size: 11px;
+          line-height: 1.5;
+          color: #000;
+          flex: 1;
+        }
+        .t4-err-txt .t4-code {
+          color: #888;
+          font-size: 10px;
+          margin-top: 6px;
+          font-family: 'Lucida Console', monospace;
+        }
+        .t4-dlg-btns {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+          padding: 0 16px 14px;
+        }
+        .t4-dlg-btns .t4-xp-btn {
+          min-width: 75px;
+          text-align: center;
+        }
+        .t4-dlg-btns .t4-xp-btn.t4-default {
+          border: 2px solid #003c74;
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+          .t4-xp-desktop {
+            display: none;
+          }
+          .t4-body {
+            background: #1a1a2e;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .t4-err-dialog {
+            position: static;
+            top: auto;
+            left: auto;
+            width: 95vw;
+            max-width: 380px;
+            animation: t4pop 0.15s ease-out;
+          }
+        }
+      </style>
+      <div class="t4-body">
+        <div class="t4-xp-desktop">
+          <div class="t4-desktop-icons">
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-mc-icon">
+                  <div class="t4-screen"></div>
+                  <div class="t4-base"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">My Computer</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-rb-icon">
+                  <div class="t4-lid"></div>
+                  <div class="t4-bin"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">Recycle Bin</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-pj64-icon"><span>PJ64k</span></div>
+              </div>
+              <div class="t4-lbl">Project64k.exe</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico"><div class="t4-ie-icon"></div></div>
+              <div class="t4-lbl">Internet Explorer</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-aim-icon">
+                  <div class="t4-head"></div>
+                  <div class="t4-body-shape"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">AIM</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico" style="font-size: 24px">&#128193;</div>
+              <div class="t4-lbl">N64 ROMs</div>
+            </div>
+          </div>
+
+          <!-- Kaillera Client Window -->
+          <div class="t4-k-win">
+            <div class="t4-k-titlebar">
+              <div class="t4-title">
+                <div class="t4-title-ico">K</div>
+                Galaxy 64
+              </div>
+              <div class="t4-win-btns">
+                <div class="t4-wbtn t4-min">_</div>
+                <div class="t4-wbtn t4-max">&#9633;</div>
+                <div class="t4-wbtn t4-cls">&#215;</div>
+              </div>
+            </div>
+            <div class="t4-k-body">
+              <div class="t4-k-top">
+                <!-- Chat/info panel (left) -->
+                <div class="t4-k-chat-panel">
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;server&gt; EmuLinker X v3.4: 02-07-2023 &mdash;
+                    Visit:
+                  </div>
+                  <div class="t4-srv" style="color: #88ccff">https://slinksoft.github.io/emulinkexdoc/</div>
+                  <div class="t4-sys">&lt;Client&gt; Connected!</div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;Slink&gt; Joined the Server
+                  </div>
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;server&gt; The King Is Here. Do Not Fuck With
+                    Him.
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:27:03 PM:</span> &lt;Mr Quimper&gt; Quit the Server: Normal client
+                    exit
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:27:18 PM:</span> &lt;Natsu&gt; Quit the Server: Rejoined
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:27:19 PM:</span> &lt;Natsu&gt; Joined the Server
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:27:41 PM:</span> &lt;Agent21&gt; Joined the Server
+                  </div>
+                  <div class="t4-usr">
+                    <span class="t4-ts">&middot;10:27:55 PM:</span> &lt;Agent21&gt; anyone down for smash?
+                  </div>
+                  <div class="t4-sys">
+                    <span class="t4-ts">&middot;10:27:59 PM:</span> &lt;Agent21&gt; Created Game: Super Smash Bros. (U)
+                    [!]
+                  </div>
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:28:09 PM:</span> &lt;server&gt; Agent21 has loaded Super Smash Bros.
+                    (U) [!]
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:28:14 PM:</span> &lt;N64_King&gt; Joined the Server
+                  </div>
+                  <div class="t4-usr">
+                    <span class="t4-ts">&middot;10:28:15 PM:</span> &lt;N64_King&gt; yo lets run it
+                  </div>
+                  <div class="t4-sys"><span class="t4-ts">&middot;10:28:20 PM:</span> *** Game started</div>
+                  <div class="t4-err">
+                    <span class="t4-ts">&middot;10:48:21 PM:</span> *** Desync Detected! Connection quality: Poor
+                  </div>
+                  <div class="t4-err">
+                    <span class="t4-ts">&middot;10:48:22 PM:</span> *** Game Ended! Didn't receive a response for 15s.
+                  </div>
+                  <div class="t4-err" id="t4-chat-error">
+                    <span class="t4-ts">&middot;10:48:22 PM:</span> *** Connection Lost! (Error {{CODE}}: Page Not
+                    Found)
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:48:23 PM:</span> &lt;N64_King&gt; has been dropped
+                  </div>
+                </div>
+                <!-- User list panel (right) -->
+                <div class="t4-k-user-panel">
+                  <div class="t4-k-user-header">
+                    <span>UserID</span><span>Nick</span><span>Ping</span><span>Type</span><span>Status</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>956</span><span>123</span><span>200</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>939</span><span>Athlas</span><span>126</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>923</span><span>AxelitoRaptor</span><span>255</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>911</span><span style="color: #000080">DniC666</span><span>140</span><span>LAN</span
+                    ><span>Playing</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>700</span><span style="color: #008800">DrisOGenDroX</span><span>49</span><span>LAN</span
+                    ><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>948</span><span>FelipeROD_06</span><span>155</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>910</span><span>Kev</span><span>124</span><span>LAN</span><span>Playing</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>953</span><span>Lomax</span><span>130</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row" style="background: #316ac5; color: #fff">
+                    <span>958</span><span>Agent21</span><span>&#8734;</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>955</span><span>Natsu</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>907</span><span>renne</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>960</span><span>Ryot</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>957</span><span>Toby</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>959</span><span>Slink</span><span></span><span></span><span></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Chat input + buttons -->
+              <div class="t4-k-chatbar">
+                <input value="" placeholder="Type message..." />
+                <button class="t4-xp-btn">Chat</button>
+                <button class="t4-xp-btn">Create</button>
+                <button class="t4-xp-btn">Join</button>
+              </div>
+
+              <!-- Game list -->
+              <div class="t4-k-games">
+                <div class="t4-k-game-header">
+                  <span>GameID</span><span>Game</span><span>Emulator</span><span>Owner</span>
+                </div>
+                <div class="t4-k-game-row t4-err">
+                  <span>385</span><span>Super Smash Bros. (U) [!]</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>Agent21</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>362</span><span>STREET FIGHTER ALPHA2 (USA)</span><span>Snes9K 0.09z</span><span>renne</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>384</span><span>SmashRemix1.3.1</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>123</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>363</span><span>Mario Kart 64 (U) [!]</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>Kev</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>288</span><span>"Away (leave messages)"</span><span>SupraEmulator</span><span>DrisOGen</span>
+                </div>
+              </div>
+
+              <!-- Bottom tabs -->
+              <div class="t4-k-tabs">
+                <div class="t4-k-tab t4-active">Login Info</div>
+                <div class="t4-k-tab">Chatroom Options</div>
+                <div class="t4-k-tab">Gameroom Options</div>
+                <div class="t4-k-tab">Extended Emulinker X v3.1.3+ Gameroom Options</div>
+              </div>
+
+              <!-- Login bar -->
+              <div class="t4-k-login">
+                <label>IP:</label><input style="width: 130px" value="18.204.206.90:27888" />
+                <label>Ping Spoof (-1 or Blank For No Spoofing):</label><input style="width: 30px" value="-1" />
+                <span style="flex: 1"></span>
+                <span>Slink Client X v3.3.4 - Final</span>
+                <span style="font-weight: bold">#Users: 17&nbsp;&nbsp;#Games: 6</span>
+              </div>
+              <div class="t4-k-login" style="border-top: none; padding-top: 0">
+                <label>Nick:</label><input style="width: 60px" value="Agent21" /> <label>Quit Msg:</label
+                ><input style="width: 180px" value="SupraSlinkClient X v3.3.4 Final (Slink's En" />
+                <label>Type:</label>
+                <select>
+                  <option selected>LAN</option>
+                  <option>Excellent</option>
+                  <option>Good</option>
+                  <option>Average</option>
+                  <option>Low</option>
+                  <option>Bad</option>
+                </select>
+                <button class="t4-xp-btn">Servers</button>
+                <button class="t4-xp-btn">Login</button>
+                <button class="t4-xp-btn">Logoff</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- XP Taskbar -->
+          <div class="t4-xp-taskbar">
+            <button class="t4-start-btn">
+              <div class="t4-win-flag">
+                <div class="t4-r"></div>
+                <div class="t4-g"></div>
+                <div class="t4-b"></div>
+                <div class="t4-y"></div>
+              </div>
+              start
+            </button>
+            <div class="t4-taskbar-items">
+              <div class="t4-taskbar-item t4-active">&#127918; Project64k &mdash; Super S...</div>
+              <div class="t4-taskbar-item">&#128172; AIM Buddy List</div>
+            </div>
+            <div class="t4-tray">&#128266; &#128737;&#65039; 11:42 PM</div>
+          </div>
+        </div>
+
+        <!-- XP Error Dialog -->
+        <div class="t4-err-dialog">
+          <div class="t4-k-titlebar">
+            <div class="t4-title" style="font-size: 11px">kaillera-next</div>
+            <div class="t4-win-btns">
+              <div class="t4-wbtn t4-cls" style="width: 18px; height: 18px; font-size: 10px">&#215;</div>
+            </div>
+          </div>
+          <div class="t4-dlg-body">
+            <div class="t4-err-ico">&#10005;</div>
+            <div class="t4-err-txt" role="alert">
+              <strong id="t4-dialog-title">Connection Lost!</strong><br /><br />
+              <span id="t4-dialog-msg">The page you're looking for has been dropped from the server.</span><br />
+              <div class="t4-code" id="t4-diag-line">
+                Error {{CODE}} &middot; kailleraclient.dll &middot; 0x004F4E46<br />Ping: &#8734; ms &middot; Frames
+                behind: {{CODE}} &middot; Desync: Yes
+              </div>
+            </div>
+          </div>
+          <div class="t4-dlg-btns">
+            <button class="t4-xp-btn t4-default" id="t4-reconnect-btn" aria-label="Return to lobby">Reconnect</button>
+            <button class="t4-xp-btn" id="t4-lobby-btn">Back to Lobby</button>
+            <button class="t4-xp-btn" id="t4-blow-btn">Blow on Cartridge</button>
+          </div>
+        </div>
+      </div>
+    </template>
+    <script>
+      window.initTheme1 = (code) => {
+        const pad = `00${code}00`.padStart(7, '0');
+        document.getElementById('t1-score').textContent = pad;
+        document.getElementById('t1-yourscore').textContent = pad;
+        let count = 9;
+        const el = document.getElementById('t1-countdown');
+        const coin = document.getElementById('t1-coin');
+        const timer = setInterval(() => {
+          count--;
+          if (count < 0) {
+            clearInterval(timer);
+            el.textContent = '0';
+            el.style.color = '#f33';
+            coin.textContent = 'RETURNING TO LOBBY...';
+            coin.style.color = '#ff0';
+            setTimeout(() => {
+              window.location.href = '/';
+            }, 1500);
+            return;
+          }
+          el.textContent = count;
+          if (count <= 3) el.style.color = '#f33';
+        }, 1000);
+      };
+    </script>
+    <script>
+      window.initTheme2 = (code) => {
+        const msgs = {
+          404: ['CARTRIDGE NOT FOUND', 'CARTRIDGE NOT FOUND'],
+          500: ['FATAL EXCEPTION: CORE DUMP', 'FATAL EXCEPTION'],
+          429: ['BUFFER OVERFLOW: TOO MANY REQUESTS', 'BUFFER OVERFLOW'],
+        };
+        const m = msgs[code] || msgs['404'];
+        const el = document.getElementById('t2-errmsg');
+        if (el) el.textContent = 'FATAL EXCEPTION: ' + m[1];
+        const t = document.getElementById('t2-title');
+        if (t) t.textContent = m[1];
+        // Static noise
+        const c = document.getElementById('t2-noise');
+        if (c) {
+          const ctx = c.getContext('2d');
+          c.width = window.innerWidth;
+          c.height = window.innerHeight;
+          const noise = () => {
+            const d = ctx.createImageData(c.width, c.height);
+            for (let i = 0; i < d.data.length; i += 4) {
+              const v = Math.random() * 255;
+              d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+              d.data[i + 3] = 255;
+            }
+            ctx.putImageData(d, 0, 0);
+            requestAnimationFrame(noise);
+          };
+          noise();
+        }
+        // Scramble hex
+        const sc = document.getElementById('t2-scramble');
+        if (sc)
+          setInterval(() => {
+            let s = '0x';
+            for (let i = 0; i < 8; i++) s += '0123456789ABCDEF'[(Math.random() * 16) | 0];
+            sc.textContent = s;
+          }, 100);
+      };
+    </script>
+    <script>
+      window.initTheme3 = (code) => {
+        const canvas = document.getElementById('t3-game');
+        const ctx = canvas.getContext('2d');
+        const W = 480,
+          H = 360;
+
+        let hiScore = parseInt(localStorage.getItem('kn-error-hiscore') || '0');
+        document.getElementById('t3-hiscore').textContent = hiScore;
+
+        const player = {
+          x: 40,
+          y: 0,
+          vx: 0,
+          vy: 0,
+          w: 16,
+          h: 24,
+          onGround: false,
+          color: '#6af',
+          jumpHeld: false,
+          facing: 1,
+        };
+        const GRAVITY = 0.5,
+          JUMP = -9,
+          SPEED = 3.5,
+          FRICTION = 0.85;
+
+        const platforms = [
+          { x: 0, y: H - 20, w: W, h: 20 },
+          { x: 60, y: 280, w: 80, h: 10 },
+          { x: 200, y: 240, w: 90, h: 10 },
+          { x: 350, y: 200, w: 80, h: 10 },
+          { x: 120, y: 160, w: 100, h: 10 },
+          { x: 300, y: 120, w: 90, h: 10 },
+          { x: 50, y: 80, w: 70, h: 10 },
+          { x: 220, y: 60, w: 80, h: 10 },
+          { x: 380, y: 300, w: 70, h: 10 },
+        ];
+
+        const codeStr = String(code);
+        const digits = [
+          { x: 100, y: 256, char: codeStr[0] || '4', collected: false },
+          { x: 240, y: 216, char: codeStr[1] || '0', collected: false },
+          { x: 390, y: 176, char: codeStr[2] || '4', collected: false },
+        ];
+        let score = 0;
+
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+          keys[e.code] = true;
+          if (['Space', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+        });
+        window.addEventListener('keyup', (e) => {
+          keys[e.code] = false;
+        });
+
+        // Touch: bottom 40% = move zones, top 60% = jump
+        let touchLeft = false,
+          touchRight = false,
+          touchJump = false;
+        canvas.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          for (const t of e.touches) {
+            const rect = canvas.getBoundingClientRect();
+            const x = t.clientX - rect.left;
+            const y = t.clientY - rect.top;
+            if (y > H * 0.6) {
+              if (x < W / 2) touchLeft = true;
+              else touchRight = true;
+            } else touchJump = true;
+          }
+        });
+        canvas.addEventListener('touchend', (e) => {
+          touchLeft = touchRight = touchJump = false;
+        });
+
+        const update = () => {
+          if (keys['ArrowLeft'] || touchLeft) {
+            player.vx = -SPEED;
+            player.facing = -1;
+          } else if (keys['ArrowRight'] || touchRight) {
+            player.vx = SPEED;
+            player.facing = 1;
+          } else player.vx *= FRICTION;
+
+          const jumpPressed = keys['Space'] || keys['ArrowUp'] || touchJump;
+          if (jumpPressed && !player.jumpHeld && player.onGround) {
+            player.vy = JUMP;
+            player.onGround = false;
+          }
+          player.jumpHeld = jumpPressed;
+
+          player.vy += GRAVITY;
+          player.x += player.vx;
+          player.y += player.vy;
+
+          if (player.x > W) player.x = -player.w;
+          if (player.x + player.w < 0) player.x = W;
+
+          player.onGround = false;
+          const prevBottom = player.y + player.h - player.vy;
+          for (const p of platforms) {
+            if (
+              player.x + player.w > p.x &&
+              player.x < p.x + p.w &&
+              prevBottom <= p.y &&
+              player.y + player.h >= p.y &&
+              player.vy >= 0
+            ) {
+              player.y = p.y - player.h;
+              player.vy = 0;
+              player.onGround = true;
+            }
+          }
+
+          if (player.y > H + 50) {
+            player.x = 40;
+            player.y = 0;
+            player.vy = 0;
+          }
+
+          for (const d of digits) {
+            if (d.collected) continue;
+            const dx = player.x + player.w / 2 - (d.x + 10);
+            const dy = player.y + player.h / 2 - (d.y + 10);
+            if (Math.abs(dx) < 18 && Math.abs(dy) < 18) {
+              d.collected = true;
+              score += 100;
+              document.getElementById('t3-score').textContent = score;
+              if (score > hiScore) {
+                hiScore = score;
+                localStorage.setItem('kn-error-hiscore', hiScore);
+                document.getElementById('t3-hiscore').textContent = hiScore;
+              }
+              if (digits.every((d) => d.collected)) {
+                document.getElementById('t3-win').classList.add('show');
+                setTimeout(() => {
+                  window.location.href = '/';
+                }, 2000);
+              }
+            }
+          }
+        };
+
+        let t = 0;
+        const draw = () => {
+          t++;
+          ctx.fillStyle = '#0d0d1a';
+          ctx.fillRect(0, 0, W, H);
+
+          for (const p of platforms) {
+            if (p.y === H - 20) {
+              ctx.fillStyle = '#1a2a1a';
+              ctx.fillRect(p.x, p.y, p.w, p.h);
+            } else {
+              ctx.fillStyle = '#3a5a8a';
+              ctx.beginPath();
+              ctx.roundRect(p.x, p.y, p.w, p.h, 4);
+              ctx.fill();
+              ctx.shadowColor = 'rgba(106,170,255,0.15)';
+              ctx.shadowBlur = 8;
+              ctx.fillStyle = 'rgba(106,170,255,0.1)';
+              ctx.fillRect(p.x, p.y - 2, p.w, 2);
+              ctx.shadowBlur = 0;
+            }
+          }
+
+          for (const d of digits) {
+            if (d.collected) continue;
+            const bob = Math.sin(t * 0.05 + d.x) * 4;
+            ctx.shadowColor = 'rgba(255,170,85,0.5)';
+            ctx.shadowBlur = 12;
+            ctx.fillStyle = '#fa5';
+            ctx.font = 'bold 22px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(d.char, d.x + 10, d.y + 16 + bob);
+            ctx.shadowBlur = 0;
+          }
+
+          // Player with visual feedback
+          const px = Math.round(player.x),
+            py = Math.round(player.y);
+          const moving = Math.abs(player.vx) > 0.5;
+          const jumping = !player.onGround;
+
+          ctx.save();
+          // Lean in movement direction
+          if (moving) {
+            ctx.translate(px + player.w / 2, py + player.h);
+            ctx.rotate(player.facing * 0.12);
+            ctx.translate(-(px + player.w / 2), -(py + player.h));
+          }
+          // Squash/stretch on jump
+          const sy = jumping ? (player.vy < 0 ? 0.85 : 1.1) : 1;
+          const sx = jumping ? (player.vy < 0 ? 1.15 : 0.9) : 1;
+          if (jumping) {
+            ctx.translate(px + player.w / 2, py + player.h);
+            ctx.scale(sx, sy);
+            ctx.translate(-(px + player.w / 2), -(py + player.h));
+          }
+
+          ctx.fillStyle = player.color;
+          // Head
+          ctx.beginPath();
+          ctx.arc(px + player.w / 2, py + 7, 7, 0, Math.PI * 2);
+          ctx.fill();
+          // Body
+          ctx.fillRect(px + 3, py + 14, 10, 14);
+          // Arms
+          const armWave = moving ? Math.sin(t * 0.3) * 4 : 0;
+          ctx.fillRect(px - 3, py + 16 + armWave, 6, 3);
+          ctx.fillRect(px + player.w - 3, py + 16 - armWave, 6, 3);
+          // Legs
+          const legWave = moving ? Math.sin(t * 0.4) * 3 : 0;
+          ctx.fillRect(px + 3, py + 28, 4, 6 + legWave);
+          ctx.fillRect(px + 9, py + 28, 4, 6 - legWave);
+
+          // Jump trail
+          if (jumping && player.vy < -2) {
+            ctx.globalAlpha = 0.2;
+            ctx.fillStyle = '#6af';
+            ctx.beginPath();
+            ctx.arc(px + player.w / 2, py + player.h + 4, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+
+          ctx.restore();
+
+          // Movement direction indicator
+          if (moving) {
+            ctx.fillStyle = 'rgba(106,170,255,0.3)';
+            const arrowX = px + player.w / 2 + player.facing * 14;
+            ctx.beginPath();
+            ctx.moveTo(arrowX, py + 18);
+            ctx.lineTo(arrowX + player.facing * 6, py + 21);
+            ctx.lineTo(arrowX, py + 24);
+            ctx.fill();
+          }
+
+          // Touch zones (mobile)
+          if ('ontouchstart' in window) {
+            ctx.fillStyle = 'rgba(106,170,255,0.05)';
+            ctx.fillRect(0, H * 0.6, W / 2, H * 0.4);
+            ctx.fillRect(W / 2, H * 0.6, W / 2, H * 0.4);
+            ctx.fillStyle = 'rgba(106,170,255,0.15)';
+            ctx.font = '20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('←', W * 0.25, H * 0.85);
+            ctx.fillText('→', W * 0.75, H * 0.85);
+            ctx.fillText('TAP ABOVE TO JUMP', W / 2, H * 0.3);
+          }
+        };
+
+        const loop = () => {
+          update();
+          draw();
+          requestAnimationFrame(loop);
+        };
+        loop();
+      };
+    </script>
+    <script>
+      window.initTheme4 = (code) => {
+        const titles = {
+          404: { title: 'Connection Lost!', msg: "The page you're looking for has been dropped from the server." },
+          500: { title: 'Fatal Exception!', msg: 'The server encountered an unrecoverable error.' },
+          429: { title: 'Server Full!', msg: 'Too many connections. Please wait before retrying.' },
+        };
+        const info = titles[String(code)] || titles['404'];
+        const titleEl = document.getElementById('t4-dialog-title');
+        const msgEl = document.getElementById('t4-dialog-msg');
+        if (titleEl) titleEl.textContent = info.title;
+        if (msgEl) msgEl.textContent = info.msg;
+
+        const reconnectBtn = document.getElementById('t4-reconnect-btn');
+        const lobbyBtn = document.getElementById('t4-lobby-btn');
+        const blowBtn = document.getElementById('t4-blow-btn');
+
+        if (reconnectBtn)
+          reconnectBtn.onclick = () => {
+            location.href = '/';
+          };
+        if (lobbyBtn)
+          lobbyBtn.onclick = () => {
+            location.href = '/';
+          };
+        if (blowBtn)
+          blowBtn.onclick = () => {
+            blowBtn.textContent = '\uD83D\uDCA8 Pfffft!';
+          };
+      };
+    </script>
+  </body>
+</html>

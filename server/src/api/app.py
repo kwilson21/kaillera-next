@@ -40,7 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
 from src.api.og import build_og_tags, generate_og_image, inject_og_tags
-from src.api.signaling import MAX_ROOMS, rooms
+from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
 from src.ratelimit import check_ip
 
 log = logging.getLogger(__name__)
@@ -127,12 +127,12 @@ class SecurityHeadersMiddleware:
     _CSP = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "connect-src 'self' wss: ws: blob:; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
-        "font-src 'self' data:"
+        "font-src 'self' data: https://fonts.gstatic.com"
     )
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
@@ -279,6 +279,71 @@ class CacheBustMiddleware:
         await self.app(scope, receive, capture_send)
 
 
+# ── Error page middleware ─────────────────────────────────────────────────────
+
+
+class ErrorPageMiddleware:
+    """ASGI middleware that serves custom HTML error pages for browser requests.
+
+    Intercepts 404/500/429 responses for requests that accept text/html and
+    are not on API paths. Injects the status code into the HTML template.
+    """
+
+    _API_PREFIXES = ("/api/", "/admin/api/", "/socket.io/", "/health", "/list", "/room/", "/ice-servers", "/og-image/")
+
+    def __init__(self, app, error_html: str) -> None:  # noqa: ANN001
+        self.app = app
+        self._error_html = error_html
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path: str = scope.get("path", "")
+        # Skip API paths — they return JSON
+        if any(path.startswith(p) for p in self._API_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        # Only intercept browser navigation (Accept: text/html)
+        headers = dict(scope.get("headers", []))
+        accept = headers.get(b"accept", b"").decode()
+        if "text/html" not in accept:
+            await self.app(scope, receive, send)
+            return
+
+        # Capture response; replace error status with custom page
+        intercepted = False
+
+        async def capture_send(message: dict) -> None:
+            nonlocal intercepted
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                if status in (404, 500, 429):
+                    intercepted = True
+                    html = self._error_html.replace("{{CODE}}", str(status))
+                    body = html.encode()
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": status,
+                            "headers": [
+                                (b"content-type", b"text/html; charset=utf-8"),
+                                (b"content-length", str(len(body)).encode()),
+                            ],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": body})
+                    return
+                await send(message)
+            elif message["type"] == "http.response.body":
+                if not intercepted:
+                    await send(message)
+
+        await self.app(scope, receive, capture_send)
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
@@ -295,6 +360,16 @@ def create_app(lifespan=None) -> FastAPI:
     version = _asset_version()
     app.add_middleware(CacheBustMiddleware, version=version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
+
+    # Load error page template
+    _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
+    if _error_html_path.exists():
+        _error_html = _error_html_path.read_text()
+        app.add_middleware(ErrorPageMiddleware, error_html=_error_html)
+        log.info("Custom error pages loaded")
+    else:
+        log.warning("web/error.html not found — using default error responses")
+
     log.info("Cache bust version: %s", version)
 
     @app.get("/health")
@@ -379,6 +454,10 @@ def create_app(lifespan=None) -> FastAPI:
         if not check_ip(_client_ip(request), "cache-state"):
             raise HTTPException(status_code=429, detail="Rate limited")
         _validate_rom_hash(rom_hash)
+        token = request.query_params.get("token", "")
+        room_id = request.query_params.get("room", "")
+        if not room_id or not verify_upload_token(room_id, token):
+            raise HTTPException(status_code=403, detail="Invalid upload token")
         if not _rom_hash_in_active_room(rom_hash):
             raise HTTPException(status_code=403, detail="ROM hash not associated with any active room")
         body = await request.body()
@@ -402,7 +481,10 @@ def create_app(lifespan=None) -> FastAPI:
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="Empty log")
         # Extract metadata from query params
-        room = request.query_params.get("room", "unknown")[:32]
+        room = request.query_params.get("room", "")[:32]
+        token = request.query_params.get("token", "")
+        if not room or not verify_upload_token(room, token):
+            raise HTTPException(status_code=403, detail="Invalid upload token")
         slot = request.query_params.get("slot", "x")[:4]
         src = request.query_params.get("src", "")
         ts = int(time.time())

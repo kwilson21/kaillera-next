@@ -9,11 +9,15 @@
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
         // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
-        fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
-          method: 'POST',
-          body: logs,
-          headers: { 'Content-Type': 'text/plain' },
-        })
+        const token = localStorage.getItem('kn-upload-token') || '';
+        fetch(
+          `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery&token=${encodeURIComponent(token)}`,
+          {
+            method: 'POST',
+            body: logs,
+            headers: { 'Content-Type': 'text/plain' },
+          },
+        )
           .then(() => console.log('[lobby] recovered pending sync log'))
           .catch(() => {});
       }

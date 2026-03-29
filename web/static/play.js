@@ -107,6 +107,7 @@
   let _romSignalHandler = null; // pre-game rom-signal Socket.IO listener
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
+  let _uploadToken = localStorage.getItem('kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
 
   const _persistentId =
     sessionStorage.getItem('kn-player-id') ||
@@ -146,11 +147,14 @@
       const { room, slot, logs } = JSON.parse(pending);
       if (logs) {
         // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
-        fetch(`/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery`, {
-          method: 'POST',
-          body: logs,
-          headers: { 'Content-Type': 'text/plain' },
-        })
+        fetch(
+          `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery&token=${encodeURIComponent(_uploadToken)}`,
+          {
+            method: 'POST',
+            body: logs,
+            headers: { 'Content-Type': 'text/plain' },
+          },
+        )
           .then(() => console.log('[play] recovered pending sync log'))
           .catch(() => {});
       }
@@ -197,7 +201,7 @@
       const cutIdx = logs.indexOf('\n', logs.length - MAX_BEACON);
       beaconLog = logs.slice(cutIdx === -1 ? logs.length - MAX_BEACON : cutIdx + 1);
     }
-    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=beacon`;
+    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=beacon&token=${encodeURIComponent(_uploadToken)}`;
     try {
       navigator.sendBeacon(url, new Blob([beaconLog], { type: 'text/plain' }));
     } catch (_) {}
@@ -325,6 +329,12 @@
       }
     });
     socket.on('users-updated', onUsersUpdated);
+    socket.on('upload-token', (data) => {
+      _uploadToken = data?.token || '';
+      try {
+        localStorage.setItem('kn-upload-token', _uploadToken);
+      } catch (_) {}
+    });
     socket.on('game-started', onGameStarted);
     socket.on('game-ended', onGameEnded);
     socket.on('room-closed', onRoomClosed);
@@ -2177,6 +2187,7 @@
       gameElement: document.getElementById('game'),
       rollbackEnabled,
       romHash: _romHash ?? null,
+      uploadToken: _uploadToken,
       isMobile: _isMobile,
       onStatus: (msg) => {
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
@@ -2280,7 +2291,7 @@
     if (!logs) return;
     const slot = window._playerSlot ?? 'x';
     const room = roomCode ?? 'unknown';
-    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}`;
+    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&token=${encodeURIComponent(_uploadToken)}`;
     try {
       const res = await fetch(url, { method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' } });
       if (res.ok) {
