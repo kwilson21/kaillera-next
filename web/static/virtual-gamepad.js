@@ -386,8 +386,20 @@
 
       if (el === _stickZone || el === _stickEl || el?.parentNode === _stickZone) {
         _stickTouch = t.identifier;
+        // Floating center: wherever the thumb lands becomes the origin.
+        // Clamp so the full radius fits within the zone.
         const rect = _stickZone.getBoundingClientRect();
-        _stickCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const margin = rect.width / 2 - STICK_RADIUS;
+        _stickCenter = {
+          x: Math.max(rect.left + margin, Math.min(rect.right - margin, t.clientX)),
+          y: Math.max(rect.top + margin, Math.min(rect.bottom - margin, t.clientY)),
+        };
+        // Move the knob visual to the new center on contact
+        const dx = _stickCenter.x - cx;
+        const dy = _stickCenter.y - cy;
+        if (_stickEl) _stickEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
         updateStick(t.clientX, t.clientY);
         continue;
       }

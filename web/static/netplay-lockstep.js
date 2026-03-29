@@ -1876,7 +1876,7 @@
       // On mobile: hide EJS's built-in virtual gamepad and use our custom one.
       // Our VirtualGamepad writes directly to KNState.touchInput which
       // readLocalInput() already reads — no hookVirtualGamepad needed for it.
-      if (_config?.isMobile && window.VirtualGamepad) {
+      if (_config?.isMobile && !_isSpectator && window.VirtualGamepad) {
         const ejs2 = window.EJS_emulator;
         if (ejs2?.virtualGamepad) {
           ejs2.virtualGamepad.style.display = 'none';
