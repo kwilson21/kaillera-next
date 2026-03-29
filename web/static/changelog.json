@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.19.1",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "crash protection + frontend observability instrumentation"
+      }
+    ]
+  },
+  {
     "version": "0.19.0",
     "date": "2026-03-29",
     "changes": [
@@ -186,16 +196,6 @@
       {
         "type": "fix",
         "message": "only bump version on main branch"
-      }
-    ]
-  },
-  {
-    "version": "0.10.1",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "add knitephox, near, and firo to admin easter egg names"
       }
     ]
   }
