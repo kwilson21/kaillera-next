@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.18.5",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "landscape layout overlap in lobby"
+      }
+    ]
+  },
+  {
     "version": "0.18.4",
     "date": "2026-03-29",
     "changes": [
@@ -186,16 +196,6 @@
       {
         "type": "feat",
         "message": "Konami Code easter egg — HELLOD00D protocol tribute"
-      }
-    ]
-  },
-  {
-    "version": "0.8.1",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "vertical alignment of version badge in lobby footer"
       }
     ]
   }
