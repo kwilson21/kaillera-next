@@ -461,7 +461,410 @@
         };
       </script>
     </template>
-    <template id="theme-2"></template>
+    <template id="theme-2">
+      <style>
+        .t2-body {
+          background: #0a0a0a;
+          color: #0f0;
+          font-family: 'Courier New', monospace;
+          min-height: 100vh;
+          overflow: hidden;
+          position: fixed;
+          inset: 0;
+        }
+        .t2-scanlines {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 10;
+          background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(0, 0, 0, 0.15) 2px,
+            rgba(0, 0, 0, 0.15) 4px
+          );
+        }
+        .t2-scan-bar {
+          position: fixed;
+          left: 0;
+          right: 0;
+          height: 6px;
+          z-index: 11;
+          pointer-events: none;
+          animation: t2scanDown 4s linear infinite;
+        }
+        .t2-scan-bar::before {
+          content: '';
+          display: block;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(
+            90deg,
+            rgba(255, 0, 0, 0.4),
+            rgba(0, 255, 0, 0.4),
+            rgba(0, 0, 255, 0.4),
+            rgba(255, 0, 255, 0.4)
+          );
+        }
+        @keyframes t2scanDown {
+          from {
+            top: -6px;
+          }
+          to {
+            top: 100vh;
+          }
+        }
+        .t2-gb {
+          position: fixed;
+          left: 0;
+          right: 0;
+          height: 3px;
+          pointer-events: none;
+          z-index: 5;
+          opacity: 0.5;
+        }
+        .t2-gb1 {
+          top: 15%;
+          background: linear-gradient(90deg, #f00, #0f0, #00f, #f0f, #ff0);
+          animation: t2drift 3s ease-in-out infinite alternate;
+        }
+        .t2-gb2 {
+          top: 35%;
+          background: linear-gradient(90deg, #0ff, #f0f, #ff0, #0f0);
+          animation: t2drift 4s ease-in-out infinite alternate-reverse;
+          height: 6px;
+        }
+        .t2-gb3 {
+          top: 65%;
+          background: linear-gradient(90deg, #f55, #5f5, #55f);
+          animation: t2drift 2.5s ease-in-out infinite alternate;
+          height: 2px;
+        }
+        .t2-gb4 {
+          top: 82%;
+          background: linear-gradient(90deg, #ff0, #f0f, #0ff, #f00);
+          animation: t2drift 3.5s ease-in-out infinite alternate-reverse;
+          height: 4px;
+        }
+        @keyframes t2drift {
+          from {
+            transform: translateX(-20px);
+          }
+          to {
+            transform: translateX(20px);
+          }
+        }
+        .t2-crt {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          z-index: 12;
+          background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.5) 100%);
+        }
+        .t2-content {
+          position: relative;
+          z-index: 8;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          padding: 40px 20px;
+        }
+        .t2-glitch {
+          font-size: 64px;
+          font-weight: bold;
+          color: #0f0;
+          position: relative;
+          text-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+        }
+        .t2-glitch::before,
+        .t2-glitch::after {
+          content: attr(data-text);
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+        }
+        .t2-glitch::before {
+          color: #f00;
+          animation: t2g1 2s infinite;
+          clip-path: polygon(0 0, 100% 0, 100% 35%, 0 35%);
+        }
+        .t2-glitch::after {
+          color: #00f;
+          animation: t2g2 2s infinite;
+          clip-path: polygon(0 65%, 100% 65%, 100% 100%, 0 100%);
+        }
+        @keyframes t2g1 {
+          0%,
+          95% {
+            transform: none;
+          }
+          96% {
+            transform: translate(-4px, -2px);
+          }
+          97% {
+            transform: translate(4px, 2px);
+          }
+          98% {
+            transform: translate(-2px, 4px);
+          }
+          100% {
+            transform: none;
+          }
+        }
+        @keyframes t2g2 {
+          0%,
+          95% {
+            transform: none;
+          }
+          96% {
+            transform: translate(4px, 2px);
+          }
+          97% {
+            transform: translate(-4px, -2px);
+          }
+          98% {
+            transform: translate(2px, -4px);
+          }
+          100% {
+            transform: none;
+          }
+        }
+        .t2-dump {
+          margin: 20px 0;
+          text-align: left;
+          font-size: 12px;
+          color: #0a0;
+          line-height: 1.8;
+          opacity: 0.8;
+        }
+        .t2-addr {
+          color: #0f0;
+        }
+        .t2-err {
+          color: #f44;
+        }
+        .t2-warn {
+          color: #ff0;
+        }
+        .t2-cart-area {
+          margin: 30px 0;
+          position: relative;
+        }
+        .t2-cart {
+          width: 100px;
+          height: 130px;
+          background: linear-gradient(180deg, #444, #333, #3a3a3a);
+          border-radius: 8px 8px 0 0;
+          margin: 0 auto;
+          position: relative;
+          transform: rotate(12deg);
+          animation: t2wobble 3s ease-in-out infinite;
+          border: 2px solid #555;
+          box-shadow: 4px 4px 15px rgba(0, 0, 0, 0.5);
+        }
+        @keyframes t2wobble {
+          0%,
+          100% {
+            transform: rotate(12deg);
+          }
+          50% {
+            transform: rotate(15deg);
+          }
+        }
+        .t2-cart-label {
+          position: absolute;
+          top: 15px;
+          left: 10px;
+          right: 10px;
+          height: 60px;
+          background: #1a1a2e;
+          border-radius: 3px;
+          border: 1px solid #555;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-direction: column;
+          padding: 4px;
+        }
+        .t2-cart-text {
+          color: #6af;
+          font-size: 7px;
+          font-family: sans-serif;
+          font-weight: bold;
+          text-align: center;
+          line-height: 1.3;
+        }
+        .t2-cart-slot {
+          position: absolute;
+          bottom: 0;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 50px;
+          height: 14px;
+          background: #222;
+          border-radius: 0 0 4px 4px;
+          border: 1px solid #444;
+          border-top: none;
+        }
+        .t2-cart-chip {
+          position: absolute;
+          bottom: 20px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 30px;
+          height: 8px;
+          background: #2a2a2a;
+          border-radius: 2px;
+          border: 1px solid #444;
+        }
+        .t2-blow {
+          text-align: center;
+          margin-top: 12px;
+          font-size: 14px;
+          color: #888;
+          font-style: italic;
+          animation: t2blink 2s infinite;
+        }
+        @keyframes t2blink {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.3;
+          }
+        }
+        .t2-details {
+          margin-top: 20px;
+          text-align: center;
+        }
+        .t2-title {
+          font-size: 20px;
+          color: #0f0;
+          margin-bottom: 8px;
+          text-shadow: 0 0 8px rgba(0, 255, 0, 0.3);
+        }
+        .t2-sub {
+          font-size: 13px;
+          color: #555;
+          margin-bottom: 20px;
+        }
+        .t2-btn {
+          padding: 10px 20px;
+          background: transparent;
+          color: #0f0;
+          border: 1px solid #0f0;
+          font-family: 'Courier New', monospace;
+          font-size: 14px;
+          cursor: pointer;
+          text-decoration: none;
+          display: inline-block;
+          transition: all 0.2s;
+        }
+        .t2-btn:hover {
+          background: #0f0;
+          color: #000;
+        }
+        #t2-noise {
+          position: fixed;
+          inset: 0;
+          z-index: 1;
+          opacity: 0.04;
+          pointer-events: none;
+        }
+        @media (max-width: 768px) {
+          .t2-glitch {
+            font-size: 36px;
+          }
+          .t2-dump {
+            font-size: 10px;
+          }
+        }
+      </style>
+      <div class="t2-body">
+        <canvas id="t2-noise"></canvas>
+        <div class="t2-scanlines"></div>
+        <div class="t2-scan-bar"></div>
+        <div class="t2-crt"></div>
+        <div class="t2-gb t2-gb1"></div>
+        <div class="t2-gb t2-gb2"></div>
+        <div class="t2-gb t2-gb3"></div>
+        <div class="t2-gb t2-gb4"></div>
+        <div class="t2-content">
+          <div class="t2-glitch" data-text="ERR {{CODE}}" role="alert">ERR {{CODE}}</div>
+          <div class="t2-dump">
+            <span class="t2-err" id="t2-errmsg">FATAL EXCEPTION: CARTRIDGE NOT FOUND</span><br />
+            <span class="t2-addr">ADDR 0x00FF{{CODE}}F</span> · <span class="t2-warn">SEGMENT VIOLATION</span><br />
+            <span class="t2-addr">ADDR 0x80246010</span> · RSP STATUS: <span class="t2-err">HALTED</span><br />
+            <span class="t2-addr">ADDR 0x04001000</span> · RDRAM: <span class="t2-warn">CORRUPTED</span><br />
+            <span style="color: #555">PC: 0x800{{CODE}} · RA: 0xDEADBEEF · SP: 0x00000000</span><br />
+            <span style="color: #555"
+              >CAUSE: PAGE_NOT_FOUND · BADVADDR: <span class="t2-err" id="t2-scramble">0x????????</span></span
+            >
+          </div>
+          <div class="t2-cart-area">
+            <div class="t2-cart">
+              <div class="t2-cart-label">
+                <div class="t2-cart-text">SUPER<br />SMASH BROS.<br />kaillera-next</div>
+              </div>
+              <div class="t2-cart-chip"></div>
+              <div class="t2-cart-slot"></div>
+            </div>
+            <div class="t2-blow">[ blow on it? ]</div>
+          </div>
+          <div class="t2-details">
+            <div class="t2-title" id="t2-title">CARTRIDGE NOT FOUND</div>
+            <div class="t2-sub">The page could not be read from memory</div>
+            <a href="/" class="t2-btn" aria-label="Return to lobby">&gt; REBOOT SYSTEM _</a>
+          </div>
+        </div>
+      </div>
+      <script>
+        window.initTheme2 = (code) => {
+          const msgs = {
+            404: ['CARTRIDGE NOT FOUND', 'CARTRIDGE NOT FOUND'],
+            500: ['FATAL EXCEPTION: CORE DUMP', 'FATAL EXCEPTION'],
+            429: ['BUFFER OVERFLOW: TOO MANY REQUESTS', 'BUFFER OVERFLOW'],
+          };
+          const m = msgs[code] || msgs['404'];
+          const el = document.getElementById('t2-errmsg');
+          if (el) el.textContent = 'FATAL EXCEPTION: ' + m[1];
+          const t = document.getElementById('t2-title');
+          if (t) t.textContent = m[1];
+          // Static noise
+          const c = document.getElementById('t2-noise');
+          if (c) {
+            const ctx = c.getContext('2d');
+            c.width = window.innerWidth;
+            c.height = window.innerHeight;
+            const noise = () => {
+              const d = ctx.createImageData(c.width, c.height);
+              for (let i = 0; i < d.data.length; i += 4) {
+                const v = Math.random() * 255;
+                d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+                d.data[i + 3] = 255;
+              }
+              ctx.putImageData(d, 0, 0);
+              requestAnimationFrame(noise);
+            };
+            noise();
+          }
+          // Scramble hex
+          const sc = document.getElementById('t2-scramble');
+          if (sc)
+            setInterval(() => {
+              let s = '0x';
+              for (let i = 0; i < 8; i++) s += '0123456789ABCDEF'[(Math.random() * 16) | 0];
+              sc.textContent = s;
+            }, 100);
+        };
+      </script>
+    </template>
     <template id="theme-3"></template>
     <template id="theme-4"></template>
   </body>
