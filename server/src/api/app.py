@@ -159,7 +159,7 @@ class SecurityHeadersMiddleware:
                     (b"cache-control", self._cache_control(path).encode()),
                 ]
                 # COOP/COEP breaks OG image fetches by crawlers
-                if not path.startswith("/og-image/"):
+                if not path.startswith(("/og-image/", "/static/og/")):
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra

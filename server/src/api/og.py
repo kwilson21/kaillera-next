@@ -343,6 +343,8 @@ def build_og_tags(
         f'<meta property="og:title" content="{title}" />\n'
         f'    <meta property="og:description" content="{description}" />\n'
         f'    <meta property="og:image" content="{image_url}" />\n'
+        f'    <meta property="og:image:width" content="1200" />\n'
+        f'    <meta property="og:image:height" content="630" />\n'
         f'    <meta property="og:url" content="{page_url}" />\n'
         f'    <meta property="og:type" content="website" />\n'
         f'    <meta name="twitter:card" content="summary_large_image" />'
