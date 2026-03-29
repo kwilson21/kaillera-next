@@ -91,6 +91,7 @@ button:hover {
 .footer-link {
   display: inline-flex;
   align-items: center;
+  vertical-align: middle;
   gap: 3px;
   color: #777;
   text-decoration: none;
