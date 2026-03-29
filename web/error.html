@@ -13,7 +13,7 @@
       <a href="/">Back to lobby</a></noscript
     >
     <script>
-      (() => {
+      document.addEventListener('DOMContentLoaded', () => {
         const code = document.body.dataset.errorCode;
         document.title = `Error ${code} — kaillera-next`;
 
@@ -35,7 +35,7 @@
         // Run theme-specific init if defined
         const initFn = window[`initTheme${themeIndex}`];
         if (typeof initFn === 'function') initFn(code);
-      })();
+      });
     </script>
 
     <!-- Theme templates added in subsequent tasks -->
@@ -434,32 +434,6 @@
           </div>
         </div>
       </div>
-      <script>
-        window.initTheme1 = (code) => {
-          const pad = `00${code}00`.padStart(7, '0');
-          document.getElementById('t1-score').textContent = pad;
-          document.getElementById('t1-yourscore').textContent = pad;
-          let count = 9;
-          const el = document.getElementById('t1-countdown');
-          const coin = document.getElementById('t1-coin');
-          const timer = setInterval(() => {
-            count--;
-            if (count < 0) {
-              clearInterval(timer);
-              el.textContent = '0';
-              el.style.color = '#f33';
-              coin.textContent = 'RETURNING TO LOBBY...';
-              coin.style.color = '#ff0';
-              setTimeout(() => {
-                window.location.href = '/';
-              }, 1500);
-              return;
-            }
-            el.textContent = count;
-            if (count <= 3) el.style.color = '#f33';
-          }, 1000);
-        };
-      </script>
     </template>
     <template id="theme-2">
       <style>
@@ -824,46 +798,6 @@
           </div>
         </div>
       </div>
-      <script>
-        window.initTheme2 = (code) => {
-          const msgs = {
-            404: ['CARTRIDGE NOT FOUND', 'CARTRIDGE NOT FOUND'],
-            500: ['FATAL EXCEPTION: CORE DUMP', 'FATAL EXCEPTION'],
-            429: ['BUFFER OVERFLOW: TOO MANY REQUESTS', 'BUFFER OVERFLOW'],
-          };
-          const m = msgs[code] || msgs['404'];
-          const el = document.getElementById('t2-errmsg');
-          if (el) el.textContent = 'FATAL EXCEPTION: ' + m[1];
-          const t = document.getElementById('t2-title');
-          if (t) t.textContent = m[1];
-          // Static noise
-          const c = document.getElementById('t2-noise');
-          if (c) {
-            const ctx = c.getContext('2d');
-            c.width = window.innerWidth;
-            c.height = window.innerHeight;
-            const noise = () => {
-              const d = ctx.createImageData(c.width, c.height);
-              for (let i = 0; i < d.data.length; i += 4) {
-                const v = Math.random() * 255;
-                d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
-                d.data[i + 3] = 255;
-              }
-              ctx.putImageData(d, 0, 0);
-              requestAnimationFrame(noise);
-            };
-            noise();
-          }
-          // Scramble hex
-          const sc = document.getElementById('t2-scramble');
-          if (sc)
-            setInterval(() => {
-              let s = '0x';
-              for (let i = 0; i < 8; i++) s += '0123456789ABCDEF'[(Math.random() * 16) | 0];
-              sc.textContent = s;
-            }, 100);
-        };
-      </script>
     </template>
     <template id="theme-3">
       <style>
@@ -1018,268 +952,6 @@
           <a href="/" class="t3-btn" aria-label="Return to lobby">Skip to Lobby</a>
         </div>
       </div>
-      <script>
-        window.initTheme3 = (code) => {
-          const canvas = document.getElementById('t3-game');
-          const ctx = canvas.getContext('2d');
-          const W = 480,
-            H = 360;
-
-          let hiScore = parseInt(localStorage.getItem('kn-error-hiscore') || '0');
-          document.getElementById('t3-hiscore').textContent = hiScore;
-
-          const player = {
-            x: 40,
-            y: 0,
-            vx: 0,
-            vy: 0,
-            w: 16,
-            h: 24,
-            onGround: false,
-            color: '#6af',
-            jumpHeld: false,
-            facing: 1,
-          };
-          const GRAVITY = 0.5,
-            JUMP = -9,
-            SPEED = 3.5,
-            FRICTION = 0.85;
-
-          const platforms = [
-            { x: 0, y: H - 20, w: W, h: 20 },
-            { x: 60, y: 280, w: 80, h: 10 },
-            { x: 200, y: 240, w: 90, h: 10 },
-            { x: 350, y: 200, w: 80, h: 10 },
-            { x: 120, y: 160, w: 100, h: 10 },
-            { x: 300, y: 120, w: 90, h: 10 },
-            { x: 50, y: 80, w: 70, h: 10 },
-            { x: 220, y: 60, w: 80, h: 10 },
-            { x: 380, y: 300, w: 70, h: 10 },
-          ];
-
-          const codeStr = String(code);
-          const digits = [
-            { x: 100, y: 256, char: codeStr[0] || '4', collected: false },
-            { x: 240, y: 216, char: codeStr[1] || '0', collected: false },
-            { x: 390, y: 176, char: codeStr[2] || '4', collected: false },
-          ];
-          let score = 0;
-
-          const keys = {};
-          window.addEventListener('keydown', (e) => {
-            keys[e.code] = true;
-            if (['Space', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
-          });
-          window.addEventListener('keyup', (e) => {
-            keys[e.code] = false;
-          });
-
-          // Touch: bottom 40% = move zones, top 60% = jump
-          let touchLeft = false,
-            touchRight = false,
-            touchJump = false;
-          canvas.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            for (const t of e.touches) {
-              const rect = canvas.getBoundingClientRect();
-              const x = t.clientX - rect.left;
-              const y = t.clientY - rect.top;
-              if (y > H * 0.6) {
-                if (x < W / 2) touchLeft = true;
-                else touchRight = true;
-              } else touchJump = true;
-            }
-          });
-          canvas.addEventListener('touchend', (e) => {
-            touchLeft = touchRight = touchJump = false;
-          });
-
-          const update = () => {
-            if (keys['ArrowLeft'] || touchLeft) {
-              player.vx = -SPEED;
-              player.facing = -1;
-            } else if (keys['ArrowRight'] || touchRight) {
-              player.vx = SPEED;
-              player.facing = 1;
-            } else player.vx *= FRICTION;
-
-            const jumpPressed = keys['Space'] || keys['ArrowUp'] || touchJump;
-            if (jumpPressed && !player.jumpHeld && player.onGround) {
-              player.vy = JUMP;
-              player.onGround = false;
-            }
-            player.jumpHeld = jumpPressed;
-
-            player.vy += GRAVITY;
-            player.x += player.vx;
-            player.y += player.vy;
-
-            if (player.x > W) player.x = -player.w;
-            if (player.x + player.w < 0) player.x = W;
-
-            player.onGround = false;
-            const prevBottom = player.y + player.h - player.vy;
-            for (const p of platforms) {
-              if (
-                player.x + player.w > p.x &&
-                player.x < p.x + p.w &&
-                prevBottom <= p.y &&
-                player.y + player.h >= p.y &&
-                player.vy >= 0
-              ) {
-                player.y = p.y - player.h;
-                player.vy = 0;
-                player.onGround = true;
-              }
-            }
-
-            if (player.y > H + 50) {
-              player.x = 40;
-              player.y = 0;
-              player.vy = 0;
-            }
-
-            for (const d of digits) {
-              if (d.collected) continue;
-              const dx = player.x + player.w / 2 - (d.x + 10);
-              const dy = player.y + player.h / 2 - (d.y + 10);
-              if (Math.abs(dx) < 18 && Math.abs(dy) < 18) {
-                d.collected = true;
-                score += 100;
-                document.getElementById('t3-score').textContent = score;
-                if (score > hiScore) {
-                  hiScore = score;
-                  localStorage.setItem('kn-error-hiscore', hiScore);
-                  document.getElementById('t3-hiscore').textContent = hiScore;
-                }
-                if (digits.every((d) => d.collected)) {
-                  document.getElementById('t3-win').classList.add('show');
-                  setTimeout(() => {
-                    window.location.href = '/';
-                  }, 2000);
-                }
-              }
-            }
-          };
-
-          let t = 0;
-          const draw = () => {
-            t++;
-            ctx.fillStyle = '#0d0d1a';
-            ctx.fillRect(0, 0, W, H);
-
-            for (const p of platforms) {
-              if (p.y === H - 20) {
-                ctx.fillStyle = '#1a2a1a';
-                ctx.fillRect(p.x, p.y, p.w, p.h);
-              } else {
-                ctx.fillStyle = '#3a5a8a';
-                ctx.beginPath();
-                ctx.roundRect(p.x, p.y, p.w, p.h, 4);
-                ctx.fill();
-                ctx.shadowColor = 'rgba(106,170,255,0.15)';
-                ctx.shadowBlur = 8;
-                ctx.fillStyle = 'rgba(106,170,255,0.1)';
-                ctx.fillRect(p.x, p.y - 2, p.w, 2);
-                ctx.shadowBlur = 0;
-              }
-            }
-
-            for (const d of digits) {
-              if (d.collected) continue;
-              const bob = Math.sin(t * 0.05 + d.x) * 4;
-              ctx.shadowColor = 'rgba(255,170,85,0.5)';
-              ctx.shadowBlur = 12;
-              ctx.fillStyle = '#fa5';
-              ctx.font = 'bold 22px sans-serif';
-              ctx.textAlign = 'center';
-              ctx.fillText(d.char, d.x + 10, d.y + 16 + bob);
-              ctx.shadowBlur = 0;
-            }
-
-            // Player with visual feedback
-            const px = Math.round(player.x),
-              py = Math.round(player.y);
-            const moving = Math.abs(player.vx) > 0.5;
-            const jumping = !player.onGround;
-
-            ctx.save();
-            // Lean in movement direction
-            if (moving) {
-              ctx.translate(px + player.w / 2, py + player.h);
-              ctx.rotate(player.facing * 0.12);
-              ctx.translate(-(px + player.w / 2), -(py + player.h));
-            }
-            // Squash/stretch on jump
-            const sy = jumping ? (player.vy < 0 ? 0.85 : 1.1) : 1;
-            const sx = jumping ? (player.vy < 0 ? 1.15 : 0.9) : 1;
-            if (jumping) {
-              ctx.translate(px + player.w / 2, py + player.h);
-              ctx.scale(sx, sy);
-              ctx.translate(-(px + player.w / 2), -(py + player.h));
-            }
-
-            ctx.fillStyle = player.color;
-            // Head
-            ctx.beginPath();
-            ctx.arc(px + player.w / 2, py + 7, 7, 0, Math.PI * 2);
-            ctx.fill();
-            // Body
-            ctx.fillRect(px + 3, py + 14, 10, 14);
-            // Arms
-            const armWave = moving ? Math.sin(t * 0.3) * 4 : 0;
-            ctx.fillRect(px - 3, py + 16 + armWave, 6, 3);
-            ctx.fillRect(px + player.w - 3, py + 16 - armWave, 6, 3);
-            // Legs
-            const legWave = moving ? Math.sin(t * 0.4) * 3 : 0;
-            ctx.fillRect(px + 3, py + 28, 4, 6 + legWave);
-            ctx.fillRect(px + 9, py + 28, 4, 6 - legWave);
-
-            // Jump trail
-            if (jumping && player.vy < -2) {
-              ctx.globalAlpha = 0.2;
-              ctx.fillStyle = '#6af';
-              ctx.beginPath();
-              ctx.arc(px + player.w / 2, py + player.h + 4, 5, 0, Math.PI * 2);
-              ctx.fill();
-              ctx.globalAlpha = 1;
-            }
-
-            ctx.restore();
-
-            // Movement direction indicator
-            if (moving) {
-              ctx.fillStyle = 'rgba(106,170,255,0.3)';
-              const arrowX = px + player.w / 2 + player.facing * 14;
-              ctx.beginPath();
-              ctx.moveTo(arrowX, py + 18);
-              ctx.lineTo(arrowX + player.facing * 6, py + 21);
-              ctx.lineTo(arrowX, py + 24);
-              ctx.fill();
-            }
-
-            // Touch zones (mobile)
-            if ('ontouchstart' in window) {
-              ctx.fillStyle = 'rgba(106,170,255,0.05)';
-              ctx.fillRect(0, H * 0.6, W / 2, H * 0.4);
-              ctx.fillRect(W / 2, H * 0.6, W / 2, H * 0.4);
-              ctx.fillStyle = 'rgba(106,170,255,0.15)';
-              ctx.font = '20px sans-serif';
-              ctx.textAlign = 'center';
-              ctx.fillText('←', W * 0.25, H * 0.85);
-              ctx.fillText('→', W * 0.75, H * 0.85);
-              ctx.fillText('TAP ABOVE TO JUMP', W / 2, H * 0.3);
-            }
-          };
-
-          const loop = () => {
-            update();
-            draw();
-            requestAnimationFrame(loop);
-          };
-          loop();
-        };
-      </script>
     </template>
     <template id="theme-4">
       <style>
@@ -2218,37 +1890,365 @@
           </div>
         </div>
       </div>
-      <script>
-        window.initTheme4 = (code) => {
-          const titles = {
-            404: { title: 'Connection Lost!', msg: "The page you're looking for has been dropped from the server." },
-            500: { title: 'Fatal Exception!', msg: 'The server encountered an unrecoverable error.' },
-            429: { title: 'Server Full!', msg: 'Too many connections. Please wait before retrying.' },
-          };
-          const info = titles[String(code)] || titles['404'];
-          const titleEl = document.getElementById('t4-dialog-title');
-          const msgEl = document.getElementById('t4-dialog-msg');
-          if (titleEl) titleEl.textContent = info.title;
-          if (msgEl) msgEl.textContent = info.msg;
-
-          const reconnectBtn = document.getElementById('t4-reconnect-btn');
-          const lobbyBtn = document.getElementById('t4-lobby-btn');
-          const blowBtn = document.getElementById('t4-blow-btn');
-
-          if (reconnectBtn)
-            reconnectBtn.onclick = () => {
-              location.href = '/';
-            };
-          if (lobbyBtn)
-            lobbyBtn.onclick = () => {
-              location.href = '/';
-            };
-          if (blowBtn)
-            blowBtn.onclick = () => {
-              blowBtn.textContent = '\uD83D\uDCA8 Pfffft!';
-            };
-        };
-      </script>
     </template>
+    <script>
+      window.initTheme1 = (code) => {
+        const pad = `00${code}00`.padStart(7, '0');
+        document.getElementById('t1-score').textContent = pad;
+        document.getElementById('t1-yourscore').textContent = pad;
+        let count = 9;
+        const el = document.getElementById('t1-countdown');
+        const coin = document.getElementById('t1-coin');
+        const timer = setInterval(() => {
+          count--;
+          if (count < 0) {
+            clearInterval(timer);
+            el.textContent = '0';
+            el.style.color = '#f33';
+            coin.textContent = 'RETURNING TO LOBBY...';
+            coin.style.color = '#ff0';
+            setTimeout(() => {
+              window.location.href = '/';
+            }, 1500);
+            return;
+          }
+          el.textContent = count;
+          if (count <= 3) el.style.color = '#f33';
+        }, 1000);
+      };
+    </script>
+    <script>
+      window.initTheme2 = (code) => {
+        const msgs = {
+          404: ['CARTRIDGE NOT FOUND', 'CARTRIDGE NOT FOUND'],
+          500: ['FATAL EXCEPTION: CORE DUMP', 'FATAL EXCEPTION'],
+          429: ['BUFFER OVERFLOW: TOO MANY REQUESTS', 'BUFFER OVERFLOW'],
+        };
+        const m = msgs[code] || msgs['404'];
+        const el = document.getElementById('t2-errmsg');
+        if (el) el.textContent = 'FATAL EXCEPTION: ' + m[1];
+        const t = document.getElementById('t2-title');
+        if (t) t.textContent = m[1];
+        // Static noise
+        const c = document.getElementById('t2-noise');
+        if (c) {
+          const ctx = c.getContext('2d');
+          c.width = window.innerWidth;
+          c.height = window.innerHeight;
+          const noise = () => {
+            const d = ctx.createImageData(c.width, c.height);
+            for (let i = 0; i < d.data.length; i += 4) {
+              const v = Math.random() * 255;
+              d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+              d.data[i + 3] = 255;
+            }
+            ctx.putImageData(d, 0, 0);
+            requestAnimationFrame(noise);
+          };
+          noise();
+        }
+        // Scramble hex
+        const sc = document.getElementById('t2-scramble');
+        if (sc)
+          setInterval(() => {
+            let s = '0x';
+            for (let i = 0; i < 8; i++) s += '0123456789ABCDEF'[(Math.random() * 16) | 0];
+            sc.textContent = s;
+          }, 100);
+      };
+    </script>
+    <script>
+      window.initTheme3 = (code) => {
+        const canvas = document.getElementById('t3-game');
+        const ctx = canvas.getContext('2d');
+        const W = 480,
+          H = 360;
+
+        let hiScore = parseInt(localStorage.getItem('kn-error-hiscore') || '0');
+        document.getElementById('t3-hiscore').textContent = hiScore;
+
+        const player = {
+          x: 40,
+          y: 0,
+          vx: 0,
+          vy: 0,
+          w: 16,
+          h: 24,
+          onGround: false,
+          color: '#6af',
+          jumpHeld: false,
+          facing: 1,
+        };
+        const GRAVITY = 0.5,
+          JUMP = -9,
+          SPEED = 3.5,
+          FRICTION = 0.85;
+
+        const platforms = [
+          { x: 0, y: H - 20, w: W, h: 20 },
+          { x: 60, y: 280, w: 80, h: 10 },
+          { x: 200, y: 240, w: 90, h: 10 },
+          { x: 350, y: 200, w: 80, h: 10 },
+          { x: 120, y: 160, w: 100, h: 10 },
+          { x: 300, y: 120, w: 90, h: 10 },
+          { x: 50, y: 80, w: 70, h: 10 },
+          { x: 220, y: 60, w: 80, h: 10 },
+          { x: 380, y: 300, w: 70, h: 10 },
+        ];
+
+        const codeStr = String(code);
+        const digits = [
+          { x: 100, y: 256, char: codeStr[0] || '4', collected: false },
+          { x: 240, y: 216, char: codeStr[1] || '0', collected: false },
+          { x: 390, y: 176, char: codeStr[2] || '4', collected: false },
+        ];
+        let score = 0;
+
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+          keys[e.code] = true;
+          if (['Space', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+        });
+        window.addEventListener('keyup', (e) => {
+          keys[e.code] = false;
+        });
+
+        // Touch: bottom 40% = move zones, top 60% = jump
+        let touchLeft = false,
+          touchRight = false,
+          touchJump = false;
+        canvas.addEventListener('touchstart', (e) => {
+          e.preventDefault();
+          for (const t of e.touches) {
+            const rect = canvas.getBoundingClientRect();
+            const x = t.clientX - rect.left;
+            const y = t.clientY - rect.top;
+            if (y > H * 0.6) {
+              if (x < W / 2) touchLeft = true;
+              else touchRight = true;
+            } else touchJump = true;
+          }
+        });
+        canvas.addEventListener('touchend', (e) => {
+          touchLeft = touchRight = touchJump = false;
+        });
+
+        const update = () => {
+          if (keys['ArrowLeft'] || touchLeft) {
+            player.vx = -SPEED;
+            player.facing = -1;
+          } else if (keys['ArrowRight'] || touchRight) {
+            player.vx = SPEED;
+            player.facing = 1;
+          } else player.vx *= FRICTION;
+
+          const jumpPressed = keys['Space'] || keys['ArrowUp'] || touchJump;
+          if (jumpPressed && !player.jumpHeld && player.onGround) {
+            player.vy = JUMP;
+            player.onGround = false;
+          }
+          player.jumpHeld = jumpPressed;
+
+          player.vy += GRAVITY;
+          player.x += player.vx;
+          player.y += player.vy;
+
+          if (player.x > W) player.x = -player.w;
+          if (player.x + player.w < 0) player.x = W;
+
+          player.onGround = false;
+          const prevBottom = player.y + player.h - player.vy;
+          for (const p of platforms) {
+            if (
+              player.x + player.w > p.x &&
+              player.x < p.x + p.w &&
+              prevBottom <= p.y &&
+              player.y + player.h >= p.y &&
+              player.vy >= 0
+            ) {
+              player.y = p.y - player.h;
+              player.vy = 0;
+              player.onGround = true;
+            }
+          }
+
+          if (player.y > H + 50) {
+            player.x = 40;
+            player.y = 0;
+            player.vy = 0;
+          }
+
+          for (const d of digits) {
+            if (d.collected) continue;
+            const dx = player.x + player.w / 2 - (d.x + 10);
+            const dy = player.y + player.h / 2 - (d.y + 10);
+            if (Math.abs(dx) < 18 && Math.abs(dy) < 18) {
+              d.collected = true;
+              score += 100;
+              document.getElementById('t3-score').textContent = score;
+              if (score > hiScore) {
+                hiScore = score;
+                localStorage.setItem('kn-error-hiscore', hiScore);
+                document.getElementById('t3-hiscore').textContent = hiScore;
+              }
+              if (digits.every((d) => d.collected)) {
+                document.getElementById('t3-win').classList.add('show');
+                setTimeout(() => {
+                  window.location.href = '/';
+                }, 2000);
+              }
+            }
+          }
+        };
+
+        let t = 0;
+        const draw = () => {
+          t++;
+          ctx.fillStyle = '#0d0d1a';
+          ctx.fillRect(0, 0, W, H);
+
+          for (const p of platforms) {
+            if (p.y === H - 20) {
+              ctx.fillStyle = '#1a2a1a';
+              ctx.fillRect(p.x, p.y, p.w, p.h);
+            } else {
+              ctx.fillStyle = '#3a5a8a';
+              ctx.beginPath();
+              ctx.roundRect(p.x, p.y, p.w, p.h, 4);
+              ctx.fill();
+              ctx.shadowColor = 'rgba(106,170,255,0.15)';
+              ctx.shadowBlur = 8;
+              ctx.fillStyle = 'rgba(106,170,255,0.1)';
+              ctx.fillRect(p.x, p.y - 2, p.w, 2);
+              ctx.shadowBlur = 0;
+            }
+          }
+
+          for (const d of digits) {
+            if (d.collected) continue;
+            const bob = Math.sin(t * 0.05 + d.x) * 4;
+            ctx.shadowColor = 'rgba(255,170,85,0.5)';
+            ctx.shadowBlur = 12;
+            ctx.fillStyle = '#fa5';
+            ctx.font = 'bold 22px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(d.char, d.x + 10, d.y + 16 + bob);
+            ctx.shadowBlur = 0;
+          }
+
+          // Player with visual feedback
+          const px = Math.round(player.x),
+            py = Math.round(player.y);
+          const moving = Math.abs(player.vx) > 0.5;
+          const jumping = !player.onGround;
+
+          ctx.save();
+          // Lean in movement direction
+          if (moving) {
+            ctx.translate(px + player.w / 2, py + player.h);
+            ctx.rotate(player.facing * 0.12);
+            ctx.translate(-(px + player.w / 2), -(py + player.h));
+          }
+          // Squash/stretch on jump
+          const sy = jumping ? (player.vy < 0 ? 0.85 : 1.1) : 1;
+          const sx = jumping ? (player.vy < 0 ? 1.15 : 0.9) : 1;
+          if (jumping) {
+            ctx.translate(px + player.w / 2, py + player.h);
+            ctx.scale(sx, sy);
+            ctx.translate(-(px + player.w / 2), -(py + player.h));
+          }
+
+          ctx.fillStyle = player.color;
+          // Head
+          ctx.beginPath();
+          ctx.arc(px + player.w / 2, py + 7, 7, 0, Math.PI * 2);
+          ctx.fill();
+          // Body
+          ctx.fillRect(px + 3, py + 14, 10, 14);
+          // Arms
+          const armWave = moving ? Math.sin(t * 0.3) * 4 : 0;
+          ctx.fillRect(px - 3, py + 16 + armWave, 6, 3);
+          ctx.fillRect(px + player.w - 3, py + 16 - armWave, 6, 3);
+          // Legs
+          const legWave = moving ? Math.sin(t * 0.4) * 3 : 0;
+          ctx.fillRect(px + 3, py + 28, 4, 6 + legWave);
+          ctx.fillRect(px + 9, py + 28, 4, 6 - legWave);
+
+          // Jump trail
+          if (jumping && player.vy < -2) {
+            ctx.globalAlpha = 0.2;
+            ctx.fillStyle = '#6af';
+            ctx.beginPath();
+            ctx.arc(px + player.w / 2, py + player.h + 4, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+          }
+
+          ctx.restore();
+
+          // Movement direction indicator
+          if (moving) {
+            ctx.fillStyle = 'rgba(106,170,255,0.3)';
+            const arrowX = px + player.w / 2 + player.facing * 14;
+            ctx.beginPath();
+            ctx.moveTo(arrowX, py + 18);
+            ctx.lineTo(arrowX + player.facing * 6, py + 21);
+            ctx.lineTo(arrowX, py + 24);
+            ctx.fill();
+          }
+
+          // Touch zones (mobile)
+          if ('ontouchstart' in window) {
+            ctx.fillStyle = 'rgba(106,170,255,0.05)';
+            ctx.fillRect(0, H * 0.6, W / 2, H * 0.4);
+            ctx.fillRect(W / 2, H * 0.6, W / 2, H * 0.4);
+            ctx.fillStyle = 'rgba(106,170,255,0.15)';
+            ctx.font = '20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('←', W * 0.25, H * 0.85);
+            ctx.fillText('→', W * 0.75, H * 0.85);
+            ctx.fillText('TAP ABOVE TO JUMP', W / 2, H * 0.3);
+          }
+        };
+
+        const loop = () => {
+          update();
+          draw();
+          requestAnimationFrame(loop);
+        };
+        loop();
+      };
+    </script>
+    <script>
+      window.initTheme4 = (code) => {
+        const titles = {
+          404: { title: 'Connection Lost!', msg: "The page you're looking for has been dropped from the server." },
+          500: { title: 'Fatal Exception!', msg: 'The server encountered an unrecoverable error.' },
+          429: { title: 'Server Full!', msg: 'Too many connections. Please wait before retrying.' },
+        };
+        const info = titles[String(code)] || titles['404'];
+        const titleEl = document.getElementById('t4-dialog-title');
+        const msgEl = document.getElementById('t4-dialog-msg');
+        if (titleEl) titleEl.textContent = info.title;
+        if (msgEl) msgEl.textContent = info.msg;
+
+        const reconnectBtn = document.getElementById('t4-reconnect-btn');
+        const lobbyBtn = document.getElementById('t4-lobby-btn');
+        const blowBtn = document.getElementById('t4-blow-btn');
+
+        if (reconnectBtn)
+          reconnectBtn.onclick = () => {
+            location.href = '/';
+          };
+        if (lobbyBtn)
+          lobbyBtn.onclick = () => {
+            location.href = '/';
+          };
+        if (blowBtn)
+          blowBtn.onclick = () => {
+            blowBtn.textContent = '\uD83D\uDCA8 Pfffft!';
+          };
+      };
+    </script>
   </body>
 </html>
