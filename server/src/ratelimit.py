@@ -1,8 +1,11 @@
 """In-memory per-IP rate limiting with rolling window."""
 
+import logging
 import os
 import time
 from collections import defaultdict, deque
+
+log = logging.getLogger(__name__)
 
 _disabled = os.environ.get("DISABLE_RATE_LIMIT") == "1"
 
@@ -22,9 +25,14 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "rom-signal": (60, 1),
     "cache-state": (5, 60),
     "sync-logs": (10, 60),
+    "client-event": (10, 60),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
 }
+
+# Rate-limit denial logging — log once per (ip, event) per 60s to avoid spam.
+_warned: dict[tuple[str, str], float] = {}
+_WARN_INTERVAL = 60.0
 
 MAX_CONNECTIONS_PER_IP = 20
 
@@ -54,6 +62,10 @@ def _check_key(key: str, event: str) -> bool:
     while timestamps and timestamps[0] < cutoff:
         timestamps.popleft()
     if len(timestamps) >= max_count:
+        warn_key = (key, event)
+        if now - _warned.get(warn_key, 0) >= _WARN_INTERVAL:
+            _warned[warn_key] = now
+            log.warning("Rate limited: %s (ip=%s…)", event, key[:8])
         return False
     timestamps.append(now)
     return True
@@ -96,3 +108,7 @@ def cleanup() -> None:
     stale_conns = [ip for ip, count in _connections.items() if count <= 0]
     for ip in stale_conns:
         del _connections[ip]
+    # Prune stale rate-limit warning timestamps
+    stale_warns = [k for k, t in _warned.items() if now - t > _WARN_INTERVAL * 2]
+    for k in stale_warns:
+        del _warned[k]

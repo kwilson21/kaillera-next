@@ -340,3 +340,29 @@ tbody tr {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* Tab bar */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 0;
+}
+.tab {
+  background: none;
+  border: none;
+  color: #888;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 14px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: #ccc;
+}
+.tab.active {
+  color: #6af;
+  border-bottom-color: #6af;
+}

@@ -67,7 +67,7 @@
 
     // Check localStorage for custom keyboard mapping first
     try {
-      const saved = KNState.safeGet("localStorage", 'keyboard-mapping');
+      const saved = KNState.safeGet('localStorage', 'keyboard-mapping');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && Object.keys(parsed).length > 0) {
@@ -170,6 +170,10 @@
         }
         if (++attempts >= maxAttempts) {
           _bootPromise = null;
+          KNEvent('wasm-fail', `Emulator boot timed out after ${timeoutMs}ms`, {
+            ejs: !!window.EJS_emulator,
+            gameManager: !!window.EJS_emulator?.gameManager,
+          });
           reject(new Error(`Emulator boot timed out after ${timeoutMs}ms`));
           return;
         }
@@ -245,7 +249,9 @@
     if (peer.remoteDescSet) {
       try {
         await peer.pc.addIceCandidate(candidate);
-      } catch (_) {}
+      } catch (e) {
+        KNEvent('webrtc-fail', 'ICE candidate add failed', { error: e?.message });
+      }
     } else {
       if (!peer.pendingCandidates) peer.pendingCandidates = [];
       peer.pendingCandidates.push(candidate);
@@ -553,6 +559,28 @@
       cx: unpackX(arr[3]),
       cy: unpackY(arr[3]),
     };
+  };
+
+  // ── Client event beacon ───────────────────────────────────────────────
+  // Fire-and-forget error/event reporting via navigator.sendBeacon().
+  // Events land in the server's /api/client-event endpoint.
+  window.KNEvent = (type, msg, meta = {}) => {
+    if (!KNState?.uploadToken) return;
+    const body = JSON.stringify({
+      type,
+      msg,
+      meta,
+      room: KNState.room || '',
+      slot: KNState.slot ?? -1,
+      ua: navigator.userAgent,
+      ts: Date.now(),
+    });
+    try {
+      navigator.sendBeacon(
+        `/api/client-event?token=${KNState.uploadToken}`,
+        new Blob([body], { type: 'application/json' }),
+      );
+    } catch (_) {}
   };
 
   window.KNShared = {

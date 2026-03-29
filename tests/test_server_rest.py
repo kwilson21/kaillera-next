@@ -10,7 +10,11 @@ import requests
 def test_health(server_url):
     r = requests.get(f"{server_url}/health", timeout=5)
     assert r.status_code == 200
-    assert r.json()["status"] == "ok"
+    data = r.json()
+    assert data["status"] in ("ok", "degraded")
+    assert "redis" in data
+    assert "rooms" in data
+    assert "players" in data
 
 
 def test_room_not_found(server_url):

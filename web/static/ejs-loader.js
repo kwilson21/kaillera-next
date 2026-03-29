@@ -73,6 +73,8 @@
       } else {
         await loadStyle('emulator.css');
       }
+    } else {
+      if (typeof KNEvent === 'function') KNEvent('wasm-fail', `Failed to load ${file}`, { file });
     }
   }
 

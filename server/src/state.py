@@ -91,6 +91,17 @@ async def init() -> None:
         _redis = None
 
 
+async def ping() -> bool:
+    """Check if Redis is reachable. Returns True if no Redis configured (ephemeral mode)."""
+    if not _redis:
+        return True
+    try:
+        await _redis.ping()
+        return True
+    except Exception:
+        return False
+
+
 async def close() -> None:
     """Close the Redis connection."""
     global _redis

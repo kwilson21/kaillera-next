@@ -381,6 +381,7 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     await _leave(sid)  # clean up if already in another room
 
     if len(rooms) >= MAX_ROOMS:
+        log.warning("Server full, room rejected (MAX_ROOMS=%d)", MAX_ROOMS)
         return "Server is full"
 
     player_name = _sanitize_str(player_name, 32)

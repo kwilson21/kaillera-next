@@ -20,6 +20,10 @@
     frameNum: 0, // lockstep.js → play.js info overlay
     delayAutoValue: 2, // play.js → lockstep.js
     romHash: null, // play.js → gamepad-manager.js (per-game profiles)
+    room: null, // play.js → shared.js (KNEvent beacon)
+    slot: -1, // play.js → shared.js (KNEvent beacon)
+    uploadToken: null, // play.js → shared.js (KNEvent beacon)
+    sessionStats: { reconnects: 0, desyncs: 0, stalls: 0 }, // play.js, lockstep.js → pagehide summary
 
     // ── Safe storage helpers ──
     safeGet,

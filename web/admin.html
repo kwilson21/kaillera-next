@@ -23,7 +23,12 @@
 
       <div class="stats-row" id="stats-row"></div>
 
-      <div class="log-section">
+      <div class="tab-bar">
+        <button class="tab active" data-tab="logs">Sync Logs</button>
+        <button class="tab" data-tab="errors">Client Events</button>
+      </div>
+
+      <div class="log-section" id="tab-logs">
         <div class="log-header">
           <h2>Sync Logs</h2>
           <div class="log-actions">
@@ -34,6 +39,28 @@
         </div>
         <div id="log-groups"></div>
         <p id="no-logs" class="dim hidden">No sync logs found.</p>
+      </div>
+
+      <div class="log-section hidden" id="tab-errors">
+        <div class="log-header">
+          <h2>Client Events</h2>
+          <div class="log-actions">
+            <select id="error-type-filter">
+              <option value="">All types</option>
+              <option value="webrtc-fail">webrtc-fail</option>
+              <option value="wasm-fail">wasm-fail</option>
+              <option value="desync">desync</option>
+              <option value="stall">stall</option>
+              <option value="reconnect">reconnect</option>
+              <option value="audio-fail">audio-fail</option>
+              <option value="unhandled">unhandled</option>
+              <option value="compat">compat</option>
+              <option value="session-end">session-end</option>
+            </select>
+          </div>
+        </div>
+        <div id="error-list"></div>
+        <p id="no-errors" class="dim hidden">No client events found.</p>
       </div>
 
       <div id="log-viewer" class="hidden">

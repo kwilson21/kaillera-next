@@ -31,7 +31,9 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
+import string
 import subprocess as _sp
 import time
 from pathlib import Path
@@ -39,6 +41,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
 
+from src import state
 from src.api.og import build_og_tags, generate_og_image, inject_og_tags
 from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
 from src.ratelimit import check_ip
@@ -47,6 +50,19 @@ log = logging.getLogger(__name__)
 
 _SYNC_LOG_DIR = Path(os.environ.get("SYNC_LOG_DIR", "logs/sync"))
 _SYNC_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB max per upload
+_ERROR_LOG_DIR = Path(os.environ.get("ERROR_LOG_DIR", "logs/errors"))
+_CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
+_VALID_EVENT_TYPES = {
+    "webrtc-fail",
+    "wasm-fail",
+    "desync",
+    "stall",
+    "reconnect",
+    "audio-fail",
+    "unhandled",
+    "compat",
+    "session-end",
+}
 
 
 def _pinned_set() -> set[str]:
@@ -97,6 +113,12 @@ async def cleanup_old_logs() -> None:
                 unpinned.pop(0)
                 logs = [f for f in logs if f.exists()]
                 cleaned += 1
+            # Also clean error logs
+            if _ERROR_LOG_DIR.exists():
+                for f in _ERROR_LOG_DIR.glob("evt-*.json"):
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        cleaned += 1
             if cleaned:
                 log.info("Log cleanup: removed %d log(s)", cleaned)
         except Exception as e:
@@ -373,8 +395,14 @@ def create_app(lifespan=None) -> FastAPI:
     log.info("Cache bust version: %s", version)
 
     @app.get("/health")
-    def health() -> dict:
-        return {"status": "ok"}
+    async def health() -> dict:
+        redis_ok = await state.ping()
+        return {
+            "status": "ok" if redis_ok else "degraded",
+            "redis": redis_ok,
+            "rooms": len(rooms),
+            "players": sum(len(r.players) for r in rooms.values()),
+        }
 
     @app.get("/ice-servers")
     def ice_servers() -> list:
@@ -464,6 +492,7 @@ def create_app(lifespan=None) -> FastAPI:
         if len(body) > _STATE_MAX_SIZE:
             raise HTTPException(status_code=413, detail="State too large")
         if len(_state_cache) >= _MAX_CACHE_ENTRIES and rom_hash not in _state_cache:
+            log.warning("State cache full (%d entries)", _MAX_CACHE_ENTRIES)
             raise HTTPException(status_code=507, detail="Cache full")
         _state_cache[rom_hash] = body
         log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
@@ -498,6 +527,43 @@ def create_app(lifespan=None) -> FastAPI:
         log.info("Sync log saved: %s (%d KB)", filename, len(body) // 1024)
         return {"status": "saved", "filename": filename, "size": len(body)}
 
+    # ── Client event beacon ─────────────────────────────────────────────
+
+    def _rand4() -> str:
+        return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+
+    @app.post("/api/client-event")
+    async def client_event(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "client-event"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        token = request.query_params.get("token", "")
+        if not token or not any(verify_upload_token(sid, token) for sid in rooms):
+            raise HTTPException(status_code=403, detail="Invalid token")
+        body = await request.body()
+        if len(body) > _CLIENT_EVENT_MAX_SIZE:
+            raise HTTPException(status_code=413, detail="Event too large")
+        if len(body) == 0:
+            raise HTTPException(status_code=400, detail="Empty event")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+        evt_type = data.get("type", "")
+        if evt_type not in _VALID_EVENT_TYPES:
+            raise HTTPException(status_code=400, detail="Invalid event type")
+        msg = str(data.get("msg", ""))[:500]
+        meta = data.get("meta", {})
+        if not isinstance(meta, dict) or len(json.dumps(meta)) > 2048:
+            raise HTTPException(status_code=400, detail="Meta too large")
+        room = str(data.get("room", ""))[:32]
+        safe_room = "".join(c if c.isalnum() or c in "-_" else "_" for c in room)
+        ts = int(time.time())
+        filename = f"evt-{evt_type}-{safe_room}-{ts}-{_rand4()}.json"
+        _ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        (_ERROR_LOG_DIR / filename).write_text(json.dumps(data, indent=2))
+        log.info("Client event: %s room=%s msg=%s", evt_type, room, msg[:100])
+        return {"status": "saved", "filename": filename}
+
     # ── Admin API ─────────────────────────────────────────────────────────
 
     def _admin_auth(request: Request) -> None:
@@ -520,6 +586,17 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Log not found")
         return path
 
+    def _safe_error_filename(filename: str) -> Path:
+        """Validate error event filename to prevent directory traversal."""
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        if not filename.startswith("evt-") or not filename.endswith(".json"):
+            raise HTTPException(status_code=400, detail="Invalid error filename")
+        path = _ERROR_LOG_DIR / filename
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Error not found")
+        return path
+
     @app.get("/admin/api/stats")
     def admin_stats(request: Request) -> dict:
         _admin_auth(request)
@@ -527,6 +604,7 @@ def create_app(lifespan=None) -> FastAPI:
         total_spectators = sum(len(r.spectators) for r in rooms.values())
         log_files = list(_SYNC_LOG_DIR.glob("sync-*.log")) if _SYNC_LOG_DIR.exists() else []
         total_size = sum(f.stat().st_size for f in log_files)
+        error_files = list(_ERROR_LOG_DIR.glob("evt-*.json")) if _ERROR_LOG_DIR.exists() else []
         return {
             "rooms": len(rooms),
             "players": total_players,
@@ -534,6 +612,7 @@ def create_app(lifespan=None) -> FastAPI:
             "max_rooms": MAX_ROOMS,
             "log_count": len(log_files),
             "log_size_bytes": total_size,
+            "error_count": len(error_files),
             "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "14")),
             "auth_required": bool(os.environ.get("ADMIN_KEY")),
         }
@@ -618,6 +697,44 @@ def create_app(lifespan=None) -> FastAPI:
             log.info("Manual cleanup: removed %d expired log(s)", deleted)
         return {"deleted": deleted}
 
+    # ── Admin error event API ────────────────────────────────────────────
+
+    @app.get("/admin/api/errors")
+    def admin_list_errors(request: Request) -> list:
+        _admin_auth(request)
+        if not _ERROR_LOG_DIR.exists():
+            return []
+        result = []
+        for f in sorted(_ERROR_LOG_DIR.glob("evt-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = f.stat()
+            # Parse filename: evt-{type}-{room}-{ts}-{rand}.json
+            parts = f.stem.split("-", 3)
+            evt_type = parts[1] if len(parts) > 1 else "?"
+            room_code = parts[2] if len(parts) > 2 else "?"
+            result.append(
+                {
+                    "filename": f.name,
+                    "size": stat.st_size,
+                    "created": int(stat.st_mtime),
+                    "type": evt_type,
+                    "room": room_code,
+                }
+            )
+        return result
+
+    @app.get("/admin/api/errors/{filename}")
+    def admin_get_error(filename: str, request: Request) -> Response:
+        _admin_auth(request)
+        path = _safe_error_filename(filename)
+        return Response(content=path.read_text(errors="replace"), media_type="application/json")
+
+    @app.delete("/admin/api/errors/{filename}")
+    def admin_delete_error(filename: str, request: Request) -> dict:
+        _admin_auth(request)
+        path = _safe_error_filename(filename)
+        path.unlink()
+        return {"status": "deleted"}
+
     # ── OG card routes ────────────────────────────────────────────────────
 
     _web_dir = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
@@ -647,15 +764,25 @@ def create_app(lifespan=None) -> FastAPI:
         """Get list of player display names in the room."""
         return [p.get("playerName", "?") for p in room.players.values()]
 
+    _fallback_png = _web_dir / "static" / "og" / "fallback.png"
+
     @app.get("/og-image/{room_id}.png")
     async def og_image(room_id: str, request: Request) -> Response:
-        room = rooms.get(room_id)
-        spectate = request.query_params.get("spectate") == "1"
-        if room:
-            names = _player_names(room) if spectate else None
-            img = await generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
-        else:
-            img = await generate_og_image(room_id, None, spectate)
+        try:
+            room = rooms.get(room_id)
+            spectate = request.query_params.get("spectate") == "1"
+            if room:
+                names = _player_names(room) if spectate else None
+                img = await generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
+            else:
+                img = await generate_og_image(room_id, None, spectate)
+        except Exception:
+            log.warning("OG image generation failed for room %s", room_id, exc_info=True)
+            if _fallback_png.exists():
+                img = _fallback_png.read_bytes()
+            else:
+                log.warning("OG fallback image missing at %s", _fallback_png)
+                raise HTTPException(status_code=500, detail="OG image unavailable") from None
         return Response(
             content=img,
             media_type="image/png",
