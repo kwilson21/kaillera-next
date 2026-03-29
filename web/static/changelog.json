@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.18.4",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
+      }
+    ]
+  },
+  {
     "version": "0.18.3",
     "date": "2026-03-29",
     "changes": [
@@ -186,24 +196,6 @@
       {
         "type": "fix",
         "message": "vertical alignment of version badge in lobby footer"
-      }
-    ]
-  },
-  {
-    "version": "0.8.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "auto-versioning with changelog display"
-      },
-      {
-        "type": "fix",
-        "message": "prevent permanent freeze when a peer stops advancing in lockstep"
-      },
-      {
-        "type": "feat",
-        "message": "support multiple CORS origins via comma-separated ALLOWED_ORIGIN"
       }
     ]
   }
