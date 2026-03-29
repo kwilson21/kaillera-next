@@ -30,14 +30,14 @@ _browser = None
 _playwright = None
 
 
-def _get_browser():
+async def _get_browser():
     """Lazy-init a headless Chromium browser."""
     global _browser, _playwright
     if _browser is None:
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import async_playwright
 
-        _playwright = sync_playwright().start()
-        _browser = _playwright.chromium.launch(headless=True)
+        _playwright = await async_playwright().start()
+        _browser = await _playwright.chromium.launch(headless=True)
         log.info("OG image renderer: Playwright browser started")
     return _browser
 
@@ -276,7 +276,7 @@ def _build_card_html(
 </html>"""
 
 
-def generate_og_image(
+async def generate_og_image(
     room_name: str | None,
     game_id: str | None,
     spectate: bool,
@@ -294,13 +294,13 @@ def generate_og_image(
         PNG image as bytes.
     """
     html = _build_card_html(room_name, game_id, spectate, player_names)
-    browser = _get_browser()
-    page = browser.new_page(viewport={"width": 1200, "height": 630})
+    browser = await _get_browser()
+    page = await browser.new_page(viewport={"width": 1200, "height": 630})
     try:
-        page.set_content(html, wait_until="networkidle")
-        return page.screenshot(type="png")
+        await page.set_content(html, wait_until="networkidle")
+        return await page.screenshot(type="png")
     finally:
-        page.close()
+        await page.close()
 
 
 # ── HTML meta tag injection ───────────────────────────────────────────────────

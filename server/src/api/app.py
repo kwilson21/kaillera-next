@@ -648,14 +648,14 @@ def create_app(lifespan=None) -> FastAPI:
         return [p.get("playerName", "?") for p in room.players.values()]
 
     @app.get("/og-image/{room_id}.png")
-    def og_image(room_id: str, request: Request) -> Response:
+    async def og_image(room_id: str, request: Request) -> Response:
         room = rooms.get(room_id)
         spectate = request.query_params.get("spectate") == "1"
         if room:
             names = _player_names(room) if spectate else None
-            img = generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
+            img = await generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
         else:
-            img = generate_og_image(room_id, None, spectate)
+            img = await generate_og_image(room_id, None, spectate)
         return Response(
             content=img,
             media_type="image/png",

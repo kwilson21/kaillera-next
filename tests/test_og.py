@@ -3,6 +3,7 @@
 Run: pytest tests/test_og.py -v
 """
 
+import asyncio
 import io
 import sys
 from pathlib import Path
@@ -13,15 +14,23 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
 from PIL import Image  # still used for PNG validation in tests
 
 
+_loop = asyncio.new_event_loop()
+
+
+def _run(coro):
+    """Run an async function in a shared event loop (Playwright browser is loop-bound)."""
+    return _loop.run_until_complete(coro)
+
+
 def test_generate_og_image_with_game():
     """Generate a play invite card with game background."""
     from src.api.og import generate_og_image
 
-    img_bytes = generate_og_image(
+    img_bytes = _run(generate_og_image(
         room_name="Agent 21's room",
         game_id="ssb64",
         spectate=False,
-    )
+    ))
     assert isinstance(img_bytes, bytes)
     assert len(img_bytes) > 0
     img = Image.open(io.BytesIO(img_bytes))
@@ -33,11 +42,11 @@ def test_generate_og_image_spectate():
     """Generate a watch invite card."""
     from src.api.og import generate_og_image
 
-    img_bytes = generate_og_image(
+    img_bytes = _run(generate_og_image(
         room_name="Agent 21",
         game_id="ssb64",
         spectate=True,
-    )
+    ))
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))
     assert img.size == (1200, 630)
@@ -47,12 +56,12 @@ def test_generate_og_image_spectate_with_players():
     """Generate a watch card showing player matchup."""
     from src.api.og import generate_og_image
 
-    img_bytes = generate_og_image(
+    img_bytes = _run(generate_og_image(
         room_name="Agent 21",
         game_id="ssb64",
         spectate=True,
         player_names=["Agent 21", "Player2"],
-    )
+    ))
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))
     assert img.size == (1200, 630)
@@ -62,11 +71,11 @@ def test_generate_og_image_unknown_game():
     """Generate a generic card for unknown game_id."""
     from src.api.og import generate_og_image
 
-    img_bytes = generate_og_image(
+    img_bytes = _run(generate_og_image(
         room_name="Test Room",
         game_id="unknown_game",
         spectate=False,
-    )
+    ))
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))
     assert img.size == (1200, 630)
@@ -76,24 +85,24 @@ def test_generate_og_image_homepage():
     """Generate homepage card (no room info)."""
     from src.api.og import generate_og_image
 
-    img_bytes = generate_og_image(
+    img_bytes = _run(generate_og_image(
         room_name=None,
         game_id=None,
         spectate=False,
-    )
+    ))
     assert isinstance(img_bytes, bytes)
     img = Image.open(io.BytesIO(img_bytes))
     assert img.size == (1200, 630)
 
 
-# ── Server route tests (require running server) ──────────────────────────────
+# ── Server route tests (require running server) ──────────────────────────
 
 
 def test_og_image_endpoint_no_room(server_url):
     """OG image endpoint returns a PNG even when room doesn't exist (generic card)."""
     import requests
 
-    r = requests.get(f"{server_url}/og-image/NONEXIST.png", timeout=5, verify=False)
+    r = requests.get(f"{server_url}/og-image/NONEXIST.png", timeout=10, verify=False)
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     img = Image.open(io.BytesIO(r.content))
@@ -125,5 +134,5 @@ def test_og_image_no_coep_header(server_url):
     """OG image endpoint must not have COEP header (blocks crawler fetches)."""
     import requests
 
-    r = requests.get(f"{server_url}/og-image/TEST.png", timeout=5, verify=False)
+    r = requests.get(f"{server_url}/og-image/TEST.png", timeout=10, verify=False)
     assert "cross-origin-embedder-policy" not in r.headers

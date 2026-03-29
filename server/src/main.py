@@ -44,7 +44,7 @@ async def lifespan(_app):
     try:
         from src.api.og import _get_browser
 
-        await asyncio.to_thread(_get_browser)
+        await _get_browser()
     except Exception as e:
         log.warning("OG image warmup failed (non-fatal): %s", e)
     yield
