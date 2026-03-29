@@ -299,6 +299,12 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
+  // Frames to wait for peers' first input before giving up on boot sync.
+  // During this window, connected peers are treated as input peers even
+  // before their first packet arrives — prevents host from advancing
+  // frames 0..DELAY with fabricated zeros while guest sends real input,
+  // which would seed permanent hash divergence and force continuous resyncs.
+  const BOOT_GRACE_FRAMES = 120;
   const _lastKnownInput = {}; // slot -> last input mask received from that peer
 
   // -- Direct memory input layout -----------------------------------------------
@@ -374,7 +380,7 @@
   let _syncBaseInterval = 10; // direct RDRAM reads are ~0.1ms (no getState)
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount = 0;
-  let _consecutiveResyncs = 0; // track consecutive resyncs for adaptive backoff
+  let _consecutiveResyncs = 0; // incremented on each resync, reset on sync OK
   // Resync cooldown: C-level path is <2ms so we can resync very frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
   const _resyncCooldownMs = () => (_hasKnSync ? 200 : 10000);
@@ -697,6 +703,7 @@
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null; // stored for removal in stopSync()
+  let _networkChangeHandler = null; // stored for removal in stopSync()
   let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
 
   // Spectator streaming state
@@ -1592,14 +1599,22 @@
     Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined && p.dc && p.dc.readyState === 'open');
 
   // Wait for all active peers that have started sending input.
-  // Peers with open data channels who haven't sent any input yet (e.g.
-  // late-joiners still booting) are excluded so they don't stall the game.
-  // Once a peer sends their first input, they're included and the game
-  // waits for them on every frame (Kaillera-style strict lockstep).
+  // During the boot grace window (first BOOT_GRACE_FRAMES), also include
+  // peers with open DCs that haven't sent their first input yet — this
+  // stalls the host at frame DELAY_FRAMES instead of letting it race ahead
+  // with fabricated zeros, which would seed hash divergence from frame 0.
+  // After the grace window, unstarted peers are excluded so a slow/missing
+  // peer doesn't stall an established game (normal late-join behavior).
   // Uses _peerInputStarted (persistent flag) instead of checking buffer
   // length — prevents peers from dropping out when their buffer is
   // momentarily empty between frames (causes 3+ player desync).
-  const getInputPeers = () => getActivePeers().filter((p) => _peerInputStarted[p.slot] && !p.reconnecting);
+  const getInputPeers = () =>
+    getActivePeers().filter((p) => {
+      if (p.reconnecting) return false;
+      if (_peerInputStarted[p.slot]) return true;
+      // Boot grace: include connected peers before their first input arrives
+      return _frameNum < BOOT_GRACE_FRAMES;
+    });
 
   // -- Game start sequence ---------------------------------------------------
 
@@ -2674,6 +2689,31 @@
     };
     document.addEventListener('visibilitychange', _visChangeHandler);
 
+    // Network change detection: mobile WiFi↔cellular switches cause desync.
+    // Request a FULL (non-delta) resync when the network path changes.
+    _networkChangeHandler = () => {
+      if (!_running) return;
+      _syncLog('network change detected — requesting full resync');
+      if (_playerSlot !== 0) {
+        _setLastSyncState(null, 'network-change');
+        _lastResyncTime = 0; // clear cooldown
+        const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+        if (hostPeer?.dc?.readyState === 'open') {
+          try {
+            hostPeer.dc.send('sync-request-full');
+          } catch (_) {}
+        }
+      } else {
+        // Host: reset sync interval so hash checks resume quickly
+        _consecutiveResyncs = 0;
+        _syncCheckInterval = _syncBaseInterval;
+        _resetDrift();
+      }
+    };
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (conn) conn.addEventListener('change', _networkChangeHandler);
+    window.addEventListener('online', _networkChangeHandler);
+
     // Use setInterval so background tabs are not throttled
     _tickInterval = setInterval(tick, 16);
   };
@@ -2710,6 +2750,13 @@
     if (_visChangeHandler) {
       document.removeEventListener('visibilitychange', _visChangeHandler);
       _visChangeHandler = null;
+    }
+    // Remove network change handlers
+    if (_networkChangeHandler) {
+      const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (conn) conn.removeEventListener('change', _networkChangeHandler);
+      window.removeEventListener('online', _networkChangeHandler);
+      _networkChangeHandler = null;
     }
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
@@ -3595,7 +3642,7 @@
       const compressed = await compressState(toCompress);
       const sizeKB = Math.round(compressed.length / 1024);
       _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-      sendSyncChunks(compressed, frame, isFull, targetSid);
+      await sendSyncChunks(compressed, frame, isFull, targetSid);
     } catch (err) {
       _syncLog(`sync compress failed: ${err}`);
     } finally {
@@ -3603,9 +3650,11 @@
     }
   };
 
-  const sendSyncChunks = (compressed, frame, isFull, targetSid) => {
+  const sendSyncChunks = async (compressed, frame, isFull, targetSid) => {
     // Host: send compressed state/delta via DC in 64KB chunks.
-    // If targetSid is set, send only to that peer (star topology).
+    // Chunks are sent with yields between them so input messages can
+    // interleave — prevents DataChannel saturation that causes mutual
+    // input deadlock (see project_stall_timeout_desync).
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
     let targets;
@@ -3628,6 +3677,12 @@
           const start = i * CHUNK_SIZE;
           const end = Math.min(start + CHUNK_SIZE, compressed.length);
           dc.send(compressed.slice(start, end));
+          // Yield after every 3 chunks (~192KB) so the tick loop can
+          // send input messages between bursts. Without this, 15 chunks
+          // (894KB) saturates the DC buffer and blocks input delivery.
+          if ((i + 1) % 3 === 0 && i < numChunks - 1) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
         }
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
       } catch (err) {

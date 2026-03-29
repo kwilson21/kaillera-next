@@ -919,8 +919,8 @@
     if (retryBtn) retryBtn.style.display = 'none';
 
     if (_romSharingEnabled && _romSharingDecision === null && !_romBlob) {
-      // Show accept/decline prompt
-      if (romDrop) romDrop.style.display = 'none';
+      // Show ROM drop zone with compact "accept from host" option below
+      if (romDrop) romDrop.style.display = '';
       if (prompt) prompt.style.display = '';
       if (progress) progress.style.display = 'none';
     } else if (_romTransferState === 'receiving') {
@@ -3558,8 +3558,7 @@
     const romAcceptBtn = document.getElementById('rom-accept-btn');
     if (romAcceptBtn) romAcceptBtn.addEventListener('click', acceptRomSharing);
 
-    const romDeclineBtn = document.getElementById('rom-decline-btn');
-    if (romDeclineBtn) romDeclineBtn.addEventListener('click', declineRomSharing);
+    // rom-decline-btn removed — guests now see rom-drop + compact "accept from host" option
 
     const romRetryBtn = document.getElementById('rom-transfer-retry');
     if (romRetryBtn) romRetryBtn.addEventListener('click', retryRomTransfer);

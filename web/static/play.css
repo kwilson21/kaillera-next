@@ -606,7 +606,8 @@ button:hover {
 /* Mobile: info overlay as in-flow flex child between gamepad and toolbar */
 @media (hover: none) and (pointer: coarse) {
   #info-overlay {
-    position: static;
+    position: relative;
+    z-index: 60;
     top: auto;
     bottom: auto;
     left: auto;
