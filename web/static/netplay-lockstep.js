@@ -418,7 +418,21 @@
   const _diagShouldLog = (frameNum, interval) => frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
 
   // DIAG-HASH: compute and stream per-region RDRAM hashes for this player
-  const _diagRegionNames = ['cfg', 'ps0', 'ps1', 'ps2', 'ph1a', 'ph1b', 'ph1c', 'misc', 'ph2', 'ph3a', 'ph3b', 'ph3c'];
+  // ps0*/ps1*/ps2* are excluded from kn_sync_hash (volatile WebKit/V8 divergence) but still sampled here for diagnostics
+  const _diagRegionNames = [
+    'cfg',
+    'ps0*',
+    'ps1*',
+    'ps2*',
+    'ph1a',
+    'ph1b',
+    'ph1c',
+    'misc',
+    'ph2',
+    'ph3a',
+    'ph3b',
+    'ph3c',
+  ];
   // Hex lookup table for byte-to-hex conversion
   const _hexLUT = [];
   for (let _hi = 0; _hi < 256; _hi++) _hexLUT[_hi] = (_hi < 16 ? '0' : '') + _hi.toString(16);
