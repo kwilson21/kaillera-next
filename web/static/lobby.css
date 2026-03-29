@@ -9,6 +9,7 @@ body {
   color: #eee;
   font-family: sans-serif;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
@@ -107,7 +108,3 @@ button:hover {
   vertical-align: middle;
 }
 
-/* Hide footer in landscape to prevent overlap with lobby card */
-@media (orientation: landscape) and (max-height: 500px) {
-  #lobby-footer { display: none; }
-}
