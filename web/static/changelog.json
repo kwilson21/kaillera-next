@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.18.3",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "switch Playwright OG generation to async API"
+      }
+    ]
+  },
+  {
     "version": "0.18.2",
     "date": "2026-03-29",
     "changes": [
@@ -194,28 +204,6 @@
       {
         "type": "feat",
         "message": "support multiple CORS origins via comma-separated ALLOWED_ORIGIN"
-      }
-    ]
-  },
-  {
-    "version": "0.7.0",
-    "date": "2026-03-27",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "emulator hibernate — WASM module stays alive between games"
-      },
-      {
-        "type": "feat",
-        "message": "mode switching: lockstep ↔ streaming without page reload"
-      },
-      {
-        "type": "fix",
-        "message": "guest black screen after streaming → lockstep"
-      },
-      {
-        "type": "fix",
-        "message": "EJS menus appearing during gameplay after hibernate/wake"
       }
     ]
   }
