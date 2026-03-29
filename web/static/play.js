@@ -2790,8 +2790,15 @@
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
+  const _gameParam = () => {
+    // Include game_id in shared URLs so OG cards show the right background
+    // even if the room doesn't exist yet when the crawler fetches it
+    const params = new URLSearchParams(window.location.search);
+    return params.get('game') || 'ssb64';
+  };
+
   const copyLink = () => {
-    const url = `${window.location.origin}/play.html?room=${roomCode}`;
+    const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
     copyToClipboard(url, 'Link');
   };
 
@@ -3470,7 +3477,7 @@
     const sharePlay = document.getElementById('share-play');
     if (sharePlay)
       sharePlay.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}`;
+        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
         copyToClipboard(url, 'Play link');
         closeShareDropdown();
       });
@@ -3478,7 +3485,7 @@
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch)
       shareWatch.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}&spectate=1`;
+        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
         copyToClipboard(url, 'Watch link');
         closeShareDropdown();
       });

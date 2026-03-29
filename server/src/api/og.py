@@ -327,10 +327,17 @@ def build_og_tags(
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
-        image_url = f"https://{host}/og-image/{room_id}.png"
+        img_params = []
+        if game_id:
+            img_params.append(f"game={game_id}")
         if spectate:
-            image_url += "?spectate=1"
+            img_params.append("spectate=1")
+        image_url = f"https://{host}/og-image/{room_id}.png"
+        if img_params:
+            image_url += "?" + "&".join(img_params)
         page_url = f"https://{host}/play.html?room={room_id}"
+        if game_id:
+            page_url += f"&game={game_id}"
         if spectate:
             page_url += "&spectate=1"
     else:

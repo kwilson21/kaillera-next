@@ -771,11 +771,13 @@ def create_app(lifespan=None) -> FastAPI:
         try:
             room = rooms.get(room_id)
             spectate = request.query_params.get("spectate") == "1"
+            game_hint = request.query_params.get("game")  # fallback from URL param
             if room:
                 names = _player_names(room) if spectate else None
-                img = await generate_og_image(_owner_name(room), room.game_id, spectate, player_names=names)
+                game_id = room.game_id or game_hint
+                img = await generate_og_image(_owner_name(room), game_id, spectate, player_names=names)
             else:
-                img = await generate_og_image(room_id, None, spectate)
+                img = await generate_og_image(room_id, game_hint, spectate)
         except Exception:
             log.warning("OG image generation failed for room %s", room_id, exc_info=True)
             if _fallback_png.exists():
@@ -794,11 +796,13 @@ def create_app(lifespan=None) -> FastAPI:
         room_id = request.query_params.get("room")
         spectate = request.query_params.get("spectate") == "1"
         host = request.headers.get("host", "localhost")
+        game_hint = request.query_params.get("game")
         room = rooms.get(room_id) if room_id else None
         if room:
-            tags = build_og_tags(host, room_id, _owner_name(room), room.game_id, spectate)
+            game_id = room.game_id or game_hint
+            tags = build_og_tags(host, room_id, _owner_name(room), game_id, spectate)
         elif room_id:
-            tags = build_og_tags(host, room_id, room_id, None, spectate)
+            tags = build_og_tags(host, room_id, room_id, game_hint, spectate)
         else:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)
