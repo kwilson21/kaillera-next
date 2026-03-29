@@ -1281,6 +1281,974 @@
         };
       </script>
     </template>
-    <template id="theme-4"></template>
+    <template id="theme-4">
+      <style>
+        .t4-body {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+          font-family: Tahoma, sans-serif;
+          overflow: hidden;
+          cursor: default;
+          user-select: none;
+          position: fixed;
+          inset: 0;
+        }
+        .t4-body * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+        }
+
+        /* XP Desktop - Bliss wallpaper */
+        .t4-xp-desktop {
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(
+            180deg,
+            #3a6bc5 0%,
+            #5ba3e8 25%,
+            #87ceeb 40%,
+            #6ab04c 42%,
+            #5ca841 50%,
+            #4e9a36 70%,
+            #3d8b2c 100%
+          );
+          position: relative;
+          display: flex;
+          flex-direction: column;
+        }
+
+        /* Desktop icons */
+        .t4-desktop-icons {
+          flex: 1;
+          padding: 12px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          align-items: flex-start;
+        }
+        .t4-desktop-icon {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          width: 70px;
+          padding: 4px;
+          cursor: pointer;
+          border-radius: 2px;
+        }
+        .t4-desktop-icon:hover {
+          background: rgba(0, 0, 200, 0.15);
+        }
+        .t4-desktop-icon .t4-ico {
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 2px;
+        }
+        .t4-desktop-icon .t4-lbl {
+          font-size: 11px;
+          color: #fff;
+          text-align: center;
+          text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+          line-height: 1.2;
+        }
+
+        /* IE icon */
+        .t4-ie-icon {
+          width: 28px;
+          height: 28px;
+          background: linear-gradient(135deg, #00a2ed 0%, #0078d4 50%, #005a9e 100%);
+          border-radius: 50%;
+          position: relative;
+          border: 2px solid #ffd700;
+        }
+        .t4-ie-icon::after {
+          content: 'e';
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+          font-size: 18px;
+          font-weight: bold;
+          font-style: italic;
+          font-family: Georgia, serif;
+        }
+
+        /* AIM icon */
+        .t4-aim-icon {
+          width: 28px;
+          height: 28px;
+          position: relative;
+        }
+        .t4-aim-icon .t4-head {
+          width: 14px;
+          height: 14px;
+          background: #ffd700;
+          border-radius: 50%;
+          position: absolute;
+          top: 0;
+          left: 7px;
+        }
+        .t4-aim-icon .t4-body-shape {
+          width: 20px;
+          height: 10px;
+          background: #ffd700;
+          border-radius: 10px 10px 0 0;
+          position: absolute;
+          bottom: 2px;
+          left: 4px;
+        }
+
+        /* PJ64 icon */
+        .t4-pj64-icon {
+          width: 28px;
+          height: 28px;
+          background: #1a1a2e;
+          border-radius: 4px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid #444;
+        }
+        .t4-pj64-icon span {
+          color: #6af;
+          font-size: 9px;
+          font-weight: bold;
+          font-family: monospace;
+        }
+
+        /* My Computer icon */
+        .t4-mc-icon {
+          width: 28px;
+          height: 24px;
+          position: relative;
+        }
+        .t4-mc-icon .t4-screen {
+          width: 24px;
+          height: 16px;
+          background: #000080;
+          border: 2px solid #c0c0c0;
+          border-radius: 2px;
+          margin: 0 auto;
+        }
+        .t4-mc-icon .t4-base {
+          width: 20px;
+          height: 3px;
+          background: #c0c0c0;
+          margin: 1px auto 0;
+          border-radius: 0 0 2px 2px;
+        }
+
+        /* Recycle bin */
+        .t4-rb-icon {
+          width: 26px;
+          height: 28px;
+          position: relative;
+        }
+        .t4-rb-icon .t4-lid {
+          width: 20px;
+          height: 4px;
+          background: #c0c0c0;
+          border-radius: 2px 2px 0 0;
+          margin: 0 auto;
+          border: 1px solid #888;
+        }
+        .t4-rb-icon .t4-bin {
+          width: 18px;
+          height: 18px;
+          background: linear-gradient(180deg, #e8e8e8, #c0c0c0);
+          margin: 0 auto;
+          border: 1px solid #888;
+          border-radius: 0 0 3px 3px;
+        }
+
+        /* XP Taskbar */
+        .t4-xp-taskbar {
+          height: 30px;
+          background: linear-gradient(
+            180deg,
+            #3168d5 0%,
+            #1f48a0 3%,
+            #2c5cc7 4%,
+            #245dbd 50%,
+            #1941a5 97%,
+            #163b9c 100%
+          );
+          display: flex;
+          align-items: center;
+          padding: 0 2px;
+          z-index: 100;
+        }
+        .t4-start-btn {
+          height: 26px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          padding: 0 10px 0 6px;
+          background: linear-gradient(180deg, #3b9c3b 0%, #2d8e2d 40%, #1a6e1a 100%);
+          border: none;
+          border-radius: 0 8px 8px 0;
+          color: #fff;
+          font-size: 12px;
+          font-weight: bold;
+          font-family: 'Franklin Gothic Medium', Tahoma, sans-serif;
+          cursor: pointer;
+          letter-spacing: 0.5px;
+          text-shadow: 0 1px 1px rgba(0, 0, 0, 0.4);
+        }
+        .t4-win-flag {
+          display: grid;
+          grid-template-columns: 7px 7px;
+          grid-template-rows: 7px 7px;
+          gap: 1px;
+          transform: rotate(-5deg);
+        }
+        .t4-win-flag .t4-r {
+          background: #ff0000;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-g {
+          background: #00aa00;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-b {
+          background: #0066ff;
+          border-radius: 1px;
+        }
+        .t4-win-flag .t4-y {
+          background: #ffbb00;
+          border-radius: 1px;
+        }
+        .t4-taskbar-items {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          padding: 0 8px;
+          gap: 2px;
+        }
+        .t4-taskbar-item {
+          height: 22px;
+          background: linear-gradient(180deg, #3c7fdb, #2862b8);
+          border: 1px solid #1a4a90;
+          border-radius: 2px;
+          padding: 0 8px;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 11px;
+          color: #fff;
+          min-width: 100px;
+          max-width: 180px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .t4-taskbar-item.t4-active {
+          background: linear-gradient(180deg, #e8f0fb, #b8d0eb);
+          border-color: #8ba5c5;
+          color: #000;
+        }
+        .t4-tray {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 0 8px;
+          height: 100%;
+          background: linear-gradient(180deg, #1290e9, #0f5fb5);
+          border-left: 1px solid #1050a0;
+          font-size: 11px;
+          color: #fff;
+        }
+
+        /* Kaillera Window */
+        .t4-k-win {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -52%);
+          width: 640px;
+          background: #ece9d8;
+          border: 1px solid #0054e3;
+          border-radius: 8px 8px 0 0;
+          box-shadow: 2px 4px 20px rgba(0, 0, 0, 0.5);
+          z-index: 50;
+        }
+        .t4-k-titlebar {
+          background: linear-gradient(180deg, #0997ff 0%, #0561d2 8%, #0654c4 88%, #0347a8 100%);
+          color: #fff;
+          padding: 4px 6px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-radius: 7px 7px 0 0;
+          height: 26px;
+        }
+        .t4-k-titlebar .t4-title {
+          font-size: 12px;
+          font-weight: bold;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .t4-title-ico {
+          width: 16px;
+          height: 16px;
+          background: #ffd700;
+          border-radius: 2px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 10px;
+          font-weight: bold;
+          color: #333;
+        }
+        .t4-win-btns {
+          display: flex;
+          gap: 2px;
+        }
+        .t4-wbtn {
+          width: 21px;
+          height: 21px;
+          border: 1px solid rgba(255, 255, 255, 0.4);
+          border-radius: 3px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          font-weight: bold;
+          color: #fff;
+          cursor: pointer;
+        }
+        .t4-wbtn.t4-min {
+          background: linear-gradient(180deg, #3c8ee6, #2570c0);
+        }
+        .t4-wbtn.t4-max {
+          background: linear-gradient(180deg, #3c8ee6, #2570c0);
+        }
+        .t4-wbtn.t4-cls {
+          background: linear-gradient(180deg, #e87461, #c9362c);
+        }
+
+        .t4-k-body {
+          padding: 0;
+          font-size: 11px;
+          color: #000;
+        }
+
+        /* Top panels */
+        .t4-k-top {
+          display: flex;
+          height: 180px;
+          margin: 4px;
+          gap: 4px;
+        }
+        .t4-k-chat-panel {
+          flex: 1;
+          background: #fff;
+          border: 1px inset #aca899;
+          overflow-y: auto;
+          padding: 3px;
+          font-size: 11px;
+          line-height: 1.4;
+        }
+        .t4-k-user-panel {
+          width: 240px;
+          background: #fff;
+          border: 1px inset #aca899;
+          overflow-y: auto;
+        }
+        .t4-k-user-header,
+        .t4-k-game-header {
+          display: grid;
+          background: #ece9d8;
+          border-bottom: 1px solid #aca899;
+          font-weight: bold;
+          padding: 1px 0;
+          position: sticky;
+          top: 0;
+          font-size: 10px;
+        }
+        .t4-k-user-header {
+          grid-template-columns: 40px 70px 40px 40px 50px;
+        }
+        .t4-k-user-header span,
+        .t4-k-user-row span,
+        .t4-k-game-header span,
+        .t4-k-game-row span {
+          padding: 1px 3px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .t4-k-user-row {
+          display: grid;
+          grid-template-columns: 40px 70px 40px 40px 50px;
+          border-bottom: 1px solid #f0f0f0;
+          font-size: 10px;
+        }
+
+        /* Chat input bar */
+        .t4-k-chatbar {
+          display: flex;
+          margin: 0 4px;
+          gap: 2px;
+          padding: 2px 0;
+        }
+        .t4-k-chatbar input {
+          flex: 1;
+          height: 20px;
+          border: 1px inset #aca899;
+          padding: 1px 4px;
+          font-size: 11px;
+          font-family: Tahoma, sans-serif;
+          background: #fff;
+        }
+        .t4-xp-btn {
+          height: 22px;
+          padding: 0 10px;
+          background: linear-gradient(180deg, #fff, #ece9d8 45%, #d6d0c4);
+          border: 1px solid #003c74;
+          border-radius: 3px;
+          font-size: 11px;
+          font-family: Tahoma, sans-serif;
+          cursor: pointer;
+        }
+        .t4-xp-btn:hover {
+          background: linear-gradient(180deg, #fff, #e8e0d0 45%, #d0c8b8);
+        }
+
+        /* Game list */
+        .t4-k-games {
+          margin: 4px;
+          background: #fff;
+          border: 1px inset #aca899;
+          height: 70px;
+          overflow-y: auto;
+        }
+        .t4-k-game-header {
+          grid-template-columns: 45px 200px 180px 90px;
+        }
+        .t4-k-game-row {
+          display: grid;
+          grid-template-columns: 45px 200px 180px 90px;
+          border-bottom: 1px solid #f0f0f0;
+          font-size: 10px;
+          cursor: pointer;
+        }
+        .t4-k-game-row:hover {
+          background: #e8e8ff;
+        }
+        .t4-k-game-row.t4-err {
+          color: #cc0000;
+        }
+
+        /* Bottom tabs */
+        .t4-k-tabs {
+          display: flex;
+          background: #ece9d8;
+          border-bottom: 1px solid #aca899;
+          padding: 2px 4px 0;
+        }
+        .t4-k-tab {
+          padding: 3px 8px;
+          font-size: 10px;
+          border: 1px solid #aca899;
+          border-bottom: none;
+          background: #ece9d8;
+          border-radius: 3px 3px 0 0;
+          cursor: pointer;
+          margin-right: 1px;
+        }
+        .t4-k-tab.t4-active {
+          background: #fff;
+          font-weight: bold;
+          position: relative;
+          top: 1px;
+          border-bottom: 1px solid #fff;
+        }
+
+        /* Login bar */
+        .t4-k-login {
+          display: flex;
+          align-items: center;
+          padding: 4px;
+          gap: 4px;
+          flex-wrap: wrap;
+          background: #ece9d8;
+          font-size: 10px;
+        }
+        .t4-k-login label {
+          font-weight: bold;
+          color: #333;
+        }
+        .t4-k-login input {
+          height: 18px;
+          border: 1px inset #aca899;
+          padding: 0 3px;
+          font-size: 10px;
+          font-family: Tahoma, sans-serif;
+          background: #fff;
+        }
+        .t4-k-login select {
+          height: 18px;
+          border: 1px solid #7f9db9;
+          background: #fff;
+          font-size: 10px;
+          font-family: Tahoma, sans-serif;
+          padding: 0 2px;
+        }
+        .t4-k-status {
+          background: #ece9d8;
+          border-top: 1px solid #fff;
+          padding: 2px 6px;
+          font-size: 9px;
+          color: #555;
+          display: flex;
+          justify-content: space-between;
+        }
+
+        /* Chat message types */
+        .t4-sys {
+          color: #888;
+        }
+        .t4-err {
+          color: #cc0000;
+          font-weight: bold;
+        }
+        .t4-usr {
+          color: #000080;
+        }
+        .t4-join {
+          color: #008800;
+        }
+        .t4-leave {
+          color: #cc6600;
+        }
+        .t4-srv {
+          color: #cc8800;
+        }
+        .t4-ts {
+          color: #888;
+          font-size: 10px;
+        }
+
+        /* Error Dialog */
+        .t4-err-dialog {
+          position: absolute;
+          top: 32%;
+          left: 55%;
+          width: 380px;
+          background: #ece9d8;
+          border: 1px solid #0054e3;
+          border-radius: 8px 8px 0 0;
+          box-shadow: 3px 5px 15px rgba(0, 0, 0, 0.5);
+          z-index: 60;
+          animation: t4pop 0.15s ease-out;
+        }
+        @keyframes t4pop {
+          from {
+            transform: scale(0.95);
+            opacity: 0;
+          }
+          to {
+            transform: scale(1);
+            opacity: 1;
+          }
+        }
+        .t4-err-dialog .t4-k-titlebar {
+          height: 24px;
+        }
+        .t4-dlg-body {
+          padding: 16px;
+          display: flex;
+          gap: 12px;
+          align-items: flex-start;
+        }
+        .t4-err-ico {
+          width: 32px;
+          height: 32px;
+          flex-shrink: 0;
+          background: radial-gradient(circle, #ff4444 40%, #cc0000 70%, #990000);
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: #fff;
+          font-size: 20px;
+          font-weight: bold;
+          text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        }
+        .t4-err-txt {
+          font-size: 11px;
+          line-height: 1.5;
+          color: #000;
+          flex: 1;
+        }
+        .t4-err-txt .t4-code {
+          color: #888;
+          font-size: 10px;
+          margin-top: 6px;
+          font-family: 'Lucida Console', monospace;
+        }
+        .t4-dlg-btns {
+          display: flex;
+          justify-content: center;
+          gap: 8px;
+          padding: 0 16px 14px;
+        }
+        .t4-dlg-btns .t4-xp-btn {
+          min-width: 75px;
+          text-align: center;
+        }
+        .t4-dlg-btns .t4-xp-btn.t4-default {
+          border: 2px solid #003c74;
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+          .t4-xp-desktop {
+            display: none;
+          }
+          .t4-body {
+            background: #1a1a2e;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          .t4-err-dialog {
+            position: static;
+            top: auto;
+            left: auto;
+            width: 95vw;
+            max-width: 380px;
+            animation: t4pop 0.15s ease-out;
+          }
+        }
+      </style>
+      <div class="t4-body">
+        <div class="t4-xp-desktop">
+          <div class="t4-desktop-icons">
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-mc-icon">
+                  <div class="t4-screen"></div>
+                  <div class="t4-base"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">My Computer</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-rb-icon">
+                  <div class="t4-lid"></div>
+                  <div class="t4-bin"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">Recycle Bin</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-pj64-icon"><span>PJ64k</span></div>
+              </div>
+              <div class="t4-lbl">Project64k.exe</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico"><div class="t4-ie-icon"></div></div>
+              <div class="t4-lbl">Internet Explorer</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico">
+                <div class="t4-aim-icon">
+                  <div class="t4-head"></div>
+                  <div class="t4-body-shape"></div>
+                </div>
+              </div>
+              <div class="t4-lbl">AIM</div>
+            </div>
+            <div class="t4-desktop-icon">
+              <div class="t4-ico" style="font-size: 24px">&#128193;</div>
+              <div class="t4-lbl">N64 ROMs</div>
+            </div>
+          </div>
+
+          <!-- Kaillera Client Window -->
+          <div class="t4-k-win">
+            <div class="t4-k-titlebar">
+              <div class="t4-title">
+                <div class="t4-title-ico">K</div>
+                Galaxy 64
+              </div>
+              <div class="t4-win-btns">
+                <div class="t4-wbtn t4-min">_</div>
+                <div class="t4-wbtn t4-max">&#9633;</div>
+                <div class="t4-wbtn t4-cls">&#215;</div>
+              </div>
+            </div>
+            <div class="t4-k-body">
+              <div class="t4-k-top">
+                <!-- Chat/info panel (left) -->
+                <div class="t4-k-chat-panel">
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;server&gt; EmuLinker X v3.4: 02-07-2023 &mdash;
+                    Visit:
+                  </div>
+                  <div class="t4-srv" style="color: #88ccff">https://slinksoft.github.io/emulinkexdoc/</div>
+                  <div class="t4-sys">&lt;Client&gt; Connected!</div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;Slink&gt; Joined the Server
+                  </div>
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:26:59 PM:</span> &lt;server&gt; The King Is Here. Do Not Fuck With
+                    Him.
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:27:03 PM:</span> &lt;Mr Quimper&gt; Quit the Server: Normal client
+                    exit
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:27:18 PM:</span> &lt;Natsu&gt; Quit the Server: Rejoined
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:27:19 PM:</span> &lt;Natsu&gt; Joined the Server
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:27:41 PM:</span> &lt;Agent21&gt; Joined the Server
+                  </div>
+                  <div class="t4-usr">
+                    <span class="t4-ts">&middot;10:27:55 PM:</span> &lt;Agent21&gt; anyone down for smash?
+                  </div>
+                  <div class="t4-sys">
+                    <span class="t4-ts">&middot;10:27:59 PM:</span> &lt;Agent21&gt; Created Game: Super Smash Bros. (U)
+                    [!]
+                  </div>
+                  <div class="t4-srv">
+                    <span class="t4-ts">&middot;10:28:09 PM:</span> &lt;server&gt; Agent21 has loaded Super Smash Bros.
+                    (U) [!]
+                  </div>
+                  <div class="t4-join">
+                    <span class="t4-ts">&middot;10:28:14 PM:</span> &lt;N64_King&gt; Joined the Server
+                  </div>
+                  <div class="t4-usr">
+                    <span class="t4-ts">&middot;10:28:15 PM:</span> &lt;N64_King&gt; yo lets run it
+                  </div>
+                  <div class="t4-sys"><span class="t4-ts">&middot;10:28:20 PM:</span> *** Game started</div>
+                  <div class="t4-err">
+                    <span class="t4-ts">&middot;10:48:21 PM:</span> *** Desync Detected! Connection quality: Poor
+                  </div>
+                  <div class="t4-err">
+                    <span class="t4-ts">&middot;10:48:22 PM:</span> *** Game Ended! Didn't receive a response for 15s.
+                  </div>
+                  <div class="t4-err" id="t4-chat-error">
+                    <span class="t4-ts">&middot;10:48:22 PM:</span> *** Connection Lost! (Error {{CODE}}: Page Not
+                    Found)
+                  </div>
+                  <div class="t4-leave">
+                    <span class="t4-ts">&middot;10:48:23 PM:</span> &lt;N64_King&gt; has been dropped
+                  </div>
+                </div>
+                <!-- User list panel (right) -->
+                <div class="t4-k-user-panel">
+                  <div class="t4-k-user-header">
+                    <span>UserID</span><span>Nick</span><span>Ping</span><span>Type</span><span>Status</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>956</span><span>123</span><span>200</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>939</span><span>Athlas</span><span>126</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>923</span><span>AxelitoRaptor</span><span>255</span><span>LAN</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>911</span><span style="color: #000080">DniC666</span><span>140</span><span>LAN</span
+                    ><span>Playing</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>700</span><span style="color: #008800">DrisOGenDroX</span><span>49</span><span>LAN</span
+                    ><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>948</span><span>FelipeROD_06</span><span>155</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>910</span><span>Kev</span><span>124</span><span>LAN</span><span>Playing</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>953</span><span>Lomax</span><span>130</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row" style="background: #316ac5; color: #fff">
+                    <span>958</span><span>Agent21</span><span>&#8734;</span><span>Good</span><span>Idle</span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>955</span><span>Natsu</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>907</span><span>renne</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>960</span><span>Ryot</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>957</span><span>Toby</span><span></span><span></span><span></span>
+                  </div>
+                  <div class="t4-k-user-row">
+                    <span>959</span><span>Slink</span><span></span><span></span><span></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Chat input + buttons -->
+              <div class="t4-k-chatbar">
+                <input value="" placeholder="Type message..." />
+                <button class="t4-xp-btn">Chat</button>
+                <button class="t4-xp-btn">Create</button>
+                <button class="t4-xp-btn">Join</button>
+              </div>
+
+              <!-- Game list -->
+              <div class="t4-k-games">
+                <div class="t4-k-game-header">
+                  <span>GameID</span><span>Game</span><span>Emulator</span><span>Owner</span>
+                </div>
+                <div class="t4-k-game-row t4-err">
+                  <span>385</span><span>Super Smash Bros. (U) [!]</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>Agent21</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>362</span><span>STREET FIGHTER ALPHA2 (USA)</span><span>Snes9K 0.09z</span><span>renne</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>384</span><span>SmashRemix1.3.1</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>123</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>363</span><span>Mario Kart 64 (U) [!]</span><span>Project 64k 0.13 (01 Aug 2003)</span
+                  ><span>Kev</span>
+                </div>
+                <div class="t4-k-game-row">
+                  <span>288</span><span>"Away (leave messages)"</span><span>SupraEmulator</span><span>DrisOGen</span>
+                </div>
+              </div>
+
+              <!-- Bottom tabs -->
+              <div class="t4-k-tabs">
+                <div class="t4-k-tab t4-active">Login Info</div>
+                <div class="t4-k-tab">Chatroom Options</div>
+                <div class="t4-k-tab">Gameroom Options</div>
+                <div class="t4-k-tab">Extended Emulinker X v3.1.3+ Gameroom Options</div>
+              </div>
+
+              <!-- Login bar -->
+              <div class="t4-k-login">
+                <label>IP:</label><input style="width: 130px" value="18.204.206.90:27888" />
+                <label>Ping Spoof (-1 or Blank For No Spoofing):</label><input style="width: 30px" value="-1" />
+                <span style="flex: 1"></span>
+                <span>Slink Client X v3.3.4 - Final</span>
+                <span style="font-weight: bold">#Users: 17&nbsp;&nbsp;#Games: 6</span>
+              </div>
+              <div class="t4-k-login" style="border-top: none; padding-top: 0">
+                <label>Nick:</label><input style="width: 60px" value="Agent21" /> <label>Quit Msg:</label
+                ><input style="width: 180px" value="SupraSlinkClient X v3.3.4 Final (Slink's En" />
+                <label>Type:</label>
+                <select>
+                  <option selected>LAN</option>
+                  <option>Excellent</option>
+                  <option>Good</option>
+                  <option>Average</option>
+                  <option>Low</option>
+                  <option>Bad</option>
+                </select>
+                <button class="t4-xp-btn">Servers</button>
+                <button class="t4-xp-btn">Login</button>
+                <button class="t4-xp-btn">Logoff</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- XP Taskbar -->
+          <div class="t4-xp-taskbar">
+            <button class="t4-start-btn">
+              <div class="t4-win-flag">
+                <div class="t4-r"></div>
+                <div class="t4-g"></div>
+                <div class="t4-b"></div>
+                <div class="t4-y"></div>
+              </div>
+              start
+            </button>
+            <div class="t4-taskbar-items">
+              <div class="t4-taskbar-item t4-active">&#127918; Project64k &mdash; Super S...</div>
+              <div class="t4-taskbar-item">&#128172; AIM Buddy List</div>
+            </div>
+            <div class="t4-tray">&#128266; &#128737;&#65039; 11:42 PM</div>
+          </div>
+        </div>
+
+        <!-- XP Error Dialog -->
+        <div class="t4-err-dialog">
+          <div class="t4-k-titlebar">
+            <div class="t4-title" style="font-size: 11px">kaillera-next</div>
+            <div class="t4-win-btns">
+              <div class="t4-wbtn t4-cls" style="width: 18px; height: 18px; font-size: 10px">&#215;</div>
+            </div>
+          </div>
+          <div class="t4-dlg-body">
+            <div class="t4-err-ico">&#10005;</div>
+            <div class="t4-err-txt" role="alert">
+              <strong id="t4-dialog-title">Connection Lost!</strong><br /><br />
+              <span id="t4-dialog-msg">The page you're looking for has been dropped from the server.</span><br />
+              <div class="t4-code" id="t4-diag-line">
+                Error {{CODE}} &middot; kailleraclient.dll &middot; 0x004F4E46<br />Ping: &#8734; ms &middot; Frames
+                behind: {{CODE}} &middot; Desync: Yes
+              </div>
+            </div>
+          </div>
+          <div class="t4-dlg-btns">
+            <button class="t4-xp-btn t4-default" id="t4-reconnect-btn" aria-label="Return to lobby">Reconnect</button>
+            <button class="t4-xp-btn" id="t4-lobby-btn">Back to Lobby</button>
+            <button class="t4-xp-btn" id="t4-blow-btn">Blow on Cartridge</button>
+          </div>
+        </div>
+      </div>
+      <script>
+        window.initTheme4 = (code) => {
+          const titles = {
+            404: { title: 'Connection Lost!', msg: "The page you're looking for has been dropped from the server." },
+            500: { title: 'Fatal Exception!', msg: 'The server encountered an unrecoverable error.' },
+            429: { title: 'Server Full!', msg: 'Too many connections. Please wait before retrying.' },
+          };
+          const info = titles[String(code)] || titles['404'];
+          const titleEl = document.getElementById('t4-dialog-title');
+          const msgEl = document.getElementById('t4-dialog-msg');
+          if (titleEl) titleEl.textContent = info.title;
+          if (msgEl) msgEl.textContent = info.msg;
+
+          const reconnectBtn = document.getElementById('t4-reconnect-btn');
+          const lobbyBtn = document.getElementById('t4-lobby-btn');
+          const blowBtn = document.getElementById('t4-blow-btn');
+
+          if (reconnectBtn)
+            reconnectBtn.onclick = () => {
+              location.href = '/';
+            };
+          if (lobbyBtn)
+            lobbyBtn.onclick = () => {
+              location.href = '/';
+            };
+          if (blowBtn)
+            blowBtn.onclick = () => {
+              blowBtn.textContent = '\uD83D\uDCA8 Pfffft!';
+            };
+        };
+      </script>
+    </template>
   </body>
 </html>
