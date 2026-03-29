@@ -72,8 +72,12 @@
  *     5. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
  *        inputs are ready to apply)
  *     6. Check if all "input peers" have sent input for applyFrame.
- *        Input peers = peers who have sent at least one input (excludes
- *        late-joiners still booting). If missing, two-stage stall:
+ *        Input peers = peers who have sent at least one input. During the
+ *        first BOOT_GRACE_FRAMES (120), connected peers are also included
+ *        before their first packet — prevents the host from racing ahead
+ *        with fabricated zeros and seeding permanent hash divergence.
+ *        After the grace window, unstarted peers are excluded (late-join).
+ *        If input is missing, two-stage stall:
  *          Stage 1 (0 – 3000ms): stall, retry via setTimeout(1).
  *          Stage 2 (3000 – 5000ms): send "resend:<frame>" to the
  *            missing peer requesting retransmission, keep stalling.

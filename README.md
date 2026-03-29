@@ -178,7 +178,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)
-tests/               E2E tests (pytest + Playwright)
+tests/               E2E tests (pytest + Playwright) + VGP visual regression
 docs/                Roadmap, MVP plan, design specs
 certs/               TLS certificates for HTTPS dev (gitignored)
 ```
