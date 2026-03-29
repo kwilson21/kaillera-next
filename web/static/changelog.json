@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.18.0",
+    "date": "2026-03-29",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "custom error pages, HMAC upload tokens, CSP fix (#1)"
+      }
+    ]
+  },
+  {
     "version": "0.17.1",
     "date": "2026-03-28",
     "changes": [
@@ -254,36 +264,6 @@
       {
         "type": "fix",
         "message": "WebRTC offer-before-listener race on late-join"
-      }
-    ]
-  },
-  {
-    "version": "0.4.0",
-    "date": "2026-03-19",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "4-player mesh networking (up to 6 bidirectional WebRTC connections)"
-      },
-      {
-        "type": "feat",
-        "message": "spectator support via host canvas MediaStream"
-      },
-      {
-        "type": "feat",
-        "message": "audio bypass — AudioWorklet with fallback for non-secure contexts"
-      },
-      {
-        "type": "feat",
-        "message": "C-level deterministic timing via forked mupen64plus-next core"
-      },
-      {
-        "type": "feat",
-        "message": "late-join infrastructure — host sends compressed save state"
-      },
-      {
-        "type": "feat",
-        "message": "desync detection with deferred hash checks"
       }
     ]
   }
