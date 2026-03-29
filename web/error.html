@@ -39,7 +39,428 @@
     </script>
 
     <!-- Theme templates added in subsequent tasks -->
-    <template id="theme-1"></template>
+    <template id="theme-1">
+      <style>
+        .t1-body {
+          background: #000;
+          color: #fff;
+          font-family: 'Courier New', monospace;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          overflow: hidden;
+          position: fixed;
+          inset: 0;
+        }
+        .cabinet {
+          position: relative;
+          width: 100%;
+          max-width: 520px;
+          padding: 24px;
+          background: #0a0a0a;
+          border: 3px solid #222;
+          border-radius: 16px;
+          box-shadow:
+            0 0 60px rgba(0, 0, 0, 0.8),
+            inset 0 0 80px rgba(0, 0, 0, 0.5);
+        }
+        .cabinet::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          border-radius: 16px;
+          pointer-events: none;
+          background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(0, 0, 0, 0.12) 2px,
+            rgba(0, 0, 0, 0.12) 4px
+          );
+          z-index: 20;
+        }
+        .screen {
+          background: #0a0a18;
+          border: 2px solid #333;
+          border-radius: 4px;
+          padding: 20px;
+          position: relative;
+          overflow: hidden;
+        }
+        .screen::before {
+          content: '';
+          position: absolute;
+          inset: 0;
+          background: radial-gradient(ellipse at center, rgba(40, 40, 80, 0.15) 0%, transparent 70%);
+          pointer-events: none;
+          z-index: 1;
+        }
+        .hud {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 16px;
+          position: relative;
+          z-index: 2;
+        }
+        .hud-col {
+          text-align: center;
+        }
+        .hud-label {
+          font-size: 11px;
+          color: #f44;
+          letter-spacing: 2px;
+        }
+        .hud-label.p2 {
+          color: #4af;
+        }
+        .hud-value {
+          font-size: 14px;
+          color: #fff;
+          margin-top: 2px;
+          letter-spacing: 1px;
+        }
+        .game-over {
+          text-align: center;
+          margin: 20px 0;
+          position: relative;
+          z-index: 2;
+        }
+        .game-over h1 {
+          font-size: 42px;
+          color: #f33;
+          letter-spacing: 6px;
+          text-shadow: 0 0 20px rgba(255, 50, 50, 0.4);
+          animation: t1pulse 1.5s ease-in-out infinite alternate;
+        }
+        @keyframes t1pulse {
+          from {
+            text-shadow: 0 0 20px rgba(255, 50, 50, 0.4);
+          }
+          to {
+            text-shadow:
+              0 0 40px rgba(255, 50, 50, 0.6),
+              0 0 80px rgba(255, 50, 50, 0.2);
+          }
+        }
+        .round {
+          text-align: center;
+          font-size: 14px;
+          color: #ff0;
+          letter-spacing: 3px;
+          margin: 8px 0 20px;
+          position: relative;
+          z-index: 2;
+        }
+        .t1-scene {
+          position: relative;
+          height: 140px;
+          margin: 10px 0;
+          z-index: 2;
+        }
+        .ground {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          right: 0;
+          height: 16px;
+          background: repeating-linear-gradient(90deg, #2a4a2a 0px, #2a4a2a 8px, #1a3a1a 8px, #1a3a1a 16px);
+          border-top: 2px solid #4a8a4a;
+        }
+        .char-down {
+          position: absolute;
+          bottom: 18px;
+          left: 50%;
+          transform: translateX(-50%) rotate(90deg);
+          opacity: 0.9;
+        }
+        .dizzy {
+          position: absolute;
+          bottom: 50px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 40px;
+          height: 20px;
+        }
+        .dizzy-star {
+          position: absolute;
+          font-size: 10px;
+          color: #ff0;
+          animation: t1orbit 1.5s linear infinite;
+        }
+        .dizzy-star:nth-child(2) {
+          animation-delay: -0.5s;
+        }
+        .dizzy-star:nth-child(3) {
+          animation-delay: -1s;
+        }
+        @keyframes t1orbit {
+          from {
+            transform: rotate(0deg) translateX(18px);
+          }
+          to {
+            transform: rotate(360deg) translateX(18px);
+          }
+        }
+        .ghost {
+          position: absolute;
+          bottom: 70px;
+          left: 52%;
+          animation: t1float 3s ease-out infinite;
+          z-index: 3;
+        }
+        @keyframes t1float {
+          0% {
+            transform: translateY(0);
+            opacity: 0.8;
+          }
+          100% {
+            transform: translateY(-120px);
+            opacity: 0;
+          }
+        }
+        .ghost-body {
+          width: 18px;
+          height: 22px;
+          background: rgba(255, 255, 255, 0.3);
+          border-radius: 9px 9px 0 0;
+          position: relative;
+        }
+        .ghost-body::after {
+          content: '';
+          position: absolute;
+          bottom: -4px;
+          left: 0;
+          width: 18px;
+          height: 8px;
+          background: rgba(255, 255, 255, 0.3);
+          clip-path: polygon(0 0, 33% 100%, 66% 0, 100% 100%);
+        }
+        .ghost-eyes {
+          display: flex;
+          gap: 4px;
+          justify-content: center;
+          padding-top: 6px;
+        }
+        .ghost-eye {
+          width: 4px;
+          height: 5px;
+          background: #000;
+          border-radius: 50%;
+        }
+        .t1-continue {
+          text-align: center;
+          margin: 20px 0 8px;
+          position: relative;
+          z-index: 2;
+        }
+        .continue-text {
+          font-size: 16px;
+          color: #fff;
+          letter-spacing: 3px;
+        }
+        .countdown {
+          font-size: 48px;
+          color: #ff0;
+          margin: 8px 0;
+          animation: t1count 0.5s ease-in-out infinite alternate;
+          text-shadow: 0 0 15px rgba(255, 255, 0, 0.4);
+        }
+        @keyframes t1count {
+          from {
+            transform: scale(1);
+          }
+          to {
+            transform: scale(1.1);
+          }
+        }
+        .insert-coin {
+          text-align: center;
+          font-size: 14px;
+          color: #0ff;
+          letter-spacing: 4px;
+          animation: t1blink 1s step-end infinite;
+          margin: 12px 0;
+          position: relative;
+          z-index: 2;
+        }
+        @keyframes t1blink {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0;
+          }
+        }
+        .t1-credits {
+          text-align: center;
+          font-size: 11px;
+          color: #555;
+          position: relative;
+          z-index: 2;
+          margin-top: 8px;
+          letter-spacing: 1px;
+        }
+        .hiscore-table {
+          margin: 16px auto 0;
+          position: relative;
+          z-index: 2;
+          text-align: center;
+        }
+        .hiscore-title {
+          font-size: 13px;
+          color: #f44;
+          letter-spacing: 3px;
+          margin-bottom: 6px;
+        }
+        .hiscore-row {
+          font-size: 12px;
+          color: #ff0;
+          letter-spacing: 2px;
+          line-height: 1.8;
+        }
+        .hiscore-row .rank {
+          color: #fff;
+        }
+        .hiscore-row .initials {
+          color: #0f0;
+        }
+        .hiscore-row .pts {
+          color: #ff0;
+        }
+        .action-row {
+          text-align: center;
+          margin-top: 16px;
+          position: relative;
+          z-index: 2;
+        }
+        .t1-btn {
+          padding: 10px 24px;
+          background: transparent;
+          color: #0ff;
+          border: 2px solid #0ff;
+          font-family: 'Courier New', monospace;
+          font-size: 13px;
+          cursor: pointer;
+          text-decoration: none;
+          display: inline-block;
+          letter-spacing: 2px;
+          transition: all 0.2s;
+        }
+        .t1-btn:hover {
+          background: #0ff;
+          color: #000;
+        }
+        @media (max-width: 768px) {
+          .cabinet {
+            max-width: 95vw;
+            padding: 12px;
+          }
+          .game-over h1 {
+            font-size: 28px;
+          }
+          .countdown {
+            font-size: 36px;
+          }
+        }
+      </style>
+      <div class="t1-body">
+        <div class="cabinet">
+          <div class="screen">
+            <div class="hud">
+              <div class="hud-col">
+                <div class="hud-label">1UP</div>
+                <div class="hud-value" id="t1-score">0040400</div>
+              </div>
+              <div class="hud-col">
+                <div class="hud-label" style="color: #fff">HI-SCORE</div>
+                <div class="hud-value">0099900</div>
+              </div>
+              <div class="hud-col">
+                <div class="hud-label p2">2UP</div>
+                <div class="hud-value">0050000</div>
+              </div>
+            </div>
+            <div class="game-over" role="alert"><h1>GAME OVER</h1></div>
+            <div class="round">ROUND {{CODE}}</div>
+            <div class="t1-scene">
+              <div class="char-down">
+                <svg width="48" height="24" viewBox="0 0 48 24" style="image-rendering: pixelated">
+                  <rect x="0" y="4" width="10" height="10" rx="2" fill="#6af" />
+                  <rect x="10" y="6" width="16" height="8" rx="1" fill="#6af" />
+                  <rect x="14" y="0" width="4" height="6" rx="1" fill="#6af" />
+                  <rect x="20" y="14" width="4" height="6" rx="1" fill="#6af" />
+                  <rect x="26" y="6" width="10" height="4" rx="1" fill="#6af" />
+                  <rect x="26" y="12" width="10" height="4" rx="1" fill="#6af" />
+                  <text x="3" y="11" font-size="6" fill="#000" font-family="monospace">x</text>
+                </svg>
+              </div>
+              <div class="dizzy">
+                <div class="dizzy-star">★</div>
+                <div class="dizzy-star">★</div>
+                <div class="dizzy-star">★</div>
+              </div>
+              <div class="ghost">
+                <div class="ghost-body">
+                  <div class="ghost-eyes">
+                    <div class="ghost-eye"></div>
+                    <div class="ghost-eye"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="ground"></div>
+            </div>
+            <div class="t1-continue">
+              <div class="continue-text">CONTINUE?</div>
+              <div class="countdown" id="t1-countdown">9</div>
+            </div>
+            <div class="insert-coin" id="t1-coin">INSERT COIN</div>
+            <div class="hiscore-table">
+              <div class="hiscore-title">- BEST PLAYERS -</div>
+              <div class="hiscore-row">
+                <span class="rank">1ST</span> <span class="pts">099900</span> <span class="initials">ASH</span>
+              </div>
+              <div class="hiscore-row">
+                <span class="rank">2ND</span> <span class="pts">088800</span> <span class="initials">KAZ</span>
+              </div>
+              <div class="hiscore-row">
+                <span class="rank">3RD</span> <span class="pts" id="t1-yourscore">040400</span>
+                <span class="initials">YOU</span>
+              </div>
+            </div>
+            <div class="t1-credits">CREDIT 00</div>
+            <div class="action-row"><a href="/" class="t1-btn" aria-label="Return to lobby">INSERT COIN</a></div>
+          </div>
+        </div>
+      </div>
+      <script>
+        window.initTheme1 = (code) => {
+          const pad = `00${code}00`.padStart(7, '0');
+          document.getElementById('t1-score').textContent = pad;
+          document.getElementById('t1-yourscore').textContent = pad;
+          let count = 9;
+          const el = document.getElementById('t1-countdown');
+          const coin = document.getElementById('t1-coin');
+          const timer = setInterval(() => {
+            count--;
+            if (count < 0) {
+              clearInterval(timer);
+              el.textContent = '0';
+              el.style.color = '#f33';
+              coin.textContent = 'RETURNING TO LOBBY...';
+              coin.style.color = '#ff0';
+              setTimeout(() => {
+                window.location.href = '/';
+              }, 1500);
+              return;
+            }
+            el.textContent = count;
+            if (count <= 3) el.style.color = '#f33';
+          }, 1000);
+        };
+      </script>
+    </template>
     <template id="theme-2"></template>
     <template id="theme-3"></template>
     <template id="theme-4"></template>
