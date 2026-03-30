@@ -568,6 +568,12 @@
             }
 
             showOverlay();
+            // If host already has ROM sharing enabled, show the accept/decline prompt
+            // immediately from the ack data — don't rely on users-updated event timing.
+            if (!isHost && !isSpectator && joinData?.romSharing && !_romBlob && !_romBlobUrl) {
+              _romSharingEnabled = true;
+              updateRomSharingUI();
+            }
           },
         );
       } catch (_) {
@@ -1588,11 +1594,13 @@
     const displayName = _romTransferHeader?.name ?? 'rom.z64';
     const expectedHash = _romTransferHeader?.hash ?? null;
 
-    // Set ROM data (ephemeral — do NOT cache to IndexedDB)
     _romBlob = blob;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(blob);
     window.EJS_gameUrl = _romBlobUrl;
+    // Cache received ROM so guests auto-load on future joins without re-downloading
+    _safeSet('localStorage', 'kaillera-rom-name', displayName);
+    cacheRom(blob);
 
     _romTransferState = 'complete';
     _romTransferChunks = [];
