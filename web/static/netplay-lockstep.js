@@ -745,9 +745,9 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 90; // frames (~3s at 30fps) — 30f was flooding the DC queue ahead of input,
-  // causing 200-450ms FRAME-CAPs every push cycle. 90f = 3x less frequent while still keeping
-  // preloaded state well within the 120f expiry (worst-case age = interval + 1 sync-check cycle ≈ 100f).
+  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps). Was 90f when sync+input shared one DC
+  // (proactive flood caused input FRAME-CAPs). Now that sync uses a separate low-priority DC,
+  // 30f is safe. Faster interval = fresher buffered state = smaller correction snap (~30f snap vs ~60f).
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
 
@@ -757,7 +757,7 @@
     if (!_preloadedResyncState) return false;
     // Note: _consecutiveResyncs check removed. The fast-path can't loop because it
     // consumes _preloadedResyncState, which isn't refilled until the next proactive
-    // push (~90 frames later). After the fast-path fires once, subsequent desync
+    // push (~30 frames later). After the fast-path fires once, subsequent desync
     // checks find _preloadedResyncState=null and fall through to the explicit path.
     const age = _frameNum - _preloadedResyncState.receivedFrame;
     if (age >= 120) {
