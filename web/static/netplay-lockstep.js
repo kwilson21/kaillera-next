@@ -739,7 +739,7 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 90; // frames (~3s at 30fps) — full state each time, so keep infrequent
+  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps) — keeps preloaded state fresh within 120f expiry
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
 
