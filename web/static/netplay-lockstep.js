@@ -411,9 +411,13 @@
   let _lastResyncFrame = 0; // frame when last applySyncState ran (pixel verify window)
   let _lastResyncToastTime = 0; // wall-clock ms of last 'Desync corrected' toast (throttle)
   let _lastDesyncEventTime = 0; // wall-clock ms of last KNEvent('desync') — throttle to avoid 429
-  // Resync cooldown: C-level path is <2ms so we can resync very frequently.
-  // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
-  const _resyncCooldownMs = () => (_hasKnSync ? 200 : 10000);
+  // Resync cooldown: minimum time between applying a state and sending the next explicit request.
+  // With _resyncRequestInFlight blocking stacking, 400ms is sufficient — a new request is only
+  // sent once the previous apply is complete (~430ms RTT+transfer), so 400ms just means the
+  // first re-desync check after apply (10 frames / ~330ms) is skipped, then the second fires.
+  // 1000ms was too conservative: after a fast-path correction that immediately re-desyncs,
+  // the explicit path was blocked for 1000ms causing 30+ frame divergence before recovery.
+  const _resyncCooldownMs = () => (_hasKnSync ? 400 : 10000);
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
   const SYNC_LOG_MAX = 5000;
@@ -715,6 +719,8 @@
   let _syncFrame = 0; // frame number of incoming sync
   let _syncIsFull = true; // true=full state, false=XOR delta
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
+  let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
+  let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingSyncCheck = null; // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   let _hashRegion = null; // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
@@ -739,7 +745,9 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps) — keeps preloaded state fresh within 120f expiry
+  const _PROACTIVE_SYNC_INTERVAL = 90; // frames (~3s at 30fps) — 30f was flooding the DC queue ahead of input,
+  // causing 200-450ms FRAME-CAPs every push cycle. 90f = 3x less frequent while still keeping
+  // preloaded state well within the 120f expiry (worst-case age = interval + 1 sync-check cycle ≈ 100f).
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
 
@@ -747,12 +755,16 @@
   // Returns true if a preloaded state was promoted (caller should NOT send sync-request).
   const _tryApplyPreloaded = () => {
     if (!_preloadedResyncState) return false;
+    // Note: _consecutiveResyncs check removed. The fast-path can't loop because it
+    // consumes _preloadedResyncState, which isn't refilled until the next proactive
+    // push (~90 frames later). After the fast-path fires once, subsequent desync
+    // checks find _preloadedResyncState=null and fall through to the explicit path.
     const age = _frameNum - _preloadedResyncState.receivedFrame;
     if (age >= 120) {
       _preloadedResyncState = null;
       return false;
     }
-    _pendingResyncState = _preloadedResyncState;
+    _pendingResyncState = { ..._preloadedResyncState, fromProactive: true };
     _preloadedResyncState = null;
     _lastResyncTime = performance.now();
     _syncLog(`instant resync from preloaded state (age=${age}f frame=${_pendingResyncState.frame})`);
@@ -1151,6 +1163,9 @@
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
           _resetDrift();
+          // Discard any proactive state buffered before the reconnect — it was
+          // captured on the old network path and may be inconsistent post-ICE-restart.
+          _preloadedResyncState = null;
         }
       }
       if (s === 'failed') {
@@ -1196,15 +1211,18 @@
     KNState.peers = _peers;
 
     if (isInitiator) {
-      peer.dc = peer.pc.createDataChannel('lockstep', {
-        ordered: true,
-      });
+      peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
       setupDataChannel(remoteSid, peer.dc);
+      peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
+      setupSyncDataChannel(remoteSid, peer.syncDc);
       // Delegate non-lockstep channels created by remote
       peer.pc.ondatachannel = (e) => {
         if (e.channel.label === 'lockstep') {
           peer.dc = e.channel;
           setupDataChannel(remoteSid, peer.dc);
+        } else if (e.channel.label === 'sync-state') {
+          peer.syncDc = e.channel;
+          setupSyncDataChannel(remoteSid, peer.syncDc);
         } else if (_onExtraDataChannel) {
           _onExtraDataChannel(remoteSid, e.channel);
         }
@@ -1214,6 +1232,9 @@
         if (e.channel.label === 'lockstep') {
           peer.dc = e.channel;
           setupDataChannel(remoteSid, peer.dc);
+        } else if (e.channel.label === 'sync-state') {
+          peer.syncDc = e.channel;
+          setupSyncDataChannel(remoteSid, peer.syncDc);
         } else if (_onExtraDataChannel) {
           _onExtraDataChannel(remoteSid, e.channel);
         }
@@ -1261,6 +1282,9 @@
             if (e.channel.label === 'lockstep') {
               existingPeer.dc = e.channel;
               setupDataChannel(senderSid, existingPeer.dc);
+            } else if (e.channel.label === 'sync-state') {
+              existingPeer.syncDc = e.channel;
+              setupSyncDataChannel(senderSid, existingPeer.syncDc);
             } else if (_onExtraDataChannel) {
               _onExtraDataChannel(senderSid, e.channel);
             }
@@ -1477,8 +1501,9 @@
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (_tryApplyPreloaded()) {
                   // instant resync — no round-trip needed
-                } else if (cooldownElapsed > _resyncCooldownMs()) {
+                } else if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
+                  _resyncRequestInFlight = true;
                   const forceFull = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
                   const reqType = forceFull ? 'sync-request-full' : 'sync-request';
                   _syncLog(
@@ -1488,9 +1513,12 @@
                     peer.dc.send(reqType);
                   } catch (e) {
                     _syncLog(`sync-request send failed: ${e}`);
+                    _resyncRequestInFlight = false;
                   }
                 } else {
-                  _syncLog(`DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
+                  _syncLog(
+                    `DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms inFlight=${_resyncRequestInFlight})`,
+                  );
                 }
               } else {
                 // RDRAM anchor hash matches — verify with live block 25 and pixel hash.
@@ -1568,11 +1596,18 @@
                       const now2 = performance.now();
                       if (_tryApplyPreloaded()) {
                         // instant resync
-                      } else if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
+                      } else if (
+                        !_resyncRequestInFlight &&
+                        !_pendingResyncState &&
+                        now2 - _lastResyncTime > _resyncCooldownMs()
+                      ) {
                         _lastResyncTime = now2;
+                        _resyncRequestInFlight = true;
                         try {
                           peerRef.dc.send('sync-request');
-                        } catch (_) {}
+                        } catch (_) {
+                          _resyncRequestInFlight = false;
+                        }
                         _syncLog('sync-request sent');
                       }
                     } else {
@@ -1601,23 +1636,12 @@
             _syncLog(`sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
           }
         }
-        // State sync: host received request, or chunked binary transfer header
+        // State sync: host received request from guest (sent on lockstep DC)
         if ((e.data === 'sync-request' || e.data === 'sync-request-full') && _playerSlot === 0) {
           const forceFull = e.data === 'sync-request-full';
           _syncLog(`received ${e.data} from ${remoteSid}`);
           if (forceFull) _setLastSyncState(null, 'guest-requested-full');
           pushSyncState(remoteSid);
-        }
-        if (e.data.startsWith('sync-start:')) {
-          const parts = e.data.split(':');
-          _syncFrame = parseInt(parts[1], 10);
-          _syncExpected = parseInt(parts[2], 10);
-          _syncIsFull = parts[3] === '1';
-          _syncIsProactive = parts[4] === '1';
-          _syncChunks = [];
-          _syncLog(
-            `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
-          );
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -1646,22 +1670,7 @@
         return;
       }
 
-      // Binary: sync state chunk or input (16 bytes).
-      // Sync chunks only arrive between sync-start and completion (_syncExpected > 0).
-      if (e.data instanceof ArrayBuffer && e.data.byteLength !== 16) {
-        if (_syncExpected > 0) {
-          _syncChunks.push(new Uint8Array(e.data));
-          if (_syncChunks.length >= _syncExpected) {
-            _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
-            handleSyncChunksComplete();
-          }
-          return;
-        }
-        // Binary data arrived but no sync-start header received — log and drop
-        _syncLog(`WARN: binary data (${e.data.byteLength}B) arrived but _syncExpected=0 — dropped`);
-        return;
-      }
-      // Binary: encoded input -- 16 bytes per input
+      // Binary: encoded input -- 16 bytes. State chunks arrive on the sync-state DC.
       if (e.data instanceof ArrayBuffer && e.data.byteLength === 16) {
         if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
         const decoded = KNShared.decodeInput(e.data);
@@ -1698,6 +1707,45 @@
             window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
           }
         }
+      }
+    };
+  };
+
+  // -- Sync-state data channel -----------------------------------------------
+  // Separate low-priority DC for all state transfer traffic (proactive pushes
+  // and explicit resync). Keeping state off the lockstep DC prevents 1MB state
+  // bursts from queuing ahead of 16-byte input messages on the same SCTP stream,
+  // which caused 200-450ms FRAME-CAPs every proactive push cycle.
+
+  const setupSyncDataChannel = (_remoteSid, ch) => {
+    ch.binaryType = 'arraybuffer';
+    ch.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        // Guest: incoming state transfer header
+        if (e.data.startsWith('sync-start:')) {
+          const parts = e.data.split(':');
+          _syncFrame = parseInt(parts[1], 10);
+          _syncExpected = parseInt(parts[2], 10);
+          _syncIsFull = parts[3] === '1';
+          _syncIsProactive = parts[4] === '1';
+          _syncChunks = [];
+          _syncLog(
+            `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
+          );
+          return;
+        }
+      }
+      // Binary: sync state chunks
+      if (e.data instanceof ArrayBuffer) {
+        if (_syncExpected > 0) {
+          _syncChunks.push(new Uint8Array(e.data));
+          if (_syncChunks.length >= _syncExpected) {
+            _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
+            handleSyncChunksComplete();
+          }
+          return;
+        }
+        _syncLog(`WARN: binary data (${e.data.byteLength}B) on sync-state DC but _syncExpected=0 — dropped`);
       }
     };
   };
@@ -1807,14 +1855,19 @@
       if (e.channel.label === 'lockstep') {
         peer.dc = e.channel;
         setupDataChannel(remoteSid, peer.dc);
+      } else if (e.channel.label === 'sync-state') {
+        peer.syncDc = e.channel;
+        setupSyncDataChannel(remoteSid, peer.syncDc);
       } else if (_onExtraDataChannel) {
         _onExtraDataChannel(remoteSid, e.channel);
       }
     };
 
-    // Create new DC and send offer with reconnect flag
+    // Create new DCs and send offer with reconnect flag
     peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
     setupDataChannel(remoteSid, peer.dc);
+    peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
+    setupSyncDataChannel(remoteSid, peer.syncDc);
 
     try {
       const offer = await peer.pc.createOffer();
@@ -2107,10 +2160,13 @@
         if (ejs2?.elements?.menu) {
           ejs2.elements.menu.classList.add('ejs_menu_bar_hidden');
         }
-        const gameEl2 = document.getElementById('game');
-        if (gameEl2) VirtualGamepad.init(gameEl2);
-        // If a physical gamepad is already connected, hide virtual controls immediately
-        // (GamepadManager.onUpdate won't fire if nothing changed since last game)
+        // VirtualGamepad.init() is called from play.js before bootEmulator() for
+        // the normal ROM path — prevents canvas resize when #game shrinks after EJS
+        // attaches its ResizeObserver. For the ROM-sharing path (ROM arrives after
+        // game-started, so bootEmulator() is called directly from afterRomTransferComplete
+        // without going through initEngine() again), init() must run here as a fallback.
+        // The idempotent guard in init() makes double-calling harmless.
+        VirtualGamepad.init();
         const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (detected.length > 0) VirtualGamepad.setVisible(false);
       }
@@ -2915,11 +2971,15 @@
           _syncCheckInterval = _syncBaseInterval;
           _resetDrift();
         } else {
+          _resyncRequestInFlight = false; // override — tab-focus resync always wins
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
             try {
+              _resyncRequestInFlight = true;
               hostPeer.dc.send('sync-request');
-            } catch (_) {}
+            } catch (_) {
+              _resyncRequestInFlight = false;
+            }
           }
         }
       }
@@ -2934,11 +2994,15 @@
       if (_playerSlot !== 0) {
         _setLastSyncState(null, 'network-change');
         _lastResyncTime = 0; // clear cooldown
+        _resyncRequestInFlight = false; // override — network change resync always wins
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
           try {
+            _resyncRequestInFlight = true;
             hostPeer.dc.send('sync-request-full');
-          } catch (_) {}
+          } catch (_) {
+            _resyncRequestInFlight = false;
+          }
         }
       } else {
         // Host: reset sync interval so hash checks resume quickly
@@ -2958,6 +3022,8 @@
   const stopSync = () => {
     _running = false;
     window._lockstepActive = false;
+    _resyncRequestInFlight = false;
+    _lastAppliedSyncHostFrame = -1;
 
     // Disable all deterministic timing
     window._kn_inStep = false;
@@ -3032,7 +3098,7 @@
       const pending = _pendingResyncState;
       _pendingResyncState = null;
       _awaitingResync = false;
-      applySyncState(pending.bytes, pending.frame);
+      applySyncState(pending.bytes, pending.frame, pending.fromProactive);
     }
 
     // ── Frame pacing (GGPO-style frame advantage cap) ────────────────────
@@ -3142,6 +3208,28 @@
       }
 
       if (!allArrived) {
+        // Gap-fill: if a peer has already sent inputs AHEAD of applyFrame, this specific
+        // frame will never arrive (late-join or post-reconnect gap). Fabricate immediately
+        // rather than waiting MAX_STALL_MS + RESEND_TIMEOUT_MS (5s) — otherwise a proactive
+        // state flood can starve the setInterval tick and the hard-timeout never fires.
+        const gapSlots = _missingSlots.filter(
+          (s) => _lastRemoteFramePerSlot[s] !== undefined && _lastRemoteFramePerSlot[s] > applyFrame,
+        );
+        if (gapSlots.length > 0) {
+          for (const s of gapSlots) {
+            if (!_remoteInputs[s]) _remoteInputs[s] = {};
+            if (_remoteInputs[s][applyFrame] === undefined) {
+              _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
+              _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
+            }
+          }
+          _syncLog(
+            `INPUT-GAP-FILL applyFrame=${applyFrame} slots=[${gapSlots.join(',')}] — peer ahead, immediate fabricate`,
+          );
+          _stallStart = 0;
+          return; // re-enter next tick with input now present
+        }
+
         // Check if ALL missing peers are phantom (dead) or in rapid-fabrication mode
         const allMissingArePhantom = _missingSlots.every(
           (s) => _peerPhantom[s] || (_consecutiveFabrications[s] || 0) >= RAPID_FABRICATION_THRESHOLD,
@@ -3426,15 +3514,19 @@
                 const cooldownElapsed3 = now3 - _lastResyncTime;
                 if (_tryApplyPreloaded()) {
                   // instant resync
-                } else if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
+                } else if (!_resyncRequestInFlight && !_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
                   _lastResyncTime = now3;
+                  _resyncRequestInFlight = true;
                   const sp = _peers[_pendingSyncCheck.peerSid];
                   if (sp?.dc) {
                     try {
                       sp.dc.send('sync-request');
                     } catch (e) {
                       _syncLog(`deferred blk25 sync-request failed: ${e}`);
+                      _resyncRequestInFlight = false;
                     }
+                  } else {
+                    _resyncRequestInFlight = false;
                   }
                 }
               }
@@ -3479,13 +3571,22 @@
                     const now3 = performance.now();
                     if (_tryApplyPreloaded()) {
                       // instant resync
-                    } else if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
+                    } else if (
+                      !_resyncRequestInFlight &&
+                      !_pendingResyncState &&
+                      now3 - _lastResyncTime > _resyncCooldownMs()
+                    ) {
                       _lastResyncTime = now3;
+                      _resyncRequestInFlight = true;
                       const sp = _peers[deferCheck.peerSid];
                       if (sp?.dc) {
                         try {
                           sp.dc.send('sync-request');
-                        } catch (_) {}
+                        } catch (_) {
+                          _resyncRequestInFlight = false;
+                        }
+                      } else {
+                        _resyncRequestInFlight = false;
                       }
                     }
                   } else {
@@ -4006,6 +4107,10 @@
       // Do NOT advance _lastSyncState — proactive pushes are independent of the
       // requested-sync delta chain.
     } else {
+      // Delta chain safety: with _resyncRequestInFlight (single in-flight) on the guest,
+      // the host only receives a second sync-request after the first response has been
+      // received and applied. So when the host computes a delta here, _lastSyncState
+      // matches what the guest has already applied — no forced-full needed.
       isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
       _syncLog(
         `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
@@ -4054,9 +4159,22 @@
 
     const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`;
     for (const target of targets) {
-      const dc = target.dc;
+      // Prefer the dedicated low-priority sync-state DC; fall back to lockstep DC
+      // if syncDc isn't open yet (e.g. during initial handshake race).
+      const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
       if (!dc || dc.readyState !== 'open') {
         _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
+        continue;
+      }
+      // Proactive flood prevention: if the DataChannel is already backed up
+      // (e.g. host is many frames ahead after a guest reconnect), skip this
+      // proactive push. A backed-up DC means the event loop is already saturated
+      // with chunk-send microtasks — sending more would starve setInterval ticks
+      // and prevent the stall hard-timeout from firing.
+      if (isProactive && dc.bufferedAmount > 1024 * 1024) {
+        _syncLog(
+          `proactive push skipped: slot=${target.slot} bufferedAmount=${Math.round(dc.bufferedAmount / 1024)}KB — DC backed up`,
+        );
         continue;
       }
       try {
@@ -4108,11 +4226,16 @@
           _syncLog(
             `delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length} — requesting full`,
           );
+          _resyncRequestInFlight = false; // allow fresh request
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-          if (hostPeer?.dc?.readyState === 'open') {
+          const hostSyncDc = hostPeer?.syncDc?.readyState === 'open' ? hostPeer.syncDc : hostPeer?.dc;
+          if (hostSyncDc?.readyState === 'open') {
             try {
-              hostPeer.dc.send('sync-request-full');
-            } catch (_) {}
+              _resyncRequestInFlight = true;
+              hostSyncDc.send('sync-request-full');
+            } catch (_) {
+              _resyncRequestInFlight = false;
+            }
           }
           return;
         }
@@ -4130,6 +4253,14 @@
         _preloadedResyncState = { bytes: fullBytes, frame, receivedFrame: _frameNum };
         _syncLog(`proactive state buffered: ${Math.round(assembled.length / 1024)}KB wire, frame=${frame}`);
       } else {
+        // Request satisfied — clear in-flight flag so next desync can send a new request.
+        _resyncRequestInFlight = false;
+        // Discard if we already applied a state at or after this frame (e.g. proactive
+        // fast-path already jumped us forward — applying an older explicit would roll back).
+        if (frame <= _lastAppliedSyncHostFrame) {
+          _syncLog(`explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
+          return;
+        }
         _pendingResyncState = { bytes: fullBytes, frame };
         _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
       }
@@ -4138,7 +4269,7 @@
     }
   };
 
-  const applySyncState = (bytes, frame) => {
+  const applySyncState = (bytes, frame, fromProactive = false) => {
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
     // never fires mid-tick or mid-input-processing.
@@ -4170,8 +4301,11 @@
         return;
       }
 
-      // Cache applied state as delta base for next resync
-      _setLastSyncState(bytes.slice(), 'applySyncC');
+      // Cache applied state as delta base for next resync.
+      // Proactive states must NOT update the delta base — the host's delta base only
+      // advances on explicit syncs, so applying a proactive state here would cause
+      // host/guest delta bases to diverge, producing XOR-garbage on the next delta.
+      if (!fromProactive) _setLastSyncState(bytes.slice(), 'applySyncC');
 
       _resyncCount++;
       _consecutiveResyncs++;
@@ -4195,8 +4329,8 @@
       }
       _hashRegion = null;
 
-      // Cache applied state as delta base
-      _setLastSyncState(new Uint8Array(bytes), 'applySyncFallback');
+      // Cache applied state as delta base (same proactive guard as C path above)
+      if (!fromProactive) _setLastSyncState(new Uint8Array(bytes), 'applySyncFallback');
 
       _resyncCount++;
       _consecutiveResyncs++;
@@ -4213,6 +4347,8 @@
 
     _syncMismatchStreak = 0;
     _lastResyncFrame = _frameNum;
+    _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
+    _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
     const now = performance.now();
@@ -4301,6 +4437,10 @@
       if (p.dc)
         try {
           p.dc.close();
+        } catch (_) {}
+      if (p.syncDc)
+        try {
+          p.syncDc.close();
         } catch (_) {}
       if (p.pc)
         try {

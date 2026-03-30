@@ -110,6 +110,7 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
   let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
+  KNState.uploadToken = _uploadToken; // initialize immediately so KNEvent works before upload-token socket event
   const _sessionStart = Date.now();
 
   const _persistentId =
@@ -2188,6 +2189,15 @@
       if (gameEl) {
         gameEl.style.display = '';
         gameEl.classList.add('kn-playing');
+      }
+      // Mobile: init virtual gamepad BEFORE booting EJS so #game is already at
+      // its final (smaller) size when EJS attaches its ResizeObserver.
+      // If called after boot, VirtualGamepad.init appending to the body flex
+      // layout shrinks #game, triggering a canvas resize mid-session.
+      if ('ontouchstart' in window && !isSpectator && window.VirtualGamepad) {
+        VirtualGamepad.init();
+        const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+        if (_detected.length > 0) VirtualGamepad.setVisible(false);
       }
       if (_hibernated && _hibernatedRomHash === _romHash) {
         wakeEmulator();

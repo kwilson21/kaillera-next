@@ -11,7 +11,7 @@ index a626706..960ab74 100644
 +                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms, \
 +                     _kn_get_audio_ptr,_kn_get_audio_samples,_kn_reset_audio,_kn_get_audio_rate, \
 +                     _kn_reset_cycle_count,_kn_canon_fpu_regs, \
-+                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_sync_hash_regions
++                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_sync_hash_regions,_kn_rdram_block_hashes
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  

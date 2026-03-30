@@ -557,6 +557,7 @@
 
   window.VirtualGamepad = {
     init: () => {
+      if (_overlay) return; // already initialized — idempotent
       createOverlay();
       // Shrink game to share space — gamepad is an in-flow sibling
       const gameEl = document.getElementById('game');
