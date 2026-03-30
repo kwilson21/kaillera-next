@@ -262,6 +262,22 @@
         if (window.setAutoDelay) window.setAutoDelay(delay);
         _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
       }
+      // Mid-game reconnect: if delay needs to increase, apply and broadcast
+      if (_running) {
+        const peerMedian = peer.rttSamples[Math.floor(peer.rttSamples.length / 2)];
+        const reconnectDelay = Math.min(9, Math.max(2, Math.ceil(peerMedian / 16.67)));
+        if (reconnectDelay > DELAY_FRAMES) {
+          DELAY_FRAMES = reconnectDelay;
+          _syncLog(`delay increased to ${reconnectDelay}f after reconnect (peer RTT=${peerMedian.toFixed(1)}ms)`);
+          for (const p of Object.values(_peers)) {
+            if (p.dc && p.dc.readyState === 'open') {
+              try {
+                p.dc.send(JSON.stringify({ type: 'delay-update', delay: reconnectDelay }));
+              } catch (_) {}
+            }
+          }
+        }
+      }
       return;
     }
     try {
@@ -385,6 +401,16 @@
   // Hash byte limit (65536) is set inside the sync worker's fnv1a function
   let _resyncCount = 0;
   let _consecutiveResyncs = 0; // incremented on each resync, reset on sync OK
+  let _syncMismatchStreak = 0; // consecutive anchor-hash mismatches without a successful sync-OK
+  // Escalate to full resync after this many consecutive mismatches (delta syncs stopped converging).
+  // At 10-frame interval: 5 mismatches ≈ 50 frames ≈ 0.8s — fast enough to catch stuck delta loops.
+  const MISMATCH_FULL_RESYNC_THRESHOLD = 5;
+  let _prevBlockHashes = null; // diagnostic: previous kn_rdram_block_hashes snapshot
+  let _offscreenCanvas = null; // reused 64×48 canvas for pixel hash capture
+  let _offscreenCtx = null;
+  let _lastResyncFrame = 0; // frame when last applySyncState ran (pixel verify window)
+  let _lastResyncToastTime = 0; // wall-clock ms of last 'Desync corrected' toast (throttle)
+  let _lastDesyncEventTime = 0; // wall-clock ms of last KNEvent('desync') — throttle to avoid 429
   // Resync cooldown: C-level path is <2ms so we can resync very frequently.
   // Fallback (loadState) blocks 3-10ms, needs longer cooldown to avoid freezes.
   const _resyncCooldownMs = () => (_hasKnSync ? 200 : 10000);
@@ -413,19 +439,61 @@
     return lines.join('\n');
   };
 
+  // -- Canvas pixel hash + live RDRAM block hash helpers ---------------------
+
+  // Capture the emulator canvas at 64×48 and return a FNV-1a hash of RGB pixels.
+  // Returns 0 on any error (no canvas, CORS taint, WebGL buffer cleared, etc.).
+  // Reuses a persistent offscreen canvas to avoid GC pressure every sync check.
+  const _captureCanvasHash = () => {
+    const canvas = document.querySelector('#game canvas');
+    if (!canvas || !canvas.width || !canvas.height) return 0;
+    try {
+      if (!_offscreenCanvas) {
+        _offscreenCanvas = document.createElement('canvas');
+        _offscreenCanvas.width = 64;
+        _offscreenCanvas.height = 48;
+        _offscreenCtx = _offscreenCanvas.getContext('2d');
+      }
+      _offscreenCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, 64, 48);
+      const data = _offscreenCtx.getImageData(0, 0, 64, 48).data;
+      let h = 2166136261;
+      for (let i = 0; i < data.length; i += 4) {
+        h = Math.imul(h ^ data[i], 16777619) >>> 0;
+        h = Math.imul(h ^ data[i + 1], 16777619) >>> 0;
+        h = Math.imul(h ^ data[i + 2], 16777619) >>> 0;
+      }
+      return h;
+    } catch (_) {
+      return 0;
+    }
+  };
+
+  // Read block 25 (0x190000) hash from kn_rdram_block_hashes.
+  // Block 25 is 92% live during SSB64 match play and outside all known volatile
+  // ranges (N64 OS ends ~0x0A3000, RSP/audio ends ~0x0C4000).
+  // Allocates only 26 slots (not the full 128) to minimise heap churn.
+  const _getBlk25Hash = (mod) => {
+    if (!mod._kn_rdram_block_hashes) return 0;
+    const buf = mod._malloc(26 * 4);
+    mod._kn_rdram_block_hashes(buf, 26);
+    const h = mod.HEAPU32[(buf >> 2) + 25] >>> 0;
+    mod._free(buf);
+    return h;
+  };
+
   // -- Diagnostic logger functions -------------------------------------------
 
   const _diagShouldLog = (frameNum, interval) => frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
 
   // DIAG-HASH: compute and stream per-region RDRAM hashes for this player
-  // ps0*/ps1*/ps2* are excluded from kn_sync_hash (volatile WebKit/V8 divergence) but still sampled here for diagnostics
+  // ps0*/ps1*/ps2*/ph1b* are excluded from kn_sync_hash (volatile between iOS WebKit versions) but still sampled here for diagnostics
   const _diagRegionNames = [
     'cfg',
     'ps0*',
     'ps1*',
     'ps2*',
     'ph1a',
-    'ph1b',
+    'ph1b*',
     'ph1c',
     'misc',
     'ph2',
@@ -752,9 +820,20 @@
 
     try {
       // Reuse gesture-created context if available (already running on mobile).
-      // Otherwise create a new one at the correct sample rate.
+      // For mobile hosts, play.js pre-creates one in the startGame() click handler
+      // (window._kn_preloadedAudioCtx) since the engine starts audio 30+ seconds
+      // after the gesture — past iOS's trust window.
       if (!_audioCtx || _audioCtx.state === 'closed') {
-        _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
+        const preloaded = window._kn_preloadedAudioCtx;
+        if (preloaded && preloaded.state !== 'closed') {
+          _audioCtx = preloaded;
+          delete window._kn_preloadedAudioCtx;
+          _syncLog(
+            `reusing host gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`,
+          );
+        } else {
+          _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
+        }
       } else {
         _syncLog(`reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
         // Keep the gesture oscillator alive until a real audio node is connected.
@@ -1296,6 +1375,19 @@
           const syncFrame = parseInt(parts[1], 10);
           const hostHash = parseInt(parts[2], 10);
           const hostCycleMs = parts[3] !== undefined ? parseFloat(parts[3]) : null;
+          // Named fields blk25= and ph= may appear anywhere after part[3].
+          // Filter them out before building the numeric regions array.
+          const blk25Part = parts.find((p) => p.startsWith('blk25='));
+          const hostBlk25 = blk25Part ? parseInt(blk25Part.slice(6), 10) >>> 0 : 0;
+          const phPart = parts.find((p) => p.startsWith('ph='));
+          const hostPixelHash = phPart ? parseInt(phPart.slice(3), 10) >>> 0 : 0;
+          const hostRegions =
+            parts.length > 4
+              ? parts
+                  .slice(4)
+                  .filter((p) => !p.includes('='))
+                  .map((v) => parseInt(v, 10) >>> 0)
+              : null;
           const frameDiff = _frameNum - syncFrame;
           if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
             _syncLog(
@@ -1307,12 +1399,38 @@
               if (!mod) return;
               const guestHash = mod._kn_sync_hash();
               if (guestHash !== hostHash) {
+                // Collect per-region hashes before KNEvent so they're included in payload
+                let localRegions = null;
+                let diffRegions = null;
+                if (mod._kn_sync_hash_regions) {
+                  const hashBuf = mod._malloc(48);
+                  const regionCount = mod._kn_sync_hash_regions(hashBuf, 12);
+                  localRegions = [];
+                  for (let ri = 0; ri < regionCount; ri++) localRegions.push(mod.HEAPU32[(hashBuf >> 2) + ri] >>> 0);
+                  mod._free(hashBuf);
+                  if (hostRegions) {
+                    diffRegions = _diagRegionNames.filter(
+                      (_, ri) => hostRegions[ri] !== undefined && localRegions[ri] !== hostRegions[ri],
+                    );
+                  }
+                }
                 _syncLog(`DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash}`);
-                KNEvent('desync', `Desync at frame ${syncFrame}`, {
-                  frame: syncFrame,
-                  local: guestHash,
-                  host: hostHash,
-                });
+                const _nowDesync = performance.now();
+                if (_nowDesync - _lastDesyncEventTime > 10000) {
+                  _lastDesyncEventTime = _nowDesync;
+                  KNEvent('desync', `Desync at frame ${syncFrame}`, {
+                    frame: syncFrame,
+                    local: guestHash,
+                    host: hostHash,
+                    ...(localRegions && {
+                      localRegions: Object.fromEntries(localRegions.map((h, ri) => [_diagRegionNames[ri], h])),
+                    }),
+                    ...(hostRegions && {
+                      hostRegions: Object.fromEntries(hostRegions.map((h, ri) => [_diagRegionNames[ri], h])),
+                    }),
+                    ...(diffRegions?.length && { diffRegions }),
+                  });
+                }
                 KNState.sessionStats.desyncs++;
                 _recordDrift(null);
                 if (hostCycleMs !== null && mod._kn_get_cycle_time_ms) {
@@ -1321,23 +1439,29 @@
                     `CYCLE-DRIFT host=${hostCycleMs.toFixed(1)}ms guest=${guestCycleMs.toFixed(1)}ms diff=${(guestCycleMs - hostCycleMs).toFixed(1)}ms`,
                   );
                 }
-                if (mod._kn_sync_hash_regions) {
-                  const hashBuf = mod._malloc(48);
-                  const regionCount = mod._kn_sync_hash_regions(hashBuf, 12);
-                  const hashes = new Uint32Array(regionCount);
-                  for (let ri = 0; ri < regionCount; ri++) {
-                    hashes[ri] = mod.HEAPU32[(hashBuf >> 2) + ri];
+                if (localRegions) {
+                  _syncLog(
+                    `REGION-HASH local ${localRegions.map((h, ri) => `${_diagRegionNames[ri]}=${h}`).join(' ')}`,
+                  );
+                  if (hostRegions) {
+                    _syncLog(
+                      `REGION-HASH host  ${hostRegions.map((h, ri) => `${_diagRegionNames[ri]}=${h}`).join(' ')}`,
+                    );
+                    if (diffRegions?.length) _syncLog(`REGION-DIFF ${diffRegions.join(' ')}`);
                   }
-                  mod._free(hashBuf);
-                  _syncLog(`REGION-HASH ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`);
                 }
+                _syncMismatchStreak++;
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
                 if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
-                  _syncLog(`sending sync-request (cooldown=${Math.round(cooldownElapsed)}ms)`);
+                  const forceFull = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
+                  const reqType = forceFull ? 'sync-request-full' : 'sync-request';
+                  _syncLog(
+                    `sending ${reqType} (cooldown=${Math.round(cooldownElapsed)}ms streak=${_syncMismatchStreak})`,
+                  );
                   try {
-                    peer.dc.send('sync-request');
+                    peer.dc.send(reqType);
                   } catch (e) {
                     _syncLog(`sync-request send failed: ${e}`);
                   }
@@ -1345,10 +1469,63 @@
                   _syncLog(`DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`);
                 }
               } else {
-                _syncLog(`sync OK frame=${syncFrame} hash=${guestHash}`);
-                _consecutiveResyncs = 0;
-                _syncCheckInterval = _syncBaseInterval;
-                _resetDrift();
+                // RDRAM anchor hash matches — verify with live block 25 and pixel hash.
+                // blk25 triggers resyncs: session 0OV63I8X confirmed the burst-then-stable
+                // pattern means each burst IS self-correcting (blk25=✓ immediately after
+                // the last resync sticks). The pixel hash is log-only due to the persistent
+                // 1-frame timing gap that causes false positives on every check.
+                let extraDesync = false;
+
+                if (hostBlk25) {
+                  const guestBlk25 = _getBlk25Hash(mod);
+                  if (guestBlk25 && guestBlk25 !== hostBlk25) {
+                    extraDesync = true;
+                    _syncLog(`BLK25-DESYNC frame=${syncFrame} local=${guestBlk25} host=${hostBlk25}`);
+                    KNState.sessionStats.desyncs++;
+                    _recordDrift(null);
+                    const now2 = performance.now();
+                    const cooldownElapsed = now2 - _lastResyncTime;
+                    if (cooldownElapsed > _resyncCooldownMs()) {
+                      _lastResyncTime = now2;
+                      _syncLog(`sending sync-request (blk25 mismatch, cooldown=${Math.round(cooldownElapsed)}ms)`);
+                      try {
+                        peer.dc.send('sync-request');
+                      } catch (e) {
+                        _syncLog(`sync-request send failed: ${e}`);
+                      }
+                    } else {
+                      _syncLog(
+                        `BLK25-DESYNC but cooldown active (${Math.round(cooldownElapsed)}ms / ${_resyncCooldownMs()}ms)`,
+                      );
+                    }
+                  }
+                }
+
+                // Pixel comparison is log-only — never triggers sync-request.
+                // Guest is consistently 1 frame ahead → pixel hashes capture different
+                // rendered frames → false mismatch on virtually every check.
+                let pixelMatchedStr = '';
+                if (!extraDesync && hostPixelHash) {
+                  const guestPixelHash = _captureCanvasHash();
+                  const postResync = _lastResyncFrame > 0 && _frameNum - _lastResyncFrame <= _syncCheckInterval * 2;
+                  if (guestPixelHash && guestPixelHash !== hostPixelHash) {
+                    _syncLog(
+                      `PIXEL-DESYNC frame=${syncFrame} local=${guestPixelHash} host=${hostPixelHash}${postResync ? ' [post-resync]' : ''}`,
+                    );
+                    pixelMatchedStr = ' pixel=✗';
+                  } else if (guestPixelHash) {
+                    pixelMatchedStr = ` pixel=✓${postResync ? ' RESYNC-VISUAL-OK' : ''}`;
+                  }
+                }
+
+                if (!extraDesync) {
+                  const verifiedStr = (hostBlk25 ? ' blk25=✓' : '') + pixelMatchedStr;
+                  _syncLog(`sync OK frame=${syncFrame} hash=${guestHash}${verifiedStr}`);
+                  _consecutiveResyncs = 0;
+                  _syncMismatchStreak = 0;
+                  _syncCheckInterval = _syncBaseInterval;
+                  _resetDrift();
+                }
               }
             } else {
               // Fallback: async hash via HEAPU8 (RDRAM) — avoids expensive getState()
@@ -1384,7 +1561,14 @@
             _syncLog(
               `sync check deferred: hostFrame=${syncFrame} myFrame=${_frameNum} (behind by ${syncFrame - _frameNum})`,
             );
-            _pendingSyncCheck = { frame: syncFrame, hash: hostHash, peerSid: remoteSid };
+            _pendingSyncCheck = {
+              frame: syncFrame,
+              hash: hostHash,
+              peerSid: remoteSid,
+              hostRegions,
+              hostBlk25,
+              hostPixelHash,
+            };
           } else {
             _syncLog(`sync check skipped: hostFrame=${syncFrame} myFrame=${_frameNum} (ahead by ${frameDiff})`);
           }
@@ -1418,6 +1602,11 @@
               peer.delayValue = msg.delay || 2;
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
+            } else if (msg.type === 'delay-update') {
+              if (typeof msg.delay === 'number' && msg.delay > DELAY_FRAMES) {
+                DELAY_FRAMES = msg.delay;
+                _syncLog(`delay updated to ${msg.delay}f by peer (reconnect)`);
+              }
             } else if (_onUnhandledMessage) {
               _onUnhandledMessage(remoteSid, msg);
             }
@@ -1656,16 +1845,15 @@
     let _bootPollCount = 0;
     let _bootGestureReceived = false;
 
-    // Only mobile guests need a user gesture before the emulator starts.
-    // iOS blocks AudioContext without a gesture, causing the WASM to stall
-    // at frame 6. Desktop browsers and the host don't have this restriction.
-    // Host has a user gesture from ROM drag-drop, so AudioContext is allowed.
-    // All guests (desktop + mobile) need a gesture — browsers block AudioContext
-    // without one, causing the WASM emulator to stall at frame 6.
+    // Guests need a gesture prompt before booting: iOS blocks AudioContext
+    // without a direct user gesture, causing WASM to stall at frame 6.
+    // Hosts skip the prompt — play.js pre-creates the AudioContext in the
+    // startGame() click handler (window._kn_preloadedAudioCtx) before the
+    // Socket.IO round-trip that calls start(), keeping it within the gesture window.
     const _needsGesture = _playerSlot !== 0;
 
     if (!_needsGesture) {
-      // Host: proceed immediately (gesture from ROM load)
+      // Host: proceed immediately — AudioContext pre-created by play.js
       _bootGestureReceived = true;
       _syncLog('host auto-boot (slot=0)');
       setStatus('Loading emulator...');
@@ -3115,29 +3303,67 @@
           const mod = window.EJS_emulator.gameManager.Module;
           const guestHash = mod._kn_sync_hash();
           if (guestHash !== _pendingSyncCheck.hash) {
-            _syncLog(`DESYNC (deferred) at frame ${_pendingSyncCheck.frame}`);
-            _recordDrift(null);
+            const deferredHostRegions = _pendingSyncCheck.hostRegions ?? null;
+            let deferredLocalRegions = null;
+            let deferredDiffRegions = null;
             if (mod._kn_sync_hash_regions) {
               const hashBuf = mod._malloc(48);
               const regionCount = mod._kn_sync_hash_regions(hashBuf, 12);
-              const hashes = new Uint32Array(regionCount);
-              for (let ri = 0; ri < regionCount; ri++) {
-                hashes[ri] = mod.HEAPU32[(hashBuf >> 2) + ri];
-              }
+              deferredLocalRegions = [];
+              for (let ri = 0; ri < regionCount; ri++)
+                deferredLocalRegions.push(mod.HEAPU32[(hashBuf >> 2) + ri] >>> 0);
               mod._free(hashBuf);
-              _syncLog(
-                `REGION-HASH deferred ${[...hashes].map((h, ri) => `${_diagRegionNames[ri]}=${h >>> 0}`).join(' ')}`,
-              );
+              if (deferredHostRegions) {
+                deferredDiffRegions = _diagRegionNames.filter(
+                  (_, ri) =>
+                    deferredHostRegions[ri] !== undefined && deferredLocalRegions[ri] !== deferredHostRegions[ri],
+                );
+              }
             }
+            _syncLog(`DESYNC (deferred) at frame ${_pendingSyncCheck.frame}`);
+            const _nowDeferredDesync = performance.now();
+            if (_nowDeferredDesync - _lastDesyncEventTime > 10000) {
+              _lastDesyncEventTime = _nowDeferredDesync;
+              KNEvent('desync', `Desync at frame ${_pendingSyncCheck.frame}`, {
+                frame: _pendingSyncCheck.frame,
+                local: guestHash,
+                host: _pendingSyncCheck.hash,
+                ...(deferredLocalRegions && {
+                  localRegions: Object.fromEntries(deferredLocalRegions.map((h, ri) => [_diagRegionNames[ri], h])),
+                }),
+                ...(deferredHostRegions && {
+                  hostRegions: Object.fromEntries(deferredHostRegions.map((h, ri) => [_diagRegionNames[ri], h])),
+                }),
+                ...(deferredDiffRegions?.length && { diffRegions: deferredDiffRegions }),
+              });
+            }
+            KNState.sessionStats.desyncs++;
+            _recordDrift(null);
+            if (deferredLocalRegions) {
+              _syncLog(
+                `REGION-HASH local ${deferredLocalRegions.map((h, ri) => `${_diagRegionNames[ri]}=${h}`).join(' ')}`,
+              );
+              if (deferredHostRegions) {
+                _syncLog(
+                  `REGION-HASH host  ${deferredHostRegions.map((h, ri) => `${_diagRegionNames[ri]}=${h}`).join(' ')}`,
+                );
+                if (deferredDiffRegions?.length) _syncLog(`REGION-DIFF ${deferredDiffRegions.join(' ')}`);
+              }
+            }
+            _syncMismatchStreak++;
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
             if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
-              _syncLog(`sending sync-request (deferred, cooldown=${Math.round(cooldownElapsed3)}ms)`);
+              const forceFull3 = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
+              const reqType3 = forceFull3 ? 'sync-request-full' : 'sync-request';
+              _syncLog(
+                `sending ${reqType3} (deferred, cooldown=${Math.round(cooldownElapsed3)}ms streak=${_syncMismatchStreak})`,
+              );
               const sp = _peers[_pendingSyncCheck.peerSid];
               if (sp?.dc) {
                 try {
-                  sp.dc.send('sync-request');
+                  sp.dc.send(reqType3);
                 } catch (e) {
                   _syncLog(`deferred sync-request failed: ${e}`);
                 }
@@ -3148,10 +3374,60 @@
               );
             }
           } else {
-            _syncLog(`sync OK (deferred) frame=${_pendingSyncCheck.frame} hash=${guestHash}`);
-            _consecutiveResyncs = 0;
-            _syncCheckInterval = _syncBaseInterval;
-            _resetDrift();
+            // RDRAM anchor hash matches — verify with live block 25 and pixel hash.
+            // blk25 triggers resyncs (see immediate path comment). Pixel is log-only.
+            const deferredBlk25 = _pendingSyncCheck.hostBlk25 ?? 0;
+            const deferredPixelHash = _pendingSyncCheck.hostPixelHash ?? 0;
+            let deferredExtraDesync = false;
+
+            if (deferredBlk25) {
+              const guestBlk25 = _getBlk25Hash(mod);
+              if (guestBlk25 && guestBlk25 !== deferredBlk25) {
+                deferredExtraDesync = true;
+                _syncLog(
+                  `BLK25-DESYNC (deferred) frame=${_pendingSyncCheck.frame} local=${guestBlk25} host=${deferredBlk25}`,
+                );
+                KNState.sessionStats.desyncs++;
+                _recordDrift(null);
+                const now3 = performance.now();
+                const cooldownElapsed3 = now3 - _lastResyncTime;
+                if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
+                  _lastResyncTime = now3;
+                  const sp = _peers[_pendingSyncCheck.peerSid];
+                  if (sp?.dc) {
+                    try {
+                      sp.dc.send('sync-request');
+                    } catch (e) {
+                      _syncLog(`deferred blk25 sync-request failed: ${e}`);
+                    }
+                  }
+                }
+              }
+            }
+
+            // Pixel comparison: log-only, no sync-request trigger.
+            let deferredPixelMatchedStr = '';
+            if (!deferredExtraDesync && deferredPixelHash) {
+              const guestPixelHash = _captureCanvasHash();
+              const postResync = _lastResyncFrame > 0 && _frameNum - _lastResyncFrame <= _syncCheckInterval * 2;
+              if (guestPixelHash && guestPixelHash !== deferredPixelHash) {
+                _syncLog(
+                  `PIXEL-DESYNC (deferred) frame=${_pendingSyncCheck.frame} local=${guestPixelHash} host=${deferredPixelHash}${postResync ? ' [post-resync]' : ''}`,
+                );
+                deferredPixelMatchedStr = ' pixel=✗';
+              } else if (guestPixelHash) {
+                deferredPixelMatchedStr = ` pixel=✓${postResync ? ' RESYNC-VISUAL-OK' : ''}`;
+              }
+            }
+
+            if (!deferredExtraDesync) {
+              const verifiedStr = (deferredBlk25 ? ' blk25=✓' : '') + deferredPixelMatchedStr;
+              _syncLog(`sync OK (deferred) frame=${_pendingSyncCheck.frame} hash=${guestHash}${verifiedStr}`);
+              _consecutiveResyncs = 0;
+              _syncMismatchStreak = 0;
+              _syncCheckInterval = _syncBaseInterval;
+              _resetDrift();
+            }
           }
         } else {
           // Fallback: async hash via HEAPU8 (RDRAM)
@@ -3196,7 +3472,19 @@
         const mod = window.EJS_emulator.gameManager.Module;
         const hash = mod._kn_sync_hash();
         const cycleMs = mod._kn_get_cycle_time_ms ? mod._kn_get_cycle_time_ms() : 0;
-        const syncMsg = `sync-hash:${_frameNum}:${hash}:${cycleMs.toFixed(1)}`;
+        let regionSuffix = '';
+        if (mod._kn_sync_hash_regions) {
+          const hb = mod._malloc(48);
+          const rc = mod._kn_sync_hash_regions(hb, 12);
+          const rh = [];
+          for (let ri = 0; ri < rc; ri++) rh.push(mod.HEAPU32[(hb >> 2) + ri] >>> 0);
+          mod._free(hb);
+          regionSuffix = `:${rh.join(':')}`;
+        }
+        const blk25Hash = _getBlk25Hash(mod);
+        const pixelHash = _captureCanvasHash();
+        const extraFields = (blk25Hash ? `:blk25=${blk25Hash}` : '') + (pixelHash ? `:ph=${pixelHash}` : '');
+        const syncMsg = `sync-hash:${_frameNum}:${hash}:${cycleMs.toFixed(1)}${regionSuffix}${extraFields}`;
         const peers = getActivePeers();
         let sent = 0;
         for (const p of peers) {
@@ -3207,6 +3495,24 @@
         }
         if (_frameNum % (_syncCheckInterval * 10) === 0) {
           _syncLog(`sync-check frame=${_frameNum} hash=${hash} sent=${sent}`);
+        }
+        // RDRAM block scan — every 300 frames (~5s). Samples 256 bytes at the
+        // start of each 64KB block to find which blocks are live during gameplay.
+        if (mod._kn_rdram_block_hashes && _frameNum % 300 === 0) {
+          const BLOCKS = 128;
+          const buf = mod._malloc(BLOCKS * 4);
+          mod._kn_rdram_block_hashes(buf, BLOCKS);
+          const cur = new Uint32Array(BLOCKS);
+          for (let bi = 0; bi < BLOCKS; bi++) cur[bi] = mod.HEAPU32[(buf >> 2) + bi];
+          mod._free(buf);
+          if (_prevBlockHashes) {
+            const changed = [];
+            for (let bi = 0; bi < BLOCKS; bi++) {
+              if (cur[bi] !== _prevBlockHashes[bi]) changed.push(`0x${(bi * 0x10000).toString(16).padStart(6, '0')}`);
+            }
+            if (changed.length) _syncLog(`RDRAM-LIVE-BLOCKS f=${_frameNum} changed=[${changed.join(',')}]`);
+          }
+          _prevBlockHashes = cur;
         }
       } else {
         // Fallback: async hash via HEAPU8 + worker
@@ -3832,8 +4138,15 @@
       }
     }
 
+    _syncMismatchStreak = 0;
+    _lastResyncFrame = _frameNum;
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
+    const now = performance.now();
+    if (now - _lastResyncToastTime > 5000) {
+      _lastResyncToastTime = now;
+      _config?.onSyncStatus?.('Desync corrected');
+    }
   };
 
   // -- Init / Stop API -------------------------------------------------------
@@ -4100,7 +4413,11 @@
     },
     getInfo: () => {
       const peers = getActivePeers();
-      const rtt = _rttSamples.length > 0 ? _rttSamples[Math.floor(_rttSamples.length / 2)] : null;
+      // Use latest per-peer RTT samples (updated after reconnects) rather than
+      // frozen global _rttSamples which only accumulates at game start
+      const allRtts = peers.flatMap((p) => p.rttSamples ?? []);
+      allRtts.sort((a, b) => a - b);
+      const rtt = allRtts.length > 0 ? allRtts[Math.floor(allRtts.length / 2)] : null;
       const peerInfo = peers.map((peer) => ({
         slot: peer.slot,
         rtt: peer.rttSamples?.length > 0 ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)] : null,

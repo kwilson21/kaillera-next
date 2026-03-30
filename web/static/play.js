@@ -2244,6 +2244,7 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
+      onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {
         const overlay = document.getElementById('reconnect-overlay');
         if (!overlay) return;
@@ -2305,6 +2306,34 @@
     if (!_romBlob && !_romBlobUrl) {
       showToast('Load a ROM file before starting');
       return;
+    }
+    // Pre-unlock AudioContext for mobile host within this gesture callstack.
+    // iOS rejects AudioContext.resume() called >~1s after the user's tap.
+    // The engine won't init audio until 30+ seconds after this click (boot + state sync),
+    // so we pre-create and keep-alive the context here and the engine picks it up.
+    if (_isMobile) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && (!window._kn_preloadedAudioCtx || window._kn_preloadedAudioCtx.state === 'closed')) {
+        try {
+          window._kn_preloadedAudioCtx = new AC({ sampleRate: 44100 });
+        } catch (_) {
+          window._kn_preloadedAudioCtx = new AC();
+        }
+        window._kn_preloadedAudioCtx.resume().catch(() => {});
+        const dest = window._kn_preloadedAudioCtx.createMediaStreamDestination();
+        const el = document.createElement('audio');
+        el.srcObject = dest.stream;
+        el.play().catch(() => {});
+        window._kn_gestureAudioEl = el;
+        window._kn_gestureAudioDest = dest;
+        const gain = window._kn_preloadedAudioCtx.createGain();
+        gain.gain.value = 0;
+        const osc = window._kn_preloadedAudioCtx.createOscillator();
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+        window._kn_keepAliveOsc = osc;
+      }
     }
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
@@ -2748,6 +2777,18 @@
   };
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
+
+  let _syncStatusTimer = null;
+  const showSyncStatus = (msg) => {
+    const el = document.getElementById('toolbar-status');
+    if (!el) return;
+    el.textContent = msg;
+    if (_syncStatusTimer) clearTimeout(_syncStatusTimer);
+    _syncStatusTimer = setTimeout(() => {
+      el.textContent = '';
+      _syncStatusTimer = null;
+    }, 3000);
+  };
 
   const showToast = (msg) => {
     const container = document.getElementById('toast-container');

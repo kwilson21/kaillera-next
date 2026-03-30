@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
 from src import state
 from src.api.og import build_og_tags, generate_og_image, inject_og_tags
@@ -393,6 +393,12 @@ def create_app(lifespan=None) -> FastAPI:
         log.warning("web/error.html not found — using default error responses")
 
     log.info("Cache bust version: %s", version)
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+    async def favicon_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/static/favicon.svg", status_code=302)
 
     @app.get("/health")
     async def health() -> dict:
