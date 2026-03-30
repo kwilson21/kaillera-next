@@ -737,6 +737,28 @@
   let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
 
+  // Proactive state push: host sends delta state every N frames so guests have a
+  // fresh snapshot ready for instant resyncs — no request-response RTT needed.
+  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps)
+  let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
+  let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
+
+  // Apply buffered proactive state immediately on desync, skipping the round-trip.
+  // Returns true if a preloaded state was promoted (caller should NOT send sync-request).
+  const _tryApplyPreloaded = () => {
+    if (!_preloadedResyncState) return false;
+    const age = _frameNum - _preloadedResyncState.receivedFrame;
+    if (age >= 120) {
+      _preloadedResyncState = null;
+      return false;
+    }
+    _pendingResyncState = _preloadedResyncState;
+    _preloadedResyncState = null;
+    _lastResyncTime = performance.now();
+    _syncLog(`instant resync from preloaded state (age=${age}f frame=${_pendingResyncState.frame})`);
+    return true;
+  };
+
   // Drift diagnostics
   let _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
   const _driftSummaryAt = [1, 5, 10, 20, 50, 100, 200, 500]; // exponential log intervals
@@ -1453,7 +1475,9 @@
                 _syncMismatchStreak++;
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
-                if (cooldownElapsed > _resyncCooldownMs()) {
+                if (_tryApplyPreloaded()) {
+                  // instant resync — no round-trip needed
+                } else if (cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
                   const forceFull = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
                   const reqType = forceFull ? 'sync-request-full' : 'sync-request';
@@ -1485,7 +1509,9 @@
                     _recordDrift(null);
                     const now2 = performance.now();
                     const cooldownElapsed = now2 - _lastResyncTime;
-                    if (cooldownElapsed > _resyncCooldownMs()) {
+                    if (_tryApplyPreloaded()) {
+                      // instant resync
+                    } else if (cooldownElapsed > _resyncCooldownMs()) {
                       _lastResyncTime = now2;
                       _syncLog(`sending sync-request (blk25 mismatch, cooldown=${Math.round(cooldownElapsed)}ms)`);
                       try {
@@ -1540,7 +1566,9 @@
                       _syncLog(`DESYNC frame=${syncFrame} local=${res.hash} host=${hostHash}`);
                       _recordDrift(null);
                       const now2 = performance.now();
-                      if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
+                      if (_tryApplyPreloaded()) {
+                        // instant resync
+                      } else if (!_pendingResyncState && now2 - _lastResyncTime > _resyncCooldownMs()) {
                         _lastResyncTime = now2;
                         try {
                           peerRef.dc.send('sync-request');
@@ -1585,8 +1613,11 @@
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
           _syncIsFull = parts[3] === '1';
+          _syncIsProactive = parts[4] === '1';
           _syncChunks = [];
-          _syncLog(`sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull}`);
+          _syncLog(
+            `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
+          );
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -3353,7 +3384,9 @@
             _syncMismatchStreak++;
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
-            if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
+            if (_tryApplyPreloaded()) {
+              // instant resync
+            } else if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
               const forceFull3 = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
               const reqType3 = forceFull3 ? 'sync-request-full' : 'sync-request';
@@ -3391,7 +3424,9 @@
                 _recordDrift(null);
                 const now3 = performance.now();
                 const cooldownElapsed3 = now3 - _lastResyncTime;
-                if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
+                if (_tryApplyPreloaded()) {
+                  // instant resync
+                } else if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
                   _lastResyncTime = now3;
                   const sp = _peers[_pendingSyncCheck.peerSid];
                   if (sp?.dc) {
@@ -3442,7 +3477,9 @@
                     _syncLog(`DESYNC (deferred) at frame ${deferCheck.frame}`);
                     _recordDrift(null);
                     const now3 = performance.now();
-                    if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
+                    if (_tryApplyPreloaded()) {
+                      // instant resync
+                    } else if (!_pendingResyncState && now3 - _lastResyncTime > _resyncCooldownMs()) {
                       _lastResyncTime = now3;
                       const sp = _peers[deferCheck.peerSid];
                       if (sp?.dc) {
@@ -3498,6 +3535,12 @@
         }
         // RDRAM block scan — every 300 frames (~5s). Samples 256 bytes at the
         // start of each 64KB block to find which blocks are live during gameplay.
+        // Proactive state push — every N frames, push state to guests so they have
+        // a fresh snapshot for instant resync (no round-trip on next desync).
+        if (_frameNum % _PROACTIVE_SYNC_INTERVAL === 0 && getActivePeers().length > 0) {
+          pushSyncState(null, true); // null = broadcast, true = proactive
+        }
+
         if (mod._kn_rdram_block_hashes && _frameNum % 300 === 0) {
           const BLOCKS = 128;
           const buf = mod._malloc(BLOCKS * 4);
@@ -3908,7 +3951,7 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
-  const pushSyncState = async (targetSid) => {
+  const pushSyncState = async (targetSid, isProactive = false) => {
     // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
     if (_pushingSyncState) return;
@@ -3966,7 +4009,7 @@
       const compressed = await compressState(toCompress);
       const sizeKB = Math.round(compressed.length / 1024);
       _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-      await sendSyncChunks(compressed, frame, isFull, targetSid);
+      await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive);
     } catch (err) {
       _syncLog(`sync compress failed: ${err}`);
     } finally {
@@ -3974,7 +4017,7 @@
     }
   };
 
-  const sendSyncChunks = async (compressed, frame, isFull, targetSid) => {
+  const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false) => {
     // Host: send compressed state/delta via DC in 64KB chunks.
     // Chunks are sent with yields between them so input messages can
     // interleave — prevents DataChannel saturation that causes mutual
@@ -3988,7 +4031,7 @@
       targets = getActivePeers();
     }
 
-    const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}`;
+    const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`;
     for (const target of targets) {
       const dc = target.dc;
       if (!dc || dc.readyState !== 'open') {
@@ -4031,20 +4074,19 @@
     _syncExpected = 0;
     const frame = _syncFrame;
     const isFull = _syncIsFull;
+    const isProactive = _syncIsProactive;
 
     try {
       const decompressed = await decompressState(assembled);
+      let fullBytes;
       if (isFull) {
-        // Full state — use directly
-        _pendingResyncState = { bytes: decompressed, frame };
+        fullBytes = decompressed;
       } else {
-        // Delta: XOR against _lastSyncState (the state from the last completed
-        // resync). Both host and guest cached this, so the XOR base matches.
+        // Delta: XOR against _lastSyncState. Both host and guest cached this.
         if (!_lastSyncState || _lastSyncState.length !== decompressed.length) {
           _syncLog(
             `delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length} — requesting full`,
           );
-          // Request a full resync from the host since we have no delta base
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
             try {
@@ -4053,13 +4095,22 @@
           }
           return;
         }
-        const reconstructed = new Uint8Array(_lastSyncState.length);
+        fullBytes = new Uint8Array(_lastSyncState.length);
         for (let j = 0; j < _lastSyncState.length; j++) {
-          reconstructed[j] = _lastSyncState[j] ^ decompressed[j];
+          fullBytes[j] = _lastSyncState[j] ^ decompressed[j];
         }
-        _pendingResyncState = { bytes: reconstructed, frame };
       }
-      _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
+
+      if (isProactive) {
+        // Proactive push: buffer for instant resync on desync, don't apply now.
+        // Advance the delta base so the next proactive delta chains correctly.
+        _preloadedResyncState = { bytes: fullBytes, frame, receivedFrame: _frameNum };
+        _setLastSyncState(fullBytes.slice(), 'proactive-received');
+        _syncLog(`proactive state buffered: ${Math.round(assembled.length / 1024)}KB wire, frame=${frame}`);
+      } else {
+        _pendingResyncState = { bytes: fullBytes, frame };
+        _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(assembled.length / 1024)}KB wire)`);
+      }
     } catch (err) {
       _syncLog(`sync decompress failed: ${err}`);
     }
@@ -4286,6 +4337,7 @@
     _syncExpected = 0;
     _pushingSyncState = false;
     _pendingResyncState = null;
+    _preloadedResyncState = null;
     _hashRegion = null;
     _awaitingResync = false;
     _awaitingResyncAt = 0;
