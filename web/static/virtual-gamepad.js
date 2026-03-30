@@ -115,12 +115,12 @@
 
       // Stick zone — flex child, scales with viewport height, extra top margin for spacing
       '.vgp-stick-zone {',
-      '  position: relative; flex-shrink: 1; margin-top: 16px;',
-      '  width: 110px; height: 110px; border-radius: 50%;',
+      '  position: relative; flex-shrink: 1; margin-top: 28px;',
+      '  width: 128px; height: 128px; border-radius: 50%;',
       '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
       '}',
       '.vgp-stick-knob {',
-      '  position: absolute; width: 46px; height: 46px; border-radius: 50%;',
+      '  position: absolute; width: 54px; height: 54px; border-radius: 50%;',
       '  background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);',
       '  left: 50%; top: 50%; transform: translate(-50%,-50%);',
       '  transition: none; will-change: transform;',
@@ -134,18 +134,18 @@
       '.vgp-cr { width: 38px; height: 38px; right: 0; left: auto; top: 50%; transform: translateY(-50%); font-size: 11px; }',
 
       // A + B — diagonal layout (Gameboy style: A lower-right, B upper-left)
-      '.vgp-a { width: 66px; height: 66px; right: 14px; bottom: 8px; top: auto; font-size: 21px; }',
-      '.vgp-b { width: 66px; height: 66px; right: 86px; bottom: 50px; top: auto; font-size: 21px; }',
+      '.vgp-a { width: 66px; height: 66px; right: 14px; bottom: 2px; top: auto; font-size: 21px; }',
+      '.vgp-b { width: 66px; height: 66px; right: 86px; bottom: 44px; top: auto; font-size: 21px; }',
 
       // Start button
       '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
 
       // Sub-containers: flex children that scale with viewport height in portrait
       '.vgp-cbuttons { position: relative; width: clamp(86px, 18dvh, 120px); height: clamp(86px, 18dvh, 112px); flex-shrink: 1; }',
-      '.vgp-ab { position: relative; width: clamp(110px, 24dvh, 160px); height: clamp(84px, 18dvh, 116px); flex-shrink: 1; }',
+      '.vgp-ab { position: relative; width: clamp(110px, 24dvh, 160px); height: clamp(84px, 18dvh, 116px); flex-shrink: 1; margin-top: 12px; }',
       '.vgp-spacer { display: none; pointer-events: none; }',
       // Portrait: Z sits at bottom of right column (near B/A), Start centered at bottom
-      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-40px); pointer-events: none !important; }',
+      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-34px); pointer-events: none !important; }',
       '.vgp-start-portrait {',
       '  grid-area: start; display: flex; align-items: center; justify-content: center;',
       '  padding: 4px 0;',
@@ -158,8 +158,8 @@
       '@media (orientation: portrait) and (max-width: 430px) {',
       '  .vgp-dpad { width: clamp(68px, 15dvh, 96px); height: clamp(68px, 15dvh, 96px); }',
       '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(24px, 5dvh, 34px); height: clamp(24px, 5dvh, 34px); }',
-      '  .vgp-stick-zone { width: clamp(80px, 16dvh, 110px); height: clamp(80px, 16dvh, 110px); }',
-      '  .vgp-stick-knob { width: clamp(34px, 7dvh, 46px); height: clamp(34px, 7dvh, 46px); }',
+      '  .vgp-stick-zone { width: clamp(90px, 18dvh, 128px); height: clamp(90px, 18dvh, 128px); }',
+      '  .vgp-stick-knob { width: clamp(38px, 7.5dvh, 54px); height: clamp(38px, 7.5dvh, 54px); }',
       '  .vgp-cbuttons { width: clamp(76px, 16dvh, 120px); height: clamp(76px, 16dvh, 112px); }',
       '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(24px, 5dvh, 38px); height: clamp(24px, 5dvh, 38px); }',
       '  .vgp-ab { width: clamp(100px, 22dvh, 160px); height: clamp(76px, 16dvh, 116px); }',
@@ -280,7 +280,7 @@
 
       // A/B — flex-shrink:1 so group compresses on very short screens
       '  .vgp-ab {',
-      '    display: block; position: relative; flex-shrink: 0;',
+      '    display: block; position: relative; flex-shrink: 0; margin-top: 0;',
       '    width: var(--ab-group-w); height: var(--ab-group-h);',
       '  }',
       '  .vgp-a {',
