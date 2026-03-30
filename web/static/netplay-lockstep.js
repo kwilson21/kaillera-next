@@ -739,7 +739,7 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps)
+  const _PROACTIVE_SYNC_INTERVAL = 90; // frames (~3s at 30fps) — full state each time, so keep infrequent
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
 
@@ -3941,6 +3941,7 @@
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   let _pushingSyncState = false; // debounce concurrent sync-request handling
+  let _proactivePushInFlight = false; // separate flag so proactive pushes never block explicit sync-requests
 
   let _lastSyncState = null; // host/guest: previous state for delta computation
   let _lastSyncStateInfo = null; // { frame, setBy, ts } for debugging
@@ -3954,11 +3955,17 @@
   const pushSyncState = async (targetSid, isProactive = false) => {
     // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
-    if (_pushingSyncState) return;
+    // Proactive and explicit syncs use separate in-flight guards so that a
+    // proactive push in progress never drops a sync-request from a reconnecting guest.
+    if (isProactive ? _proactivePushInFlight : _pushingSyncState) return;
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
-    _pushingSyncState = true;
+    if (isProactive) {
+      _proactivePushInFlight = true;
+    } else {
+      _pushingSyncState = true;
+    }
     let currentState;
     const frame = _frameNum;
 
@@ -3971,7 +3978,8 @@
       const ps1 = performance.now();
       if (bytesWritten === 0) {
         _syncLog('kn_sync_read returned 0');
-        _pushingSyncState = false;
+        if (isProactive) _proactivePushInFlight = false;
+        else _pushingSyncState = false;
         return;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
@@ -3985,25 +3993,37 @@
       _syncLog(`host getState (FALLBACK): ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
     }
 
-    // Delta sync: XOR against previous state
-    const isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
-    _syncLog(
-      `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
-    );
-    let toCompress;
-    if (isFull) {
+    // Proactive: always send full state — no shared delta chain with explicit syncs.
+    // If a proactive packet is lost (e.g. network switch), the host and guest would
+    // have divergent delta bases, making the next explicit delta unapplicable → freeze.
+    // By keeping proactive pushes full and independent, packet loss is harmless.
+    //
+    // Explicit: delta XOR against previous state if available.
+    let isFull, toCompress;
+    if (isProactive) {
+      isFull = true;
       toCompress = currentState;
+      // Do NOT advance _lastSyncState — proactive pushes are independent of the
+      // requested-sync delta chain.
     } else {
-      toCompress = new Uint8Array(currentState.length);
-      for (let i = 0; i < currentState.length; i++) {
-        toCompress[i] = currentState[i] ^ _lastSyncState[i];
+      isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
+      _syncLog(
+        `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
+      );
+      if (isFull) {
+        toCompress = currentState;
+      } else {
+        toCompress = new Uint8Array(currentState.length);
+        for (let i = 0; i < currentState.length; i++) {
+          toCompress[i] = currentState[i] ^ _lastSyncState[i];
+        }
       }
+      // Update delta base for next explicit sync.
+      // Must .slice() because compressState() transfers the buffer to a Web Worker,
+      // which detaches the ArrayBuffer. Without the copy, _lastSyncState.length === 0
+      // on the next push and delta never fires.
+      _setLastSyncState(currentState.slice(), 'pushSync');
     }
-    // Update delta base (guest caches after applying).
-    // Must .slice() because compressState() transfers the buffer to a Web Worker,
-    // which detaches the ArrayBuffer. Without the copy, _lastSyncState.length === 0
-    // on the next push and delta never fires.
-    _setLastSyncState(currentState.slice(), 'pushSync');
 
     try {
       const compressed = await compressState(toCompress);
@@ -4013,7 +4033,8 @@
     } catch (err) {
       _syncLog(`sync compress failed: ${err}`);
     } finally {
-      _pushingSyncState = false;
+      if (isProactive) _proactivePushInFlight = false;
+      else _pushingSyncState = false;
     }
   };
 
@@ -4102,10 +4123,11 @@
       }
 
       if (isProactive) {
-        // Proactive push: buffer for instant resync on desync, don't apply now.
-        // Advance the delta base so the next proactive delta chains correctly.
+        // Proactive push: buffer for instant resync, don't apply yet.
+        // Do NOT advance _lastSyncState — proactive states are independent of the
+        // requested-sync delta chain. Advancing it here would desync delta bases
+        // if any proactive packet is lost (e.g. during a network switch).
         _preloadedResyncState = { bytes: fullBytes, frame, receivedFrame: _frameNum };
-        _setLastSyncState(fullBytes.slice(), 'proactive-received');
         _syncLog(`proactive state buffered: ${Math.round(assembled.length / 1024)}KB wire, frame=${frame}`);
       } else {
         _pendingResyncState = { bytes: fullBytes, frame };
@@ -4336,6 +4358,7 @@
     _syncChunks = [];
     _syncExpected = 0;
     _pushingSyncState = false;
+    _proactivePushInFlight = false;
     _pendingResyncState = null;
     _preloadedResyncState = null;
     _hashRegion = null;
