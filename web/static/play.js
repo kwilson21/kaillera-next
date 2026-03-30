@@ -2498,6 +2498,8 @@
         if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
+        if (playerInSlot.playerName.toLowerCase() === 'agent 21') nameEl.dataset.a21 = '1';
+        else delete nameEl.dataset.a21;
         // Show input type indicator
         if (gpEl) {
           const itype = playerInSlot.inputType || 'keyboard';
@@ -2513,6 +2515,7 @@
       } else {
         nameEl.textContent = 'Open';
         nameEl.classList.add('empty');
+        delete nameEl.dataset.a21;
         if (gpEl) {
           gpEl.textContent = '';
           gpEl.title = '';
@@ -3411,6 +3414,13 @@
     console.log('kaillera-next — v0.9 forever');
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
+    // Agent 21 badge — gold jersey number for the creator's handle
+    const _a21style = document.createElement('style');
+    _a21style.textContent =
+      `.name[data-a21]::after{content:'21';display:inline-block;` +
+      `margin-left:5px;padding:1px 5px;background:#c9a227;color:#111;` +
+      `border-radius:3px;font-size:.7em;font-weight:700;vertical-align:middle;}`;
+    document.head.appendChild(_a21style);
     parseParams();
     if (!roomCode) {
       window.location.href = '/';
