@@ -2498,7 +2498,7 @@
         if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
-        if (playerInSlot.playerName.toLowerCase() === 'agent 21') nameEl.dataset.a21 = '1';
+        if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
         else delete nameEl.dataset.a21;
         // Show input type indicator
         if (gpEl) {
