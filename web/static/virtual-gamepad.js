@@ -1,6 +1,7 @@
 // web/static/virtual-gamepad.js
-// Standalone N64 virtual gamepad for mobile streaming (and lockstep) guests.
-// Writes touch state into KNState.touchInput using EJS simulateInput indices.
+// Standalone N64 virtual gamepad for mobile players (lockstep and streaming).
+// Not shown for spectators. Writes touch state into KNState.touchInput using
+// EJS simulateInput indices.
 //
 // Layout strategy:
 //   Portrait: in-flow grid child of <body>, sits between game area and toolbar.
