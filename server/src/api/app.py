@@ -714,9 +714,20 @@ def create_app(lifespan=None) -> FastAPI:
         for f in sorted(_ERROR_LOG_DIR.glob("evt-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             stat = f.stat()
             # Parse filename: evt-{type}-{room}-{ts}-{rand}.json
-            parts = f.stem.split("-", 3)
-            evt_type = parts[1] if len(parts) > 1 else "?"
-            room_code = parts[2] if len(parts) > 2 else "?"
+            # Event types can contain hyphens (e.g. "webrtc-fail"), so match
+            # against the known set rather than splitting on the Nth dash.
+            stem = f.stem
+            evt_type = "?"
+            room_code = "?"
+            if stem.startswith("evt-"):
+                body = stem[4:]  # strip "evt-"
+                for t in _VALID_EVENT_TYPES:
+                    if body.startswith(t + "-"):
+                        evt_type = t
+                        rest = body[len(t) + 1 :]  # "{room}-{ts}-{rand}"
+                        rest_parts = rest.rsplit("-", 2)
+                        room_code = rest_parts[0] if len(rest_parts) == 3 else rest
+                        break
             result.append(
                 {
                     "filename": f.name,

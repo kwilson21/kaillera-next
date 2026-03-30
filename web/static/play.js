@@ -568,10 +568,17 @@
             }
 
             showOverlay();
-            // If host already has ROM sharing enabled, show the accept/decline prompt
-            // immediately from the ack data — don't rely on users-updated event timing.
-            if (!isHost && !isSpectator && joinData?.romSharing && !_romBlob && !_romBlobUrl) {
-              _romSharingEnabled = true;
+            // Sync ROM sharing state and refresh UI unconditionally.
+            // users-updated may arrive before or after the ack, and only calls
+            // updateRomSharingUI() when the value changes. If it already set
+            // _romSharingEnabled=true before the ack, the change-guard skips it
+            // a second time — so we call it here after showOverlay() to ensure
+            // the prompt appears regardless of event ordering.
+            if (!isHost && !isSpectator) {
+              const sharingFromAck = joinData?.romSharing ?? roomData?.rom_sharing;
+              if (sharingFromAck !== undefined) {
+                _romSharingEnabled = !!sharingFromAck;
+              }
               updateRomSharingUI();
             }
           },
