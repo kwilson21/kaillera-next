@@ -380,6 +380,29 @@
     document.body.appendChild(_overlay);
   };
 
+  // Hit-test a point against a button's actual visual shape.
+  // Round buttons (border-radius ≥ 50% of shorter side) use ellipse math;
+  // everything else uses the rectangular bounding box.
+  const hitTestBtn = (btn, x, y) => {
+    const r = btn.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const br = parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0;
+    if (br >= Math.min(r.width, r.height) / 2 - 2) {
+      // Circular / elliptical
+      const dx = x - (r.left + r.width / 2);
+      const dy = y - (r.top + r.height / 2);
+      return (dx * dx) / (r.width / 2) ** 2 + (dy * dy) / (r.height / 2) ** 2 <= 1;
+    }
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  };
+
+  const findBtnAt = (x, y) => {
+    for (const btn of _overlay.querySelectorAll('.vgp-btn')) {
+      if (hitTestBtn(btn, x, y)) return btn;
+    }
+    return null;
+  };
+
   const onTouchStart = (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
@@ -405,7 +428,7 @@
         continue;
       }
 
-      const btnEl = el?.closest?.('.vgp-btn') ?? (el?.classList?.contains('vgp-btn') ? el : null);
+      const btnEl = findBtnAt(t.clientX, t.clientY);
       if (btnEl && btnEl.dataset.idx !== undefined) {
         const idx = parseInt(btnEl.dataset.idx, 10);
         _buttonTouches[t.identifier] = idx;
