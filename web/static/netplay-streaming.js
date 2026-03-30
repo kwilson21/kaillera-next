@@ -1005,7 +1005,7 @@
     // startHost() / startGuestInputLoop() triggered from ch.onopen
 
     // Virtual gamepad for mobile streaming guests
-    if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
+    if (config.isMobile && !_isSpectator && window.VirtualGamepad) {
       const gameEl = config.gameElement || document.getElementById('game');
       if (gameEl) {
         try {
