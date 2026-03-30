@@ -586,10 +586,16 @@
 
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
+      const prevMode = mode;
       mode = data.mode;
       // Sync mode-select dropdown if we're the host
       const modeSel = document.getElementById('mode-select');
       if (modeSel && !isHost) modeSel.value = mode;
+      // Re-emit rom-ready when switching to lockstep so the host's "Waiting for ROMs"
+      // check clears for guests who had already declared ROM in streaming mode.
+      if (prevMode !== 'lockstep' && mode === 'lockstep' && (_romBlob || _romBlobUrl)) {
+        notifyRomReady();
+      }
     }
 
     // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
