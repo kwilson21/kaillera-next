@@ -728,6 +728,15 @@
   let _hasKnSync = false;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
+  // C-level regions sync: kn_sync_read_regions/kn_sync_write_regions
+  // Patches only the 4 diverged 64KB RDRAM blocks (~256KB) instead of full 8MB.
+  // Produces ~1-2 frame correction snap vs ~30 frames for full state write.
+  let _hasKnSyncRegions = false;
+  let _regionsBufPtr = 0; // WASM buffer for region data (4 × 64KB)
+  let _regionsOffsetPtr = 0; // WASM buffer for the offset array (4 × uint32)
+  // Fixed block offsets: ps0*/ps1* → 0xB0000, ps2* → 0xC0000, ph1b* → 0x260000, ph3c → 0x330000
+  const _SYNC_REGION_OFFSETS = [0xb0000, 0xc0000, 0x260000, 0x330000];
+  const _SYNC_REGIONS_TOTAL = _SYNC_REGION_OFFSETS.length * 0x10000; // 4 × 64KB = 262144
 
   // Lazy-allocate the WASM sync buffer. Called before any kn_sync_read/write.
   // Deferred from startup because the 8MB malloc can trigger WASM memory growth
@@ -740,6 +749,18 @@
     _syncBufPtr = mod._malloc(_syncBufSize);
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
+
+  const ensureRegionsBuffer = () => {
+    if (_regionsBufPtr) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._malloc) return;
+    _regionsBufPtr = mod._malloc(_SYNC_REGIONS_TOTAL);
+    _regionsOffsetPtr = mod._malloc(_SYNC_REGION_OFFSETS.length * 4);
+    for (let i = 0; i < _SYNC_REGION_OFFSETS.length; i++) {
+      mod.HEAPU32[(_regionsOffsetPtr >> 2) + i] = _SYNC_REGION_OFFSETS[i];
+    }
+    _syncLog(`regions buffer allocated: data=${_regionsBufPtr} offsets=${_regionsOffsetPtr}`);
+  };
   let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
 
@@ -750,6 +771,7 @@
   // 30f is safe. Faster interval = fresher buffered state = smaller correction snap (~30f snap vs ~60f).
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
+  let _syncIsRegions = false; // true when current incoming sync-regions-start is a regions patch
 
   // Apply buffered proactive state immediately on desync, skipping the round-trip.
   // Returns true if a preloaded state was promoted (caller should NOT send sync-request).
@@ -1499,13 +1521,17 @@
                 _syncMismatchStreak++;
                 const now2 = performance.now();
                 const cooldownElapsed = now2 - _lastResyncTime;
-                if (_tryApplyPreloaded()) {
-                  // instant resync — no round-trip needed
+                if (!_hasKnSyncRegions && _tryApplyPreloaded()) {
+                  // instant resync via proactive state — only used when regions path unavailable
                 } else if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
                   _lastResyncTime = now2;
                   _resyncRequestInFlight = true;
                   const forceFull = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
-                  const reqType = forceFull ? 'sync-request-full' : 'sync-request';
+                  const reqType = forceFull
+                    ? 'sync-request-full'
+                    : _hasKnSyncRegions
+                      ? 'sync-request-regions'
+                      : 'sync-request';
                   _syncLog(
                     `sending ${reqType} (cooldown=${Math.round(cooldownElapsed)}ms streak=${_syncMismatchStreak})`,
                   );
@@ -1537,13 +1563,14 @@
                     _recordDrift(null);
                     const now2 = performance.now();
                     const cooldownElapsed = now2 - _lastResyncTime;
-                    if (_tryApplyPreloaded()) {
-                      // instant resync
+                    if (!_hasKnSyncRegions && _tryApplyPreloaded()) {
+                      // instant resync via proactive state — only used when regions path unavailable
                     } else if (cooldownElapsed > _resyncCooldownMs()) {
                       _lastResyncTime = now2;
-                      _syncLog(`sending sync-request (blk25 mismatch, cooldown=${Math.round(cooldownElapsed)}ms)`);
+                      const reqType2 = _hasKnSyncRegions ? 'sync-request-regions' : 'sync-request';
+                      _syncLog(`sending ${reqType2} (blk25 mismatch, cooldown=${Math.round(cooldownElapsed)}ms)`);
                       try {
-                        peer.dc.send('sync-request');
+                        peer.dc.send(reqType2);
                       } catch (e) {
                         _syncLog(`sync-request send failed: ${e}`);
                       }
@@ -1637,11 +1664,18 @@
           }
         }
         // State sync: host received request from guest (sent on lockstep DC)
-        if ((e.data === 'sync-request' || e.data === 'sync-request-full') && _playerSlot === 0) {
+        if (
+          (e.data === 'sync-request' || e.data === 'sync-request-full' || e.data === 'sync-request-regions') &&
+          _playerSlot === 0
+        ) {
           const forceFull = e.data === 'sync-request-full';
           _syncLog(`received ${e.data} from ${remoteSid}`);
           if (forceFull) _setLastSyncState(null, 'guest-requested-full');
-          pushSyncState(remoteSid);
+          if (e.data === 'sync-request-regions') {
+            pushRegionsSyncState(remoteSid);
+          } else {
+            pushSyncState(remoteSid);
+          }
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -1728,10 +1762,23 @@
           _syncExpected = parseInt(parts[2], 10);
           _syncIsFull = parts[3] === '1';
           _syncIsProactive = parts[4] === '1';
+          _syncIsRegions = false;
           _syncChunks = [];
           _syncLog(
             `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
           );
+          return;
+        }
+        // Guest: incoming regions patch header — only diverged RDRAM blocks
+        if (e.data.startsWith('sync-regions-start:')) {
+          const parts = e.data.split(':');
+          _syncFrame = parseInt(parts[1], 10);
+          _syncExpected = parseInt(parts[2], 10);
+          _syncIsFull = true;
+          _syncIsProactive = false;
+          _syncIsRegions = true;
+          _syncChunks = [];
+          _syncLog(`sync-regions-start received: frame=${_syncFrame} expected=${_syncExpected}`);
           return;
         }
       }
@@ -2907,11 +2954,15 @@
     // growth at startup when sync may never be needed.
     const knMod = window.EJS_emulator?.gameManager?.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
+    _hasKnSyncRegions = _hasKnSync && !!(knMod._kn_sync_read_regions && knMod._kn_sync_write_regions);
     if (_hasKnSync) {
       if (_syncEnabled) {
         ensureSyncBuffer();
+        if (_hasKnSyncRegions) ensureRegionsBuffer();
       }
-      _syncLog(`C-level sync available${_syncBufPtr ? `, buf at ${_syncBufPtr}` : ' (buffer deferred)'}`);
+      _syncLog(
+        `C-level sync available${_syncBufPtr ? `, buf at ${_syncBufPtr}` : ' (buffer deferred)'}${_hasKnSyncRegions ? ' [regions]' : ''}`,
+      );
     } else {
       _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
@@ -3073,13 +3124,20 @@
     _pendingRunner = null;
     _pendingSyncCheck = null;
     _setLastSyncState(null, 'stopSync');
-    // Free C-level sync buffer
+    // Free C-level sync buffers
     if (_syncBufPtr && _hasKnSync) {
       const modStop = window.EJS_emulator?.gameManager?.Module;
-      if (modStop?._free) modStop._free(_syncBufPtr);
+      if (modStop?._free) {
+        modStop._free(_syncBufPtr);
+        if (_regionsBufPtr) modStop._free(_regionsBufPtr);
+        if (_regionsOffsetPtr) modStop._free(_regionsOffsetPtr);
+      }
       _syncBufPtr = 0;
+      _regionsBufPtr = 0;
+      _regionsOffsetPtr = 0;
     }
     _hasKnSync = false;
+    _hasKnSyncRegions = false;
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
@@ -3098,7 +3156,11 @@
       const pending = _pendingResyncState;
       _pendingResyncState = null;
       _awaitingResync = false;
-      applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      if (pending.isRegions) {
+        applyRegionsSyncState(pending.bytes, pending.frame);
+      } else {
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      }
     }
 
     // ── Frame pacing (GGPO-style frame advantage cap) ────────────────────
@@ -3472,21 +3534,27 @@
             _syncMismatchStreak++;
             const now3 = performance.now();
             const cooldownElapsed3 = now3 - _lastResyncTime;
-            if (_tryApplyPreloaded()) {
-              // instant resync
+            if (!_hasKnSyncRegions && _tryApplyPreloaded()) {
+              // instant resync via proactive state — only used when regions path unavailable
             } else if (!_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
               _lastResyncTime = now3;
               const forceFull3 = _syncMismatchStreak >= MISMATCH_FULL_RESYNC_THRESHOLD;
-              const reqType3 = forceFull3 ? 'sync-request-full' : 'sync-request';
+              const reqType3 = forceFull3
+                ? 'sync-request-full'
+                : _hasKnSyncRegions
+                  ? 'sync-request-regions'
+                  : 'sync-request';
               _syncLog(
                 `sending ${reqType3} (deferred, cooldown=${Math.round(cooldownElapsed3)}ms streak=${_syncMismatchStreak})`,
               );
               const sp = _peers[_pendingSyncCheck.peerSid];
               if (sp?.dc) {
                 try {
+                  _resyncRequestInFlight = true;
                   sp.dc.send(reqType3);
                 } catch (e) {
                   _syncLog(`deferred sync-request failed: ${e}`);
+                  _resyncRequestInFlight = false;
                 }
               }
             } else {
@@ -3512,15 +3580,16 @@
                 _recordDrift(null);
                 const now3 = performance.now();
                 const cooldownElapsed3 = now3 - _lastResyncTime;
-                if (_tryApplyPreloaded()) {
-                  // instant resync
+                if (!_hasKnSyncRegions && _tryApplyPreloaded()) {
+                  // instant resync via proactive state — only used when regions path unavailable
                 } else if (!_resyncRequestInFlight && !_pendingResyncState && cooldownElapsed3 > _resyncCooldownMs()) {
                   _lastResyncTime = now3;
                   _resyncRequestInFlight = true;
+                  const reqTypeBlk25 = _hasKnSyncRegions ? 'sync-request-regions' : 'sync-request';
                   const sp = _peers[_pendingSyncCheck.peerSid];
                   if (sp?.dc) {
                     try {
-                      sp.dc.send('sync-request');
+                      sp.dc.send(reqTypeBlk25);
                     } catch (e) {
                       _syncLog(`deferred blk25 sync-request failed: ${e}`);
                       _resyncRequestInFlight = false;
@@ -4200,6 +4269,68 @@
     );
   };
 
+  const pushRegionsSyncState = async (targetSid) => {
+    // Host: read only the 4 diverged 64KB RDRAM blocks, compress, send as sync-regions-start packet.
+    // ~256KB vs 8MB — guest applies with kn_sync_write_regions, no full state snap.
+    if (_playerSlot !== 0 || !_syncEnabled) return;
+    if (_pushingSyncState) return;
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm) return;
+    const mod = gm.Module;
+    ensureRegionsBuffer();
+    if (!_regionsBufPtr || !_hasKnSyncRegions) {
+      return pushSyncState(targetSid);
+    }
+    _pushingSyncState = true;
+    const frame = _frameNum;
+    try {
+      const bytesRead = mod._kn_sync_read_regions(
+        _regionsOffsetPtr,
+        _SYNC_REGION_OFFSETS.length,
+        _regionsBufPtr,
+        _SYNC_REGIONS_TOTAL,
+      );
+      if (!bytesRead) {
+        _syncLog('kn_sync_read_regions returned 0 — falling back to full sync');
+        _pushingSyncState = false;
+        return pushSyncState(targetSid);
+      }
+      const regionData = new Uint8Array(mod.HEAPU8.buffer, _regionsBufPtr, bytesRead).slice();
+      _syncLog(`host kn_sync_read_regions: ${Math.round(regionData.length / 1024)}KB frame=${frame}`);
+      const compressed = await compressState(regionData);
+      await sendRegionsSyncChunks(compressed, frame, targetSid);
+    } catch (err) {
+      _syncLog(`regions sync error: ${err}`);
+    } finally {
+      _pushingSyncState = false;
+    }
+  };
+
+  const sendRegionsSyncChunks = async (compressed, frame, targetSid) => {
+    const CHUNK_SIZE = 64000;
+    const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
+    const target = _peers[targetSid];
+    if (!target) return;
+    const dc = target.syncDc?.readyState === 'open' ? target.syncDc : target.dc;
+    if (!dc || dc.readyState !== 'open') {
+      _syncLog(`regions sync: target slot=${target.slot} dc not open`);
+      return;
+    }
+    try {
+      dc.send(`sync-regions-start:${frame}:${numChunks}`);
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        dc.send(compressed.slice(start, Math.min(start + CHUNK_SIZE, compressed.length)));
+        if ((i + 1) % 3 === 0 && i < numChunks - 1) await new Promise((r) => setTimeout(r, 0));
+      }
+      _syncLog(
+        `regions sync sent to slot=${target.slot}: frame=${frame} ${Math.round(compressed.length / 1024)}KB ${numChunks} chunks`,
+      );
+    } catch (err) {
+      _syncLog(`regions sync send failed to slot=${target.slot}: ${err}`);
+    }
+  };
+
   const handleSyncChunksComplete = async () => {
     // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     const total = _syncChunks.reduce((a, c) => a + c.length, 0);
@@ -4214,9 +4345,24 @@
     const frame = _syncFrame;
     const isFull = _syncIsFull;
     const isProactive = _syncIsProactive;
+    const isRegions = _syncIsRegions;
+    _syncIsRegions = false;
 
     try {
       const decompressed = await decompressState(assembled);
+
+      // Regions patch: decompress directly, buffer for apply — no delta chain
+      if (isRegions) {
+        _resyncRequestInFlight = false;
+        if (frame <= _lastAppliedSyncHostFrame) {
+          _syncLog(`regions sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
+          return;
+        }
+        _pendingResyncState = { bytes: decompressed, frame, isRegions: true };
+        _syncLog(`regions resync ready: ${Math.round(assembled.length / 1024)}KB wire frame=${frame}`);
+        return;
+      }
+
       let fullBytes;
       if (isFull) {
         fullBytes = decompressed;
@@ -4351,6 +4497,46 @@
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
+    const now = performance.now();
+    if (now - _lastResyncToastTime > 5000) {
+      _lastResyncToastTime = now;
+      _config?.onSyncStatus?.('Desync corrected');
+    }
+  };
+
+  const applyRegionsSyncState = (bytes, frame) => {
+    // Guest: patch only the diverged RDRAM blocks via kn_sync_write_regions.
+    // No full state snap — CPU state is untouched, game continues forward.
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm || !_hasKnSyncRegions) return;
+    const mod = gm.Module;
+    ensureRegionsBuffer();
+    if (!_regionsBufPtr) {
+      _syncLog('regions buffer not ready — skipping regions apply');
+      return;
+    }
+    mod.HEAPU8.set(bytes, _regionsBufPtr);
+    const lt0 = performance.now();
+    const result = mod._kn_sync_write_regions(
+      _regionsOffsetPtr,
+      _SYNC_REGION_OFFSETS.length,
+      _regionsBufPtr,
+      bytes.length,
+    );
+    const lt1 = performance.now();
+    if (result !== 0) {
+      _syncLog(`kn_sync_write_regions failed: result=${result}`);
+      return;
+    }
+    _syncLog(`kn_sync_write_regions: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+    // Do NOT update _lastSyncState — regions don't participate in the full-state delta chain.
+    _resyncCount++;
+    _consecutiveResyncs++;
+    _syncMismatchStreak = 0;
+    _lastResyncFrame = _frameNum;
+    _lastAppliedSyncHostFrame = frame;
+    _lastResyncTime = performance.now();
+    _syncLog(`regions sync #${_resyncCount} applied (frame ${frame}, next in ${_syncCheckInterval}f)`);
     const now = performance.now();
     if (now - _lastResyncToastTime > 5000) {
       _lastResyncToastTime = now;
