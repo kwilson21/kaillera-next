@@ -3514,6 +3514,7 @@
     if (modeSelect && lockstepOpts) {
       // Set mode-select from URL params before running updateOpts
       modeSelect.value = mode;
+      let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
         const isLockstep = modeSelect.value === 'lockstep';
         lockstepOpts.style.display = isLockstep ? '' : 'none';
@@ -3525,13 +3526,19 @@
         const romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
         if (romSharingRow) romSharingRow.style.display = isLockstep ? '' : 'none';
         if (!isLockstep && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
-        // Auto-disable sharing when switching to streaming
+        const cb = document.getElementById('opt-rom-sharing');
         if (!isLockstep) {
-          const cb = document.getElementById('opt-rom-sharing');
+          // Switching to streaming — save and disable sharing
+          _romSharingBeforeStreamingMode = cb?.checked ?? false;
           if (cb?.checked) {
             cb.checked = false;
             socket.emit('rom-sharing-toggle', { enabled: false });
           }
+        } else if (_romSharingBeforeStreamingMode && cb && !cb.checked) {
+          // Switching back to lockstep — restore previous sharing state
+          cb.checked = true;
+          socket.emit('rom-sharing-toggle', { enabled: true });
+          _romSharingBeforeStreamingMode = false;
         }
         updateRomDeclarePrompt();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
