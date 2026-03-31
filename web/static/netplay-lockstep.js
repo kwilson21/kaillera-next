@@ -896,6 +896,11 @@
 
     _audioPtr = mod._kn_get_audio_ptr();
     _audioRate = mod._kn_get_audio_rate();
+    const initSamples = mod._kn_get_audio_samples();
+    const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+    _syncLog(
+      `audio init: ptr=${_audioPtr} rate=${_audioRate} initSamples=${initSamples} alCtx=${alCtxCount} f=${_frameNum}`,
+    );
     if (!_audioRate || _audioRate <= 0) {
       _syncLog('audio rate not set yet, defaulting to 33600');
       _audioRate = 33600;
@@ -1054,10 +1059,20 @@
     const n = mod._kn_get_audio_samples();
     if (n <= 0) {
       _audioEmptyCount++;
+      // Log first 30 empty frames for diagnostics on fresh boot
+      if (_audioEmptyCount <= 30) {
+        const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+        const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'none';
+        _syncLog(
+          `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState}`,
+        );
+      }
       // Log once after 300 consecutive empty frames (~5s) to detect silent audio
       if (_audioEmptyCount === 300) {
+        const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+        const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
         _syncLog(
-          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state})`,
+          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState})`,
         );
       }
       return;
