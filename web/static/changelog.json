@@ -1,5 +1,99 @@
 [
   {
+    "version": "0.21.0",
+    "date": "2026-03-31",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "v0.21.0 — Agent's Version (#2)"
+      },
+      {
+        "type": "feat",
+        "message": "virtual gamepad overhaul + lockstep boot grace fix"
+      },
+      {
+        "type": "fix",
+        "message": "pass game_id in share URLs so OG cards show game background"
+      },
+      {
+        "type": "fix",
+        "message": "crash protection + frontend observability instrumentation"
+      },
+      {
+        "type": "feat",
+        "message": "add observability — client event beacon, health check, admin errors tab"
+      },
+      {
+        "type": "fix",
+        "message": "lobby landscape layout — scrollable with visible footer"
+      },
+      {
+        "type": "fix",
+        "message": "revert lobby to fixed footer, hide in landscape instead"
+      },
+      {
+        "type": "fix",
+        "message": "landscape layout overlap in lobby"
+      },
+      {
+        "type": "fix",
+        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
+      },
+      {
+        "type": "fix",
+        "message": "switch Playwright OG generation to async API"
+      },
+      {
+        "type": "fix",
+        "message": "safe storage fallback for privacy browsers (Brave mobile)"
+      },
+      {
+        "type": "fix",
+        "message": "exempt /static/og/ from COEP, add og:image dimensions"
+      },
+      {
+        "type": "feat",
+        "message": "custom error pages, HMAC upload tokens, CSP fix (#1)"
+      },
+      {
+        "type": "fix",
+        "message": "warm up Playwright browser on startup for fast first OG image"
+      },
+      {
+        "type": "feat",
+        "message": "finalize OG cards with Playwright HTML screenshots"
+      },
+      {
+        "type": "feat",
+        "message": "switch OG image generation from Pillow to Playwright HTML screenshots"
+      },
+      {
+        "type": "fix",
+        "message": "scale OG card fonts larger, fix version footer alignment"
+      },
+      {
+        "type": "feat",
+        "message": "scale up OG card text, arcade-style copy, spectate player matchups"
+      },
+      {
+        "type": "feat",
+        "message": "add homepage OG image and Playwright E2E tests"
+      },
+      {
+        "type": "feat",
+        "message": "wire up OG card routes and COEP exemption"
+      },
+      {
+        "type": "feat",
+        "message": "add OG image generation module"
+      },
+      {
+        "type": "feat",
+        "message": "add Pillow dependency and OG card assets"
+      }
+    ]
+  },
+  {
     "version": "0.20.0",
     "date": "2026-03-29",
     "changes": [
@@ -186,16 +280,6 @@
       {
         "type": "feat",
         "message": "wire up OG card routes and COEP exemption"
-      }
-    ]
-  },
-  {
-    "version": "0.12.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "add OG image generation module"
       }
     ]
   }
