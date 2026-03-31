@@ -72,7 +72,7 @@
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
-  let _gameRollbackEnabled = false;
+  let _gameResyncEnabled = false;
   let previousPlayers = {};
   let previousSpectators = {};
   let _lateJoin = false;
@@ -83,6 +83,9 @@
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _pendingLateJoin = false; // waiting for ROM before late-join init
+  // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
+  const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
+
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
   let _romDeclared = false; // true if user declared ROM ownership (streaming, page-lifetime)
@@ -110,6 +113,7 @@
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
   let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
+  KNState.uploadToken = _uploadToken; // initialize immediately so KNEvent works before upload-token socket event
   const _sessionStart = Date.now();
 
   const _persistentId =
@@ -169,7 +173,6 @@
 
   window.addEventListener('unhandledrejection', (e) => {
     console.error('[play] unhandled rejection:', e.reason);
-    showToast('Something went wrong — check console');
     KNEvent('unhandled', String(e.reason)?.slice(0, 500), { stack: e.reason?.stack?.slice(0, 500) });
   });
 
@@ -568,6 +571,19 @@
             }
 
             showOverlay();
+            // Sync ROM sharing state and refresh UI unconditionally.
+            // users-updated may arrive before or after the ack, and only calls
+            // updateRomSharingUI() when the value changes. If it already set
+            // _romSharingEnabled=true before the ack, the change-guard skips it
+            // a second time — so we call it here after showOverlay() to ensure
+            // the prompt appears regardless of event ordering.
+            if (!isHost && !isSpectator) {
+              const sharingFromAck = joinData?.romSharing ?? roomData?.rom_sharing;
+              if (sharingFromAck !== undefined) {
+                _romSharingEnabled = !!sharingFromAck;
+              }
+              updateRomSharingUI();
+            }
           },
         );
       } catch (_) {
@@ -586,14 +602,20 @@
 
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
+      const prevMode = mode;
       mode = data.mode;
       // Sync mode-select dropdown if we're the host
       const modeSel = document.getElementById('mode-select');
       if (modeSel && !isHost) modeSel.value = mode;
+      // Re-emit rom-ready when switching to lockstep so the host's "Waiting for ROMs"
+      // check clears for guests who had already declared ROM in streaming mode.
+      if (prevMode !== 'lockstep' && mode === 'lockstep' && (_romBlob || _romBlobUrl)) {
+        notifyRomReady();
+      }
     }
 
     // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
-    if (data.romSharing !== undefined) {
+    if (_ROM_SHARING_FEATURE && data.romSharing !== undefined) {
       const wasSharing = _romSharingEnabled;
       _romSharingEnabled = !!data.romSharing;
       if (_romSharingEnabled !== wasSharing) {
@@ -697,7 +719,7 @@
       `gameRunning=${gameRunning}`,
     );
     mode = data.mode || mode;
-    _gameRollbackEnabled = !!data.rollbackEnabled;
+    _gameResyncEnabled = !!data.resyncEnabled;
 
     gameRunning = true;
 
@@ -811,6 +833,7 @@
   // ── ROM Sharing ──────────────────────────────────────────────────────
 
   const onRomSharingUpdated = (data) => {
+    if (!_ROM_SHARING_FEATURE) return;
     const wasEnabled = _romSharingEnabled;
     _romSharingEnabled = !!data.romSharing;
     console.log('[play] rom-sharing-updated:', _romSharingEnabled);
@@ -1582,11 +1605,13 @@
     const displayName = _romTransferHeader?.name ?? 'rom.z64';
     const expectedHash = _romTransferHeader?.hash ?? null;
 
-    // Set ROM data (ephemeral — do NOT cache to IndexedDB)
     _romBlob = blob;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(blob);
     window.EJS_gameUrl = _romBlobUrl;
+    // Cache received ROM so guests auto-load on future joins without re-downloading
+    _safeSet('localStorage', 'kaillera-rom-name', displayName);
+    cacheRom(blob);
 
     _romTransferState = 'complete';
     _romTransferChunks = [];
@@ -2168,6 +2193,15 @@
         gameEl.style.display = '';
         gameEl.classList.add('kn-playing');
       }
+      // Mobile: init virtual gamepad BEFORE booting EJS so #game is already at
+      // its final (smaller) size when EJS attaches its ResizeObserver.
+      // If called after boot, VirtualGamepad.init appending to the body flex
+      // layout shrinks #game, triggering a canvas resize mid-session.
+      if ('ontouchstart' in window && !isSpectator && window.VirtualGamepad) {
+        VirtualGamepad.init();
+        const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
+        if (_detected.length > 0) VirtualGamepad.setVisible(false);
+      }
       if (_hibernated && _hibernatedRomHash === _romHash) {
         wakeEmulator();
         // Streaming host needs the emulator free-running for canvas capture.
@@ -2198,7 +2232,7 @@
       return;
     }
 
-    const rollbackEnabled = _gameRollbackEnabled;
+    const resyncEnabled = _gameResyncEnabled;
 
     engine = Engine;
     engine.init({
@@ -2208,7 +2242,7 @@
       isSpectator,
       playerName,
       gameElement: document.getElementById('game'),
-      rollbackEnabled,
+      resyncEnabled,
       romHash: _romHash ?? null,
       uploadToken: _uploadToken,
       isMobile: _isMobile,
@@ -2230,6 +2264,7 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
+      onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {
         const overlay = document.getElementById('reconnect-overlay');
         if (!overlay) return;
@@ -2248,7 +2283,7 @@
           overlay.classList.remove('hidden');
           const text = document.getElementById('reconnect-text');
           const rejoinBtn = document.getElementById('reconnect-rejoin');
-          if (text) text.textContent = 'Connection lost — reconnecting...';
+          if (text) text.textContent = 'Connection lost — reconnecting & resyncing...';
           if (rejoinBtn) rejoinBtn.classList.add('hidden');
         }
       },
@@ -2292,14 +2327,42 @@
       showToast('Load a ROM file before starting');
       return;
     }
+    // Pre-unlock AudioContext for mobile host within this gesture callstack.
+    // iOS rejects AudioContext.resume() called >~1s after the user's tap.
+    // The engine won't init audio until 30+ seconds after this click (boot + state sync),
+    // so we pre-create and keep-alive the context here and the engine picks it up.
+    if (_isMobile) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && (!window._kn_preloadedAudioCtx || window._kn_preloadedAudioCtx.state === 'closed')) {
+        try {
+          window._kn_preloadedAudioCtx = new AC({ sampleRate: 44100 });
+        } catch (_) {
+          window._kn_preloadedAudioCtx = new AC();
+        }
+        window._kn_preloadedAudioCtx.resume().catch(() => {});
+        const dest = window._kn_preloadedAudioCtx.createMediaStreamDestination();
+        const el = document.createElement('audio');
+        el.srcObject = dest.stream;
+        el.play().catch(() => {});
+        window._kn_gestureAudioEl = el;
+        window._kn_gestureAudioDest = dest;
+        const gain = window._kn_preloadedAudioCtx.createGain();
+        gain.gain.value = 0;
+        const osc = window._kn_preloadedAudioCtx.createOscillator();
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+        window._kn_keepAliveOsc = osc;
+      }
+    }
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
-    const optRollback = document.getElementById('opt-rollback');
+    const optResync = document.getElementById('opt-resync');
     socket.emit(
       'start-game',
       {
         mode: selectedMode,
-        rollbackEnabled: optRollback ? optRollback.checked : false,
+        resyncEnabled: optResync ? optResync.checked : false,
         romHash: _romHash ?? null,
       },
       (err) => {
@@ -2492,6 +2555,8 @@
         if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
+        if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
+        else delete nameEl.dataset.a21;
         // Show input type indicator
         if (gpEl) {
           const itype = playerInSlot.inputType || 'keyboard';
@@ -2507,6 +2572,7 @@
       } else {
         nameEl.textContent = 'Open';
         nameEl.classList.add('empty');
+        delete nameEl.dataset.a21;
         if (gpEl) {
           gpEl.textContent = '';
           gpEl.title = '';
@@ -2631,7 +2697,7 @@
     if (toolbar) toolbar.classList.remove('hidden');
 
     const roomEl = document.getElementById('toolbar-room');
-    if (roomEl) roomEl.textContent = `Room: ${roomCode}`;
+    if (roomEl) roomEl.textContent = roomCode;
 
     const endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
@@ -2732,6 +2798,11 @@
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
 
+  const showSyncStatus = (_msg) => {
+    // Intentionally silent — updating toolbar-status wraps the toolbar on mobile,
+    // shrinking #game and triggering EJS ResizeObserver (canvas clear).
+  };
+
   const showToast = (msg) => {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -2798,11 +2869,87 @@
   };
 
   const copyLink = () => {
-    const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-    copyToClipboard(url, 'Link');
+    // Toggle overlay invite dropdown — positioned via JS to escape overflow:auto clipping
+    const existing = document.getElementById('kn-invite-dropdown');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const btn = document.getElementById('copy-link');
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+
+    const dropdown = document.createElement('div');
+    dropdown.id = 'kn-invite-dropdown';
+    Object.assign(dropdown.style, {
+      position: 'fixed',
+      top: `${rect.bottom + 6}px`,
+      right: `${window.innerWidth - rect.right}px`,
+      background: '#1a1a2e',
+      border: '1px solid #2a2a40',
+      borderRadius: '8px',
+      padding: '4px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: '140px',
+      zIndex: '99999',
+    });
+
+    const makeOption = (label, url, title) => {
+      const opt = document.createElement('button');
+      opt.textContent = label;
+      opt.className = 'share-option';
+      opt.addEventListener('click', () => {
+        shareOrCopy(url, `${label} link`, title);
+        dropdown.remove();
+      });
+      return opt;
+    };
+
+    const playUrl = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
+    const watchUrl = `${playUrl}&spectate=1`;
+    dropdown.append(
+      makeOption('Play', playUrl, 'Join my game on Kaillera Next'),
+      makeOption('Watch', watchUrl, 'Watch my game on Kaillera Next'),
+    );
+
+    document.body.appendChild(dropdown);
+
+    // Close on outside click (next tick to avoid immediate self-close)
+    setTimeout(() => {
+      const close = (e) => {
+        if (!dropdown.contains(e.target) && e.target !== btn) {
+          dropdown.remove();
+          document.removeEventListener('click', close);
+        }
+      };
+      document.addEventListener('click', close);
+    }, 0);
   };
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
+
+  const _canNativeShare = _isMobile && typeof navigator.share === 'function';
+
+  const nativeShare = async (url, title) => {
+    try {
+      await navigator.share({ title, url });
+    } catch (err) {
+      // AbortError = user dismissed; NotAllowedError = permission denied (e.g. no gesture)
+      if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+        showToast('Share failed');
+      }
+    }
+  };
+
+  const shareOrCopy = async (url, label, title) => {
+    if (_canNativeShare) {
+      await nativeShare(url, title);
+    } else {
+      await copyToClipboard(url, label);
+    }
+  };
 
   const copyToClipboard = async (text, label) => {
     if (navigator.clipboard && window.isSecureContext) {
@@ -2832,10 +2979,17 @@
     const isOpen = !dd.classList.contains('hidden');
     if (isOpen) {
       dd.classList.add('hidden');
-      if (btn) btn.classList.remove('active');
+      if (btn) {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-expanded', 'false');
+      }
     } else {
+      closeMoreDropdown();
       dd.classList.remove('hidden');
-      if (btn) btn.classList.add('active');
+      if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-expanded', 'true');
+      }
     }
   };
 
@@ -2843,7 +2997,43 @@
     const dd = document.getElementById('share-dropdown');
     const btn = document.getElementById('toolbar-share');
     if (dd) dd.classList.add('hidden');
-    if (btn) btn.classList.remove('active');
+    if (btn) {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  };
+
+  // ── UI: More (overflow) Dropdown ──────────────────────────────────────
+
+  const toggleMoreDropdown = () => {
+    const dd = document.getElementById('more-dropdown');
+    const btn = document.getElementById('toolbar-more');
+    if (!dd) return;
+    const isOpen = !dd.classList.contains('hidden');
+    if (isOpen) {
+      dd.classList.add('hidden');
+      if (btn) {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    } else {
+      closeShareDropdown();
+      dd.classList.remove('hidden');
+      if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    }
+  };
+
+  const closeMoreDropdown = () => {
+    const dd = document.getElementById('more-dropdown');
+    const btn = document.getElementById('toolbar-more');
+    if (dd) dd.classList.add('hidden');
+    if (btn) {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-expanded', 'false');
+    }
   };
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
@@ -3405,6 +3595,13 @@
     console.log('kaillera-next — v0.9 forever');
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
+    // Agent 21 badge — gold jersey number for the creator's handle
+    const _a21style = document.createElement('style');
+    _a21style.textContent =
+      `.name[data-a21]::after{content:'21';display:inline-block;` +
+      `margin-left:5px;padding:1px 5px;background:#c9a227;color:#111;` +
+      `border-radius:3px;font-size:.7em;font-weight:700;vertical-align:middle;}`;
+    document.head.appendChild(_a21style);
     parseParams();
     if (!roomCode) {
       window.location.href = '/';
@@ -3449,10 +3646,18 @@
     if (toolbarLeave) toolbarLeave.addEventListener('click', leaveGame);
 
     const toolbarEnd = document.getElementById('toolbar-end');
-    if (toolbarEnd) toolbarEnd.addEventListener('click', endGame);
+    if (toolbarEnd)
+      toolbarEnd.addEventListener('click', () => {
+        closeMoreDropdown();
+        endGame();
+      });
 
     const toolbarInfo = document.getElementById('toolbar-info');
-    if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
+    if (toolbarInfo)
+      toolbarInfo.addEventListener('click', () => {
+        closeMoreDropdown();
+        toggleInfoOverlay();
+      });
 
     // Mobile: tap info overlay to expand/collapse details
     const infoOverlay = document.getElementById('info-overlay');
@@ -3475,28 +3680,39 @@
     if (toolbarShare) toolbarShare.addEventListener('click', toggleShareDropdown);
 
     const sharePlay = document.getElementById('share-play');
-    if (sharePlay)
+    if (sharePlay) {
       sharePlay.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-        copyToClipboard(url, 'Play link');
+        shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
         closeShareDropdown();
       });
+    }
 
     const shareWatch = document.getElementById('share-watch');
-    if (shareWatch)
+    if (shareWatch) {
       shareWatch.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
-        copyToClipboard(url, 'Watch link');
+        shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
         closeShareDropdown();
       });
+    }
 
-    // Close share dropdown on outside click or Escape
+    // More (overflow) dropdown
+    const toolbarMore = document.getElementById('toolbar-more');
+    if (toolbarMore) toolbarMore.addEventListener('click', toggleMoreDropdown);
+
+    // Close dropdowns on outside click or Escape
     document.addEventListener('click', (e) => {
-      const wrapper = document.getElementById('share-wrapper');
-      if (wrapper && !wrapper.contains(e.target)) closeShareDropdown();
+      const shareW = document.getElementById('share-wrapper');
+      if (shareW && !shareW.contains(e.target)) closeShareDropdown();
+      const moreW = document.getElementById('more-wrapper');
+      if (moreW && !moreW.contains(e.target)) closeMoreDropdown();
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeShareDropdown();
+      if (e.key === 'Escape') {
+        closeShareDropdown();
+        closeMoreDropdown();
+      }
     });
 
     const copyBtn = document.getElementById('copy-link');
@@ -3508,6 +3724,7 @@
     if (modeSelect && lockstepOpts) {
       // Set mode-select from URL params before running updateOpts
       modeSelect.value = mode;
+      let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
         const isLockstep = modeSelect.value === 'lockstep';
         lockstepOpts.style.display = isLockstep ? '' : 'none';
@@ -3519,13 +3736,19 @@
         const romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
         if (romSharingRow) romSharingRow.style.display = isLockstep ? '' : 'none';
         if (!isLockstep && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
-        // Auto-disable sharing when switching to streaming
+        const cb = document.getElementById('opt-rom-sharing');
         if (!isLockstep) {
-          const cb = document.getElementById('opt-rom-sharing');
+          // Switching to streaming — save and disable sharing
+          _romSharingBeforeStreamingMode = cb?.checked ?? false;
           if (cb?.checked) {
             cb.checked = false;
             socket.emit('rom-sharing-toggle', { enabled: false });
           }
+        } else if (_romSharingBeforeStreamingMode && cb && !cb.checked) {
+          // Switching back to lockstep — restore previous sharing state
+          cb.checked = true;
+          socket.emit('rom-sharing-toggle', { enabled: true });
+          _romSharingBeforeStreamingMode = false;
         }
         updateRomDeclarePrompt();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
@@ -3542,16 +3765,26 @@
 
     // ROM sharing toggle
     const romShareCb = document.getElementById('opt-rom-sharing');
-    if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
+    if (!_ROM_SHARING_FEATURE) {
+      // Feature disabled server-side — hide all ROM sharing UI permanently.
+      const sharingRow = document.getElementById('rom-sharing-options');
+      const sharingPrompt = document.getElementById('rom-sharing-prompt');
+      const sharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
+      if (sharingRow) sharingRow.style.display = 'none';
+      if (sharingPrompt) sharingPrompt.style.display = 'none';
+      if (sharingDisclaimer) sharingDisclaimer.style.display = 'none';
+    } else {
+      if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
 
-    // Show/hide disclaimer based on checkbox
-    const romDisclaimer = document.getElementById('rom-sharing-disclaimer');
-    if (romShareCb && romDisclaimer) {
-      const updateDisclaimer = () => {
-        romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
-      };
-      romShareCb.addEventListener('change', updateDisclaimer);
-      updateDisclaimer();
+      // Show/hide disclaimer based on checkbox
+      const romDisclaimer = document.getElementById('rom-sharing-disclaimer');
+      if (romShareCb && romDisclaimer) {
+        const updateDisclaimer = () => {
+          romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
+        };
+        romShareCb.addEventListener('change', updateDisclaimer);
+        updateDisclaimer();
+      }
     }
 
     // ROM sharing accept/decline/cancel buttons
@@ -3611,7 +3844,11 @@
 
     // In-game remap (toolbar button + overlay buttons)
     const toolbarRemapBtn = document.getElementById('toolbar-remap');
-    if (toolbarRemapBtn) toolbarRemapBtn.addEventListener('click', () => startWizard(true));
+    if (toolbarRemapBtn)
+      toolbarRemapBtn.addEventListener('click', () => {
+        closeMoreDropdown();
+        startWizard(true);
+      });
 
     const igBackBtn = document.getElementById('ingame-remap-back');
     if (igBackBtn) igBackBtn.addEventListener('click', wizardBack);
@@ -3626,6 +3863,7 @@
     const toolbarLogs = document.getElementById('toolbar-logs');
     if (toolbarLogs) {
       toolbarLogs.addEventListener('click', () => {
+        closeMoreDropdown();
         uploadSyncLogs('manual');
       });
     }

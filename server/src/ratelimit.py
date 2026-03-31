@@ -25,7 +25,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "rom-signal": (60, 1),
     "cache-state": (5, 60),
     "sync-logs": (10, 60),
-    "client-event": (10, 60),
+    "client-event": (60, 60),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
 }

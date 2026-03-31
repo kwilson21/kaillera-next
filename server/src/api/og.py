@@ -20,6 +20,32 @@ GAME_INFO: dict[str, dict[str, str]] = {
     "ssb64": {"image": "ssb64.jpg", "name": "Super Smash Bros. 64"},
 }
 
+# Raw env var values — evaluated per-request via feature_enabled_for_host().
+# Each can be "true" (all hosts), "false" (no hosts), or "domain1.com,domain2.com"
+# (enabled only for the listed hostnames, port-stripped).
+_GAME_IMAGES_RAW = os.environ.get("GAME_IMAGES_ENABLED", "true")
+_ROM_SHARING_RAW = os.environ.get("ROM_SHARING_ENABLED", "true")
+
+
+def feature_enabled_for_host(raw: str, host: str) -> bool:
+    """Return True if the feature is enabled for the given request host.
+
+    raw values:
+      "true" / "" / "1"  → enabled for all hosts (default)
+      "false" / "0"      → disabled for all hosts
+      "a.com,b.com"      → enabled only when host matches one of the listed domains
+    """
+    val = raw.strip().lower()
+    if val in ("true", "1", ""):
+        return True
+    if val in ("false", "0"):
+        return False
+    # Comma-separated domain allow-list — strip port before comparing.
+    request_host = host.split(":")[0].lower()
+    allowed = {d.strip().lower() for d in raw.split(",") if d.strip()}
+    return request_host in allowed
+
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
@@ -52,10 +78,11 @@ def _build_card_html(
     game_id: str | None,
     spectate: bool,
     player_names: list[str] | None = None,
+    game_images_enabled: bool = True,
 ) -> str:
     """Build a self-contained HTML page for the OG card."""
     game_info = GAME_INFO.get(game_id) if game_id else None
-    has_game_bg = game_info is not None and (_OG_DIR / game_info["image"]).exists()
+    has_game_bg = game_images_enabled and game_info is not None and (_OG_DIR / game_info["image"]).exists()
     is_homepage = room_name is None
 
     # Background image as base64 data URI for self-contained HTML
@@ -73,10 +100,7 @@ def _build_card_html(
     text_shadow_class = "text-shadowed" if has_game_bg else ""
 
     # kn watermark
-    if has_game_bg:
-        kn_html = '<div class="kn-bg">kn</div>'
-    else:
-        kn_html = '<div class="kn-bg-generic">kn</div>'
+    kn_html = '<div class="kn-bg">kn</div>' if has_game_bg else '<div class="kn-bg-generic">kn</div>'
 
     # Badge
     badge_html = ""
@@ -102,7 +126,9 @@ def _build_card_html(
         if len(player_names) == 2:
             subtitle = f"{_html_escape(player_names[0])} vs {_html_escape(player_names[1])}"
         else:
-            subtitle = f"{_html_escape(player_names[0])}, {_html_escape(player_names[1])} & {len(player_names) - 2} more"
+            subtitle = (
+                f"{_html_escape(player_names[0])}, {_html_escape(player_names[1])} & {len(player_names) - 2} more"
+            )
         subtitle_class = "subtitle-blue"
     elif spectate:
         subtitle = f"{_html_escape(room_name)} is playing"
@@ -281,6 +307,7 @@ async def generate_og_image(
     game_id: str | None,
     spectate: bool,
     player_names: list[str] | None = None,
+    game_images_enabled: bool = True,
 ) -> bytes:
     """Generate a 1200x630 OG card image by screenshotting HTML.
 
@@ -289,11 +316,12 @@ async def generate_og_image(
         game_id: Game identifier for background lookup (None for homepage).
         spectate: True for "WATCH GAME" badge, False for "JOIN GAME".
         player_names: List of player names in room (for spectate cards).
+        game_images_enabled: When False, renders text-only card with no game art.
 
     Returns:
         PNG image as bytes.
     """
-    html = _build_card_html(room_name, game_id, spectate, player_names)
+    html = _build_card_html(room_name, game_id, spectate, player_names, game_images_enabled)
     browser = await _get_browser()
     page = await browser.new_page(viewport={"width": 1200, "height": 630})
     try:
@@ -320,10 +348,7 @@ def build_og_tags(
 
     if room_id and room_name:
         game_label = game_info["name"] if game_info else (game_id or "")
-        if spectate:
-            title = f"Come watch! {room_name} is playing"
-        else:
-            title = f"Ready to fight? {room_name} is waiting"
+        title = f"Come watch! {room_name} is playing" if spectate else f"Ready to fight? {room_name} is waiting"
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
@@ -361,3 +386,11 @@ def build_og_tags(
 def inject_og_tags(html: str, og_tags: str) -> str:
     """Inject OG meta tags into cached HTML by inserting after <head> opening tag."""
     return _HEAD_RE.sub(rf"\1\n    {og_tags}", html, count=1)
+
+
+def _inject_kn_config(html: str, *, rom_sharing_enabled: bool) -> str:
+    """Inject server-side feature flags as window.KN_CONFIG before </head>."""
+    config_js = (
+        f'<script>window.KN_CONFIG = {{"romSharingEnabled": {"true" if rom_sharing_enabled else "false"}}};</script>'
+    )
+    return html.replace("</head>", f"  {config_js}\n</head>", 1)

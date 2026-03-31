@@ -117,7 +117,7 @@ cd "${SRC_DIR}/mupen64plus-libretro-nx"
 emmake make -f Makefile platform=emscripten clean 2>/dev/null || true
 
 # Build
-emmake make -j$(nproc) -f Makefile platform=emscripten
+emmake make -j$(nproc) -f Makefile platform=emscripten LTO=1
 
 BC_FILE="${SRC_DIR}/mupen64plus-libretro-nx/mupen64plus_next_libretro_emscripten.bc"
 if [ ! -f "${BC_FILE}" ]; then
@@ -151,6 +151,7 @@ emmake make -f Makefile.emulatorjs \
     STACK_SIZE=134217728 \
     INITIAL_HEAP=536870912 \
     TARGET=mupen64plus_next_libretro.js \
+    LTO=1 \
     -j$(nproc)
 
 JS_FILE="${SRC_DIR}/RetroArch/mupen64plus_next_libretro.js"

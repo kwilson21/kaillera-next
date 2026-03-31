@@ -4,83 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>VGP Test</title>
+    <!-- Use the real play.css so body/game/toolbar/info-overlay styles match production exactly
+         (including 100dvh, #info-overlay in-flow on mobile, #gamepad-indicator, etc.) -->
+    <link rel="stylesheet" href="/static/play.css" />
     <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
-      }
-      body {
-        background: #111;
-        color: #eee;
-        font-family: sans-serif;
-        height: 100vh;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        overflow: hidden;
-      }
-      #game {
-        width: 100vw;
-        max-width: 100vw;
-        flex: 1 1 0;
-        min-height: 0;
-        margin: auto 0;
-        order: 1;
-        position: relative;
-        background: #000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
+      /* Mock game canvas */
       #game .game-content {
         height: 100%;
         aspect-ratio: 4/3;
         max-width: 100%;
+        margin: 0 auto;
         background: linear-gradient(135deg, #1a2a1a 25%, #1a3a1a 50%, #1a2a1a 75%);
         border: 2px solid rgba(100, 255, 100, 0.4);
       }
-      #toolbar {
-        width: 100%;
-        flex-shrink: 0;
-        order: 10;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        padding: 8px 12px;
-        background: rgba(17, 17, 17, 0.95);
-        z-index: 50;
-        align-items: center;
-      }
-      #toolbar span {
-        font-size: 12px;
-        color: #888;
-      }
-      #toolbar .status {
-        color: #6af;
-        margin-left: 8px;
-      }
-      .toolbar-spacer {
-        flex: 1;
-      }
-      #toolbar button {
-        padding: 6px 12px;
-        font-size: 12px;
-        min-height: 36px;
-        border: none;
-        border-radius: 6px;
-        color: #fff;
-        cursor: pointer;
-      }
-      .toolbar-toggle {
-        background: #333;
-        font-size: 11px !important;
-        padding: 4px 10px !important;
-        min-height: 28px !important;
-      }
-      #toolbar-leave {
-        background: #8a3a3a;
-      }
+      /* Device label injected by the test runner */
       #device-label {
         position: fixed;
         top: 0;
@@ -100,12 +37,36 @@
   <body>
     <div id="device-label"></div>
     <div id="game"><div class="game-content"></div></div>
-    <div id="toolbar">
-      <span>Room: TEST1234</span><span class="status">Connected -- game on!</span>
-      <div class="toolbar-spacer"></div>
-      <button class="toolbar-toggle">Share</button><button class="toolbar-toggle">Info</button
-      ><button class="toolbar-toggle">Remap</button><button id="toolbar-leave">Leave Game</button>
+
+    <!-- Matches production in-flow elements (order 8 + 9 on mobile) -->
+    <div id="info-overlay">
+      <span id="info-header">Room TEST1234</span>
+      <span id="info-stats">f=1234 delay=4f ping=32ms</span>
     </div>
+    <div id="gamepad-indicator" class="hidden">Gamepad connected</div>
+
+    <div id="toolbar">
+      <span id="toolbar-room">TEST1234</span>
+      <span id="toolbar-status"></span>
+      <div class="toolbar-spacer"></div>
+      <div id="share-wrapper">
+        <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
+        <div id="share-dropdown" class="share-dropdown hidden">
+          <button id="share-play" class="share-option">Share Play Link</button>
+          <button id="share-watch" class="share-option">Share Watch Link</button>
+        </div>
+      </div>
+      <button id="toolbar-leave">Leave</button>
+      <div id="more-wrapper">
+        <button id="toolbar-more" class="toolbar-toggle" title="More options">&#x22EF;</button>
+        <div id="more-dropdown" class="more-dropdown hidden">
+          <button id="toolbar-info" class="more-option">Info</button>
+          <button id="toolbar-remap" class="more-option">Remap</button>
+          <button id="toolbar-end" class="more-option more-end">End Game</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       window.KNState = { touchInput: {} };
       for (let i = 0; i < 24; i++) window.KNState.touchInput[i] = 0;

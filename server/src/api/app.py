@@ -39,10 +39,18 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 
 from src import state
-from src.api.og import build_og_tags, generate_og_image, inject_og_tags
+from src.api.og import (
+    _GAME_IMAGES_RAW,
+    _ROM_SHARING_RAW,
+    _inject_kn_config,
+    build_og_tags,
+    feature_enabled_for_host,
+    generate_og_image,
+    inject_og_tags,
+)
 from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
 from src.ratelimit import check_ip
 
@@ -394,6 +402,12 @@ def create_app(lifespan=None) -> FastAPI:
 
     log.info("Cache bust version: %s", version)
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+    async def favicon_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/static/favicon.svg", status_code=302)
+
     @app.get("/health")
     async def health() -> dict:
         redis_ok = await state.ping()
@@ -708,9 +722,20 @@ def create_app(lifespan=None) -> FastAPI:
         for f in sorted(_ERROR_LOG_DIR.glob("evt-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             stat = f.stat()
             # Parse filename: evt-{type}-{room}-{ts}-{rand}.json
-            parts = f.stem.split("-", 3)
-            evt_type = parts[1] if len(parts) > 1 else "?"
-            room_code = parts[2] if len(parts) > 2 else "?"
+            # Event types can contain hyphens (e.g. "webrtc-fail"), so match
+            # against the known set rather than splitting on the Nth dash.
+            stem = f.stem
+            evt_type = "?"
+            room_code = "?"
+            if stem.startswith("evt-"):
+                body = stem[4:]  # strip "evt-"
+                for t in _VALID_EVENT_TYPES:
+                    if body.startswith(t + "-"):
+                        evt_type = t
+                        rest = body[len(t) + 1 :]  # "{room}-{ts}-{rand}"
+                        rest_parts = rest.rsplit("-", 2)
+                        room_code = rest_parts[0] if len(rest_parts) == 3 else rest
+                        break
             result.append(
                 {
                     "filename": f.name,
@@ -772,12 +797,15 @@ def create_app(lifespan=None) -> FastAPI:
             room = rooms.get(room_id)
             spectate = request.query_params.get("spectate") == "1"
             game_hint = request.query_params.get("game")  # fallback from URL param
+            game_images = feature_enabled_for_host(_GAME_IMAGES_RAW, request.headers.get("host", ""))
             if room:
                 names = _player_names(room) if spectate else None
                 game_id = room.game_id or game_hint
-                img = await generate_og_image(_owner_name(room), game_id, spectate, player_names=names)
+                img = await generate_og_image(
+                    _owner_name(room), game_id, spectate, player_names=names, game_images_enabled=game_images
+                )
             else:
-                img = await generate_og_image(room_id, game_hint, spectate)
+                img = await generate_og_image(room_id, game_hint, spectate, game_images_enabled=game_images)
         except Exception:
             log.warning("OG image generation failed for room %s", room_id, exc_info=True)
             if _fallback_png.exists():
@@ -806,6 +834,7 @@ def create_app(lifespan=None) -> FastAPI:
         else:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)
+        html = _inject_kn_config(html, rom_sharing_enabled=feature_enabled_for_host(_ROM_SHARING_RAW, host))
         return Response(content=html, media_type="text/html")
 
     @app.get("/")

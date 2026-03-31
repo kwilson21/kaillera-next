@@ -7,9 +7,10 @@
 class LockstepAudioProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
-    // Ring buffer: ~50ms at the given sample rate (3 frames at 60fps)
+    // Ring buffer: ~300ms at the given sample rate — large enough to survive
+    // resync stalls (which can last 100-300ms waiting for coordinated state).
     const rate = options.processorOptions?.sampleRate ?? 33600;
-    this._bufSize = Math.ceil(rate * 0.05) * 2; // stereo samples
+    this._bufSize = Math.ceil(rate * 0.3) * 2; // stereo samples
     this._buf = new Float32Array(this._bufSize);
     this._readPos = 0;
     this._writePos = 0;

@@ -32,6 +32,14 @@ package-lock.json
 # MCP config (local)
 .mcp.json
 
+# Local tooling dirs (Claude, superpowers plugins)
+.claude/
+.superpowers/
+
+# Runtime logs
+server/logs/
+tests/diag-screenshots/
+
 # Screenshots (dev artifacts)
 *.png
 !web/static/og/*.png

@@ -288,8 +288,9 @@
           const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
           const overlay = document.createElement('div');
           overlay.id = 'stream-overlay';
-          // Take the same flex slot as #game (which is hidden during streaming guest)
-          overlay.style.cssText = 'width:100%;max-width:100vw;flex:1 1 0;overflow:hidden;';
+          // Take #game's flex slot — hide #game so overlay gets all the space
+          overlay.style.cssText = 'width:100%;max-width:100vw;flex:1 1 0;overflow:hidden;order:1;';
+          gameDiv.style.display = 'none';
           overlay.appendChild(_guestVideo);
           gameDiv.parentNode.insertBefore(overlay, gameDiv.nextSibling);
         }
@@ -575,6 +576,9 @@
       const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
       _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
       const captureTrack = _hostStream.getVideoTracks()[0];
+      // 'motion' hint tells the browser encoder to use a low-latency profile
+      // (e.g. CBP H264, shorter GOP) rather than optimizing for quality.
+      if ('contentHint' in captureTrack) captureTrack.contentHint = 'motion';
 
       let _blitCount = 0;
       let _lastSrcW = srcCanvas.width;
@@ -717,6 +721,7 @@
         }
         params.encodings[0].maxBitrate = 2_500_000; // 2.5 Mbps (ample for 640x480 N64)
         params.encodings[0].maxFramerate = 60;
+        params.encodings[0].networkPriority = 'high'; // DSCP EF — minimize queuing delay
         // No scaleResolutionDownBy needed — capture canvas is already 640x480
         params.degradationPreference = 'maintain-framerate';
         try {
@@ -1000,7 +1005,7 @@
     // startHost() / startGuestInputLoop() triggered from ch.onopen
 
     // Virtual gamepad for mobile streaming guests
-    if (config.isMobile && !_isSpectator && _playerSlot !== 0 && window.VirtualGamepad) {
+    if (config.isMobile && !_isSpectator && window.VirtualGamepad) {
       const gameEl = config.gameElement || document.getElementById('game');
       if (gameEl) {
         try {
@@ -1062,6 +1067,9 @@
       if (streamOverlay) streamOverlay.remove();
       else if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);
       _guestVideo = null;
+      // Restore #game visibility (was hidden when overlay was inserted)
+      const gameDiv = (_config && _config.gameElement) || document.getElementById('game');
+      if (gameDiv) gameDiv.style.display = '';
     }
     const unmuteBanner = document.getElementById('unmute-banner');
     if (unmuteBanner) unmuteBanner.classList.add('hidden');

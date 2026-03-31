@@ -91,7 +91,7 @@ class SetNamePayload(BaseModel):
 
 class StartGamePayload(BaseModel):
     mode: str = "lockstep"
-    rollbackEnabled: bool = False
+    resyncEnabled: bool = False
     romHash: str | None = None
 
 
