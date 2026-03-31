@@ -2621,6 +2621,10 @@
       }
 
       gm.loadState(bytes);
+      // Seed the delta base so future delta syncs have a reference.
+      // Without this, the first desync-triggered sync arrives as a delta
+      // but _lastSyncState is null → "delta base missing" → resync fails.
+      _setLastSyncState(bytes.slice(), 'late-join');
       enterManualMode();
 
       // Sync to the host's current frame. The host sent the state at msg.frame,
