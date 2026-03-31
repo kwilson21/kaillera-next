@@ -4817,6 +4817,15 @@
     _peers = {};
     KNState.peers = _peers;
 
+    // Pause the emulator before restoring rAF — without this, the Emscripten
+    // main loop is still in "resumed" state with a captured runner. Restoring
+    // native rAF while the loop is resumed causes two concurrent frame runners
+    // (the captured one + a new rAF callback), resulting in 2x FPS.
+    const stopMod = window.EJS_emulator?.gameManager?.Module;
+    if (stopMod?.pauseMainLoop && _manualMode) {
+      stopMod.pauseMainLoop();
+    }
+
     // Restore all overridden browser APIs (rAF, performance.now, getGamepads)
     APISandbox.restoreAll();
     _manualMode = false;
