@@ -1258,7 +1258,7 @@
               setStatus('Peer connection lost');
               handlePeerDisconnect(remoteSid);
             }
-          }, 7000);
+          }, 3000);
         }
       }
     };
@@ -1812,14 +1812,15 @@
                   // single 5G spike permanently inflating delay for the whole session.
                   if (neededDelay > DELAY_FRAMES) {
                     peer._liveRttHighCount = (peer._liveRttHighCount || 0) + 1;
+                    peer._liveRttLowCount = 0;
+                  } else if (neededDelay < DELAY_FRAMES) {
+                    peer._liveRttHighCount = 0;
+                    peer._liveRttLowCount = (peer._liveRttLowCount || 0) + 1;
                   } else {
                     peer._liveRttHighCount = 0;
+                    peer._liveRttLowCount = 0;
                   }
-                  if (neededDelay > DELAY_FRAMES && peer._liveRttHighCount >= 2) {
-                    DELAY_FRAMES = neededDelay;
-                    _syncLog(
-                      `delay increased to ${DELAY_FRAMES}f (live RTT=${liveRtt.toFixed(1)}ms x${peer._liveRttHighCount})`,
-                    );
+                  const broadcastDelay = () => {
                     for (const p of Object.values(_peers)) {
                       if (p.dc?.readyState === 'open') {
                         try {
@@ -1827,13 +1828,34 @@
                         } catch (_) {}
                       }
                     }
+                  };
+                  if (neededDelay > DELAY_FRAMES && peer._liveRttHighCount >= 2) {
+                    DELAY_FRAMES = neededDelay;
+                    _syncLog(
+                      `delay increased to ${DELAY_FRAMES}f (live RTT=${liveRtt.toFixed(1)}ms x${peer._liveRttHighCount})`,
+                    );
+                    broadcastDelay();
+                  } else if (neededDelay < DELAY_FRAMES && peer._liveRttLowCount >= 4) {
+                    // Gradual decrease: drop 1 frame at a time, require 4 consecutive
+                    // low readings (~20s) to avoid oscillation on jittery connections.
+                    const newDelay = Math.max(2, DELAY_FRAMES - 1);
+                    if (newDelay < DELAY_FRAMES) {
+                      DELAY_FRAMES = newDelay;
+                      peer._liveRttLowCount = 0;
+                      _syncLog(
+                        `delay decreased to ${DELAY_FRAMES}f (live RTT=${liveRtt.toFixed(1)}ms, needed=${neededDelay}f)`,
+                      );
+                      broadcastDelay();
+                    }
                   }
                 }
               }
             } else if (msg.type === 'delay-update') {
-              if (typeof msg.delay === 'number' && msg.delay > DELAY_FRAMES) {
+              if (typeof msg.delay === 'number' && msg.delay >= 2 && msg.delay <= 9) {
+                const direction =
+                  msg.delay > DELAY_FRAMES ? 'increased' : msg.delay < DELAY_FRAMES ? 'decreased' : 'unchanged';
                 DELAY_FRAMES = msg.delay;
-                _syncLog(`delay updated to ${msg.delay}f by peer (reconnect)`);
+                _syncLog(`delay ${direction} to ${msg.delay}f by peer`);
               }
             } else if (_onUnhandledMessage) {
               _onUnhandledMessage(remoteSid, msg);
