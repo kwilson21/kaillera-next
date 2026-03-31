@@ -2876,7 +2876,7 @@
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
 
-  const _canNativeShare = typeof navigator.share === 'function';
+  const _canNativeShare = _isMobile && typeof navigator.share === 'function';
 
   const nativeShare = async (url, title) => {
     try {
