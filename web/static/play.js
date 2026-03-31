@@ -2283,7 +2283,7 @@
           overlay.classList.remove('hidden');
           const text = document.getElementById('reconnect-text');
           const rejoinBtn = document.getElementById('reconnect-rejoin');
-          if (text) text.textContent = 'Connection lost — reconnecting...';
+          if (text) text.textContent = 'Connection lost — reconnecting & resyncing...';
           if (rejoinBtn) rejoinBtn.classList.add('hidden');
         }
       },

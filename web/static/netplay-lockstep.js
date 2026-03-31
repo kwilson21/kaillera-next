@@ -1227,14 +1227,14 @@
           peer._disconnectTimer = null;
         }
         if (_peers[remoteSid] !== peer) return;
-        setStatus('Player dropped — connection failed');
+        // handlePeerDisconnect will attempt reconnect if game is running
         handlePeerDisconnect(remoteSid);
       }
       if (s === 'disconnected') {
         // Disconnected is recoverable — give ICE time to reconnect (mobile-friendly)
         if (_peers[remoteSid] !== peer) return;
         if (!peer._disconnectTimer) {
-          setStatus('Player connection unstable...');
+          setStatus('Connection unstable — standing by...');
           peer._disconnectTimer = setTimeout(() => {
             peer._disconnectTimer = null;
             // Still disconnected or failed after grace period — give up
@@ -1242,7 +1242,8 @@
             if (currentState === 'disconnected' || currentState === 'failed') {
               _syncLog(`peer ${remoteSid} disconnect grace expired (was ${currentState})`);
               if (_peers[remoteSid] !== peer) return;
-              setStatus('Peer connection lost');
+              // Don't show "lost" — handlePeerDisconnect will attempt reconnect
+              // and show the appropriate "reconnecting..." status
               handlePeerDisconnect(remoteSid);
             }
           }, 3000);
@@ -1398,7 +1399,7 @@
         }
         const rKnown = _knownPlayers[remoteSid];
         const rName = rKnown ? rKnown.playerName : `P${(peer.slot ?? 0) + 1}`;
-        setStatus(`${rName} reconnected`);
+        setStatus(`${rName} reconnected — resyncing...`);
         _config?.onToast?.(`${rName} reconnected`);
         _config?.onReconnecting?.(remoteSid, false);
         _config?.onPeerReconnected?.(remoteSid);
@@ -1907,7 +1908,7 @@
 
       const known = _knownPlayers[remoteSid];
       const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
-      setStatus(`${name} disconnected — reconnecting...`);
+      setStatus(`${name} disconnected — reconnecting & resyncing...`);
       _config?.onToast?.(`${name} disconnected — reconnecting...`);
       _config?.onReconnecting?.(remoteSid, true);
 
