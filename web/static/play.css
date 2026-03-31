@@ -167,7 +167,7 @@ body {
 }
 
 .name-label {
-  font-size: 13px;
+  font-size: 14px;
   color: #888;
   white-space: nowrap;
 }
@@ -192,7 +192,7 @@ body {
 
 .copy-btn {
   padding: 8px 14px !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
   min-height: 44px !important;
   background: #2a2a40 !important;
   white-space: nowrap;
@@ -271,12 +271,12 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   color: #ccc;
 }
 
 .mode-label {
-  font-size: 13px;
+  font-size: 14px;
   color: #888;
   white-space: nowrap;
 }
@@ -287,7 +287,7 @@ body {
   border-radius: 5px;
   color: #eee;
   padding: 6px 8px;
-  font-size: 13px;
+  font-size: 14px;
   flex: 1;
 }
 
@@ -335,7 +335,7 @@ body {
   text-align: center;
   color: #666;
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 #gamepad-area {
@@ -371,7 +371,7 @@ button {
   border-radius: 6px;
   background: #3a5a8a;
   color: #fff;
-  font-size: 14px;
+  font-size: 15px;
   cursor: pointer;
   min-height: 44px;
 }
@@ -382,7 +382,7 @@ button:hover {
 
 .small-btn {
   padding: 8px 12px !important;
-  font-size: 13px !important;
+  font-size: 14px !important;
   min-height: 44px !important;
   background: #2a2a40 !important;
 }
@@ -413,7 +413,7 @@ button:hover {
   margin-top: 8px;
   min-height: 44px;
   background: #3a2a2a;
-  font-size: 13px;
+  font-size: 14px;
   padding: 10px;
   min-height: 38px;
 }
