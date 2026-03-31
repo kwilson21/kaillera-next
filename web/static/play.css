@@ -306,8 +306,8 @@ body {
 #lockstep-options input[type='checkbox'],
 .overlay-card input[type='checkbox'] {
   accent-color: #7c5cff;
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
   flex-shrink: 0;
 }
 .opt-hint {
