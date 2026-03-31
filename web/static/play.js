@@ -2869,15 +2869,63 @@
   };
 
   const copyLink = () => {
-    // Toggle overlay invite dropdown
-    const dropdown = document.getElementById('overlay-invite-dropdown');
-    if (dropdown) {
-      dropdown.classList.toggle('hidden');
+    // Toggle overlay invite dropdown — positioned via JS to escape overflow:auto clipping
+    const existing = document.getElementById('kn-invite-dropdown');
+    if (existing) {
+      existing.remove();
       return;
     }
-    // Fallback: copy play link directly
-    const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-    shareOrCopy(url, 'Link', 'Join my game on Kaillera Next');
+    const btn = document.getElementById('copy-link');
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+
+    const dropdown = document.createElement('div');
+    dropdown.id = 'kn-invite-dropdown';
+    Object.assign(dropdown.style, {
+      position: 'fixed',
+      top: `${rect.bottom + 6}px`,
+      right: `${window.innerWidth - rect.right}px`,
+      background: '#1a1a2e',
+      border: '1px solid #2a2a40',
+      borderRadius: '8px',
+      padding: '4px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      minWidth: '140px',
+      zIndex: '99999',
+    });
+
+    const makeOption = (label, url, title) => {
+      const opt = document.createElement('button');
+      opt.textContent = label;
+      opt.className = 'share-option';
+      opt.addEventListener('click', () => {
+        shareOrCopy(url, `${label} link`, title);
+        dropdown.remove();
+      });
+      return opt;
+    };
+
+    const playUrl = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
+    const watchUrl = `${playUrl}&spectate=1`;
+    dropdown.append(
+      makeOption('Play', playUrl, 'Join my game on Kaillera Next'),
+      makeOption('Watch', watchUrl, 'Watch my game on Kaillera Next'),
+    );
+
+    document.body.appendChild(dropdown);
+
+    // Close on outside click (next tick to avoid immediate self-close)
+    setTimeout(() => {
+      const close = (e) => {
+        if (!dropdown.contains(e.target) && e.target !== btn) {
+          dropdown.remove();
+          document.removeEventListener('click', close);
+        }
+      };
+      document.addEventListener('click', close);
+    }, 0);
   };
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
@@ -3668,39 +3716,7 @@
     });
 
     const copyBtn = document.getElementById('copy-link');
-    console.log('[play] copy-link button:', copyBtn ? 'found' : 'NOT FOUND');
-    if (copyBtn) {
-      copyBtn.addEventListener('click', (e) => {
-        console.log('[play] Invite clicked');
-        copyLink();
-      });
-    }
-
-    // Overlay invite dropdown (pre-game Play/Watch)
-    const overlayInvitePlay = document.getElementById('overlay-invite-play');
-    if (overlayInvitePlay) {
-      overlayInvitePlay.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-        shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
-        document.getElementById('overlay-invite-dropdown')?.classList.add('hidden');
-      });
-    }
-    const overlayInviteWatch = document.getElementById('overlay-invite-watch');
-    if (overlayInviteWatch) {
-      overlayInviteWatch.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
-        shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
-        document.getElementById('overlay-invite-dropdown')?.classList.add('hidden');
-      });
-    }
-    // Close overlay invite dropdown on outside click
-    document.addEventListener('click', (e) => {
-      const wrapper = document.getElementById('overlay-invite-wrapper');
-      const dropdown = document.getElementById('overlay-invite-dropdown');
-      if (wrapper && dropdown && !wrapper.contains(e.target)) {
-        dropdown.classList.add('hidden');
-      }
-    });
+    if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
     // Show/hide lockstep options based on mode selector
     const modeSelect = document.getElementById('mode-select');
