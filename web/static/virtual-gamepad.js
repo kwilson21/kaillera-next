@@ -105,7 +105,7 @@
       '.vgp-l, .vgp-r, .vgp-z { position: static; border-radius: 8px; padding: 6px 16px; font-size: 14px; }',
 
       // D-pad — flex child, scales with viewport height
-      '.vgp-dpad { position: relative; width: clamp(68px, 15dvh, 96px); height: clamp(68px, 15dvh, 96px); flex-shrink: 1; }',
+      '.vgp-dpad { position: relative; width: clamp(68px, 15svh, 96px); height: clamp(68px, 15svh, 96px); flex-shrink: 1; }',
       // D-pad arrows: centered transforms so they scale with any container size
       '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 13px; width: 34px; height: 34px; }',
       '.vgp-du { left: 50%; transform: translateX(-50%); top: 0; }',
@@ -116,11 +116,11 @@
       // Stick zone — flex child, scales with viewport height, extra top margin for spacing
       '.vgp-stick-zone {',
       '  position: relative; flex-shrink: 1; margin-top: 28px;',
-      '  width: clamp(128px, 20dvh, 164px); height: clamp(128px, 20dvh, 164px); border-radius: 50%;',
+      '  width: clamp(128px, 20svh, 164px); height: clamp(128px, 20svh, 164px); border-radius: 50%;',
       '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
       '}',
       '.vgp-stick-knob {',
-      '  position: absolute; width: clamp(54px, 8dvh, 68px); height: clamp(54px, 8dvh, 68px); border-radius: 50%;',
+      '  position: absolute; width: clamp(54px, 8svh, 68px); height: clamp(54px, 8svh, 68px); border-radius: 50%;',
       '  background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);',
       '  left: 50%; top: 50%; transform: translate(-50%,-50%);',
       '  transition: none; will-change: transform;',
@@ -141,8 +141,8 @@
       '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
 
       // Sub-containers: flex children that scale with viewport height in portrait
-      '.vgp-cbuttons { position: relative; width: clamp(86px, 18dvh, 120px); height: clamp(86px, 18dvh, 112px); flex-shrink: 1; }',
-      '.vgp-ab { position: relative; width: clamp(110px, 24dvh, 160px); height: clamp(84px, 18dvh, 116px); flex-shrink: 1; margin-top: 12px; }',
+      '.vgp-cbuttons { position: relative; width: clamp(86px, 18svh, 120px); height: clamp(86px, 18svh, 112px); flex-shrink: 1; }',
+      '.vgp-ab { position: relative; width: clamp(110px, 24svh, 160px); height: clamp(84px, 18svh, 116px); flex-shrink: 1; margin-top: 12px; }',
       '.vgp-spacer { display: none; pointer-events: none; }',
       // Portrait: Z sits at bottom of right column (near B/A), Start centered at bottom
       '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-34px); pointer-events: none !important; }',
@@ -153,44 +153,44 @@
       // Landscape: Start+Z wrapper hidden in portrait
       '.vgp-start-landscape { display: none; }',
 
-      // Portrait responsive: scale sizes with min(vw, dvh) on small phones.
+      // Portrait responsive: scale sizes with min(vw, svh) on small phones.
       // Centered transforms handle positioning — only sizes need scaling.
       '@media (orientation: portrait) and (max-width: 430px) {',
-      '  .vgp-dpad { width: clamp(68px, 15dvh, 96px); height: clamp(68px, 15dvh, 96px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(24px, 5dvh, 34px); height: clamp(24px, 5dvh, 34px); }',
-      '  .vgp-stick-zone { width: clamp(90px, 18dvh, 128px); height: clamp(90px, 18dvh, 128px); }',
-      '  .vgp-stick-knob { width: clamp(38px, 7.5dvh, 54px); height: clamp(38px, 7.5dvh, 54px); }',
-      '  .vgp-cbuttons { width: clamp(76px, 16dvh, 120px); height: clamp(76px, 16dvh, 112px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(24px, 5dvh, 38px); height: clamp(24px, 5dvh, 38px); }',
-      '  .vgp-ab { width: clamp(100px, 22dvh, 160px); height: clamp(76px, 16dvh, 116px); }',
-      '  .vgp-a, .vgp-b { width: clamp(40px, 9dvh, 66px); height: clamp(40px, 9dvh, 66px); font-size: clamp(14px, 3dvh, 21px); }',
+      '  .vgp-dpad { width: clamp(68px, 15svh, 96px); height: clamp(68px, 15svh, 96px); }',
+      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(24px, 5svh, 34px); height: clamp(24px, 5svh, 34px); }',
+      '  .vgp-stick-zone { width: clamp(90px, 18svh, 128px); height: clamp(90px, 18svh, 128px); }',
+      '  .vgp-stick-knob { width: clamp(38px, 7.5svh, 54px); height: clamp(38px, 7.5svh, 54px); }',
+      '  .vgp-cbuttons { width: clamp(76px, 16svh, 120px); height: clamp(76px, 16svh, 112px); }',
+      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(24px, 5svh, 38px); height: clamp(24px, 5svh, 38px); }',
+      '  .vgp-ab { width: clamp(100px, 22svh, 160px); height: clamp(76px, 16svh, 116px); }',
+      '  .vgp-a, .vgp-b { width: clamp(40px, 9svh, 66px); height: clamp(40px, 9svh, 66px); font-size: clamp(14px, 3svh, 21px); }',
       '}',
 
       // Small portrait phones: narrow AND short (Moto G4, iPhone SE, iPhone 12 Mini, etc.)
       // Reduce element sizes + column padding to shrink VGP footprint on tiny screens.
       '@media (orientation: portrait) and (max-width: 430px) and (max-height: 650px) {',
       '  .vgp-left, .vgp-right { padding-top: 5px; padding-bottom: 2px; gap: 5px; }',
-      '  .vgp-stick-zone { width: clamp(76px, 14dvh, 108px); height: clamp(76px, 14dvh, 108px); }',
-      '  .vgp-stick-knob { width: clamp(32px, 6dvh, 45px); height: clamp(32px, 6dvh, 45px); }',
-      '  .vgp-dpad { width: clamp(60px, 12dvh, 84px); height: clamp(60px, 12dvh, 84px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(20px, 4dvh, 28px); height: clamp(20px, 4dvh, 28px); }',
-      '  .vgp-ab { width: clamp(90px, 20dvh, 140px); height: clamp(68px, 14dvh, 100px); }',
-      '  .vgp-a, .vgp-b { width: clamp(35px, 7.5dvh, 56px); height: clamp(35px, 7.5dvh, 56px); font-size: clamp(12px, 2.5dvh, 18px); }',
-      '  .vgp-cbuttons { width: clamp(68px, 13dvh, 96px); height: clamp(68px, 13dvh, 96px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(22px, 4.5dvh, 32px); height: clamp(22px, 4.5dvh, 32px); }',
+      '  .vgp-stick-zone { width: clamp(76px, 14svh, 108px); height: clamp(76px, 14svh, 108px); }',
+      '  .vgp-stick-knob { width: clamp(32px, 6svh, 45px); height: clamp(32px, 6svh, 45px); }',
+      '  .vgp-dpad { width: clamp(60px, 12svh, 84px); height: clamp(60px, 12svh, 84px); }',
+      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(20px, 4svh, 28px); height: clamp(20px, 4svh, 28px); }',
+      '  .vgp-ab { width: clamp(90px, 20svh, 140px); height: clamp(68px, 14svh, 100px); }',
+      '  .vgp-a, .vgp-b { width: clamp(35px, 7.5svh, 56px); height: clamp(35px, 7.5svh, 56px); font-size: clamp(12px, 2.5svh, 18px); }',
+      '  .vgp-cbuttons { width: clamp(68px, 13svh, 96px); height: clamp(68px, 13svh, 96px); }',
+      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(22px, 4.5svh, 32px); height: clamp(22px, 4.5svh, 32px); }',
       '}',
 
       // Tablet portrait: more inward padding + larger stick + larger d-pad and face buttons
       '@media (orientation: portrait) and (min-width: 600px) {',
       '  #virtual-gamepad { padding: 8px 32px; }',
-      '  .vgp-stick-zone { width: clamp(150px, 18dvh, 200px); height: clamp(150px, 18dvh, 200px); }',
-      '  .vgp-stick-knob { width: clamp(62px, 7.5dvh, 84px); height: clamp(62px, 7.5dvh, 84px); }',
-      '  .vgp-dpad { width: clamp(100px, 13dvh, 160px); height: clamp(100px, 13dvh, 160px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(35px, 4.5dvh, 56px); height: clamp(35px, 4.5dvh, 56px); }',
-      '  .vgp-ab { width: clamp(150px, 26dvh, 220px); height: clamp(116px, 20dvh, 170px); }',
-      '  .vgp-a, .vgp-b { width: clamp(64px, 11dvh, 88px); height: clamp(64px, 11dvh, 88px); font-size: clamp(22px, 4dvh, 30px); }',
-      '  .vgp-cbuttons { width: clamp(116px, 18dvh, 168px); height: clamp(116px, 18dvh, 168px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(38px, 6dvh, 56px); height: clamp(38px, 6dvh, 56px); }',
+      '  .vgp-stick-zone { width: clamp(150px, 18svh, 200px); height: clamp(150px, 18svh, 200px); }',
+      '  .vgp-stick-knob { width: clamp(62px, 7.5svh, 84px); height: clamp(62px, 7.5svh, 84px); }',
+      '  .vgp-dpad { width: clamp(100px, 13svh, 160px); height: clamp(100px, 13svh, 160px); }',
+      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(35px, 4.5svh, 56px); height: clamp(35px, 4.5svh, 56px); }',
+      '  .vgp-ab { width: clamp(150px, 26svh, 220px); height: clamp(116px, 20svh, 170px); }',
+      '  .vgp-a, .vgp-b { width: clamp(64px, 11svh, 88px); height: clamp(64px, 11svh, 88px); font-size: clamp(22px, 4svh, 30px); }',
+      '  .vgp-cbuttons { width: clamp(116px, 18svh, 168px); height: clamp(116px, 18svh, 168px); }',
+      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(38px, 6svh, 56px); height: clamp(38px, 6svh, 56px); }',
       '}',
 
       // ── Landscape: coordinated responsive layout system ──
@@ -205,17 +205,17 @@
 
       // ── Design tokens on :root so both #game and #virtual-gamepad can use them ──
       '  :root {',
-      '    --btn-ab: clamp(32px, 17dvh, 66px);',
-      '    --btn-c: clamp(20px, 10dvh, 38px);',
-      '    --btn-dpad: clamp(18px, 9dvh, 34px);',
+      '    --btn-ab: clamp(32px, 17svh, 66px);',
+      '    --btn-c: clamp(20px, 10svh, 38px);',
+      '    --btn-dpad: clamp(18px, 9svh, 34px);',
       '    --dpad-size: calc(var(--btn-dpad) * 3);',
       '    --stick-size: calc(var(--btn-ab) * 1.7);',
       '    --knob-size: calc(var(--btn-ab) * 0.7);',
       '    --c-group: calc(var(--btn-c) * 3);',
       '    --ab-group-w: calc(var(--btn-ab) * 2.4);',
       '    --ab-group-h: calc(var(--btn-ab) * 1.5);',
-      '    --gap: clamp(2px, 2dvh, 12px);',
-      '    --shoulder-h: calc(clamp(11px, 3.5dvh, 14px) + clamp(4px, 1.5dvh, 6px) * 2 + 8px);',
+      '    --gap: clamp(2px, 2svh, 12px);',
+      '    --shoulder-h: calc(clamp(11px, 3.5svh, 14px) + clamp(4px, 1.5svh, 6px) * 2 + 8px);',
       '    --spacer-pref: calc(var(--shoulder-h) + 4px);',
       '    --pad-l: clamp(16px, 5vw, 32px);',
       // Panel widths derived from content
@@ -249,16 +249,16 @@
       '  .vgp-right { right: var(--offset-r); width: var(--panel-r); align-items: flex-end; padding: 0 14px 0 0; }',
 
       // Shoulders — top of screen
-      '  .vgp-shoulders { position: fixed; top: clamp(4px, 1dvh, 10px); left: 0; right: 0;',
+      '  .vgp-shoulders { position: fixed; top: clamp(4px, 1svh, 10px); left: 0; right: 0;',
       '    padding: 0 calc(var(--offset-r) + 4px) 0 calc(var(--offset-l) + 4px);',
       '    z-index: 56; }',
-      '  .vgp-l, .vgp-r, .vgp-z { padding: clamp(4px, 1.5dvh, 6px) clamp(10px, 3dvh, 16px); font-size: clamp(11px, 3.5dvh, 14px); }',
+      '  .vgp-l, .vgp-r, .vgp-z { padding: clamp(4px, 1.5svh, 6px) clamp(10px, 3svh, 16px); font-size: clamp(11px, 3.5svh, 14px); }',
 
       // Start — flex child between C-buttons and A/B
       '  .vgp-start-portrait { display: none; }',
       '  .vgp-z-portrait { display: none; }',
       '  .vgp-start-landscape { display: flex; justify-content: center; gap: 8px; flex-shrink: 5; }',
-      '  .vgp-start { padding: clamp(4px, 1.5dvh, 6px) clamp(14px, 4dvh, 20px); font-size: clamp(10px, 3dvh, 13px); }',
+      '  .vgp-start { padding: clamp(4px, 1.5svh, 6px) clamp(14px, 4svh, 20px); font-size: clamp(10px, 3svh, 13px); }',
 
       // Spacer: preferred height clears shoulders, collapses on tight viewports.
       // flex-shrink:10 means spacer absorbs compression first before groups shrink.
@@ -272,7 +272,7 @@
       '  }',
       '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr {',
       '    width: var(--btn-dpad); height: var(--btn-dpad);',
-      '    font-size: clamp(10px, 3dvh, 13px);',
+      '    font-size: clamp(10px, 3svh, 13px);',
       '  }',
       // D-pad uses centered transforms — stays symmetric at any container size
       '  .vgp-du { left: 50%; transform: translateX(-50%); top: 0; }',
@@ -293,7 +293,7 @@
       '  }',
       '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr {',
       '    width: var(--btn-c); height: var(--btn-c);',
-      '    font-size: clamp(9px, 2.5dvh, 11px);',
+      '    font-size: clamp(9px, 2.5svh, 11px);',
       '  }',
       '  .vgp-cu { left: 50%; transform: translateX(-50%); top: 0; right: auto; }',
       '  .vgp-cd { left: 50%; transform: translateX(-50%); bottom: 0; top: auto; right: auto; }',
@@ -307,11 +307,11 @@
       '  }',
       '  .vgp-a {',
       '    width: var(--btn-ab); height: var(--btn-ab);',
-      '    right: 0; bottom: 0; top: auto; font-size: clamp(15px, 5dvh, 21px);',
+      '    right: 0; bottom: 0; top: auto; font-size: clamp(15px, 5svh, 21px);',
       '  }',
       '  .vgp-b {',
       '    width: var(--btn-ab); height: var(--btn-ab);',
-      '    right: 55%; bottom: 30%; top: auto; font-size: clamp(15px, 5dvh, 21px);',
+      '    right: 55%; bottom: 30%; top: auto; font-size: clamp(15px, 5svh, 21px);',
       '  }',
       '}',
 
@@ -327,14 +327,14 @@
       '}',
 
       // Short landscape phones (iPhone SE, Galaxy S9+, etc.): analog too small when
-      // dvh is tiny. Use max(dvh, vw) so the wider dimension governs — these devices
+      // svh is tiny. Use max(svh, vw) so the wider dimension governs — these devices
       // have plenty of horizontal room. Stick grows proportionally with screen width.
       '@media (orientation: landscape) and (max-height: 380px) {',
       '  :root {',
-      '    --stick-size: clamp(100px, max(32dvh, 18vw), 155px);',
-      '    --knob-size: clamp(41px, max(13dvh, 7.5vw), 64px);',
-      '    --btn-ab: clamp(40px, 17dvh, 66px);',
-      '    --btn-dpad: clamp(20px, 9dvh, 34px);',
+      '    --stick-size: clamp(100px, max(32svh, 18vw), 155px);',
+      '    --knob-size: clamp(41px, max(13svh, 7.5vw), 64px);',
+      '    --btn-ab: clamp(40px, 17svh, 66px);',
+      '    --btn-dpad: clamp(20px, 9svh, 34px);',
       '  }',
       '}',
 

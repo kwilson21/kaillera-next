@@ -2,7 +2,7 @@ diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
 index 3ef61a2..65f09ec 100644
 --- a/mupen64plus-core/src/main/main.c
 +++ b/mupen64plus-core/src/main/main.c
-@@ -129,6 +129,31 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+@@ -129,6 +129,33 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
  
  struct device g_dev;
  

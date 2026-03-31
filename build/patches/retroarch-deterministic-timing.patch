@@ -2,7 +2,7 @@ diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
 index a626706..960ab74 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
-@@ -126,7 +126,11 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+@@ -126,7 +126,12 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
                       _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \

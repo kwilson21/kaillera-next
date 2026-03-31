@@ -2795,16 +2795,9 @@
 
   // ── UI: Toast Notifications ───────────────────────────────────────────
 
-  let _syncStatusTimer = null;
-  const showSyncStatus = (msg) => {
-    const el = document.getElementById('toolbar-status');
-    if (!el) return;
-    el.textContent = msg;
-    if (_syncStatusTimer) clearTimeout(_syncStatusTimer);
-    _syncStatusTimer = setTimeout(() => {
-      el.textContent = '';
-      _syncStatusTimer = null;
-    }, 3000);
+  const showSyncStatus = (_msg) => {
+    // Intentionally silent — updating toolbar-status wraps the toolbar on mobile,
+    // shrinking #game and triggering EJS ResizeObserver (canvas clear).
   };
 
   const showToast = (msg) => {
