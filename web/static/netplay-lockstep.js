@@ -1491,7 +1491,14 @@
             if (_hasKnSync) {
               // C-level hash — synchronous comparison
               const mod = window.EJS_emulator?.gameManager?.Module;
-              if (!mod) return;
+              if (!mod) {
+                _syncLog(`sync-compare SKIPPED: EJS module ref is null (hasKnSync=${_hasKnSync})`);
+                return;
+              }
+              if (!mod._kn_sync_hash) {
+                _syncLog(`sync-compare SKIPPED: _kn_sync_hash not on module`);
+                return;
+              }
               const guestHash = mod._kn_sync_hash();
               if (guestHash !== hostHash) {
                 // Collect per-region hashes before KNEvent so they're included in payload
@@ -3633,6 +3640,11 @@
         if (_hasKnSync && window.EJS_emulator?.gameManager?.Module) {
           // C-level hash — synchronous comparison
           const mod = window.EJS_emulator.gameManager.Module;
+          if (!mod._kn_sync_hash) {
+            _syncLog(`deferred sync-compare SKIPPED: _kn_sync_hash not on module`);
+            _pendingSyncCheck = null;
+            return;
+          }
           const guestHash = mod._kn_sync_hash();
           if (guestHash !== _pendingSyncCheck.hash) {
             const deferredHostRegions = _pendingSyncCheck.hostRegions ?? null;
@@ -3829,6 +3841,10 @@
             }
           } catch (_) {}
         }
+      } else {
+        _syncLog(
+          `deferred sync SKIPPED: frame too old (myFrame=${_frameNum} checkFrame=${_pendingSyncCheck.frame} diff=${_frameNum - _pendingSyncCheck.frame})`,
+        );
       }
       _pendingSyncCheck = null;
     }
