@@ -83,7 +83,19 @@
   });
 
   // EmuLinker admin welcome — enter as "Moosehead"
-  const ADMIN_NAMES = ['moosehead', 'suprafast', 'agent 21', 'agent21', 'knitephox', 'near', 'firo'];
+  const ADMIN_NAMES = [
+    'moosehead',
+    'suprafast',
+    'agent 21',
+    'agent21',
+    'agent-21',
+    'a21',
+    'atwenty0ne',
+    'kazon',
+    'knitephox',
+    'near',
+    'firo',
+  ];
   const showLobbyToast = (msg) => {
     const t = document.createElement('div');
     Object.assign(t.style, {
