@@ -1484,7 +1484,10 @@
                   .map((v) => parseInt(v, 10) >>> 0)
               : null;
           const frameDiff = _frameNum - syncFrame;
-          if (_frameNum === syncFrame || (_frameNum > syncFrame && frameDiff <= 2)) {
+          // Allow comparison when guest is up to 10 frames ahead — after reconnect
+          // the guest can run ahead of the host by 5-9 frames due to pacing drift.
+          // The C-level hash is instantaneous so a few frames of drift is acceptable.
+          if (_frameNum >= syncFrame && frameDiff <= 10) {
             _syncLog(
               `sync check received: hostFrame=${syncFrame} myFrame=${_frameNum} (diff=${frameDiff}) — comparing`,
             );
