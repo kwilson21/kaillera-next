@@ -561,6 +561,12 @@ button:hover {
   position: relative;
   flex-shrink: 0;
 }
+#toolbar-more {
+  min-width: 44px;
+  text-align: center;
+  font-size: 18px !important;
+  letter-spacing: 2px;
+}
 .more-dropdown {
   position: absolute;
   bottom: 100%;
