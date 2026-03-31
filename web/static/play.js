@@ -2869,6 +2869,13 @@
   };
 
   const copyLink = () => {
+    // Toggle overlay invite dropdown
+    const dropdown = document.getElementById('overlay-invite-dropdown');
+    if (dropdown) {
+      dropdown.classList.toggle('hidden');
+      return;
+    }
+    // Fallback: copy play link directly
     const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
     shareOrCopy(url, 'Link', 'Join my game on Kaillera Next');
   };
@@ -3626,7 +3633,6 @@
 
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) {
-      if (_canNativeShare) sharePlay.textContent = 'Share Play Link';
       sharePlay.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
         shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
@@ -3636,7 +3642,6 @@
 
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch) {
-      if (_canNativeShare) shareWatch.textContent = 'Share Watch Link';
       shareWatch.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
         shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
@@ -3664,6 +3669,32 @@
 
     const copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
+
+    // Overlay invite dropdown (pre-game Play/Watch)
+    const overlayInvitePlay = document.getElementById('overlay-invite-play');
+    if (overlayInvitePlay) {
+      overlayInvitePlay.addEventListener('click', () => {
+        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
+        shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
+        document.getElementById('overlay-invite-dropdown')?.classList.add('hidden');
+      });
+    }
+    const overlayInviteWatch = document.getElementById('overlay-invite-watch');
+    if (overlayInviteWatch) {
+      overlayInviteWatch.addEventListener('click', () => {
+        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
+        shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
+        document.getElementById('overlay-invite-dropdown')?.classList.add('hidden');
+      });
+    }
+    // Close overlay invite dropdown on outside click
+    document.addEventListener('click', (e) => {
+      const wrapper = document.getElementById('overlay-invite-wrapper');
+      const dropdown = document.getElementById('overlay-invite-dropdown');
+      if (wrapper && dropdown && !wrapper.contains(e.target)) {
+        dropdown.classList.add('hidden');
+      }
+    });
 
     // Show/hide lockstep options based on mode selector
     const modeSelect = document.getElementById('mode-select');

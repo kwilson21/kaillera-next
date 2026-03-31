@@ -14,7 +14,13 @@
       <div class="overlay-card">
         <div class="card-header">
           <h2>Room: <span id="room-display"></span></h2>
-          <button id="copy-link" class="copy-btn" title="Copy invite link">Copy Link</button>
+          <div id="overlay-invite-wrapper" style="position: relative">
+            <button id="copy-link" class="copy-btn" title="Invite players">Invite</button>
+            <div id="overlay-invite-dropdown" class="share-dropdown hidden" role="menu" style="right: 0; left: auto">
+              <button id="overlay-invite-play" class="share-option" role="menuitem">Play</button>
+              <button id="overlay-invite-watch" class="share-option" role="menuitem">Watch</button>
+            </div>
+          </div>
         </div>
 
         <div class="card-section name-section">
@@ -221,15 +227,15 @@
         <button
           id="toolbar-share"
           class="toolbar-toggle"
-          title="Share invite link"
+          title="Invite players"
           aria-haspopup="true"
           aria-expanded="false"
         >
-          Share
+          Invite
         </button>
         <div id="share-dropdown" class="share-dropdown hidden" role="menu">
-          <button id="share-play" class="share-option" role="menuitem">Copy Play Link</button>
-          <button id="share-watch" class="share-option" role="menuitem">Copy Watch Link</button>
+          <button id="share-play" class="share-option" role="menuitem">Play</button>
+          <button id="share-watch" class="share-option" role="menuitem">Watch</button>
         </div>
       </div>
       <button id="toolbar-leave">Leave</button>
