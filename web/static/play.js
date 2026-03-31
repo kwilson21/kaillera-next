@@ -173,7 +173,6 @@
 
   window.addEventListener('unhandledrejection', (e) => {
     console.error('[play] unhandled rejection:', e.reason);
-    showToast('Something went wrong — check console');
     KNEvent('unhandled', String(e.reason)?.slice(0, 500), { stack: e.reason?.stack?.slice(0, 500) });
   });
 
