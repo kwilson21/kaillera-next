@@ -569,7 +569,7 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
         "game-started",
         {
             "mode": room.mode,
-            "rollbackEnabled": payload.rollbackEnabled,
+            "resyncEnabled": payload.resyncEnabled,
             "romHash": room.rom_hash,
         },
         room=session_id,

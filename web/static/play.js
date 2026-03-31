@@ -72,7 +72,7 @@
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
-  let _gameRollbackEnabled = false;
+  let _gameResyncEnabled = false;
   let previousPlayers = {};
   let previousSpectators = {};
   let _lateJoin = false;
@@ -719,7 +719,7 @@
       `gameRunning=${gameRunning}`,
     );
     mode = data.mode || mode;
-    _gameRollbackEnabled = !!data.rollbackEnabled;
+    _gameResyncEnabled = !!data.resyncEnabled;
 
     gameRunning = true;
 
@@ -2232,7 +2232,7 @@
       return;
     }
 
-    const rollbackEnabled = _gameRollbackEnabled;
+    const resyncEnabled = _gameResyncEnabled;
 
     engine = Engine;
     engine.init({
@@ -2242,7 +2242,7 @@
       isSpectator,
       playerName,
       gameElement: document.getElementById('game'),
-      rollbackEnabled,
+      resyncEnabled,
       romHash: _romHash ?? null,
       uploadToken: _uploadToken,
       isMobile: _isMobile,
@@ -2357,12 +2357,12 @@
     }
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
-    const optRollback = document.getElementById('opt-rollback');
+    const optResync = document.getElementById('opt-resync');
     socket.emit(
       'start-game',
       {
         mode: selectedMode,
-        rollbackEnabled: optRollback ? optRollback.checked : false,
+        resyncEnabled: optResync ? optResync.checked : false,
         romHash: _romHash ?? null,
       },
       (err) => {

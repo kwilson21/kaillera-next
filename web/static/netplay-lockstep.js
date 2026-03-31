@@ -137,7 +137,7 @@
  *
  * ── Desync Detection & Resync (Star Topology) ────────────────────────────
  *
- *   Opt-in (rollbackEnabled flag). Star topology: host (slot 0) is the
+ *   Opt-in (resyncEnabled flag). Star topology: host (slot 0) is the
  *   sync authority. Two hashing paths:
  *
  *   1. C-level (patched core): _kn_sync_hash() hashes game-specific
@@ -3041,7 +3041,7 @@
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
     // kn_sync_write_regions is disabled: patching only RDRAM mid-frame causes video
     // freeze + UI resize because the N64 CPU state (PC, registers) is inconsistent
-    // with the patched data. Safe partial sync requires rollback (v2). Exports remain
+    // with the patched data. Safe partial sync requires frame-level state management (v2). Exports remain
     // compiled in for future diagnostic use.
     _hasKnSyncRegions = false;
     if (_hasKnSync) {
@@ -4726,7 +4726,7 @@
     _isSpectator = config.isSpectator;
 
     // Apply pre-game options
-    _syncEnabled = !!config.rollbackEnabled; // default: false
+    _syncEnabled = !!config.resyncEnabled; // default: false
     _lateJoin = !!config.lateJoin;
 
     window._playerSlot = _playerSlot;
