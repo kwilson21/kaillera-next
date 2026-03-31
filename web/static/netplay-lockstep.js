@@ -271,22 +271,9 @@
         if (window.setAutoDelay) window.setAutoDelay(delay);
         _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
       }
-      // Mid-game reconnect: if delay needs to increase, apply and broadcast
-      if (_running) {
-        const peerMedian = peer.rttSamples[Math.floor(peer.rttSamples.length / 2)];
-        const reconnectDelay = Math.min(9, Math.max(2, Math.ceil(peerMedian / 16.67)));
-        if (reconnectDelay > DELAY_FRAMES) {
-          DELAY_FRAMES = reconnectDelay;
-          _syncLog(`delay increased to ${reconnectDelay}f after reconnect (peer RTT=${peerMedian.toFixed(1)}ms)`);
-          for (const p of Object.values(_peers)) {
-            if (p.dc && p.dc.readyState === 'open') {
-              try {
-                p.dc.send(JSON.stringify({ type: 'delay-update', delay: reconnectDelay }));
-              } catch (_) {}
-            }
-          }
-        }
-      }
+      // Delay stays fixed for the session — changing it mid-match breaks
+      // muscle memory for combo timing. Input stalls and resync handle
+      // transient latency spikes instead.
       return;
     }
     try {
@@ -397,7 +384,7 @@
   let _resendSent = false; // true once resend request sent for current stall
   let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
   let _tickInterval = null; // setInterval handle for tick loop
-  let _rttProbeInterval = null; // setInterval for live RTT probes (dynamic delay adjustment)
+  let _rttProbeInterval = null;
 
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
@@ -1790,73 +1777,6 @@
               peer.delayValue = msg.delay || 2;
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
-            } else if (msg.type === 'live-rtt-ping') {
-              // Echo back: don't trust peer's ts — use our own clock on the pong side
-              peer.dc.send(JSON.stringify({ type: 'live-rtt-pong', ts: msg.ts }));
-            } else if (msg.type === 'live-rtt-pong') {
-              // Anti-spoofing: use locally stored send time, not the echoed ts.
-              // A malicious peer could return ts=0 to fake a huge RTT and force max delay.
-              const liveRtt = peer._liveRttPingTs ? performance.now() - peer._liveRttPingTs : null;
-              if (liveRtt !== null) {
-                // null = unsolicited pong — ignore
-                peer._liveRttPingTs = 0; // consume — next pong is unsolicited until next ping
-                const neededDelay = Math.min(9, Math.max(2, Math.ceil(liveRtt / 16.67)));
-                _syncLog(
-                  `live RTT slot${peer.slot}: ${liveRtt.toFixed(1)}ms needed=${neededDelay}f current=${DELAY_FRAMES}f`,
-                );
-                // Never override a manually-set delay — user's explicit pre-game choice takes precedence.
-                const autoEl = document.getElementById('delay-auto');
-                const isManual = autoEl && !autoEl.checked;
-                if (!isManual) {
-                  // Require 2 consecutive high measurements before increasing — avoids a
-                  // single 5G spike permanently inflating delay for the whole session.
-                  if (neededDelay > DELAY_FRAMES) {
-                    peer._liveRttHighCount = (peer._liveRttHighCount || 0) + 1;
-                    peer._liveRttLowCount = 0;
-                  } else if (neededDelay < DELAY_FRAMES) {
-                    peer._liveRttHighCount = 0;
-                    peer._liveRttLowCount = (peer._liveRttLowCount || 0) + 1;
-                  } else {
-                    peer._liveRttHighCount = 0;
-                    peer._liveRttLowCount = 0;
-                  }
-                  const broadcastDelay = () => {
-                    for (const p of Object.values(_peers)) {
-                      if (p.dc?.readyState === 'open') {
-                        try {
-                          p.dc.send(JSON.stringify({ type: 'delay-update', delay: DELAY_FRAMES }));
-                        } catch (_) {}
-                      }
-                    }
-                  };
-                  if (neededDelay > DELAY_FRAMES && peer._liveRttHighCount >= 2) {
-                    DELAY_FRAMES = neededDelay;
-                    _syncLog(
-                      `delay increased to ${DELAY_FRAMES}f (live RTT=${liveRtt.toFixed(1)}ms x${peer._liveRttHighCount})`,
-                    );
-                    broadcastDelay();
-                  } else if (neededDelay < DELAY_FRAMES && peer._liveRttLowCount >= 4) {
-                    // Gradual decrease: drop 1 frame at a time, require 4 consecutive
-                    // low readings (~20s) to avoid oscillation on jittery connections.
-                    const newDelay = Math.max(2, DELAY_FRAMES - 1);
-                    if (newDelay < DELAY_FRAMES) {
-                      DELAY_FRAMES = newDelay;
-                      peer._liveRttLowCount = 0;
-                      _syncLog(
-                        `delay decreased to ${DELAY_FRAMES}f (live RTT=${liveRtt.toFixed(1)}ms, needed=${neededDelay}f)`,
-                      );
-                      broadcastDelay();
-                    }
-                  }
-                }
-              }
-            } else if (msg.type === 'delay-update') {
-              if (typeof msg.delay === 'number' && msg.delay >= 2 && msg.delay <= 9) {
-                const direction =
-                  msg.delay > DELAY_FRAMES ? 'increased' : msg.delay < DELAY_FRAMES ? 'decreased' : 'unchanged';
-                DELAY_FRAMES = msg.delay;
-                _syncLog(`delay ${direction} to ${msg.delay}f by peer`);
-              }
             } else if (_onUnhandledMessage) {
               _onUnhandledMessage(remoteSid, msg);
             }
@@ -3241,21 +3161,7 @@
     _tickInterval = setInterval(tick, 16);
 
     // Live RTT probe — runs every 5s to catch latency spikes (e.g. 5G jitter).
-    // Only increases DELAY_FRAMES, never decreases. Both sides will probe and
-    // apply the same neededDelay since RTT is symmetric.
-    _rttProbeInterval = setInterval(() => {
-      if (!_running) return;
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p._liveRttPingTs = performance.now();
-            p.dc.send(JSON.stringify({ type: 'live-rtt-ping' }));
-          } catch (_) {
-            p._liveRttPingTs = 0;
-          }
-        }
-      }
-    }, 5000);
+    // Delay is fixed for the session — no live RTT probes.
   };
 
   const stopSync = () => {
