@@ -20,9 +20,31 @@ GAME_INFO: dict[str, dict[str, str]] = {
     "ssb64": {"image": "ssb64.jpg", "name": "Super Smash Bros. 64"},
 }
 
-# When false (set via GAME_IMAGES_ENABLED=false env var), OG cards render
-# as text-only — no copyrighted game artwork embedded in the card.
-_GAME_IMAGES_ENABLED = os.environ.get("GAME_IMAGES_ENABLED", "true").lower() != "false"
+# Raw env var values — evaluated per-request via feature_enabled_for_host().
+# Each can be "true" (all hosts), "false" (no hosts), or "domain1.com,domain2.com"
+# (enabled only for the listed hostnames, port-stripped).
+_GAME_IMAGES_RAW = os.environ.get("GAME_IMAGES_ENABLED", "true")
+_ROM_SHARING_RAW = os.environ.get("ROM_SHARING_ENABLED", "true")
+
+
+def feature_enabled_for_host(raw: str, host: str) -> bool:
+    """Return True if the feature is enabled for the given request host.
+
+    raw values:
+      "true" / "" / "1"  → enabled for all hosts (default)
+      "false" / "0"      → disabled for all hosts
+      "a.com,b.com"      → enabled only when host matches one of the listed domains
+    """
+    val = raw.strip().lower()
+    if val in ("true", "1", ""):
+        return True
+    if val in ("false", "0"):
+        return False
+    # Comma-separated domain allow-list — strip port before comparing.
+    request_host = host.split(":")[0].lower()
+    allowed = {d.strip().lower() for d in raw.split(",") if d.strip()}
+    return request_host in allowed
+
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -56,10 +78,11 @@ def _build_card_html(
     game_id: str | None,
     spectate: bool,
     player_names: list[str] | None = None,
+    game_images_enabled: bool = True,
 ) -> str:
     """Build a self-contained HTML page for the OG card."""
     game_info = GAME_INFO.get(game_id) if game_id else None
-    has_game_bg = _GAME_IMAGES_ENABLED and game_info is not None and (_OG_DIR / game_info["image"]).exists()
+    has_game_bg = game_images_enabled and game_info is not None and (_OG_DIR / game_info["image"]).exists()
     is_homepage = room_name is None
 
     # Background image as base64 data URI for self-contained HTML
@@ -284,6 +307,7 @@ async def generate_og_image(
     game_id: str | None,
     spectate: bool,
     player_names: list[str] | None = None,
+    game_images_enabled: bool = True,
 ) -> bytes:
     """Generate a 1200x630 OG card image by screenshotting HTML.
 
@@ -292,11 +316,12 @@ async def generate_og_image(
         game_id: Game identifier for background lookup (None for homepage).
         spectate: True for "WATCH GAME" badge, False for "JOIN GAME".
         player_names: List of player names in room (for spectate cards).
+        game_images_enabled: When False, renders text-only card with no game art.
 
     Returns:
         PNG image as bytes.
     """
-    html = _build_card_html(room_name, game_id, spectate, player_names)
+    html = _build_card_html(room_name, game_id, spectate, player_names, game_images_enabled)
     browser = await _get_browser()
     page = await browser.new_page(viewport={"width": 1200, "height": 630})
     try:
