@@ -2882,7 +2882,10 @@
     try {
       await navigator.share({ title, url });
     } catch (err) {
-      if (err.name !== 'AbortError') showToast('Share failed');
+      // AbortError = user dismissed; NotAllowedError = permission denied (e.g. no gesture)
+      if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+        showToast('Share failed');
+      }
     }
   };
 
