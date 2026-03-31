@@ -42,7 +42,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
 from src import state
-from src.api.og import build_og_tags, generate_og_image, inject_og_tags
+from src.api.og import _inject_kn_config, build_og_tags, generate_og_image, inject_og_tags
 from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
 from src.ratelimit import check_ip
 
@@ -379,6 +379,7 @@ def create_app(lifespan=None) -> FastAPI:
         lifespan=lifespan,
     )
     production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
+    rom_sharing_enabled = os.environ.get("ROM_SHARING_ENABLED", "true").lower() != "false"
     version = _asset_version()
     app.add_middleware(CacheBustMiddleware, version=version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
@@ -823,6 +824,7 @@ def create_app(lifespan=None) -> FastAPI:
         else:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)
+        html = _inject_kn_config(html, rom_sharing_enabled=rom_sharing_enabled)
         return Response(content=html, media_type="text/html")
 
     @app.get("/")

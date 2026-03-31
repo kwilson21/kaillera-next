@@ -83,6 +83,9 @@
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _pendingLateJoin = false; // waiting for ROM before late-join init
+  // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
+  const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
+
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
   let _romDeclared = false; // true if user declared ROM ownership (streaming, page-lifetime)
@@ -613,7 +616,7 @@
     }
 
     // Update ROM sharing state from users-updated (supplementary to rom-sharing-updated)
-    if (data.romSharing !== undefined) {
+    if (_ROM_SHARING_FEATURE && data.romSharing !== undefined) {
       const wasSharing = _romSharingEnabled;
       _romSharingEnabled = !!data.romSharing;
       if (_romSharingEnabled !== wasSharing) {
@@ -831,6 +834,7 @@
   // ── ROM Sharing ──────────────────────────────────────────────────────
 
   const onRomSharingUpdated = (data) => {
+    if (!_ROM_SHARING_FEATURE) return;
     const wasEnabled = _romSharingEnabled;
     _romSharingEnabled = !!data.romSharing;
     console.log('[play] rom-sharing-updated:', _romSharingEnabled);
@@ -3624,16 +3628,26 @@
 
     // ROM sharing toggle
     const romShareCb = document.getElementById('opt-rom-sharing');
-    if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
+    if (!_ROM_SHARING_FEATURE) {
+      // Feature disabled server-side — hide all ROM sharing UI permanently.
+      const sharingRow = document.getElementById('rom-sharing-options');
+      const sharingPrompt = document.getElementById('rom-sharing-prompt');
+      const sharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
+      if (sharingRow) sharingRow.style.display = 'none';
+      if (sharingPrompt) sharingPrompt.style.display = 'none';
+      if (sharingDisclaimer) sharingDisclaimer.style.display = 'none';
+    } else {
+      if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
 
-    // Show/hide disclaimer based on checkbox
-    const romDisclaimer = document.getElementById('rom-sharing-disclaimer');
-    if (romShareCb && romDisclaimer) {
-      const updateDisclaimer = () => {
-        romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
-      };
-      romShareCb.addEventListener('change', updateDisclaimer);
-      updateDisclaimer();
+      // Show/hide disclaimer based on checkbox
+      const romDisclaimer = document.getElementById('rom-sharing-disclaimer');
+      if (romShareCb && romDisclaimer) {
+        const updateDisclaimer = () => {
+          romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
+        };
+        romShareCb.addEventListener('change', updateDisclaimer);
+        updateDisclaimer();
+      }
     }
 
     // ROM sharing accept/decline/cancel buttons
