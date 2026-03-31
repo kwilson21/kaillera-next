@@ -771,7 +771,7 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 30; // frames (~1s at 30fps). Was 90f when sync+input shared one DC
+  const _PROACTIVE_SYNC_INTERVAL = 300; // frames (~5s at 60fps). Reduced from 30f to avoid FPS drops — each push reads 8MB + compresses + sends 2.5MB
   // (proactive flood caused input FRAME-CAPs). Now that sync uses a separate low-priority DC,
   // 30f is safe. Faster interval = fresher buffered state = smaller correction snap (~30f snap vs ~60f).
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
@@ -3860,7 +3860,11 @@
         // start of each 64KB block to find which blocks are live during gameplay.
         // Proactive state push — every N frames, push state to guests so they have
         // a fresh snapshot for instant resync (no round-trip on next desync).
-        if (_frameNum % _PROACTIVE_SYNC_INTERVAL === 0 && getActivePeers().length > 0) {
+        if (
+          _frameNum % _PROACTIVE_SYNC_INTERVAL === 0 &&
+          getActivePeers().length > 0 &&
+          !_framePacingActive // skip when host is already struggling (FRAME-CAP active)
+        ) {
           pushSyncState(null, true); // null = broadcast, true = proactive
         }
 
