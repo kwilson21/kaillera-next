@@ -1400,11 +1400,37 @@
         _config?.onToast?.(`${rName} reconnected`);
         _config?.onReconnecting?.(remoteSid, false);
         _config?.onPeerReconnected?.(remoteSid);
-        // Request resync
+        // Force resync — after disconnect the guest was fabricating inputs,
+        // so states are guaranteed to have diverged. Send on the sync-state DC
+        // if available (avoids the _syncExpected=0 race on the new DC), fall back
+        // to the lockstep DC. Reset resync tracking so cooldowns don't block it.
         if (_playerSlot !== 0) {
-          try {
-            ch.send('sync-request');
-          } catch (_) {}
+          _lastResyncTime = 0;
+          _consecutiveResyncs = 0;
+          _resyncRequestInFlight = false;
+          _syncMismatchStreak = 0;
+          const syncDc = peer.syncDc;
+          const sendResync = () => {
+            const dc = (syncDc?.readyState === 'open' ? syncDc : null) || ch;
+            try {
+              dc.send('sync-request-full');
+              _syncLog(`reconnect resync: sent sync-request-full on ${dc === syncDc ? 'sync-state' : 'lockstep'} DC`);
+            } catch (e) {
+              _syncLog(`reconnect resync send failed: ${e}`);
+            }
+          };
+          if (syncDc?.readyState === 'open') {
+            sendResync();
+          } else if (syncDc) {
+            // Sync-state DC not open yet — wait for it
+            const origOnOpen = syncDc.onopen;
+            syncDc.onopen = (ev) => {
+              origOnOpen?.call(syncDc, ev);
+              sendResync();
+            };
+          } else {
+            sendResync(); // fallback: lockstep DC
+          }
         } else {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
@@ -1851,6 +1877,10 @@
 
   const setupSyncDataChannel = (_remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
+    // Reset sync assembly state — after reconnect the old DC's partial
+    // state must not carry over or binary chunks will be dropped as unexpected.
+    _syncExpected = 0;
+    _syncChunks = [];
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
         // Guest: incoming state transfer header
