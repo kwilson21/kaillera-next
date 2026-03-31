@@ -13,6 +13,7 @@
         height: 100%;
         aspect-ratio: 4/3;
         max-width: 100%;
+        margin: 0 auto;
         background: linear-gradient(135deg, #1a2a1a 25%, #1a3a1a 50%, #1a2a1a 75%);
         border: 2px solid rgba(100, 255, 100, 0.4);
       }
@@ -48,10 +49,22 @@
       <span id="toolbar-room">TEST1234</span>
       <span id="toolbar-status"></span>
       <div class="toolbar-spacer"></div>
-      <button class="toolbar-toggle">Share</button>
-      <button class="toolbar-toggle">Info</button>
-      <button class="toolbar-toggle">Remap</button>
-      <button id="toolbar-end">Leave Game</button>
+      <div id="share-wrapper">
+        <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
+        <div id="share-dropdown" class="share-dropdown hidden">
+          <button id="share-play" class="share-option">Share Play Link</button>
+          <button id="share-watch" class="share-option">Share Watch Link</button>
+        </div>
+      </div>
+      <button id="toolbar-leave">Leave</button>
+      <div id="more-wrapper">
+        <button id="toolbar-more" class="toolbar-toggle" title="More options">&#x22EF;</button>
+        <div id="more-dropdown" class="more-dropdown hidden">
+          <button id="toolbar-info" class="more-option">Info</button>
+          <button id="toolbar-remap" class="more-option">Remap</button>
+          <button id="toolbar-end" class="more-option more-end">End Game</button>
+        </div>
+      </div>
     </div>
 
     <script>

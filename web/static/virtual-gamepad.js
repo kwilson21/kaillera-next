@@ -71,7 +71,7 @@
       '  grid-template-columns: 1fr 1fr;',
       '  grid-template-rows: auto 1fr auto;',
       '  grid-template-areas: "shoulders shoulders" "left right" "start start";',
-      '  padding: 4px 16px;',
+      '  padding: 2px 8px;',
       '  gap: 0;',
       '}',
 
@@ -80,12 +80,12 @@
       // Left column: flexbox so dpad and stick can never overlap
       '.vgp-left {',
       '  grid-area: left; display: flex; flex-direction: column;',
-      '  align-items: flex-start; gap: 8px; padding: 12px 0 4px;',
+      '  align-items: flex-start; gap: 2px; padding: 4px 0 2px;',
       '}',
       // Right column: flexbox so c-buttons and A/B can never overlap
       '.vgp-right {',
       '  grid-area: right; display: flex; flex-direction: column;',
-      '  align-items: flex-end; gap: 8px; padding: 12px 0 4px;',
+      '  align-items: flex-end; gap: 2px; padding: 4px 0 2px;',
       '}',
       // Start wrapper in portrait grid — last row, centered
       '.vgp-start-wrap { grid-area: start; }',
@@ -113,9 +113,9 @@
       '.vgp-dl { left: 0; top: 50%; transform: translateY(-50%); }',
       '.vgp-dr { right: 0; top: 50%; transform: translateY(-50%); }',
 
-      // Stick zone — flex child, scales with viewport height, extra top margin for spacing
+      // Stick zone — flex child, scales with viewport height
       '.vgp-stick-zone {',
-      '  position: relative; flex-shrink: 1; margin-top: 28px;',
+      '  position: relative; flex-shrink: 1; margin-top: 6px;',
       '  width: clamp(128px, 20svh, 164px); height: clamp(128px, 20svh, 164px); border-radius: 50%;',
       '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
       '}',
@@ -134,21 +134,22 @@
       '.vgp-cr { width: 38px; height: 38px; right: 0; left: auto; top: 50%; transform: translateY(-50%); font-size: 11px; }',
 
       // A + B — diagonal layout (Gameboy style: A lower-right, B upper-left)
-      '.vgp-a { width: 66px; height: 66px; right: 14px; bottom: 2px; top: auto; font-size: 21px; }',
-      '.vgp-b { width: 66px; height: 66px; right: 86px; bottom: 44px; top: auto; font-size: 21px; }',
+      // Percentage positioning so the gap scales with the container at any size.
+      '.vgp-a { width: 66px; height: 66px; right: 9%; bottom: 2%; top: auto; font-size: 21px; }',
+      '.vgp-b { width: 66px; height: 66px; right: 54%; bottom: 38%; top: auto; font-size: 21px; }',
 
       // Start button
       '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
 
       // Sub-containers: flex children that scale with viewport height in portrait
       '.vgp-cbuttons { position: relative; width: clamp(86px, 18svh, 120px); height: clamp(86px, 18svh, 112px); flex-shrink: 1; }',
-      '.vgp-ab { position: relative; width: clamp(110px, 24svh, 160px); height: clamp(84px, 18svh, 116px); flex-shrink: 1; margin-top: 12px; }',
+      '.vgp-ab { position: relative; width: clamp(110px, 24svh, 160px); height: clamp(84px, 18svh, 116px); flex-shrink: 1; margin-top: 4px; }',
       '.vgp-spacer { display: none; pointer-events: none; }',
-      // Portrait: Z sits at bottom of right column (near B/A), Start centered at bottom
+      // Portrait: Z sits at bottom of right column (near B/A), floats above Start area
       '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-34px); pointer-events: none !important; }',
       '.vgp-start-portrait {',
       '  grid-area: start; display: flex; align-items: center; justify-content: center;',
-      '  padding: 4px 0;',
+      '  padding: 2px 0;',
       '}',
       // Landscape: Start+Z wrapper hidden in portrait
       '.vgp-start-landscape { display: none; }',
@@ -167,9 +168,9 @@
       '}',
 
       // Small portrait phones: narrow AND short (Moto G4, iPhone SE, iPhone 12 Mini, etc.)
-      // Reduce element sizes + column padding to shrink VGP footprint on tiny screens.
+      // Reduce element sizes further on tiny screens.
       '@media (orientation: portrait) and (max-width: 430px) and (max-height: 650px) {',
-      '  .vgp-left, .vgp-right { padding-top: 5px; padding-bottom: 2px; gap: 5px; }',
+      '  .vgp-left, .vgp-right { padding-top: 2px; padding-bottom: 1px; gap: 1px; }',
       '  .vgp-stick-zone { width: clamp(76px, 14svh, 108px); height: clamp(76px, 14svh, 108px); }',
       '  .vgp-stick-knob { width: clamp(32px, 6svh, 45px); height: clamp(32px, 6svh, 45px); }',
       '  .vgp-dpad { width: clamp(60px, 12svh, 84px); height: clamp(60px, 12svh, 84px); }',
@@ -380,7 +381,7 @@
         const zClone = btn.cloneNode(true);
         startLandscapeEl.prepend(zClone);
       } else if (cls === 'vgp-start') {
-        // Start in both portrait and landscape containers (after Z so Z is on the left)
+        // Start in portrait row (Z appended after), and landscape container
         startPortraitEl.appendChild(btn);
         const clone = btn.cloneNode(true);
         startLandscapeEl.appendChild(clone);

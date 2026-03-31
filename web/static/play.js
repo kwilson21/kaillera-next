@@ -2698,7 +2698,7 @@
     if (toolbar) toolbar.classList.remove('hidden');
 
     const roomEl = document.getElementById('toolbar-room');
-    if (roomEl) roomEl.textContent = `Room: ${roomCode}`;
+    if (roomEl) roomEl.textContent = roomCode;
 
     const endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
@@ -2871,10 +2871,28 @@
 
   const copyLink = () => {
     const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-    copyToClipboard(url, 'Link');
+    shareOrCopy(url, 'Link', 'Join my game on Kaillera Next');
   };
 
   // ── UI: In-Game Share Dropdown ──────────────────────────────────────
+
+  const _canNativeShare = typeof navigator.share === 'function';
+
+  const nativeShare = async (url, title) => {
+    try {
+      await navigator.share({ title, url });
+    } catch (err) {
+      if (err.name !== 'AbortError') showToast('Share failed');
+    }
+  };
+
+  const shareOrCopy = async (url, label, title) => {
+    if (_canNativeShare) {
+      await nativeShare(url, title);
+    } else {
+      await copyToClipboard(url, label);
+    }
+  };
 
   const copyToClipboard = async (text, label) => {
     if (navigator.clipboard && window.isSecureContext) {
@@ -2904,10 +2922,17 @@
     const isOpen = !dd.classList.contains('hidden');
     if (isOpen) {
       dd.classList.add('hidden');
-      if (btn) btn.classList.remove('active');
+      if (btn) {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-expanded', 'false');
+      }
     } else {
+      closeMoreDropdown();
       dd.classList.remove('hidden');
-      if (btn) btn.classList.add('active');
+      if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-expanded', 'true');
+      }
     }
   };
 
@@ -2915,7 +2940,43 @@
     const dd = document.getElementById('share-dropdown');
     const btn = document.getElementById('toolbar-share');
     if (dd) dd.classList.add('hidden');
-    if (btn) btn.classList.remove('active');
+    if (btn) {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  };
+
+  // ── UI: More (overflow) Dropdown ──────────────────────────────────────
+
+  const toggleMoreDropdown = () => {
+    const dd = document.getElementById('more-dropdown');
+    const btn = document.getElementById('toolbar-more');
+    if (!dd) return;
+    const isOpen = !dd.classList.contains('hidden');
+    if (isOpen) {
+      dd.classList.add('hidden');
+      if (btn) {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+    } else {
+      closeShareDropdown();
+      dd.classList.remove('hidden');
+      if (btn) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-expanded', 'true');
+      }
+    }
+  };
+
+  const closeMoreDropdown = () => {
+    const dd = document.getElementById('more-dropdown');
+    const btn = document.getElementById('toolbar-more');
+    if (dd) dd.classList.add('hidden');
+    if (btn) {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-expanded', 'false');
+    }
   };
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
@@ -3528,10 +3589,18 @@
     if (toolbarLeave) toolbarLeave.addEventListener('click', leaveGame);
 
     const toolbarEnd = document.getElementById('toolbar-end');
-    if (toolbarEnd) toolbarEnd.addEventListener('click', endGame);
+    if (toolbarEnd)
+      toolbarEnd.addEventListener('click', () => {
+        closeMoreDropdown();
+        endGame();
+      });
 
     const toolbarInfo = document.getElementById('toolbar-info');
-    if (toolbarInfo) toolbarInfo.addEventListener('click', toggleInfoOverlay);
+    if (toolbarInfo)
+      toolbarInfo.addEventListener('click', () => {
+        closeMoreDropdown();
+        toggleInfoOverlay();
+      });
 
     // Mobile: tap info overlay to expand/collapse details
     const infoOverlay = document.getElementById('info-overlay');
@@ -3554,28 +3623,41 @@
     if (toolbarShare) toolbarShare.addEventListener('click', toggleShareDropdown);
 
     const sharePlay = document.getElementById('share-play');
-    if (sharePlay)
+    if (sharePlay) {
+      if (_canNativeShare) sharePlay.textContent = 'Share Play Link';
       sharePlay.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-        copyToClipboard(url, 'Play link');
+        shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
         closeShareDropdown();
       });
+    }
 
     const shareWatch = document.getElementById('share-watch');
-    if (shareWatch)
+    if (shareWatch) {
+      if (_canNativeShare) shareWatch.textContent = 'Share Watch Link';
       shareWatch.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
-        copyToClipboard(url, 'Watch link');
+        shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
         closeShareDropdown();
       });
+    }
 
-    // Close share dropdown on outside click or Escape
+    // More (overflow) dropdown
+    const toolbarMore = document.getElementById('toolbar-more');
+    if (toolbarMore) toolbarMore.addEventListener('click', toggleMoreDropdown);
+
+    // Close dropdowns on outside click or Escape
     document.addEventListener('click', (e) => {
-      const wrapper = document.getElementById('share-wrapper');
-      if (wrapper && !wrapper.contains(e.target)) closeShareDropdown();
+      const shareW = document.getElementById('share-wrapper');
+      if (shareW && !shareW.contains(e.target)) closeShareDropdown();
+      const moreW = document.getElementById('more-wrapper');
+      if (moreW && !moreW.contains(e.target)) closeMoreDropdown();
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeShareDropdown();
+      if (e.key === 'Escape') {
+        closeShareDropdown();
+        closeMoreDropdown();
+      }
     });
 
     const copyBtn = document.getElementById('copy-link');
@@ -3707,7 +3789,11 @@
 
     // In-game remap (toolbar button + overlay buttons)
     const toolbarRemapBtn = document.getElementById('toolbar-remap');
-    if (toolbarRemapBtn) toolbarRemapBtn.addEventListener('click', () => startWizard(true));
+    if (toolbarRemapBtn)
+      toolbarRemapBtn.addEventListener('click', () => {
+        closeMoreDropdown();
+        startWizard(true);
+      });
 
     const igBackBtn = document.getElementById('ingame-remap-back');
     if (igBackBtn) igBackBtn.addEventListener('click', wizardBack);
@@ -3722,6 +3808,7 @@
     const toolbarLogs = document.getElementById('toolbar-logs');
     if (toolbarLogs) {
       toolbarLogs.addEventListener('click', () => {
+        closeMoreDropdown();
         uploadSyncLogs('manual');
       });
     }

@@ -203,24 +203,44 @@
     </div>
 
     <!-- In-game toolbar -->
-    <div id="toolbar" class="hidden">
+    <div id="toolbar" class="hidden" role="toolbar" aria-label="Game controls">
       <span id="toolbar-room"></span>
-      <span id="toolbar-status"></span>
+      <span id="toolbar-status" aria-live="polite"></span>
       <div class="toolbar-spacer"></div>
-      <div id="share-wrapper" style="position: relative">
-        <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
-        <div id="share-dropdown" class="share-dropdown hidden">
-          <button id="share-play" class="share-option">Copy Play Link</button>
-          <button id="share-watch" class="share-option">Copy Watch Link</button>
+      <div id="share-wrapper">
+        <button
+          id="toolbar-share"
+          class="toolbar-toggle"
+          title="Share invite link"
+          aria-haspopup="true"
+          aria-expanded="false"
+        >
+          Share
+        </button>
+        <div id="share-dropdown" class="share-dropdown hidden" role="menu">
+          <button id="share-play" class="share-option" role="menuitem">Copy Play Link</button>
+          <button id="share-watch" class="share-option" role="menuitem">Copy Watch Link</button>
         </div>
       </div>
-      <button id="toolbar-info" class="toolbar-toggle" title="Toggle info overlay">Info</button>
-      <button id="toolbar-remap" class="toolbar-toggle" title="Remap controls">Remap</button>
-      <button id="toolbar-logs" class="toolbar-toggle" title="Dump sync logs to server" style="display: none">
-        Dump Logs
-      </button>
-      <button id="toolbar-leave">Leave Game</button>
-      <button id="toolbar-end" style="display: none">End Game</button>
+      <button id="toolbar-leave">Leave</button>
+      <div id="more-wrapper">
+        <button
+          id="toolbar-more"
+          class="toolbar-toggle"
+          title="More options"
+          aria-label="More options"
+          aria-haspopup="true"
+          aria-expanded="false"
+        >
+          &#x22EF;
+        </button>
+        <div id="more-dropdown" class="more-dropdown hidden" role="menu">
+          <button id="toolbar-info" class="more-option" role="menuitem">Info</button>
+          <button id="toolbar-remap" class="more-option" role="menuitem">Remap</button>
+          <button id="toolbar-logs" class="more-option" role="menuitem" style="display: none">Dump Logs</button>
+          <button id="toolbar-end" class="more-option more-end" role="menuitem" style="display: none">End Game</button>
+        </div>
+      </div>
     </div>
 
     <!-- In-game remap overlay -->

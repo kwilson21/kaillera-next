@@ -4,6 +4,11 @@
   box-sizing: border-box;
 }
 
+:focus-visible {
+  outline: 2px solid #6af;
+  outline-offset: 2px;
+}
+
 body {
   background: #111;
   color: #eee;
@@ -173,20 +178,22 @@ body {
   border: 1px solid #2a2a40;
   border-radius: 6px;
   color: #e0e0e0;
-  padding: 6px 10px;
+  padding: 10px;
   font-size: 14px;
   font-family: inherit;
-  outline: none;
+  min-height: 44px;
 }
 
 .name-input:focus {
   border-color: #6af;
+  outline: 2px solid #6af;
+  outline-offset: -2px;
 }
 
 .copy-btn {
-  padding: 6px 14px !important;
-  font-size: 12px !important;
-  min-height: 32px !important;
+  padding: 8px 14px !important;
+  font-size: 13px !important;
+  min-height: 44px !important;
   background: #2a2a40 !important;
   white-space: nowrap;
 }
@@ -292,15 +299,20 @@ body {
 #lockstep-options label {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   cursor: pointer;
+  min-height: 44px;
 }
-#lockstep-options input[type='checkbox'] {
+#lockstep-options input[type='checkbox'],
+.overlay-card input[type='checkbox'] {
   accent-color: #7c5cff;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
 }
 .opt-hint {
   color: #555;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 #start-btn {
@@ -369,9 +381,9 @@ button:hover {
 }
 
 .small-btn {
-  padding: 4px 10px !important;
-  font-size: 11px !important;
-  min-height: 28px !important;
+  padding: 8px 12px !important;
+  font-size: 13px !important;
+  min-height: 44px !important;
   background: #2a2a40 !important;
 }
 .small-btn:hover {
@@ -399,6 +411,7 @@ button:hover {
   display: block;
   width: 100%;
   margin-top: 8px;
+  min-height: 44px;
   background: #3a2a2a;
   font-size: 13px;
   padding: 10px;
@@ -421,7 +434,8 @@ button:hover {
 .footer-link {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
+  min-height: 44px;
   color: #555;
   text-decoration: none;
   font-size: 11px;
@@ -448,9 +462,9 @@ button:hover {
   flex-shrink: 0;
   order: 10;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 12px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 6px 8px;
   background: rgba(17, 17, 17, 0.95);
   z-index: 50;
   align-items: center;
@@ -461,32 +475,40 @@ button:hover {
 }
 
 #toolbar-room {
-  font-size: 12px;
+  font-size: 13px;
   color: #888;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
 }
 
 #toolbar-status {
-  font-size: 12px;
+  font-size: 13px;
   color: #6af;
-  margin-left: 8px;
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .toolbar-spacer {
   flex: 1;
+  min-width: 0;
 }
 
 #toolbar button {
-  padding: 6px 12px;
-  font-size: 12px;
-  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 13px;
+  min-height: 44px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .toolbar-toggle {
   background: #333;
-  font-size: 11px !important;
-  padding: 4px 10px !important;
-  min-height: 28px !important;
+  font-size: 13px !important;
+  padding: 6px 10px !important;
+  min-height: 44px !important;
 }
 .toolbar-toggle.active {
   background: #4a6;
@@ -501,6 +523,7 @@ button:hover {
 /* Share dropdown */
 #share-wrapper {
   position: relative;
+  flex-shrink: 0;
 }
 .share-dropdown {
   position: absolute;
@@ -521,9 +544,9 @@ button:hover {
   display: none;
 }
 .share-option {
-  padding: 8px 12px !important;
-  font-size: 12px !important;
-  min-height: 32px !important;
+  padding: 10px 14px !important;
+  font-size: 14px !important;
+  min-height: 44px !important;
   background: transparent !important;
   text-align: left;
   border-radius: 6px;
@@ -531,6 +554,45 @@ button:hover {
 }
 .share-option:hover {
   background: #2a2a40 !important;
+}
+
+/* More (overflow) dropdown */
+#more-wrapper {
+  position: relative;
+  flex-shrink: 0;
+}
+.more-dropdown {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin-bottom: 6px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  z-index: 55;
+}
+.more-dropdown.hidden {
+  display: none;
+}
+.more-option {
+  padding: 10px 14px !important;
+  font-size: 14px !important;
+  min-height: 44px !important;
+  background: transparent !important;
+  text-align: left;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.more-option:hover {
+  background: #2a2a40 !important;
+}
+.more-end {
+  color: #e66 !important;
 }
 
 /* Room-full banner */
@@ -554,6 +616,8 @@ button:hover {
   background: transparent !important;
   border: none;
   color: #888;
+  min-width: 44px !important;
+  min-height: 44px !important;
   font-size: 16px;
   cursor: pointer;
   padding: 0 4px !important;
