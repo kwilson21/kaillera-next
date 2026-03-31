@@ -3668,7 +3668,13 @@
     });
 
     const copyBtn = document.getElementById('copy-link');
-    if (copyBtn) copyBtn.addEventListener('click', copyLink);
+    console.log('[play] copy-link button:', copyBtn ? 'found' : 'NOT FOUND');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', (e) => {
+        console.log('[play] Invite clicked');
+        copyLink();
+      });
+    }
 
     // Overlay invite dropdown (pre-game Play/Watch)
     const overlayInvitePlay = document.getElementById('overlay-invite-play');
