@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.22.0",
+    "date": "2026-04-01",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "AI DMA determinism, RSP audio skip, reconnect-only resync"
+      },
+      {
+        "type": "feat",
+        "message": "v0.21.0 — Agent's Version (#2)"
+      }
+    ]
+  },
+  {
     "version": "0.21.0",
     "date": "2026-03-31",
     "changes": [
@@ -270,16 +284,6 @@
       {
         "type": "feat",
         "message": "add homepage OG image and Playwright E2E tests"
-      }
-    ]
-  },
-  {
-    "version": "0.13.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "wire up OG card routes and COEP exemption"
       }
     ]
   }
