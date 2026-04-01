@@ -516,8 +516,34 @@
             }
 
             sendDeviceType();
-            // If ROM was already loaded from cache, notify server immediately
-            if (_romBlob || _romBlobUrl) notifyRomReady();
+            // Pick up the host's ROM hash from the join ack so we can
+            // verify our cached ROM before reporting as ready.
+            if (!isHost && joinData?.romHash) _hostRomHash = joinData.romHash;
+            // If ROM was already loaded from cache, notify server immediately.
+            // Skip for guests if host's ROM hash is known and doesn't match —
+            // onUsersUpdated will handle activation once the host hash is verified.
+            if ((_romBlob || _romBlobUrl) && (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash))) {
+              notifyRomReady();
+            } else if (
+              _hostRomHash &&
+              _romHash &&
+              !_romSharingEnabled &&
+              !roomData.rom_sharing &&
+              romHashMismatch(_hostRomHash, _romHash)
+            ) {
+              // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
+              console.log('[play] join: cached ROM mismatch — clearing');
+              if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+              _romBlob = null;
+              _romBlobUrl = null;
+              _romHash = null;
+              KNState.romHash = null;
+              window.EJS_gameUrl = undefined;
+              const romDrop = document.getElementById('rom-drop');
+              const statusEl = document.getElementById('rom-status');
+              if (romDrop) romDrop.classList.remove('loaded');
+              if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+            }
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
@@ -609,7 +635,45 @@
       if (modeSel && !isHost) modeSel.value = mode;
       // Re-emit rom-ready when switching to lockstep so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
-      if (prevMode !== 'lockstep' && mode === 'lockstep' && (_romBlob || _romBlobUrl)) {
+      // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
+      if (
+        prevMode !== 'lockstep' &&
+        mode === 'lockstep' &&
+        (_romBlob || _romBlobUrl) &&
+        (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash))
+      ) {
+        notifyRomReady();
+      }
+    }
+
+    // Track host's ROM hash for cache verification (guests only).
+    // Skip when ROM sharing is enabled — the ROM comes from the host via transfer.
+    if (!isHost && data.romHash && data.romHash !== _hostRomHash) {
+      _hostRomHash = data.romHash;
+      // If we have a cached ROM loaded that doesn't match, clear it
+      if (_romHash && !_romSharingEnabled && romHashMismatch(_hostRomHash, _romHash)) {
+        console.log(
+          '[play] host ROM hash changed — clearing mismatched cached ROM (host:',
+          _hostRomHash?.substring(0, 16),
+          'ours:',
+          _romHash?.substring(0, 16),
+          ')',
+        );
+        if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+        _romBlob = null;
+        _romBlobUrl = null;
+        _romHash = null;
+        KNState.romHash = null;
+        window.EJS_gameUrl = undefined;
+        // Reset drop zone UI
+        const romDrop = document.getElementById('rom-drop');
+        const statusEl = document.getElementById('rom-status');
+        if (romDrop) romDrop.classList.remove('loaded');
+        if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+        // Tell server we no longer have a ROM
+        if (socket?.connected) socket.emit('rom-ready', { ready: false });
+      } else if ((_romBlob || _romBlobUrl) && _romHash && !romHashMismatch(_hostRomHash, _romHash)) {
+        // Hash matches — if we haven't notified yet, do so now
         notifyRomReady();
       }
     }
@@ -1669,7 +1733,7 @@
 
   const notifyRomReady = () => {
     if (socket?.connected) {
-      socket.emit('rom-ready', { ready: true });
+      socket.emit('rom-ready', { ready: true, hash: _romHash || undefined });
     }
   };
 
@@ -2146,6 +2210,30 @@
           cb(null);
           return;
         }
+        // Compute hash first so we can verify against the host's ROM
+        let hash = null;
+        try {
+          hash = await hashArrayBuffer(req.result);
+        } catch (err) {
+          console.log('[play] cached ROM hash failed:', err);
+        }
+
+        // Guests: only activate the cached ROM if its hash matches the host's.
+        // If we don't know the host's hash yet, defer — onUsersUpdated will
+        // activate or discard the cache once the host's hash arrives.
+        // Skip when ROM sharing is enabled — the ROM comes from the host.
+        if (!isHost && !_romSharingEnabled && hash && _hostRomHash && romHashMismatch(_hostRomHash, hash)) {
+          console.log(
+            '[play] cached ROM hash mismatch — not loading (host:',
+            _hostRomHash?.substring(0, 16),
+            'cached:',
+            hash?.substring(0, 16),
+            ')',
+          );
+          cb(null);
+          return;
+        }
+
         const blob = new Blob([req.result]);
         _romBlob = blob;
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
@@ -2154,16 +2242,18 @@
         // Enable ROM sharing checkbox immediately (don't gate on hash)
         const romShareCb = document.getElementById('opt-rom-sharing');
         if (romShareCb && isHost) romShareCb.disabled = false;
-        // Compute hash from cached data (best-effort — don't block ROM load)
-        try {
-          const hash = await hashArrayBuffer(req.result);
+        if (hash) {
           _romHash = hash;
           KNState.romHash = hash;
           _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        } catch (err) {
-          console.log('[play] cached ROM hash failed:', err);
         }
-        notifyRomReady();
+
+        // Host always notifies immediately. Guests only notify if we already
+        // know the host's hash matches (or host hash isn't known yet — the
+        // onUsersUpdated handler will clear the ROM if it later mismatches).
+        if (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash)) {
+          notifyRomReady();
+        }
         cb(name);
       };
       req.onerror = () => {
@@ -2548,38 +2638,59 @@
 
       const gpEl = slotEl.querySelector('.gamepad');
       const devEl = slotEl.querySelector('.device');
+      const romEl = slotEl.querySelector('.rom-status');
 
       if (playerInSlot) {
         const isOwner = ownerSid && playerInSlot.socketId === ownerSid;
-        let suffix = isOwner ? ' (host)' : '';
-        if (!playerInSlot.romReady && !_romSharingEnabled) suffix += ' — no ROM';
+        const suffix = isOwner ? ' (host)' : '';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
         if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
         else delete nameEl.dataset.a21;
+        // ROM ready indicator (pre-game only, hide when ROM sharing handles it)
+        if (romEl) {
+          if (!gameRunning && !_romSharingEnabled) {
+            const ready = !!playerInSlot.romReady;
+            romEl.textContent = ready ? 'Ready' : 'Not Ready';
+            romEl.className = `rom-status ${ready ? 'ready' : 'not-ready'}`;
+          } else {
+            romEl.textContent = '';
+            romEl.className = 'rom-status';
+          }
+        }
         // Show input type indicator
         if (gpEl) {
           const itype = playerInSlot.inputType || 'keyboard';
+          const gpLabel = itype === 'gamepad' ? 'Gamepad' : 'Keyboard';
           gpEl.textContent = itype === 'gamepad' ? '\uD83C\uDFAE' : '\u2328\uFE0F';
-          gpEl.title = itype === 'gamepad' ? 'Gamepad' : 'Keyboard';
+          gpEl.title = gpLabel;
+          gpEl.setAttribute('aria-label', gpLabel);
         }
         // Show device type indicator
         if (devEl) {
           const dtype = playerInSlot.deviceType || 'desktop';
+          const devLabel = dtype === 'mobile' ? 'Mobile' : 'Desktop';
           devEl.textContent = dtype === 'mobile' ? '\uD83D\uDCF1' : '\uD83D\uDDA5\uFE0F';
-          devEl.title = dtype === 'mobile' ? 'Mobile' : 'Desktop';
+          devEl.title = devLabel;
+          devEl.setAttribute('aria-label', devLabel);
         }
       } else {
         nameEl.textContent = 'Open';
         nameEl.classList.add('empty');
         delete nameEl.dataset.a21;
+        if (romEl) {
+          romEl.textContent = '';
+          romEl.className = 'rom-status';
+        }
         if (gpEl) {
           gpEl.textContent = '';
           gpEl.title = '';
+          gpEl.removeAttribute('aria-label');
         }
         if (devEl) {
           devEl.textContent = '';
           devEl.title = '';
+          devEl.removeAttribute('aria-label');
         }
       }
     }

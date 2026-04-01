@@ -1,8 +1,8 @@
 diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
-index 3ef61a2..2c29fa2 100644
+index 3ef61a2..83ba6f1 100644
 --- a/mupen64plus-core/src/main/main.c
 +++ b/mupen64plus-core/src/main/main.c
-@@ -129,6 +129,74 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+@@ -129,6 +129,95 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
  
  struct device g_dev;
  
@@ -70,6 +70,27 @@ index 3ef61a2..2c29fa2 100644
 +EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read_regions(const uint32_t *offsets, uint32_t count, uint8_t *buf, uint32_t buf_size) { const uint8_t *rdram = (const uint8_t *)g_dev.rdram.dram; uint8_t *dst = buf; uint32_t total = 0; uint32_t r; for (r = 0; r < count; r++) { uint32_t off = offsets[r]; uint32_t size = 0x10000u; if (off + size > RDRAM_MAX_SIZE || total + size > buf_size) break; memcpy(dst, rdram + off, size); dst += size; total += size; } return total; }
 +EMSCRIPTEN_KEEPALIVE int kn_sync_write_regions(const uint32_t *offsets, uint32_t count, const uint8_t *buf, uint32_t buf_size) { uint8_t *rdram = (uint8_t *)g_dev.rdram.dram; const uint8_t *src = buf; uint32_t pos = 0; uint32_t r; for (r = 0; r < count; r++) { uint32_t off = offsets[r]; uint32_t size = 0x10000u; if (off + size > RDRAM_MAX_SIZE || pos + size > buf_size) return -1; memcpy(rdram + off, src, size); src += size; pos += size; } return 0; }
 +EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf, uint32_t size) { struct device *dev = &g_dev; const uint8_t *p = buf; const uint32_t *header; int i; char queue[1024]; uint32_t pc_val; if (!buf || size < 16) return -1; header = (const uint32_t *)p; if (header[0] != 0x4B4E5331 || header[1] != 1) return -1; p += 16; memcpy(dev->rdram.dram, p, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE; memcpy(r4300_regs(&dev->r4300), p, 32*8); p += 32*8; memcpy(r4300_cp0_regs(&dev->r4300.cp0), p, CP0_REGS_COUNT*4); p += CP0_REGS_COUNT*4; { unsigned int ni; uint32_t cnt; memcpy(&ni,p,4); p+=4; memcpy(&cnt,p,4); p+=4; *r4300_cp0_next_interrupt(&dev->r4300.cp0)=ni; dev->r4300.cp0.regs[CP0_COUNT_REG]=cnt; } memcpy(r4300_cp1_regs(&dev->r4300.cp1), p, 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg); { uint32_t f0,f31; memcpy(&f0,p,4); p+=4; memcpy(&f31,p,4); p+=4; *r4300_cp1_fcr0(&dev->r4300.cp1)=f0; *r4300_cp1_fcr31(&dev->r4300.cp1)=f31; } { unsigned int lb; int64_t hi,lo; memcpy(&lb,p,4); p+=4; memcpy(&hi,p,8); p+=8; memcpy(&lo,p,8); p+=8; memcpy(&pc_val,p,4); p+=4; *r4300_llbit(&dev->r4300)=lb; *r4300_mult_hi(&dev->r4300)=hi; *r4300_mult_lo(&dev->r4300)=lo; } { unsigned int vf,vd; memcpy(&vf,p,4); p+=4; memcpy(&vd,p,4); p+=4; dev->vi.field=vf; dev->vi.delay=vd; } memset(dev->r4300.cp0.tlb.LUT_r, 0, 0x400000); memset(dev->r4300.cp0.tlb.LUT_w, 0, 0x400000); for (i=0; i<32; i++) { memcpy(&dev->r4300.cp0.tlb.entries[i], p, sizeof(dev->r4300.cp0.tlb.entries[i])); p += sizeof(dev->r4300.cp0.tlb.entries[i]); tlb_map(&dev->r4300.cp0.tlb, i); } memcpy(queue, p, sizeof(queue)); p += sizeof(queue); load_eventqueue_infos(&dev->r4300.cp0, queue); memcpy(dev->sp.mem, p, SP_MEM_SIZE); p += SP_MEM_SIZE; memcpy(dev->pif.ram, p, PIF_RAM_SIZE); p += PIF_RAM_SIZE; setup_channels_format(&dev->pif); { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); } return 0; }
++/* kaillera-next: FPU operation trace ring buffer for cross-platform determinism verification.
++ * Records input/output bit patterns for every FPU arithmetic op.
++ * Storage lives here (single TU); fpu.h has extern decls + inline recorder. */
++#define KN_FPU_TRACE_SIZE 4096
++typedef struct {
++    uint8_t  op;
++    uint8_t  pad[3];
++    uint32_t frame;
++    uint64_t in1;
++    uint64_t in2;
++    uint64_t out;
++} kn_fpu_trace_entry;
++int kn_fpu_trace_enabled = 0;
++kn_fpu_trace_entry kn_fpu_trace_buf[KN_FPU_TRACE_SIZE];
++uint32_t kn_fpu_trace_count = 0;
++EMSCRIPTEN_KEEPALIVE void kn_fpu_trace_enable(int enable) {
++    kn_fpu_trace_enabled = enable;
++    if (enable) kn_fpu_trace_count = 0;
++}
++EMSCRIPTEN_KEEPALIVE uint32_t kn_fpu_trace_get_count(void) { return kn_fpu_trace_count; }
++EMSCRIPTEN_KEEPALIVE void *kn_fpu_trace_get_buf(void) { return kn_fpu_trace_buf; }
 +#endif
 +
 +
@@ -77,7 +98,7 @@ index 3ef61a2..2c29fa2 100644
  m64p_media_loader g_media_loader;
  
  int g_gs_vi_counter = 0;
-@@ -1687,7 +1755,7 @@ m64p_error main_run(void)
+@@ -1687,7 +1776,7 @@ m64p_error main_run(void)
                  no_compiled_jump,
                  randomize_interrupt,
                  g_start_address,

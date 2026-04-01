@@ -1,0 +1,261 @@
+diff --git a/Makefile b/Makefile
+index 2c28955..06972b5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -569,6 +569,13 @@ else ifeq ($(platform), emscripten)
+ 
+    COREFLAGS += -DOS_LINUX
+    STATIC_LINKING = 1
++
++   # kaillera-next: Berkeley SoftFloat 3e include paths for FPU determinism.
++   # SoftFloat source lives outside the git-cloned repos at /build/softfloat/.
++   # The .c files are compiled separately by build.sh and merged into the .bc.
++   SOFTFLOAT_DIR ?= $(ROOT_DIR)/../../softfloat
++   INCFLAGS += -I$(SOFTFLOAT_DIR)/include -I$(SOFTFLOAT_DIR)/8086-SSE -I$(SOFTFLOAT_DIR)
++
+ # Windows
+ else
+    TARGET := $(TARGET_NAME)_libretro.dll
+diff --git a/mupen64plus-core/src/device/r4300/fpu.h b/mupen64plus-core/src/device/r4300/fpu.h
+index 6d17553..6e8790a 100644
+--- a/mupen64plus-core/src/device/r4300/fpu.h
++++ b/mupen64plus-core/src/device/r4300/fpu.h
+@@ -24,6 +24,27 @@
+ 
+ #include <math.h>
+ #include <stdint.h>
++#include <string.h>
++
++/* ---- kaillera-next: SoftFloat integration for cross-platform determinism ---- */
++#ifdef __EMSCRIPTEN__
++#include "softfloat.h"
++
++/* Type-punning helpers: convert between C float/double and SoftFloat types.
++ * Uses memcpy to avoid strict-aliasing violations. */
++static inline float32_t kn_to_f32(float f) {
++    float32_t r; uint32_t bits; memcpy(&bits, &f, 4); r.v = bits; return r;
++}
++static inline float kn_from_f32(float32_t f) {
++    float r; memcpy(&r, &f.v, 4); return r;
++}
++static inline float64_t kn_to_f64(double d) {
++    float64_t r; uint64_t bits; memcpy(&bits, &d, 8); r.v = bits; return r;
++}
++static inline double kn_from_f64(float64_t f) {
++    double r; memcpy(&r, &f.v, 8); return r;
++}
++#endif /* __EMSCRIPTEN__ */
+ 
+ #ifdef _MSC_VER
+ #define M64P_FPU_INLINE static __inline
+@@ -71,7 +92,17 @@ static __inline float  truncf(float x) { return (float)(int)x; }
+ 
+ M64P_FPU_INLINE void set_rounding(uint32_t fcr31)
+ {
+-#if !defined(VITA) && !defined(__SWITCH__)
++#ifdef __EMSCRIPTEN__
++    /* kaillera-next: map N64 FCR31 rounding mode bits to SoftFloat.
++     * This ensures SoftFloat operations use the correct rounding mode
++     * without relying on the C library's fesetround (which WASM ignores). */
++    switch(fcr31 & 3) {
++    case 0: softfloat_roundingMode = softfloat_round_near_even; break;
++    case 1: softfloat_roundingMode = softfloat_round_minMag;    break;
++    case 2: softfloat_roundingMode = softfloat_round_max;       break;
++    case 3: softfloat_roundingMode = softfloat_round_min;       break;
++    }
++#elif !defined(VITA) && !defined(__SWITCH__)
+     switch(fcr31 & 3) {
+     case 0: /* Round to nearest, or to even if equidistant */
+         fesetround(FE_TONEAREST);
+@@ -238,7 +269,11 @@ M64P_FPU_INLINE void cvt_s_w(uint32_t* fcr31, const int32_t* source, float* dest
+     fpu_reset_cause(fcr31);
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f32(i32_to_f32(*source));
++#else
+     *dest = (float)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
+@@ -248,7 +283,11 @@ M64P_FPU_INLINE void cvt_d_w(uint32_t* fcr31, const int32_t* source, double* des
+     fpu_reset_cause(fcr31);
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f64(i32_to_f64(*source));
++#else
+     *dest = (double)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
+@@ -260,7 +299,11 @@ M64P_FPU_INLINE void cvt_s_l(uint32_t* fcr31, const int64_t* source, float* dest
+     fpu_reset_cause(fcr31);
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f32(i64_to_f32(*source));
++#else
+     *dest = (float)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
+@@ -272,7 +315,11 @@ M64P_FPU_INLINE void cvt_d_l(uint32_t* fcr31, const int64_t* source, double* des
+     fpu_reset_cause(fcr31);
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f64(i64_to_f64(*source));
++#else
+     *dest = (double)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
+@@ -284,7 +331,11 @@ M64P_FPU_INLINE void cvt_d_s(uint32_t* fcr31, const float* source, double* dest)
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f64(f32_to_f64(kn_to_f32(*source)));
++#else
+     *dest = (double)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
+@@ -298,7 +349,11 @@ M64P_FPU_INLINE void cvt_s_d(uint32_t* fcr31, const double* source, float* dest)
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *dest = kn_from_f32(f64_to_f32(kn_to_f64(*source)));
++#else
+     *dest = (float)*source;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
+@@ -989,7 +1044,11 @@ M64P_FPU_INLINE void add_s(uint32_t* fcr31, const float* source1, const float* s
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f32(f32_add(kn_to_f32(*source1), kn_to_f32(*source2)));
++#else
+     *target = *source1 + *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1005,7 +1064,11 @@ M64P_FPU_INLINE void sub_s(uint32_t* fcr31, const float* source1, const float* s
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f32(f32_sub(kn_to_f32(*source1), kn_to_f32(*source2)));
++#else
+     *target = *source1 - *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1021,7 +1084,11 @@ M64P_FPU_INLINE void mul_s(uint32_t* fcr31, const float* source1, const float* s
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f32(f32_mul(kn_to_f32(*source1), kn_to_f32(*source2)));
++#else
+     *target = *source1 * *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1037,7 +1104,11 @@ M64P_FPU_INLINE void div_s(uint32_t* fcr31, const float* source1, const float* s
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f32(f32_div(kn_to_f32(*source1), kn_to_f32(*source2)));
++#else
+     *target = *source1 / *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1052,7 +1123,11 @@ M64P_FPU_INLINE void sqrt_s(uint32_t* fcr31, const float* source, float* target)
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f32(f32_sqrt(kn_to_f32(*source)));
++#else
+     *target = sqrtf(*source);
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1090,7 +1165,11 @@ M64P_FPU_INLINE void add_d(uint32_t* fcr31, const double* source1, const double*
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f64(f64_add(kn_to_f64(*source1), kn_to_f64(*source2)));
++#else
+     *target = *source1 + *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1106,7 +1185,11 @@ M64P_FPU_INLINE void sub_d(uint32_t* fcr31, const double* source1, const double*
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f64(f64_sub(kn_to_f64(*source1), kn_to_f64(*source2)));
++#else
+     *target = *source1 - *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1122,7 +1205,11 @@ M64P_FPU_INLINE void mul_d(uint32_t* fcr31, const double* source1, const double*
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f64(f64_mul(kn_to_f64(*source1), kn_to_f64(*source2)));
++#else
+     *target = *source1 * *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1138,7 +1225,11 @@ M64P_FPU_INLINE void div_d(uint32_t* fcr31, const double* source1, const double*
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f64(f64_div(kn_to_f64(*source1), kn_to_f64(*source2)));
++#else
+     *target = *source1 / *source2;
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 
+@@ -1154,7 +1245,11 @@ M64P_FPU_INLINE void sqrt_d(uint32_t* fcr31, const double* source, double* targe
+ 
+     fpu_reset_exceptions();
+ 
++#ifdef __EMSCRIPTEN__
++    *target = kn_from_f64(f64_sqrt(kn_to_f64(*source)));
++#else
+     *target = sqrt(*source);
++#endif
+ 
+     fpu_check_exceptions(fcr31);
+ 

@@ -182,6 +182,7 @@ def _players_payload(room: Room) -> dict:
         "spectators": dict(room.spectators.items()),
         "owner": room.owner,
         "romSharing": room.rom_sharing,
+        "romHash": room.rom_hash,
         "mode": room.mode,
         "status": room.status,
     }
@@ -650,6 +651,9 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
         room.rom_ready.add(sid)
     else:
         room.rom_ready.discard(sid)
+    # Store host's ROM hash so guests can verify their cached ROM
+    if sid == room.owner and payload.hash and len(payload.hash) >= 16:
+        room.rom_hash = payload.hash
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
     return None

@@ -121,6 +121,7 @@ class RomSharingTogglePayload(BaseModel):
 
 class RomReadyPayload(BaseModel):
     ready: bool = True
+    hash: str | None = None
 
 
 # ── rom-declare ──────────────────────────────────────────────────────────────

@@ -1559,6 +1559,45 @@
           _config?.onToast?.(`${name} returned`);
           return;
         }
+        // FPU trace: cross-platform determinism verification from host
+        if (e.data.startsWith('fpu-trace:')) {
+          if (!_fpuTraceEnabled) return;
+          const parts = e.data.split(':');
+          const hostFrame = parseInt(parts[1], 10);
+          const hostHash = parseInt(parts[2], 10);
+          const hostCount = parseInt(parts[3], 10);
+          const local = _fpuTraceHash();
+          if (!local) return;
+          if (local.hash === hostHash) {
+            if (!_fpuTraceVerified) {
+              _syncLog(`FPU trace MATCH: ${local.count} ops verified (frame ${hostFrame})`);
+              _fpuTraceVerified = true;
+            }
+          } else {
+            _syncLog(
+              `FPU trace MISMATCH at frame ${hostFrame}! host_hash=${hostHash} local_hash=${local.hash} host_count=${hostCount} local_count=${local.count}`,
+            );
+            const entries = _fpuTraceExtract(Math.max(0, hostFrame - 300), hostFrame);
+            _syncLog(`FPU trace dump (last ${entries.length} entries):`);
+            for (const ent of entries.slice(0, 20)) {
+              _syncLog(
+                `  frame=${ent.frame} op=${_FPU_OP_NAMES[ent.op] ?? ent.op} in1=0x${ent.in1} in2=0x${ent.in2} out=0x${ent.out}`,
+              );
+            }
+            if (socket) {
+              socket.emit('debug-sync', {
+                type: 'fpu-trace-mismatch',
+                frame: hostFrame,
+                hostHash,
+                localHash: local.hash,
+                hostCount,
+                localCount: local.count,
+                entries: entries.slice(0, 100),
+              });
+            }
+          }
+          return;
+        }
         // State sync: hash check from host
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
@@ -2786,6 +2825,94 @@
 
   let _hasForkedCore = false; // true if Module exports kn_set_deterministic
 
+  // FPU trace — cross-platform determinism verification
+  const _FPU_TRACE_SIZE = 4096;
+  const _FPU_TRACE_ENTRY_BYTES = 32;
+  const _FPU_TRACE_CHECK_INTERVAL = 300; // frames between hash comparisons
+  let _fpuTraceEnabled = false;
+  let _fpuTraceLastCheckFrame = 0;
+  let _fpuTraceVerified = false; // true once a match is confirmed
+
+  /** Read the FPU trace ring buffer from WASM and compute FNV-1a hash */
+  const _fpuTraceHash = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_fpu_trace_get_buf || !mod?._kn_fpu_trace_get_count) return null;
+    const count = mod._kn_fpu_trace_get_count();
+    if (count === 0) return null;
+    const bufPtr = mod._kn_fpu_trace_get_buf();
+    const totalBytes = _FPU_TRACE_SIZE * _FPU_TRACE_ENTRY_BYTES;
+    const buf = mod.HEAPU8.subarray(bufPtr, bufPtr + totalBytes);
+    let hash = 2166136261;
+    for (let i = 0; i < totalBytes; i++) {
+      hash ^= buf[i];
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return { hash, count };
+  };
+
+  /** Extract trace entries for a frame range from the ring buffer */
+  const _fpuTraceExtract = (startFrame, endFrame) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_fpu_trace_get_buf) return [];
+    const bufPtr = mod._kn_fpu_trace_get_buf();
+    const count = mod._kn_fpu_trace_get_count();
+    const entries = [];
+    const used = Math.min(count, _FPU_TRACE_SIZE);
+    const startIdx = count > _FPU_TRACE_SIZE ? count - _FPU_TRACE_SIZE : 0;
+    for (let i = 0; i < used; i++) {
+      const idx = (startIdx + i) & (_FPU_TRACE_SIZE - 1);
+      const off = bufPtr + idx * _FPU_TRACE_ENTRY_BYTES;
+      const op = mod.HEAPU8[off];
+      const frame =
+        mod.HEAPU8[off + 4] | (mod.HEAPU8[off + 5] << 8) | (mod.HEAPU8[off + 6] << 16) | (mod.HEAPU8[off + 7] << 24);
+      if (frame < startFrame || frame > endFrame) continue;
+      const dv = new DataView(mod.HEAPU8.buffer, off, _FPU_TRACE_ENTRY_BYTES);
+      const in1Lo = dv.getUint32(8, true),
+        in1Hi = dv.getUint32(12, true);
+      const in2Lo = dv.getUint32(16, true),
+        in2Hi = dv.getUint32(20, true);
+      const outLo = dv.getUint32(24, true),
+        outHi = dv.getUint32(28, true);
+      entries.push({
+        op,
+        frame,
+        in1: in1Hi
+          ? `${in1Hi.toString(16).padStart(8, '0')}${in1Lo.toString(16).padStart(8, '0')}`
+          : in1Lo.toString(16).padStart(8, '0'),
+        in2: in2Hi
+          ? `${in2Hi.toString(16).padStart(8, '0')}${in2Lo.toString(16).padStart(8, '0')}`
+          : in2Lo.toString(16).padStart(8, '0'),
+        out: outHi
+          ? `${outHi.toString(16).padStart(8, '0')}${outLo.toString(16).padStart(8, '0')}`
+          : outLo.toString(16).padStart(8, '0'),
+      });
+    }
+    return entries;
+  };
+
+  const _FPU_OP_NAMES = [
+    'add_s',
+    'sub_s',
+    'mul_s',
+    'div_s',
+    'sqrt_s',
+    'abs_s',
+    'neg_s',
+    'add_d',
+    'sub_d',
+    'mul_d',
+    'div_d',
+    'sqrt_d',
+    'abs_d',
+    'neg_d',
+    'cvt_s_d',
+    'cvt_d_s',
+    'cvt_s_w',
+    'cvt_d_w',
+    'cvt_s_l',
+    'cvt_d_l',
+  ];
+
   const stepOneFrame = () => {
     if (!_pendingRunner) return false;
     const runner = _pendingRunner;
@@ -2897,6 +3024,15 @@
       // CP0_COUNT reset disabled — translate_event_queue corrupts host state.
       // The --denan WASM pass handles NaN determinism without needing cycle sync.
 
+      // Enable FPU trace for cross-platform determinism verification
+      if (detMod?._kn_fpu_trace_enable) {
+        detMod._kn_fpu_trace_enable(1);
+        _fpuTraceEnabled = true;
+        _fpuTraceLastCheckFrame = 0;
+        _fpuTraceVerified = false;
+        _syncLog('FPU trace enabled for determinism verification');
+      }
+
       // Override performance.now() during WASM frame steps for COMPLETE timing
       // determinism. Emscripten's _emscripten_get_now calls performance.now()
       // internally, and it's captured in a closure we can't override from outside.
@@ -2990,13 +3126,14 @@
     // ARM (Safari/iPhone) vs x86 (Chrome/Mac) WASM JIT engines. Skipping the
     // writes keeps guest DRAM identical to the state-sync baseline. The guest
     // receives audio via the lockstep audio bypass, not from DRAM.
-    if (_playerSlot !== 0) {
-      const skipMod = window.EJS_emulator?.gameManager?.Module;
-      if (skipMod?._kn_set_skip_rsp_audio) {
-        skipMod._kn_set_skip_rsp_audio(1);
-        _syncLog('RSP audio DRAM writes disabled (guest — lockstep audio bypass)');
-      }
-    }
+    // RSP audio skip DISABLED — testing SoftFloat FPU determinism.
+    // if (_playerSlot !== 0) {
+    //   const skipMod = window.EJS_emulator?.gameManager?.Module;
+    //   if (skipMod?._kn_set_skip_rsp_audio) {
+    //     skipMod._kn_set_skip_rsp_audio(1);
+    //     _syncLog('RSP audio DRAM writes disabled (guest — lockstep audio bypass)');
+    //   }
+    // }
 
     setStatus('Connected -- game on!');
 
@@ -3142,6 +3279,12 @@
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
+
+    // Disable FPU trace
+    if (_fpuTraceEnabled) {
+      if (stopMod?._kn_fpu_trace_enable) stopMod._kn_fpu_trace_enable(0);
+      _fpuTraceEnabled = false;
+    }
 
     // Disable all deterministic timing
     window._kn_inStep = false;
@@ -3606,6 +3749,20 @@
         _hasKnSync = true;
         ensureSyncBuffer();
         _syncLog('C-level sync available [lazy]');
+      }
+    }
+    // FPU trace hash check — host broadcasts periodically
+    if (_fpuTraceEnabled && _playerSlot === 0 && _frameNum - _fpuTraceLastCheckFrame >= _FPU_TRACE_CHECK_INTERVAL) {
+      _fpuTraceLastCheckFrame = _frameNum;
+      const traceInfo = _fpuTraceHash();
+      if (traceInfo) {
+        for (const p of Object.values(_peers)) {
+          if (p.dc?.readyState === 'open') {
+            try {
+              p.dc.send(`fpu-trace:${_frameNum}:${traceInfo.hash}:${traceInfo.count}`);
+            } catch (_) {}
+          }
+        }
       }
     }
     // Debug overlay -- update every 15 frames (~4x per second)

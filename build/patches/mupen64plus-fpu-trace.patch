@@ -1,0 +1,260 @@
+diff --git a/mupen64plus-core/src/device/r4300/fpu.h b/mupen64plus-core/src/device/r4300/fpu.h
+index 6d17553..d640658 100644
+--- a/mupen64plus-core/src/device/r4300/fpu.h
++++ b/mupen64plus-core/src/device/r4300/fpu.h
+@@ -45,6 +45,95 @@ static __inline float  truncf(float x) { return (float)(int)x; }
+ #endif
+ #endif
+ 
++/* kaillera-next: FPU trace — extern declarations for ring buffer in main.c */
++#ifdef __EMSCRIPTEN__
++#include <string.h> /* memcpy for type-punning in trace macros */
++#define KN_FPU_TRACE_SIZE 4096
++typedef struct {
++    uint8_t  op;
++    uint8_t  pad[3];
++    uint32_t frame;
++    uint64_t in1;
++    uint64_t in2;
++    uint64_t out;
++} kn_fpu_trace_entry;
++extern int kn_fpu_trace_enabled;
++extern kn_fpu_trace_entry kn_fpu_trace_buf[];
++extern uint32_t kn_fpu_trace_count;
++extern int g_gs_vi_counter;
++static inline void kn_fpu_trace_record(uint8_t op, uint64_t in1, uint64_t in2, uint64_t out) {
++    if (!kn_fpu_trace_enabled) return;
++    kn_fpu_trace_entry *e = &kn_fpu_trace_buf[kn_fpu_trace_count & (KN_FPU_TRACE_SIZE - 1)];
++    e->op = op;
++    e->frame = (uint32_t)g_gs_vi_counter;
++    e->in1 = in1;
++    e->in2 = in2;
++    e->out = out;
++    kn_fpu_trace_count++;
++}
++#define KN_FPU_TRACE_F(op_id, s1, s2, tgt) do { \
++    uint32_t _i1, _i2, _o; \
++    memcpy(&_i1, (s1), 4); memcpy(&_i2, (s2), 4); memcpy(&_o, (tgt), 4); \
++    kn_fpu_trace_record((op_id), _i1, _i2, _o); \
++} while(0)
++#define KN_FPU_TRACE_F1(op_id, s1, tgt) do { \
++    uint32_t _i1, _o; \
++    memcpy(&_i1, (s1), 4); memcpy(&_o, (tgt), 4); \
++    kn_fpu_trace_record((op_id), _i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_D(op_id, s1, s2, tgt) do { \
++    uint64_t _i1, _i2, _o; \
++    memcpy(&_i1, (s1), 8); memcpy(&_i2, (s2), 8); memcpy(&_o, (tgt), 8); \
++    kn_fpu_trace_record((op_id), _i1, _i2, _o); \
++} while(0)
++#define KN_FPU_TRACE_D1(op_id, s1, tgt) do { \
++    uint64_t _i1, _o; \
++    memcpy(&_i1, (s1), 8); memcpy(&_o, (tgt), 8); \
++    kn_fpu_trace_record((op_id), _i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_F2D(op_id, s1, tgt) do { \
++    uint32_t _i1; uint64_t _o; \
++    memcpy(&_i1, (s1), 4); memcpy(&_o, (tgt), 8); \
++    kn_fpu_trace_record((op_id), _i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_D2F(op_id, s1, tgt) do { \
++    uint64_t _i1; uint32_t _o; \
++    memcpy(&_i1, (s1), 8); memcpy(&_o, (tgt), 4); \
++    kn_fpu_trace_record((op_id), _i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_W2F(op_id, s1, tgt) do { \
++    int32_t _i1; uint32_t _o; \
++    memcpy(&_i1, (s1), 4); memcpy(&_o, (tgt), 4); \
++    kn_fpu_trace_record((op_id), (uint64_t)(uint32_t)_i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_W2D(op_id, s1, tgt) do { \
++    int32_t _i1; uint64_t _o; \
++    memcpy(&_i1, (s1), 4); memcpy(&_o, (tgt), 8); \
++    kn_fpu_trace_record((op_id), (uint64_t)(uint32_t)_i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_L2F(op_id, s1, tgt) do { \
++    int64_t _i1; uint32_t _o; \
++    memcpy(&_i1, (s1), 8); memcpy(&_o, (tgt), 4); \
++    kn_fpu_trace_record((op_id), (uint64_t)_i1, 0, _o); \
++} while(0)
++#define KN_FPU_TRACE_CVT_L2D(op_id, s1, tgt) do { \
++    int64_t _i1; uint64_t _o; \
++    memcpy(&_i1, (s1), 8); memcpy(&_o, (tgt), 8); \
++    kn_fpu_trace_record((op_id), (uint64_t)_i1, 0, _o); \
++} while(0)
++#else
++#define KN_FPU_TRACE_F(op_id, s1, s2, tgt)
++#define KN_FPU_TRACE_F1(op_id, s1, tgt)
++#define KN_FPU_TRACE_D(op_id, s1, s2, tgt)
++#define KN_FPU_TRACE_D1(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_F2D(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_D2F(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_W2F(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_W2D(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_L2F(op_id, s1, tgt)
++#define KN_FPU_TRACE_CVT_L2D(op_id, s1, tgt)
++#endif
++
+ #define FCR31_CMP_BIT UINT32_C(0x800000)
+ 
+ #define FCR31_CAUSE_BITS UINT32_C(0x01F000)
+@@ -242,6 +331,7 @@ M64P_FPU_INLINE void cvt_s_w(uint32_t* fcr31, const int32_t* source, float* dest
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
++    KN_FPU_TRACE_CVT_W2F(16, source, dest);
+ }
+ M64P_FPU_INLINE void cvt_d_w(uint32_t* fcr31, const int32_t* source, double* dest)
+ {
+@@ -252,6 +342,7 @@ M64P_FPU_INLINE void cvt_d_w(uint32_t* fcr31, const int32_t* source, double* des
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
++    KN_FPU_TRACE_CVT_W2D(17, source, dest);
+ }
+ M64P_FPU_INLINE void cvt_s_l(uint32_t* fcr31, const int64_t* source, float* dest)
+ {
+@@ -264,6 +355,7 @@ M64P_FPU_INLINE void cvt_s_l(uint32_t* fcr31, const int64_t* source, float* dest
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
++    KN_FPU_TRACE_CVT_L2F(18, source, dest);
+ }
+ M64P_FPU_INLINE void cvt_d_l(uint32_t* fcr31, const int64_t* source, double* dest)
+ {
+@@ -276,6 +368,7 @@ M64P_FPU_INLINE void cvt_d_l(uint32_t* fcr31, const int64_t* source, double* des
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
++    KN_FPU_TRACE_CVT_L2D(19, source, dest);
+ }
+ M64P_FPU_INLINE void cvt_d_s(uint32_t* fcr31, const float* source, double* dest)
+ {
+@@ -288,6 +381,7 @@ M64P_FPU_INLINE void cvt_d_s(uint32_t* fcr31, const float* source, double* dest)
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_double(fcr31, dest);
++    KN_FPU_TRACE_CVT_F2D(15, source, dest);
+ }
+ M64P_FPU_INLINE void cvt_s_d(uint32_t* fcr31, const double* source, float* dest)
+ {
+@@ -302,6 +396,7 @@ M64P_FPU_INLINE void cvt_s_d(uint32_t* fcr31, const double* source, float* dest)
+ 
+     fpu_check_exceptions(fcr31);
+     fpu_check_output_float(fcr31, dest);
++    KN_FPU_TRACE_CVT_D2F(14, source, dest);
+ }
+ 
+ M64P_FPU_INLINE void round_l_s(const float* source, int64_t* dest)
+@@ -994,6 +1089,7 @@ M64P_FPU_INLINE void add_s(uint32_t* fcr31, const float* source1, const float* s
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F(0, source1, source2, target);
+ }
+ M64P_FPU_INLINE void sub_s(uint32_t* fcr31, const float* source1, const float* source2, float* target)
+ {
+@@ -1010,6 +1106,7 @@ M64P_FPU_INLINE void sub_s(uint32_t* fcr31, const float* source1, const float* s
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F(1, source1, source2, target);
+ }
+ M64P_FPU_INLINE void mul_s(uint32_t* fcr31, const float* source1, const float* source2, float* target)
+ {
+@@ -1026,6 +1123,7 @@ M64P_FPU_INLINE void mul_s(uint32_t* fcr31, const float* source1, const float* s
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F(2, source1, source2, target);
+ }
+ M64P_FPU_INLINE void div_s(uint32_t* fcr31, const float* source1, const float* source2, float* target)
+ {
+@@ -1042,6 +1140,7 @@ M64P_FPU_INLINE void div_s(uint32_t* fcr31, const float* source1, const float* s
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F(3, source1, source2, target);
+ }
+ M64P_FPU_INLINE void sqrt_s(uint32_t* fcr31, const float* source, float* target)
+ {
+@@ -1057,6 +1156,7 @@ M64P_FPU_INLINE void sqrt_s(uint32_t* fcr31, const float* source, float* target)
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F1(4, source, target);
+ }
+ M64P_FPU_INLINE void abs_s(uint32_t* fcr31, const float* source, float* target)
+ {
+@@ -1066,6 +1166,7 @@ M64P_FPU_INLINE void abs_s(uint32_t* fcr31, const float* source, float* target)
+     *target = fabsf(*source);
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F1(5, source, target);
+ }
+ M64P_FPU_INLINE void mov_s(const float* source, float* target)
+ {
+@@ -1079,6 +1180,7 @@ M64P_FPU_INLINE void neg_s(uint32_t* fcr31, const float* source, float* target)
+     *target = - *source;
+ 
+     fpu_check_output_float(fcr31, target);
++    KN_FPU_TRACE_F1(6, source, target);
+ }
+ M64P_FPU_INLINE void add_d(uint32_t* fcr31, const double* source1, const double* source2, double* target)
+ {
+@@ -1095,6 +1197,7 @@ M64P_FPU_INLINE void add_d(uint32_t* fcr31, const double* source1, const double*
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D(7, source1, source2, target);
+ }
+ M64P_FPU_INLINE void sub_d(uint32_t* fcr31, const double* source1, const double* source2, double* target)
+ {
+@@ -1111,6 +1214,7 @@ M64P_FPU_INLINE void sub_d(uint32_t* fcr31, const double* source1, const double*
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D(8, source1, source2, target);
+ }
+ M64P_FPU_INLINE void mul_d(uint32_t* fcr31, const double* source1, const double* source2, double* target)
+ {
+@@ -1127,6 +1231,7 @@ M64P_FPU_INLINE void mul_d(uint32_t* fcr31, const double* source1, const double*
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D(9, source1, source2, target);
+ }
+ M64P_FPU_INLINE void div_d(uint32_t* fcr31, const double* source1, const double* source2, double* target)
+ {
+@@ -1143,6 +1248,7 @@ M64P_FPU_INLINE void div_d(uint32_t* fcr31, const double* source1, const double*
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D(10, source1, source2, target);
+ }
+ M64P_FPU_INLINE void sqrt_d(uint32_t* fcr31, const double* source, double* target)
+ {
+@@ -1159,6 +1265,7 @@ M64P_FPU_INLINE void sqrt_d(uint32_t* fcr31, const double* source, double* targe
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D1(11, source, target);
+ }
+ M64P_FPU_INLINE void abs_d(uint32_t* fcr31, const double* source, double* target)
+ {
+@@ -1172,6 +1279,7 @@ M64P_FPU_INLINE void abs_d(uint32_t* fcr31, const double* source, double* target
+     fpu_check_exceptions(fcr31);
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D1(12, source, target);
+ }
+ M64P_FPU_INLINE void mov_d(const double* source, double* target)
+ {
+@@ -1185,6 +1293,7 @@ M64P_FPU_INLINE void neg_d(uint32_t* fcr31, const double* source, double* target
+     *target = - *source;
+ 
+     fpu_check_output_double(fcr31, target);
++    KN_FPU_TRACE_D1(13, source, target);
+ }
+ 
+ #endif /* M64P_DEVICE_R4300_FPU_H */

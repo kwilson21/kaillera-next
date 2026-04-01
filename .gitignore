@@ -48,3 +48,5 @@ logs/*.log
 logs/*.json
 logs/sync/
 certs/
+build/softfloat/obj/
+build/softfloat/libsoftfloat.a
