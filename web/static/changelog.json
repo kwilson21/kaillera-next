@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.23.1",
+    "date": "2026-04-01",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "security hardening — CF-Connecting-IP, CSP tightening, input validation"
+      }
+    ]
+  },
+  {
     "version": "0.23.0",
     "date": "2026-04-01",
     "changes": [
@@ -274,16 +284,6 @@
       {
         "type": "fix",
         "message": "scale OG card fonts larger, fix version footer alignment"
-      }
-    ]
-  },
-  {
-    "version": "0.15.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "scale up OG card text, arcade-style copy, spectate player matchups"
       }
     ]
   }
