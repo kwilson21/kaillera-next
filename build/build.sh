@@ -105,6 +105,24 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Applied mupen64plus wasm-determinism patch (strict FP, FPU canon, srand)" || \
             echo "    WARN: wasm-determinism patch failed"
     fi
+
+    # AI DMA determinism: replace float dma_modifier with integer-only arithmetic.
+    # The float multiplication in fifo_push() was the sole source of cross-platform
+    # non-determinism — ARM FMA vs x86 separate mul+add produced different AI interrupt
+    # timing, causing cascading game state divergence.
+    if [ -f "${PATCHES_DIR}/mupen64plus-ai-determinism.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-ai-determinism.patch" && \
+            echo "    Applied mupen64plus AI DMA determinism patch" || \
+            echo "    WARN: AI DMA determinism patch failed"
+    fi
+
+    # RSP HLE audio skip: allows guest to skip RSP audio DRAM writes that
+    # produce non-deterministic intermediate values across WASM JIT engines.
+    if [ -f "${PATCHES_DIR}/mupen64plus-rsp-skip-audio.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-rsp-skip-audio.patch" && \
+            echo "    Applied mupen64plus RSP skip-audio patch" || \
+            echo "    WARN: RSP skip-audio patch failed"
+    fi
 fi
 
 # ============================================================

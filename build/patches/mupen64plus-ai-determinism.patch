@@ -1,0 +1,87 @@
+diff --git a/mupen64plus-core/src/device/device.c b/mupen64plus-core/src/device/device.c
+index 5d85733..f4122ad 100644
+--- a/mupen64plus-core/src/device/device.c
++++ b/mupen64plus-core/src/device/device.c
+@@ -201,7 +201,7 @@ void init_device(struct device* dev,
+     int randomize_interrupt,
+     uint32_t start_address,
+     /* ai */
+-    void* aout, const struct audio_out_backend_interface* iaout, float dma_modifier,
++    void* aout, const struct audio_out_backend_interface* iaout, unsigned int dma_modifier_pct,
+     /* si */
+     unsigned int si_dma_duration,
+     /* rdram */
+@@ -298,7 +298,7 @@ void init_device(struct device* dev,
+             emumode, count_per_op, count_per_op_denom_pot, no_compiled_jump, randomize_interrupt, start_address);
+     init_rdp(&dev->dp, &dev->sp, &dev->mi, &dev->mem, &dev->rdram, &dev->r4300);
+     init_rsp(&dev->sp, mem_base_u32(base, MM_RSP_MEM), &dev->mi, &dev->dp, &dev->ri);
+-    init_ai(&dev->ai, &dev->mi, &dev->ri, &dev->vi, aout, iaout, dma_modifier);
++    init_ai(&dev->ai, &dev->mi, &dev->ri, &dev->vi, aout, iaout, dma_modifier_pct);
+     init_mi(&dev->mi, &dev->r4300);
+     init_pi(&dev->pi,
+             get_pi_dma_handler,
+diff --git a/mupen64plus-core/src/device/device.h b/mupen64plus-core/src/device/device.h
+index cb000a7..87a75c3 100644
+--- a/mupen64plus-core/src/device/device.h
++++ b/mupen64plus-core/src/device/device.h
+@@ -126,7 +126,7 @@ void init_device(struct device* dev,
+     int randomize_interrupt,
+     uint32_t start_address,
+     /* ai */
+-    void* aout, const struct audio_out_backend_interface* iaout, float dma_modifier,
++    void* aout, const struct audio_out_backend_interface* iaout, unsigned int dma_modifier_pct,
+     /* si */
+     unsigned int si_dma_duration,
+     /* rdram */
+diff --git a/mupen64plus-core/src/device/rcp/ai/ai_controller.c b/mupen64plus-core/src/device/rcp/ai/ai_controller.c
+index bc46a5f..e2c5bc8 100644
+--- a/mupen64plus-core/src/device/rcp/ai/ai_controller.c
++++ b/mupen64plus-core/src/device/rcp/ai/ai_controller.c
+@@ -100,7 +100,7 @@ static void do_dma(struct ai_controller* ai, struct ai_dma* dma)
+ 
+ static void fifo_push(struct ai_controller* ai)
+ {
+-    unsigned int duration = get_dma_duration(ai) * ai->dma_modifier;
++    unsigned int duration = (unsigned int)((uint64_t)get_dma_duration(ai) * ai->dma_modifier_pct / 100);
+ 
+     if (ai->regs[AI_STATUS_REG] & AI_STATUS_BUSY)
+     {
+@@ -145,14 +145,14 @@ void init_ai(struct ai_controller* ai,
+              struct vi_controller* vi,
+              void* aout,
+              const struct audio_out_backend_interface* iaout,
+-             float dma_modifier)
++             unsigned int dma_modifier_pct)
+ {
+     ai->mi = mi;
+     ai->ri = ri;
+     ai->vi = vi;
+     ai->aout = aout;
+     ai->iaout = iaout;
+-    ai->dma_modifier = dma_modifier;
++    ai->dma_modifier_pct = dma_modifier_pct;
+ }
+ 
+ void poweron_ai(struct ai_controller* ai)
+diff --git a/mupen64plus-core/src/device/rcp/ai/ai_controller.h b/mupen64plus-core/src/device/rcp/ai/ai_controller.h
+index 6b2217c..a356f54 100644
+--- a/mupen64plus-core/src/device/rcp/ai/ai_controller.h
++++ b/mupen64plus-core/src/device/rcp/ai/ai_controller.h
+@@ -59,7 +59,7 @@ struct ai_controller
+     unsigned int samples_format_changed;
+     uint32_t last_read;
+     uint32_t delayed_carry;
+-    float dma_modifier;
++    unsigned int dma_modifier_pct; /* integer percentage (100 = 1.0x) — avoids float non-determinism */
+ 
+     struct mi_controller* mi;
+     struct ri_controller* ri;
+@@ -80,7 +80,7 @@ void init_ai(struct ai_controller* ai,
+              struct vi_controller* vi,
+              void* aout,
+              const struct audio_out_backend_interface* iaout,
+-             float dma_modifier);
++             unsigned int dma_modifier_pct);
+ 
+ void poweron_ai(struct ai_controller* ai);
+ 

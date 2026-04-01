@@ -1,0 +1,31 @@
+diff --git a/mupen64plus-rsp-hle/src/hle.c b/mupen64plus-rsp-hle/src/hle.c
+index 4e65113..7c2f71f 100644
+--- a/mupen64plus-rsp-hle/src/hle.c
++++ b/mupen64plus-rsp-hle/src/hle.c
+@@ -179,8 +179,26 @@ void rsp_break(struct hle_t* hle, unsigned int setbits)
+     }
+ }
+ 
++/* kaillera-next: When set, skip RSP audio processing (DRAM writes) but still
++ * fire the task completion interrupt. The guest in lockstep netplay enables this
++ * so the RSP audio output doesn't diverge between platforms — the guest receives
++ * audio via the lockstep audio bypass, not from DRAM. */
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++int kn_skip_rsp_audio = 0;
++EMSCRIPTEN_KEEPALIVE void kn_set_skip_rsp_audio(int skip) { kn_skip_rsp_audio = skip; }
++#endif
++
+ static void send_alist_to_audio_plugin(struct hle_t* hle)
+ {
++#ifdef __EMSCRIPTEN__
++    if (kn_skip_rsp_audio) {
++        /* Skip audio processing — DRAM stays untouched.
++         * Still signal task completion so the game's interrupt handler runs. */
++        rsp_break(hle, SP_STATUS_TASKDONE);
++        return;
++    }
++#endif
+     HleProcessAlistList(hle->user_defined);
+     rsp_break(hle, SP_STATUS_TASKDONE);
+ }
