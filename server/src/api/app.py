@@ -134,7 +134,10 @@ async def cleanup_old_logs() -> None:
 
 
 def _client_ip(request: Request) -> str:
-    """Extract the real client IP from X-Forwarded-For or fall back to direct connection."""
+    """Extract the real client IP, checking Cloudflare headers first."""
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -158,11 +161,12 @@ class SecurityHeadersMiddleware:
         "default-src 'self'; "
         "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "connect-src 'self' wss: ws: blob:; "
+        "connect-src 'self' blob:; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
-        "font-src 'self' data: https://fonts.gstatic.com"
+        "font-src 'self' data: https://fonts.gstatic.com; "
+        "object-src 'none'"
     )
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
@@ -419,7 +423,9 @@ def create_app(lifespan=None) -> FastAPI:
         }
 
     @app.get("/ice-servers")
-    def ice_servers() -> list:
+    def ice_servers(request: Request) -> list:
+        if not check_ip(_client_ip(request), "ice-servers"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         custom = os.environ.get("ICE_SERVERS")
         if custom:
             try:

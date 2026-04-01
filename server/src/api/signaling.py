@@ -300,8 +300,13 @@ async def _leave(sid: str) -> None:
 
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
+    cf_ip = environ.get("HTTP_CF_CONNECTING_IP", "")
     forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else environ.get("REMOTE_ADDR", "unknown")
+    ip = (
+        cf_ip.strip()
+        if cf_ip
+        else (forwarded.split(",")[0].strip() if forwarded else environ.get("REMOTE_ADDR", "unknown"))
+    )
     if not connection_allowed(ip):
         raise socketio.exceptions.ConnectionRefusedError("Too many connections")
     if not check_ip(ip, "connect"):

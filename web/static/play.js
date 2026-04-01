@@ -944,9 +944,16 @@
     }
   };
 
+  const _isKnownPeerSid = (sid) => {
+    if (!lastUsersData?.players) return false;
+    return Object.values(lastUsersData.players).some((p) => p.socketId === sid);
+  };
+
   const onDataMessage = (data) => {
+    if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
+      if (data.mode !== 'lockstep' && data.mode !== 'streaming') return;
       mode = data.mode;
       const modeSel = document.getElementById('mode-select');
       if (modeSel) modeSel.value = mode;
@@ -954,6 +961,7 @@
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
+      if (typeof data.sender !== 'string' || !_isKnownPeerSid(data.sender)) return;
       // Use engine's peer connection if available, otherwise pre-game connection
       if (engine?.getPeerConnection?.(data.sender)) {
         console.log('[play] peer', data.sender, 'accepted ROM sharing (via engine)');
