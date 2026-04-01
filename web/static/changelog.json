@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.23.0",
+    "date": "2026-04-01",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "SoftFloat FPU determinism — bit-exact cross-platform lockstep"
+      }
+    ]
+  },
+  {
     "version": "0.22.0",
     "date": "2026-04-01",
     "changes": [
@@ -274,16 +284,6 @@
       {
         "type": "feat",
         "message": "scale up OG card text, arcade-style copy, spectate player matchups"
-      }
-    ]
-  },
-  {
-    "version": "0.14.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "add homepage OG image and Playwright E2E tests"
       }
     ]
   }
