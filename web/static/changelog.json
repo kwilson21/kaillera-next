@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.24.7",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "test infrastructure overhaul — SSL tolerance, unique rooms, socket hooks, new UX tests"
+      }
+    ]
+  },
+  {
     "version": "0.24.6",
     "date": "2026-04-02",
     "changes": [
