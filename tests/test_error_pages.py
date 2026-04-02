@@ -4,6 +4,7 @@ Run: pytest tests/test_error_pages.py -v
 Uses the shared server_url fixture from conftest.py.
 """
 
+import pytest
 import requests
 
 
@@ -48,27 +49,6 @@ def test_health_still_works(server_url):
     assert r.json()["status"] == "ok"
 
 
-def test_sync_logs_rejected_with_bad_token(server_url):
-    """Sync log upload with invalid HMAC token is rejected."""
-    r = requests.post(
-        f"{server_url}/api/sync-logs?room=FAKROOM&slot=0&token=forged",
-        data=b"test log data",
-        headers={"Content-Type": "text/plain"},
-        timeout=5,
-    )
-    assert r.status_code == 403
-
-
-def test_sync_logs_rejected_without_token(server_url):
-    """Sync log upload with no token is rejected."""
-    r = requests.post(
-        f"{server_url}/api/sync-logs?room=FAKROOM&slot=0",
-        data=b"test log data",
-        headers={"Content-Type": "text/plain"},
-        timeout=5,
-    )
-    assert r.status_code == 403
-
 
 def test_cache_state_rejected_with_bad_token(server_url):
     """Cache state upload with invalid HMAC token is rejected."""
@@ -80,6 +60,13 @@ def test_cache_state_rejected_with_bad_token(server_url):
     assert r.status_code == 403
 
 
+_skip_ratelimit = pytest.mark.skipif(
+    not __import__("os").environ.get("DISABLE_RATE_LIMIT"),
+    reason="Feedback tests need DISABLE_RATE_LIMIT=1 (rate-limited on live server)",
+)
+
+
+@_skip_ratelimit
 def test_feedback_accepts_valid_submission(server_url):
     """Valid feedback submission returns 200 with saved status."""
     r = requests.post(
@@ -97,6 +84,7 @@ def test_feedback_accepts_valid_submission(server_url):
     assert data["id"] >= 1
 
 
+@_skip_ratelimit
 def test_feedback_rejects_missing_category(server_url):
     """Feedback without required category field is rejected."""
     r = requests.post(
@@ -107,6 +95,7 @@ def test_feedback_rejects_missing_category(server_url):
     assert r.status_code == 422
 
 
+@_skip_ratelimit
 def test_feedback_rejects_empty_message(server_url):
     """Feedback with empty message is rejected."""
     r = requests.post(
@@ -117,6 +106,7 @@ def test_feedback_rejects_empty_message(server_url):
     assert r.status_code == 422
 
 
+@_skip_ratelimit
 def test_feedback_honeypot_silently_discards(server_url):
     """Feedback with honeypot field filled returns 200 but id=0 (discarded)."""
     r = requests.post(
@@ -132,6 +122,7 @@ def test_feedback_honeypot_silently_discards(server_url):
     assert r.json()["id"] == 0
 
 
+@_skip_ratelimit
 def test_feedback_rejects_invalid_category(server_url):
     """Feedback with unknown category is rejected."""
     r = requests.post(

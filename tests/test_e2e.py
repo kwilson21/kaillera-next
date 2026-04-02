@@ -4,15 +4,21 @@ Run: pytest tests/test_e2e.py -v
 """
 
 import re
+import secrets
 
 from playwright.sync_api import expect
+
+_R = secrets.token_hex(3).upper()  # unique per run to avoid stale room collisions
 
 
 def _mark_rom_ready(page):
     """Simulate a player having loaded a ROM (client state + server signal)."""
+    page.wait_for_function(
+        "window.__test_socket && window.__test_socket.connected", timeout=10000
+    )
     page.evaluate("""
         if (window.__test_setRomLoaded) window.__test_setRomLoaded();
-        window._socket.emit('rom-ready', { ready: true });
+        window.__test_socket.emit('rom-ready', { ready: true });
     """)
 
 
@@ -34,12 +40,12 @@ def test_host_guest_start_end(context, server_url):
 
     try:
         # Host creates room
-        host.goto(f"{server_url}/play.html?room=E2E01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=E2E01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         expect(host.locator("#start-btn")).to_be_disabled()
 
         # Guest joins
-        guest.goto(f"{server_url}/play.html?room=E2E01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=E2E01{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
         expect(guest.locator("#guest-status")).to_be_visible()
 
@@ -56,7 +62,9 @@ def test_host_guest_start_end(context, server_url):
         expect(guest.locator("#overlay")).to_be_hidden(timeout=10000)
         expect(host.locator("#toolbar")).to_be_visible()
 
-        # Host ends game
+        # Host ends game (button is inside the more-dropdown)
+        host.click("#toolbar-more")
+        expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
         host.click("#toolbar-end")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
@@ -71,10 +79,10 @@ def test_host_leave_midgame_closes_room(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=E2E02&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=E2E02{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=E2E02&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=E2E02{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         _mark_rom_ready(host)
@@ -102,10 +110,10 @@ def test_host_leave_lobby_transfers_ownership(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=E2E03&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=E2E03{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=E2E03&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=E2E03{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Host leaves via button
@@ -123,7 +131,7 @@ def test_host_leave_lobby_transfers_ownership(context, server_url):
 
 def test_guest_nonexistent_room(page, server_url):
     """Guest joining nonexistent room sees error."""
-    page.goto(f"{server_url}/play.html?room=NOROOM&name=Guest")
+    page.goto(f"{server_url}/play.html?room=NOROOM{_R}&name=Guest")
     expect(page.locator("#error-msg")).to_be_visible(timeout=10000)
 
 
@@ -136,10 +144,10 @@ def test_rom_sharing_prompt_appears(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=ROMS01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=ROMS01{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Host marks ROM ready and enables sharing
@@ -168,10 +176,10 @@ def test_rom_sharing_decline_shows_drop_zone(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS02&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS02{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=ROMS02&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=ROMS02{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Host enables sharing
@@ -201,10 +209,10 @@ def test_rom_sharing_start_gated_without_roms(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS03&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS03{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=ROMS03&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=ROMS03{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Only host has ROM
@@ -231,10 +239,10 @@ def test_rom_sharing_bypasses_rom_requirement(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS04&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS04{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=ROMS04&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=ROMS04{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Only host has ROM
@@ -261,7 +269,7 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
     host = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS05&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS05{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Host enables sharing BEFORE guest joins
@@ -274,7 +282,7 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
         # Now guest joins
         guest = context.new_page()
         try:
-            guest.goto(f"{server_url}/play.html?room=ROMS05&name=Guest")
+            guest.goto(f"{server_url}/play.html?room=ROMS05{_R}&name=Guest")
             expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
             # Guest should see the prompt (from users-updated romSharing field)
@@ -291,7 +299,7 @@ def test_host_disclaimer_visible(context, server_url):
     host = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=ROMS06&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=ROMS06{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Disclaimer hidden by default
@@ -321,7 +329,7 @@ def test_info_overlay_elements_exist(context, server_url):
     host = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=INFO01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=INFO01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Info overlay exists in DOM with sub-sections (hidden by default)
@@ -338,7 +346,7 @@ def test_info_overlay_elements_exist(context, server_url):
 
 def test_info_overlay_toggle_via_js(page, server_url):
     """Info overlay toggles visibility when toggled programmatically."""
-    page.goto(f"{server_url}/play.html?room=INFO02&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=INFO02{_R}&host=1&name=Host")
     page.wait_for_function(
         "document.getElementById('info-overlay') !== null", timeout=10000
     )
@@ -363,7 +371,7 @@ def test_info_overlay_toggle_via_js(page, server_url):
 
 def test_info_overlay_lockstep_getinfo(page, server_url):
     """Lockstep engine getInfo() returns extended fields: mode, peers, sync."""
-    page.goto(f"{server_url}/play.html?room=INFO03&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=INFO03{_R}&host=1&name=Host")
     page.wait_for_function(
         "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
     )
@@ -383,7 +391,7 @@ def test_info_overlay_lockstep_getinfo(page, server_url):
 def test_info_overlay_streaming_getinfo(page, server_url):
     """Streaming engine getInfo() exists and returns correct shape."""
     page.goto(
-        f"{server_url}/play.html?room=INFO04&host=1&name=Host&mode=streaming"
+        f"{server_url}/play.html?room=INFO04{_R}&host=1&name=Host&mode=streaming"
     )
     page.wait_for_function(
         "typeof window.NetplayStreaming !== 'undefined'", timeout=10000
@@ -404,7 +412,7 @@ def test_info_overlay_streaming_getinfo(page, server_url):
 def test_guest_sees_delay_picker(page, server_url):
     """Guest player sees frame delay picker elements (lockstep mode)."""
     # Load as guest in lockstep mode — player-controls visible for non-spectators
-    page.goto(f"{server_url}/play.html?room=DLY01&name=Guest")
+    page.goto(f"{server_url}/play.html?room=DLY01{_R}&name=Guest")
     page.wait_for_function(
         "document.getElementById('player-controls') !== null", timeout=10000
     )
@@ -425,7 +433,7 @@ def test_guest_sees_delay_picker(page, server_url):
 def test_host_delay_hidden_streaming(page, server_url):
     """Host delay picker hidden when mode is streaming."""
     page.goto(
-        f"{server_url}/play.html?room=DLYS2&host=1&name=Host&mode=streaming"
+        f"{server_url}/play.html?room=DLYS2{_R}&host=1&name=Host&mode=streaming"
     )
     page.wait_for_function(
         "document.getElementById('player-controls') !== null", timeout=10000
@@ -453,7 +461,7 @@ def test_host_delay_hidden_streaming(page, server_url):
 
 def test_host_still_has_delay_picker(page, server_url):
     """Host still sees delay picker elements after restructure."""
-    page.goto(f"{server_url}/play.html?room=DLYS3&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=DLYS3{_R}&host=1&name=Host")
     page.wait_for_function(
         "document.getElementById('delay-picker') !== null", timeout=10000
     )
@@ -468,7 +476,7 @@ def test_host_still_has_delay_picker(page, server_url):
 
 def test_guest_delay_preference_readable(page, server_url):
     """getDelayPreference returns manual delay when set."""
-    page.goto(f"{server_url}/play.html?room=DLYS4&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=DLYS4{_R}&host=1&name=Host")
     page.wait_for_function(
         "typeof window.getDelayPreference === 'function'", timeout=10000
     )
@@ -492,7 +500,7 @@ def test_guest_delay_preference_readable(page, server_url):
 
 def test_worker_compress_and_encode(page, server_url):
     """NetplayLockstep module loads and getInfo is callable."""
-    page.goto(f"{server_url}/play.html?room=WKRS1&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=WKRS1{_R}&host=1&name=Host")
     page.wait_for_function(
         "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
     )
@@ -526,10 +534,10 @@ def test_share_dropdown_copies_links(context, server_url):
     guest = context.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=SHR01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=SHR01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=SHR01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=SHR01{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         _mark_rom_ready(host)
@@ -568,20 +576,20 @@ def test_auto_spectate_when_room_full(context, server_url):
 
     try:
         # Fill room to 4 players
-        host.goto(f"{server_url}/play.html?room=FULL01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=FULL01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        p2.goto(f"{server_url}/play.html?room=FULL01&name=P2")
+        p2.goto(f"{server_url}/play.html?room=FULL01{_R}&name=P2")
         expect(p2.locator("#overlay")).to_be_visible(timeout=10000)
 
-        p3.goto(f"{server_url}/play.html?room=FULL01&name=P3")
+        p3.goto(f"{server_url}/play.html?room=FULL01{_R}&name=P3")
         expect(p3.locator("#overlay")).to_be_visible(timeout=10000)
 
-        p4.goto(f"{server_url}/play.html?room=FULL01&name=P4")
+        p4.goto(f"{server_url}/play.html?room=FULL01{_R}&name=P4")
         expect(p4.locator("#overlay")).to_be_visible(timeout=10000)
 
         # 5th player joins via play link (no spectate param)
-        joiner.goto(f"{server_url}/play.html?room=FULL01&name=Late")
+        joiner.goto(f"{server_url}/play.html?room=FULL01{_R}&name=Late")
         # Should auto-spectate — overlay visible, banner appears
         expect(joiner.locator("#overlay")).to_be_visible(timeout=10000)
         expect(joiner.locator(".room-full-banner")).to_be_visible(timeout=5000)
@@ -598,7 +606,7 @@ def test_auto_spectate_when_room_full(context, server_url):
 
 def test_gamepad_manager_has_gamepad(page, server_url):
     """GamepadManager.hasGamepad exists and returns false when no gamepad."""
-    page.goto(f"{server_url}/play.html?room=GMS01&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=GMS01{_R}&host=1&name=Host")
     page.wait_for_function(
         "typeof window.GamepadManager !== 'undefined'"
         " && typeof window.GamepadManager.hasGamepad === 'function'",

@@ -17,7 +17,7 @@ def _room_code():
 
 def _wait_for_socket(page, timeout=10000):
     page.wait_for_function(
-        "window._socket && window._socket.connected", timeout=timeout)
+        "window.__test_socket && window.__test_socket.connected", timeout=timeout)
 
 
 def test_rom_declaration_full_flow(browser, server_url):
@@ -94,13 +94,13 @@ def test_rom_declaration_full_flow(browser, server_url):
         expect(guest.locator("#rom-declare-cb")).to_be_checked()
 
         # ── 8. Spectator claims slot: declaration appears ──
-        spectator.evaluate("window._socket.emit('claim-slot', { slot: 2 })")
+        spectator.evaluate("window.__test_socket.emit('claim-slot', { slot: 2 })")
         expect(spectator.locator("#rom-declare-prompt")).to_be_visible(timeout=5000)
 
     finally:
         for page in ctx.pages:
             try:
-                page.evaluate("window._socket && window._socket.disconnect()")
+                page.evaluate("window.__test_socket && window.__test_socket.disconnect()")
             except Exception:
                 pass
         try:

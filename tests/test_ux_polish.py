@@ -3,14 +3,21 @@
 Run: pytest tests/test_ux_polish.py -v
 """
 
+import secrets
+
 from playwright.sync_api import expect
+
+_R = secrets.token_hex(3).upper()
 
 
 def _mark_rom_ready(page):
     """Simulate a player having loaded a ROM (client state + server signal)."""
+    page.wait_for_function(
+        "window.__test_socket && window.__test_socket.connected", timeout=10000
+    )
     page.evaluate("""
         if (window.__test_setRomLoaded) window.__test_setRomLoaded();
-        window._socket.emit('rom-ready', { ready: true });
+        window.__test_socket.emit('rom-ready', { ready: true });
     """)
 
 
@@ -20,10 +27,10 @@ def test_game_ended_toast_appears(browser, server_url):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=UXE01&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room=UXE01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=UXE01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room=UXE01{_R}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         _mark_rom_ready(host)
@@ -34,7 +41,9 @@ def test_game_ended_toast_appears(browser, server_url):
         host.click("#start-btn")
         expect(host.locator("#overlay")).to_be_hidden(timeout=10000)
 
-        # End game
+        # End game (button is inside the more-dropdown)
+        host.click("#toolbar-more")
+        expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
         host.click("#toolbar-end")
 
         # Guest should see the toast and return to overlay
@@ -49,7 +58,7 @@ def test_game_ended_toast_appears(browser, server_url):
 
 def test_dump_logs_hidden_from_toolbar(page, server_url):
     """Dump Logs button is hidden from the toolbar (still in info overlay)."""
-    page.goto(f"{server_url}/play.html?room=UX002&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=UX002{_R}&host=1&name=Host")
     page.wait_for_function(
         "document.getElementById('toolbar-logs') !== null", timeout=10000
     )
@@ -66,7 +75,7 @@ def test_dump_logs_hidden_from_toolbar(page, server_url):
 
 def test_loading_timeout_message(page, server_url):
     """Loading overlay shows reassurance after 15s timeout."""
-    page.goto(f"{server_url}/play.html?room=UX003&host=1&name=Host")
+    page.goto(f"{server_url}/play.html?room=UX003{_R}&host=1&name=Host")
     page.wait_for_function(
         "document.getElementById('game-loading') !== null", timeout=10000
     )
@@ -100,7 +109,7 @@ def test_loading_timeout_message(page, server_url):
 
 def test_error_modal_has_back_to_lobby(page, server_url):
     """Error modal includes a Back to Lobby link."""
-    page.goto(f"{server_url}/play.html?room=NOROOM&name=Guest")
+    page.goto(f"{server_url}/play.html?room=NOROOM{_R}&name=Guest")
     expect(page.locator("#error-msg")).to_be_visible(timeout=10000)
 
     # Should contain the back link
@@ -114,7 +123,7 @@ def test_error_modal_has_back_to_lobby(page, server_url):
 
 def test_nonexistent_room_shows_error_with_escape(page, server_url):
     """Joining nonexistent room shows error with Back to Lobby escape."""
-    page.goto(f"{server_url}/play.html?room=BADROOM&name=Guest")
+    page.goto(f"{server_url}/play.html?room=BADROOM{_R}&name=Guest")
     expect(page.locator("#error-msg")).to_be_visible(timeout=10000)
     expect(page.locator(".error-card")).to_contain_text("Room not found")
     expect(page.locator(".error-back")).to_be_visible()

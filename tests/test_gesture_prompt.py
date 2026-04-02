@@ -92,7 +92,7 @@ def test_host_does_not_see_gesture_prompt(browser, server_url):
 
         guest.goto(f"{server_url}/play.html?room=GESTURE2&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
-        guest.evaluate("window._socket.emit('rom-ready', { ready: true })")
+        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
 
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")

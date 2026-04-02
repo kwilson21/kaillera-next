@@ -11,14 +11,14 @@ def _mark_rom_ready(page):
     """Simulate a player having loaded a ROM (client state + server signal)."""
     page.evaluate("""
         if (window.__test_setRomLoaded) window.__test_setRomLoaded();
-        window._socket.emit('rom-ready', { ready: true });
+        window.__test_socket.emit('rom-ready', { ready: true });
     """)
 
 
 def _start_game_via_socket(page, mode="lockstep"):
     """Emit start-game directly via socket, bypassing the client-side ROM check."""
     page.evaluate(f"""
-        window._socket.emit('start-game', {{
+        window.__test_socket.emit('start-game', {{
             mode: '{mode}',
             rollbackEnabled: false,
             romHash: null
