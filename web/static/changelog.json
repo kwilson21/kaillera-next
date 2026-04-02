@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.24.1",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "session-log rate limit too strict, ended_by overwrite on game-end"
+      },
+      {
+        "type": "feat",
+        "message": "v0.24.0 — feedback system, guaranteed session logging, PostHog integration"
+      }
+    ]
+  },
+  {
     "version": "0.24.0",
     "date": "2026-04-02",
     "changes": [
