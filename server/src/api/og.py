@@ -5,6 +5,7 @@ Generates 1200x630 PNG preview cards by screenshotting HTML templates via Playwr
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -72,11 +73,13 @@ async def close_browser() -> None:
     """Close the Playwright browser and stop the Playwright instance."""
     global _browser, _playwright
     if _browser is not None:
-        await _browser.close()
+        with contextlib.suppress(Exception):
+            await _browser.close()
         _browser = None
         log.info("OG image renderer: Playwright browser closed")
     if _playwright is not None:
-        await _playwright.stop()
+        with contextlib.suppress(Exception):
+            await _playwright.stop()
         _playwright = None
 
 
