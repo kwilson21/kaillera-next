@@ -822,12 +822,12 @@
     gameRunning = false;
     _lateJoin = false;
     _pendingLateJoin = false;
-    KNState.matchId = null;
     showToast('The host has ended the game');
     if (engine) {
       engine.stop();
       engine = null;
     }
+    KNState.matchId = null;
     hibernateEmulator();
     const gameEl = document.getElementById('game');
     if (gameEl) gameEl.classList.remove('kn-playing');
@@ -3418,6 +3418,9 @@
     } catch (_) {}
 
     cancelWizard();
+
+    // Refresh settings panel mapping grid if open
+    if (window.ControllerSettings?._refreshGrid) ControllerSettings._refreshGrid();
   };
 
   const resetMappings = () => {
@@ -3904,6 +3907,9 @@
     const resetBtn = document.getElementById('reset-mapping-btn');
     if (resetBtn) resetBtn.addEventListener('click', resetMappings);
 
+    const overlaySettingsBtn = document.getElementById('overlay-settings-btn');
+    if (overlaySettingsBtn) overlaySettingsBtn.addEventListener('click', () => window.ControllerSettings?.toggle());
+
     const backBtn = document.getElementById('remap-back');
     if (backBtn) backBtn.addEventListener('click', wizardBack);
 
@@ -3918,8 +3924,24 @@
     if (toolbarRemapBtn)
       toolbarRemapBtn.addEventListener('click', () => {
         closeMoreDropdown();
-        startWizard(true);
+        if (window.ControllerSettings) {
+          ControllerSettings.open();
+          ControllerSettings.startQuickSetup?.();
+        } else {
+          startWizard(true);
+        }
       });
+
+    // Controller settings panel (gear button)
+    const settingsBtn = document.getElementById('toolbar-settings');
+    if (settingsBtn)
+      settingsBtn.addEventListener('click', () => {
+        closeMoreDropdown();
+        window.ControllerSettings?.toggle();
+      });
+
+    // Expose in-game wizard start for Quick Setup integration
+    window._startIngameRemap = () => startWizard(true);
 
     const igBackBtn = document.getElementById('ingame-remap-back');
     if (igBackBtn) igBackBtn.addEventListener('click', wizardBack);

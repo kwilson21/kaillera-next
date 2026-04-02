@@ -11,6 +11,7 @@ V1 endpoints:
   GET  /                        homepage with injected OG meta tags
   GET  /api/cached-state/{h}    download cached save state
   POST /api/cache-state/{h}     upload save state to cache
+  POST /api/session-log          HTTP fallback for session log flush
   POST /api/client-event        submit client error/diagnostic event
   POST /api/feedback            submit user feedback
 
@@ -520,6 +521,76 @@ def create_app(lifespan=None) -> FastAPI:
         if not check_ip(_client_ip(request), "admin"):
             raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
+
+    # ── Session log HTTP fallback ─────────────────────────────────────────
+    # Mirrors the Socket.IO session-log handler but over HTTP.
+    # Used when socket.emit fails (browser quirks, transport issues).
+
+    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024  # 2MB — same as Socket.IO handler
+
+    def _require_upload_token_relaxed(request: Request) -> None:
+        """Verify upload token HMAC without requiring the room to still exist."""
+        if not check_ip(_client_ip(request), "session-log"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        token = request.query_params.get("token", "")
+        room_id = request.query_params.get("room", "")
+        if not token or not room_id or not verify_upload_token(room_id, token):
+            raise HTTPException(status_code=403, detail="Invalid token")
+
+    @app.post("/api/session-log")
+    async def session_log_http(request: Request, _auth: None = Depends(_require_upload_token_relaxed)) -> dict:
+        body = await request.body()
+        if len(body) > _SESSION_LOG_HTTP_MAX:
+            raise HTTPException(status_code=413, detail="Payload too large")
+        if len(body) == 0:
+            raise HTTPException(status_code=400, detail="Empty payload")
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+        match_id = data.get("matchId", "")
+        if not match_id:
+            raise HTTPException(status_code=400, detail="Missing matchId")
+
+        room_id = request.query_params.get("room", "")
+        slot = data.get("slot")
+        player_name = str(data.get("playerName", ""))[:32]
+        mode = str(data.get("mode", ""))[:16]
+
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            entries = []
+        log_data_str = json.dumps(entries)
+        while len(log_data_str) > _SESSION_LOG_HTTP_MAX and entries:
+            entries = entries[: len(entries) // 2]
+            log_data_str = json.dumps(entries)
+
+        summary = data.get("summary", {})
+        context = data.get("context", {})
+        summary_str = json.dumps(summary) if isinstance(summary, dict) else "{}"
+        context_str = json.dumps(context) if isinstance(context, dict) else "{}"
+        if len(summary_str) > 4096:
+            summary_str = "{}"
+        if len(context_str) > 4096:
+            context_str = "{}"
+
+        hashed_ip = ip_hash(_client_ip(request))
+        await db.upsert_session_log(
+            {
+                "match_id": match_id,
+                "room": room_id,
+                "slot": slot,
+                "player_name": player_name,
+                "mode": mode,
+                "log_data": log_data_str,
+                "summary": summary_str,
+                "context": context_str,
+                "ip_hash": hashed_ip,
+            }
+        )
+        log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
+        return {"status": "saved"}
 
     # ── Client event beacon ─────────────────────────────────────────────
 

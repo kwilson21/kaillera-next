@@ -95,6 +95,7 @@
           <div id="gamepad-controls">
             <button id="remap-btn" class="small-btn">Remap</button>
             <button id="reset-mapping-btn" class="small-btn">Reset</button>
+            <button id="overlay-settings-btn" class="small-btn">Controller Settings</button>
           </div>
           <div id="remap-wizard" style="display: none">
             <span id="remap-prompt"></span>
@@ -258,6 +259,7 @@
         <div id="more-dropdown" class="more-dropdown hidden" role="menu">
           <button id="toolbar-info" class="more-option" role="menuitem">Info</button>
           <button id="toolbar-remap" class="more-option" role="menuitem">Remap</button>
+          <button id="toolbar-settings" class="more-option" role="menuitem">Controller Settings</button>
           <button id="toolbar-logs" class="more-option" role="menuitem" style="display: none">Dump Logs</button>
           <button id="toolbar-end" class="more-option more-end" role="menuitem" style="display: none">End Game</button>
         </div>
@@ -391,6 +393,9 @@
     <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
     <script src="/static/netplay-lockstep.js"></script>
     <script src="/static/netplay-streaming.js"></script>
+
+    <!-- Controller settings panel -->
+    <script src="/static/controller-settings.js"></script>
 
     <!-- Play page controller -->
     <script src="/static/play.js"></script>

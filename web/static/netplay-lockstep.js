@@ -452,29 +452,94 @@
   const _getStructuredEntries = () => _syncLogRing.getStructuredEntries();
 
   let _flushInterval = null;
+  let _cachedMatchId = null;
+  let _cachedRoom = null;
+  let _cachedUploadToken = null;
+  let _socketFlushFails = 0;
+
+  const _buildFlushPayload = () => ({
+    matchId: _cachedMatchId || KNState.matchId,
+    slot: window._playerSlot,
+    playerName: (() => {
+      try {
+        return localStorage.getItem('kaillera-name') || 'Player';
+      } catch (_) {
+        return 'Player';
+      }
+    })(),
+    mode: 'lockstep',
+    entries: _getStructuredEntries(),
+    summary: {
+      desyncs: KNState.sessionStats?.desyncs ?? 0,
+      stalls: KNState.sessionStats?.stalls ?? 0,
+      reconnects: KNState.sessionStats?.reconnects ?? 0,
+      frames: _frameNum,
+      duration_sec: Math.round((performance.now() - _startTime) / 1000),
+      peers: Object.keys(KNState.peers || {}).length,
+    },
+    context: {
+      ua: navigator.userAgent,
+      mobile: /Mobi|Android/i.test(navigator.userAgent),
+      forkedCore: !!window.Module?._kn_set_deterministic,
+    },
+  });
+
+  const _flushViaHttp = (payload) => {
+    const token = _cachedUploadToken || KNState.uploadToken;
+    const room = _cachedRoom || KNState.room || '';
+    if (!token || !room) return;
+    try {
+      fetch(`/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {});
+    } catch (_) {}
+  };
 
   const _flushSyncLog = () => {
-    if (!KNState.matchId || !socket?.connected) return;
-    socket.emit('session-log', {
-      matchId: KNState.matchId,
-      slot: window._playerSlot,
-      playerName: localStorage.getItem('kaillera-name') || 'Player',
-      mode: 'lockstep',
-      entries: _getStructuredEntries(),
-      summary: {
-        desyncs: KNState.sessionStats.desyncs,
-        stalls: KNState.sessionStats.stalls,
-        reconnects: KNState.sessionStats.reconnects,
-        frames: _frameNum,
-        duration_sec: Math.round((performance.now() - _startTime) / 1000),
-        peers: Object.keys(KNState.peers || {}).length,
-      },
-      context: {
-        ua: navigator.userAgent,
-        mobile: /Mobi|Android/i.test(navigator.userAgent),
-        forkedCore: !!window.Module?._kn_set_deterministic,
-      },
-    });
+    const matchId = _cachedMatchId || KNState.matchId;
+    if (!matchId) return;
+    try {
+      const payload = _buildFlushPayload();
+      if (socket?.connected) {
+        let acked = false;
+        socket.emit('session-log', payload, () => {
+          acked = true;
+          _socketFlushFails = 0;
+        });
+        // If no ack within 5s, count as failure and try HTTP next time
+        setTimeout(() => {
+          if (!acked) {
+            _socketFlushFails++;
+            if (_socketFlushFails >= 2) _flushViaHttp(payload);
+          }
+        }, 5000);
+      } else {
+        _flushViaHttp(payload);
+      }
+    } catch (_) {
+      // Payload construction failed — try HTTP with minimal payload
+      try {
+        _flushViaHttp({
+          matchId,
+          slot: window._playerSlot,
+          playerName: 'Player',
+          mode: 'lockstep',
+          entries: [],
+          summary: {
+            desyncs: 0,
+            stalls: 0,
+            reconnects: 0,
+            frames: _frameNum,
+            duration_sec: Math.round((performance.now() - _startTime) / 1000),
+            peers: 0,
+          },
+          context: { ua: navigator.userAgent, mobile: /Mobi|Android/i.test(navigator.userAgent), forkedCore: false },
+        });
+      } catch (_2) {}
+    }
   };
 
   // -- Canvas pixel hash + live RDRAM block hash helpers ---------------------
@@ -3174,6 +3239,10 @@
 
     setStatus('Connected -- game on!');
     _startTime = performance.now();
+    _cachedMatchId = KNState.matchId;
+    _cachedRoom = KNState.room;
+    _cachedUploadToken = KNState.uploadToken;
+    _socketFlushFails = 0;
     _flushInterval = setInterval(_flushSyncLog, 30000);
 
     window._lockstepActive = true;
@@ -4701,6 +4770,10 @@
 
   const stop = () => {
     _flushSyncLog();
+    _cachedMatchId = null;
+    _cachedRoom = null;
+    _cachedUploadToken = null;
+    _socketFlushFails = 0;
     if (_flushInterval) {
       clearInterval(_flushInterval);
       _flushInterval = null;

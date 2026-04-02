@@ -104,13 +104,19 @@
     return _getSetting(key, parseFloat, (v) => v >= 0 && v <= 1, _DEFAULT_DEADZONE);
   }
 
+  function _getSensitivity() {
+    return _getSetting('kn-analog-sensitivity', parseFloat, (v) => v >= 0.5 && v <= 2.0, 1.0);
+  }
+
   function _analogScale(value, dz) {
     const sign = Math.sign(value);
     const abs = Math.abs(value);
     if (abs < dz) return 0;
     const n64Max = Math.floor(127 * (_getRange() / 100));
     const scaled = (abs - dz) / (1 - dz);
-    return sign * Math.min(Math.round(scaled * n64Max), n64Max);
+    const sens = _getSensitivity();
+    const curved = sens === 1.0 ? scaled : Math.pow(scaled, 1 / sens);
+    return sign * Math.min(Math.round(curved * n64Max), n64Max);
   }
 
   function _digitalSnap(value, dz) {
@@ -353,5 +359,35 @@
 
     // Expose the real getGamepads (before lockstep overrides it)
     nativeGetGamepads: () => _nativeGetGamepads(),
+
+    getCurrentSettings: () => ({
+      range: _getRange(),
+      sensitivity: _getSensitivity(),
+      deadzones: {
+        lx: _getDeadzone('kn-deadzone-lx'),
+        ly: _getDeadzone('kn-deadzone-ly'),
+        cx: _getDeadzone('kn-deadzone-cx'),
+        cy: _getDeadzone('kn-deadzone-cy'),
+      },
+    }),
+
+    getActiveProfile: (slot) => {
+      const gpIndex = _assignments[slot];
+      if (gpIndex === undefined) return null;
+      const entry = _detected[gpIndex];
+      return entry ? { id: entry.id, profileName: entry.profileName, profile: entry.profile } : null;
+    },
+
+    setSetting: (key, value, scope) => {
+      if (scope === 'game' && window.KNState?.romHash) {
+        const gk = `kn-gamepad:${KNState.romHash}:${key}`;
+        localStorage.setItem(gk, String(value));
+      } else {
+        localStorage.setItem(key, String(value));
+      }
+      // Bust range cache so changes take effect immediately
+      _cachedRange = null;
+      _cachedRangeTime = 0;
+    },
   };
 })();
