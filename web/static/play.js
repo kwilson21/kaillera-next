@@ -821,6 +821,8 @@
     // Clean up ROM transfer state (decision persists for page lifetime)
     resetRomTransfer();
     cleanupPreGameConnections();
+    // Nudge feedback while experience is fresh
+    if (window.KNFeedback?.prompt) setTimeout(() => window.KNFeedback.prompt(), 1500);
   };
 
   const onRoomClosed = (data) => {
@@ -2437,6 +2439,10 @@
       engine.stop();
       engine = null;
     }
+    // Signal homepage to show feedback prompt
+    try {
+      localStorage.setItem('kn-feedback-prompt', '1');
+    } catch (_) {}
     window.location.href = '/';
   };
 

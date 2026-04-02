@@ -405,6 +405,14 @@
       if (e.key === 'Escape' && _modal && !_modal.hidden) _closeModal();
     });
 
+    // Post-game feedback prompt (set by play.js on leave)
+    try {
+      if (localStorage.getItem('kn-feedback-prompt')) {
+        localStorage.removeItem('kn-feedback-prompt');
+        setTimeout(() => _promptFeedback(), 1000);
+      }
+    } catch (_) {}
+
     // First-visit callout — pulse + tooltip, dismissed on click or after 6s
     try {
       if (!localStorage.getItem('kn-feedback-seen') && _fab) {
@@ -428,6 +436,41 @@
       }
     } catch (_) {}
   };
+
+  // ── Public API ──────────────────────────────────────────────────────
+  // Exposed for play.js to nudge users after games.
+  const _promptFeedback = () => {
+    if (!_fab && !_toolbarItem) return;
+    const el = document.createElement('div');
+    el.innerHTML =
+      'How was your session? <a href="#" style="color:#e94560;text-decoration:underline;margin-left:4px;">Share feedback</a>';
+    Object.assign(el.style, {
+      position: 'fixed',
+      bottom: '80px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      background: '#0f0f23',
+      border: '1px solid #333',
+      borderRadius: '8px',
+      padding: '10px 20px',
+      color: '#eee',
+      fontSize: '14px',
+      zIndex: '100001',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+      cursor: 'pointer',
+    });
+    el.querySelector('a').addEventListener('click', (e) => {
+      e.preventDefault();
+      el.remove();
+      _openModal();
+    });
+    document.body.appendChild(el);
+    setTimeout(() => {
+      if (el.parentNode) el.remove();
+    }, 8000);
+  };
+
+  window.KNFeedback = { prompt: _promptFeedback, open: _openModal };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _init);
