@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.25.1",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "rebuild full changelog from git history, remove 20-entry cap"
+      }
+    ]
+  },
+  {
     "version": "0.25.0",
     "date": "2026-04-02",
     "changes": [
