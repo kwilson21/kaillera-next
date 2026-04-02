@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.24.9",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "save state relay cap and mobile guest audio unlock"
+      }
+    ]
+  },
+  {
     "version": "0.24.8",
     "date": "2026-04-02",
     "changes": [
