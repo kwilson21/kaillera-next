@@ -505,6 +505,7 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  flex-shrink: 1;
 }
 
 .toolbar-spacer {
@@ -536,7 +537,7 @@ button:hover {
   background: #a44a4a;
 }
 
-/* Share dropdown */
+/* Share/Invite dropdown */
 #share-wrapper {
   position: relative;
   flex-shrink: 0;

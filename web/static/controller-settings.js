@@ -107,10 +107,10 @@
     { label: 'D-Down', bit: 5, group: 'dpad' },
     { label: 'D-Left', bit: 6, group: 'dpad' },
     { label: 'D-Right', bit: 7, group: 'dpad' },
-    { label: 'Stick Up', bit: 19, group: 'stick' },
-    { label: 'Stick Down', bit: 18, group: 'stick' },
-    { label: 'Stick Left', bit: 17, group: 'stick' },
-    { label: 'Stick Right', bit: 16, group: 'stick' },
+    { label: 'Analog Up', bit: 19, group: 'stick' },
+    { label: 'Analog Down', bit: 18, group: 'stick' },
+    { label: 'Analog Left', bit: 17, group: 'stick' },
+    { label: 'Analog Right', bit: 16, group: 'stick' },
     { label: 'C-Up', bit: 23, group: 'cbutton' },
     { label: 'C-Down', bit: 22, group: 'cbutton' },
     { label: 'C-Left', bit: 20, group: 'cbutton' },
@@ -848,6 +848,20 @@
         { className: 'cs-header' },
         el('span', { className: 'cs-title' }, 'Controller Settings'),
         el('button', { className: 'cs-close', onClick: () => close() }, '\u00d7'),
+      ),
+    );
+
+    // Gamepad status indicator
+    const activeProfile = GamepadManager.getActiveProfile(0);
+    const statusText = activeProfile
+      ? `${activeProfile.id.substring(0, 36)} (${activeProfile.profileName})`
+      : 'No controller detected';
+    const statusColor = activeProfile ? '#6f6' : '#475569';
+    _panel.appendChild(
+      el(
+        'div',
+        { style: { fontSize: '11px', color: statusColor, marginBottom: '12px', textAlign: 'center' } },
+        statusText,
       ),
     );
 
