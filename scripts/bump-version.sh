@@ -29,13 +29,28 @@ case "$MSG" in
   chore\(version\):*) exit 0 ;;
 esac
 
-# Only bump on feat: or fix:
+# Squash-style: scan all commits since last version bump, not just the latest.
+# This way 3 feat: commits → 1 minor bump, 5 fix: commits → 1 patch bump.
+LAST_BUMP=$(git log --oneline --grep='^chore(version):' -1 --format=%H 2>/dev/null || true)
+if [ -n "$LAST_BUMP" ]; then
+  RANGE="${LAST_BUMP}..HEAD"
+else
+  RANGE="HEAD"
+fi
+MSGS=$(git log --format=%s "$RANGE" --)
+
 BUMP=""
-case "$MSG" in
-  feat:*|feat\(*) BUMP="minor" ;;
-  fix:*|fix\(*)   BUMP="patch" ;;
-  *)              exit 0 ;;
-esac
+while IFS= read -r line; do
+  case "$line" in
+    feat:*|feat\(*) BUMP="minor"; break ;;  # minor is highest, stop early
+    fix:*|fix\(*)   BUMP="patch" ;;
+  esac
+done <<< "$MSGS"
+
+# Nothing to bump
+if [ -z "$BUMP" ]; then
+  exit 0
+fi
 
 # Create lockfile
 touch "$LOCKFILE"
