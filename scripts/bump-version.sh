@@ -120,9 +120,7 @@ if (changes.length > 0) {
   changelog.unshift(entry);
 }
 
-// Keep last 20 versions
-const trimmed = changelog.slice(0, 20);
-fs.writeFileSync(changelogPath, JSON.stringify(trimmed, null, 2) + '\n');
+fs.writeFileSync(changelogPath, JSON.stringify(changelog, null, 2) + '\n');
 "
 
 # Stage and commit
