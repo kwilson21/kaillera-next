@@ -212,8 +212,8 @@
     // Check axis buttons (C-buttons from right stick)
     if (profile.axisButtons) {
       for (const [axIdx, cfg] of Object.entries(profile.axisButtons)) {
-        if (cfg.pos === 1 << bit) return `Axis${axIdx}+`;
-        if (cfg.neg === 1 << bit) return `Axis${axIdx}-`;
+        if (cfg.pos & (1 << bit)) return `Axis${axIdx}+`;
+        if (cfg.neg & (1 << bit)) return `Axis${axIdx}-`;
       }
     }
     // Analog stick axes
@@ -231,6 +231,7 @@
   let _rebindBit = null;
   let _rebindKeyHandler = null;
   let _rebindPollId = null;
+  let _rebindBaselineAxes = null;
 
   const cancelRebind = () => {
     if (_rebindCell) {
@@ -248,6 +249,7 @@
     _rebindCell = null;
     _rebindType = null;
     _rebindBit = null;
+    _rebindBaselineAxes = null;
     if (window.KNState) window.KNState.remapActive = false;
   };
 
@@ -257,7 +259,8 @@
     _rebindType = type;
     _rebindBit = bit;
     cell.dataset.prevText = cell.textContent;
-    cell.textContent = type === 'keyboard' ? 'Press a key...' : 'Press a button...';
+    const isAxisBit = bit >= 16 && bit <= 23;
+    cell.textContent = type === 'keyboard' ? 'Press a key...' : isAxisBit ? 'Button or stick...' : 'Press a button...';
     cell.classList.add('listening');
     if (window.KNState) window.KNState.remapActive = true;
 
@@ -286,7 +289,24 @@
       };
       document.addEventListener('keydown', _rebindKeyHandler, true);
     } else {
-      // Poll for gamepad button press
+      // Capture baseline axes so sticks already held don't trigger immediately
+      _rebindBaselineAxes = {};
+      const initAssignments = GamepadManager.getAssignments();
+      const initGpIdx = initAssignments[0]?.gamepadIndex;
+      if (initGpIdx !== undefined) {
+        const initGps = APISandbox.nativeGetGamepads();
+        const initGp = initGps[initGpIdx];
+        if (initGp) {
+          for (let ai = 0; ai < initGp.axes.length; ai++) {
+            _rebindBaselineAxes[ai] = initGp.axes[ai];
+          }
+        }
+      }
+
+      const isStick = bit >= 16 && bit <= 19;
+      const isCButton = bit >= 20 && bit <= 23;
+
+      // Poll for gamepad button press or axis movement
       _rebindPollId = setInterval(() => {
         const assignments = GamepadManager.getAssignments();
         const gpIndex = assignments[0]?.gamepadIndex;
@@ -294,22 +314,92 @@
         const gamepads = APISandbox.nativeGetGamepads();
         const gp = gamepads[gpIndex];
         if (!gp) return;
+
+        // Check buttons
         for (let b = 0; b < gp.buttons.length; b++) {
           if (gp.buttons[b].pressed) {
             const activeProfile = GamepadManager.getActiveProfile(0);
             if (activeProfile) {
-              const buttons = Object.assign({}, activeProfile.profile.buttons);
-              // Clear old binding for this gamepad button
-              for (const [k, v] of Object.entries(buttons)) {
-                if (v === 1 << bit) delete buttons[k];
+              const profile = JSON.parse(JSON.stringify(activeProfile.profile));
+              // Clear old button binding for this bit
+              for (const k of Object.keys(profile.buttons)) {
+                if (profile.buttons[k] === 1 << bit) delete profile.buttons[k];
               }
-              buttons[b] = 1 << bit;
-              const profile = Object.assign({}, activeProfile.profile, { buttons });
+              profile.buttons[b] = 1 << bit;
+              // Clear conflicting axis entry for stick bits
+              if (isStick && profile.axes) {
+                for (const name of Object.keys(profile.axes)) {
+                  const cfg = profile.axes[name];
+                  if (cfg.bits?.[0] === bit || cfg.bits?.[1] === bit) {
+                    delete profile.axes[name];
+                  }
+                }
+              }
+              // Clear conflicting axisButton entry for C-button bits
+              if (isCButton && profile.axisButtons) {
+                for (const idx of Object.keys(profile.axisButtons)) {
+                  const cfg = profile.axisButtons[idx];
+                  cfg.pos &= ~(1 << bit);
+                  cfg.neg &= ~(1 << bit);
+                  if (!cfg.pos && !cfg.neg) delete profile.axisButtons[idx];
+                }
+              }
               GamepadManager.saveGamepadProfile(activeProfile.id, profile);
             }
             refreshMappingGrid();
             cancelRebind();
             return;
+          }
+        }
+
+        // Check axes for stick and C-button bits
+        if (isStick || isCButton) {
+          for (let ai = 0; ai < gp.axes.length; ai++) {
+            const val = gp.axes[ai];
+            const base = _rebindBaselineAxes?.[ai] ?? 0;
+            if (Math.abs(val) > 0.5 && Math.abs(val - base) > 0.3) {
+              const activeProfile = GamepadManager.getActiveProfile(0);
+              if (activeProfile) {
+                const profile = JSON.parse(JSON.stringify(activeProfile.profile));
+                const isPositive = val > 0;
+                // Clear old button binding for this bit
+                for (const k of Object.keys(profile.buttons)) {
+                  if (profile.buttons[k] === 1 << bit) delete profile.buttons[k];
+                }
+                if (isStick) {
+                  const axisGroup = bit === 16 || bit === 17 ? 'stickX' : 'stickY';
+                  if (!profile.axes) profile.axes = {};
+                  const existing = profile.axes[axisGroup] || {};
+                  const defaultBits = axisGroup === 'stickX' ? [16, 17] : [18, 19];
+                  profile.axes[axisGroup] = {
+                    index: ai,
+                    bits: [
+                      isPositive ? bit : (existing.bits?.[0] ?? defaultBits[0]),
+                      isPositive ? (existing.bits?.[1] ?? defaultBits[1]) : bit,
+                    ],
+                  };
+                } else {
+                  if (!profile.axisButtons) profile.axisButtons = {};
+                  // Clear old axisButton for this bit
+                  for (const idx of Object.keys(profile.axisButtons)) {
+                    const cfg = profile.axisButtons[idx];
+                    cfg.pos &= ~(1 << bit);
+                    cfg.neg &= ~(1 << bit);
+                    if (!cfg.pos && !cfg.neg) delete profile.axisButtons[idx];
+                  }
+                  if (!profile.axisButtons[ai]) profile.axisButtons[ai] = { pos: 0, neg: 0 };
+                  if (isPositive) {
+                    profile.axisButtons[ai].pos |= 1 << bit;
+                  } else {
+                    profile.axisButtons[ai].neg |= 1 << bit;
+                  }
+                }
+                GamepadManager.saveGamepadProfile(activeProfile.id, profile);
+              }
+              refreshMappingGrid();
+              cancelRebind();
+              return;
+            }
           }
         }
       }, 50);
@@ -488,11 +578,26 @@
     if (!gp) return null;
     const profile = activeProfile.profile;
     const axes = profile.axes || {};
+
+    // Find C-stick axes from profile.axisButtons (fallback to 2,3)
+    let cxIdx = -1,
+      cyIdx = -1;
+    const axBtn = profile.axisButtons;
+    if (axBtn) {
+      for (const [idx, cfg] of Object.entries(axBtn)) {
+        const ai = parseInt(idx, 10);
+        if (cfg.pos & ((1 << 20) | (1 << 21)) || cfg.neg & ((1 << 20) | (1 << 21))) cxIdx = ai;
+        if (cfg.pos & ((1 << 22) | (1 << 23)) || cfg.neg & ((1 << 22) | (1 << 23))) cyIdx = ai;
+      }
+    }
+    if (cxIdx < 0) cxIdx = 2;
+    if (cyIdx < 0) cyIdx = 3;
+
     return {
       lx: axes.stickX && axes.stickX.index < gp.axes.length ? gp.axes[axes.stickX.index] : 0,
       ly: axes.stickY && axes.stickY.index < gp.axes.length ? gp.axes[axes.stickY.index] : 0,
-      cx: 2 < gp.axes.length ? gp.axes[2] : 0,
-      cy: 3 < gp.axes.length ? gp.axes[3] : 0,
+      cx: cxIdx < gp.axes.length ? gp.axes[cxIdx] : 0,
+      cy: cyIdx < gp.axes.length ? gp.axes[cyIdx] : 0,
     };
   };
 
@@ -814,6 +919,17 @@
   const startQuickSetup = () => {
     if (window._startIngameRemap) window._startIngameRemap();
   };
+
+  // ── Gamepad hot-plug — rebuild panel when controllers change ────
+  // Defer with setTimeout so GamepadManager.poll() (which also listens
+  // for gamepadconnected) finishes processing before we rebuild the UI.
+  const _onGamepadChange = () => {
+    setTimeout(() => {
+      if (_isOpen) rebuildPanel();
+    }, 0);
+  };
+  window.addEventListener('gamepadconnected', _onGamepadChange);
+  window.addEventListener('gamepaddisconnected', _onGamepadChange);
 
   // ── Escape key handler ───────────────────────────────────────────
   document.addEventListener(

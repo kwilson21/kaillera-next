@@ -243,8 +243,17 @@
       cy = 0;
     const axBtn = profile.axisButtons;
     if (axBtn) {
-      if (axBtn[2] && 2 < gp.axes.length) cx = _digitalSnap(gp.axes[2], _getDeadzone('kn-deadzone-cx'));
-      if (axBtn[3] && 3 < gp.axes.length) cy = _digitalSnap(gp.axes[3], _getDeadzone('kn-deadzone-cy'));
+      for (const [idx, cfg] of Object.entries(axBtn)) {
+        const ai = parseInt(idx, 10);
+        if (ai >= gp.axes.length) continue;
+        // C-Left(20)/C-Right(21) → X axis, C-Down(22)/C-Up(23) → Y axis
+        if (cfg.pos & ((1 << 20) | (1 << 21)) || cfg.neg & ((1 << 20) | (1 << 21))) {
+          cx = _digitalSnap(gp.axes[ai], _getDeadzone('kn-deadzone-cx'));
+        }
+        if (cfg.pos & ((1 << 22) | (1 << 23)) || cfg.neg & ((1 << 22) | (1 << 23))) {
+          cy = _digitalSnap(gp.axes[ai], _getDeadzone('kn-deadzone-cy'));
+        }
+      }
     }
 
     return { buttons, lx, ly, cx, cy };
