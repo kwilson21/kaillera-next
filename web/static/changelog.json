@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.24.8",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "Playwright shutdown crash, add 15 tests for security/feedback/logging/audit"
+      }
+    ]
+  },
+  {
     "version": "0.24.7",
     "date": "2026-04-02",
     "changes": [
