@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.25.2",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "auto-recover from orphaned Alembic revision on startup"
+      }
+    ]
+  },
+  {
     "version": "0.25.1",
     "date": "2026-04-02",
     "changes": [
