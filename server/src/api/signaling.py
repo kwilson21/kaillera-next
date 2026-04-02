@@ -845,7 +845,7 @@ async def rom_signal(sid: str, data: dict) -> None:
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
-async def _relay(sid: str, data: dict, event: str, rate_key: str) -> None:
+async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int = _RELAY_MAX_BYTES) -> None:
     """Validate, rate-check, and broadcast *data* to all peers in the sender's room."""
     if not isinstance(data, dict):
         return
@@ -855,8 +855,8 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str) -> None:
         payload_size = len(json.dumps(data, separators=(",", ":")))
     except (TypeError, ValueError, OverflowError):
         return
-    if payload_size > _RELAY_MAX_BYTES:
-        log.warning("Relay %s dropped: %d bytes exceeds %d limit (sid=%s)", event, payload_size, _RELAY_MAX_BYTES, sid)
+    if payload_size > max_bytes:
+        log.warning("Relay %s dropped: %d bytes exceeds %d limit (sid=%s)", event, payload_size, max_bytes, sid)
         return
     result = _get_room(sid)
     if result is None:
@@ -865,9 +865,13 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str) -> None:
     await sio.emit(event, data, room=session_id, skip_sid=sid)
 
 
+# Save states are ~1.5MB gzipped; data-message needs a higher cap than input/snapshot.
+_DATA_MSG_MAX_BYTES = 4 * 1024 * 1024  # 4MB (matches Socket.IO max_http_buffer_size)
+
+
 @sio.on("data-message")
 async def data_message(sid: str, data: dict) -> None:
-    await _relay(sid, data, "data-message", "data-message")
+    await _relay(sid, data, "data-message", "data-message", max_bytes=_DATA_MSG_MAX_BYTES)
 
 
 @sio.on("snapshot")

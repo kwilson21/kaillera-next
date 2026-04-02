@@ -126,8 +126,8 @@ def test_sanitize_strips_angle_brackets(page, server_url):
     assert "<script>" not in content
 
 
-def test_oversized_relay_dropped(context, server_url):
-    """Relay payloads exceeding 64KB are silently dropped."""
+def test_oversized_snapshot_dropped(context, server_url):
+    """Snapshot payloads exceeding 64KB are silently dropped (input/snapshot cap)."""
     host = context.new_page()
     guest = context.new_page()
 
@@ -144,17 +144,17 @@ def test_oversized_relay_dropped(context, server_url):
         host.click("#start-btn")
         expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
 
-        # Guest sets up listener, host sends >64KB, wait to see if it arrives
+        # Guest sets up listener, host sends >64KB snapshot, wait to see if it arrives
         guest.evaluate("window.__test_relay_received = false")
         guest.evaluate("""
-            window.__test_socket.on('data-message', () => { window.__test_relay_received = true; });
+            window.__test_socket.on('snapshot', () => { window.__test_relay_received = true; });
         """)
         host.evaluate("""
-            window.__test_socket.emit('data-message', { type: 'test', data: 'x'.repeat(70000) });
+            window.__test_socket.emit('snapshot', { type: 'test', data: 'x'.repeat(70000) });
         """)
         guest.wait_for_timeout(2000)
         assert guest.evaluate("window.__test_relay_received") is False, \
-            "Oversized relay should be dropped"
+            "Oversized snapshot should be dropped"
     finally:
         host.close()
         guest.close()

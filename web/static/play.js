@@ -103,6 +103,35 @@
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
     (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent)) ||
     navigator.userAgentData?.mobile;
+
+  // Pre-unlock AudioContext for mobile within a gesture callstack.
+  // iOS rejects AudioContext.resume() called >~1s after the user's tap.
+  // Must be called from a click/tap handler (Start Game, Accept ROM, ROM drop).
+  const _preloadAudioCtx = () => {
+    if (!_isMobile) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC || (window._kn_preloadedAudioCtx && window._kn_preloadedAudioCtx.state !== 'closed')) return;
+    try {
+      window._kn_preloadedAudioCtx = new AC({ sampleRate: 44100 });
+    } catch (_) {
+      window._kn_preloadedAudioCtx = new AC();
+    }
+    window._kn_preloadedAudioCtx.resume().catch(() => {});
+    const dest = window._kn_preloadedAudioCtx.createMediaStreamDestination();
+    const el = document.createElement('audio');
+    el.srcObject = dest.stream;
+    el.play().catch(() => {});
+    window._kn_gestureAudioEl = el;
+    window._kn_gestureAudioDest = dest;
+    const gain = window._kn_preloadedAudioCtx.createGain();
+    gain.gain.value = 0;
+    const osc = window._kn_preloadedAudioCtx.createOscillator();
+    osc.connect(gain);
+    gain.connect(dest);
+    osc.start();
+    window._kn_keepAliveOsc = osc;
+  };
+
   const ROM_CHUNK_SIZE = 64 * 1024; // 64KB — same for all platforms
   const ROM_BUFFER_THRESHOLD = 1024 * 1024; // 1MB — DC handles this fine on mobile
   let _romTransferBytesReceived = 0;
@@ -1014,6 +1043,7 @@
   };
 
   const acceptRomSharing = () => {
+    _preloadAudioCtx(); // gesture — unlock audio for mobile guests
     _romSharingDecision = 'accepted';
     _romTransferChunks = [];
     _romTransferHeader = null;
@@ -2000,6 +2030,7 @@
   };
 
   const handleRomFile = (file) => {
+    _preloadAudioCtx(); // gesture — unlock audio for mobile guests dropping ROM
     const statusEl = document.getElementById('rom-status');
     const isZip = file.name.toLowerCase().endsWith('.zip');
 
@@ -2395,34 +2426,7 @@
       showToast('Load a ROM file before starting');
       return;
     }
-    // Pre-unlock AudioContext for mobile host within this gesture callstack.
-    // iOS rejects AudioContext.resume() called >~1s after the user's tap.
-    // The engine won't init audio until 30+ seconds after this click (boot + state sync),
-    // so we pre-create and keep-alive the context here and the engine picks it up.
-    if (_isMobile) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && (!window._kn_preloadedAudioCtx || window._kn_preloadedAudioCtx.state === 'closed')) {
-        try {
-          window._kn_preloadedAudioCtx = new AC({ sampleRate: 44100 });
-        } catch (_) {
-          window._kn_preloadedAudioCtx = new AC();
-        }
-        window._kn_preloadedAudioCtx.resume().catch(() => {});
-        const dest = window._kn_preloadedAudioCtx.createMediaStreamDestination();
-        const el = document.createElement('audio');
-        el.srcObject = dest.stream;
-        el.play().catch(() => {});
-        window._kn_gestureAudioEl = el;
-        window._kn_gestureAudioDest = dest;
-        const gain = window._kn_preloadedAudioCtx.createGain();
-        gain.gain.value = 0;
-        const osc = window._kn_preloadedAudioCtx.createOscillator();
-        osc.connect(gain);
-        gain.connect(dest);
-        osc.start();
-        window._kn_keepAliveOsc = osc;
-      }
-    }
+    _preloadAudioCtx();
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
     const optResync = document.getElementById('opt-resync');
