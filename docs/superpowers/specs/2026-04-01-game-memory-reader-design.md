@@ -21,6 +21,7 @@ Read live N64 game state from WASM RDRAM and surface it through a public game br
 - Support for games beyond SSB64 / Smash Remix (extensible design, but only two address maps shipped)
 - Writing to game memory (read-only)
 - Full live video streaming on the match list (periodic thumbnails instead)
+- Password frontend UI on room creation (backend exists; frontend is a separate task, not in scope here — join-from-match-list passes password via the existing `join-room` payload)
 
 ## Architecture
 
@@ -100,9 +101,9 @@ A standalone class (no IIFE, no window globals — not EJS interop). Instantiate
 
 **Lifecycle:** `start()` begins polling, `stop()` clears interval. Called by play.js on game start/end. Only runs on the host client.
 
-### 2. ThumbnailCapture
+### 2. ThumbnailCapture (`web/static/thumbnail-capture.js`)
 
-A small helper that captures the emulator canvas as a low-res JPEG on a ~5 second interval.
+A standalone class (no IIFE, no window globals — same as GameMemoryReader). Captures the emulator canvas as a low-res JPEG on a ~5 second interval.
 
 **Capture:** `canvas.toDataURL('image/jpeg', 0.4)` — produces ~10-30KB images at low quality. Good enough for thumbnail previews.
 
@@ -121,19 +122,21 @@ New fields on the `Room` dataclass:
 - `allow_join: bool = True` — whether open slots are fillable from match list
 - `allow_spectate: bool = True` — whether spectators can join from match list
 
-These fields need to be added to `_serialize_room` / `_deserialize_room` in `state.py` for Redis persistence.
+**Redis persistence:** Only `public`, `allow_join`, and `allow_spectate` are persisted to Redis. `game_state` and `thumbnail` are **memory-only** — they're ephemeral data that the host re-sends on the next poll cycle after any server restart. Excluding them avoids bloating Redis keys (thumbnails are ~20KB base64 vs the current sub-1KB room JSON).
 
 #### New Socket.IO events
 
+Each event gets a corresponding Pydantic payload model in `server/src/api/payloads.py` following the existing `@validated()` decorator pattern.
+
 **`game-state`** (client → server)
-- Payload: decoded game state dict
+- Payload model: `GameStatePayload` — `matchState: str`, `stage: str | None`, `stageId: int | None`, `timer: int | None`, `players: list[dict | None]`, `winner: int | None`
 - Only accepted from room owner
-- Rate-limited: max 4/sec per room
+- Rate-limited: max 5/sec per room (small buffer above 250ms poll cadence)
 - Stores on `room.game_state`
 - Not broadcast to room (room members don't need it — they have their own emulator)
 
 **`match-thumbnail`** (client → server)
-- Payload: `{ thumbnail: "<base64 JPEG>" }`
+- Payload model: `MatchThumbnailPayload` — `thumbnail: str`
 - Only accepted from room owner
 - Rate-limited: max 1/5sec per room
 - Stores on `room.thumbnail`
@@ -141,9 +144,9 @@ These fields need to be added to `_serialize_room` / `_deserialize_room` in `sta
 - Not broadcast to room
 
 **`set-visibility`** (client → server)
-- Payload: `{ public?: bool, allowJoin?: bool, allowSpectate?: bool }`
+- Payload model: `SetVisibilityPayload` — `public: bool | None`, `allowJoin: bool | None`, `allowSpectate: bool | None`
 - Only accepted from room owner
-- Updates room fields
+- Updates room fields (only fields present in payload)
 - Broadcasts visibility change to room (so lobby UI can reflect it)
 
 #### REST endpoint
@@ -152,7 +155,9 @@ These fields need to be added to `_serialize_room` / `_deserialize_room` in `sta
 - Returns JSON array of public rooms
 - Each entry includes: room name, game ID, status, mode, player names + characters, spectator count, open slots, game state, thumbnail URL/data, password-protected flag
 - Excludes: password value, socket IDs, internal state
+- **Security invariant:** Only rooms with `public=True` are included. Private rooms are never exposed regardless of other settings. Session IDs are intentionally included for public rooms — they serve as the join token and are equivalent to sharing the room URL.
 - No auth required (public endpoint)
+- The existing `GET /list` endpoint continues unchanged (it serves the lobby's room list). `/api/matches` is a separate public-facing endpoint with game state enrichment.
 - Response shape:
 ```json
 [
@@ -196,8 +201,8 @@ New page accessible from the lobby (tab or link). Polls `GET /api/matches` every
 - Lock icon for password-protected rooms
 
 **Actions per card:**
-- **Join** button — visible when `allowJoin` is true and slots are open. Navigates to play.html with the room session ID. Prompts for password if protected.
-- **Spectate** button — visible when `allowSpectate` is true. Navigates to play.html in spectator mode. Prompts for password if protected.
+- **Join** button — visible when `allowJoin` is true and slots are open. If password-protected, shows a browser `prompt()` dialog for the password before navigating. Navigates to `play.html?room={sessionId}&password={password}` — the password is passed via the existing `join-room` Socket.IO payload on connection (same flow as invite links, just with password added).
+- **Spectate** button — visible when `allowSpectate` is true. Same password prompt flow. Navigates to `play.html?room={sessionId}&spectate=1&password={password}`.
 - Both buttons disabled with explanation when the respective permission is off.
 
 **Empty state:** "No public matches right now. Create a room to get started!"
@@ -211,13 +216,12 @@ The room creation flow and in-room lobby need UI for the new visibility settings
 - **Public toggle** — "List this room on the game browser" (default off for backwards compat)
 - **Allow join toggle** — "Allow players to join from browser" (default on when public)
 - **Allow spectate toggle** — "Allow spectators from browser" (default on when public)
-- **Password field** — already exists in backend, needs frontend UI
 
-These are shown to the host in the room lobby before and during a game.
+These are shown to the host in the room lobby before and during a game. Password frontend UI is out of scope for this feature (see Non-Goals) — the existing backend password validation works for match-list joins via the `join-room` payload.
 
 ### 6. Integration Points
 
-**Session logs:** When `game-state` arrives, the server can log match events (game started with characters X on stage Y, player lost a stock, match ended with winner Z) to the session log system.
+**Session logs:** The server enriches session log entries server-side when `game-state` events arrive. Key state transitions (game started with characters X on stage Y, match ended with winner Z) are appended to the existing session log via `db.upsert_session_log`. This keeps the merge logic server-side where the game state and session log data are co-located.
 
 **PostHog:** Enrich existing game-started / game-ended events with character picks, stage, winner, match duration.
 
