@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.24.5",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "pre-launch UX polish — validation, meta tags, console cleanup, copy improvements"
+      }
+    ]
+  },
+  {
     "version": "0.24.4",
     "date": "2026-04-02",
     "changes": [
