@@ -109,8 +109,9 @@ async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> N
             (ended_by, match_id, slot),
         )
     else:
+        # Only update rows without an existing ended_by (don't overwrite leave/disconnect with game-end)
         await _db.execute(
-            "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=?",
+            "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND ended_by IS NULL",
             (ended_by, match_id),
         )
     await _db.commit()
