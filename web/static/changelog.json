@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.25.4",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "controller settings UX — analog labels, gamepad status, toolbar overflow"
+      }
+    ]
+  },
+  {
     "version": "0.25.3",
     "date": "2026-04-02",
     "changes": [
