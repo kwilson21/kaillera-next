@@ -592,6 +592,32 @@ def create_app(lifespan=None) -> FastAPI:
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
         return {"status": "saved"}
 
+    # ── ROM hash table ──────────────────────────────────────────────────
+
+    # Load known ROM hashes from config file into memory once at import time.
+    _known_roms_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "known_roms.json")
+    _known_roms: dict = {}
+    try:
+        with open(_known_roms_path) as _f:
+            _known_roms = {
+                entry["sha256"]: {"game": entry["game"], "region": entry.get("region"), "format": entry.get("format")}
+                for entry in json.load(_f)
+            }
+        log.info("Loaded %d known ROM(s) from %s", len(_known_roms), _known_roms_path)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as _e:
+        log.warning("Failed to load known_roms config: %s", _e)
+
+    _known_roms_json = json.dumps(_known_roms)
+
+    @app.get("/api/rom-hashes")
+    async def get_rom_hashes() -> Response:
+        """Return known ROM hash table for client-side verification."""
+        return Response(
+            content=_known_roms_json,
+            media_type="application/json",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
     # ── Client event beacon ─────────────────────────────────────────────
 
     @app.post("/api/client-event")

@@ -1,0 +1,14 @@
+[
+  {
+    "sha256": "S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d",
+    "game": "Super Smash Bros.",
+    "region": "US",
+    "format": "z64"
+  },
+  {
+    "sha256": "S73855bdf5e8753c546a31e278dfe558c3eaa575b97752c1d95950d66b1161130",
+    "game": "Smash Remix 2.0.0",
+    "region": "US",
+    "format": "z64"
+  }
+]

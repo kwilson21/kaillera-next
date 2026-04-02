@@ -931,6 +931,125 @@ button:hover {
   margin-top: 4px;
 }
 
+/* ROM Library */
+.rom-library {
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.rom-library-header {
+  padding: 6px 10px;
+  background: #222238;
+  color: #888;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.rom-library-header .rom-count {
+  color: #666;
+  font-size: 10px;
+}
+
+.rom-library-list {
+  max-height: 132px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+.rom-library-item {
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-top: 1px solid #1e1e30;
+  transition: background 0.15s;
+}
+
+.rom-library-item:first-child {
+  border-top: none;
+}
+
+.rom-library-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.rom-library-item.active {
+  background: rgba(68, 170, 68, 0.08);
+  border-left: 3px solid #4a4;
+  padding-left: 7px;
+}
+
+.rom-library-item .rom-check {
+  color: transparent;
+  font-size: 14px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.rom-library-item.active .rom-check {
+  color: #4a4;
+}
+
+.rom-library-item .rom-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.rom-library-item .rom-name {
+  color: #aaa;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rom-library-item.active .rom-name {
+  color: #ddd;
+}
+
+.rom-library-item .rom-meta {
+  color: #666;
+  font-size: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.rom-library-item .rom-meta .verified {
+  color: #4a4;
+}
+
+.rom-library-item .rom-meta .unverified {
+  color: #888;
+}
+
+.rom-library-item .rom-delete {
+  background: none;
+  border: 1px solid #333;
+  color: #666;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.rom-library-item .rom-delete:hover {
+  border-color: #a44;
+  color: #a44;
+}
+
 .rom-status {
   font-size: 12px;
   color: #6af;

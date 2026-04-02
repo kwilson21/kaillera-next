@@ -86,6 +86,9 @@
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
 
+  let _knownRoms = {}; // populated from /api/rom-hashes on load
+  let renderRomLibrary = () => {}; // replaced with full impl after IDB functions
+
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
   let _romDeclared = false; // true if user declared ROM ownership (streaming, page-lifetime)
@@ -569,7 +572,7 @@
 
               // Verify ROM hash if available (skip when ROM came from host via sharing)
               if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
-                showError("ROM mismatch — your ROM doesn't match the host's. Please load the correct ROM and rejoin.");
+                showError("Your ROM doesn't match the host's game. Drop the correct ROM or enable ROM sharing.");
                 return;
               }
 
@@ -635,17 +638,18 @@
       // If we have a cached ROM loaded that doesn't match, clear it
       if (_romHash && !_romSharingEnabled && romHashMismatch(_hostRomHash, _romHash)) {
         console.log(
-          '[play] host ROM hash changed — clearing mismatched cached ROM (host:',
+          '[play] host ROM hash changed (host:',
           _hostRomHash?.substring(0, 16),
           'ours:',
           _romHash?.substring(0, 16),
-          ')',
+          ') \u2014 checking library',
         );
         clearLoadedRom();
-        // Tell server we no longer have a ROM
         if (socket?.connected) socket.emit('rom-ready', { ready: false });
+        // Try auto-match from library before prompting
+        showToast('Host selected a different game');
+        autoMatchRom(_hostRomHash);
       } else if ((_romBlob || _romBlobUrl) && _romHash && !romHashMismatch(_hostRomHash, _romHash)) {
-        // Hash matches — if we haven't notified yet, do so now
         notifyRomReady();
       }
     }
@@ -686,6 +690,7 @@
     }
     if (!wasHost && isHost) {
       showToast('You are now the host');
+      renderRomLibrary();
     }
 
     // Diff for toasts
@@ -772,7 +777,7 @@
 
     // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
     if (romHashMismatch(data.romHash, _romHash) && _romSharingDecision !== 'accepted') {
-      showError("ROM mismatch — your ROM doesn't match the host's. Please load the correct ROM and rejoin.");
+      showError("Your ROM doesn't match the host's game. Drop the correct ROM to continue.");
       return;
     }
 
@@ -1670,7 +1675,7 @@
     window.EJS_gameUrl = _romBlobUrl;
     // Cache received ROM so guests auto-load on future joins without re-downloading
     _safeSet('localStorage', 'kaillera-rom-name', displayName);
-    cacheRom(blob);
+    cacheRom(blob, { name: displayName, source: 'p2p' });
 
     _romTransferState = 'complete';
     _romTransferChunks = [];
@@ -2014,19 +2019,23 @@
       if (e.dataTransfer.files.length > 0) handleRomFile(e.dataTransfer.files[0]);
     });
 
-    // Auto-load cached ROM from IndexedDB
-    loadCachedRom((cachedName) => {
-      if (cachedName) {
-        drop.classList.add('loaded');
-        if (statusEl) statusEl.textContent = `Loaded: ${cachedName} (drop to change)`;
-        // If we were waiting for a ROM to late-join, proceed now
-        if (_pendingLateJoin) {
-          dismissLateJoinPrompt();
+    // Auto-load the most recently used ROM from library
+    const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
+    if (lastHash) {
+      loadRomFromLibrary(lastHash, (ok, name) => {
+        if (ok) {
+          drop.classList.add('loaded');
+          if (statusEl) statusEl.textContent = `Loaded: ${name} (drop to change)`;
+          if (_pendingLateJoin) dismissLateJoinPrompt();
+        } else if (savedRom && statusEl) {
+          statusEl.textContent = `Last used: ${savedRom} (file not cached — drop again)`;
         }
-      } else if (savedRom && statusEl) {
-        statusEl.textContent = `Last used: ${savedRom} (file not cached — drop again)`;
-      }
-    });
+        // Render library for host after loading
+        if (isHost) renderRomLibrary();
+      });
+    } else {
+      if (isHost) renderRomLibrary();
+    }
   };
 
   const handleRomFile = (file) => {
@@ -2064,7 +2073,7 @@
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
     _safeSet('localStorage', 'kaillera-rom-name', displayName);
-    cacheRom(file);
+    cacheRom(file, { name: displayName, source: 'local' });
 
     const drop = document.getElementById('rom-drop');
     if (drop) drop.classList.add('loaded');
@@ -2167,107 +2176,304 @@
     return a !== b;
   };
 
-  // ── ROM IDB Cache ──────────────────────────────────────────────────────
+  // ── ROM IDB Cache (multi-ROM library) ──────────────────────────────────
 
   const _ROM_DB = 'kaillera-rom-cache';
   const _ROM_STORE = 'roms';
+  const _ROM_DB_VERSION = 2;
 
   const openRomDB = (cb) => {
     if (typeof indexedDB === 'undefined') {
       cb(null);
       return;
     }
-    const req = indexedDB.open(_ROM_DB, 1);
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore(_ROM_STORE);
+    const req = indexedDB.open(_ROM_DB, _ROM_DB_VERSION);
+    req.onupgradeneeded = (event) => {
+      const db = req.result;
+      const oldVersion = event.oldVersion;
+
+      if (oldVersion < 1) {
+        // Fresh install — create store
+        db.createObjectStore(_ROM_STORE);
+      }
+
+      if (oldVersion < 2 && oldVersion >= 1) {
+        // Migration: move 'current' key to hash-keyed entry.
+        // All operations stay synchronous within the upgrade transaction —
+        // async calls (like SubtleCrypto) would cause the transaction to
+        // auto-commit prematurely. Use the cached hash from localStorage.
+        const tx = req.transaction;
+        const store = tx.objectStore(_ROM_STORE);
+        const getReq = store.get('current');
+        getReq.onsuccess = () => {
+          if (!getReq.result) return;
+          const buf = getReq.result;
+          const name = _safeGet('localStorage', 'kaillera-rom-name') || 'Unknown ROM';
+          const hash = _safeGet('localStorage', 'kaillera-rom-hash');
+          if (hash) {
+            store.put(
+              {
+                blob: buf,
+                name,
+                size: buf.byteLength,
+                source: 'local',
+                verified: false,
+                gameName: null,
+                addedAt: Date.now(),
+                lastUsed: Date.now(),
+              },
+              hash,
+            );
+          }
+          store.delete('current');
+        };
+      }
     };
-    req.onsuccess = () => {
-      cb(req.result);
-    };
-    req.onerror = () => {
-      cb(null);
-    };
+    req.onsuccess = () => cb(req.result);
+    req.onerror = () => cb(null);
   };
 
-  const cacheRom = (file) => {
+  const cacheRom = (blob, { name, source = 'local' } = {}) => {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
+      let hash = null;
+      try {
+        hash = await hashArrayBuffer(reader.result);
+      } catch (_) {
+        return; // can't cache without a hash
+      }
+      const verified = !!(hash && _knownRoms[hash]);
+      const gameName = verified ? _knownRoms[hash].game : null;
       openRomDB((db) => {
         if (!db) return;
         const tx = db.transaction(_ROM_STORE, 'readwrite');
-        tx.objectStore(_ROM_STORE).put(reader.result, 'current');
+        tx.objectStore(_ROM_STORE).put(
+          {
+            blob: reader.result,
+            name: gameName || name || 'Unknown ROM',
+            size: reader.result.byteLength,
+            source,
+            verified,
+            gameName,
+            addedAt: Date.now(),
+            lastUsed: Date.now(),
+          },
+          hash,
+        );
+        // Re-render after write commits (not before)
+        tx.oncomplete = () => {
+          if (isHost) renderRomLibrary();
+        };
       });
     };
-    reader.readAsArrayBuffer(file);
+    reader.readAsArrayBuffer(blob instanceof Blob ? blob : new Blob([blob]));
   };
 
-  const loadCachedRom = (cb) => {
-    const name = _safeGet('localStorage', 'kaillera-rom-name');
-    if (!name) {
-      cb(null);
-      return;
-    }
+  const getRomLibrary = (cb) => {
     openRomDB((db) => {
       if (!db) {
-        cb(null);
+        cb([]);
         return;
       }
       const tx = db.transaction(_ROM_STORE, 'readonly');
-      const req = tx.objectStore(_ROM_STORE).get('current');
-      req.onsuccess = async () => {
-        if (!req.result) {
-          cb(null);
+      const store = tx.objectStore(_ROM_STORE);
+      const req = store.openCursor();
+      const entries = [];
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          const val = cursor.value;
+          entries.push({
+            hash: cursor.key,
+            name: val.name,
+            size: val.size,
+            source: val.source,
+            verified: val.verified,
+            gameName: val.gameName,
+            addedAt: val.addedAt,
+            lastUsed: val.lastUsed,
+          });
+          cursor.continue();
+        } else {
+          // Sort by lastUsed descending
+          entries.sort((a, b) => b.lastUsed - a.lastUsed);
+          cb(entries);
+        }
+      };
+      req.onerror = () => cb([]);
+    });
+  };
+
+  const loadRomFromLibrary = (hash, cb) => {
+    openRomDB((db) => {
+      if (!db) {
+        cb(false);
+        return;
+      }
+      const tx = db.transaction(_ROM_STORE, 'readwrite');
+      const req = tx.objectStore(_ROM_STORE).get(hash);
+      req.onsuccess = () => {
+        if (!req.result?.blob) {
+          cb(false);
           return;
         }
-        // Compute hash first so we can verify against the host's ROM
-        let hash = null;
-        try {
-          hash = await hashArrayBuffer(req.result);
-        } catch (err) {
-          console.log('[play] cached ROM hash failed:', err);
-        }
-
-        // Guests: only activate the cached ROM if its hash matches the host's.
-        // If we don't know the host's hash yet, defer — onUsersUpdated will
-        // activate or discard the cache once the host's hash arrives.
-        // Skip when ROM sharing is enabled — the ROM comes from the host.
-        if (!isHost && !_romSharingEnabled && hash && _hostRomHash && romHashMismatch(_hostRomHash, hash)) {
-          console.log(
-            '[play] cached ROM hash mismatch — not loading (host:',
-            _hostRomHash?.substring(0, 16),
-            'cached:',
-            hash?.substring(0, 16),
-            ')',
-          );
-          cb(null);
-          return;
-        }
-
-        const blob = new Blob([req.result]);
+        const val = req.result;
+        const blob = new Blob([val.blob]);
         _romBlob = blob;
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
-        // Enable ROM sharing checkbox immediately (don't gate on hash)
+        _romHash = hash;
+        KNState.romHash = hash;
+        _safeSet('localStorage', 'kaillera-rom-name', val.name);
+        _safeSet('localStorage', 'kaillera-rom-hash', hash);
+        // Update lastUsed
+        tx.objectStore(_ROM_STORE).put({ ...val, lastUsed: Date.now() }, hash);
+        // Enable ROM sharing checkbox if host
         const romShareCb = document.getElementById('opt-rom-sharing');
         if (romShareCb && isHost) romShareCb.disabled = false;
-        if (hash) {
-          _romHash = hash;
-          KNState.romHash = hash;
-          _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        }
+        notifyRomReady();
+        cb(true, val.name);
+      };
+      req.onerror = () => cb(false);
+    });
+  };
 
-        // Host always notifies immediately. Guests only notify if we already
-        // know the host's hash matches (or host hash isn't known yet — the
-        // onUsersUpdated handler will clear the ROM if it later mismatches).
-        if (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash)) {
-          notifyRomReady();
+  renderRomLibrary = () => {
+    const container = document.getElementById('rom-library');
+    if (!container) return;
+
+    // Only show for host
+    if (!isHost) {
+      container.style.display = 'none';
+      container.innerHTML = '';
+      return;
+    }
+
+    getRomLibrary((entries) => {
+      if (entries.length === 0) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+      }
+
+      container.style.display = '';
+      container.className = 'rom-library';
+
+      const esc = (s) =>
+        s ? s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') : '';
+
+      const formatSize = (bytes) => {
+        if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+        return `${bytes} B`;
+      };
+
+      let html = `<div class="rom-library-header"><span>ROM Library</span><span class="rom-count">${entries.length} ROM${entries.length !== 1 ? 's' : ''}</span></div>`;
+      html += '<div class="rom-library-list">';
+
+      for (const entry of entries) {
+        const isActive = entry.hash === _romHash;
+        const verifiedLabel = entry.verified
+          ? `<span class="verified">Verified \u2014 ${esc(entry.gameName)}</span>`
+          : '<span class="unverified">Unverified</span>';
+        const sourceLabel = entry.source === 'p2p' ? 'From host' : '';
+
+        html += `<div class="rom-library-item${isActive ? ' active' : ''}" data-hash="${esc(entry.hash)}">`;
+        html += '<span class="rom-check">\u2713</span>';
+        html += '<div class="rom-info">';
+        html += `<div class="rom-name">${esc(entry.name)}</div>`;
+        html += `<div class="rom-meta">${verifiedLabel}<span>${formatSize(entry.size)}</span>${sourceLabel ? `<span>${sourceLabel}</span>` : ''}</div>`;
+        html += '</div>';
+        html += `<button class="rom-delete" data-hash="${esc(entry.hash)}" title="Remove from library">\u2715</button>`;
+        html += '</div>';
+      }
+
+      html += '</div>';
+      container.innerHTML = html;
+
+      // Wire click handlers
+      for (const item of container.querySelectorAll('.rom-library-item')) {
+        item.addEventListener('click', (e) => {
+          // Don't trigger load when clicking delete
+          if (e.target.closest('.rom-delete')) return;
+          const hash = item.dataset.hash;
+          if (hash === _romHash) return; // already active
+          loadRomFromLibrary(hash, (ok, name) => {
+            if (ok) {
+              const drop = document.getElementById('rom-drop');
+              const statusEl = document.getElementById('rom-status');
+              if (drop) drop.classList.add('loaded');
+              if (statusEl) statusEl.textContent = `Loaded: ${name}`;
+              renderRomLibrary();
+            }
+          });
+        });
+      }
+
+      for (const btn of container.querySelectorAll('.rom-delete')) {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteRomFromLibrary(btn.dataset.hash);
+        });
+      }
+    });
+  };
+
+  const deleteRomFromLibrary = (hash) => {
+    openRomDB((db) => {
+      if (!db) return;
+      const tx = db.transaction(_ROM_STORE, 'readwrite');
+      tx.objectStore(_ROM_STORE).delete(hash);
+      // If we deleted the active ROM, clear it
+      if (_romHash === hash) clearLoadedRom();
+      // Re-render after transaction commits (not before)
+      tx.oncomplete = () => renderRomLibrary();
+    });
+  };
+
+  const _retroVerifyLibrary = () => {
+    if (!Object.keys(_knownRoms).length) return;
+    openRomDB((db) => {
+      if (!db) return;
+      const tx = db.transaction(_ROM_STORE, 'readwrite');
+      const store = tx.objectStore(_ROM_STORE);
+      const req = store.openCursor();
+      let updated = false;
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          const val = cursor.value;
+          const known = _knownRoms[cursor.key];
+          if (known && !val.verified) {
+            cursor.update({
+              ...val,
+              verified: true,
+              gameName: known.game,
+              name: known.game,
+            });
+            updated = true;
+          }
+          cursor.continue();
         }
-        cb(name);
       };
-      req.onerror = () => {
-        cb(null);
+      tx.oncomplete = () => {
+        if (updated && isHost) renderRomLibrary();
       };
+    });
+  };
+
+  const autoMatchRom = (hostHash) => {
+    loadRomFromLibrary(hostHash, (ok, name) => {
+      if (ok) {
+        const displayName = name || 'cached ROM';
+        showToast(`ROM matched \u2014 ${displayName} loaded`);
+        const drop = document.getElementById('rom-drop');
+        const statusEl = document.getElementById('rom-status');
+        if (drop) drop.classList.add('loaded');
+        if (statusEl) statusEl.textContent = `Loaded: ${displayName}`;
+        if (_pendingLateJoin) dismissLateJoinPrompt();
+      }
     });
   };
 
@@ -2510,7 +2716,7 @@
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
     if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
-      showError("ROM mismatch — your ROM doesn't match the host's. Please load the correct ROM and rejoin.");
+      showError("Your ROM doesn't match the host's game. Drop the correct ROM to rejoin.");
       return;
     }
 
@@ -3677,6 +3883,16 @@
       `border-radius:3px;font-size:.7em;font-weight:700;vertical-align:middle;}`;
     document.head.appendChild(_a21style);
     parseParams();
+    // Fetch known ROM hashes for verification
+    fetch('/api/rom-hashes')
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data) => {
+        _knownRoms = data;
+        // Retroactively verify any cached ROMs that were stored before
+        // the known-hash table was available (e.g. v1→v2 migration)
+        _retroVerifyLibrary();
+      })
+      .catch(() => {}); // non-fatal — verification just won't work
     if (!roomCode) {
       window.location.href = '/';
       return;
