@@ -36,6 +36,9 @@ package-lock.json
 .claude/
 .superpowers/
 
+# Git worktrees
+.worktrees/
+
 # Runtime logs
 server/logs/
 tests/diag-screenshots/
