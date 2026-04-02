@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.25.0",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "squash-style version bumping in post-commit hook"
+      },
+      {
+        "type": "feat",
+        "message": "multi-ROM library with hash verification and host picker UI"
+      },
+      {
+        "type": "feat",
+        "message": "controller settings UI panel, session log reliability fixes"
+      }
+    ]
+  },
+  {
     "version": "0.24.9",
     "date": "2026-04-02",
     "changes": [
