@@ -104,8 +104,8 @@ All events go through the default Socket.IO namespace (`/`).
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, playerId, player_name, room_name, game_id}, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, userid, player_name, spectate}}` | Join/spectate |
+| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, maxPlayers}` | Create room |
+| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `start-game` | client→server | `{mode, rollbackEnabled}` | Host starts game |
@@ -114,17 +114,20 @@ All events go through the default Socket.IO namespace (`/`).
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
 | `webrtc-signal` | bidirectional | `{target, offer/answer/candidate}` | WebRTC relay |
 | `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay |
-| `snapshot` | client→server→room | `{...}` | Game snapshot relay |
-| `input` | client→server→room | `{...}` | Input relay (streaming mode) |
+| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (64KB max) |
+| `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
+| `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
 | `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
 | `rom-declare` | client→server | `{...}` | Declare ROM file info to room |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
+| `session-log` | client→server | `{matchId, entries, summary, context}` | Periodic sync log flush |
 | `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
 | `debug-logs` | client→server | `{...}` | Upload debug console log |
 | `users-updated` | server→room | `{players, spectators, owner}` | Room state broadcast |
+| `upload-token` | server→client | `{token}` | HMAC token for upload endpoints |
+| `reconnect-token` | server→client | `{token}` | HMAC token for session reconnection |
 | `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
 | `game-started` | server→room | `{mode, rollbackEnabled, romHash}` | Game started |
 | `game-ended` | server→room | `{}` | Back to lobby |
