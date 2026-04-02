@@ -5,7 +5,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <title>kaillera-next</title>
+    <meta name="description" content="Play N64 games online with friends in your browser — no download needed." />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <script>
+      if (!new URLSearchParams(location.search).has('debug')) {
+        console.log = () => {};
+        console.debug = () => {};
+      }
+    </script>
     <link rel="stylesheet" href="/static/play.css" />
   </head>
   <body>
@@ -28,29 +35,29 @@
               <span class="slot-num" aria-hidden="true">P1</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
-              <span class="gamepad" role="img" aria-label="Input type"></span>
-              <span class="device" role="img" aria-label="Device type"></span>
+              <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
+              <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
             <div class="player-slot" data-slot="1" role="listitem" aria-label="Player 2 slot">
               <span class="slot-num" aria-hidden="true">P2</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
-              <span class="gamepad" role="img" aria-label="Input type"></span>
-              <span class="device" role="img" aria-label="Device type"></span>
+              <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
+              <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
             <div class="player-slot" data-slot="2" role="listitem" aria-label="Player 3 slot">
               <span class="slot-num" aria-hidden="true">P3</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
-              <span class="gamepad" role="img" aria-label="Input type"></span>
-              <span class="device" role="img" aria-label="Device type"></span>
+              <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
+              <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
             <div class="player-slot" data-slot="3" role="listitem" aria-label="Player 4 slot">
               <span class="slot-num" aria-hidden="true">P4</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
-              <span class="gamepad" role="img" aria-label="Input type"></span>
-              <span class="device" role="img" aria-label="Device type"></span>
+              <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
+              <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
           </div>
           <div id="spectator-list"></div>

@@ -7,6 +7,9 @@
   };
 
   const fetchVersion = async () => {
+    for (const el of document.querySelectorAll('#kn-about')) {
+      el.addEventListener('click', showAbout);
+    }
     try {
       const res = await fetch(`/static/version.json?_t=${Date.now()}`);
       const data = await res.json();
@@ -14,9 +17,6 @@
       for (const el of document.querySelectorAll('#kn-version')) {
         el.textContent = `v${data.version}`;
         el.addEventListener('click', showChangelog);
-      }
-      for (const el of document.querySelectorAll('#kn-about')) {
-        el.addEventListener('click', showAbout);
       }
     } catch (_) {}
   };

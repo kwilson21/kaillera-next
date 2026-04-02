@@ -428,11 +428,10 @@ button:hover {
   display: block;
   width: 100%;
   margin-top: 8px;
-  min-height: 44px;
   background: #3a2a2a;
   font-size: 14px;
   padding: 10px;
-  min-height: 38px;
+  min-height: 44px;
 }
 
 #leave-btn:hover {

@@ -406,7 +406,7 @@
       try {
         const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
         if (!response.ok) {
-          showError('Room not found');
+          showError('Room not found — it may have expired or the code may be incorrect');
           return;
         }
         const roomData = await response.json();

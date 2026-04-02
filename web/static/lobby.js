@@ -33,28 +33,35 @@
     _ss('localStorage', 'kaillera-name', getName());
   };
 
-  document.getElementById('create-btn').addEventListener('click', () => {
+  document.getElementById('create-btn').addEventListener('click', (e) => {
+    e.currentTarget.disabled = true;
     saveName();
     const code = randomCode();
     window.location.href = `/play.html?room=${encodeURIComponent(code)}&host=1&name=${encodeURIComponent(getName())}&mode=lockstep`;
   });
 
-  document.getElementById('join-btn').addEventListener('click', () => {
+  document.getElementById('join-btn').addEventListener('click', (e) => {
     const code = getCode();
     if (!code) {
       codeInput.focus();
+      codeInput.classList.add('shake');
+      codeInput.addEventListener('animationend', () => codeInput.classList.remove('shake'), { once: true });
       return;
     }
+    e.currentTarget.disabled = true;
     saveName();
     window.location.href = `/play.html?room=${encodeURIComponent(code)}&name=${encodeURIComponent(getName())}`;
   });
 
-  document.getElementById('watch-btn').addEventListener('click', () => {
+  document.getElementById('watch-btn').addEventListener('click', (e) => {
     const code = getCode();
     if (!code) {
       codeInput.focus();
+      codeInput.classList.add('shake');
+      codeInput.addEventListener('animationend', () => codeInput.classList.remove('shake'), { once: true });
       return;
     }
+    e.currentTarget.disabled = true;
     saveName();
     window.location.href = `/play.html?room=${encodeURIComponent(code)}&name=${encodeURIComponent(getName())}&spectate=1`;
   });
@@ -100,7 +107,7 @@
   };
   nameInput.addEventListener('change', () => {
     if (ADMIN_NAMES.includes(nameInput.value.trim().toLowerCase())) {
-      showLobbyToast('Welcome admin. Type /help for commands.');
+      showLobbyToast('Welcome back.');
     }
   });
 

@@ -115,6 +115,34 @@ button:hover {
   vertical-align: middle;
 }
 
+/* Tagline */
+.tagline {
+  color: #888;
+  font-size: 14px;
+  margin-top: -1rem;
+  margin-bottom: 1.25rem;
+}
+
+/* Validation shake */
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-4px);
+  }
+  40%,
+  80% {
+    transform: translateX(4px);
+  }
+}
+input.shake {
+  animation: shake 0.3s ease;
+  border-color: #f66 !important;
+}
+
 /* Screen reader only — visually hidden but accessible */
 .sr-only {
   position: absolute;
