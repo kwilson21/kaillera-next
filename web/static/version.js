@@ -106,7 +106,7 @@
       });
 
       const vLabel = document.createElement('span');
-      vLabel.innerHTML = `<strong style="color:#fff">v${release.version}</strong> <span style="color:#666;margin-left:8px">${release.date}</span>`;
+      vLabel.innerHTML = `<strong style="color:#fff">v${escapeHtml(release.version)}</strong> <span style="color:#666;margin-left:8px">${escapeHtml(release.date)}</span>`;
       const arrow = document.createElement('span');
       arrow.textContent = i === 0 ? '\u25BC' : '\u25B6';
       arrow.style.color = '#666';

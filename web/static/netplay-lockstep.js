@@ -371,6 +371,9 @@
   let _p1KeyMap = null;
   const _heldKeys = new Set();
 
+  const _syncRequestCooldowns = new Map();
+  const _SYNC_REQUEST_COOLDOWN_MS = 5000;
+
   // Lockstep state
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
   let _selfLockstepReady = false;
@@ -1730,6 +1733,13 @@
             e.data.startsWith('sync-request-at:') ||
             e.data.startsWith('sync-request-full-at:'))
         ) {
+          const now = Date.now();
+          const lastRequest = _syncRequestCooldowns.get(remoteSid) || 0;
+          if (now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS) {
+            _syncLog(`rate-limited sync-request from ${remoteSid}`);
+            return;
+          }
+          _syncRequestCooldowns.set(remoteSid, now);
           const isFull = e.data === 'sync-request-full' || e.data.startsWith('sync-request-full-at:');
           _syncLog(`received ${e.data} from ${remoteSid}`);
           if (isFull) _setLastSyncState(null, 'guest-requested-full');

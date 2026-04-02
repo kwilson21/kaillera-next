@@ -70,7 +70,10 @@ def run() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
-    raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip() or "*"
+    raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
+    if not raw_origin:
+        raw_origin = "*"
+        log.warning("ALLOWED_ORIGIN not set — defaulting to '*' (allow all origins). Set ALLOWED_ORIGIN in production.")
     if raw_origin == "REQUIRED":
         log.error(
             "ALLOWED_ORIGIN environment variable is not set. Set it to your domain (e.g. 'https://yourdomain.com') or '*' for development."
@@ -153,9 +156,10 @@ def run() -> None:
     else:
         log.info("Listening on :%d", port)
 
-    # Trust proxy headers only from specified IPs (comma-separated).
-    # Default "*" trusts all — set TRUSTED_PROXY_IPS in production.
-    trusted_proxies = os.environ.get("TRUSTED_PROXY_IPS", "*").strip()
+    trusted_proxies = os.environ.get("TRUSTED_PROXY_IPS", "").strip()
+    if not trusted_proxies:
+        trusted_proxies = "*"
+        log.warning("TRUSTED_PROXY_IPS not set — trusting all proxy headers. Set TRUSTED_PROXY_IPS in production.")
 
     uvicorn.run(
         socket_app,

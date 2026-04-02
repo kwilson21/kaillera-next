@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  let adminKey = KNStorage.get('localStorage', 'kn-admin-key') || '';
+  let adminKey = KNStorage.get('sessionStorage', 'kn-admin-key') || '';
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -37,11 +37,11 @@
 
   $('#auth-btn').addEventListener('click', async () => {
     adminKey = $('#admin-key-input').value.trim();
-    KNStorage.set('localStorage', 'kn-admin-key', adminKey);
+    KNStorage.set('sessionStorage', 'kn-admin-key', adminKey);
     const ok = await checkAuth();
     if (!ok) {
       $('#auth-error').classList.remove('hidden');
-      KNStorage.remove('localStorage', 'kn-admin-key');
+      KNStorage.remove('sessionStorage', 'kn-admin-key');
       adminKey = '';
     } else {
       $('#auth-error').classList.add('hidden');
@@ -79,13 +79,13 @@
     if (!res.ok) return;
     const s = await res.json();
     $('#stats-row').innerHTML = [
-      { label: 'Active Rooms', value: `${s.rooms} / ${s.max_rooms}` },
-      { label: 'Players', value: s.players },
-      { label: 'Spectators', value: s.spectators },
-      { label: 'Session Logs', value: s.session_log_count ?? 0 },
-      { label: 'Client Events', value: s.client_event_count ?? 0 },
-      { label: 'Feedback', value: s.feedback_count ?? 0 },
-      { label: 'Retention', value: `${s.retention_days}d` },
+      { label: 'Active Rooms', value: `${escapeHtml(String(s.rooms))} / ${escapeHtml(String(s.max_rooms))}` },
+      { label: 'Players', value: escapeHtml(String(s.players)) },
+      { label: 'Spectators', value: escapeHtml(String(s.spectators)) },
+      { label: 'Session Logs', value: escapeHtml(String(s.session_log_count ?? 0)) },
+      { label: 'Client Events', value: escapeHtml(String(s.client_event_count ?? 0)) },
+      { label: 'Feedback', value: escapeHtml(String(s.feedback_count ?? 0)) },
+      { label: 'Retention', value: `${escapeHtml(String(s.retention_days))}d` },
     ]
       .map((c) => `<div class="stat-card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`)
       .join('');
@@ -102,7 +102,12 @@
   };
 
   const escapeHtml = (str) =>
-    str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
   const showToast = (msg) => {
     let toast = $('#toast');
@@ -161,13 +166,13 @@
                 .filter(Boolean)
                 .join(', ') || 'clean';
             const endedColor = { 'game-end': '#2ecc71', disconnect: '#e74c3c', leave: '#f39c12' }[l.ended_by] || '#888';
-            return `<tr data-session-log-id="${l.id}">
-            <td>P${l.slot ?? '?'}</td>
+            return `<tr data-session-log-id="${escapeHtml(String(l.id))}">
+            <td>P${escapeHtml(String(l.slot ?? '?'))}</td>
             <td>${escapeHtml(l.player_name || '-')}</td>
             <td>${duration}</td>
             <td>${issues}</td>
-            <td><span style="color:${endedColor}">${l.ended_by || 'active'}</span></td>
-            <td title="${l.updated_at}">${l.updated_at ? timeAgo(new Date(l.updated_at + 'Z').getTime() / 1000) : '-'}</td>
+            <td><span style="color:${endedColor}">${escapeHtml(String(l.ended_by || 'active'))}</span></td>
+            <td title="${escapeHtml(String(l.updated_at || ''))}">${l.updated_at ? timeAgo(new Date(l.updated_at + 'Z').getTime() / 1000) : '-'}</td>
           </tr>`;
           })
           .join('');
@@ -176,7 +181,7 @@
         <div class="room-header">
           <div class="room-info">
             <span class="room-code">${escapeHtml(room)}</span>
-            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${logs[0].mode || 'unknown'}</span>
+            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}</span>
           </div>
         </div>
         <table>
@@ -248,7 +253,7 @@
     container.innerHTML = currentClientEvents
       .map((e) => {
         const color = _typeColors[e.type] || '#999';
-        return `<div class="feedback-card" data-event-id="${e.id}">
+        return `<div class="feedback-card" data-event-id="${escapeHtml(String(e.id))}">
         <div class="feedback-header">
           <span class="source-badge" style="border-color:${color};color:${color}">${escapeHtml(e.type)}</span>
           <span class="feedback-date">${e.created_at ? timeAgo(new Date(e.created_at + 'Z').getTime() / 1000) : ''}</span>
@@ -320,28 +325,32 @@
         const ctx = fb.context || {};
         const metaParts = [];
         if (ctx.playerName) metaParts.push(escapeHtml(ctx.playerName));
-        if (ctx.page) metaParts.push(ctx.page);
+        if (ctx.page) metaParts.push(escapeHtml(ctx.page));
         if (ctx.roomCode) metaParts.push(`Room: ${escapeHtml(ctx.roomCode)}`);
-        if (ctx.mode) metaParts.push(ctx.mode);
-        if (ctx.peerCount != null) metaParts.push(`${ctx.peerCount} peer${ctx.peerCount !== 1 ? 's' : ''}`);
-        if (ctx.userAgent) metaParts.push(formatUserAgent(ctx.userAgent));
+        if (ctx.mode) metaParts.push(escapeHtml(ctx.mode));
+        if (ctx.peerCount != null)
+          metaParts.push(`${escapeHtml(String(ctx.peerCount))} peer${ctx.peerCount !== 1 ? 's' : ''}`);
+        if (ctx.userAgent) metaParts.push(escapeHtml(formatUserAgent(ctx.userAgent)));
 
         const sessionStats = ctx.sessionStats;
         const statsParts = [];
         if (sessionStats) {
           if (sessionStats.desyncs)
-            statsParts.push(`${sessionStats.desyncs} desync${sessionStats.desyncs > 1 ? 's' : ''}`);
-          if (sessionStats.stalls) statsParts.push(`${sessionStats.stalls} stall${sessionStats.stalls > 1 ? 's' : ''}`);
+            statsParts.push(`${escapeHtml(String(sessionStats.desyncs))} desync${sessionStats.desyncs > 1 ? 's' : ''}`);
+          if (sessionStats.stalls)
+            statsParts.push(`${escapeHtml(String(sessionStats.stalls))} stall${sessionStats.stalls > 1 ? 's' : ''}`);
           if (sessionStats.reconnects)
-            statsParts.push(`${sessionStats.reconnects} reconnect${sessionStats.reconnects > 1 ? 's' : ''}`);
+            statsParts.push(
+              `${escapeHtml(String(sessionStats.reconnects))} reconnect${sessionStats.reconnects > 1 ? 's' : ''}`,
+            );
         }
 
         const created = fb.created_at ? new Date(fb.created_at + 'Z').toLocaleString() : '';
 
-        return `<div class="feedback-card" data-feedback-id="${fb.id}">
+        return `<div class="feedback-card" data-feedback-id="${escapeHtml(String(fb.id))}">
           <div class="feedback-header">
             <span class="source-badge" style="border-color:${color};color:${color}">${emoji} ${escapeHtml(fb.category)}</span>
-            <span class="feedback-date" title="${created}">${created ? timeAgo(new Date(fb.created_at + 'Z').getTime() / 1000) : ''}</span>
+            <span class="feedback-date" title="${escapeHtml(created)}">${created ? timeAgo(new Date(fb.created_at + 'Z').getTime() / 1000) : ''}</span>
           </div>
           <div class="feedback-message">${escapeHtml(fb.message)}</div>
           ${fb.email ? `<div class="feedback-email">${escapeHtml(fb.email)}</div>` : ''}

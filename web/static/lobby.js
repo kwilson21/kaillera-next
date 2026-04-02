@@ -36,7 +36,7 @@
   document.getElementById('create-btn').addEventListener('click', () => {
     saveName();
     const code = randomCode();
-    window.location.href = `/play.html?room=${code}&host=1&name=${encodeURIComponent(getName())}&mode=lockstep`;
+    window.location.href = `/play.html?room=${encodeURIComponent(code)}&host=1&name=${encodeURIComponent(getName())}&mode=lockstep`;
   });
 
   document.getElementById('join-btn').addEventListener('click', () => {
@@ -46,7 +46,7 @@
       return;
     }
     saveName();
-    window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}`;
+    window.location.href = `/play.html?room=${encodeURIComponent(code)}&name=${encodeURIComponent(getName())}`;
   });
 
   document.getElementById('watch-btn').addEventListener('click', () => {
@@ -56,7 +56,7 @@
       return;
     }
     saveName();
-    window.location.href = `/play.html?room=${code}&name=${encodeURIComponent(getName())}&spectate=1`;
+    window.location.href = `/play.html?room=${encodeURIComponent(code)}&name=${encodeURIComponent(getName())}&spectate=1`;
   });
 
   // EmuLinker admin welcome — enter as "Moosehead"

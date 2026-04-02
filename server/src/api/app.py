@@ -364,6 +364,25 @@ def create_app(lifespan=None) -> FastAPI:
 
     log.info("Cache bust version: %s", version)
 
+    def _validated_host(request: Request) -> str:
+        """Return the Host header if it matches ALLOWED_ORIGIN, else a safe fallback."""
+        host = request.headers.get("host", "localhost")
+        raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
+        if not raw_origin or raw_origin == "*":
+            return host
+        allowed_hosts = set()
+        for origin in raw_origin.split(","):
+            origin = origin.strip().rstrip("/")
+            if "://" in origin:
+                origin = origin.split("://", 1)[1]
+            allowed_hosts.add(origin)
+            if ":" in origin:
+                allowed_hosts.add(origin.split(":")[0])
+        allowed_hosts.add("localhost")
+        if host in allowed_hosts:
+            return host
+        return next(iter(allowed_hosts))
+
     @app.get("/favicon.ico", include_in_schema=False)
     @app.get("/apple-touch-icon.png", include_in_schema=False)
     @app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
@@ -384,13 +403,18 @@ def create_app(lifespan=None) -> FastAPI:
     def ice_servers(request: Request) -> list:
         if not check_ip(_client_ip(request), "ice-servers"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        default_stun = [{"urls": "stun:stun.cloudflare.com:3478"}]
         custom = os.environ.get("ICE_SERVERS")
-        if custom:
-            try:
-                return json.loads(custom)
-            except json.JSONDecodeError:
-                log.warning("ICE_SERVERS env var contains invalid JSON, using default STUN server")
-        return [{"urls": "stun:stun.cloudflare.com:3478"}]
+        if not custom:
+            return default_stun
+        token = request.query_params.get("token", "")
+        if not token or not any(verify_upload_token(sid, token) for sid in rooms):
+            return default_stun
+        try:
+            return json.loads(custom)
+        except json.JSONDecodeError:
+            log.warning("ICE_SERVERS env var contains invalid JSON, using default STUN server")
+            return default_stun
 
     @app.get("/room/{room_id}")
     def get_room(room_id: str, request: Request) -> dict:
@@ -466,9 +490,14 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Invalid upload token")
         if not _rom_hash_in_active_room(rom_hash):
             raise HTTPException(status_code=403, detail="ROM hash not associated with any active room")
-        body = await request.body()
-        if len(body) > _STATE_MAX_SIZE:
-            raise HTTPException(status_code=413, detail="State too large")
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > _STATE_MAX_SIZE:
+                raise HTTPException(status_code=413, detail="State too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
         if len(_state_cache) >= _MAX_CACHE_ENTRIES and rom_hash not in _state_cache:
             log.warning("State cache full (%d entries)", _MAX_CACHE_ENTRIES)
             raise HTTPException(status_code=507, detail="Cache full")
@@ -529,8 +558,8 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON") from exc
         try:
             payload = FeedbackPayload.model_validate(body)
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            raise HTTPException(status_code=422, detail="Invalid feedback data") from None
 
         # Honeypot check — silent discard
         if payload.company_fax:
@@ -572,6 +601,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/stats")
     async def admin_stats(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         session_log_rows = await db.query("SELECT COUNT(*) as cnt FROM session_logs", ())
         client_event_rows = await db.query("SELECT COUNT(*) as cnt FROM client_events", ())
@@ -591,6 +622,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/session-logs")
     async def admin_session_logs_list(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         room = request.query_params.get("room")
         match_id = request.query_params.get("match_id")
@@ -631,6 +664,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/session-logs/{log_id}")
     async def admin_session_log_detail(request: Request, log_id: int) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
         if not rows:
@@ -646,6 +681,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/client-events")
     async def admin_client_events_list(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         evt_type = request.query_params.get("type")
         room = request.query_params.get("room")
@@ -679,6 +716,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/client-events/{event_id}")
     async def admin_client_event_detail(request: Request, event_id: int) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         rows = await db.query("SELECT * FROM client_events WHERE id = ?", (event_id,))
         if not rows:
@@ -693,6 +732,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/feedback")
     async def admin_feedback_list(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         category = request.query_params.get("category")
         days = int(request.query_params.get("days", "30"))
@@ -725,6 +766,8 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/feedback/{feedback_id}")
     async def admin_feedback_single(request: Request, feedback_id: int) -> dict:
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
         _admin_auth(request)
         rows = await db.query("SELECT * FROM feedback WHERE id = ?", (feedback_id,))
         if not rows:
@@ -798,7 +841,7 @@ def create_app(lifespan=None) -> FastAPI:
     def play_page(request: Request) -> Response:
         room_id = request.query_params.get("room")
         spectate = request.query_params.get("spectate") == "1"
-        host = request.headers.get("host", "localhost")
+        host = _validated_host(request)
         game_hint = request.query_params.get("game")
         room = rooms.get(room_id) if room_id else None
         if room:
@@ -814,7 +857,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/")
     def index_page(request: Request) -> Response:
-        host = request.headers.get("host", "localhost")
+        host = _validated_host(request)
         tags = build_og_tags(host)
         html = inject_og_tags(_get_index_html(), tags)
         return Response(content=html, media_type="text/html")

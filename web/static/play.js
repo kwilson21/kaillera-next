@@ -99,6 +99,7 @@
   let _romTransferDCs = {}; // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   const ROM_MAX_SIZE = 128 * 1024 * 1024; // 128MB
+  const ROM_TRANSFER_ABSOLUTE_MAX = 134_217_728; // 128 MB
   const _isMobile =
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
     (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent)) ||
@@ -121,6 +122,7 @@
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   _safeSet('sessionStorage', 'kn-player-id', _persistentId);
+  let _reconnectToken = _safeGet('sessionStorage', 'kn-reconnect-token') || '';
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
@@ -172,7 +174,6 @@
 
   const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
-    window._socket = socket; // expose for E2E tests
     window._isSpectator = isSpectator;
 
     let _reconnectErrorTimer = null;
@@ -240,6 +241,7 @@
               room_name: `${playerName}'s room`,
               game_id: 'ssb64',
               persistentId: _persistentId,
+              reconnectToken: _reconnectToken,
             },
             maxPlayers: 4,
           }
@@ -250,6 +252,7 @@
               player_name: playerName,
               spectate: isSpectator,
               persistentId: _persistentId,
+              reconnectToken: _reconnectToken,
             },
           };
       socket.emit(rejoinEvent, payload, (err, joinData) => {
@@ -298,6 +301,18 @@
       try {
         _safeSet('localStorage', 'kn-upload-token', _uploadToken);
       } catch (_) {}
+      fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}`)
+        .then((r) => r.json())
+        .then((s) => {
+          window._iceServers = s;
+        })
+        .catch(() => {});
+    });
+    socket.on('reconnect-token', (data) => {
+      _reconnectToken = data?.token || '';
+      try {
+        _safeSet('sessionStorage', 'kn-reconnect-token', _reconnectToken);
+      } catch (_) {}
     });
     socket.on('game-started', onGameStarted);
     socket.on('game-ended', onGameEnded);
@@ -337,6 +352,7 @@
               room_name: `${playerName}'s room`,
               game_id: 'ssb64',
               persistentId: _persistentId,
+              reconnectToken: _reconnectToken,
             },
             maxPlayers: 4,
           }
@@ -347,6 +363,7 @@
               player_name: playerName,
               spectate: isSpectator,
               persistentId: _persistentId,
+              reconnectToken: _reconnectToken,
             },
           };
       socket.emit(rejoinEvent, payload, (err) => {
@@ -368,6 +385,7 @@
             room_name: `${playerName}'s room`,
             game_id: 'ssb64',
             persistentId: _persistentId,
+            reconnectToken: _reconnectToken,
           },
           maxPlayers: 4,
         },
@@ -409,6 +427,7 @@
               player_name: playerName,
               spectate: isSpectator,
               persistentId: _persistentId,
+              reconnectToken: _reconnectToken,
             },
           },
           (err, joinData) => {
@@ -426,6 +445,7 @@
                       player_name: playerName,
                       spectate: true,
                       persistentId: _persistentId,
+                      reconnectToken: _reconnectToken,
                     },
                   },
                   (err2, joinData2) => {
@@ -1511,6 +1531,18 @@
       } else if (e.data instanceof ArrayBuffer) {
         _romTransferChunks.push(new Uint8Array(e.data));
         _romTransferBytesReceived += e.data.byteLength;
+        if (_romTransferBytesReceived > ROM_TRANSFER_ABSOLUTE_MAX) {
+          showToast('ROM transfer too large — aborting');
+          channel.close();
+          cancelRomTransfer();
+          return;
+        }
+        if (_romTransferHeader && _romTransferBytesReceived > _romTransferHeader.size * 1.1) {
+          showToast('ROM transfer size mismatch — aborting');
+          channel.close();
+          cancelRomTransfer();
+          return;
+        }
         _romTransferLastChunkAt = Date.now();
         resetStallTimer();
         if (_romTransferHeader) {

@@ -60,6 +60,7 @@ from src.api.payloads import (
     RomDeclarePayload,
     RomReadyPayload,
     RomSharingTogglePayload,
+    SessionLogPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
@@ -74,6 +75,8 @@ _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _VALID_MODES = {"lockstep", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
+_RELAY_MAX_BYTES = 65_536
+_SIGNAL_MAX_BYTES = 65_536
 
 # Per-instance signing key for HMAC upload tokens.
 # Tokens prove the client was in a real room without requiring the room to still exist.
@@ -88,6 +91,17 @@ def make_upload_token(room_id: str) -> str:
 def verify_upload_token(room_id: str, token: str) -> bool:
     """Verify an upload token for a given room_id."""
     expected = make_upload_token(room_id)
+    return hmac.compare_digest(expected, token)
+
+
+def make_reconnect_token(persistent_id: str) -> str:
+    """HMAC-SHA256 token that authorizes reconnection for a specific persistentId."""
+    return hmac.new(_UPLOAD_KEY, f"reconnect:{persistent_id}".encode(), hashlib.sha256).hexdigest()
+
+
+def verify_reconnect_token(persistent_id: str, token: str) -> bool:
+    """Verify a reconnect token for a given persistentId."""
+    expected = make_reconnect_token(persistent_id)
     return hmac.compare_digest(expected, token)
 
 
@@ -173,7 +187,8 @@ def _players_payload(room: Room) -> dict:
     return {
         "players": {
             pid: {
-                **info,
+                "socketId": info["socketId"],
+                "playerName": info.get("playerName", "Player"),
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
                 "romDeclared": info["socketId"] in room.rom_declared,
@@ -182,7 +197,13 @@ def _players_payload(room: Room) -> dict:
             }
             for pid, info in room.players.items()
         },
-        "spectators": dict(room.spectators.items()),
+        "spectators": {
+            pid: {
+                "socketId": info["socketId"],
+                "playerName": info.get("playerName", "Player"),
+            }
+            for pid, info in room.spectators.items()
+        },
         "owner": room.owner,
         "romSharing": room.rom_sharing,
         "romHash": room.rom_hash,
@@ -389,6 +410,8 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     # Reconnect detection — BEFORE _leave
     existing = rooms.get(session_id)
     if existing and persistent_id in existing.players:
+        if not payload.extra.reconnectToken or not verify_reconnect_token(persistent_id, payload.extra.reconnectToken):
+            return "Invalid reconnect token"
         old_sid = existing.players[persistent_id]["socketId"]
         _swap_sid(existing, persistent_id, old_sid, sid)
         _sid_to_room.pop(old_sid, None)
@@ -396,6 +419,7 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
         await sio.enter_room(sid, session_id)
         await sio.emit("users-updated", _players_payload(existing), room=session_id)
         await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+        await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         await state.save_room(session_id, existing)
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
@@ -430,6 +454,7 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
     log.info("SIO %s opened room %s (game=%s, persistentId=%s)", sid, session_id, game_id, persistent_id)
     return None  # success
 
@@ -453,10 +478,15 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
     if room is None:
         return ("Room not found", None)
 
+    if room.password and not hmac.compare_digest(room.password, password or ""):
+        return ("Wrong password", None)
+
     # Reconnect detection — BEFORE _leave
     is_returning_player = persistent_id in room.players
     is_returning_spectator = persistent_id in room.spectators
     if is_returning_player or is_returning_spectator:
+        if not payload.extra.reconnectToken or not verify_reconnect_token(persistent_id, payload.extra.reconnectToken):
+            return ("Invalid reconnect token", None)
         entry = room.players.get(persistent_id) or room.spectators.get(persistent_id)
         old_sid = entry["socketId"]
         _swap_sid(room, persistent_id, old_sid, sid)
@@ -465,14 +495,12 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
         await sio.enter_room(sid, session_id)
         await sio.emit("users-updated", _players_payload(room), room=session_id)
         await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+        await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
         return (None, _players_payload(room))
 
     await _leave(sid)  # clean up if already in another room
-
-    if room.password and not hmac.compare_digest(room.password, password or ""):
-        return ("Wrong password", None)
 
     if spectate:
         if len(room.spectators) >= MAX_SPECTATORS:
@@ -490,6 +518,7 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
     await sio.enter_room(sid, session_id)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
     await state.save_room(session_id, room)
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
@@ -499,6 +528,8 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
 
 @sio.on("leave-room")
 async def leave_room(sid: str, data: dict | None = None) -> None:
+    if not check(sid, "leave-room"):
+        return
     await _leave(sid, reason="leave")
 
 
@@ -509,12 +540,16 @@ async def claim_slot(sid: str, payload: ClaimSlotPayload) -> str | None:
     entry = _sid_to_room.get(sid)
     if entry is None:
         return "Not in a room"
+    if not check(sid, "claim-slot"):
+        return "Rate limited"
     session_id, player_id, is_spectator = entry
     if not is_spectator:
         return "Not a spectator"
     room = rooms.get(session_id)
     if room is None:
         return "Room not found"
+    if room.status == "playing":
+        return "Cannot claim slot during active game"
 
     if payload.slot is not None:
         if payload.slot in room.slots:
@@ -541,6 +576,8 @@ async def claim_slot(sid: str, payload: ClaimSlotPayload) -> str | None:
 @sio.on("set-name")
 @validated(SetNamePayload)
 async def set_name(sid: str, payload: SetNamePayload) -> str | None:
+    if not check(sid, "set-name"):
+        return "Rate limited"
     name = _sanitize_str(payload.name, 24).strip()
     if not name:
         return "Empty name"
@@ -644,6 +681,8 @@ async def end_game(sid: str, payload: EndGamePayload) -> str | None:
 @validated(SetModePayload)
 async def set_mode(sid: str, payload: SetModePayload) -> str | None:
     """Host sets the game mode pre-game so guests can update their UI."""
+    if not check(sid, "set-mode"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -664,6 +703,8 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
 @sio.on("rom-sharing-toggle")
 @validated(RomSharingTogglePayload)
 async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str | None:
+    if not check(sid, "rom-sharing-toggle"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -681,6 +722,8 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
 @sio.on("rom-ready")
 @validated(RomReadyPayload)
 async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
+    if not check(sid, "rom-ready"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -702,6 +745,8 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
 @validated(RomDeclarePayload)
 async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
     """Player declares they own a legal copy of the ROM (streaming mode)."""
+    if not check(sid, "rom-declare"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -719,6 +764,8 @@ async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
 @sio.on("input-type")
 @validated(InputTypePayload)
 async def input_type(sid: str, payload: InputTypePayload) -> str | None:
+    if not check(sid, "input-type"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -733,6 +780,8 @@ async def input_type(sid: str, payload: InputTypePayload) -> str | None:
 @sio.on("device-type")
 @validated(DeviceTypePayload)
 async def device_type(sid: str, payload: DeviceTypePayload) -> str | None:
+    if not check(sid, "device-type"):
+        return "Rate limited"
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -763,6 +812,20 @@ async def _relay_signal(sid: str, data: dict, event: str, keys: tuple[str, ...])
     for key in keys:
         value = data.get(key)
         if value is not None:
+            try:
+                val_size = len(json.dumps(value, separators=(",", ":")))
+                if val_size > _SIGNAL_MAX_BYTES:
+                    log.warning(
+                        "Signal %s dropped: %s field %d bytes exceeds %d limit (sid=%s)",
+                        event,
+                        key,
+                        val_size,
+                        _SIGNAL_MAX_BYTES,
+                        sid,
+                    )
+                    return
+            except (TypeError, ValueError, OverflowError):
+                return
             payload[key] = value
     await sio.emit(event, payload, to=target)
 
@@ -786,6 +849,13 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str) -> None:
     if not isinstance(data, dict):
         return
     if not check(sid, rate_key):
+        return
+    try:
+        payload_size = len(json.dumps(data, separators=(",", ":")))
+    except (TypeError, ValueError, OverflowError):
+        return
+    if payload_size > _RELAY_MAX_BYTES:
+        log.warning("Relay %s dropped: %d bytes exceeds %d limit (sid=%s)", event, payload_size, _RELAY_MAX_BYTES, sid)
         return
     result = _get_room(sid)
     if result is None:
@@ -820,6 +890,10 @@ async def debug_sync(sid: str, data: dict) -> None:
     from pathlib import Path
 
     slot = data.get("slot", "?")
+    try:
+        slot = str(int(slot))
+    except (TypeError, ValueError):
+        slot = "x"
     msg = str(data.get("msg", ""))[:1000]  # cap message size
     log_dir = Path(__file__).parent.parent.parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -844,6 +918,10 @@ async def debug_logs(sid: str, data: dict) -> None:
 
     # Always log summary + entries to stdout (captured by docker logs)
     slot = info.get("slot", "?")
+    try:
+        slot = str(int(slot))
+    except (TypeError, ValueError):
+        slot = "x"
     log.info("DEBUG-DUMP room=%s slot=%s entries=%d info=%s", room_id, slot, len(logs), json.dumps(info))
     for line in logs[:5000]:
         log.info("[P%s] %s", slot, str(line)[:500])
@@ -870,7 +948,8 @@ _SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data
 
 
 @sio.on("session-log")
-async def session_log_handler(sid: str, data: dict) -> None:
+@validated(SessionLogPayload)
+async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
     """Receive periodic sync log flush from client. Upserts into session_logs table."""
     if not check(sid, "session-log"):
         return
@@ -885,24 +964,36 @@ async def session_log_handler(sid: str, data: dict) -> None:
     if not room or not room.match_id:
         return
 
-    match_id = data.get("matchId")
-    if not match_id or match_id != room.match_id:
-        return  # reject stale or spoofed flushes
+    if not payload.matchId or payload.matchId != room.match_id:
+        return
 
-    log_data_str = json.dumps(data.get("entries", []))
-    if len(log_data_str) > _SESSION_LOG_MAX:
-        log_data_str = log_data_str[:_SESSION_LOG_MAX]
+    pid_to_slot = {pid: s for s, pid in room.slots.items()}
+    slot = pid_to_slot.get(player_id)
+
+    _SUMMARY_MAX = 4096
+    summary_str = json.dumps(payload.summary)
+    if len(summary_str) > _SUMMARY_MAX:
+        summary_str = "{}"
+    context_str = json.dumps(payload.context)
+    if len(context_str) > _SUMMARY_MAX:
+        context_str = "{}"
+
+    entries = payload.entries if isinstance(payload.entries, list) else []
+    log_data_str = json.dumps(entries)
+    while len(log_data_str) > _SESSION_LOG_MAX and entries:
+        entries = entries[: len(entries) // 2]
+        log_data_str = json.dumps(entries)
 
     await db.upsert_session_log(
         {
-            "match_id": match_id,
+            "match_id": payload.matchId,
             "room": session_id,
-            "slot": data.get("slot"),
-            "player_name": str(data.get("playerName", ""))[:32],
-            "mode": data.get("mode"),
+            "slot": slot,
+            "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
+            "mode": room.mode,
             "log_data": log_data_str,
-            "summary": json.dumps(data.get("summary", {})),
-            "context": json.dumps(data.get("context", {})),
+            "summary": summary_str,
+            "context": context_str,
             "ip_hash": ip_hash_for_sid(sid),
         }
     )

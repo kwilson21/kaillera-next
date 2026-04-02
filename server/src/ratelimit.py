@@ -18,6 +18,15 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "connect": (30, 60),
     "open-room": (5, 60),
     "join-room": (20, 60),
+    "leave-room": (10, 10),
+    "claim-slot": (5, 10),
+    "set-name": (5, 10),
+    "set-mode": (5, 10),
+    "rom-sharing-toggle": (5, 10),
+    "rom-ready": (10, 10),
+    "rom-declare": (10, 10),
+    "input-type": (5, 10),
+    "device-type": (5, 10),
     "snapshot": (2, 1),
     "data-message": (60, 1),
     "room-lookup": (10, 60),
@@ -30,6 +39,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
     "feedback": (5, 3600),  # 5 per hour per IP
+    "admin": (30, 60),
 }
 
 # Rate-limit denial logging — log once per (ip, event) per 60s to avoid spam.
@@ -56,6 +66,7 @@ def ip_hash_for_sid(sid: str) -> str:
 
 
 MAX_CONNECTIONS_PER_IP = 20
+_MAX_TRACKED_IPS = 10_000
 
 
 def register_sid(sid: str, ip: str) -> None:
@@ -134,3 +145,12 @@ def cleanup() -> None:
     stale_warns = [k for k, t in _warned.items() if now - t > _WARN_INTERVAL * 2]
     for k in stale_warns:
         del _warned[k]
+    # Evict least-active IPs if tracking too many
+    if len(_counters) > _MAX_TRACKED_IPS:
+        sorted_ips = sorted(_counters.keys(), key=lambda ip: sum(len(q) for q in _counters[ip].values()))
+        for ip in sorted_ips[: len(_counters) - _MAX_TRACKED_IPS]:
+            del _counters[ip]
+    if len(_warned) > _MAX_TRACKED_IPS:
+        sorted_warns = sorted(_warned.keys(), key=lambda k: _warned[k])
+        for k in sorted_warns[: len(_warned) - _MAX_TRACKED_IPS]:
+            del _warned[k]

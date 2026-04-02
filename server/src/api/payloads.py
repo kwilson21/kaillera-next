@@ -45,6 +45,7 @@ def validated(model_cls: type[BaseModel], *, error_response: Any = "Invalid data
 class OpenRoomExtra(BaseModel):
     sessionid: str = ""
     persistentId: str = ""
+    reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     room_name: str = Field(default="Room", max_length=64)
     game_id: str = Field(default="", max_length=32)
@@ -63,6 +64,7 @@ class OpenRoomPayload(BaseModel):
 class JoinRoomExtra(BaseModel):
     sessionid: str = ""
     persistentId: str = ""
+    reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
 
@@ -143,6 +145,17 @@ class InputTypePayload(BaseModel):
 
 class DeviceTypePayload(BaseModel):
     type: str = "desktop"
+
+
+# ── session-log ─────────────────────────────────────────────────────────────
+
+
+class SessionLogPayload(BaseModel):
+    matchId: str = ""
+    entries: list = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)
+    context: dict = Field(default_factory=dict)
+    playerName: str = Field(default="", max_length=32)
 
 
 # ── feedback ────────────────────────────────────────────────────────────────
