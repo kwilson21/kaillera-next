@@ -8,7 +8,7 @@ the model before the handler runs.
 from __future__ import annotations
 
 from functools import wraps
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -143,3 +143,15 @@ class InputTypePayload(BaseModel):
 
 class DeviceTypePayload(BaseModel):
     type: str = "desktop"
+
+
+# ── feedback ────────────────────────────────────────────────────────────────
+
+
+class FeedbackPayload(BaseModel):
+    category: Literal["bug", "feature", "general"]
+    message: str = Field(min_length=1, max_length=2000)
+    email: str | None = Field(default=None, max_length=254)
+    company_fax: str | None = None  # honeypot — non-empty = bot
+    page: str | None = Field(default=None, max_length=20)
+    context: dict | None = None

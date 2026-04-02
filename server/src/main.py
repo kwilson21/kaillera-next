@@ -21,8 +21,8 @@ from contextlib import asynccontextmanager
 import socketio
 import uvicorn
 
-from src import state
-from src.api.app import cleanup_old_logs, create_app
+from src import analytics, db, state
+from src.api.app import cleanup_old_data, create_app
 from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, set_shutting_down, sio
 
 log = logging.getLogger(__name__)
@@ -34,12 +34,14 @@ _WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web")
 @asynccontextmanager
 async def lifespan(_app):
     await state.init()
+    await db.init_db()
+    analytics.init_posthog()
     restored = await state.load_all_rooms()
     if restored:
         rooms.update(restored)
         log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
-    log_task = asyncio.create_task(cleanup_old_logs())
+    log_task = asyncio.create_task(cleanup_old_data())
     # Warm up Playwright browser so the first OG image request isn't slow
     try:
         from src.api.og import _get_browser
@@ -53,6 +55,7 @@ async def lifespan(_app):
     log_task.cancel()
     if rooms:
         log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+    await db.close_db()
     await state.close()
 
 

@@ -11,37 +11,36 @@ V1 endpoints:
   GET  /                        homepage with injected OG meta tags
   GET  /api/cached-state/{h}    download cached save state
   POST /api/cache-state/{h}     upload save state to cache
-  POST /api/sync-logs           upload sync diagnostic logs
+  POST /api/client-event        submit client error/diagnostic event
+  POST /api/feedback            submit user feedback
 
 Admin endpoints (auth via ADMIN_KEY env var):
-  GET    /admin/api/stats              server stats
-  GET    /admin/api/logs               list sync log files
-  GET    /admin/api/logs/{filename}    view log content
-  POST   /admin/api/logs/{filename}/pin    pin log
-  DELETE /admin/api/logs/{filename}/pin    unpin log
-  DELETE /admin/api/logs/{filename}    delete log
-  POST   /admin/api/cleanup            run manual log cleanup
+  GET  /admin/api/stats                    server stats (DB-backed counts)
+  GET  /admin/api/session-logs             list session logs (filtered, paged)
+  GET  /admin/api/session-logs/{id}        session log detail
+  GET  /admin/api/client-events            list client events (filtered, paged)
+  GET  /admin/api/client-events/{id}       client event detail
+  GET  /admin/api/feedback                 list feedback entries
+  GET  /admin/api/feedback/{id}            single feedback entry
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import os
-import random
 import re
-import string
 import subprocess as _sp
-import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
-from src import state
+from src import db, state
 from src.api.og import (
     _GAME_IMAGES_RAW,
     _ROM_SHARING_RAW,
@@ -51,14 +50,12 @@ from src.api.og import (
     generate_og_image,
     inject_og_tags,
 )
+from src.api.payloads import FeedbackPayload
 from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
-from src.ratelimit import check_ip
+from src.ratelimit import check_ip, ip_hash
 
 log = logging.getLogger(__name__)
 
-_SYNC_LOG_DIR = Path(os.environ.get("SYNC_LOG_DIR", "logs/sync"))
-_SYNC_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5MB max per upload
-_ERROR_LOG_DIR = Path(os.environ.get("ERROR_LOG_DIR", "logs/errors"))
 _CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
 _VALID_EVENT_TYPES = {
     "webrtc-fail",
@@ -72,65 +69,26 @@ _VALID_EVENT_TYPES = {
     "session-end",
 }
 
-
-def _pinned_set() -> set[str]:
-    """Read pinned log filenames from disk."""
-    pinned_file = _SYNC_LOG_DIR / ".pinned.json"
-    if pinned_file.exists():
-        try:
-            return set(json.loads(pinned_file.read_text()))
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return set()
+_FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
 
-def _save_pinned(pinned: set[str]) -> None:
-    """Write pinned log filenames to disk."""
-    _SYNC_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    (_SYNC_LOG_DIR / ".pinned.json").write_text(json.dumps(sorted(pinned)))
-
-
-async def cleanup_old_logs() -> None:
-    """Background task: delete non-pinned logs older than LOG_RETENTION_DAYS.
-
-    Also enforces a max file count (LOG_MAX_FILES, default 500) to prevent
-    disk exhaustion from high-volume sessions.
-    """
+async def cleanup_old_data() -> None:
+    """Background task: delete session logs and client events older than retention period."""
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(86400)  # daily
         try:
-            retention = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
-            max_files = int(os.environ.get("LOG_MAX_FILES", "500"))
-            if not _SYNC_LOG_DIR.exists():
-                continue
-            pinned = _pinned_set()
-            cutoff = time.time() - (retention * 86400)
-            cleaned = 0
-            # Time-based: remove logs older than retention period
-            for f in _SYNC_LOG_DIR.glob("sync-*.log"):
-                if f.name in pinned:
-                    continue
-                if f.stat().st_mtime < cutoff:
-                    f.unlink()
-                    cleaned += 1
-            # Count-based: if still over limit, remove oldest non-pinned first
-            logs = sorted(_SYNC_LOG_DIR.glob("sync-*.log"), key=lambda f: f.stat().st_mtime)
-            unpinned = [f for f in logs if f.name not in pinned]
-            while len(logs) > max_files and unpinned:
-                unpinned[0].unlink()
-                unpinned.pop(0)
-                logs = [f for f in logs if f.exists()]
-                cleaned += 1
-            # Also clean error logs
-            if _ERROR_LOG_DIR.exists():
-                for f in _ERROR_LOG_DIR.glob("evt-*.json"):
-                    if f.stat().st_mtime < cutoff:
-                        f.unlink()
-                        cleaned += 1
-            if cleaned:
-                log.info("Log cleanup: removed %d log(s)", cleaned)
+            days = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
+            await db.execute_write(
+                "DELETE FROM session_logs WHERE created_at < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            await db.execute_write(
+                "DELETE FROM client_events WHERE created_at < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            log.info("DB cleanup complete (retention: %d days)", days)
         except Exception as e:
-            log.warning("Log cleanup error: %s", e)
+            log.warning("DB cleanup error: %s", e)
 
 
 def _client_ip(request: Request) -> str:
@@ -518,39 +476,7 @@ def create_app(lifespan=None) -> FastAPI:
         log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
         return {"status": "cached", "size": len(body)}
 
-    # ── Sync log upload ────────────────────────────────────────────────────
-
-    @app.post("/api/sync-logs")
-    async def upload_sync_logs(request: Request) -> dict:
-        if not check_ip(_client_ip(request), "sync-logs"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        body = await request.body()
-        if len(body) > _SYNC_LOG_MAX_SIZE:
-            raise HTTPException(status_code=413, detail="Log too large")
-        if len(body) == 0:
-            raise HTTPException(status_code=400, detail="Empty log")
-        # Extract metadata from query params
-        room = request.query_params.get("room", "")[:32]
-        token = request.query_params.get("token", "")
-        if not room or not verify_upload_token(room, token):
-            raise HTTPException(status_code=403, detail="Invalid upload token")
-        slot = request.query_params.get("slot", "x")[:4]
-        src = request.query_params.get("src", "")
-        ts = int(time.time())
-        # Sanitize room name for filename
-        safe_room = "".join(c if c.isalnum() or c in "-_" else "_" for c in room)
-        src_suffix = f"-{src}" if src in ("beacon", "recovery") else ""
-        filename = f"sync-p{slot}-{safe_room}-{ts}{src_suffix}.log"
-        _SYNC_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = _SYNC_LOG_DIR / filename
-        path.write_bytes(body)
-        log.info("Sync log saved: %s (%d KB)", filename, len(body) // 1024)
-        return {"status": "saved", "filename": filename, "size": len(body)}
-
     # ── Client event beacon ─────────────────────────────────────────────
-
-    def _rand4() -> str:
-        return "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
 
     @app.post("/api/client-event")
     async def client_event(request: Request) -> dict:
@@ -576,13 +502,62 @@ def create_app(lifespan=None) -> FastAPI:
         if not isinstance(meta, dict) or len(json.dumps(meta)) > 2048:
             raise HTTPException(status_code=400, detail="Meta too large")
         room = str(data.get("room", ""))[:32]
-        safe_room = "".join(c if c.isalnum() or c in "-_" else "_" for c in room)
-        ts = int(time.time())
-        filename = f"evt-{evt_type}-{safe_room}-{ts}-{_rand4()}.json"
-        _ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        (_ERROR_LOG_DIR / filename).write_text(json.dumps(data, indent=2))
-        log.info("Client event: %s room=%s msg=%s", evt_type, room, msg[:100])
-        return {"status": "saved", "filename": filename}
+        hashed_ip = ip_hash(_client_ip(request))
+        row_id = await db.insert_client_event(
+            {
+                "type": evt_type,
+                "message": msg,
+                "meta": json.dumps(meta),
+                "room": room,
+                "slot": data.get("slot"),
+                "ip_hash": hashed_ip,
+                "user_agent": data.get("ua", ""),
+            }
+        )
+        log.info("Client event: %s room=%s msg=%s id=%d", evt_type, room, msg[:100], row_id)
+        return {"status": "saved", "id": row_id}
+
+    # ── Feedback submission ──────────────────────────────────────────────
+
+    @app.post("/api/feedback")
+    async def submit_feedback(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "feedback"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+        try:
+            payload = FeedbackPayload.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        # Honeypot check — silent discard
+        if payload.company_fax:
+            return {"status": "saved", "id": 0}
+
+        # Context size check — drop if over 4KB
+        context_str = None
+        if payload.context is not None:
+            context_str = json.dumps(payload.context)
+            if len(context_str) > _FEEDBACK_CONTEXT_MAX:
+                context_str = None
+
+        # Hash IP for correlation without tracking
+        hashed_ip = ip_hash(_client_ip(request))
+
+        row_id = await db.insert_feedback(
+            {
+                "category": payload.category,
+                "message": payload.message,
+                "email": payload.email,
+                "page": payload.page,
+                "context": context_str,
+                "ip_hash": hashed_ip,
+            }
+        )
+        log.info("Feedback saved: id=%d category=%s page=%s", row_id, payload.category, payload.page)
+        return {"status": "saved", "id": row_id}
 
     # ── Admin API ─────────────────────────────────────────────────────────
 
@@ -595,176 +570,170 @@ def create_app(lifespan=None) -> FastAPI:
         if not key or not hmac.compare_digest(admin_key, key):
             raise HTTPException(status_code=401, detail="Invalid admin key")
 
-    def _safe_log_filename(filename: str) -> Path:
-        """Validate filename to prevent directory traversal."""
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        if not filename.startswith("sync-") or not filename.endswith(".log"):
-            raise HTTPException(status_code=400, detail="Invalid log filename")
-        path = _SYNC_LOG_DIR / filename
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Log not found")
-        return path
-
-    def _safe_error_filename(filename: str) -> Path:
-        """Validate error event filename to prevent directory traversal."""
-        if "/" in filename or "\\" in filename or ".." in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        if not filename.startswith("evt-") or not filename.endswith(".json"):
-            raise HTTPException(status_code=400, detail="Invalid error filename")
-        path = _ERROR_LOG_DIR / filename
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Error not found")
-        return path
-
     @app.get("/admin/api/stats")
-    def admin_stats(request: Request) -> dict:
+    async def admin_stats(request: Request) -> dict:
         _admin_auth(request)
-        total_players = sum(len(r.players) for r in rooms.values())
-        total_spectators = sum(len(r.spectators) for r in rooms.values())
-        log_files = list(_SYNC_LOG_DIR.glob("sync-*.log")) if _SYNC_LOG_DIR.exists() else []
-        total_size = sum(f.stat().st_size for f in log_files)
-        error_files = list(_ERROR_LOG_DIR.glob("evt-*.json")) if _ERROR_LOG_DIR.exists() else []
+        session_log_rows = await db.query("SELECT COUNT(*) as cnt FROM session_logs", ())
+        client_event_rows = await db.query("SELECT COUNT(*) as cnt FROM client_events", ())
+        feedback_rows = await db.query("SELECT COUNT(*) as cnt FROM feedback", ())
         return {
             "rooms": len(rooms),
-            "players": total_players,
-            "spectators": total_spectators,
             "max_rooms": MAX_ROOMS,
-            "log_count": len(log_files),
-            "log_size_bytes": total_size,
-            "error_count": len(error_files),
+            "players": sum(len(r.players) for r in rooms.values()),
+            "spectators": sum(len(r.spectators) for r in rooms.values()),
+            "session_log_count": session_log_rows[0]["cnt"] if session_log_rows else 0,
+            "client_event_count": client_event_rows[0]["cnt"] if client_event_rows else 0,
+            "feedback_count": feedback_rows[0]["cnt"] if feedback_rows else 0,
             "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "14")),
-            "auth_required": bool(os.environ.get("ADMIN_KEY")),
         }
 
-    @app.get("/admin/api/logs")
-    def admin_list_logs(request: Request) -> list:
-        _admin_auth(request)
-        if not _SYNC_LOG_DIR.exists():
-            return []
-        pinned = _pinned_set()
-        result = []
-        for f in sorted(_SYNC_LOG_DIR.glob("sync-*.log"), key=lambda p: p.stat().st_mtime, reverse=True):
-            stat = f.stat()
-            # Parse filename: sync-p{slot}-{room}-{ts}[-{src}].log
-            parts = f.stem.split("-")
-            slot = parts[1][1:] if len(parts) > 1 and parts[1].startswith("p") else "?"
-            room_code = parts[2] if len(parts) > 2 else "?"
-            src = parts[4] if len(parts) > 4 else "normal"
-            result.append(
-                {
-                    "filename": f.name,
-                    "size": stat.st_size,
-                    "created": int(stat.st_mtime),
-                    "slot": slot,
-                    "room": room_code,
-                    "source": src,
-                    "pinned": f.name in pinned,
-                }
-            )
-        return result
+    # ── Admin session logs API ───────────────────────────────────────────
 
-    @app.get("/admin/api/logs/{filename}")
-    def admin_get_log(filename: str, request: Request) -> Response:
+    @app.get("/admin/api/session-logs")
+    async def admin_session_logs_list(request: Request) -> dict:
         _admin_auth(request)
-        path = _safe_log_filename(filename)
-        return Response(content=path.read_text(errors="replace"), media_type="text/plain")
+        room = request.query_params.get("room")
+        match_id = request.query_params.get("match_id")
+        mode = request.query_params.get("mode")
+        has_desyncs = request.query_params.get("has_desyncs")
+        days = int(request.query_params.get("days", "30"))
+        limit = min(int(request.query_params.get("limit", "50")), 200)
+        offset = int(request.query_params.get("offset", "0"))
 
-    @app.post("/admin/api/logs/{filename}/pin")
-    def admin_pin_log(filename: str, request: Request) -> dict:
+        conditions = ["created_at > datetime('now', ?)"]
+        params: list = [f"-{days} days"]
+        if room:
+            conditions.append("room = ?")
+            params.append(room)
+        if match_id:
+            conditions.append("match_id = ?")
+            params.append(match_id)
+        if mode and mode in ("lockstep", "streaming"):
+            conditions.append("mode = ?")
+            params.append(mode)
+        if has_desyncs == "true":
+            conditions.append("json_extract(summary, '$.desyncs') > 0")
+
+        where = " AND ".join(conditions)
+        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM session_logs WHERE {where}", tuple(params))
+        total = total_rows[0]["cnt"] if total_rows else 0
+
+        params_with_paging = params + [limit, offset]
+        entries = await db.query(
+            f"SELECT id, match_id, room, slot, player_name, mode, summary, ended_by, created_at, updated_at FROM session_logs WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            tuple(params_with_paging),
+        )
+        for entry in entries:
+            if entry.get("summary") and isinstance(entry["summary"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    entry["summary"] = json.loads(entry["summary"])
+        return {"total": total, "entries": entries}
+
+    @app.get("/admin/api/session-logs/{log_id}")
+    async def admin_session_log_detail(request: Request, log_id: int) -> dict:
         _admin_auth(request)
-        _safe_log_filename(filename)
-        pinned = _pinned_set()
-        pinned.add(filename)
-        _save_pinned(pinned)
-        return {"status": "pinned"}
+        rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        entry = rows[0]
+        for field in ("log_data", "summary", "context"):
+            if entry.get(field) and isinstance(entry[field], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    entry[field] = json.loads(entry[field])
+        return entry
 
-    @app.delete("/admin/api/logs/{filename}/pin")
-    def admin_unpin_log(filename: str, request: Request) -> dict:
+    # ── Admin client events API ──────────────────────────────────────────
+
+    @app.get("/admin/api/client-events")
+    async def admin_client_events_list(request: Request) -> dict:
         _admin_auth(request)
-        _safe_log_filename(filename)
-        pinned = _pinned_set()
-        pinned.discard(filename)
-        _save_pinned(pinned)
-        return {"status": "unpinned"}
+        evt_type = request.query_params.get("type")
+        room = request.query_params.get("room")
+        days = int(request.query_params.get("days", "30"))
+        limit = min(int(request.query_params.get("limit", "50")), 200)
+        offset = int(request.query_params.get("offset", "0"))
 
-    @app.delete("/admin/api/logs/{filename}")
-    def admin_delete_log(filename: str, request: Request) -> dict:
+        conditions = ["created_at > datetime('now', ?)"]
+        params: list = [f"-{days} days"]
+        if evt_type and evt_type in _VALID_EVENT_TYPES:
+            conditions.append("type = ?")
+            params.append(evt_type)
+        if room:
+            conditions.append("room = ?")
+            params.append(room)
+
+        where = " AND ".join(conditions)
+        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM client_events WHERE {where}", tuple(params))
+        total = total_rows[0]["cnt"] if total_rows else 0
+
+        params_with_paging = params + [limit, offset]
+        entries = await db.query(
+            f"SELECT * FROM client_events WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(params_with_paging),
+        )
+        for entry in entries:
+            if entry.get("meta") and isinstance(entry["meta"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    entry["meta"] = json.loads(entry["meta"])
+        return {"total": total, "entries": entries}
+
+    @app.get("/admin/api/client-events/{event_id}")
+    async def admin_client_event_detail(request: Request, event_id: int) -> dict:
         _admin_auth(request)
-        path = _safe_log_filename(filename)
-        pinned = _pinned_set()
-        pinned.discard(filename)
-        _save_pinned(pinned)
-        path.unlink()
-        return {"status": "deleted"}
+        rows = await db.query("SELECT * FROM client_events WHERE id = ?", (event_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Client event not found")
+        entry = rows[0]
+        if entry.get("meta") and isinstance(entry["meta"], str):
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                entry["meta"] = json.loads(entry["meta"])
+        return entry
 
-    @app.post("/admin/api/cleanup")
-    def admin_run_cleanup(request: Request) -> dict:
+    # ── Admin feedback API ───────────────────────────────────────────────
+
+    @app.get("/admin/api/feedback")
+    async def admin_feedback_list(request: Request) -> dict:
         _admin_auth(request)
-        retention = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
-        if not _SYNC_LOG_DIR.exists():
-            return {"deleted": 0}
-        pinned = _pinned_set()
-        cutoff = time.time() - (retention * 86400)
-        deleted = 0
-        for f in _SYNC_LOG_DIR.glob("sync-*.log"):
-            if f.name in pinned:
-                continue
-            if f.stat().st_mtime < cutoff:
-                f.unlink()
-                deleted += 1
-        if deleted:
-            log.info("Manual cleanup: removed %d expired log(s)", deleted)
-        return {"deleted": deleted}
+        category = request.query_params.get("category")
+        days = int(request.query_params.get("days", "30"))
+        limit = min(int(request.query_params.get("limit", "50")), 200)
+        offset = int(request.query_params.get("offset", "0"))
 
-    # ── Admin error event API ────────────────────────────────────────────
+        conditions = ["created_at > datetime('now', ?)"]
+        params: list = [f"-{days} days"]
 
-    @app.get("/admin/api/errors")
-    def admin_list_errors(request: Request) -> list:
+        if category and category in ("bug", "feature", "general"):
+            conditions.append("category = ?")
+            params.append(category)
+
+        where = " AND ".join(conditions)
+
+        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM feedback WHERE {where}", tuple(params))
+        total = total_rows[0]["cnt"] if total_rows else 0
+
+        params_with_paging = params + [limit, offset]
+        entries = await db.query(
+            f"SELECT * FROM feedback WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(params_with_paging),
+        )
+        # Parse context JSON strings back to dicts for the response
+        for entry in entries:
+            if entry.get("context") and isinstance(entry["context"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    entry["context"] = json.loads(entry["context"])
+        return {"total": total, "entries": entries}
+
+    @app.get("/admin/api/feedback/{feedback_id}")
+    async def admin_feedback_single(request: Request, feedback_id: int) -> dict:
         _admin_auth(request)
-        if not _ERROR_LOG_DIR.exists():
-            return []
-        result = []
-        for f in sorted(_ERROR_LOG_DIR.glob("evt-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            stat = f.stat()
-            # Parse filename: evt-{type}-{room}-{ts}-{rand}.json
-            # Event types can contain hyphens (e.g. "webrtc-fail"), so match
-            # against the known set rather than splitting on the Nth dash.
-            stem = f.stem
-            evt_type = "?"
-            room_code = "?"
-            if stem.startswith("evt-"):
-                body = stem[4:]  # strip "evt-"
-                for t in _VALID_EVENT_TYPES:
-                    if body.startswith(t + "-"):
-                        evt_type = t
-                        rest = body[len(t) + 1 :]  # "{room}-{ts}-{rand}"
-                        rest_parts = rest.rsplit("-", 2)
-                        room_code = rest_parts[0] if len(rest_parts) == 3 else rest
-                        break
-            result.append(
-                {
-                    "filename": f.name,
-                    "size": stat.st_size,
-                    "created": int(stat.st_mtime),
-                    "type": evt_type,
-                    "room": room_code,
-                }
-            )
-        return result
-
-    @app.get("/admin/api/errors/{filename}")
-    def admin_get_error(filename: str, request: Request) -> Response:
-        _admin_auth(request)
-        path = _safe_error_filename(filename)
-        return Response(content=path.read_text(errors="replace"), media_type="application/json")
-
-    @app.delete("/admin/api/errors/{filename}")
-    def admin_delete_error(filename: str, request: Request) -> dict:
-        _admin_auth(request)
-        path = _safe_error_filename(filename)
-        path.unlink()
-        return {"status": "deleted"}
+        rows = await db.query("SELECT * FROM feedback WHERE id = ?", (feedback_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+        entry = rows[0]
+        if entry.get("context") and isinstance(entry["context"], str):
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                entry["context"] = json.loads(entry["context"])
+        return entry
 
     # ── OG card routes ────────────────────────────────────────────────────
 

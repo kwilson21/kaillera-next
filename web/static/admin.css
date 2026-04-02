@@ -366,3 +366,49 @@ tbody tr {
   color: #6af;
   border-bottom-color: #6af;
 }
+
+/* Feedback cards */
+.feedback-card {
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color 0.1s;
+}
+.feedback-card:hover {
+  border-color: #555;
+}
+.feedback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.feedback-date {
+  font-size: 11px;
+  color: #666;
+}
+.feedback-message {
+  font-size: 14px;
+  color: #ddd;
+  line-height: 1.5;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.feedback-email {
+  font-size: 12px;
+  color: #6af;
+  margin-bottom: 4px;
+}
+.feedback-meta {
+  font-size: 11px;
+  color: #888;
+}
+.feedback-stats {
+  font-size: 11px;
+  color: #f39c12;
+  margin-top: 2px;
+}

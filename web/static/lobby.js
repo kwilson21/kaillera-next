@@ -3,29 +3,6 @@
 
   const { get: _sg, set: _ss, remove: _sr } = KNStorage;
 
-  // Recover pending sync logs from a previous game session that closed unexpectedly
-  try {
-    const pending = _sg('localStorage', 'kn-pending-log');
-    if (pending) {
-      _sr('localStorage', 'kn-pending-log');
-      const { room, slot, logs } = JSON.parse(pending);
-      if (logs) {
-        // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
-        const token = _sg('localStorage', 'kn-upload-token') || '';
-        fetch(
-          `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery&token=${encodeURIComponent(token)}`,
-          {
-            method: 'POST',
-            body: logs,
-            headers: { 'Content-Type': 'text/plain' },
-          },
-        )
-          .then(() => console.log('[lobby] recovered pending sync log'))
-          .catch(() => {});
-      }
-    }
-  } catch (_) {}
-
   const nameInput = document.getElementById('player-name');
   const codeInput = document.getElementById('room-code');
 

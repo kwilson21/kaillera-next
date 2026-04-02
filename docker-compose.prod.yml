@@ -35,15 +35,18 @@ services:
       - MAX_ROOMS=${MAX_ROOMS}
       - MAX_SPECTATORS=${MAX_SPECTATORS}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
-      - LOG_MAX_FILES=${LOG_MAX_FILES}
-      - SYNC_LOG_DIR=${SYNC_LOG_DIR}
       - ADMIN_KEY=${ADMIN_KEY}
       - DEBUG_MODE=${DEBUG_MODE}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme}
+      - DB_PATH=${DB_PATH:-/app/server/data/kn.db}
+      - IP_HASH_SALT=${IP_HASH_SALT}
+      - POSTHOG_API_KEY=${POSTHOG_API_KEY}
+      - POSTHOG_HOST=${POSTHOG_HOST:-https://us.i.posthog.com}
     ports:
       - '27888:27888'
     volumes:
       - kaillera-logs:/app/server/logs
+      - kaillera-data:/app/server/data
     stop_grace_period: 30s
     deploy:
       replicas: 1
@@ -77,4 +80,5 @@ services:
 
 volumes:
   kaillera-logs:
+  kaillera-data:
   redis-data:

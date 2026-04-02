@@ -78,3 +78,78 @@ def test_cache_state_rejected_with_bad_token(server_url):
         timeout=5,
     )
     assert r.status_code == 403
+
+
+def test_feedback_accepts_valid_submission(server_url):
+    """Valid feedback submission returns 200 with saved status."""
+    r = requests.post(
+        f"{server_url}/api/feedback",
+        json={
+            "category": "bug",
+            "message": "Test bug report from automated test",
+            "page": "home",
+        },
+        timeout=5,
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "saved"
+    assert data["id"] >= 1
+
+
+def test_feedback_rejects_missing_category(server_url):
+    """Feedback without required category field is rejected."""
+    r = requests.post(
+        f"{server_url}/api/feedback",
+        json={"message": "No category"},
+        timeout=5,
+    )
+    assert r.status_code == 422
+
+
+def test_feedback_rejects_empty_message(server_url):
+    """Feedback with empty message is rejected."""
+    r = requests.post(
+        f"{server_url}/api/feedback",
+        json={"category": "bug", "message": ""},
+        timeout=5,
+    )
+    assert r.status_code == 422
+
+
+def test_feedback_honeypot_silently_discards(server_url):
+    """Feedback with honeypot field filled returns 200 but id=0 (discarded)."""
+    r = requests.post(
+        f"{server_url}/api/feedback",
+        json={
+            "category": "bug",
+            "message": "I am a bot",
+            "company_fax": "555-1234",
+        },
+        timeout=5,
+    )
+    assert r.status_code == 200
+    assert r.json()["id"] == 0
+
+
+def test_feedback_rejects_invalid_category(server_url):
+    """Feedback with unknown category is rejected."""
+    r = requests.post(
+        f"{server_url}/api/feedback",
+        json={"category": "spam", "message": "Bad category"},
+        timeout=5,
+    )
+    assert r.status_code == 422
+
+
+def test_admin_feedback_list_requires_auth(server_url):
+    """Admin feedback list requires ADMIN_KEY."""
+    r = requests.get(f"{server_url}/admin/api/feedback", timeout=5)
+    # Returns 401 or 403 depending on whether ADMIN_KEY is configured
+    assert r.status_code in (401, 403)
+
+
+def test_admin_feedback_single_requires_auth(server_url):
+    """Admin feedback single entry requires ADMIN_KEY."""
+    r = requests.get(f"{server_url}/admin/api/feedback/1", timeout=5)
+    assert r.status_code in (401, 403)

@@ -15,7 +15,7 @@
     }
   };
 
-  // ── Auth ──────────────────────────────────────────────────────────────
+  // -- Auth ------------------------------------------------------------------
 
   const headers = () => (adminKey ? { 'X-Admin-Key': adminKey } : {});
 
@@ -53,7 +53,7 @@
     if (e.key === 'Enter') $('#auth-btn').click();
   });
 
-  // ── Tabs ──────────────────────────────────────────────────────────────
+  // -- Tabs ------------------------------------------------------------------
 
   document.querySelectorAll('.tab-bar .tab').forEach((tab) => {
     tab.addEventListener('click', () => {
@@ -66,7 +66,7 @@
     });
   });
 
-  // ── Stats ─────────────────────────────────────────────────────────────
+  // -- Stats -----------------------------------------------------------------
 
   const formatBytes = (bytes) => {
     if (bytes < 1024) return bytes + ' B';
@@ -82,16 +82,16 @@
       { label: 'Active Rooms', value: `${s.rooms} / ${s.max_rooms}` },
       { label: 'Players', value: s.players },
       { label: 'Spectators', value: s.spectators },
-      { label: 'Log Files', value: s.log_count },
-      { label: 'Log Size', value: formatBytes(s.log_size_bytes) },
-      { label: 'Client Events', value: s.error_count ?? 0 },
+      { label: 'Session Logs', value: s.session_log_count ?? 0 },
+      { label: 'Client Events', value: s.client_event_count ?? 0 },
+      { label: 'Feedback', value: s.feedback_count ?? 0 },
       { label: 'Retention', value: `${s.retention_days}d` },
     ]
       .map((c) => `<div class="stat-card"><div class="label">${c.label}</div><div class="value">${c.value}</div></div>`)
       .join('');
   };
 
-  // ── Logs ──────────────────────────────────────────────────────────────
+  // -- Helpers ---------------------------------------------------------------
 
   const timeAgo = (ts) => {
     const diff = Date.now() / 1000 - ts;
@@ -103,211 +103,6 @@
 
   const escapeHtml = (str) =>
     str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  let currentLogs = [];
-  // Cache of fetched log contents: filename -> text
-  const logContentCache = {};
-
-  const loadLogs = async () => {
-    const res = await fetch('/admin/api/logs', { headers: headers() });
-    if (!res.ok) return;
-    currentLogs = await res.json();
-    renderLogs();
-  };
-
-  const groupByRoom = (logs) => {
-    const groups = {};
-    for (const log of logs) {
-      const room = log.room || 'unknown';
-      if (!groups[room]) groups[room] = [];
-      groups[room].push(log);
-    }
-    // Sort groups by most recent log
-    return Object.entries(groups).sort((a, b) => {
-      const aMax = Math.max(...a[1].map((l) => l.created));
-      const bMax = Math.max(...b[1].map((l) => l.created));
-      return bMax - aMax;
-    });
-  };
-
-  const renderLogs = () => {
-    const container = $('#log-groups');
-    const noLogs = $('#no-logs');
-
-    if (currentLogs.length === 0) {
-      container.innerHTML = '';
-      noLogs.classList.remove('hidden');
-      return;
-    }
-    noLogs.classList.add('hidden');
-
-    const groups = groupByRoom(currentLogs);
-    container.innerHTML = groups
-      .map(([room, logs]) => {
-        const newest = Math.max(...logs.map((l) => l.created));
-        const totalSize = logs.reduce((sum, l) => sum + l.size, 0);
-        const slots = [...new Set(logs.map((l) => l.slot))].sort().join(', ');
-
-        const rows = logs
-          .map((l) => {
-            const fn = escapeHtml(l.filename);
-            const srcClass = l.source !== 'normal' ? ` ${escapeHtml(l.source)}` : '';
-            const src = escapeHtml(l.source);
-            return `<tr data-filename="${fn}">
-          <td><button class="btn-pin${l.pinned ? ' pinned' : ''}" data-action="pin" data-file="${fn}" title="${l.pinned ? 'Unpin' : 'Pin'}">${l.pinned ? '\u2605' : '\u2606'}</button></td>
-          <td>P${escapeHtml(l.slot)}</td>
-          <td><span class="source-badge${srcClass}">${src}</span></td>
-          <td>${formatBytes(l.size)}</td>
-          <td title="${new Date(l.created * 1000).toLocaleString()}">${timeAgo(l.created)}</td>
-          <td class="action-cell">
-            <button class="btn-small" data-action="copy-one" data-file="${fn}" title="Copy log">Copy</button>
-            <button class="btn-small btn-danger" data-action="delete" data-file="${fn}">Del</button>
-          </td>
-        </tr>`;
-          })
-          .join('');
-
-        return `<div class="room-group" data-room="${escapeHtml(room)}">
-        <div class="room-header">
-          <div class="room-info">
-            <span class="room-code">${escapeHtml(room)}</span>
-            <span class="room-meta">${logs.length} log${logs.length > 1 ? 's' : ''} &middot; P${slots} &middot; ${formatBytes(totalSize)} &middot; ${timeAgo(newest)}</span>
-          </div>
-          <button class="btn-small" data-action="copy-room" data-room="${escapeHtml(room)}" title="Copy all logs for this room as JSON">Copy Room JSON</button>
-        </div>
-        <table>
-          <thead><tr>
-            <th>Pin</th><th>Slot</th><th>Source</th><th>Size</th><th>Date</th><th></th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
-      })
-      .join('');
-  };
-
-  // ── Log viewer ────────────────────────────────────────────────────────
-
-  const parseDiagStart = (text) => {
-    const match = text.match(/DIAG-START\s+slot=(\d+)\s+engine=(\S+)\s+mobile=(\S+)\s+forkedCore=(\S+)\s+ua=(.+)/);
-    if (!match) return null;
-    return {
-      slot: match[1],
-      engine: match[2],
-      mobile: match[3] === 'true',
-      forkedCore: match[4] === 'true',
-      ua: match[5].trim(),
-    };
-  };
-
-  const parseGameEvents = (text) => {
-    const events = [];
-    const patterns = [
-      [/lockstep started/, 'Lockstep started'],
-      [/Connected -- game on!/, 'Game started (lockstep)'],
-      [/Connected — streaming!/, 'Game started (streaming)'],
-      [/Hosting — game on!/, 'Hosting (streaming)'],
-      [/DESYNC frame=(\d+)/, (m) => `Desync at frame ${m[1]}`],
-      [/sync #(\d+) applied.*frame (\d+)/, (m) => `Resync #${m[1]} (frame ${m[2]})`],
-      [/INPUT-STALL resend-request/, 'Input stall (resend)'],
-      [/game-ended/, 'Game ended'],
-      [/DC closed/, 'Peer disconnected'],
-      [/boot slot=\d+ f=\d+\/120/, null], // skip boot progress
-      [/emulator ready/, 'Emulator ready'],
-      [/Syncing\.\.\./, 'State sync started'],
-      [/state cached/, 'State cached'],
-      [/lockstep-ready -- GO/, 'All players ready'],
-    ];
-
-    for (const line of text.split('\n')) {
-      for (const [re, label] of patterns) {
-        if (!label) continue;
-        const m = line.match(re);
-        if (m) {
-          events.push(typeof label === 'function' ? label(m) : label);
-          break;
-        }
-      }
-    }
-    return events;
-  };
-
-  const formatUserAgent = (ua) => {
-    if (!ua) return '';
-    if (ua.includes('iPhone')) return 'iPhone ' + (ua.match(/Version\/([\d.]+)/)?.[1] || 'Safari');
-    if (ua.includes('iPad')) return 'iPad ' + (ua.match(/Version\/([\d.]+)/)?.[1] || 'Safari');
-    if (ua.includes('Android')) return 'Android ' + (ua.match(/Chrome\/([\d.]+)/)?.[1] || '');
-    if (ua.includes('Chrome')) return 'Chrome ' + (ua.match(/Chrome\/([\d.]+)/)?.[1] || '');
-    if (ua.includes('Firefox')) return 'Firefox ' + (ua.match(/Firefox\/([\d.]+)/)?.[1] || '');
-    if (ua.includes('Safari')) return 'Safari ' + (ua.match(/Version\/([\d.]+)/)?.[1] || '');
-    return ua.substring(0, 40);
-  };
-
-  const fetchLogContent = async (filename) => {
-    if (logContentCache[filename]) return logContentCache[filename];
-    const res = await fetch(`/admin/api/logs/${encodeURIComponent(filename)}`, {
-      headers: headers(),
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    logContentCache[filename] = text;
-    return text;
-  };
-
-  let _currentViewerFilename = null;
-
-  const viewLog = async (filename) => {
-    const viewer = $('#log-viewer');
-    const content = $('#viewer-content');
-    const title = $('#viewer-title');
-    const meta = $('#viewer-meta');
-
-    _currentViewerFilename = filename;
-    title.textContent = filename;
-    meta.innerHTML = '';
-    content.textContent = 'Loading...';
-    viewer.classList.remove('hidden');
-
-    const text = await fetchLogContent(filename);
-    if (!text) {
-      content.textContent = 'Error loading log';
-      return;
-    }
-    content.textContent = text;
-
-    // Parse and show metadata
-    const diag = parseDiagStart(text);
-    const events = parseGameEvents(text);
-    const parts = [];
-    if (diag) {
-      parts.push(
-        `<span class="meta-tag">${diag.mobile ? 'Mobile' : 'Desktop'}</span>`,
-        `<span class="meta-tag">${formatUserAgent(diag.ua)}</span>`,
-        `<span class="meta-tag">${diag.engine}</span>`,
-        `<span class="meta-tag ${diag.forkedCore ? 'meta-ok' : 'meta-warn'}">${diag.forkedCore ? 'Patched core' : 'Stock core'}</span>`,
-      );
-    }
-    if (events.length) {
-      parts.push(`<span class="meta-events">${events.join(' &rarr; ')}</span>`);
-    }
-    meta.innerHTML = parts.join('');
-
-    viewer.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  $('#viewer-close').addEventListener('click', () => {
-    $('#log-viewer').classList.add('hidden');
-    _currentViewerFilename = null;
-  });
-
-  $('#viewer-copy').addEventListener('click', async () => {
-    const content = $('#viewer-content').textContent;
-    if (content && (await copyText(content))) {
-      showToast('Log copied');
-    }
-  });
-
-  // ── Copy helpers ────────────────────────────────────────────────────
 
   const showToast = (msg) => {
     let toast = $('#toast');
@@ -321,87 +116,99 @@
     setTimeout(() => toast.classList.remove('show'), 2000);
   };
 
-  const copyOneLog = async (filename) => {
-    const text = await fetchLogContent(filename);
-    if (text && (await copyText(text))) {
-      showToast('Log copied');
-    }
-  };
+  // -- Session Logs ----------------------------------------------------------
 
-  const copyRoomJson = async (room) => {
-    const roomLogs = currentLogs.filter((l) => l.room === room);
-    if (!roomLogs.length) return;
+  let currentSessionLogs = [];
 
-    showToast('Fetching logs...');
-
-    const entries = await Promise.all(
-      roomLogs.map(async (l) => {
-        const text = await fetchLogContent(l.filename);
-        const diag = text ? parseDiagStart(text) : null;
-        const events = text ? parseGameEvents(text) : [];
-        return {
-          slot: parseInt(l.slot, 10),
-          source: l.source,
-          device: diag
-            ? {
-                mobile: diag.mobile,
-                browser: formatUserAgent(diag.ua),
-                engine: diag.engine,
-                forkedCore: diag.forkedCore,
-                ua: diag.ua,
-              }
-            : null,
-          events,
-          content: text || '',
-        };
-      }),
-    );
-
-    // Sort by slot
-    entries.sort((a, b) => a.slot - b.slot);
-
-    const json = JSON.stringify({ room, timestamp: new Date().toISOString(), logs: entries }, null, 2);
-    if (await copyText(json)) {
-      showToast(`Copied ${entries.length} log${entries.length > 1 ? 's' : ''} as JSON`);
-    }
-  };
-
-  // ── Actions ─────────────────────────────────────────────────────────
-
-  const pinLog = async (filename, currentlyPinned) => {
-    const method = currentlyPinned ? 'DELETE' : 'POST';
-    await fetch(`/admin/api/logs/${encodeURIComponent(filename)}/pin`, {
-      method,
-      headers: headers(),
-    });
-    await loadLogs();
-  };
-
-  const deleteLog = async (filename) => {
-    if (!confirm(`Delete ${filename}?`)) return;
-    await fetch(`/admin/api/logs/${encodeURIComponent(filename)}`, {
-      method: 'DELETE',
-      headers: headers(),
-    });
-    if (_currentViewerFilename === filename) {
-      $('#log-viewer').classList.add('hidden');
-      _currentViewerFilename = null;
-    }
-    delete logContentCache[filename];
-    await loadLogs();
-  };
-
-  // ── Client Events ──────────────────────────────────────────────────────
-
-  let currentErrors = [];
-  const errorContentCache = {};
-
-  const loadErrors = async () => {
-    const res = await fetch('/admin/api/errors', { headers: headers() });
+  const loadSessionLogs = async () => {
+    const res = await fetch('/admin/api/session-logs?days=30&limit=100', { headers: headers() });
     if (!res.ok) return;
-    currentErrors = await res.json();
-    renderErrors();
+    const data = await res.json();
+    currentSessionLogs = data.entries || [];
+    renderSessionLogs();
   };
+
+  const renderSessionLogs = () => {
+    const container = $('#session-log-list');
+    const noLogs = $('#no-session-logs');
+    if (!currentSessionLogs.length) {
+      container.innerHTML = '';
+      noLogs.classList.remove('hidden');
+      return;
+    }
+    noLogs.classList.add('hidden');
+
+    // Group by match_id
+    const groups = {};
+    for (const log of currentSessionLogs) {
+      const key = log.match_id || 'unknown';
+      if (!groups[key]) groups[key] = { room: log.room, logs: [] };
+      groups[key].logs.push(log);
+    }
+
+    container.innerHTML = Object.entries(groups)
+      .map(([matchId, { room, logs }]) => {
+        const rows = logs
+          .map((l) => {
+            const s = l.summary || {};
+            const duration = s.duration_sec ? `${Math.floor(s.duration_sec / 60)}m${s.duration_sec % 60}s` : '-';
+            const issues =
+              [
+                s.desyncs ? `${s.desyncs} desync${s.desyncs > 1 ? 's' : ''}` : '',
+                s.stalls ? `${s.stalls} stall${s.stalls > 1 ? 's' : ''}` : '',
+                s.reconnects ? `${s.reconnects} reconnect${s.reconnects > 1 ? 's' : ''}` : '',
+              ]
+                .filter(Boolean)
+                .join(', ') || 'clean';
+            const endedColor = { 'game-end': '#2ecc71', disconnect: '#e74c3c', leave: '#f39c12' }[l.ended_by] || '#888';
+            return `<tr data-session-log-id="${l.id}">
+            <td>P${l.slot ?? '?'}</td>
+            <td>${escapeHtml(l.player_name || '-')}</td>
+            <td>${duration}</td>
+            <td>${issues}</td>
+            <td><span style="color:${endedColor}">${l.ended_by || 'active'}</span></td>
+            <td title="${l.updated_at}">${l.updated_at ? timeAgo(new Date(l.updated_at + 'Z').getTime() / 1000) : '-'}</td>
+          </tr>`;
+          })
+          .join('');
+
+        return `<div class="room-group">
+        <div class="room-header">
+          <div class="room-info">
+            <span class="room-code">${escapeHtml(room)}</span>
+            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${logs[0].mode || 'unknown'}</span>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>Slot</th><th>Player</th><th>Duration</th><th>Issues</th><th>Ended</th><th>Updated</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+      })
+      .join('');
+  };
+
+  const viewSessionLog = async (id) => {
+    const viewer = $('#log-viewer');
+    const content = $('#viewer-content');
+    const title = $('#viewer-title');
+    const meta = $('#viewer-meta');
+    title.textContent = `Session Log #${id}`;
+    meta.innerHTML = '';
+    content.textContent = 'Loading...';
+    viewer.classList.remove('hidden');
+
+    const res = await fetch(`/admin/api/session-logs/${id}`, { headers: headers() });
+    if (!res.ok) {
+      content.textContent = 'Error loading log';
+      return;
+    }
+    const data = await res.json();
+    content.textContent = JSON.stringify(data, null, 2);
+    viewer.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // -- Client Events ---------------------------------------------------------
 
   const _typeColors = {
     'webrtc-fail': '#e74c3c',
@@ -415,156 +222,175 @@
     'session-end': '#2ecc71',
   };
 
-  const renderErrors = () => {
+  let currentClientEvents = [];
+
+  const loadClientEvents = async () => {
+    const filterType = $('#error-type-filter')?.value || '';
+    const params = new URLSearchParams({ days: '30', limit: '100' });
+    if (filterType) params.set('type', filterType);
+    const res = await fetch(`/admin/api/client-events?${params}`, { headers: headers() });
+    if (!res.ok) return;
+    const data = await res.json();
+    currentClientEvents = data.entries || [];
+    renderClientEvents();
+  };
+
+  const renderClientEvents = () => {
     const container = $('#error-list');
     const noErrors = $('#no-errors');
-    const filterType = $('#error-type-filter')?.value || '';
-
-    const filtered = filterType ? currentErrors.filter((e) => e.type === filterType) : currentErrors;
-
-    if (filtered.length === 0) {
+    if (!currentClientEvents.length) {
       container.innerHTML = '';
       noErrors.classList.remove('hidden');
       return;
     }
     noErrors.classList.add('hidden');
 
-    const groups = groupByRoom(filtered);
-    container.innerHTML = groups
-      .map(([room, events]) => {
-        const newest = Math.max(...events.map((e) => e.created));
-        const types = [...new Set(events.map((e) => e.type))].sort();
-
-        const rows = events
-          .map((e) => {
-            const fn = escapeHtml(e.filename);
-            const color = _typeColors[e.type] || '#999';
-            return `<tr data-error-file="${fn}">
-          <td><span class="source-badge" style="border-color:${color};color:${color}">${escapeHtml(e.type)}</span></td>
-          <td>${formatBytes(e.size)}</td>
-          <td title="${new Date(e.created * 1000).toLocaleString()}">${timeAgo(e.created)}</td>
-          <td class="action-cell">
-            <button class="btn-small" data-action="copy-error" data-file="${fn}" title="Copy JSON">Copy</button>
-            <button class="btn-small btn-danger" data-action="delete-error" data-file="${fn}">Del</button>
-          </td>
-        </tr>`;
-          })
-          .join('');
-
-        return `<div class="room-group" data-room="${escapeHtml(room)}">
-        <div class="room-header">
-          <div class="room-info">
-            <span class="room-code">${escapeHtml(room)}</span>
-            <span class="room-meta">${events.length} event${events.length > 1 ? 's' : ''} &middot; ${types.join(', ')} &middot; ${timeAgo(newest)}</span>
-          </div>
-          <button class="btn-small" data-action="copy-room-errors" data-room="${escapeHtml(room)}" title="Copy all events for this room as JSON">Copy Room JSON</button>
+    container.innerHTML = currentClientEvents
+      .map((e) => {
+        const color = _typeColors[e.type] || '#999';
+        return `<div class="feedback-card" data-event-id="${e.id}">
+        <div class="feedback-header">
+          <span class="source-badge" style="border-color:${color};color:${color}">${escapeHtml(e.type)}</span>
+          <span class="feedback-date">${e.created_at ? timeAgo(new Date(e.created_at + 'Z').getTime() / 1000) : ''}</span>
         </div>
-        <table>
-          <thead><tr><th>Type</th><th>Size</th><th>Date</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div class="feedback-message">${escapeHtml(e.message || '')}</div>
+        ${e.room ? `<div class="feedback-meta">Room: ${escapeHtml(e.room)}</div>` : ''}
       </div>`;
       })
       .join('');
   };
 
-  const viewError = async (filename) => {
-    const viewer = $('#log-viewer');
-    const content = $('#viewer-content');
-    const title = $('#viewer-title');
-    const meta = $('#viewer-meta');
-
-    _currentViewerFilename = filename;
-    title.textContent = filename;
-    meta.innerHTML = '';
-    content.textContent = 'Loading...';
-    viewer.classList.remove('hidden');
-
-    if (!errorContentCache[filename]) {
-      const res = await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { headers: headers() });
-      if (!res.ok) {
-        content.textContent = 'Error loading event';
-        return;
-      }
-      errorContentCache[filename] = await res.text();
-    }
-    const text = errorContentCache[filename];
-    try {
-      content.textContent = JSON.stringify(JSON.parse(text), null, 2);
-    } catch {
-      content.textContent = text;
-    }
-
-    // Show meta from parsed JSON
-    try {
-      const data = JSON.parse(text);
-      const parts = [];
-      if (data.ua) parts.push(`<span class="meta-tag">${formatUserAgent(data.ua)}</span>`);
-      if (data.msg) parts.push(`<span class="meta-events">${escapeHtml(String(data.msg).slice(0, 200))}</span>`);
-      meta.innerHTML = parts.join('');
-    } catch {}
-
-    viewer.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  const deleteError = async (filename) => {
-    if (!confirm(`Delete ${filename}?`)) return;
-    await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { method: 'DELETE', headers: headers() });
-    if (_currentViewerFilename === filename) {
-      $('#log-viewer').classList.add('hidden');
-      _currentViewerFilename = null;
-    }
-    delete errorContentCache[filename];
-    await loadErrors();
-  };
-
-  const copyError = async (filename) => {
-    if (!errorContentCache[filename]) {
-      const res = await fetch(`/admin/api/errors/${encodeURIComponent(filename)}`, { headers: headers() });
-      if (!res.ok) return;
-      errorContentCache[filename] = await res.text();
-    }
-    if (await copyText(errorContentCache[filename])) {
-      showToast('Event JSON copied');
-    }
-  };
-
-  const copyRoomErrors = async (room) => {
-    const roomEvents = currentErrors.filter((e) => e.room === room);
-    if (!roomEvents.length) return;
-
-    showToast('Fetching events...');
-
-    const entries = await Promise.all(
-      roomEvents.map(async (e) => {
-        if (!errorContentCache[e.filename]) {
-          const res = await fetch(`/admin/api/errors/${encodeURIComponent(e.filename)}`, { headers: headers() });
-          if (res.ok) errorContentCache[e.filename] = await res.text();
-        }
-        try {
-          return JSON.parse(errorContentCache[e.filename] || '{}');
-        } catch {
-          return { filename: e.filename, error: 'parse failed' };
-        }
-      }),
-    );
-
-    const json = JSON.stringify({ room, timestamp: new Date().toISOString(), events: entries }, null, 2);
-    if (await copyText(json)) {
-      showToast(`Copied ${entries.length} event${entries.length > 1 ? 's' : ''} as JSON`);
-    }
-  };
-
   if ($('#error-type-filter')) {
-    $('#error-type-filter').addEventListener('change', renderErrors);
+    $('#error-type-filter').addEventListener('change', loadClientEvents);
   }
 
-  // ── Init ──────────────────────────────────────────────────────────────
+  // -- Feedback --------------------------------------------------------------
+
+  let currentFeedback = [];
+
+  const _categoryColors = {
+    bug: '#e74c3c',
+    feature: '#3498db',
+    general: '#2ecc71',
+  };
+
+  const _categoryEmoji = {
+    bug: '\u{1F41B}',
+    feature: '\u{1F4A1}',
+    general: '\u{1F4AC}',
+  };
+
+  const formatUserAgent = (ua) => {
+    if (!ua) return '';
+    if (ua.includes('iPhone')) return 'iPhone ' + (ua.match(/Version\/([\d.]+)/)?.[1] || 'Safari');
+    if (ua.includes('iPad')) return 'iPad ' + (ua.match(/Version\/([\d.]+)/)?.[1] || 'Safari');
+    if (ua.includes('Android')) return 'Android ' + (ua.match(/Chrome\/([\d.]+)/)?.[1] || '');
+    if (ua.includes('Chrome')) return 'Chrome ' + (ua.match(/Chrome\/([\d.]+)/)?.[1] || '');
+    if (ua.includes('Firefox')) return 'Firefox ' + (ua.match(/Firefox\/([\d.]+)/)?.[1] || '');
+    if (ua.includes('Safari')) return 'Safari ' + (ua.match(/Version\/([\d.]+)/)?.[1] || '');
+    return ua.substring(0, 40);
+  };
+
+  const loadFeedback = async () => {
+    const category = $('#feedback-category-filter')?.value || '';
+    const params = new URLSearchParams({ days: '90', limit: '100' });
+    if (category) params.set('category', category);
+    const res = await fetch(`/admin/api/feedback?${params}`, { headers: headers() });
+    if (!res.ok) return;
+    const data = await res.json();
+    currentFeedback = data.entries || [];
+    renderFeedback();
+  };
+
+  const renderFeedback = () => {
+    const container = $('#feedback-list');
+    const noFeedback = $('#no-feedback');
+
+    if (currentFeedback.length === 0) {
+      container.innerHTML = '';
+      noFeedback.classList.remove('hidden');
+      return;
+    }
+    noFeedback.classList.add('hidden');
+
+    container.innerHTML = currentFeedback
+      .map((fb) => {
+        const color = _categoryColors[fb.category] || '#999';
+        const emoji = _categoryEmoji[fb.category] || '';
+        const ctx = fb.context || {};
+        const metaParts = [];
+        if (ctx.playerName) metaParts.push(escapeHtml(ctx.playerName));
+        if (ctx.page) metaParts.push(ctx.page);
+        if (ctx.roomCode) metaParts.push(`Room: ${escapeHtml(ctx.roomCode)}`);
+        if (ctx.mode) metaParts.push(ctx.mode);
+        if (ctx.peerCount != null) metaParts.push(`${ctx.peerCount} peer${ctx.peerCount !== 1 ? 's' : ''}`);
+        if (ctx.userAgent) metaParts.push(formatUserAgent(ctx.userAgent));
+
+        const sessionStats = ctx.sessionStats;
+        const statsParts = [];
+        if (sessionStats) {
+          if (sessionStats.desyncs)
+            statsParts.push(`${sessionStats.desyncs} desync${sessionStats.desyncs > 1 ? 's' : ''}`);
+          if (sessionStats.stalls) statsParts.push(`${sessionStats.stalls} stall${sessionStats.stalls > 1 ? 's' : ''}`);
+          if (sessionStats.reconnects)
+            statsParts.push(`${sessionStats.reconnects} reconnect${sessionStats.reconnects > 1 ? 's' : ''}`);
+        }
+
+        const created = fb.created_at ? new Date(fb.created_at + 'Z').toLocaleString() : '';
+
+        return `<div class="feedback-card" data-feedback-id="${fb.id}">
+          <div class="feedback-header">
+            <span class="source-badge" style="border-color:${color};color:${color}">${emoji} ${escapeHtml(fb.category)}</span>
+            <span class="feedback-date" title="${created}">${created ? timeAgo(new Date(fb.created_at + 'Z').getTime() / 1000) : ''}</span>
+          </div>
+          <div class="feedback-message">${escapeHtml(fb.message)}</div>
+          ${fb.email ? `<div class="feedback-email">${escapeHtml(fb.email)}</div>` : ''}
+          ${metaParts.length ? `<div class="feedback-meta">${metaParts.join(' &middot; ')}</div>` : ''}
+          ${statsParts.length ? `<div class="feedback-stats">${statsParts.join(' &middot; ')}</div>` : ''}
+        </div>`;
+      })
+      .join('');
+  };
+
+  if ($('#feedback-category-filter')) {
+    $('#feedback-category-filter').addEventListener('change', loadFeedback);
+  }
+
+  $('#feedback-list')?.addEventListener('click', (e) => {
+    const card = e.target.closest('.feedback-card');
+    if (!card) return;
+    const id = card.dataset.feedbackId;
+    const fb = currentFeedback.find((f) => String(f.id) === id);
+    if (!fb) return;
+    // Show full feedback in the viewer
+    const viewer = $('#log-viewer');
+    $('#viewer-title').textContent = `Feedback #${fb.id} — ${fb.category}`;
+    $('#viewer-meta').innerHTML = fb.email ? `<span class="meta-tag">${escapeHtml(fb.email)}</span>` : '';
+    $('#viewer-content').textContent = JSON.stringify(fb, null, 2);
+    viewer.classList.remove('hidden');
+    viewer.scrollIntoView({ behavior: 'smooth' });
+  });
+
+  // -- Viewer ----------------------------------------------------------------
+
+  $('#viewer-close').addEventListener('click', () => {
+    $('#log-viewer').classList.add('hidden');
+  });
+
+  $('#viewer-copy').addEventListener('click', async () => {
+    const content = $('#viewer-content').textContent;
+    if (content && (await copyText(content))) {
+      showToast('Log copied');
+    }
+  });
+
+  // -- Init ------------------------------------------------------------------
 
   const loadAll = async () => {
     await loadStats();
-    await loadLogs();
-    await loadErrors();
+    await loadSessionLogs();
+    await loadClientEvents();
+    await loadFeedback();
   };
 
   const init = async () => {
@@ -572,58 +398,27 @@
     if (ok) loadAll();
   };
 
-  // ── Event delegation ──────────────────────────────────────────────────
+  // -- Event delegation ------------------------------------------------------
 
-  $('#log-groups').addEventListener('click', (e) => {
-    const btn = e.target.closest('button');
-    if (btn) {
-      e.stopPropagation();
-      const file = btn.dataset.file;
-      const action = btn.dataset.action;
-      if (action === 'pin') {
-        const entry = currentLogs.find((l) => l.filename === file);
-        pinLog(file, entry?.pinned);
-      } else if (action === 'delete') {
-        deleteLog(file);
-      } else if (action === 'copy-one') {
-        copyOneLog(file);
-      } else if (action === 'copy-room') {
-        copyRoomJson(btn.dataset.room);
-      }
-      return;
-    }
-    const row = e.target.closest('tr[data-filename]');
-    if (row) viewLog(row.dataset.filename);
+  $('#session-log-list')?.addEventListener('click', (e) => {
+    const row = e.target.closest('tr[data-session-log-id]');
+    if (row) viewSessionLog(row.dataset.sessionLogId);
   });
 
   $('#error-list')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('button');
-    if (btn) {
-      e.stopPropagation();
-      const file = btn.dataset.file;
-      const action = btn.dataset.action;
-      if (action === 'delete-error') deleteError(file);
-      else if (action === 'copy-error') copyError(file);
-      else if (action === 'copy-room-errors') copyRoomErrors(btn.dataset.room);
-      return;
-    }
-    const row = e.target.closest('tr[data-error-file]');
-    if (row) viewError(row.dataset.errorFile);
+    const card = e.target.closest('[data-event-id]');
+    if (!card) return;
+    const id = card.dataset.eventId;
+    const evt = currentClientEvents.find((ev) => String(ev.id) === id);
+    if (!evt) return;
+    $('#log-viewer').classList.remove('hidden');
+    $('#viewer-title').textContent = `Event #${id} — ${evt.type}`;
+    $('#viewer-meta').innerHTML = '';
+    $('#viewer-content').textContent = JSON.stringify(evt, null, 2);
+    $('#log-viewer').scrollIntoView({ behavior: 'smooth' });
   });
 
   $('#refresh-btn').addEventListener('click', () => loadAll());
-
-  $('#cleanup-btn').addEventListener('click', async () => {
-    if (!confirm('Delete all unpinned logs older than the retention period?')) return;
-    const res = await fetch('/admin/api/cleanup', { method: 'POST', headers: headers() });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.deleted > 0) {
-        console.log(`[admin] cleaned up ${data.deleted} log(s)`);
-      }
-    }
-    await loadAll();
-  });
 
   init();
 })();

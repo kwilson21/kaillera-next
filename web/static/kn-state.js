@@ -24,6 +24,7 @@
     slot: -1, // play.js → shared.js (KNEvent beacon)
     uploadToken: null, // play.js → shared.js (KNEvent beacon)
     sessionStats: { reconnects: 0, desyncs: 0, stalls: 0 }, // play.js, lockstep.js → pagehide summary
+    matchId: null, // signaling game-started → lockstep flush interval
 
     // ── Safe storage helpers ──
     safeGet,

@@ -24,21 +24,17 @@
       <div class="stats-row" id="stats-row"></div>
 
       <div class="tab-bar">
-        <button class="tab active" data-tab="logs">Sync Logs</button>
+        <button class="tab active" data-tab="logs">Session Logs</button>
         <button class="tab" data-tab="errors">Client Events</button>
+        <button class="tab" data-tab="feedback">Feedback</button>
       </div>
 
       <div class="log-section" id="tab-logs">
         <div class="log-header">
-          <h2>Sync Logs</h2>
-          <div class="log-actions">
-            <button id="cleanup-btn" class="btn-danger" title="Delete all unpinned logs past retention">
-              Run Cleanup Now
-            </button>
-          </div>
+          <h2>Session Logs</h2>
         </div>
-        <div id="log-groups"></div>
-        <p id="no-logs" class="dim hidden">No sync logs found.</p>
+        <div id="session-log-list"></div>
+        <p id="no-session-logs" class="dim hidden">No session logs found.</p>
       </div>
 
       <div class="log-section hidden" id="tab-errors">
@@ -61,6 +57,22 @@
         </div>
         <div id="error-list"></div>
         <p id="no-errors" class="dim hidden">No client events found.</p>
+      </div>
+
+      <div class="log-section hidden" id="tab-feedback">
+        <div class="log-header">
+          <h2>Feedback</h2>
+          <div class="log-actions">
+            <select id="feedback-category-filter">
+              <option value="">All categories</option>
+              <option value="bug">Bug Reports</option>
+              <option value="feature">Feature Requests</option>
+              <option value="general">General</option>
+            </select>
+          </div>
+        </div>
+        <div id="feedback-list"></div>
+        <p id="no-feedback" class="dim hidden">No feedback found.</p>
       </div>
 
       <div id="log-viewer" class="hidden">

@@ -1,5 +1,6 @@
 """In-memory per-IP rate limiting with rolling window."""
 
+import hashlib
 import logging
 import os
 import time
@@ -24,15 +25,35 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "input": (120, 1),
     "rom-signal": (60, 1),
     "cache-state": (5, 60),
-    "sync-logs": (10, 60),
+    "session-log": (2, 30),
     "client-event": (60, 60),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
+    "feedback": (5, 3600),  # 5 per hour per IP
 }
 
 # Rate-limit denial logging — log once per (ip, event) per 60s to avoid spam.
 _warned: dict[tuple[str, str], float] = {}
 _WARN_INTERVAL = 60.0
+
+_IP_HASH_SALT = os.environ.get("IP_HASH_SALT", "")
+if not _IP_HASH_SALT:
+    import secrets as _secrets
+
+    _IP_HASH_SALT = _secrets.token_hex(16)
+    log.warning("IP_HASH_SALT not set — using random salt (rate correlation won't survive restarts)")
+
+
+def ip_hash(ip: str) -> str:
+    """Hash an IP address for storage. Does not store raw IPs."""
+    return hashlib.sha256(f"{ip}{_IP_HASH_SALT}".encode()).hexdigest()[:16]
+
+
+def ip_hash_for_sid(sid: str) -> str:
+    """Hash the IP address associated with a Socket.IO sid."""
+    ip = _sid_ip.get(sid, "unknown")
+    return ip_hash(ip)
+
 
 MAX_CONNECTIONS_PER_IP = 20
 
@@ -92,10 +113,11 @@ def connection_allowed(ip: str) -> bool:
 
 def cleanup() -> None:
     now = time.monotonic()
+    max_window = max(w for _, w in _LIMITS.values())
     stale_ips = []
     for ip, events in list(_counters.items()):
         for event, timestamps in list(events.items()):
-            fresh = deque(t for t in timestamps if now - t < 120)
+            fresh = deque(t for t in timestamps if now - t < max_window)
             if fresh:
                 events[event] = fresh
             else:

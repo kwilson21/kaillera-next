@@ -428,11 +428,12 @@
   };
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
-  const SYNC_LOG_MAX = 5000;
+  const SYNC_LOG_MAX = 10000;
   const _syncLogRing = new Array(SYNC_LOG_MAX);
   let _syncLogHead = 0;
   let _syncLogCount = 0;
   let _syncLogSeq = 0;
+  let _startTime = 0;
 
   const _syncLog = (msg) => {
     _syncLogRing[_syncLogHead] = { seq: _syncLogSeq++, t: performance.now(), f: _frameNum, msg };
@@ -449,6 +450,42 @@
       lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
     }
     return lines.join('\n');
+  };
+
+  const _getStructuredEntries = () => {
+    const entries = [];
+    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
+    for (let i = 0; i < _syncLogCount; i++) {
+      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
+      entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
+    }
+    return entries;
+  };
+
+  let _flushInterval = null;
+
+  const _flushSyncLog = () => {
+    if (!KNState.matchId || !socket?.connected) return;
+    socket.emit('session-log', {
+      matchId: KNState.matchId,
+      slot: window._playerSlot,
+      playerName: localStorage.getItem('kaillera-name') || 'Player',
+      mode: 'lockstep',
+      entries: _getStructuredEntries(),
+      summary: {
+        desyncs: KNState.sessionStats.desyncs,
+        stalls: KNState.sessionStats.stalls,
+        reconnects: KNState.sessionStats.reconnects,
+        frames: _frameNum,
+        duration_sec: Math.round((performance.now() - _startTime) / 1000),
+        peers: Object.keys(KNState.peers || {}).length,
+      },
+      context: {
+        ua: navigator.userAgent,
+        mobile: /Mobi|Android/i.test(navigator.userAgent),
+        forkedCore: !!window.Module?._kn_set_deterministic,
+      },
+    });
   };
 
   // -- Canvas pixel hash + live RDRAM block hash helpers ---------------------
@@ -1266,6 +1303,7 @@
           peer._disconnectTimer = null;
           _syncLog(`peer ${remoteSid} reconnected (ICE recovery)`);
           setStatus('Connected -- game on!');
+          _startTime = performance.now();
           // Reset sync backoff so next desync check happens within ~1s
           // (connection hiccup likely caused a desync — don't wait 30s)
           _consecutiveResyncs = 0;
@@ -2438,10 +2476,9 @@
     _frameNum = 0;
     startLockstep();
 
-    // Host: start spectator streaming after lockstep begins
-    if (_playerSlot === 0) {
-      setTimeout(startSpectatorStream, 1000);
-    }
+    // Spectator stream starts lazily — only when a spectator actually connects.
+    // Eager start wastes CPU (drawImage + video encode every frame) which causes
+    // thermal throttling on mobile hosts even with zero spectators.
   };
 
   let _cacheAttempted = false;
@@ -2722,9 +2759,12 @@
 
   const startSpectatorStreamForPeer = (remoteSid) => {
     if (!_hostStream) {
-      // Stream not started yet -- it will be started after lockstep begins
-      // and will pick up this peer then
-      return;
+      // Lazy start: first spectator triggers stream creation
+      startSpectatorStream();
+      // startSpectatorStream may retry async if canvas not ready yet.
+      // If stream is ready now, add tracks immediately; otherwise
+      // startSpectatorStream will pick up all spectator peers when it finishes.
+      if (!_hostStream) return;
     }
     addStreamToPeer(remoteSid);
   };
@@ -3136,6 +3176,8 @@
     // }
 
     setStatus('Connected -- game on!');
+    _startTime = performance.now();
+    _flushInterval = setInterval(_flushSyncLog, 30000);
 
     window._lockstepActive = true;
 
@@ -4637,6 +4679,12 @@
   };
 
   const stop = () => {
+    _flushSyncLog();
+    if (_flushInterval) {
+      clearInterval(_flushInterval);
+      _flushInterval = null;
+    }
+    _startTime = 0;
     DELAY_FRAMES = 2;
     _rttSamples = [];
     _rttComplete = false;

@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.24.0",
+    "date": "2026-04-02",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "feedback system — FAB button, modal form, SQLite storage, admin API and UI"
+      },
+      {
+        "type": "feat",
+        "message": "guaranteed session log streaming — 30s Socket.IO flush, structured JSON, PostHog integration"
+      },
+      {
+        "type": "feat",
+        "message": "client events migrated from files to SQLite, admin page rewired to DB"
+      },
+      {
+        "type": "fix",
+        "message": "lazy-start spectator capture stream to avoid mobile host FPS degradation"
+      }
+    ]
+  },
+  {
     "version": "0.23.1",
     "date": "2026-04-01",
     "changes": [
@@ -16,274 +38,6 @@
       {
         "type": "feat",
         "message": "SoftFloat FPU determinism — bit-exact cross-platform lockstep"
-      }
-    ]
-  },
-  {
-    "version": "0.22.0",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "AI DMA determinism, RSP audio skip, reconnect-only resync"
-      },
-      {
-        "type": "feat",
-        "message": "v0.21.0 — Agent's Version (#2)"
-      }
-    ]
-  },
-  {
-    "version": "0.21.0",
-    "date": "2026-03-31",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "v0.21.0 — Agent's Version (#2)"
-      },
-      {
-        "type": "feat",
-        "message": "virtual gamepad overhaul + lockstep boot grace fix"
-      },
-      {
-        "type": "fix",
-        "message": "pass game_id in share URLs so OG cards show game background"
-      },
-      {
-        "type": "fix",
-        "message": "crash protection + frontend observability instrumentation"
-      },
-      {
-        "type": "feat",
-        "message": "add observability — client event beacon, health check, admin errors tab"
-      },
-      {
-        "type": "fix",
-        "message": "lobby landscape layout — scrollable with visible footer"
-      },
-      {
-        "type": "fix",
-        "message": "revert lobby to fixed footer, hide in landscape instead"
-      },
-      {
-        "type": "fix",
-        "message": "landscape layout overlap in lobby"
-      },
-      {
-        "type": "fix",
-        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
-      },
-      {
-        "type": "fix",
-        "message": "switch Playwright OG generation to async API"
-      },
-      {
-        "type": "fix",
-        "message": "safe storage fallback for privacy browsers (Brave mobile)"
-      },
-      {
-        "type": "fix",
-        "message": "exempt /static/og/ from COEP, add og:image dimensions"
-      },
-      {
-        "type": "feat",
-        "message": "custom error pages, HMAC upload tokens, CSP fix (#1)"
-      },
-      {
-        "type": "fix",
-        "message": "warm up Playwright browser on startup for fast first OG image"
-      },
-      {
-        "type": "feat",
-        "message": "finalize OG cards with Playwright HTML screenshots"
-      },
-      {
-        "type": "feat",
-        "message": "switch OG image generation from Pillow to Playwright HTML screenshots"
-      },
-      {
-        "type": "fix",
-        "message": "scale OG card fonts larger, fix version footer alignment"
-      },
-      {
-        "type": "feat",
-        "message": "scale up OG card text, arcade-style copy, spectate player matchups"
-      },
-      {
-        "type": "feat",
-        "message": "add homepage OG image and Playwright E2E tests"
-      },
-      {
-        "type": "feat",
-        "message": "wire up OG card routes and COEP exemption"
-      },
-      {
-        "type": "feat",
-        "message": "add OG image generation module"
-      },
-      {
-        "type": "feat",
-        "message": "add Pillow dependency and OG card assets"
-      }
-    ]
-  },
-  {
-    "version": "0.20.0",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "virtual gamepad overhaul + lockstep boot grace fix"
-      }
-    ]
-  },
-  {
-    "version": "0.19.2",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "pass game_id in share URLs so OG cards show game background"
-      }
-    ]
-  },
-  {
-    "version": "0.19.1",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "crash protection + frontend observability instrumentation"
-      }
-    ]
-  },
-  {
-    "version": "0.19.0",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "add observability — client event beacon, health check, admin errors tab"
-      }
-    ]
-  },
-  {
-    "version": "0.18.7",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "lobby landscape layout — scrollable with visible footer"
-      }
-    ]
-  },
-  {
-    "version": "0.18.6",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "revert lobby to fixed footer, hide in landscape instead"
-      }
-    ]
-  },
-  {
-    "version": "0.18.5",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "landscape layout overlap in lobby"
-      }
-    ]
-  },
-  {
-    "version": "0.18.4",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
-      }
-    ]
-  },
-  {
-    "version": "0.18.3",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "switch Playwright OG generation to async API"
-      }
-    ]
-  },
-  {
-    "version": "0.18.2",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "safe storage fallback for privacy browsers (Brave mobile)"
-      }
-    ]
-  },
-  {
-    "version": "0.18.1",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "exempt /static/og/ from COEP, add og:image dimensions"
-      }
-    ]
-  },
-  {
-    "version": "0.18.0",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "custom error pages, HMAC upload tokens, CSP fix (#1)"
-      }
-    ]
-  },
-  {
-    "version": "0.17.1",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "warm up Playwright browser on startup for fast first OG image"
-      }
-    ]
-  },
-  {
-    "version": "0.17.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "finalize OG cards with Playwright HTML screenshots"
-      }
-    ]
-  },
-  {
-    "version": "0.16.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "switch OG image generation from Pillow to Playwright HTML screenshots"
-      }
-    ]
-  },
-  {
-    "version": "0.15.1",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "scale OG card fonts larger, fix version footer alignment"
       }
     ]
   }

@@ -39,15 +39,17 @@ Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import secrets
+import uuid
 from dataclasses import dataclass, field
 
 import socketio
 
-from src import state
+from src import analytics, db, state
 from src.api.payloads import (
     ClaimSlotPayload,
     DeviceTypePayload,
@@ -63,7 +65,7 @@ from src.api.payloads import (
     StartGamePayload,
     validated,
 )
-from src.ratelimit import check, check_ip, cleanup, connection_allowed, register_sid, unregister_sid
+from src.ratelimit import check, check_ip, cleanup, connection_allowed, ip_hash_for_sid, register_sid, unregister_sid
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +145,7 @@ class Room:
     rom_declared: set[str] = field(default_factory=set)  # sids that declared ROM ownership (streaming)
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
+    match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -220,7 +223,7 @@ def _swap_sid(room: Room, persistent_id: str, old_sid: str, new_sid: str) -> Non
         room.device_types[new_sid] = room.device_types.pop(old_sid)
 
 
-async def _leave(sid: str) -> None:
+async def _leave(sid: str, reason: str = "disconnect") -> None:
     """Remove sid from its room; handle ownership transfer and cleanup."""
     entry = _sid_to_room.pop(sid, None)
     if entry is None:
@@ -234,6 +237,22 @@ async def _leave(sid: str) -> None:
     if is_spectator:
         room.spectators.pop(player_id, None)
     else:
+        rm_slot_for_log = None
+        for s, pid in room.slots.items():
+            if pid == player_id:
+                rm_slot_for_log = s
+                break
+        if room.match_id and rm_slot_for_log is not None:
+            await db.set_session_ended(room.match_id, rm_slot_for_log, reason)
+            analytics.capture_session_ended(
+                player_id,
+                {
+                    "room": session_id,
+                    "mode": room.mode,
+                    "ended_by": reason,
+                },
+            )
+
         room.players.pop(player_id, None)
         # Free the slot
         rm_slot = None
@@ -480,7 +499,7 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
 
 @sio.on("leave-room")
 async def leave_room(sid: str, data: dict | None = None) -> None:
-    await _leave(sid)
+    await _leave(sid, reason="leave")
 
 
 @sio.on("claim-slot")
@@ -569,6 +588,7 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
 
     room.status = "playing"
     room.mode = mode
+    room.match_id = str(uuid.uuid4())
     if payload.romHash and len(payload.romHash) >= 16:
         room.rom_hash = payload.romHash
     await sio.emit(
@@ -577,6 +597,7 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
             "mode": room.mode,
             "resyncEnabled": payload.resyncEnabled,
             "romHash": room.rom_hash,
+            "matchId": room.match_id,
         },
         room=session_id,
     )
@@ -594,6 +615,19 @@ async def end_game(sid: str, payload: EndGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
+
+    if room.match_id:
+        await db.set_session_ended(room.match_id, None, "game-end")
+        for pid in room.players:
+            analytics.capture_session_ended(
+                pid,
+                {
+                    "room": session_id,
+                    "mode": room.mode,
+                    "ended_by": "game-end",
+                },
+            )
+        room.match_id = None
 
     room.status = "lobby"
     # mode persists for rematch convenience
@@ -800,7 +834,6 @@ async def debug_logs(sid: str, data: dict) -> None:
     In DEBUG_MODE, also writes to local file."""
     if not check(sid, "debug-logs"):
         return
-    import json
 
     entry = _sid_to_room.get(sid)
     room_id = entry[0] if entry else "unknown"
@@ -831,6 +864,48 @@ async def debug_logs(sid: str, data: dict) -> None:
             for line in logs[:5000]:
                 f.write(str(line)[:500] + "\n")
         log.info("Debug logs also written to: %s", out)
+
+
+_SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data
+
+
+@sio.on("session-log")
+async def session_log_handler(sid: str, data: dict) -> None:
+    """Receive periodic sync log flush from client. Upserts into session_logs table."""
+    if not check(sid, "session-log"):
+        return
+    entry = _sid_to_room.get(sid)
+    if not entry:
+        return
+    session_id, player_id, is_spectator = entry
+    if is_spectator:
+        return
+
+    room = rooms.get(session_id)
+    if not room or not room.match_id:
+        return
+
+    match_id = data.get("matchId")
+    if not match_id or match_id != room.match_id:
+        return  # reject stale or spoofed flushes
+
+    log_data_str = json.dumps(data.get("entries", []))
+    if len(log_data_str) > _SESSION_LOG_MAX:
+        log_data_str = log_data_str[:_SESSION_LOG_MAX]
+
+    await db.upsert_session_log(
+        {
+            "match_id": match_id,
+            "room": session_id,
+            "slot": data.get("slot"),
+            "player_name": str(data.get("playerName", ""))[:32],
+            "mode": data.get("mode"),
+            "log_data": log_data_str,
+            "summary": json.dumps(data.get("summary", {})),
+            "context": json.dumps(data.get("context", {})),
+            "ip_hash": ip_hash_for_sid(sid),
+        }
+    )
 
 
 @sio.event

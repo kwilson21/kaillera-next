@@ -114,7 +114,6 @@
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
   let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
   KNState.uploadToken = _uploadToken; // initialize immediately so KNEvent works before upload-token socket event
-  const _sessionStart = Date.now();
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -147,28 +146,6 @@
     isSpectator = params.get('spectate') === '1';
   };
 
-  // ── Recover pending logs from previous session ───────────────────────
-  try {
-    const pending = _safeGet('localStorage', 'kn-pending-log');
-    if (pending) {
-      _safeRemove('localStorage', 'kn-pending-log');
-      const { room, slot, logs } = JSON.parse(pending);
-      if (logs) {
-        // NOTE: intentionally fire-and-forget .then() — best-effort log recovery at page load
-        fetch(
-          `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=recovery&token=${encodeURIComponent(_uploadToken)}`,
-          {
-            method: 'POST',
-            body: logs,
-            headers: { 'Content-Type': 'text/plain' },
-          },
-        )
-          .then(() => console.log('[play] recovered pending sync log'))
-          .catch(() => {});
-      }
-    }
-  } catch (_) {}
-
   // ── Global error handler ───────────────────────────────────────────────
 
   window.addEventListener('unhandledrejection', (e) => {
@@ -189,40 +166,6 @@
         }
       }
     }
-
-    // Capture sync logs before page unloads
-    if (!engine) return;
-    const logs = engine.exportSyncLog?.();
-    if (!logs) return;
-    const room = roomCode ?? 'unknown';
-    const slot = window._playerSlot ?? 'x';
-
-    // Store full log in localStorage for reliable recovery on next visit
-    try {
-      _safeSet('localStorage', 'kn-pending-log', JSON.stringify({ room, slot, logs, ts: Date.now() }));
-    } catch (_) {}
-
-    // Also fire sendBeacon with truncated log (browsers cap at ~64KB)
-    const MAX_BEACON = 60000;
-    let beaconLog = logs;
-    if (logs.length > MAX_BEACON) {
-      const cutIdx = logs.indexOf('\n', logs.length - MAX_BEACON);
-      beaconLog = logs.slice(cutIdx === -1 ? logs.length - MAX_BEACON : cutIdx + 1);
-    }
-    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&src=beacon&token=${encodeURIComponent(_uploadToken)}`;
-    try {
-      navigator.sendBeacon(url, new Blob([beaconLog], { type: 'text/plain' }));
-    } catch (_) {}
-
-    // Session summary event
-    KNEvent('session-end', 'session complete', {
-      duration: Math.round((Date.now() - _sessionStart) / 1000),
-      reconnects: KNState.sessionStats.reconnects,
-      desyncs: KNState.sessionStats.desyncs,
-      stalls: KNState.sessionStats.stalls,
-      mode: engine?.mode || 'unknown',
-      players: Object.keys(KNState.peers || {}).length + 1,
-    });
   });
 
   // ── Socket.IO ──────────────────────────────────────────────────────────
@@ -784,6 +727,7 @@
     );
     mode = data.mode || mode;
     _gameResyncEnabled = !!data.resyncEnabled;
+    KNState.matchId = data.matchId || null;
 
     gameRunning = true;
 
@@ -849,10 +793,9 @@
     gameRunning = false;
     _lateJoin = false;
     _pendingLateJoin = false;
+    KNState.matchId = null;
     showToast('The host has ended the game');
     if (engine) {
-      // Upload sync logs to server before stopping
-      uploadSyncLogs('game-ended');
       engine.stop();
       engine = null;
     }
@@ -2469,31 +2412,6 @@
     );
   };
 
-  // ── Sync log upload ──────────────────────────────────────────────────
-  const uploadSyncLogs = async (trigger) => {
-    const logs = engine?.exportSyncLog?.();
-    if (!logs) return;
-    const slot = window._playerSlot ?? 'x';
-    const room = roomCode ?? 'unknown';
-    const url = `/api/sync-logs?room=${encodeURIComponent(room)}&slot=${slot}&token=${encodeURIComponent(_uploadToken)}`;
-    try {
-      const res = await fetch(url, { method: 'POST', body: logs, headers: { 'Content-Type': 'text/plain' } });
-      if (res.ok) {
-        console.log(`[play] sync logs uploaded (${trigger}, ${Math.round(logs.length / 1024)}KB)`);
-        showToast?.('Logs uploaded');
-        try {
-          _safeRemove('localStorage', 'kn-pending-log');
-        } catch (_) {}
-      } else {
-        console.log(`[play] sync log upload failed: ${res.status}`);
-        showToast?.(`Log upload failed: ${res.status}`);
-      }
-    } catch (err) {
-      console.log('[play] sync log upload error:', err);
-      showToast?.('Log upload failed');
-    }
-  };
-
   const endGame = () => {
     socket.emit('end-game', {}, (err) => {
       if (err) {
@@ -2516,7 +2434,6 @@
     }
     socket.emit('leave-room', {});
     if (engine) {
-      uploadSyncLogs('leave');
       engine.stop();
       engine = null;
     }
@@ -3978,12 +3895,12 @@
     const igCancelBtn = document.getElementById('ingame-remap-cancel');
     if (igCancelBtn) igCancelBtn.addEventListener('click', cancelWizard);
 
-    // Sync log upload
+    // Sync log upload (placeholder — now handled by continuous Socket.IO streaming)
     const toolbarLogs = document.getElementById('toolbar-logs');
     if (toolbarLogs) {
       toolbarLogs.addEventListener('click', () => {
         closeMoreDropdown();
-        uploadSyncLogs('manual');
+        showToast('Logs are streamed continuously to the server');
       });
     }
 
