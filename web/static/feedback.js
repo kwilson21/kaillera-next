@@ -83,6 +83,19 @@
       }
       .kn-feedback-fab:hover .kn-feedback-fab-tooltip { opacity: 1; }
 
+      @keyframes kn-feedback-pulse {
+        0%, 100% { box-shadow: 0 4px 16px rgba(233,69,96,0.4); }
+        50% { box-shadow: 0 0 24px rgba(233,69,96,0.8); }
+      }
+      .kn-feedback-fab.intro { animation: kn-feedback-pulse 1.5s ease-in-out 3; }
+      .kn-feedback-callout {
+        position: absolute; bottom: 56px; right: 0;
+        background: #0f0f23; border: 1px solid #e94560; border-radius: 8px;
+        padding: 8px 12px; color: #eee; font-size: 12px; white-space: nowrap;
+        pointer-events: none; opacity: 0; transition: opacity 0.3s;
+      }
+      .kn-feedback-callout.show { opacity: 1; }
+
       .kn-feedback-backdrop {
         position: fixed; inset: 0; z-index: 100000;
         background: rgba(0,0,0,0.6); display: flex;
@@ -391,6 +404,29 @@
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && _modal && !_modal.hidden) _closeModal();
     });
+
+    // First-visit callout — pulse + tooltip, dismissed on click or after 6s
+    try {
+      if (!localStorage.getItem('kn-feedback-seen') && _fab) {
+        const callout = document.createElement('span');
+        callout.className = 'kn-feedback-callout';
+        callout.textContent = 'Got feedback? Let us know!';
+        _fab.appendChild(callout);
+        _fab.classList.add('intro');
+        requestAnimationFrame(() => callout.classList.add('show'));
+
+        const dismiss = () => {
+          callout.classList.remove('show');
+          _fab.classList.remove('intro');
+          try {
+            localStorage.setItem('kn-feedback-seen', '1');
+          } catch (_) {}
+          setTimeout(() => callout.remove(), 300);
+        };
+        setTimeout(dismiss, 6000);
+        _fab.addEventListener('click', dismiss, { once: true });
+      }
+    } catch (_) {}
   };
 
   if (document.readyState === 'loading') {
