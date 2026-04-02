@@ -66,12 +66,22 @@ from src.api.payloads import (
     StartGamePayload,
     validated,
 )
-from src.ratelimit import check, check_ip, cleanup, connection_allowed, ip_hash_for_sid, register_sid, unregister_sid
+from src.ratelimit import (
+    check,
+    check_ip,
+    cleanup,
+    connection_allowed,
+    extract_ip,
+    ip_hash_for_sid,
+    register_sid,
+    unregister_sid,
+)
 
 log = logging.getLogger(__name__)
 
 _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
+_ANGLE_RE = re.compile(r"[<>]")
 _VALID_MODES = {"lockstep", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
@@ -107,7 +117,7 @@ def verify_reconnect_token(persistent_id: str, token: str) -> bool:
 
 def _sanitize_str(value: str, max_len: int) -> str:
     """Strip angle brackets and truncate."""
-    return re.sub(r"[<>]", "", str(value))[:max_len]
+    return _ANGLE_RE.sub("", str(value))[:max_len]
 
 
 def configure_cors(origin: str | list[str]) -> None:
@@ -258,13 +268,13 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     if is_spectator:
         room.spectators.pop(player_id, None)
     else:
-        rm_slot_for_log = None
+        rm_slot = None
         for s, pid in room.slots.items():
             if pid == player_id:
-                rm_slot_for_log = s
+                rm_slot = s
                 break
-        if room.match_id and rm_slot_for_log is not None:
-            await db.set_session_ended(room.match_id, rm_slot_for_log, reason)
+        if room.match_id and rm_slot is not None:
+            await db.set_session_ended(room.match_id, rm_slot, reason)
             analytics.capture_session_ended(
                 player_id,
                 {
@@ -275,12 +285,6 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
             )
 
         room.players.pop(player_id, None)
-        # Free the slot
-        rm_slot = None
-        for s, pid in room.slots.items():
-            if pid == player_id:
-                rm_slot = s
-                break
         if rm_slot is not None:
             del room.slots[rm_slot]
 
@@ -340,13 +344,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
-    cf_ip = environ.get("HTTP_CF_CONNECTING_IP", "")
-    forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
-    ip = (
-        cf_ip.strip()
-        if cf_ip
-        else (forwarded.split(",")[0].strip() if forwarded else environ.get("REMOTE_ADDR", "unknown"))
-    )
+    ip = extract_ip(environ)
     if not connection_allowed(ip):
         raise socketio.exceptions.ConnectionRefusedError("Too many connections")
     if not check_ip(ip, "connect"):
@@ -585,15 +583,18 @@ async def set_name(sid: str, payload: SetNamePayload) -> str | None:
     if result is None:
         return "Not in a room"
     session_id, room = result
-    # Update name in players or spectators
+    # Update name in players or spectators (SID is in one collection only)
+    found = False
     for info in room.players.values():
         if info["socketId"] == sid:
             info["playerName"] = name
+            found = True
             break
-    for info in room.spectators.values():
-        if info["socketId"] == sid:
-            info["playerName"] = name
-            break
+    if not found:
+        for info in room.spectators.values():
+            if info["socketId"] == sid:
+                info["playerName"] = name
+                break
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 

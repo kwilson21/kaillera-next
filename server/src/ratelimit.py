@@ -65,6 +65,31 @@ def ip_hash_for_sid(sid: str) -> str:
     return ip_hash(ip)
 
 
+def extract_ip(source: object) -> str:
+    """Extract client IP from a FastAPI Request or ASGI environ dict.
+
+    Checks Cloudflare, then X-Forwarded-For, then falls back to the
+    direct connection address.
+    """
+    if isinstance(source, dict):
+        # ASGI environ dict (Socket.IO connect handler)
+        cf_ip = source.get("HTTP_CF_CONNECTING_IP", "")
+        if cf_ip:
+            return cf_ip.strip()
+        forwarded = source.get("HTTP_X_FORWARDED_FOR", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return source.get("REMOTE_ADDR", "unknown")
+    # FastAPI Request object
+    cf_ip = source.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    forwarded = source.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return source.client.host if source.client else "unknown"
+
+
 MAX_CONNECTIONS_PER_IP = 20
 _MAX_TRACKED_IPS = 10_000
 
@@ -87,6 +112,8 @@ def _check_key(key: str, event: str) -> bool:
     limit = _LIMITS.get(event)
     if not limit:
         return True
+    if key not in _counters and len(_counters) >= _MAX_TRACKED_IPS:
+        return False
     max_count, window = limit
     now = time.monotonic()
     timestamps = _counters[key][event]

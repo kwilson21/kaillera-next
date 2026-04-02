@@ -45,7 +45,7 @@
  * ── Video Encoding Optimization ───────────────────────────────────────────
  *
  *   SDP is munged before offer/answer to optimize for low-latency gaming:
- *     - Codec preference: VP9 → H264 → VP8 (reorders m-line payload types)
+ *     - Codec preference: H264 > VP9 > VP8 — H264 preferred for mobile HW decode (reorders m-line payload types)
  *     - Bitrate cap: b=AS:3000 added after video c= line
  *     - RTCRtpSender parameters: maxBitrate=2.5Mbps, maxFramerate=60,
  *       degradationPreference='maintain-framerate' (drop resolution, not FPS)
@@ -87,7 +87,7 @@
 (function () {
   'use strict';
 
-  const ICE_SERVERS = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+  const _getIceServers = () => window._iceServers || KNState.DEFAULT_ICE_SERVERS;
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -109,27 +109,14 @@
 
   // -- Sync log ring buffer (matches lockstep — uploaded on game end) --------
   const SYNC_LOG_MAX = 5000;
-  const _syncLogRing = new Array(SYNC_LOG_MAX);
-  let _syncLogHead = 0;
-  let _syncLogCount = 0;
-  let _syncLogSeq = 0;
+  const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
 
   const _syncLog = (msg) => {
-    _syncLogRing[_syncLogHead] = { seq: _syncLogSeq++, t: performance.now(), f: 0, msg };
-    _syncLogHead = (_syncLogHead + 1) % SYNC_LOG_MAX;
-    if (_syncLogCount < SYNC_LOG_MAX) _syncLogCount++;
+    _syncLogRing.push({ t: performance.now(), f: 0, msg });
     console.log(`[streaming] ${msg}`);
   };
 
-  const exportSyncLog = () => {
-    const lines = [];
-    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
-    for (let i = 0; i < _syncLogCount; i++) {
-      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
-      lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
-    }
-    return lines.join('\n');
-  };
+  const exportSyncLog = () => _syncLogRing.export();
 
   // Expose for Playwright
   window._playerSlot = _playerSlot;
@@ -190,7 +177,7 @@
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peerGuard = (p) => _peers[remoteSid] === p;
-    const peer = KNShared.createBasePeer(ICE_SERVERS, remoteSid, socket, peerGuard);
+    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, socket, peerGuard);
     peer.slot = remoteSlot;
 
     peer.pc.onconnectionstatechange = () => {
@@ -1078,6 +1065,7 @@
     _knownPlayers = {};
     _prevSlotInputs = {};
     _p1KeyMap = null;
+    KNShared.teardownKeyTracking();
 
     // Remove socket listeners (no data-message — streaming doesn't use it)
     if (socket) {
@@ -1094,9 +1082,7 @@
     }
 
     // Reset sync log for next game
-    _syncLogHead = 0;
-    _syncLogCount = 0;
-    _syncLogSeq = 0;
+    _syncLogRing.clear();
 
     _config = null;
   };

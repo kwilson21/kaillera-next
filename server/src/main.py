@@ -55,6 +55,9 @@ async def lifespan(_app):
     log_task.cancel()
     if rooms:
         log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+    from src.api.og import close_browser
+
+    await close_browser()
     await db.close_db()
     await state.close()
 

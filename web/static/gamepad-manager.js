@@ -73,23 +73,31 @@
       // Per-game override first
       const gk = _gameKey(key);
       if (gk) {
-        const gv = parse(KNState.safeGet("localStorage", gk));
+        const gv = parse(KNState.safeGet('localStorage', gk));
         if (validate(gv)) return gv;
       }
       // Global setting
-      const v = parse(KNState.safeGet("localStorage", key));
+      const v = parse(KNState.safeGet('localStorage', key));
       if (validate(v)) return v;
     } catch (_) {}
     return fallback;
   }
 
+  let _cachedRange = null;
+  let _cachedRangeTime = 0;
+  const _RANGE_CACHE_MS = 1000;
+
   function _getRange() {
-    return _getSetting(
+    const now = performance.now();
+    if (_cachedRange !== null && now - _cachedRangeTime < _RANGE_CACHE_MS) return _cachedRange;
+    _cachedRange = _getSetting(
       'kn-analog-range',
       (s) => parseInt(s, 10),
       (v) => v >= 0 && v <= 100,
       _DEFAULT_RANGE,
     );
+    _cachedRangeTime = now;
+    return _cachedRange;
   }
 
   function _getDeadzone(key) {
@@ -131,7 +139,7 @@
   function resolveProfile(id) {
     // Check localStorage for custom profile
     try {
-      const saved = KNState.safeGet("localStorage", `gamepad-profile:${id}`);
+      const saved = KNState.safeGet('localStorage', `gamepad-profile:${id}`);
       if (saved) {
         const profile = JSON.parse(saved);
         profile.name = 'Custom';
@@ -304,7 +312,7 @@
 
     saveGamepadProfile: (gamepadId, profile) => {
       try {
-        KNState.safeSet("localStorage", `gamepad-profile:${gamepadId}`, JSON.stringify(profile));
+        KNState.safeSet('localStorage', `gamepad-profile:${gamepadId}`, JSON.stringify(profile));
       } catch (_) {}
       // Re-resolve profile for this gamepad
       for (const entry of Object.values(_detected)) {
@@ -319,7 +327,7 @@
 
     clearGamepadProfile: (gamepadId) => {
       try {
-        KNState.safeRemove("localStorage", `gamepad-profile:${gamepadId}`);
+        KNState.safeRemove('localStorage', `gamepad-profile:${gamepadId}`);
       } catch (_) {}
       for (const entry of Object.values(_detected)) {
         if (entry.id === gamepadId) {
@@ -337,7 +345,7 @@
 
     hasCustomProfile: (gamepadId) => {
       try {
-        return KNState.safeGet("localStorage", `gamepad-profile:${gamepadId}`) !== null;
+        return KNState.safeGet('localStorage', `gamepad-profile:${gamepadId}`) !== null;
       } catch (_) {
         return false;
       }

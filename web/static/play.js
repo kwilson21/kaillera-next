@@ -99,7 +99,6 @@
   let _romTransferDCs = {}; // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   const ROM_MAX_SIZE = 128 * 1024 * 1024; // 128MB
-  const ROM_TRANSFER_ABSOLUTE_MAX = 134_217_728; // 128 MB
   const _isMobile =
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
     (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent)) ||
@@ -301,7 +300,7 @@
       try {
         _safeSet('localStorage', 'kn-upload-token', _uploadToken);
       } catch (_) {}
-      fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}`)
+      fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
         .then((r) => r.json())
         .then((s) => {
           window._iceServers = s;
@@ -496,16 +495,7 @@
             ) {
               // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
               console.log('[play] join: cached ROM mismatch — clearing');
-              if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
-              _romBlob = null;
-              _romBlobUrl = null;
-              _romHash = null;
-              KNState.romHash = null;
-              window.EJS_gameUrl = undefined;
-              const romDrop = document.getElementById('rom-drop');
-              const statusEl = document.getElementById('rom-status');
-              if (romDrop) romDrop.classList.remove('loaded');
-              if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+              clearLoadedRom();
             }
 
             // Mid-game join handling
@@ -622,17 +612,7 @@
           _romHash?.substring(0, 16),
           ')',
         );
-        if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
-        _romBlob = null;
-        _romBlobUrl = null;
-        _romHash = null;
-        KNState.romHash = null;
-        window.EJS_gameUrl = undefined;
-        // Reset drop zone UI
-        const romDrop = document.getElementById('rom-drop');
-        const statusEl = document.getElementById('rom-status');
-        if (romDrop) romDrop.classList.remove('loaded');
-        if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+        clearLoadedRom();
         // Tell server we no longer have a ROM
         if (socket?.connected) socket.emit('rom-ready', { ready: false });
       } else if ((_romBlob || _romBlobUrl) && _romHash && !romHashMismatch(_hostRomHash, _romHash)) {
@@ -1173,7 +1153,7 @@
 
       if (data.offer && !isHost) {
         // Guest: received offer from host for ROM preload
-        const ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+        const ICE = window._iceServers || KNState.DEFAULT_ICE_SERVERS;
         if (_preGamePC) {
           try {
             _preGamePC.close();
@@ -1227,7 +1207,7 @@
 
     registerRomSignalHandler();
 
-    const ICE = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    const ICE = window._iceServers || KNState.DEFAULT_ICE_SERVERS;
     const pc = new RTCPeerConnection({ iceServers: ICE });
     _preGamePCs[peerSid] = pc;
 
@@ -1531,7 +1511,7 @@
       } else if (e.data instanceof ArrayBuffer) {
         _romTransferChunks.push(new Uint8Array(e.data));
         _romTransferBytesReceived += e.data.byteLength;
-        if (_romTransferBytesReceived > ROM_TRANSFER_ABSOLUTE_MAX) {
+        if (_romTransferBytesReceived > ROM_MAX_SIZE) {
           showToast('ROM transfer too large — aborting');
           channel.close();
           cancelRomTransfer();
@@ -2135,6 +2115,19 @@
   };
 
   // Compare ROM hashes: returns true if they definitely mismatch.
+  const clearLoadedRom = () => {
+    if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+    _romBlob = null;
+    _romBlobUrl = null;
+    _romHash = null;
+    KNState.romHash = null;
+    window.EJS_gameUrl = undefined;
+    const romDrop = document.getElementById('rom-drop');
+    const statusEl = document.getElementById('rom-status');
+    if (romDrop) romDrop.classList.remove('loaded');
+    if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+  };
+
   // Hashes are prefixed with 'S' (SHA-256) or 'F' (FNV-1a).
   // If algorithms differ (host on localhost, guest on LAN HTTP), skip — can't compare.
   const romHashMismatch = (a, b) => {
@@ -3978,7 +3971,8 @@
     }
   });
 
-  // E2E test hook — simulate ROM-loaded state without drag-and-drop
+  // E2E test hooks — getter returns live socket value (socket is null until async init)
+  Object.defineProperty(window, '__test_socket', { get: () => socket, configurable: true });
   window.__test_setRomLoaded = () => {
     _romBlob = new Uint8Array([0]);
     _romBlobUrl = 'blob:test';

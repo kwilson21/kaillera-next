@@ -58,7 +58,8 @@ async def close_db() -> None:
 
 async def insert_feedback(data: dict) -> int:
     """Insert a feedback row and return the new row ID."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     cursor = await _db.execute(
         """INSERT INTO feedback (category, message, email, page, context, ip_hash)
            VALUES (?, ?, ?, ?, ?, ?)""",
@@ -77,7 +78,8 @@ async def insert_feedback(data: dict) -> int:
 
 async def upsert_session_log(data: dict) -> int:
     """Insert or update a session log by (match_id, slot). Returns row ID."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     cursor = await _db.execute(
         """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -102,7 +104,8 @@ async def upsert_session_log(data: dict) -> int:
 
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:
     """Mark how a session ended."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     if slot is not None:
         await _db.execute(
             "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND slot=?",
@@ -119,7 +122,8 @@ async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> N
 
 async def insert_client_event(data: dict) -> int:
     """Insert a client event and return row ID."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     cursor = await _db.execute(
         """INSERT INTO client_events (type, message, meta, room, slot, ip_hash, user_agent)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -139,14 +143,16 @@ async def insert_client_event(data: dict) -> int:
 
 async def execute_write(sql: str, params: tuple) -> None:
     """Run a write query (DELETE, UPDATE) and commit."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     await _db.execute(sql, params)
     await _db.commit()
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
     """Run a read query and return results as a list of dicts."""
-    assert _db is not None, "Database not initialized — call init_db() first"
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
     cursor = await _db.execute(sql, params)
     rows = await cursor.fetchall()
     if not rows:

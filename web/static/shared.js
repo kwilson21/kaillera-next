@@ -58,6 +58,8 @@
 
   let _listenersAdded = false;
   let _activeHeldKeys = null;
+  let _keydownHandler = null;
+  let _keyupHandler = null;
 
   function setupKeyTracking(keymap, heldKeys) {
     _activeHeldKeys = heldKeys;
@@ -94,24 +96,32 @@
     }
 
     if (!_listenersAdded) {
-      document.addEventListener(
-        'keydown',
-        (e) => {
-          if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
-        },
-        true,
-      );
-      document.addEventListener(
-        'keyup',
-        (e) => {
-          if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
-        },
-        true,
-      );
+      _keydownHandler = (e) => {
+        if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
+      };
+      _keyupHandler = (e) => {
+        if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
+      };
+      document.addEventListener('keydown', _keydownHandler, true);
+      document.addEventListener('keyup', _keyupHandler, true);
       _listenersAdded = true;
     }
 
     return resolved;
+  }
+
+  function teardownKeyTracking() {
+    if (_listenersAdded) {
+      if (_keydownHandler) document.removeEventListener('keydown', _keydownHandler, true);
+      if (_keyupHandler) document.removeEventListener('keyup', _keyupHandler, true);
+      _keydownHandler = null;
+      _keyupHandler = null;
+      _listenersAdded = false;
+    }
+    if (_activeHeldKeys) {
+      _activeHeldKeys.clear();
+      _activeHeldKeys = null;
+    }
   }
 
   let _bootPromise = null; // deduplication: only one poll loop at a time
@@ -577,10 +587,50 @@
     });
     try {
       navigator.sendBeacon(
-        `/api/client-event?token=${KNState.uploadToken}`,
+        `/api/client-event?token=${KNState.uploadToken}&room=${encodeURIComponent(KNState.room || '')}`,
         new Blob([body], { type: 'application/json' }),
       );
     } catch (_) {}
+  };
+
+  const createSyncLogRing = (maxSize) => {
+    const ring = new Array(maxSize);
+    let head = 0;
+    let count = 0;
+    let seq = 0;
+    return {
+      push: (entry) => {
+        ring[head] = { seq: seq++, ...entry };
+        head = (head + 1) % maxSize;
+        if (count < maxSize) count++;
+      },
+      export: () => {
+        const lines = [];
+        const start = count < maxSize ? 0 : head;
+        for (let i = 0; i < count; i++) {
+          const e = ring[(start + i) % maxSize];
+          lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
+        }
+        return lines.join('\n');
+      },
+      getStructuredEntries: () => {
+        const entries = [];
+        const start = count < maxSize ? 0 : head;
+        for (let i = 0; i < count; i++) {
+          const e = ring[(start + i) % maxSize];
+          entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
+        }
+        return entries;
+      },
+      clear: () => {
+        head = 0;
+        count = 0;
+        seq = 0;
+      },
+      get length() {
+        return count;
+      },
+    };
   };
 
   window.KNShared = {
@@ -595,6 +645,7 @@
     createAndSendAnswer: createAndSendAnswer,
     resetPeerConnection: resetPeerConnection,
     setupKeyTracking: setupKeyTracking,
+    teardownKeyTracking: teardownKeyTracking,
     triggerEmulatorStart: triggerEmulatorStart,
     waitForEmulator: waitForEmulator,
     resetBootState: resetBootState,
@@ -606,5 +657,6 @@
     inputEqual,
     encodeInput,
     decodeInput,
+    createSyncLogRing,
   };
 })();

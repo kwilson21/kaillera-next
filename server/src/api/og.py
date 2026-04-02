@@ -68,6 +68,18 @@ async def _get_browser():
     return _browser
 
 
+async def close_browser() -> None:
+    """Close the Playwright browser and stop the Playwright instance."""
+    global _browser, _playwright
+    if _browser is not None:
+        await _browser.close()
+        _browser = None
+        log.info("OG image renderer: Playwright browser closed")
+    if _playwright is not None:
+        await _playwright.stop()
+        _playwright = None
+
+
 def _html_escape(s: str) -> str:
     """Escape HTML special characters."""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")

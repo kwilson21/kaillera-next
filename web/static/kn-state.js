@@ -26,6 +26,9 @@
     sessionStats: { reconnects: 0, desyncs: 0, stalls: 0 }, // play.js, lockstep.js → pagehide summary
     matchId: null, // signaling game-started → lockstep flush interval
 
+    // ── Constants ──
+    DEFAULT_ICE_SERVERS: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+
     // ── Safe storage helpers ──
     safeGet,
     safeSet,

@@ -21,6 +21,7 @@
   let _buttonTouches = {};
   let _stickEl = null;
   let _stickZone = null;
+  let _cachedBtns = null;
 
   const STICK_RADIUS = 50;
   const MAX_AXIS = 32767;
@@ -412,6 +413,8 @@
     _overlay.addEventListener('touchend', onTouchEnd, { passive: false });
     _overlay.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
+    _cachedBtns = _overlay.querySelectorAll('.vgp-btn');
+
     document.body.appendChild(_overlay);
   };
 
@@ -432,7 +435,8 @@
   };
 
   const findBtnAt = (x, y) => {
-    for (const btn of _overlay.querySelectorAll('.vgp-btn')) {
+    const btns = _cachedBtns || _overlay?.querySelectorAll('.vgp-btn') || [];
+    for (const btn of btns) {
       if (hitTestBtn(btn, x, y)) return btn;
     }
     return null;
@@ -575,6 +579,7 @@
         _overlay.parentNode?.removeChild(_overlay);
         _overlay = null;
       }
+      _cachedBtns = null;
       clearState();
       _stickTouch = null;
       _stickCenter = null;

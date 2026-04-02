@@ -37,7 +37,7 @@ import re
 import subprocess as _sp
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 
 from src import db, state
@@ -52,7 +52,7 @@ from src.api.og import (
 )
 from src.api.payloads import FeedbackPayload
 from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
-from src.ratelimit import check_ip, ip_hash
+from src.ratelimit import check_ip, extract_ip, ip_hash
 
 log = logging.getLogger(__name__)
 
@@ -93,13 +93,7 @@ async def cleanup_old_data() -> None:
 
 def _client_ip(request: Request) -> str:
     """Extract the real client IP, checking Cloudflare headers first."""
-    cf_ip = request.headers.get("cf-connecting-ip")
-    if cf_ip:
-        return cf_ip.strip()
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return extract_ip(request)
 
 
 # In-memory save state cache: rom_hash -> raw state bytes.
@@ -364,24 +358,28 @@ def create_app(lifespan=None) -> FastAPI:
 
     log.info("Cache bust version: %s", version)
 
+    # Pre-compute allowed hosts set once at app creation time
+    _raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
+    _allowed_hosts: set[str] | None = None
+    if _raw_origin and _raw_origin != "*":
+        _allowed_hosts = set()
+        for _origin in _raw_origin.split(","):
+            _origin = _origin.strip().rstrip("/")
+            if "://" in _origin:
+                _origin = _origin.split("://", 1)[1]
+            _allowed_hosts.add(_origin)
+            if ":" in _origin:
+                _allowed_hosts.add(_origin.split(":")[0])
+        _allowed_hosts.add("localhost")
+
     def _validated_host(request: Request) -> str:
         """Return the Host header if it matches ALLOWED_ORIGIN, else a safe fallback."""
         host = request.headers.get("host", "localhost")
-        raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
-        if not raw_origin or raw_origin == "*":
+        if _allowed_hosts is None:
             return host
-        allowed_hosts = set()
-        for origin in raw_origin.split(","):
-            origin = origin.strip().rstrip("/")
-            if "://" in origin:
-                origin = origin.split("://", 1)[1]
-            allowed_hosts.add(origin)
-            if ":" in origin:
-                allowed_hosts.add(origin.split(":")[0])
-        allowed_hosts.add("localhost")
-        if host in allowed_hosts:
+        if host in _allowed_hosts:
             return host
-        return next(iter(allowed_hosts))
+        return next(iter(_allowed_hosts))
 
     @app.get("/favicon.ico", include_in_schema=False)
     @app.get("/apple-touch-icon.png", include_in_schema=False)
@@ -408,7 +406,8 @@ def create_app(lifespan=None) -> FastAPI:
         if not custom:
             return default_stun
         token = request.query_params.get("token", "")
-        if not token or not any(verify_upload_token(sid, token) for sid in rooms):
+        room_id = request.query_params.get("room", "")
+        if not token or not room_id or room_id not in rooms or not verify_upload_token(room_id, token):
             return default_stun
         try:
             return json.loads(custom)
@@ -505,15 +504,27 @@ def create_app(lifespan=None) -> FastAPI:
         log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
         return {"status": "cached", "size": len(body)}
 
-    # ── Client event beacon ─────────────────────────────────────────────
+    # ── Auth dependencies ─────────────────────────────────────────────
 
-    @app.post("/api/client-event")
-    async def client_event(request: Request) -> dict:
+    def _require_upload_token(request: Request) -> None:
+        """Dependency: rate limit + verify upload token against room query param."""
         if not check_ip(_client_ip(request), "client-event"):
             raise HTTPException(status_code=429, detail="Rate limited")
         token = request.query_params.get("token", "")
-        if not token or not any(verify_upload_token(sid, token) for sid in rooms):
+        room_id = request.query_params.get("room", "")
+        if not token or not room_id or room_id not in rooms or not verify_upload_token(room_id, token):
             raise HTTPException(status_code=403, detail="Invalid token")
+
+    def _require_admin(request: Request) -> None:
+        """Dependency: rate limit + admin key verification."""
+        if not check_ip(_client_ip(request), "admin"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        _admin_auth(request)
+
+    # ── Client event beacon ─────────────────────────────────────────────
+
+    @app.post("/api/client-event")
+    async def client_event(request: Request, _auth: None = Depends(_require_upload_token)) -> dict:
         body = await request.body()
         if len(body) > _CLIENT_EVENT_MAX_SIZE:
             raise HTTPException(status_code=413, detail="Event too large")
@@ -600,10 +611,7 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid admin key")
 
     @app.get("/admin/api/stats")
-    async def admin_stats(request: Request) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_stats(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         session_log_rows = await db.query("SELECT COUNT(*) as cnt FROM session_logs", ())
         client_event_rows = await db.query("SELECT COUNT(*) as cnt FROM client_events", ())
         feedback_rows = await db.query("SELECT COUNT(*) as cnt FROM feedback", ())
@@ -621,10 +629,7 @@ def create_app(lifespan=None) -> FastAPI:
     # ── Admin session logs API ───────────────────────────────────────────
 
     @app.get("/admin/api/session-logs")
-    async def admin_session_logs_list(request: Request) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_session_logs_list(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         room = request.query_params.get("room")
         match_id = request.query_params.get("match_id")
         mode = request.query_params.get("mode")
@@ -663,10 +668,7 @@ def create_app(lifespan=None) -> FastAPI:
         return {"total": total, "entries": entries}
 
     @app.get("/admin/api/session-logs/{log_id}")
-    async def admin_session_log_detail(request: Request, log_id: int) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
@@ -680,10 +682,7 @@ def create_app(lifespan=None) -> FastAPI:
     # ── Admin client events API ──────────────────────────────────────────
 
     @app.get("/admin/api/client-events")
-    async def admin_client_events_list(request: Request) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_client_events_list(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         evt_type = request.query_params.get("type")
         room = request.query_params.get("room")
         days = int(request.query_params.get("days", "30"))
@@ -715,10 +714,7 @@ def create_app(lifespan=None) -> FastAPI:
         return {"total": total, "entries": entries}
 
     @app.get("/admin/api/client-events/{event_id}")
-    async def admin_client_event_detail(request: Request, event_id: int) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_client_event_detail(request: Request, event_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query("SELECT * FROM client_events WHERE id = ?", (event_id,))
         if not rows:
             raise HTTPException(status_code=404, detail="Client event not found")
@@ -731,10 +727,7 @@ def create_app(lifespan=None) -> FastAPI:
     # ── Admin feedback API ───────────────────────────────────────────────
 
     @app.get("/admin/api/feedback")
-    async def admin_feedback_list(request: Request) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_feedback_list(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         category = request.query_params.get("category")
         days = int(request.query_params.get("days", "30"))
         limit = min(int(request.query_params.get("limit", "50")), 200)
@@ -765,10 +758,7 @@ def create_app(lifespan=None) -> FastAPI:
         return {"total": total, "entries": entries}
 
     @app.get("/admin/api/feedback/{feedback_id}")
-    async def admin_feedback_single(request: Request, feedback_id: int) -> dict:
-        if not check_ip(_client_ip(request), "admin"):
-            raise HTTPException(status_code=429, detail="Rate limited")
-        _admin_auth(request)
+    async def admin_feedback_single(request: Request, feedback_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query("SELECT * FROM feedback WHERE id = ?", (feedback_id,))
         if not rows:
             raise HTTPException(status_code=404, detail="Feedback not found")

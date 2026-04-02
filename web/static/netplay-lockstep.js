@@ -202,15 +202,17 @@
 (function () {
   'use strict';
 
-  const ICE_SERVERS = window._iceServers || [{ urls: 'stun:stun.cloudflare.com:3478' }];
+  const _getIceServers = () => window._iceServers || KNState.DEFAULT_ICE_SERVERS;
 
   // ── Debug log capture ─────────────────────────────────────────────────
   // Intercepts all console.log('[lockstep] ...') calls for remote debugging.
   // Unbounded array — game sessions are finite. Pushed to server on demand.
   const _debugLog = [];
   const _debugLogStart = Date.now();
+  let _originalConsoleLog = null;
   (function () {
-    const _origLog = console.log;
+    _originalConsoleLog = console.log;
+    const _origLog = _originalConsoleLog;
     console.log = function () {
       _origLog.apply(console, arguments);
       // Capture [lockstep] and [play] prefixed messages
@@ -340,6 +342,11 @@
   let _diagLastTickTime = 0; // wall-clock time of previous tick() call
   const _diagEventLog = []; // buffered async events [{t, type, detail}]
   let _diagHookInstalled = false; // true once async event hooks are set up
+  let _diagVisHandler = null;
+  let _diagFocusHandler = null;
+  let _diagBlurHandler = null;
+  let _diagTouchHandlers = []; // [{el, evName, handler}]
+  let _diagObserver = null;
   const DIAG_HASH_INTERVAL = 300; // frames between RDRAM hash+dump logs (~once per 5s)
   const DIAG_INPUT_INTERVAL = 300; // frames between input read logs
   const DIAG_TIME_INTERVAL = 60; // frames between timing logs
@@ -432,38 +439,17 @@
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
   const SYNC_LOG_MAX = 10000;
-  const _syncLogRing = new Array(SYNC_LOG_MAX);
-  let _syncLogHead = 0;
-  let _syncLogCount = 0;
-  let _syncLogSeq = 0;
+  const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
   let _startTime = 0;
 
   const _syncLog = (msg) => {
-    _syncLogRing[_syncLogHead] = { seq: _syncLogSeq++, t: performance.now(), f: _frameNum, msg };
-    _syncLogHead = (_syncLogHead + 1) % SYNC_LOG_MAX;
-    if (_syncLogCount < SYNC_LOG_MAX) _syncLogCount++;
+    _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     console.log(`[lockstep] ${msg}`);
   };
 
-  const exportSyncLog = () => {
-    const lines = [];
-    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
-    for (let i = 0; i < _syncLogCount; i++) {
-      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
-      lines.push(`${e.seq}\t${e.t.toFixed(1)}\tf=${e.f}\t${e.msg}`);
-    }
-    return lines.join('\n');
-  };
+  const exportSyncLog = () => _syncLogRing.export();
 
-  const _getStructuredEntries = () => {
-    const entries = [];
-    const start = _syncLogCount < SYNC_LOG_MAX ? 0 : _syncLogHead;
-    for (let i = 0; i < _syncLogCount; i++) {
-      const e = _syncLogRing[(start + i) % SYNC_LOG_MAX];
-      entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
-    }
-    return entries;
-  };
+  const _getStructuredEntries = () => _syncLogRing.getStructuredEntries();
 
   let _flushInterval = null;
 
@@ -718,42 +704,43 @@
     _diagHookInstalled = true;
 
     // Visibility change (tab hidden/shown)
-    document.addEventListener('visibilitychange', () => {
+    _diagVisHandler = () => {
       _diagEventLog.push({
         t: performance.now(),
         type: 'visibility',
         detail: document.visibilityState,
       });
-    });
+    };
+    document.addEventListener('visibilitychange', _diagVisHandler);
 
     // Window focus/blur
-    window.addEventListener('focus', () => {
+    _diagFocusHandler = () => {
       _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'gained' });
-    });
-    window.addEventListener('blur', () => {
+    };
+    _diagBlurHandler = () => {
       _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'lost' });
-    });
+    };
+    window.addEventListener('focus', _diagFocusHandler);
+    window.addEventListener('blur', _diagBlurHandler);
 
     // Touch events on emulator canvas
     const canvas = document.querySelector('#game canvas, canvas');
     if (canvas) {
       for (const evName of ['touchstart', 'touchend', 'touchmove']) {
-        canvas.addEventListener(
-          evName,
-          (e) => {
-            _diagEventLog.push({
-              t: performance.now(),
-              type: 'touch',
-              detail: `${evName}:${e.touches.length}`,
-            });
-          },
-          { passive: true },
-        );
+        const handler = (e) => {
+          _diagEventLog.push({
+            t: performance.now(),
+            type: 'touch',
+            detail: `${evName}:${e.touches.length}`,
+          });
+        };
+        canvas.addEventListener(evName, handler, { passive: true });
+        _diagTouchHandlers.push({ el: canvas, evName, handler });
       }
     }
 
     // EJS settings menu open/close (MutationObserver on body for settings panel)
-    const observer = new MutationObserver((mutations) => {
+    _diagObserver = new MutationObserver((mutations) => {
       for (const mut of mutations) {
         for (const node of mut.addedNodes) {
           if (
@@ -774,7 +761,7 @@
         }
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    _diagObserver.observe(document.body, { childList: true, subtree: true });
 
     // Monkey-patch pauseMainLoop/resumeMainLoop to detect unexpected pauses
     const diagMod = window.EJS_emulator?.gameManager?.Module;
@@ -1289,7 +1276,7 @@
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peerGuard = (p) => _peers[remoteSid] === p;
-    const peer = KNShared.createBasePeer(ICE_SERVERS, remoteSid, socket, peerGuard);
+    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, socket, peerGuard);
     peer.slot = remoteSlot;
     peer.ready = false;
     peer.emuReady = false;
@@ -1421,7 +1408,7 @@
           _syncLog(`received reconnect offer from ${senderSid}`);
 
           const peerGuard = (p) => _peers[senderSid] === p;
-          KNShared.resetPeerConnection(existingPeer, ICE_SERVERS, senderSid, socket, peerGuard);
+          KNShared.resetPeerConnection(existingPeer, _getIceServers(), senderSid, socket, peerGuard);
           existingPeer.ready = false;
 
           // Timeout: if reconnect doesn't reach 'connected' within 10s, close and retry
@@ -1986,7 +1973,7 @@
     _syncLog(`initiating reconnect to ${remoteSid}`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, ICE_SERVERS, remoteSid, socket, peerGuard);
+    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
     peer.ready = false;
 
     // Timeout: if reconnect doesn't reach 'connected' within 10s, hard disconnect
@@ -3412,6 +3399,30 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
+    // Remove diagnostic hooks
+    if (_diagHookInstalled) {
+      if (_diagVisHandler) {
+        document.removeEventListener('visibilitychange', _diagVisHandler);
+        _diagVisHandler = null;
+      }
+      if (_diagFocusHandler) {
+        window.removeEventListener('focus', _diagFocusHandler);
+        _diagFocusHandler = null;
+      }
+      if (_diagBlurHandler) {
+        window.removeEventListener('blur', _diagBlurHandler);
+        _diagBlurHandler = null;
+      }
+      for (const { el, evName, handler } of _diagTouchHandlers) {
+        el.removeEventListener(evName, handler);
+      }
+      _diagTouchHandlers = [];
+      if (_diagObserver) {
+        _diagObserver.disconnect();
+        _diagObserver = null;
+      }
+      _diagHookInstalled = false;
+    }
   };
 
   const tick = () => {
@@ -4798,6 +4809,7 @@
     _lastResyncTime = 0;
     _heldKeys.clear();
     _p1KeyMap = null;
+    KNShared.teardownKeyTracking();
     if (_romWaitInterval) {
       clearInterval(_romWaitInterval);
       _romWaitInterval = null;
@@ -4811,8 +4823,7 @@
       _syncWorkerUrl = null;
     }
     _syncWorkerCallbacks = {};
-    _syncLogHead = 0;
-    _syncLogCount = 0;
+    _syncLogRing.clear();
 
     // Clean up audio bypass
     if (_audioWorklet) {
@@ -4895,6 +4906,15 @@
     // Dismiss gesture prompt if still showing
     const gp = document.getElementById('gesture-prompt');
     if (gp) gp.classList.add('hidden');
+
+    // Restore original console.log
+    if (_originalConsoleLog) {
+      console.log = _originalConsoleLog;
+      _originalConsoleLog = null;
+    }
+
+    // Clear debug log between sessions
+    _debugLog.length = 0;
 
     _config = null;
   };

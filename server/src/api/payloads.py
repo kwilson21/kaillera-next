@@ -92,7 +92,7 @@ class SetNamePayload(BaseModel):
 
 
 class StartGamePayload(BaseModel):
-    mode: str = "lockstep"
+    mode: Literal["lockstep", "streaming"] = "lockstep"
     resyncEnabled: bool = False
     romHash: str | None = None
 
@@ -108,7 +108,7 @@ class EndGamePayload(BaseModel):
 
 
 class SetModePayload(BaseModel):
-    mode: str = "lockstep"
+    mode: Literal["lockstep", "streaming"] = "lockstep"
 
 
 # ── rom-sharing-toggle ───────────────────────────────────────────────────────
@@ -155,7 +155,6 @@ class SessionLogPayload(BaseModel):
     entries: list = Field(default_factory=list)
     summary: dict = Field(default_factory=dict)
     context: dict = Field(default_factory=dict)
-    playerName: str = Field(default="", max_length=32)
 
 
 # ── feedback ────────────────────────────────────────────────────────────────
