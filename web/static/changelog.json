@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.5",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "gamepad rebind uses rAF, skip cheats for non-SSB64 ROMs"
+      }
+    ]
+  },
+  {
     "version": "0.26.4",
     "date": "2026-04-03",
     "changes": [
