@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.6",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "block Emscripten SDL gamepad while preserving native access"
+      }
+    ]
+  },
+  {
     "version": "0.26.5",
     "date": "2026-04-03",
     "changes": [
