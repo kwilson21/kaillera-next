@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.2",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "PostHog CSP wildcards and local dev support"
+      }
+    ]
+  },
+  {
     "version": "0.26.1",
     "date": "2026-04-03",
     "changes": [
