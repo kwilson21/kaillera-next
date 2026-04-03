@@ -496,6 +496,15 @@
         ejs.gamepad.getGamepads = () => [];
         ejs.gamepad.updateGamepadState = () => {};
       }
+
+      // Block navigator.getGamepads globally so the WASM core's Emscripten
+      // SDL gamepad layer can't read gamepads (it has its own RetroArch
+      // button mapping that conflicts with our profiles). Our code uses
+      // APISandbox.nativeGetGamepads() which calls Navigator.prototype
+      // directly and bypasses this override.
+      if (window.APISandbox?.overrideGetGamepads) {
+        APISandbox.overrideGetGamepads(() => []);
+      }
     };
     attempt();
   };

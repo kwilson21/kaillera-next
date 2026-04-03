@@ -313,7 +313,7 @@
       const pollRebind = () => {
         if (!_rebindCell) return; // cancelled
         _rebindPollId = APISandbox.nativeRAF(pollRebind);
-        const gamepads = navigator.getGamepads();
+        const gamepads = APISandbox.nativeGetGamepads();
         let gp = null;
         for (let gi = 0; gi < gamepads.length; gi++) {
           if (gamepads[gi]) {

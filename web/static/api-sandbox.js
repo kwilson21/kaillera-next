@@ -21,7 +21,9 @@
   const _nativeRAF = window.requestAnimationFrame.bind(window);
   const _nativeCancelRAF = window.cancelAnimationFrame.bind(window);
   const _nativePerfNow = performance.now.bind(performance);
-  const _nativeGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
+  // Use the prototype method directly — survives navigator.getGamepads being overridden.
+  const _protoGetGamepads = Navigator.prototype.getGamepads;
+  const _nativeGetGamepads = _protoGetGamepads ? () => _protoGetGamepads.call(navigator) : () => [];
 
   // Track which APIs are currently overridden
   let _rafOverridden = false;
