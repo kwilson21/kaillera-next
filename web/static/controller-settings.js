@@ -908,7 +908,16 @@
 
   // ── Open / Close ─────────────────────────────────────────────────
   const open = () => {
-    if (!_panel) buildPanel();
+    // Always rebuild to pick up current gamepad state
+    if (_panel) {
+      _panel.remove();
+      _panel = null;
+    }
+    if (_backdrop) {
+      _backdrop.remove();
+      _backdrop = null;
+    }
+    buildPanel();
     _panel.classList.add('open');
     _backdrop.classList.add('visible');
     _isOpen = true;

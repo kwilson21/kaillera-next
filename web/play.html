@@ -359,6 +359,38 @@
       var EJS_defaultOptions = {
         'mupen64plus-cpucore': 'cached_interpreter',
       };
+      // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (shared.js).
+      // This ensures the Emscripten SDL keyboard layer uses the same keys
+      // as our netplay input system, preventing EJS TFGH defaults from
+      // conflicting with our WASD analog mapping.
+      var EJS_defaultControls = {
+        0: {
+          0: { value: 'c', value2: 'BUTTON_2' }, // A
+          1: { value: 'x', value2: 'BUTTON_4' }, // B
+          3: { value: 'v', value2: 'START' }, // Start
+          4: { value: 'up arrow', value2: 'DPAD_UP' }, // D-Up
+          5: { value: 'down arrow', value2: 'DPAD_DOWN' }, // D-Down
+          6: { value: 'left arrow', value2: 'DPAD_LEFT' }, // D-Left
+          7: { value: 'right arrow', value2: 'DPAD_RIGHT' }, // D-Right
+          10: { value: 't', value2: 'LEFT_TOP_SHOULDER' }, // L
+          11: { value: 'y', value2: 'RIGHT_TOP_SHOULDER' }, // R
+          12: { value: 'z', value2: 'LEFT_BOTTOM_SHOULDER' }, // Z
+          16: { value: 'd', value2: 'LEFT_STICK_X:+1' }, // Stick Right
+          17: { value: 'a', value2: 'LEFT_STICK_X:-1' }, // Stick Left
+          18: { value: 's', value2: 'LEFT_STICK_Y:+1' }, // Stick Down
+          19: { value: 'w', value2: 'LEFT_STICK_Y:-1' }, // Stick Up
+          20: { value: 'j', value2: 'RIGHT_STICK_X:+1' }, // C-Left
+          21: { value: 'l', value2: 'RIGHT_STICK_X:-1' }, // C-Right
+          22: { value: 'k', value2: 'RIGHT_STICK_Y:+1' }, // C-Down
+          23: { value: 'i', value2: 'RIGHT_STICK_Y:-1' }, // C-Up
+          24: { value: '', value2: '' },
+          25: { value: '', value2: '' },
+          26: { value: '', value2: '' },
+        },
+        1: {},
+        2: {},
+        3: {},
+      };
     </script>
 
     <!-- Socket.IO (self-hosted for cross-origin isolation) -->
