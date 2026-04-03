@@ -113,7 +113,7 @@
   config.gamePatchUrl = window.EJS_gamePatchUrl;
   config.gameParentUrl = window.EJS_gameParentUrl;
   config.netplayUrl = window.EJS_netplayServer;
-  config.gameId = window.EJS_gameID;
+  config.gameId = window.EJS_gameID || window.KNState?.romHash || 'kaillera-next';
   config.backgroundImg = window.EJS_backgroundImage;
   config.backgroundBlur = window.EJS_backgroundBlur;
   config.backgroundColor = window.EJS_backgroundColor;
