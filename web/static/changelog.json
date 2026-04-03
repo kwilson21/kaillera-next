@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.3",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "sync EJS keyboard defaults with WASD, rebuild controller panel on open"
+      }
+    ]
+  },
+  {
     "version": "0.26.2",
     "date": "2026-04-03",
     "changes": [
