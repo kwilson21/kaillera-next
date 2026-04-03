@@ -76,4 +76,23 @@
       return false;
     },
   };
+
+  // ── Suppress WebGL "no texture bound" warnings from mupen64plus core ──
+  // The WASM core calls glTexParameteri before binding a texture, which is
+  // harmless but spams the console. Wrap texParameteri to skip the call
+  // when no texture is bound to the target.
+  const _origGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+    const ctx = _origGetContext.call(this, type, attrs);
+    if (ctx && (type === 'webgl' || type === 'webgl2') && !ctx._kn_patched) {
+      const orig = ctx.texParameteri.bind(ctx);
+      ctx.texParameteri = function (target, pname, param) {
+        const binding = target === ctx.TEXTURE_2D ? ctx.TEXTURE_BINDING_2D : ctx.TEXTURE_BINDING_CUBE_MAP;
+        if (!ctx.getParameter(binding)) return; // no texture bound — skip
+        orig(target, pname, param);
+      };
+      ctx._kn_patched = true;
+    }
+    return ctx;
+  };
 })();
