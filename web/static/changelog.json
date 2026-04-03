@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.13",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "EJS_gameID must be a number, not a string"
+      }
+    ]
+  },
+  {
     "version": "0.26.12",
     "date": "2026-04-03",
     "changes": [
