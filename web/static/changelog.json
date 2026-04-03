@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.10",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "set EJS_gameID placeholder before EJS loads"
+      }
+    ]
+  },
+  {
     "version": "0.26.9",
     "date": "2026-04-03",
     "changes": [
