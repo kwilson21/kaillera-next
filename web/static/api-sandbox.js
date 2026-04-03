@@ -83,11 +83,6 @@
   // when no texture is bound to the target.
   const _origGetContext = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function (type, attrs) {
-    // Force preserveDrawingBuffer for WebGL so PostHog session replay
-    // (and canvas.toDataURL) can capture the rendered frame.
-    if (type === 'webgl' || type === 'webgl2') {
-      attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
-    }
     const ctx = _origGetContext.call(this, type, attrs);
     if (ctx && (type === 'webgl' || type === 'webgl2') && !ctx._kn_patched) {
       const orig = ctx.texParameteri.bind(ctx);
