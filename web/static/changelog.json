@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.25.5",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "C-button remap, invite dropdown, ready text, mobile log flush"
+      }
+    ]
+  },
+  {
     "version": "0.25.4",
     "date": "2026-04-02",
     "changes": [
