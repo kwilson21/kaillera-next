@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.0",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "PostHog client-side analytics via reverse proxy"
+      }
+    ]
+  },
+  {
     "version": "0.25.5",
     "date": "2026-04-03",
     "changes": [
