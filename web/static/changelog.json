@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.8",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "suppress WebGL texParameteri warnings from mupen64plus core"
+      }
+    ]
+  },
+  {
     "version": "0.26.7",
     "date": "2026-04-03",
     "changes": [
