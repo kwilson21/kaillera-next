@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.12",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "set EJS gameId fallback in ejs-loader.js (no server cache)"
+      }
+    ]
+  },
+  {
     "version": "0.26.11",
     "date": "2026-04-03",
     "changes": [
