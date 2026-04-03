@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.9",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "force preserveDrawingBuffer for PostHog canvas capture"
+      }
+    ]
+  },
+  {
     "version": "0.26.8",
     "date": "2026-04-03",
     "changes": [
