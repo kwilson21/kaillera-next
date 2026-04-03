@@ -244,7 +244,7 @@
       _rebindKeyHandler = null;
     }
     if (_rebindPollId) {
-      clearInterval(_rebindPollId);
+      APISandbox.nativeCancelRAF(_rebindPollId);
       _rebindPollId = null;
     }
     _rebindCell = null;
@@ -307,13 +307,20 @@
       const isStick = bit >= 16 && bit <= 19;
       const isCButton = bit >= 20 && bit <= 23;
 
-      // Poll for gamepad button press or axis movement
-      _rebindPollId = setInterval(() => {
-        const assignments = GamepadManager.getAssignments();
-        const gpIndex = assignments[0]?.gamepadIndex;
-        if (gpIndex === undefined) return;
-        const gamepads = APISandbox.nativeGetGamepads();
-        const gp = gamepads[gpIndex];
+      // Poll for gamepad button press or axis movement.
+      // Use native rAF (not setInterval) so gamepad state is fresh — browsers
+      // only update gamepad snapshots once per animation frame.
+      const pollRebind = () => {
+        if (!_rebindCell) return; // cancelled
+        _rebindPollId = APISandbox.nativeRAF(pollRebind);
+        const gamepads = navigator.getGamepads();
+        let gp = null;
+        for (let gi = 0; gi < gamepads.length; gi++) {
+          if (gamepads[gi]) {
+            gp = gamepads[gi];
+            break;
+          }
+        }
         if (!gp) return;
 
         // Check buttons
@@ -403,7 +410,8 @@
             }
           }
         }
-      }, 50);
+      };
+      _rebindPollId = APISandbox.nativeRAF(pollRebind);
     }
   };
 

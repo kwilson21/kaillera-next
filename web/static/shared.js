@@ -206,9 +206,14 @@
 
   // Common boot sequence: wait for emulator, apply cheats, disable EJS input.
   // Used by both lockstep and streaming engines at host/guest boot time.
+  const SSB64_HASH = 'S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d';
   function bootWithCheats(label) {
     triggerEmulatorStart();
-    applyStandardCheats(SSB64_ONLINE_CHEATS);
+    // Only apply SSB64 cheats for vanilla SSB64 — Smash Remix has different
+    // memory layout and the cheat addresses cause memory access out of bounds.
+    if (window.KNState?.romHash === SSB64_HASH) {
+      applyStandardCheats(SSB64_ONLINE_CHEATS);
+    }
     disableEJSInput(label);
   }
 
@@ -484,17 +489,12 @@
       }
 
       // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
+      // and neutralize its gamepad state reader so it never fires simulateInput.
       if (ejs.gamepad) {
         if (ejs.gamepad.timeout) clearTimeout(ejs.gamepad.timeout);
         ejs.gamepad.loop = () => {};
-      }
-
-      // Block navigator.getGamepads globally so the WASM core's internal
-      // Emscripten SDL gamepad layer also gets no gamepads. The core has
-      // its own RetroArch button mapping that conflicts with our profiles.
-      // GamepadManager uses APISandbox.nativeGetGamepads() so it still works.
-      if (window.APISandbox?.overrideGetGamepads) {
-        APISandbox.overrideGetGamepads(() => []);
+        ejs.gamepad.getGamepads = () => [];
+        ejs.gamepad.updateGamepadState = () => {};
       }
     };
     attempt();
