@@ -3,11 +3,13 @@
 (function () {
   'use strict';
 
-  // Only init on production domains (skip localhost / dev)
+  // Use reverse proxy on production, direct PostHog on dev
   const host = window.location.hostname;
-  if (!host.includes('gumflappers.live') && !host.includes('thesuperhuman.us')) return;
-
-  const apiHost = host.includes('gumflappers.live') ? 'https://ph.gumflappers.live' : 'https://ph.thesuperhuman.us';
+  const apiHost = host.includes('gumflappers.live')
+    ? 'https://ph.gumflappers.live'
+    : host.includes('thesuperhuman.us')
+      ? 'https://ph.thesuperhuman.us'
+      : 'https://us.posthog.com';
 
   !(function (t, e) {
     var o, n, p, r;
