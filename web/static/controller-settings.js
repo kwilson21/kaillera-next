@@ -107,10 +107,10 @@
     { label: 'D-Down', bit: 5, group: 'dpad' },
     { label: 'D-Left', bit: 6, group: 'dpad' },
     { label: 'D-Right', bit: 7, group: 'dpad' },
-    { label: 'Analog Up', bit: 19, group: 'stick' },
-    { label: 'Analog Down', bit: 18, group: 'stick' },
-    { label: 'Analog Left', bit: 17, group: 'stick' },
-    { label: 'Analog Right', bit: 16, group: 'stick' },
+    { label: 'Stick Up', bit: 19, group: 'stick' },
+    { label: 'Stick Down', bit: 18, group: 'stick' },
+    { label: 'Stick Left', bit: 17, group: 'stick' },
+    { label: 'Stick Right', bit: 16, group: 'stick' },
     { label: 'C-Up', bit: 23, group: 'cbutton' },
     { label: 'C-Down', bit: 22, group: 'cbutton' },
     { label: 'C-Left', bit: 20, group: 'cbutton' },
@@ -219,7 +219,8 @@
     // Analog stick axes
     if (profile.axes) {
       for (const [, cfg] of Object.entries(profile.axes)) {
-        if (cfg.bits && (cfg.bits[0] === bit || cfg.bits[1] === bit)) return 'Analog';
+        if (cfg.bits?.[0] === bit) return `Axis${cfg.index}+`;
+        if (cfg.bits?.[1] === bit) return `Axis${cfg.index}-`;
       }
     }
     return '—';

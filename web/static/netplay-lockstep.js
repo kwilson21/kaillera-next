@@ -4996,6 +4996,7 @@
     init,
     stop,
     exportSyncLog,
+    flushSyncLog: _flushSyncLog,
     _startSpectatorStream: startSpectatorStream, // test hook
     onExtraDataChannel: (cb) => {
       _onExtraDataChannel = cb;

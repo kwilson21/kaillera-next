@@ -230,21 +230,6 @@
       <span id="toolbar-room"></span>
       <span id="toolbar-status" aria-live="polite"></span>
       <div class="toolbar-spacer"></div>
-      <div id="share-wrapper">
-        <button
-          id="toolbar-share"
-          class="toolbar-toggle"
-          title="Invite players"
-          aria-haspopup="true"
-          aria-expanded="false"
-        >
-          Invite
-        </button>
-        <div id="share-dropdown" class="share-dropdown hidden" role="menu">
-          <button id="share-play" class="share-option" role="menuitem">Play</button>
-          <button id="share-watch" class="share-option" role="menuitem">Watch</button>
-        </div>
-      </div>
       <button id="toolbar-leave">Leave</button>
       <div id="more-wrapper">
         <button
@@ -258,6 +243,11 @@
           &#x22EF;
         </button>
         <div id="more-dropdown" class="more-dropdown hidden" role="menu">
+          <div id="invite-submenu" class="more-submenu">
+            <div class="more-submenu-label">Invite</div>
+            <button id="share-play" class="more-option" role="menuitem">Play Link</button>
+            <button id="share-watch" class="more-option" role="menuitem">Watch Link</button>
+          </div>
           <button id="toolbar-info" class="more-option" role="menuitem">Info</button>
           <button id="toolbar-remap" class="more-option" role="menuitem">Remap</button>
           <button id="toolbar-settings" class="more-option" role="menuitem">Controller Settings</button>

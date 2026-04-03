@@ -10,5 +10,11 @@
     "game": "Smash Remix 2.0.0",
     "region": "US",
     "format": "z64"
+  },
+  {
+    "sha256": "S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403",
+    "game": "Smash Remix 2.0.1",
+    "region": "US",
+    "format": "z64"
   }
 ]

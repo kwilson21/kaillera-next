@@ -258,6 +258,8 @@ body {
   font-size: 14px;
   color: #888;
   margin-left: 6px;
+  pointer-events: none;
+  cursor: default;
 }
 
 .player-slot .device {
@@ -537,40 +539,18 @@ button:hover {
   background: #a44a4a;
 }
 
-/* Share/Invite dropdown */
-#share-wrapper {
-  position: relative;
-  flex-shrink: 0;
+/* Invite submenu inside more dropdown */
+.more-submenu {
+  border-bottom: 1px solid #2a2a40;
+  padding-bottom: 4px;
+  margin-bottom: 4px;
 }
-.share-dropdown {
-  position: absolute;
-  bottom: 100%;
-  right: 0;
-  margin-bottom: 6px;
-  background: #1a1a2e;
-  border: 1px solid #2a2a40;
-  border-radius: 8px;
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 170px;
-  z-index: 55;
-}
-.share-dropdown.hidden {
-  display: none;
-}
-.share-option {
-  padding: 10px 14px !important;
-  font-size: 14px !important;
-  min-height: 44px !important;
-  background: transparent !important;
-  text-align: left;
-  border-radius: 6px;
-  white-space: nowrap;
-}
-.share-option:hover {
-  background: #2a2a40 !important;
+.more-submenu-label {
+  padding: 6px 14px 2px;
+  font-size: 10px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 /* More (overflow) dropdown */

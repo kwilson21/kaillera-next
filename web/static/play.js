@@ -189,6 +189,12 @@
   // ── Clean tab close ───────────────────────────────────────────────────
 
   window.addEventListener('pagehide', () => {
+    // Flush session log via HTTP keepalive (survives page close)
+    if (engine?.exportSyncLog) {
+      try {
+        engine.flushSyncLog?.();
+      } catch (_) {}
+    }
     // Notify peers this is intentional so they skip the 15s reconnect wait
     if (engine && KNState.peers) {
       for (const p of Object.values(KNState.peers)) {
@@ -2813,9 +2819,9 @@
         nameEl.classList.remove('empty');
         if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
         else delete nameEl.dataset.a21;
-        // ROM ready indicator (pre-game only, hide when ROM sharing handles it)
+        // ROM ready indicator (pre-game only)
         if (romEl) {
-          if (!gameRunning && !_romSharingEnabled) {
+          if (!gameRunning) {
             const ready = !!playerInSlot.romReady;
             romEl.textContent = ready ? 'Ready' : 'Not Ready';
             romEl.className = `rom-status ${ready ? 'ready' : 'not-ready'}`;
@@ -3249,37 +3255,6 @@
     showToast(`${label} copied!`);
   };
 
-  const toggleShareDropdown = () => {
-    const dd = document.getElementById('share-dropdown');
-    const btn = document.getElementById('toolbar-share');
-    if (!dd) return;
-    const isOpen = !dd.classList.contains('hidden');
-    if (isOpen) {
-      dd.classList.add('hidden');
-      if (btn) {
-        btn.classList.remove('active');
-        btn.setAttribute('aria-expanded', 'false');
-      }
-    } else {
-      closeMoreDropdown();
-      dd.classList.remove('hidden');
-      if (btn) {
-        btn.classList.add('active');
-        btn.setAttribute('aria-expanded', 'true');
-      }
-    }
-  };
-
-  const closeShareDropdown = () => {
-    const dd = document.getElementById('share-dropdown');
-    const btn = document.getElementById('toolbar-share');
-    if (dd) dd.classList.add('hidden');
-    if (btn) {
-      btn.classList.remove('active');
-      btn.setAttribute('aria-expanded', 'false');
-    }
-  };
-
   // ── UI: More (overflow) Dropdown ──────────────────────────────────────
 
   const toggleMoreDropdown = () => {
@@ -3294,7 +3269,6 @@
         btn.setAttribute('aria-expanded', 'false');
       }
     } else {
-      closeShareDropdown();
       dd.classList.remove('hidden');
       if (btn) {
         btn.classList.add('active');
@@ -3966,15 +3940,12 @@
         }
       });
 
-    const toolbarShare = document.getElementById('toolbar-share');
-    if (toolbarShare) toolbarShare.addEventListener('click', toggleShareDropdown);
-
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) {
       sharePlay.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
         shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
-        closeShareDropdown();
+        closeMoreDropdown();
       });
     }
 
@@ -3983,7 +3954,7 @@
       shareWatch.addEventListener('click', () => {
         const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
         shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
-        closeShareDropdown();
+        closeMoreDropdown();
       });
     }
 
@@ -3993,14 +3964,11 @@
 
     // Close dropdowns on outside click or Escape
     document.addEventListener('click', (e) => {
-      const shareW = document.getElementById('share-wrapper');
-      if (shareW && !shareW.contains(e.target)) closeShareDropdown();
       const moreW = document.getElementById('more-wrapper');
       if (moreW && !moreW.contains(e.target)) closeMoreDropdown();
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        closeShareDropdown();
         closeMoreDropdown();
       }
     });

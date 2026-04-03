@@ -256,6 +256,22 @@
       }
     }
 
+    // Digital C-button fallback: when C-buttons are remapped to digital
+    // buttons, bits 20-23 end up in the buttons bitmask but applyInputToWasm
+    // only reads cx/cy for C-stick. Convert bitmask bits to cx/cy values.
+    if (cx === 0) {
+      const cr = buttons & (1 << 20); // C-Right → positive cx
+      const cl = buttons & (1 << 21); // C-Left  → negative cx
+      if (cr && !cl) cx = Math.floor(127 * (_getRange() / 100));
+      else if (cl && !cr) cx = -Math.floor(127 * (_getRange() / 100));
+    }
+    if (cy === 0) {
+      const cd = buttons & (1 << 22); // C-Down → positive cy
+      const cu = buttons & (1 << 23); // C-Up   → negative cy
+      if (cd && !cu) cy = Math.floor(127 * (_getRange() / 100));
+      else if (cu && !cd) cy = -Math.floor(127 * (_getRange() / 100));
+    }
+
     return { buttons, lx, ly, cx, cy };
   }
 
