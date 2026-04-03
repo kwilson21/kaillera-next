@@ -532,11 +532,14 @@
     mod._simulate_input(slot, 18, input.ly > 0 ? clamp(input.ly) : 0);
     mod._simulate_input(slot, 19, input.ly < 0 ? clamp(-input.ly) : 0);
 
-    // C-stick (bits 20-23) — same approach, digital values (0 or ±83)
-    mod._simulate_input(slot, 20, input.cx > 0 ? clamp(input.cx) : 0);
-    mod._simulate_input(slot, 21, input.cx < 0 ? clamp(-input.cx) : 0);
-    mod._simulate_input(slot, 22, input.cy > 0 ? clamp(input.cy) : 0);
-    mod._simulate_input(slot, 23, input.cy < 0 ? clamp(-input.cy) : 0);
+    // C-stick (bits 20-23) — axis values OR digital button bitmask.
+    // C-buttons can come from either the cx/cy axis values (analog stick)
+    // or from digital button mappings (bits 20-23 in input.buttons).
+    const cMax = clamp(N64_MAX);
+    mod._simulate_input(slot, 20, input.cx > 0 ? clamp(input.cx) : (input.buttons >> 20) & 1 ? cMax : 0);
+    mod._simulate_input(slot, 21, input.cx < 0 ? clamp(-input.cx) : (input.buttons >> 21) & 1 ? cMax : 0);
+    mod._simulate_input(slot, 22, input.cy > 0 ? clamp(input.cy) : (input.buttons >> 22) & 1 ? cMax : 0);
+    mod._simulate_input(slot, 23, input.cy < 0 ? clamp(-input.cy) : (input.buttons >> 23) & 1 ? cMax : 0);
 
     // Update previous input tracker
     if (prevInputs) {
