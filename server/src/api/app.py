@@ -112,9 +112,9 @@ class SecurityHeadersMiddleware:
 
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
+        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob: https://ph.gumflappers.live https://ph.thesuperhuman.us; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "connect-src 'self' blob:; "
+        "connect-src 'self' blob: https://ph.gumflappers.live https://ph.thesuperhuman.us; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
