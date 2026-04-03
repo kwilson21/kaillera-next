@@ -1942,6 +1942,9 @@
 
     console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
+    // Set gameID from ROM hash so EJS persists settings per-game (silences
+    // "gameId (EJS_gameID) is not set" console warnings).
+    if (KNState.romHash) window.EJS_gameID = KNState.romHash;
 
     // If EmulatorJS class is already loaded (game restart), instantiate
     // directly to avoid const re-declaration errors from re-injecting scripts
