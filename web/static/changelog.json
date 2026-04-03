@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.1",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "allow PostHog proxy domains in CSP script-src and connect-src"
+      }
+    ]
+  },
+  {
     "version": "0.26.0",
     "date": "2026-04-03",
     "changes": [
