@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.26.4",
+    "date": "2026-04-03",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "C-buttons from digital button mappings now reach the emulator"
+      }
+    ]
+  },
+  {
     "version": "0.26.3",
     "date": "2026-04-03",
     "changes": [
