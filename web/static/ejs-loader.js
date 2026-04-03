@@ -113,7 +113,12 @@
   config.gamePatchUrl = window.EJS_gamePatchUrl;
   config.gameParentUrl = window.EJS_gameParentUrl;
   config.netplayUrl = window.EJS_netplayServer;
-  config.gameId = window.EJS_gameID || window.KNState?.romHash || 'kaillera-next';
+  // EJS expects gameId to be a number. Convert ROM hash to a numeric hash.
+  const _gameIdStr = window.EJS_gameID || window.KNState?.romHash || 'kaillera-next';
+  let _gameIdNum = 0;
+  for (let i = 0; i < _gameIdStr.length; i++)
+    _gameIdNum = ((_gameIdNum << 5) - _gameIdNum + _gameIdStr.charCodeAt(i)) | 0;
+  config.gameId = Math.abs(_gameIdNum);
   config.backgroundImg = window.EJS_backgroundImage;
   config.backgroundBlur = window.EJS_backgroundBlur;
   config.backgroundColor = window.EJS_backgroundColor;
