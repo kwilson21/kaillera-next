@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.30.0",
+    "date": "2026-04-04",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add 4-player roster coordination E2E test"
+      }
+    ]
+  },
+  {
     "version": "0.29.0",
     "date": "2026-04-04",
     "changes": [
