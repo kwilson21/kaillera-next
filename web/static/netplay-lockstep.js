@@ -2196,7 +2196,12 @@
         writeInputToMemory(peer.slot, 0);
       } catch (_) {}
       delete _remoteInputs[peer.slot];
-      delete _peerInputStarted[peer.slot];
+      delete _peerCatchingUp[peer.slot];
+      // Only host modifies the input roster — non-hosts wait for
+      // the host's roster broadcast to remove the slot
+      if (_playerSlot === 0 || !_activeRoster) {
+        delete _peerInputStarted[peer.slot];
+      }
     }
 
     delete _peers[remoteSid];
@@ -2300,13 +2305,23 @@
   // Uses _peerInputStarted (persistent flag) instead of checking buffer
   // length — prevents peers from dropping out when their buffer is
   // momentarily empty between frames (causes 3+ player desync).
-  const getInputPeers = () =>
-    getActivePeers().filter((p) => {
+  const getInputPeers = () => {
+    if (_activeRoster) {
+      // Roster mode: return peers for all roster slots (excluding self).
+      // Peers may have dead DCs — the stall/fabrication path handles that.
+      return Object.values(_peers).filter((p) => {
+        if (p.slot === null || p.slot === undefined) return false;
+        return _activeRoster.has(p.slot);
+      });
+    }
+    // Legacy mode (pre-roster): original behavior
+    return getActivePeers().filter((p) => {
       if (p.reconnecting) return false;
       if (_peerInputStarted[p.slot]) return true;
       // Boot grace: include connected peers before their first input arrives
       return _frameNum < BOOT_GRACE_FRAMES;
     });
+  };
 
   // -- Game start sequence ---------------------------------------------------
 
@@ -4162,15 +4177,34 @@
         }
       }
 
-      // Write ALL inputs to Wasm memory — use inputPeers for peers
-      // we're synced with, activePeers for all connected
+      // Zero ALL 4 slots first, then overwrite with real input.
+      // This ensures consistency: every slot is either written from real
+      // input or zeroed, with no conditional checks on peer state.
+      for (let zs = 0; zs < 4; zs++) {
+        writeInputToMemory(zs, 0);
+      }
+
+      // Write local player's input
       const localInput = _localInputs[applyFrame] || KNShared.ZERO_INPUT;
       writeInputToMemory(_playerSlot, localInput);
+
+      // Write remote inputs for peers in the input roster
       for (let m = 0; m < inputPeers.length; m++) {
         const peerSlot = inputPeers[m].slot;
         const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
         writeInputToMemory(peerSlot, remoteInput);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+      }
+
+      // Also write input for roster slots that have no peer object yet
+      // (e.g., late joiner whose DC hasn't formed). They get zeros, which
+      // is what every other player also writes for that slot.
+      if (_activeRoster) {
+        for (const rosterSlot of _activeRoster) {
+          if (rosterSlot === _playerSlot) continue;
+          const hasPeer = inputPeers.some((p) => p.slot === rosterSlot);
+          if (!hasPeer) writeInputToMemory(rosterSlot, 0);
+        }
       }
 
       // Periodic input pipeline log (every 60 frames = ~1s)
@@ -4189,7 +4223,7 @@
           }
         }
         _syncLog(
-          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${JSON.stringify(localInput)} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw}`,
+          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${JSON.stringify(localInput)} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw} roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}]`,
         );
       }
       // Periodic pacing summary (~5s)
@@ -4229,18 +4263,6 @@
           createPeer(sid, info.slot, true);
           sendOffer(sid, { reconnect: true });
         }
-      }
-      // Zero disconnected player slots so loadState() can't restore stale input
-      for (let zs = 0; zs < 4; zs++) {
-        if (zs === _playerSlot) continue;
-        let hasInputPeer = false;
-        for (let zi = 0; zi < inputPeers.length; zi++) {
-          if (inputPeers[zi].slot === zs) {
-            hasInputPeer = true;
-            break;
-          }
-        }
-        if (!hasInputPeer) writeInputToMemory(zs, 0);
       }
       _remoteApplied++;
 
