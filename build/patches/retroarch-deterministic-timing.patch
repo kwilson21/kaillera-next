@@ -9,7 +9,7 @@ index a626706..47d6ea0 100644
 -                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
 +                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data, \
 +                     _task_queue_check,_kn_load_state_immediate, \
-+                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms, \
++                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_deterministic,_kn_get_cycle_time_ms, \
 +                     _kn_get_audio_ptr,_kn_get_audio_samples,_kn_reset_audio,_kn_get_audio_rate, \
 +                     _kn_reset_cycle_count,_kn_canon_fpu_regs, \
 +                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_sync_hash_regions,_kn_rdram_block_hashes, \
@@ -171,6 +171,11 @@ index c9ceed1..d66e86b 100644
 +EMSCRIPTEN_KEEPALIVE void kn_set_deterministic(int enable)
 +{
 +   kn_deterministic_mode = enable;
++}
++
++EMSCRIPTEN_KEEPALIVE int kn_get_deterministic(void)
++{
++   return kn_deterministic_mode;
 +}
 +
  /* defined here since implementation is frontend dependent */

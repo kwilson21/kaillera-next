@@ -102,6 +102,24 @@
   let _romTransferDCs = {}; // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   const ROM_MAX_SIZE = 128 * 1024 * 1024; // 128MB
+
+  // ── Breadcrumb Trail ────────────────────────────────────────────────
+  // Ring buffer of pre-game events — auto-flushed via debug-logs on error.
+  const _CRUMB_MAX = 50;
+  const _breadcrumbs = [];
+  const crumb = (event, detail) => {
+    const entry = { t: Date.now(), e: event };
+    if (detail !== undefined) entry.d = detail;
+    _breadcrumbs.push(entry);
+    if (_breadcrumbs.length > _CRUMB_MAX) _breadcrumbs.shift();
+  };
+  const flushBreadcrumbs = (reason) => {
+    if (!socket?.connected || _breadcrumbs.length === 0) return;
+    socket.emit('debug-logs', {
+      info: { type: 'breadcrumbs', reason, slot: mySlot ?? '?', player: playerName },
+      logs: _breadcrumbs.map((c) => `${c.t} [${c.e}]${c.d ? ' ' + JSON.stringify(c.d) : ''}`),
+    });
+  };
   const _isMobile =
     /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
     (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent)) ||
@@ -537,6 +555,15 @@
             }
 
             sendDeviceType();
+            crumb('join-ack', {
+              host: isHost,
+              spectator: isSpectator,
+              status: roomData.status,
+              sharing: !!roomData.rom_sharing,
+              hasRom: !!(_romBlob || _romBlobUrl),
+              romHash: _romHash?.substring(0, 12),
+              hostHash: (joinData?.romHash ?? roomData?.rom_hash ?? '').substring(0, 12),
+            });
             // Pick up the host's ROM hash from the join ack so we can
             // verify our cached ROM before reporting as ready.
             if (!isHost && joinData?.romHash) _hostRomHash = joinData.romHash;
@@ -559,6 +586,14 @@
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
+              crumb('mid-game-join', {
+                spectator: isSpectator,
+                mode,
+                sharing: !!roomData.rom_sharing,
+                hasRom: !!(_romBlob || _romBlobUrl),
+                romHash: _romHash?.substring(0, 12),
+                hostHash: (roomData.rom_hash ?? '').substring(0, 12),
+              });
               console.log(
                 `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
               );
@@ -594,12 +629,14 @@
               if (!_romBlob && !_romBlobUrl) {
                 if (roomData.rom_sharing) {
                   // Show accept/decline prompt instead of ROM drop
+                  crumb('late-join-sharing-prompt', { sharing: true });
                   _romSharingEnabled = true;
                   _pendingLateJoin = true;
                   showLateJoinRomPrompt();
                   updateRomSharingUI();
                   return;
                 }
+                crumb('late-join-rom-prompt', { sharing: false });
                 _pendingLateJoin = true;
                 showLateJoinRomPrompt();
                 return;
@@ -607,6 +644,15 @@
 
               // Verify ROM hash if available (skip when ROM came from host via sharing)
               if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
+                if (roomData.rom_sharing) {
+                  // Cached ROM doesn't match but sharing is available —
+                  // show sharing prompt instead of erroring out
+                  _romSharingEnabled = true;
+                  _pendingLateJoin = true;
+                  showLateJoinRomPrompt();
+                  updateRomSharingUI();
+                  return;
+                }
                 showError("Your ROM doesn't match the host's game. Drop the correct ROM or enable ROM sharing.");
                 return;
               }
@@ -785,6 +831,14 @@
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
   const onGameStarted = (data) => {
+    crumb('game-started', {
+      mode: data.mode,
+      hasRom: !!(_romBlob || _romBlobUrl),
+      romHash: _romHash?.substring(0, 12),
+      hostHash: data.romHash?.substring(0, 12),
+      sharingEnabled: _romSharingEnabled,
+      sharingDecision: _romSharingDecision,
+    });
     console.log(
       '[play] onGameStarted:',
       JSON.stringify(data),
@@ -812,6 +866,13 @@
 
     // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
     if (romHashMismatch(data.romHash, _romHash) && _romSharingDecision !== 'accepted') {
+      if (_romSharingEnabled && _romSharingDecision === null) {
+        // Cached ROM doesn't match but sharing available and user hasn't
+        // decided — stay in overlay so they can accept the host's ROM
+        initEngine();
+        updateRomSharingUI();
+        return;
+      }
       showError("Your ROM doesn't match the host's game. Drop the correct ROM to continue.");
       return;
     }
@@ -1084,6 +1145,7 @@
 
   const acceptRomSharing = () => {
     _preloadAudioCtx(); // gesture — unlock audio for mobile guests
+    crumb('rom-sharing-accept');
     _romSharingDecision = 'accepted';
     _romTransferChunks = [];
     _romTransferHeader = null;
@@ -1151,6 +1213,7 @@
   };
 
   const declineRomSharing = () => {
+    crumb('rom-sharing-decline');
     _romSharingDecision = 'declined';
     updateRomSharingUI();
   };
@@ -1762,6 +1825,7 @@
     }
     // If we were in a pending late-join, dismiss the prompt
     if (_pendingLateJoin) {
+      crumb('rom-transfer-complete-late-join');
       dismissLateJoinPrompt();
     }
 
@@ -2062,7 +2126,15 @@
     // Auto-load the most recently used ROM from library
     const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
     if (lastHash) {
+      crumb('rom-autoload-start', { hash: lastHash.substring(0, 12) });
       loadRomFromLibrary(lastHash, (ok, name) => {
+        crumb('rom-autoload-done', {
+          ok,
+          name,
+          pendingLateJoin: _pendingLateJoin,
+          hostHash: _hostRomHash?.substring(0, 12),
+          match: !romHashMismatch(_hostRomHash, lastHash),
+        });
         if (ok) {
           drop.classList.add('loaded');
           if (statusEl) statusEl.textContent = `Loaded: ${name} (drop to change)`;
@@ -2753,10 +2825,23 @@
   };
 
   const dismissLateJoinPrompt = () => {
+    crumb('dismiss-late-join', {
+      romHash: _romHash?.substring(0, 12),
+      hostHash: _hostRomHash?.substring(0, 12),
+      sharingEnabled: _romSharingEnabled,
+      sharingDecision: _romSharingDecision,
+    });
     _pendingLateJoin = false;
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
     if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
+      if (_romSharingEnabled && _romSharingDecision === null) {
+        // ROM sharing available but user hasn't decided yet (e.g. auto-loaded
+        // a cached ROM from a previous game). Stay on the sharing prompt so
+        // they can accept the host's ROM instead of erroring out.
+        _pendingLateJoin = true;
+        return;
+      }
       showError("Your ROM doesn't match the host's game. Drop the correct ROM to rejoin.");
       return;
     }
@@ -3146,6 +3231,8 @@
   // ── UI: Error ──────────────────────────────────────────────────────────
 
   const showError = (msg) => {
+    crumb('error', msg);
+    flushBreadcrumbs(msg);
     const el = document.getElementById('error-msg');
     if (!el) return;
     el.classList.remove('hidden');

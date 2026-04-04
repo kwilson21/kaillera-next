@@ -1297,9 +1297,68 @@
       if (_audioEmptyCount === 300) {
         const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
         const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
+        // Deep diagnostic: check if al_write() is being called at all.
+        // Write a sentinel to the audio buffer, step one frame, check if overwritten.
+        let sentinel = 'n/a';
+        try {
+          const heap16 = new Int16Array(mod.HEAPU8.buffer);
+          const idx = _audioPtr >> 1; // byte offset → int16 index
+          heap16[idx] = 12345;
+          mod._kn_reset_audio();
+          // The next stepOneFrame() will call al_write() which should overwrite pos 0.
+          // But we can't step here — instead, check the sentinel AFTER the next frame.
+          // For now, just read the current buffer state.
+          const bufSlice = new Int16Array(mod.HEAPU8.buffer, _audioPtr, 10);
+          sentinel = Array.from(bufSlice).join(',');
+        } catch (_) {}
+        // Check RetroArch audio driver state via AL contexts
+        let alState = 'unknown';
+        try {
+          const alCtxs = mod.AL?.contexts;
+          if (alCtxs) {
+            for (const [id, ctx] of Object.entries(alCtxs)) {
+              if (!ctx) continue;
+              const srcCount = ctx.sources ? Object.keys(ctx.sources).length : 0;
+              const aState = ctx.audioCtx?.state ?? 'none';
+              alState = `ctx${id}:src=${srcCount},state=${aState}`;
+            }
+          }
+        } catch (_) {}
+        // Check kn_deterministic_mode via C export (if available after core rebuild)
+        const detMode = mod._kn_get_deterministic ? mod._kn_get_deterministic() : 'no-export';
         _syncLog(
-          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState})`,
+          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState} detMode=${detMode} al=${alState} buf=[${sentinel}])`,
         );
+      }
+      // One-time diagnostic: write sentinel, step frame, check if al_write overwrote it
+      if (_audioEmptyCount === 305) {
+        try {
+          const heap16 = new Int16Array(mod.HEAPU8.buffer);
+          const idx = _audioPtr >> 1;
+          heap16[idx] = 31337; // sentinel
+          heap16[idx + 1] = 31337;
+          // _kn_reset_audio already called before this frame's step; the NEXT frame
+          // will call _kn_reset_audio + step + feedAudio. Check result at frame 310.
+        } catch (e) {
+          _syncLog(`audio-diag: sentinel write failed: ${e.message}`);
+        }
+      }
+      if (_audioEmptyCount === 310) {
+        try {
+          const bufSlice = new Int16Array(mod.HEAPU8.buffer, _audioPtr, 10);
+          const sentinelAlive = bufSlice[0] === 31337 && bufSlice[1] === 31337;
+          const detMode = mod._kn_get_deterministic ? mod._kn_get_deterministic() : 'no-export';
+          _syncLog(
+            `audio-diag: sentinel=${sentinelAlive ? 'ALIVE (al_write NOT called)' : 'OVERWRITTEN (al_write called but detMode=' + detMode + ')'} buf=[${Array.from(bufSlice).join(',')}]`,
+          );
+          // If sentinel is alive, try re-setting deterministic mode and see if audio starts
+          if (sentinelAlive && mod._kn_set_deterministic) {
+            mod._kn_set_deterministic(1);
+            _syncLog('audio-diag: re-applied _kn_set_deterministic(1)');
+          }
+        } catch (e) {
+          _syncLog(`audio-diag: sentinel check failed: ${e.message}`);
+        }
       }
       return;
     }
@@ -1438,6 +1497,24 @@
         _syncLog(`onUsersUpdated: peer ${p.socketId} (slot ${p.slot}) already exists, skipping`);
         _peers[p.socketId].slot = p.slot;
         continue;
+      }
+
+      // Evict zombie peers: if another SID already holds this slot, the old
+      // connection is stale (player reconnected with a new Socket.IO ID).
+      // Clean up the old entry so _peers never has duplicate slots.
+      if (p.slot !== null && p.slot !== undefined) {
+        for (const [oldSid, oldPeer] of Object.entries(_peers)) {
+          if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
+            _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
+            try {
+              oldPeer.pc?.close();
+            } catch (_) {}
+            if (oldPeer._reconnectTimeout) clearTimeout(oldPeer._reconnectTimeout);
+            if (oldPeer._disconnectTimer) clearTimeout(oldPeer._disconnectTimer);
+            delete _peers[oldSid];
+            delete _lockstepReadyPeers[oldSid];
+          }
+        }
       }
 
       let shouldInitiate;
@@ -2317,12 +2394,20 @@
   // momentarily empty between frames (causes 3+ player desync).
   const getInputPeers = () => {
     if (_activeRoster) {
-      // Roster mode: return peers for all roster slots (excluding self).
-      // Peers may have dead DCs — the stall/fabrication path handles that.
-      return Object.values(_peers).filter((p) => {
-        if (p.slot === null || p.slot === undefined) return false;
-        return _activeRoster.has(p.slot);
-      });
+      // Roster mode: return one peer per roster slot (excluding self).
+      // Deduplicate by slot — if zombie peers survive, prefer the one with
+      // an open DataChannel. Peers may have dead DCs — the stall/fabrication
+      // path handles that.
+      const bySlot = new Map();
+      for (const p of Object.values(_peers)) {
+        if (p.slot === null || p.slot === undefined) continue;
+        if (!_activeRoster.has(p.slot)) continue;
+        const existing = bySlot.get(p.slot);
+        if (!existing || (p.dc?.readyState === 'open' && existing.dc?.readyState !== 'open')) {
+          bySlot.set(p.slot, p);
+        }
+      }
+      return [...bySlot.values()];
     }
     // Legacy mode (pre-roster): original behavior
     return getActivePeers().filter((p) => {
@@ -2878,14 +2963,14 @@
 
   const _broadcastRoster = () => {
     if (_playerSlot !== 0) return;
-    const slots = [_playerSlot];
+    const slotSet = new Set([_playerSlot]);
     for (const p of Object.values(_peers)) {
       if (p.slot !== null && p.slot !== undefined && !p._intentionalLeave) {
-        slots.push(p.slot);
+        slotSet.add(p.slot);
       }
     }
-    slots.sort((a, b) => a - b);
-    _activeRoster = new Set(slots);
+    const slots = [...slotSet].sort((a, b) => a - b);
+    _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
     const msg = `roster:${_frameNum}:${slots.join(',')}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
