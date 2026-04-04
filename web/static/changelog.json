@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.31.2",
+    "date": "2026-04-04",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
+      }
+    ]
+  },
+  {
     "version": "0.31.1",
     "date": "2026-04-04",
     "changes": [
