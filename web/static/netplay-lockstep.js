@@ -5495,6 +5495,14 @@
         peers: peerInfo,
       };
     },
+    getDebugState: () => ({
+      activeRoster: _activeRoster ? [..._activeRoster] : null,
+      inputPeerSlots: getInputPeers().map((p) => p.slot),
+      running: _running,
+      frameNum: _frameNum,
+      playerSlot: _playerSlot,
+      peerCount: Object.keys(_peers).length,
+    }),
     getDebugLog: () => _debugLog.slice(),
     _getPeers: () => _peers,
     dumpLogs: () => {
