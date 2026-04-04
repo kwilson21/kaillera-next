@@ -407,6 +407,63 @@
   ]);
   const _isSmashRemix = () => _SMASH_REMIX_HASHES.has(_config?.romHash);
 
+  // -- Deterministic RNG sync for Smash Remix netplay --
+  // Per-frame seed reset: before each frame, writes a deterministic seed
+  // derived from (base_seed, frame_counter) to the game's RNG RDRAM address.
+  // This bounds any RNG divergence to a single frame — even if code paths
+  // differ briefly (e.g., roster change), the next frame resets the seed.
+  const KN_RNG_SEED_RDRAM = 0x0005b940; // primary LCG seed
+  const KN_RNG_ALT_SEED_RDRAM = 0x000a0578; // alternate seed
+  let _rngPatched = false;
+  let _rngSeed = 0;
+  let _rdramBase = 0; // WASM heap byte offset of RDRAM
+
+  const _hashString = (str) => {
+    let h = 0x811c9dc5; // FNV-1a offset basis
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193); // FNV prime
+    }
+    return h >>> 0;
+  };
+
+  const _getRdramBase = (mod) => {
+    if (_rdramBase) return _rdramBase;
+    if (!mod._get_memory_data || !mod.stringToNewUTF8) return 0;
+    const key = mod.stringToNewUTF8('RETRO_MEMORY_SYSTEM_RAM');
+    const result = mod._get_memory_data(key);
+    mod._free(key);
+    if (!result) return 0;
+    const [size, ptr] = mod.UTF8ToString(result).split('|').map(Number);
+    if (!ptr || size < 0x800000) return 0;
+    _rdramBase = ptr;
+    return ptr;
+  };
+
+  const _rdram32 = (mod, rdramOffset) => {
+    return (_rdramBase >> 2) + (rdramOffset >> 2);
+  };
+
+  const _initRNGSync = (mod) => {
+    if (_rngPatched || !_isSmashRemix()) return false;
+    const base = _getRdramBase(mod);
+    if (!base) return false;
+    _rngSeed = _hashString(KNState.matchId || 'kn-default');
+    _rngPatched = true;
+    _syncLog(`RNG sync enabled: baseSeed=0x${_rngSeed.toString(16)} rdramBase=0x${base.toString(16)}`);
+    return true;
+  };
+
+  const _syncRNGSeed = (mod, frameNum) => {
+    if (!_rngPatched || !_rdramBase) return;
+    // Deterministic seed for this frame: hash(baseSeed, frameNum)
+    let h = _rngSeed ^ Math.imul(frameNum, 0x45d9f3b7);
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = (h ^ (h >>> 13)) >>> 0;
+    mod.HEAPU32[_rdram32(mod, KN_RNG_SEED_RDRAM)] = h;
+    mod.HEAPU32[_rdram32(mod, KN_RNG_ALT_SEED_RDRAM)] = h;
+  };
+
   // Manual mode / rAF interception state (native refs managed by APISandbox)
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
@@ -3135,6 +3192,7 @@
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
+
       startLockstep();
 
       // Re-establish WebRTC connections to any players whose peer connections
@@ -3658,6 +3716,13 @@
     }
 
     initAudioPlayback();
+
+    // Enable per-frame RNG seed sync for Smash Remix netplay.
+    {
+      const rngMod = window.EJS_emulator?.gameManager?.Module;
+      if (rngMod) _initRNGSync(rngMod);
+    }
+
     // Only install diagnostic hooks when explicitly enabled — they add
     // MutationObserver on document.body, touch listeners, and write to
     // _diagEventLog which grows unboundedly (17MB+ on mobile in 30 min).
@@ -4339,6 +4404,7 @@
     // Step one frame with audio capture
     const tickMod = window.EJS_emulator?.gameManager?.Module;
     if (tickMod?._kn_reset_audio) tickMod._kn_reset_audio();
+    _syncRNGSeed(tickMod, _frameNum);
     _inDeterministicStep = true;
     stepOneFrame();
     _inDeterministicStep = false;
