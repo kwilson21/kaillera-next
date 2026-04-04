@@ -1,3 +1,13 @@
+/**
+ * lobby.js — Lobby Page Controller
+ *
+ * Handles the index.html lobby UI: room creation (random code), join by
+ * code or pasted URL, spectate, and player name persistence (localStorage).
+ * Easter egg: typing "HELLO" triggers a Kaillera protocol HELLOD00D homage.
+ *
+ * Consumed by: index.html
+ * Exposes: nothing (self-contained IIFE)
+ */
 (function () {
   'use strict';
 

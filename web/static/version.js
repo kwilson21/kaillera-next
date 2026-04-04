@@ -1,3 +1,13 @@
+/**
+ * version.js — Version Display + Changelog Modal
+ *
+ * Fetches version.json and changelog.json, renders the current version
+ * in the page footer, and provides a changelog modal with version
+ * dedications. Loaded after play.js on the game page.
+ *
+ * Consumed by: play.html, index.html
+ * Exposes: nothing (self-contained IIFE)
+ */
 (() => {
   let _changelog = null;
   let _currentVersion = null;

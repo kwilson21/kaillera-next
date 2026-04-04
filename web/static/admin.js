@@ -1,3 +1,13 @@
+/**
+ * admin.js — Admin Dashboard Controller
+ *
+ * Drives the admin.html management page: session log browser, client
+ * event viewer, feedback list, screenshot timeline, and server stats.
+ * Authenticates via ADMIN_KEY stored in sessionStorage.
+ *
+ * Consumed by: admin.html
+ * Exposes: nothing (self-contained IIFE)
+ */
 (function () {
   'use strict';
 

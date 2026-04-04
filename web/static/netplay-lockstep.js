@@ -26,7 +26,7 @@
  * ── Startup Sequence ──────────────────────────────────────────────────────
  *
  *   1. All players boot EmulatorJS independently and wait for the WASM
- *      core to be ready (host waits 120+ frames, guests wait ~10 frames).
+ *      core to be ready (MIN_BOOT_FRAMES = 120 frames for all players).
  *   2. Standard online cheats applied automatically via KNShared
  *      (SSB64 GameShark codes: all characters, items off, etc.).
  *   3. INPUT_BASE auto-discovery: calls _simulate_input(0, 0, 1) and scans
@@ -40,10 +40,8 @@
  *   5. RTT measurement: 3 ping-pong rounds over each DataChannel. The
  *      median RTT determines initial auto frame delay: ceil(median_ms / 16.67),
  *      clamped to [2, 9]. Both sides exchange their delay preference and
- *      the maximum becomes the effective DELAY_FRAMES. During play, live
- *      RTT probes run every 5s and can increase DELAY_FRAMES dynamically
- *      if latency spikes (requires 2 consecutive high readings; manual
- *      mode users' delay is never overridden).
+ *      the maximum becomes the effective DELAY_FRAMES. Delay is fixed for
+ *      the entire session — no dynamic adjustment during play.
  *   6. All players load the same save state (double-load: first restores
  *      CPU+RAM, then enterManualMode() captures rAF, second load fixes
  *      any free-frame drift between the loads). Frame counter resets to 0.
@@ -71,8 +69,8 @@
  *
  *   Each tick at frame N:
  *     1. Apply pending resync state if buffered (async from previous sync)
- *     2. GGPO-style frame pacing check (see Frame Pacing below) — skip
- *        tick entirely if too far ahead of slowest peer
+ *     2. Proportional frame pacing check (see Frame Pacing below) —
+ *        probabilistically skip ticks based on how far ahead of slowest peer
  *     3. Read local input (keyboard via keyCode tracking + gamepad via
  *        GamepadManager + VirtualGamepad on mobile) → 24-bit mask
  *     4. Send encoded input (16 bytes) to all peer DCs
@@ -92,19 +90,18 @@
  *     7. Write all players' inputs to WASM memory via _simulate_input()
  *        (iterates 16 digital buttons + 4 analog axis pairs per player)
  *     8. Reset audio buffer, step one frame, feed audio samples to
- *        AudioWorklet (or AudioBufferSourceNode fallback)
+ *        AudioWorklet (or ScriptProcessorNode fallback)
  *     9. Increment frame counter. Periodically update debug overlay.
  *
- * ── Frame Pacing (GGPO-Inspired) ────────────────────────────────────────
+ * ── Frame Pacing (Proportional Throttle) ────────────────────────────────
  *
  *   Prevents the faster machine from outrunning the slower one's input
  *   stream. Tracks frame advantage (local frame - min remote frame) as
  *   an exponential moving average with asymmetric alpha:
  *     - Rising (falling behind): α = 0.1 (slow to trigger, avoids jitter)
  *     - Falling (catching up):   α = 0.2 (fast to release throttle)
- *   When raw frame advantage exceeds DELAY_FRAMES + 1, the tick is
- *   skipped entirely — no input sent, no emulator stepped. This keeps
- *   players within one delay window of each other.
+ *   Proportional skip based on excess = rawAdvantage - DELAY_FRAMES:
+ *     excess 1 → 25% skip, excess 2 → 50%, excess 3 → 75%, excess ≥4 → 100%
  *   Disabled during 120-frame warmup while connections stabilize.
  *
  * ── Input Encoding ────────────────────────────────────────────────────────
@@ -124,11 +121,14 @@
  *   to prevent browser auto-resume on user gestures. Instead, audio is
  *   captured per-frame from WASM memory via custom core exports
  *   (_kn_get_audio_ptr, _kn_get_audio_samples, _kn_reset_audio,
- *   _kn_get_audio_rate) and fed to an AudioWorklet ring buffer (~300ms,
+ *   _kn_get_audio_rate) and fed to an AudioWorklet ring buffer (~500ms,
  *   large enough to bridge resync stalls) in audio-worklet-processor.js.
- *   Falls back to AudioBufferSourceNode when AudioWorklet is unavailable.
- *   This ensures audio is frame-locked to the lockstep tick and identical
- *   across all players.
+ *   Falls back to ScriptProcessorNode when AudioWorklet is unavailable
+ *   (AudioBufferSourceNode doesn't produce sound on iOS WKWebView).
+ *   The patched WASM core bypasses AUDIO_FLAG_SUSPENDED in deterministic
+ *   mode so audio capture always runs regardless of RetroArch's internal
+ *   suspend/resume state. This ensures audio is frame-locked to the
+ *   lockstep tick and identical across all players.
  *   Host also routes audio to a MediaStreamDestination for spectators.
  *
  * ── Deterministic Timing ──────────────────────────────────────────────────
@@ -139,30 +139,78 @@
  *   via _kn_set_frame_time). The stock (CDN) core falls back to a JS-
  *   level performance.now() shim via window._kn_frameTime.
  *
+ * ── RNG Seed Synchronization (Smash Remix) ──────────────────────────────
+ *
+ *   For Smash Remix netplay, per-frame RNG seeds are derived from a base
+ *   seed (hashed from matchId) and the current frame number, then written
+ *   to WASM RDRAM before each frame step. This bounds RNG divergence to
+ *   single frames even if code paths temporarily differ. On late join,
+ *   the host transfers current RNG state in the late-join-state message.
+ *
+ * ── FPU Trace Verification ──────────────────────────────────────────────
+ *
+ *   The host periodically (every 300 frames) broadcasts FNV-1a hashes of
+ *   the FPU instruction trace ring buffer. Guests compare their local
+ *   trace hash to detect cross-platform FPU divergence (e.g., ARM vs x86
+ *   WASM JIT differences). Mismatches log the last 20 FPU ops and emit
+ *   debug-sync events for investigation.
+ *
+ * ── Dual DataChannels (Input + Sync-State) ──────────────────────────────
+ *
+ *   Each peer connection has two DataChannels: 'lockstep' (default
+ *   priority) for 16-byte input messages and 'sync-state' (very-low
+ *   priority) for state transfer. This prevents 1MB+ state bursts from
+ *   blocking the SCTP stream and causing 200-450ms input stalls.
+ *
  * ── Desync Detection & Resync (Star Topology) ────────────────────────────
  *
  *   Opt-in (resyncEnabled flag). Star topology: host (slot 0) is the
  *   sync authority. Two hashing paths:
  *
  *   1. C-level (patched core): _kn_sync_hash() hashes game-specific
- *      RDRAM regions directly in C — fast and deterministic. Uses
- *      _kn_sync_hash_regions for per-region checksums. Resync via
- *      _kn_sync_read_regions() / _kn_sync_write_regions() (partial
- *      4-region RDRAM patch) — avoids a full state snap which teleports
- *      on-screen positions. Falls back to full _kn_sync_read/write if
- *      the patch exports are absent.
+ *      RDRAM regions directly in C — fast and deterministic.
+ *      _kn_sync_hash_regions and _kn_sync_read/write_regions exports
+ *      exist but are disabled pending frame-level state management (v2).
+ *      Currently uses full _kn_sync_read/write for state transfer.
  *   2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access,
  *      falling back to getState() serialization.
  *
- *   The host broadcasts "sync-hash:frame:hash:cycleMs" every
- *   _syncCheckInterval frames (~120 frames / ~2s). Proactive path:
- *   host also pushes a compressed delta snapshot every 30 frames so
- *   the guest can apply it immediately on mismatch without a
- *   request-response round-trip. Reactive path (fallback): guest sends
- *   "sync-request" and the host responds with compressed state in 64KB
- *   DataChannel chunks. State is buffered for async application at the
- *   next clean frame boundary — no mid-frame stall. Resync attempts
- *   use exponential backoff (400ms→8s) to avoid cascades.
+ *   Periodic hash broadcasts are disabled — AI DMA determinism +
+ *   SoftFloat FPU makes steady-state gameplay deterministic. Resync is
+ *   only triggered by reconnect/peer-recovery events and explicit
+ *   sync-requests. When triggered, the host responds with compressed
+ *   state in 64KB DataChannel chunks. State is buffered for async
+ *   application at the next clean frame boundary — no mid-frame stall.
+ *   Resync attempts use exponential backoff (400ms→8s) to avoid cascades.
+ *   State is XOR-delta compressed against the last applied state; proactive
+ *   pushes are always full (independent of the delta chain) so packet loss
+ *   is harmless.
+ *
+ * ── Peer Phantom Detection ──────────────────────────────────────────────
+ *
+ *   Tracks wall-clock time of each peer's last frame advancement. If a
+ *   peer hasn't sent a new frame for 5 seconds (PEER_DEAD_MS), it's
+ *   marked as phantom and excluded from pacing calculations. On recovery
+ *   (frame arrives), phantom state clears and a resync is triggered.
+ *
+ * ── Mesh Health Check (~5s) ──────────────────────────────────────────────
+ *
+ *   Every 300 frames, the host reconciles _knownPlayers (server truth
+ *   from users-updated events) against actual DataChannel state. Re-
+ *   initiates WebRTC connections to players the server says are active
+ *   but who don't have healthy DCs.
+ *
+ * ── Coordinated Sync Scheduling ──────────────────────────────────────────
+ *
+ *   When multiple guests request sync at the same frame, the host
+ *   schedules a single state capture at currentFrame + 15 (to absorb
+ *   RTT) and broadcasts to all requesting guests simultaneously.
+ *
+ * ── Audio Fade on Resync ─────────────────────────────────────────────────
+ *
+ *   Before applying a resync state, audio fades out over 30ms via
+ *   GainNode. After state load, fades back in over 50ms. Prevents
+ *   audio pops/clicks during state snaps.
  *
  * ── Late Join ─────────────────────────────────────────────────────────────
  *
@@ -171,33 +219,36 @@
  *     2. Sends "request-late-join" via Socket.IO data-message
  *     3. Host captures + compresses state, sends "late-join-state" with
  *        the current frame number and effective delay
- *     4. Joiner loads state, syncs frame counter to max(hostFrame,
- *        lastRemoteFrame), pre-fills delay gap with zero input, starts
- *        lockstep tick loop
+ *     4. Joiner loads state, syncs frame counter to hostFrame, pre-fills
+ *        delay gap with zero input, starts lockstep tick loop
  *   The late-joiner always initiates WebRTC connections to avoid the
  *   offer-before-listener race condition.
  *
  * ── Drop Handling ─────────────────────────────────────────────────────────
  *
  *   When a peer's DataChannel closes or ICE connection fails:
- *     - Their input in WASM memory is zeroed (neutral stick, no buttons)
+ *     - Reconnect is attempted for up to 15 seconds (re-offer cycle)
+ *     - If reconnect fails, their input in WASM memory is zeroed
+ *       (neutral stick, no buttons)
  *     - They're removed from the peer map and input tracking
  *     - Remaining players continue — the tick loop handles zero active
  *       peers gracefully (single-player mode)
- *     - No reconnect attempt; the dropped player can re-join as late join
+ *     - The dropped player can re-join as late join
  *
  * ── Tab Visibility ──────────────────────────────────────────────────────
  *
- *   A visibilitychange listener pauses/resumes emulation when the tab
- *   loses or regains focus, preventing runaway frame advancement in
- *   background tabs and saving CPU/bandwidth.
+ *   A visibilitychange listener detects when the tab loses or regains
+ *   focus. Background tabs are naturally throttled by the browser
+ *   (~1fps setInterval). On return to foreground, a full resync is
+ *   requested and the frame counter fast-forwards to recover.
  *
  * ── Diagnostics ─────────────────────────────────────────────────────────
  *
  *   _debugLog: timestamped log of [lockstep] and [play] console output
- *   _syncLogRing: 32-entry circular buffer for sync events (hash mismatches,
- *     resync triggers, frame caps), exportable as CSV via debug-sync
- *   _diagEventLog: frame-level diagnostic events flushed to IndexedDB
+ *   _syncLogRing: 10,000-entry circular buffer for sync events (hash
+ *     mismatches, resync triggers, frame caps), exportable as CSV
+ *   _diagEventLog: frame-level diagnostic events (cleared each tick,
+ *     only active when window._KN_DIAG is set)
  *   debug-sync / debug-logs: Socket.IO events for remote log upload to server
  *   Sync hash/resync operations run in a Web Worker to avoid blocking
  *   the main thread during compression/decompression.
@@ -343,7 +394,6 @@
 
   // -- Diagnostics state (DIAG logger) ----------------------------------------
   let _diagPlayerAddrs = [null, null, null, null]; // per-player input base addresses
-  let _diagLastTickTime = 0; // wall-clock time of previous tick() call
   const _diagEventLog = []; // buffered async events [{t, type, detail}]
   let _diagHookInstalled = false; // true once async event hooks are set up
   let _diagVisHandler = null;
@@ -351,9 +401,7 @@
   let _diagBlurHandler = null;
   let _diagTouchHandlers = []; // [{el, evName, handler}]
   let _diagObserver = null;
-  const DIAG_HASH_INTERVAL = 300; // frames between RDRAM hash+dump logs (~once per 5s)
   const DIAG_INPUT_INTERVAL = 300; // frames between input read logs
-  const DIAG_TIME_INTERVAL = 60; // frames between timing logs
   const DIAG_EARLY_FRAMES = 30; // log everything for first N frames
 
   // -- State -----------------------------------------------------------------
@@ -472,8 +520,6 @@
   let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _tickInterval = null; // setInterval handle for tick loop
-  let _rttProbeInterval = null;
-
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -775,114 +821,9 @@
   };
 
   // Read block 25 (0x190000) hash from kn_rdram_block_hashes.
-  // Block 25 is 92% live during SSB64 match play and outside all known volatile
-  // ranges (N64 OS ends ~0x0A3000, RSP/audio ends ~0x0C4000).
-  // Allocates only 26 slots (not the full 128) to minimise heap churn.
-  const _getBlk25Hash = (mod) => {
-    if (!mod._kn_rdram_block_hashes) return 0;
-    const buf = mod._malloc(26 * 4);
-    mod._kn_rdram_block_hashes(buf, 26);
-    const h = mod.HEAPU32[(buf >> 2) + 25] >>> 0;
-    mod._free(buf);
-    return h;
-  };
-
   // -- Diagnostic logger functions -------------------------------------------
 
   const _diagShouldLog = (frameNum, interval) => frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
-
-  // DIAG-HASH: compute and stream per-region RDRAM hashes for this player
-  // ps0*/ps1*/ps2*/ph1b* are excluded from kn_sync_hash (volatile between iOS WebKit versions) but still sampled here for diagnostics
-  const _diagRegionNames = [
-    'cfg',
-    'ps0*',
-    'ps1*',
-    'ps2*',
-    'ph1a',
-    'ph1b*',
-    'ph1c',
-    'misc',
-    'ph2',
-    'ph3a',
-    'ph3b',
-    'ph3c',
-  ];
-  // Hex lookup table for byte-to-hex conversion
-  const _hexLUT = [];
-  for (let _hi = 0; _hi < 256; _hi++) _hexLUT[_hi] = (_hi < 16 ? '0' : '') + _hi.toString(16);
-  const _bytesToHex = (bytes, off, len) => {
-    let s = '';
-    for (let i = off; i < off + len; i++) s += _hexLUT[bytes[i]];
-    return s;
-  };
-
-  const _diagGetRdram = () => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod) return null;
-    if (!_hashRegion) {
-      getHashBytes();
-    }
-    if (!_hashRegion?.ptr) return null;
-    const buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
-    if (!buf || buf.byteLength === 0) return null;
-    return { live: new Uint8Array(buf), base: _hashRegion.ptr };
-  };
-
-  const _diagHash = (frameNum) => {
-    if (!_diagShouldLog(frameNum, DIAG_HASH_INTERVAL)) return;
-    const rd = _diagGetRdram();
-    if (!rd) return;
-    const gameRegions = [
-      0xa4000, 0xba000, 0xbf000, 0xc4000, 0x262000, 0x266000, 0x26a000, 0x290000, 0x2f6000, 0x32b000, 0x330000,
-      0x335000,
-    ];
-    const SAMPLE = 256;
-    const f = frameNum;
-    let pending = gameRegions.length;
-    const regionHashes = new Array(gameRegions.length);
-    for (let gi = 0; gi < gameRegions.length; gi++) {
-      ((idx) => {
-        const gOff = rd.base + gameRegions[idx];
-        const regionBytes = rd.live.slice(gOff, gOff + SAMPLE);
-        // NOTE: intentionally fire-and-forget .then() — runs in frame loop, must not block
-        workerPost({ type: 'hash', data: regionBytes })
-          .then((res) => {
-            regionHashes[idx] = res.hash;
-            pending--;
-            if (pending === 0) {
-              const parts = [];
-              for (let r = 0; r < regionHashes.length; r++) {
-                parts.push(`${_diagRegionNames[r]}=${regionHashes[r]}`);
-              }
-              _syncLog(`DIAG-HASH f=${f} ${parts.join(' ')}`);
-            }
-          })
-          .catch(() => {
-            pending--;
-          });
-      })(gi);
-    }
-  };
-
-  // DIAG-DUMP: hex dump of ps0 (0xBA000) and ps1 (0xBF000) — the diverging regions.
-  // Dumps 64 bytes from each at 4 sub-offsets (0, 64, 128, 192) to find which
-  // part of the 256-byte sample diverges. Runs every DIAG_HASH_INTERVAL frames.
-  const _diagDump = (frameNum) => {
-    if (!_diagShouldLog(frameNum, DIAG_HASH_INTERVAL)) return;
-    const rd = _diagGetRdram();
-    if (!rd) return;
-    // Dump 4 x 32-byte chunks from ps0 and ps1 (128 hex chars per chunk, manageable)
-    const dumpRegions = [
-      { name: 'ps0', off: 0xba000 },
-      { name: 'ps1', off: 0xbf000 },
-    ];
-    for (let di = 0; di < dumpRegions.length; di++) {
-      const addr = rd.base + dumpRegions[di].off;
-      // 4 chunks of 64 bytes = full 256 byte sample
-      const hex = _bytesToHex(rd.live, addr, 256);
-      _syncLog(`DIAG-DUMP f=${frameNum} ${dumpRegions[di].name} @0x${dumpRegions[di].off.toString(16)} ${hex}`);
-    }
-  };
 
   // DIAG-INPUT: read back per-player inputs from WASM memory using discovered addresses
   const _diagInput = (frameNum, applyFrame, force = false) => {
@@ -906,28 +847,6 @@
       }
     }
     _syncLog(`DIAG-INPUT f=${frameNum} apply=${applyFrame} p0=${vals[0]} p1=${vals[1]} p2=${vals[2]} p3=${vals[3]}`);
-  };
-
-  // DIAG-TIME: timing values after frame step
-  const _diagTime = (frameNum, wallBefore, wallAfter) => {
-    if (!_diagShouldLog(frameNum, DIAG_TIME_INTERVAL)) return;
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    const cycleTime = mod?._kn_get_cycle_time_ms ? mod._kn_get_cycle_time_ms() : -1;
-    const frameArg = window._kn_frameTime || -1;
-    const wallDelta = _diagLastTickTime > 0 ? wallBefore - _diagLastTickTime : 0;
-    const stepDuration = wallAfter - wallBefore;
-    _syncLog(
-      `DIAG-TIME f=${frameNum} cycle=${typeof cycleTime === 'number' ? cycleTime.toFixed(1) : cycleTime} frameArg=${typeof frameArg === 'number' ? frameArg.toFixed(1) : frameArg} wallDelta=${wallDelta.toFixed(1)} stepMs=${stepDuration.toFixed(1)}`,
-    );
-  };
-
-  // DIAG-EVENT: flush buffered async events
-  const _diagFlushEvents = (frameNum) => {
-    if (_diagEventLog.length === 0) return;
-    for (const ev of _diagEventLog) {
-      _syncLog(`DIAG-EVENT f=${frameNum} type=${ev.type} detail=${ev.detail} t=${ev.t.toFixed(1)}`);
-    }
-    _diagEventLog.length = 0;
   };
 
   // Install async event hooks (called once at lockstep start)
@@ -1026,7 +945,6 @@
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingSyncCheck = null; // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
-  let _hashRegion = null; // {ptr, size} RDRAM pointer for direct HEAPU8 hashing
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
   let _hasKnSync = false;
   let _syncBufPtr = 0;
@@ -1105,41 +1023,6 @@
     _lastResyncTime = performance.now();
     _syncLog(`instant resync from preloaded state (age=${age}f frame=${_pendingResyncState.frame})`);
     return true;
-  };
-
-  // Drift diagnostics
-  let _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
-  const _driftSummaryAt = [1, 5, 10, 20, 50, 100, 200, 500]; // exponential log intervals
-
-  const _recordDrift = (regionHashes) => {
-    const now = performance.now();
-    _driftStats.count++;
-    if (_driftStats.count === 1) _driftStats.firstAt = now;
-    _driftStats.lastAt = now;
-
-    // Tally per-region drifts if available
-    if (regionHashes) {
-      for (const [name, drifted] of Object.entries(regionHashes)) {
-        if (drifted) _driftStats.regions[name] = (_driftStats.regions[name] || 0) + 1;
-      }
-    }
-
-    // Log summary at exponential intervals
-    if (_driftSummaryAt.includes(_driftStats.count) || (_driftStats.count > 0 && _driftStats.count % 100 === 0)) {
-      const elapsed = (now - _driftStats.firstAt) / 1000;
-      const avgInterval = _driftStats.count > 1 ? Math.round((elapsed * 1000) / (_driftStats.count - 1)) : 0;
-      const regionStr = Object.entries(_driftStats.regions)
-        .sort((a, b) => b[1] - a[1])
-        .map(([k, v]) => `${k}:${v}`)
-        .join(' ');
-      _syncLog(
-        `DRIFT-SUMMARY count=${_driftStats.count} over=${elapsed.toFixed(1)}s avgInterval=${avgInterval}ms regions=[${regionStr}]`,
-      );
-    }
-  };
-
-  const _resetDrift = () => {
-    _driftStats = { count: 0, firstAt: 0, lastAt: 0, regions: {} };
   };
 
   // Frame pacing (GGPO-style frame advantage cap)
@@ -1582,7 +1465,6 @@
           // (connection hiccup likely caused a desync — don't wait 30s)
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
-          _resetDrift();
           // Discard any proactive state buffered before the reconnect — it was
           // captured on the old network path and may be inconsistent post-ICE-restart.
           _preloadedResyncState = null;
@@ -1839,7 +1721,6 @@
         } else {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
-          _resetDrift();
         }
       }
 
@@ -3853,7 +3734,6 @@
         if (_playerSlot === 0) {
           _consecutiveResyncs = 0;
           _syncCheckInterval = _syncBaseInterval;
-          _resetDrift();
         } else {
           _resyncRequestInFlight = false; // override — tab-focus resync always wins
           _syncTargetFrame = -1; // cancel any pending coord target — tab was paused, immediate sync needed
@@ -3894,7 +3774,6 @@
         // Host: reset sync interval so hash checks resume quickly
         _consecutiveResyncs = 0;
         _syncCheckInterval = _syncBaseInterval;
-        _resetDrift();
       }
     };
     const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
@@ -3963,10 +3842,6 @@
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);
       _tickInterval = null;
-    }
-    if (_rttProbeInterval !== null) {
-      clearInterval(_rttProbeInterval);
-      _rttProbeInterval = null;
     }
     // Restore rAF if we intercepted it (other overrides restored in stop())
     if (_manualMode) {
@@ -4751,101 +4626,6 @@
     _p1KeyMap = KNShared.setupKeyTracking(_p1KeyMap, _heldKeys);
   };
 
-  // -- Direct memory hashing (avoids expensive getState() serialization) ------
-
-  const getHashBytes = () => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod) return null;
-
-    // Discover RDRAM pointer FRESH each time. The core may remap RDRAM
-    // after save state loads (which happen during lockstep initial sync
-    // and resyncs), making cached pointers stale.
-    if (mod.cwrap) {
-      try {
-        const getMemData = mod.cwrap('get_memory_data', 'string', ['string']);
-        const result = getMemData('RETRO_MEMORY_SYSTEM_RAM');
-        if (result) {
-          const parts = result.split('|');
-          const rdramSize = parseInt(parts[0], 10);
-          const rdramPtr = parseInt(parts[1], 10);
-          if (rdramPtr > 0 && rdramSize > 0) {
-            if (_hashRegion === null) {
-              const bufSrc = mod.wasmMemory
-                ? 'wasmMemory'
-                : mod.asm?.memory
-                  ? 'asm.memory'
-                  : mod.buffer
-                    ? 'mod.buffer'
-                    : 'HEAPU8.buffer';
-              _syncLog(`hash: RDRAM at [${rdramPtr}], size=${rdramSize}, buf=${bufSrc}`);
-            } else if (_hashRegion?.ptr !== rdramPtr) {
-              _syncLog(`hash: RDRAM moved! old=${_hashRegion.ptr} new=${rdramPtr}`);
-            }
-            _hashRegion = { ptr: rdramPtr, size: rdramSize };
-          }
-        }
-      } catch (_) {}
-    }
-
-    // Direct RDRAM read using scan-verified regions (Playwright automated scan).
-    // Buffer staleness: detect detached buffer and try re-acquisition.
-    let buf = mod.HEAPU8 ? mod.HEAPU8.buffer : null;
-    if (!buf || buf.byteLength === 0) {
-      buf = mod.wasmMemory?.buffer || mod.asm?.memory?.buffer || null;
-    }
-    if (_hashRegion?.ptr && buf && buf.byteLength > 0) {
-      try {
-        const live = new Uint8Array(buf);
-        const base = _hashRegion.ptr;
-
-        // SSB64 VS mode RDRAM map (verified by visual Playwright MCP scan).
-        // Match-only volatile regions (change during gameplay, NOT during menus):
-        //   0xA4000          — player/match config (near GameShark addresses)
-        //   0xBA000-0xC7000  — player/match state
-        //   0x262000-0x26C000 — physics/animation
-        //   0x32B000-0x335000 — physics/animation
-        // NEVER hash (core internals, always volatile = false positives):
-        //   0x3B000-0xA3000, 0xA5000-0xB9000, 0xD5000-0xD6000
-        //
-        // Sample 256B from each match-only volatile block (lightweight).
-        const gameRegions = [
-          0xa4000, // player/match config
-          0xba000, // player state block start
-          0xbf000, // player state block mid
-          0xc4000, // player state block end
-          0x262000, // physics block 1
-          0x266000, // physics block 1 mid
-          0x26a000, // physics block 1 end
-          0x290000, // misc gameplay
-          0x2f6000, // physics block 2
-          0x32b000, // physics block 3 start
-          0x330000, // physics block 3 mid
-          0x335000, // physics block 3 end
-        ];
-        const SAMPLE = 256;
-        const combined = new Uint8Array(SAMPLE * gameRegions.length);
-        for (let gi = 0; gi < gameRegions.length; gi++) {
-          const gOff = base + gameRegions[gi];
-          combined.set(live.subarray(gOff, gOff + SAMPLE), gi * SAMPLE);
-        }
-        return combined;
-      } catch (e) {
-        _syncLog(`hash: RDRAM read failed: ${e.message}`);
-      }
-    }
-
-    // Fallback: getState() — expensive but always correct
-    try {
-      const gm = window.EJS_emulator?.gameManager;
-      if (!gm) return null;
-      const raw = gm.getState();
-      const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      return bytes.slice(0x100000, Math.min(0x300000, bytes.length));
-    } catch (_) {
-      return null;
-    }
-  };
-
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   let _pushingSyncState = false; // debounce concurrent sync-request handling
@@ -5211,7 +4991,6 @@
       } else if (mod._emscripten_notify_memory_growth) {
         mod._emscripten_notify_memory_growth(0);
       }
-      _hashRegion = null;
 
       // Cache applied state as delta base (same proactive guard as C path above)
       if (!fromProactive) _setLastSyncState(new Uint8Array(bytes), 'applySyncFallback');
@@ -5452,14 +5231,12 @@
     _resyncCount = 0;
     _consecutiveResyncs = 0;
     _syncCheckInterval = _syncBaseInterval;
-    _resetDrift();
     _syncChunks = [];
     _syncExpected = 0;
     _pushingSyncState = false;
     _proactivePushInFlight = false;
     _pendingResyncState = null;
     _preloadedResyncState = null;
-    _hashRegion = null;
     _awaitingResync = false;
     _awaitingResyncAt = 0;
     _syncTargetFrame = -1;

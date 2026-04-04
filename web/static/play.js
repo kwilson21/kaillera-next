@@ -27,25 +27,24 @@
  *
  * ── Major Sections ──────────────────────────────────────────────────────
  *
- *   State & URL params .............. ~line 14
- *   Socket.IO connection ............ ~line 151
- *   Users updated handler ........... ~line 484
- *   Game lifecycle (start/end) ...... ~line 591
- *   ROM sharing UI + consent ........ ~line 715
- *   Pre-game ROM preloading ......... ~line 1010
- *   ROM transfer (host sending) ..... ~line 1148
- *   ROM transfer (guest receiving) .. ~line 1303
- *   ZIP extraction .................. ~line 1918
- *   ROM IDB cache ................... ~line 1976
- *   Sync log upload ................. ~line 2210
- *   Late-join ROM prompt ............ ~line 2264
- *   UI: Overlay ..................... ~line 2324
- *   UI: Toolbar ..................... ~line 2495
- *   UI: Info overlay ................ ~line 2545
- *   UI: Toasts / errors / share ..... ~line 2632
- *   Gamepad detection + remap wizard  ~line 2737
- *   Delay preference ................ ~line 3245
- *   Init ............................ ~line 3290
+ *   State & URL params .............. ~line 63
+ *   Socket.IO connection ............ ~line 228
+ *   Users updated handler ........... ~line 687
+ *   Game lifecycle (start/end) ...... ~line 831
+ *   ROM sharing UI + consent ........ ~line 972
+ *   Pre-game ROM preloading ......... ~line 1284
+ *   ROM transfer (host sending) ..... ~line 1422
+ *   ROM transfer (guest receiving) .. ~line 1577
+ *   ZIP extraction .................. ~line 2221
+ *   ROM IDB cache ................... ~line 2292
+ *   Late-join ROM prompt ............ ~line 2797
+ *   UI: Overlay ..................... ~line 2875
+ *   UI: Toolbar ..................... ~line 3070
+ *   UI: Info overlay ................ ~line 3120
+ *   UI: Toasts / errors / share ..... ~line 3207
+ *   Gamepad detection + remap wizard  ~line 3417
+ *   Delay preference ................ ~line 3928
+ *   Init ............................ ~line 3973
  *
  * ── Cross-Module Communication ──────────────────────────────────────────
  *
@@ -53,7 +52,7 @@
  *   Writes: KNState.remapActive, KNState.delayAutoValue, KNState.romHash
  *   Exposes: window.play_notifyPeerStatus, window.play_notifyDesync,
  *            window.play_notifyResync (engine → play.js callbacks for toasts)
- *   Creates: window.LockstepEngine.init() or window.StreamingEngine.init()
+ *   Creates: window.NetplayLockstep.init() or window.NetplayStreaming.init()
  */
 (function () {
   'use strict';

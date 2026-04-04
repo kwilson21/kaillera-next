@@ -3,7 +3,7 @@
  *
  * Provides input encoding/decoding (24-bit N64 input mask ↔ wire format),
  * standard online cheat codes (SSB64 GameShark), default keyboard mapping,
- * and the applyInputForSlot() function that writes decoded input into the
+ * and the applyInputToWasm() function that writes decoded input into the
  * WASM core's memory via _simulate_input().
  *
  * Consumed by: netplay-lockstep.js, netplay-streaming.js, play.js
@@ -658,9 +658,7 @@
     resetPeerConnection: resetPeerConnection,
     setupKeyTracking: setupKeyTracking,
     teardownKeyTracking: teardownKeyTracking,
-    triggerEmulatorStart: triggerEmulatorStart,
     waitForEmulator: waitForEmulator,
-    resetBootState: resetBootState,
     readLocalInput: readLocalInput,
     disableEJSInput: disableEJSInput,
     applyInputToWasm: applyInputToWasm,

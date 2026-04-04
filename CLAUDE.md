@@ -51,14 +51,17 @@ kaillera-next/
 │       ├── main.py          # entry point (FastAPI + Socket.IO + uvloop)
 │       ├── state.py         # Redis-backed room persistence
 │       ├── ratelimit.py     # per-IP rate limiting
+│       ├── db.py            # SQLite database (aiosqlite + Alembic migrations)
 │       └── api/
 │           ├── app.py       # FastAPI app (REST + security middleware)
 │           ├── og.py        # OG card image generation (Playwright HTML screenshots)
-│           └── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
+│           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
+│           └── payloads.py  # Pydantic v2 payload models for Socket.IO validation
 ├── web/             # Static frontend
 │   ├── index.html           # lobby: create/join rooms
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # sync log management page
+│   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── lobby.js             # lobby controller
 │       ├── play.js              # play page orchestrator
@@ -66,11 +69,15 @@ kaillera-next/
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
 │       ├── shared.js            # input encoding/decoding, cheats, wire format
 │       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
+│       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-state.js          # cross-module shared state (KNState)
+│       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
+│       ├── feedback.js          # in-app feedback collection
+│       ├── version.js           # version display + changelog modal
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 ├── build/           # WASM core build system (Docker + patches)
 ├── tests/           # pytest + Playwright E2E tests
@@ -108,7 +115,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
-| `start-game` | client→server | `{mode, rollbackEnabled}` | Host starts game |
+| `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game |
 | `end-game` | client→server | `{}` | Host ends game |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
@@ -125,11 +132,12 @@ All events go through the default Socket.IO namespace (`/`).
 | `session-log` | client→server | `{matchId, entries, summary, context}` | Periodic sync log flush |
 | `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
 | `debug-logs` | client→server | `{...}` | Upload debug console log |
+| `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |
 | `users-updated` | server→room | `{players, spectators, owner}` | Room state broadcast |
 | `upload-token` | server→client | `{token}` | HMAC token for upload endpoints |
 | `reconnect-token` | server→client | `{token}` | HMAC token for session reconnection |
 | `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
-| `game-started` | server→room | `{mode, rollbackEnabled, romHash}` | Game started |
+| `game-started` | server→room | `{mode, resyncEnabled, romHash, matchId}` | Game started |
 | `game-ended` | server→room | `{}` | Back to lobby |
 | `room-closed` | server→room | `{reason}` | Room force-closed |
 

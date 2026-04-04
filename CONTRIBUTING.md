@@ -120,42 +120,53 @@ To trace data flow between modules, grep for the `KNState` property name.
 Scripts are loaded in `play.html` in dependency order. Later scripts expect
 earlier ones to have set up their `window.*` exports:
 
-1. `kn-state.js` — shared state namespace
-2. `api-sandbox.js` — saves native browser APIs before anything overrides them
-3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
-4. `shared.js` — input encoding/decoding, cheats, wire format
+1. `api-sandbox.js` — saves native browser APIs before anything overrides them
+2. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
+3. `storage.js` — safe localStorage/sessionStorage wrapper
+4. `kn-state.js` — shared state namespace
 5. `gamepad-manager.js` — gamepad profiles and mapping
-6. `virtual-gamepad.js` — touch controls for mobile
-7. `netplay-lockstep.js` — lockstep engine (exposes `window.LockstepEngine`)
-8. `netplay-streaming.js` — streaming engine (exposes `window.StreamingEngine`)
-9. `play.js` — page orchestrator (connects everything)
+6. `shared.js` — input encoding/decoding, cheats, wire format
+7. `virtual-gamepad.js` — touch controls for mobile
+8. `netplay-lockstep.js` — lockstep engine (exposes `window.NetplayLockstep`)
+9. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+10. `controller-settings.js` — in-game controller settings panel
+11. `play.js` — page orchestrator (connects everything)
+12. `version.js` — version display + changelog modal
+13. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
-The Python server is small (~1,700 lines across 5 files):
+The Python server is small (~3,400 lines across 8 files):
 
 | File | Purpose |
 |---|---|
 | `main.py` | Entry point — mounts FastAPI, Socket.IO, static files, HTTPS |
 | `api/app.py` | REST endpoints, security headers (COOP/COEP/CSP), admin API |
 | `api/signaling.py` | Socket.IO event handlers — rooms, WebRTC relay, game data |
+| `api/payloads.py` | Pydantic v2 payload models + `@validated` decorator for Socket.IO events |
+| `api/og.py` | Open Graph image generation (Playwright HTML screenshots) |
 | `state.py` | Redis-backed room persistence for zero-downtime deploys |
 | `ratelimit.py` | Per-IP rolling-window rate limiting |
+| `db.py` | SQLite database (aiosqlite), Alembic migrations, session/feedback storage |
 
 #### Frontend file map
 
 | File | Lines | What it does | Talks to |
 |---|---|---|---|
-| `play.js` | ~3,500 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
-| `netplay-lockstep.js` | ~4,000 | Deterministic lockstep engine (4P mesh WebRTC, frame stepping, desync/resync) | play.js, KNState, shared.js |
+| `play.js` | ~4,300 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
+| `netplay-lockstep.js` | ~5,650 | Deterministic lockstep engine (4P mesh WebRTC, frame stepping, desync/resync) | play.js, KNState, shared.js |
 | `netplay-streaming.js` | ~1,100 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
-| `shared.js` | ~570 | Input encoding/decoding, N64 button map, cheat codes, wire format | lockstep, streaming |
-| `gamepad-manager.js` | ~350 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
-| `virtual-gamepad.js` | — | On-screen touch controls for mobile | KNState |
+| `shared.js` | ~670 | Input encoding/decoding, N64 button map, cheat codes, wire format | lockstep, streaming |
+| `gamepad-manager.js` | ~420 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
+| `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
+| `virtual-gamepad.js` | ~600 | On-screen touch controls for mobile | KNState |
+| `feedback.js` | ~480 | In-app feedback collection UI | play.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | lockstep, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
-| `kn-state.js` | ~22 | Cross-module shared state namespace | all modules |
-| `lobby.js` | ~90 | Room creation and join form on index.html | — |
+| `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
+| `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
+| `version.js` | ~350 | Version display + changelog modal | play.js |
+| `lobby.js` | ~175 | Room creation and join form on index.html | — |
 
 ### Conventions
 

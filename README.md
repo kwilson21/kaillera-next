@@ -154,27 +154,34 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
     main.py            Entry point — serves API, Socket.IO, and static frontend
     state.py           Redis-backed room persistence
     ratelimit.py       Per-IP rolling-window rate limiting
+    db.py              SQLite database (aiosqlite + Alembic migrations)
     api/
-      app.py           REST endpoints, security headers (COOP/COEP/CSP)
+      app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
+      payloads.py      Pydantic v2 payload models + @validated decorator
+      og.py            Open Graph image generation (Playwright HTML screenshots)
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
   play.html            Game page — overlay, EmulatorJS embed, toolbar
-  admin.html           Sync log management (pin, delete, download)
+  admin.html           Admin dashboard (session logs, events, feedback, screenshots)
+  error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     lobby.js           Lobby controller (room creation, invite links)
     netplay-lockstep.js    Deterministic lockstep engine (4P mesh WebRTC)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
+    controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM
     audio-worklet-processor.js  AudioWorklet ring buffer for lockstep audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
+    storage.js             Safe localStorage/sessionStorage wrapper
     kn-state.js            Shared cross-module state
+    feedback.js            In-app feedback collection
+    version.js             Version display + changelog modal
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.3)
-    ejs-loader.js          Self-hosted EmulatorJS loader (v4.2.3)
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)
@@ -217,7 +224,11 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `mupen64plus-kn-all.patch` | Core exports: deterministic timing, resync hash/read/write, audio capture |
 | `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
 | `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
-| `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override for frame-based timing |
+| `mupen64plus-ai-determinism.patch` | AI DMA deterministic audio interface timing |
+| `mupen64plus-rsp-skip-audio.patch` | RSP audio skip for deterministic frame pacing |
+| `mupen64plus-fpu-trace.patch` | FPU operation tracing for cross-platform determinism verification |
+| `mupen64plus-softfloat.patch` | SoftFloat FPU for bit-exact cross-platform floating point |
+| `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override + AUDIO_FLAG_SUSPENDED bypass |
 
 ## Configuration
 
@@ -228,11 +239,25 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `MAX_ROOMS` | `100` | Maximum concurrent rooms |
 | `MAX_SPECTATORS` | `20` | Maximum spectators per room |
 | `REDIS_URL` | — | Redis connection URL (required for session persistence) |
-| `ADMIN_KEY` | — | Admin API key for sync log management |
-| `LOG_RETENTION_DAYS` | `14` | Auto-delete unpinned sync logs after N days |
-| `LOG_MAX_FILES` | `500` | Maximum sync log files before oldest are pruned |
+| `REDIS_HOST` | `redis` | Redis host (used if REDIS_URL not set) |
+| `REDIS_PORT` | `6379` | Redis port |
+| `REDIS_PASSWORD` | — | Redis password |
+| `ADMIN_KEY` | — | Admin API key for management endpoints |
+| `LOG_RETENTION_DAYS` | `14` | Auto-delete old session data after N days |
+| `DB_PATH` | `data/kn.db` | SQLite database file path |
+| `IP_HASH_SALT` | random | Salt for IP address hashing (random per restart if unset) |
+| `TRUSTED_PROXY_IPS` | — | Comma-separated trusted proxy IPs for X-Forwarded-For |
+| `TURN_SECRET` | — | HMAC secret for time-limited TURN credentials |
+| `TURN_SERVERS` | — | Comma-separated TURN server URLs |
+| `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
+| `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
+| `DISABLE_RATE_LIMIT` | `1` | Disable per-IP rate limiting (dev only) |
+| `DEBUG_MODE` | — | Enable debug endpoints and local log files |
+| `GIT_VERSION` | — | Override version string (set automatically in Docker) |
 
 ## REST endpoints
+
+**Public:**
 
 | Endpoint | Description |
 |---|---|
@@ -242,14 +267,25 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /ice-servers` | ICE/TURN server configuration |
 | `GET /api/cached-state/{rom_hash}` | Retrieve cached save state |
 | `POST /api/cache-state/{rom_hash}` | Upload save state to cache |
-| `POST /api/sync-logs` | Upload sync diagnostic logs |
-| `GET /admin/api/logs` | List sync logs (admin) |
-| `GET /admin/api/logs/{name}` | Download a sync log (admin) |
-| `DELETE /admin/api/logs/{name}` | Delete a sync log (admin) |
-| `POST /admin/api/logs/{name}/pin` | Pin a sync log (admin) |
-| `DELETE /admin/api/logs/{name}/pin` | Unpin a sync log (admin) |
-| `GET /admin/api/stats` | Server statistics (admin) |
-| `POST /admin/api/cleanup` | Trigger manual log cleanup (admin) |
+| `POST /api/session-log` | HTTP fallback for session log flush |
+| `POST /api/client-event` | Client event logging |
+| `POST /api/feedback` | Feedback submission |
+| `GET /api/rom-hashes` | Known ROM hashes |
+| `GET /og-image/{room_id}.png` | Open Graph card image for social sharing |
+
+**Admin** (requires `ADMIN_KEY`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /admin/api/stats` | Server statistics |
+| `GET /admin/api/session-logs` | List session logs |
+| `GET /admin/api/session-logs/{log_id}` | Download a session log |
+| `GET /admin/api/client-events` | List client events |
+| `GET /admin/api/client-events/{event_id}` | Client event detail |
+| `GET /admin/api/feedback` | List feedback |
+| `GET /admin/api/feedback/{feedback_id}` | Feedback detail |
+| `GET /admin/api/screenshots/{match_id}` | List screenshots for a match |
+| `GET /admin/api/screenshots/img/{screenshot_id}` | Serve screenshot image |
 
 ## Current status
 

@@ -1,3 +1,14 @@
+/**
+ * controller-settings.js — In-Game Controller Settings Panel
+ *
+ * Provides a slide-out settings panel for gamepad configuration during
+ * gameplay: deadzone, sensitivity, analog stick inversion, per-game
+ * profile persistence (localStorage), and a button test visualizer.
+ * Self-contained — injects its own CSS styles.
+ *
+ * Consumed by: play.js
+ * Exposes: window.ControllerSettings
+ */
 (function () {
   'use strict';
 
