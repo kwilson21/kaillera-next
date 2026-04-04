@@ -28,6 +28,7 @@ Admin endpoints (auth via ADMIN_KEY env var):
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -36,6 +37,7 @@ import logging
 import os
 import re
 import subprocess as _sp
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -402,19 +404,54 @@ def create_app(lifespan=None) -> FastAPI:
     def ice_servers(request: Request) -> list:
         if not check_ip(_client_ip(request), "ice-servers"):
             raise HTTPException(status_code=429, detail="Rate limited")
-        default_stun = [{"urls": "stun:stun.cloudflare.com:3478"}]
-        custom = os.environ.get("ICE_SERVERS")
-        if not custom:
-            return default_stun
+
+        # Public STUN servers (free, no auth needed)
+        stun_servers = [
+            {"urls": "stun:stun.cloudflare.com:3478"},
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+        ]
+
+        # Verify request is from an active room participant
         token = request.query_params.get("token", "")
         room_id = request.query_params.get("room", "")
         if not token or not room_id or room_id not in rooms or not verify_upload_token(room_id, token):
-            return default_stun
-        try:
-            return json.loads(custom)
-        except json.JSONDecodeError:
-            log.warning("ICE_SERVERS env var contains invalid JSON, using default STUN server")
-            return default_stun
+            return stun_servers
+
+        # Check for legacy static ICE_SERVERS (backwards compatible)
+        legacy = os.environ.get("ICE_SERVERS")
+        if legacy:
+            try:
+                return json.loads(legacy)
+            except json.JSONDecodeError:
+                log.warning("ICE_SERVERS env var contains invalid JSON")
+
+        # Generate HMAC time-limited TURN credentials
+        turn_secret = os.environ.get("TURN_SECRET", "")
+        turn_urls_raw = os.environ.get("TURN_SERVERS", "")
+        if not turn_secret or not turn_urls_raw:
+            return stun_servers
+
+        # Credentials expire in 24 hours (username = expiry:random_id)
+        expiry = int(time.time()) + 86400
+        username = f"{expiry}:{room_id}"
+        mac = hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1)
+        credential = base64.b64encode(mac.digest()).decode()
+
+        # Build TURN server entries from comma-separated TURN_SERVERS env
+        turn_entries = []
+        for url in turn_urls_raw.split(","):
+            url = url.strip()
+            if url:
+                turn_entries.append(
+                    {
+                        "urls": url,
+                        "username": username,
+                        "credential": credential,
+                    }
+                )
+
+        return stun_servers + turn_entries
 
     @app.get("/room/{room_id}")
     def get_room(room_id: str, request: Request) -> dict:
