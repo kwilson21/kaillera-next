@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.29.0",
+    "date": "2026-04-04",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "rewrite input application to use host-authoritative roster"
+      }
+    ]
+  },
+  {
     "version": "0.28.0",
     "date": "2026-04-04",
     "changes": [
