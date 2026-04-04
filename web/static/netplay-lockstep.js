@@ -394,6 +394,7 @@
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
+  let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
   let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
@@ -827,8 +828,8 @@
   };
 
   // DIAG-INPUT: read back per-player inputs from WASM memory using discovered addresses
-  const _diagInput = (frameNum, applyFrame) => {
-    if (!_diagShouldLog(frameNum, DIAG_INPUT_INTERVAL)) return;
+  const _diagInput = (frameNum, applyFrame, force = false) => {
+    if (!force && !_diagShouldLog(frameNum, DIAG_INPUT_INTERVAL)) return;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?.HEAPU8) return;
     const mem = mod.HEAPU8;
@@ -1821,6 +1822,7 @@
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
           _activeRoster = new Set(slots);
+          _rosterChangeFrame = _frameNum;
           _syncLog(`ROSTER received: frame=${rosterFrame} slots=[${slots.join(',')}]`);
         }
         if (e.data === 'leaving') {
@@ -2879,6 +2881,7 @@
     }
     slots.sort((a, b) => a - b);
     _activeRoster = new Set(slots);
+    _rosterChangeFrame = _frameNum;
     const msg = `roster:${_frameNum}:${slots.join(',')}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
     for (const p of Object.values(_peers)) {
@@ -3517,6 +3520,7 @@
       _remoteInputs = {};
       _peerInputStarted = {};
       _activeRoster = null;
+      _rosterChangeFrame = -1;
       // _lastKnownInput is const (object), clear its entries
       for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];
     }
@@ -4208,6 +4212,12 @@
           const hasPeer = inputPeers.some((p) => p.slot === rosterSlot);
           if (!hasPeer) writeInputToMemory(rosterSlot, 0);
         }
+      }
+
+      // Dense DIAG-INPUT after roster changes: read back what's in WASM
+      // memory for each slot so we can compare across players frame-by-frame.
+      if (_rosterChangeFrame >= 0 && _frameNum - _rosterChangeFrame < 120) {
+        _diagInput(_frameNum, applyFrame, true);
       }
 
       // Periodic input pipeline log (every 60 frames = ~1s)
