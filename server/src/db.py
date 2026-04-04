@@ -170,6 +170,42 @@ async def execute_write(sql: str, params: tuple) -> None:
     await _db.commit()
 
 
+async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -> int:
+    """Insert a gameplay screenshot and return row ID."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)",
+        (match_id, slot, frame, data),
+    )
+    await _db.commit()
+    return cursor.lastrowid
+
+
+async def get_screenshots(match_id: str) -> list[dict]:
+    """Return screenshot metadata (without data) for a match."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        "SELECT id, match_id, slot, frame, length(data) as size, created_at FROM screenshots WHERE match_id = ? ORDER BY slot, frame",
+        (match_id,),
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return []
+    columns = [desc[0] for desc in cursor.description]
+    return [dict(zip(columns, row, strict=False)) for row in rows]
+
+
+async def get_screenshot_data(screenshot_id: int) -> bytes | None:
+    """Return raw JPEG bytes for a screenshot."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute("SELECT data FROM screenshots WHERE id = ?", (screenshot_id,))
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
 async def query(sql: str, params: tuple) -> list[dict]:
     """Run a read query and return results as a list of dicts."""
     if _db is None:

@@ -2,12 +2,13 @@ diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
 index a626706..47d6ea0 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
-@@ -126,7 +126,14 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+@@ -126,7 +126,15 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
                       _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
 -                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
 +                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data, \
++                     _task_queue_check,_kn_load_state_immediate, \
 +                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_cycle_time_ms, \
 +                     _kn_get_audio_ptr,_kn_get_audio_samples,_kn_reset_audio,_kn_get_audio_rate, \
 +                     _kn_reset_cycle_count,_kn_canon_fpu_regs, \

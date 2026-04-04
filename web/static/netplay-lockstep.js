@@ -391,6 +391,15 @@
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
+  let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
+
+  // Smash Remix ROM hashes (for game-specific RNG/settings sync).
+  // Must match hashes in server/config/known_roms.json.
+  const _SMASH_REMIX_HASHES = new Set([
+    'S73855bdf5e8753c546a31e278dfe558c3eaa575b97752c1d95950d66b1161130', // v2.0.0
+    'S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403', // v2.0.1
+  ]);
+  const _isSmashRemix = () => _SMASH_REMIX_HASHES.has(_config?.romHash);
 
   // Manual mode / rAF interception state (native refs managed by APISandbox)
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
@@ -398,6 +407,7 @@
   let _stallStart = 0; // timestamp when current stall began
   let _resendSent = false; // true once resend request sent for current stall
   let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
+  let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _tickInterval = null; // setInterval handle for tick loop
   let _rttProbeInterval = null;
 
@@ -605,6 +615,100 @@
     } catch (_) {
       return 0;
     }
+  };
+
+  // -- Gameplay screenshot capture (for desync debugging) --------------------
+  // Periodically capture the WebGL canvas via readPixels → scale → JPEG →
+  // send to server. Cost: ~3-5ms GPU sync every SCREENSHOT_INTERVAL frames.
+  const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
+  const SCREENSHOT_WIDTH = 160;
+  const SCREENSHOT_HEIGHT = 120;
+  let _screenshotCanvas = null;
+  let _screenshotCtx = null;
+  let _screenshotSrcCanvas = null;
+  let _screenshotSrcCtx = null;
+
+  const _captureAndSendScreenshot = () => {
+    const canvas = document.querySelector('#game canvas');
+    if (!canvas || !canvas.width || !canvas.height) return;
+    const gl =
+      canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+      canvas.getContext('webgl', { preserveDrawingBuffer: true });
+    if (!gl) return;
+
+    const w = gl.drawingBufferWidth;
+    const h = gl.drawingBufferHeight;
+
+    // Read pixels from GPU
+    if (!_glPixelBuf || _glPixelBuf.length !== w * h * 4) {
+      _glPixelBuf = new Uint8Array(w * h * 4);
+    }
+    // Unbind PIXEL_PACK buffer (Emscripten WebGL2 binds one)
+    const pbo = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
+    if (pbo) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
+    if (pbo) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+
+    // Copy to full-size source canvas (flipped vertically)
+    if (!_screenshotSrcCanvas || _screenshotSrcCanvas.width !== w || _screenshotSrcCanvas.height !== h) {
+      _screenshotSrcCanvas = document.createElement('canvas');
+      _screenshotSrcCanvas.width = w;
+      _screenshotSrcCanvas.height = h;
+      _screenshotSrcCtx = _screenshotSrcCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    const imgData = _screenshotSrcCtx.createImageData(w, h);
+    for (let row = 0; row < h; row++) {
+      const srcOff = (h - 1 - row) * w * 4;
+      const dstOff = row * w * 4;
+      imgData.data.set(_glPixelBuf.subarray(srcOff, srcOff + w * 4), dstOff);
+    }
+    _screenshotSrcCtx.putImageData(imgData, 0, 0);
+
+    // Center-crop to 4:3 (N64 native) then scale to thumbnail
+    if (!_screenshotCanvas) {
+      _screenshotCanvas = document.createElement('canvas');
+      _screenshotCanvas.width = SCREENSHOT_WIDTH;
+      _screenshotCanvas.height = SCREENSHOT_HEIGHT;
+      _screenshotCtx = _screenshotCanvas.getContext('2d');
+    }
+    const targetRatio = 4 / 3;
+    const srcRatio = w / h;
+    let sx = 0,
+      sy = 0,
+      sw = w,
+      sh = h;
+    if (srcRatio > targetRatio) {
+      // Source is wider than 4:3 — crop sides
+      sw = Math.round(h * targetRatio);
+      sx = Math.round((w - sw) / 2);
+    } else if (srcRatio < targetRatio) {
+      // Source is taller than 4:3 — crop top/bottom
+      sh = Math.round(w / targetRatio);
+      sy = Math.round((h - sh) / 2);
+    }
+    _screenshotCtx.drawImage(_screenshotSrcCanvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+
+    // Encode as JPEG and send
+    _screenshotCanvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = reader.result.split(',')[1]; // strip data:image/jpeg;base64,
+          if (socket?.connected) {
+            socket.emit('game-screenshot', {
+              matchId: _cachedMatchId || KNState.matchId,
+              slot: _playerSlot,
+              frame: _frameNum,
+              data: base64,
+            });
+          }
+        };
+        reader.readAsDataURL(blob);
+      },
+      'image/jpeg',
+      0.6,
+    );
   };
 
   // Read block 25 (0x190000) hash from kn_rdram_block_hashes.
@@ -1261,6 +1365,17 @@
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
+    if (msg.type === 'late-join-ready' && _lateJoinPaused) {
+      _lateJoinPaused = false;
+      _syncLog('late-join resume: joiner ready');
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send('late-join-resume');
+          } catch (_) {}
+        }
+      }
+    }
   };
 
   const handleLateJoinRequest = (msg) => {
@@ -1296,6 +1411,12 @@
     }
 
     const otherPlayers = Object.values(players).filter((p) => p.socketId !== socket.id);
+    const existingPeerSids = Object.keys(_peers);
+    _syncLog(
+      `onUsersUpdated: ${Object.keys(players).length} players, ${otherPlayers.length} others, ` +
+        `mySlot=${_playerSlot}, lateJoin=${_lateJoin}, running=${_running}, spectator=${_isSpectator}, ` +
+        `existingPeers=[${existingPeerSids.join(',')}]`,
+    );
 
     // Establish mesh connections to other players
     // Normal: lower slot initiates (creates data channel + sends offer)
@@ -1303,20 +1424,27 @@
     // Running host: DON'T initiate to new players — let them initiate after their init()
     for (const p of otherPlayers) {
       if (_peers[p.socketId]) {
+        _syncLog(`onUsersUpdated: peer ${p.socketId} (slot ${p.slot}) already exists, skipping`);
         _peers[p.socketId].slot = p.slot;
         continue;
       }
 
       let shouldInitiate;
+      let reason;
       if (_lateJoin && !_isSpectator) {
-        shouldInitiate = true; // late-joiner always initiates
+        shouldInitiate = true;
+        reason = 'late-joiner always initiates';
       } else if (_running) {
-        shouldInitiate = false; // running host waits for late-joiner's offer
+        shouldInitiate = false;
+        reason = 'running — wait for late-joiner offer';
       } else if (_isSpectator) {
-        shouldInitiate = false; // spectators never initiate
+        shouldInitiate = false;
+        reason = 'spectator never initiates';
       } else {
         shouldInitiate = _playerSlot < p.slot;
+        reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
+      _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
 
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
@@ -1447,7 +1575,11 @@
 
   async function sendOffer(remoteSid) {
     const peer = _peers[remoteSid];
-    if (!peer) return;
+    if (!peer) {
+      _syncLog(`sendOffer: no peer for ${remoteSid}, skipping`);
+      return;
+    }
+    _syncLog(`sendOffer: sending to ${remoteSid} (slot ${peer.slot})`);
     await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
   }
 
@@ -1455,15 +1587,23 @@
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
+    const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
+    _syncLog(
+      `onWebRTCSignal: ${sigType} from ${senderSid}, hasPeer=${!!_peers[senderSid]}, knownPlayer=${!!_knownPlayers[senderSid]}`,
+    );
 
     // Create peer on demand if offer arrives before users-updated
     if (data.offer && !_peers[senderSid]) {
       const known = _knownPlayers[senderSid];
+      _syncLog(`onWebRTCSignal: on-demand createPeer for ${senderSid}, slot=${known?.slot ?? 'null'}`);
       createPeer(senderSid, known ? known.slot : null, false);
     }
 
     let peer = _peers[senderSid];
-    if (!peer) return;
+    if (!peer) {
+      _syncLog(`onWebRTCSignal: no peer for ${senderSid}, dropping ${sigType}`);
+      return;
+    }
 
     try {
       if (data.offer) {
@@ -1575,19 +1715,25 @@
           _consecutiveResyncs = 0;
           _resyncRequestInFlight = false;
           _syncMismatchStreak = 0;
-          // Send sync-request-full on the LOCKSTEP DC (always open at this point).
-          // The sync-state DC is unreliable after reconnect — the host may not have
-          // set up its listener on the new channel yet, causing the request to be lost.
-          const _reconnectTarget = _frameNum + SYNC_COORD_DELTA;
-          _syncTargetFrame = _reconnectTarget;
-          _resyncRequestInFlight = true;
-          try {
-            ch.send(`sync-request-full-at:${_reconnectTarget}`);
-            _syncLog(`reconnect resync: sent sync-request-full-at:${_reconnectTarget} on lockstep DC`);
-          } catch (e) {
-            _syncLog(`reconnect resync send failed: ${e}`);
-            _resyncRequestInFlight = false;
-            _syncTargetFrame = -1;
+          // Send sync-request-full to the HOST's lockstep DC (only host handles
+          // sync requests). `ch` is the DC to the reconnected peer — which may
+          // not be the host (e.g. P1 reconnecting to P2).
+          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+          const hostDc = hostPeer?.dc;
+          if (hostDc?.readyState === 'open') {
+            const _reconnectTarget = _frameNum + SYNC_COORD_DELTA;
+            _syncTargetFrame = _reconnectTarget;
+            _resyncRequestInFlight = true;
+            try {
+              hostDc.send(`sync-request-full-at:${_reconnectTarget}`);
+              _syncLog(`reconnect resync: sent sync-request-full-at:${_reconnectTarget} to host DC`);
+            } catch (e) {
+              _syncLog(`reconnect resync send failed: ${e}`);
+              _resyncRequestInFlight = false;
+              _syncTargetFrame = -1;
+            }
+          } else {
+            _syncLog(`reconnect resync: host DC not open, skipping resync request`);
           }
           // Sync-state DC onopen handler preserved for future use
           const syncDc = peer.syncDc;
@@ -1631,6 +1777,12 @@
         if (e.data === 'emu-ready') {
           peer.emuReady = true;
           checkAllEmuReady();
+        }
+        if (e.data === 'late-join-pause') {
+          _lateJoinPaused = true;
+        }
+        if (e.data === 'late-join-resume') {
+          _lateJoinPaused = false;
         }
         if (e.data === 'leaving') {
           peer._intentionalLeave = true;
@@ -2389,6 +2541,7 @@
       const hostAlreadyRunning = _lastRemoteFrame > 0;
       if ((_lateJoin || hostAlreadyRunning) && _playerSlot !== 0) {
         _syncLog(`using late-join path (lateJoin=${_lateJoin}, hostRunning=${hostAlreadyRunning})`);
+        _awaitingLateJoinState = true;
         setStatus('Requesting game state...');
         socket.emit('data-message', {
           type: 'request-late-join',
@@ -2415,6 +2568,7 @@
     if (!_selfEmuReady) return;
     if (_isSpectator) return;
     if (_running) return;
+    if (_awaitingLateJoinState) return; // late-join path active — don't use normal sync
 
     // Wait for ALL player peers to be emu-ready (not just 1)
     const playerPeers = Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined);
@@ -2671,16 +2825,75 @@
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
       const encoded = await compressAndEncode(bytes);
+
+      // Read game-specific RNG/settings values from RDRAM
+      let rngValues = null;
+      let saveData = null;
+      const hMod = gm.Module;
+      if (hMod?.HEAPU32 && hMod?._get_memory_data) {
+        try {
+          const rk = hMod.stringToNewUTF8('RETRO_MEMORY_SYSTEM_RAM');
+          const rr = hMod._get_memory_data(rk);
+          hMod._free(rk);
+          if (rr) {
+            const [rs, rp] = hMod.UTF8ToString(rr).split('|').map(Number);
+            const u32 = rp >> 2;
+            if (_isSmashRemix()) {
+              // Smash Remix RNG addresses (from source code analysis)
+              const vsBytes = Array.from(hMod.HEAPU8.slice(rp + 0x000a4d08, rp + 0x000a4d28));
+              rngValues = {
+                seed: hMod.HEAPU32[u32 + (0x0005b940 >> 2)] >>> 0,
+                altSeed: hMod.HEAPU32[u32 + (0x000a0578 >> 2)] >>> 0,
+                frameCounter: hMod.HEAPU32[u32 + (0x0003cb30 >> 2)] >>> 0,
+                screenFC: hMod.HEAPU32[u32 + (0x0003b6e4 >> 2)] >>> 0,
+                vsBytes,
+                matchCopy: hMod.HEAPU32[u32 + (0x0013bdac >> 2)] >>> 0,
+                globalGameMode: hMod.HEAPU32[u32 + (0x004f756c >> 2)] >>> 0,
+              };
+            }
+            // SAVE_RAM (EEPROM/SRAM) — generic, works for any game
+            const sk = hMod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
+            const sr = hMod._get_memory_data(sk);
+            hMod._free(sk);
+            if (sr) {
+              const [ss, sp] = hMod.UTF8ToString(sr).split('|').map(Number);
+              if (ss > 0 && sp > 0) {
+                saveData = uint8ToBase64(hMod.HEAPU8.slice(sp, sp + ss));
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Pause lockstep — freeze all players at this exact frame until
+      // the late-joiner confirms ready. Zero frame gap = zero RNG drift.
+      _lateJoinPaused = true;
+      _syncLog(`pausing for late-join at frame ${_frameNum}`);
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send('late-join-pause');
+          } catch (_) {}
+        }
+      }
+      setTimeout(() => {
+        if (_lateJoinPaused) {
+          _lateJoinPaused = false;
+          _syncLog('late-join pause timeout — resuming');
+        }
+      }, 10000);
+
       _syncLog(
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
       );
 
-      // Send via Socket.IO since save states are too large for DC
       socket.emit('data-message', {
         type: 'late-join-state',
         frame: _frameNum,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
+        rngValues,
+        saveData,
       });
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
@@ -2692,6 +2905,7 @@
     if (_running) return; // already running, ignore duplicate
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
+    _awaitingLateJoinState = false;
     setStatus('Loading late-join state...');
 
     try {
@@ -2707,22 +2921,74 @@
         _syncLog(`late-join: using room delay ${DELAY_FRAMES}`);
       }
 
-      gm.loadState(bytes);
-      // Seed the delta base so future delta syncs have a reference.
-      // Without this, the first desync-triggered sync arrives as a delta
-      // but _lastSyncState is null → "delta base missing" → resync fails.
+      // Write SAVE_RAM before enterManualMode so boot frame reads host's EEPROM
+      const mod = gm.Module;
+      if (msg.saveData && mod?._get_memory_data && mod.HEAPU8) {
+        try {
+          const saveBytes = base64ToUint8(msg.saveData);
+          const sk = mod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
+          const sr = mod._get_memory_data(sk);
+          mod._free(sk);
+          if (sr) {
+            const [ss, sp] = mod.UTF8ToString(sr).split('|').map(Number);
+            if (ss > 0 && sp > 0) mod.HEAPU8.set(saveBytes.subarray(0, Math.min(saveBytes.length, ss)), sp);
+          }
+        } catch (_) {}
+      }
+
+      // Load state synchronously if available, else async
+      if (mod?._kn_load_state_immediate) {
+        const statePtr = mod._malloc(bytes.length);
+        mod.HEAPU8.set(bytes, statePtr);
+        mod._kn_load_state_immediate(statePtr, bytes.length);
+        mod._free(statePtr);
+      } else {
+        gm.loadState(bytes);
+        if (mod?._task_queue_check) mod._task_queue_check();
+      }
+
       _setLastSyncState(bytes.slice(), 'late-join');
       enterManualMode();
 
-      // Sync to the host's current frame. The host sent the state at msg.frame,
-      // but has advanced since then. _lastRemoteFrame tracks the highest frame
-      // received via data channel from any peer — use that to catch up.
-      // Then pre-fill the delay gap so the tick loop doesn't stall waiting
-      // for historical input that was sent before we started lockstep.
-      const startFrame = _lastRemoteFrame > msg.frame ? _lastRemoteFrame : msg.frame;
-      _frameNum = startFrame;
+      // Write game-specific RNG/settings values (gated to Smash Remix)
+      if (msg.rngValues && _isSmashRemix() && mod?.HEAPU32 && mod?._get_memory_data) {
+        try {
+          const rk = mod.stringToNewUTF8('RETRO_MEMORY_SYSTEM_RAM');
+          const rr = mod._get_memory_data(rk);
+          mod._free(rk);
+          if (rr) {
+            const [, rp] = mod.UTF8ToString(rr).split('|').map(Number);
+            const u32 = rp >> 2;
+            mod.HEAPU32[u32 + (0x0005b940 >> 2)] = msg.rngValues.seed >>> 0;
+            mod.HEAPU32[u32 + (0x000a0578 >> 2)] = msg.rngValues.altSeed >>> 0;
+            mod.HEAPU32[u32 + (0x0003cb30 >> 2)] = msg.rngValues.frameCounter >>> 0;
+            mod.HEAPU32[u32 + (0x0003b6e4 >> 2)] = msg.rngValues.screenFC >>> 0;
+            if (msg.rngValues.vsBytes) mod.HEAPU8.set(new Uint8Array(msg.rngValues.vsBytes), rp + 0x000a4d08);
+            if (msg.rngValues.matchCopy !== undefined)
+              mod.HEAPU32[u32 + (0x0013bdac >> 2)] = msg.rngValues.matchCopy >>> 0;
+            if (msg.rngValues.globalGameMode !== undefined)
+              mod.HEAPU32[u32 + (0x004f756c >> 2)] = msg.rngValues.globalGameMode >>> 0;
+          }
+        } catch (_) {}
+      }
 
-      for (let f = Math.max(0, startFrame - DELAY_FRAMES); f <= startFrame + DELAY_FRAMES; f++) {
+      // Write SAVE_RAM again after loadState (in case loadState overwrote it)
+      if (msg.saveData && mod?._get_memory_data && mod.HEAPU8) {
+        try {
+          const saveBytes = base64ToUint8(msg.saveData);
+          const sk = mod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
+          const sr = mod._get_memory_data(sk);
+          mod._free(sk);
+          if (sr) {
+            const [ss, sp] = mod.UTF8ToString(sr).split('|').map(Number);
+            if (ss > 0 && sp > 0) mod.HEAPU8.set(saveBytes.subarray(0, Math.min(saveBytes.length, ss)), sp);
+          }
+        } catch (_) {}
+      }
+
+      // Start at host's current frame (host is paused at msg.frame)
+      _frameNum = msg.frame;
+      for (let f = Math.max(0, msg.frame - DELAY_FRAMES); f <= msg.frame + DELAY_FRAMES; f++) {
         if (!_localInputs[f]) _localInputs[f] = KNShared.ZERO_INPUT;
         for (const p of Object.values(_peers)) {
           if (p.slot !== null && p.slot !== undefined) {
@@ -2732,10 +2998,11 @@
         }
       }
 
-      _syncLog(
-        `late-join state loaded at frame ${msg.frame} synced to frame ${_frameNum} (lastRemote: ${_lastRemoteFrame})`,
-      );
+      _syncLog(`late-join loaded at frame ${msg.frame}`);
       startLockstep();
+
+      // Tell host to resume
+      socket.emit('data-message', { type: 'late-join-ready' });
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     }
@@ -3045,6 +3312,11 @@
 
     runner(frameTimeMs);
 
+    // Periodic gameplay screenshot for desync debugging
+    if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
+      _captureAndSendScreenshot();
+    }
+
     // Force GL composite via real rAF no-op
     APISandbox.nativeRAF(() => {});
     return true;
@@ -3080,6 +3352,19 @@
   const startLockstep = () => {
     if (_running) return;
     _running = true;
+
+    // Ensure session log flushing is active. startGameSequence() sets this
+    // up for normal joins, but late-joiners return early from that function
+    // and resume here via handleLateJoinState() → startLockstep(). Without
+    // this, late-joiners produce zero session logs and zero screenshots.
+    if (!_flushInterval) {
+      _cachedMatchId = _cachedMatchId || KNState.matchId;
+      _cachedRoom = _cachedRoom || KNState.room;
+      _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
+      _socketFlushFails = 0;
+      _flushInterval = setInterval(_flushSyncLog, 30000);
+      _startTime = _startTime || performance.now();
+    }
 
     // Detect forked core with C-level deterministic timing exports
     const lsMod = window.EJS_emulator?.gameManager?.Module;
@@ -3215,7 +3500,7 @@
           : 'unknown';
     const isMobile = /Mobile|Android|iPhone|iPad/.test(ua);
     _syncLog(
-      `DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} ua=${ua.substring(0, 120)}`,
+      `DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} romHash=${_config?.romHash?.substring(0, 16) || 'none'} ua=${ua.substring(0, 120)}`,
     );
 
     const activePeers = getActivePeers();
@@ -3496,6 +3781,7 @@
 
   const tick = () => {
     if (!_running) return;
+    if (_lateJoinPaused) return; // frozen while late-joiner loads state
 
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
@@ -4846,6 +5132,7 @@
     _selfEmuReady = false;
     _selfLockstepReady = false;
     _syncStarted = false;
+    _awaitingLateJoinState = false;
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
     _guestStateBytes = null;

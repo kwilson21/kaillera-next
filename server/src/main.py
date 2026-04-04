@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 import socketio
 import uvicorn
 
-from src import analytics, db, state
+from src import db, state
 from src.api.app import cleanup_old_data, create_app
 from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, set_shutting_down, sio
 
@@ -35,7 +35,6 @@ _WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "web")
 async def lifespan(_app):
     await state.init()
     await db.init_db()
-    analytics.init_posthog()
     restored = await state.load_all_rooms()
     if restored:
         rooms.update(restored)

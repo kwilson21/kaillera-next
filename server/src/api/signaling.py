@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 
 import socketio
 
-from src import analytics, db, state
+from src import db, state
 from src.api.payloads import (
     ClaimSlotPayload,
     DeviceTypePayload,
@@ -275,14 +275,6 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
                 break
         if room.match_id and rm_slot is not None:
             await db.set_session_ended(room.match_id, rm_slot, reason)
-            analytics.capture_session_ended(
-                player_id,
-                {
-                    "room": session_id,
-                    "mode": room.mode,
-                    "ended_by": reason,
-                },
-            )
 
         room.players.pop(player_id, None)
         if rm_slot is not None:
@@ -496,7 +488,14 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
         await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
-        return (None, _players_payload(room))
+        resp = _players_payload(room)
+        resp["status"] = room.status
+        resp["mode"] = room.mode
+        resp["rom_hash"] = room.rom_hash
+        resp["rom_sharing"] = room.rom_sharing
+        if room.match_id:
+            resp["matchId"] = room.match_id
+        return (None, resp)
 
     await _leave(sid)  # clean up if already in another room
 
@@ -521,7 +520,14 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
     )
-    return (None, _players_payload(room))
+    resp = _players_payload(room)
+    resp["status"] = room.status
+    resp["mode"] = room.mode
+    resp["rom_hash"] = room.rom_hash
+    resp["rom_sharing"] = room.rom_sharing
+    if room.match_id:
+        resp["matchId"] = room.match_id
+    return (None, resp)
 
 
 @sio.on("leave-room")
@@ -656,15 +662,6 @@ async def end_game(sid: str, payload: EndGamePayload) -> str | None:
 
     if room.match_id:
         await db.set_session_ended(room.match_id, None, "game-end")
-        for pid in room.players:
-            analytics.capture_session_ended(
-                pid,
-                {
-                    "room": session_id,
-                    "mode": room.mode,
-                    "ended_by": "game-end",
-                },
-            )
         room.match_id = None
 
     room.status = "lobby"
@@ -947,6 +944,40 @@ async def debug_logs(sid: str, data: dict) -> None:
             for line in logs[:5000]:
                 f.write(str(line)[:500] + "\n")
         log.info("Debug logs also written to: %s", out)
+
+
+@sio.on("game-screenshot")
+async def game_screenshot(sid: str, data: dict) -> None:
+    """Receive periodic gameplay screenshot from client for desync debugging."""
+    if not check(sid, "game-screenshot"):
+        return
+    entry = _sid_to_room.get(sid)
+    if not entry:
+        return
+    session_id, player_id, is_spectator = entry
+    if is_spectator:
+        return
+    match_id = data.get("matchId")
+    slot = data.get("slot")
+    frame = data.get("frame")
+    b64_data = data.get("data")
+    if not match_id or slot is None or not b64_data or not frame:
+        return
+    # Validate match_id matches the room's current match
+    room = rooms.get(session_id)
+    if not room or room.match_id != match_id:
+        return
+    # Decode and store in DB
+    import base64
+
+    try:
+        img_bytes = base64.b64decode(b64_data)
+    except Exception:
+        return
+    # Cap at 50KB per screenshot
+    if len(img_bytes) > 50_000:
+        return
+    await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
 _SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data

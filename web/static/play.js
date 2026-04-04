@@ -314,6 +314,24 @@
           }
         }
         sendDeviceType();
+        // Resume stalled ROM transfer — pre-game WebRTC connections are lost on
+        // socket reconnect, so re-register signaling and retry via Socket.IO
+        if (
+          !isHost &&
+          _romSharingDecision === 'accepted' &&
+          !_romBlob &&
+          (_romTransferState === 'resuming' || _romTransferState === 'paused')
+        ) {
+          console.log('[play] resuming ROM transfer after reconnect');
+          cleanupPreGameConnections();
+          registerRomSignalHandler();
+          _romTransferRetries = 0;
+          _romTransferState = 'resuming';
+          clearTimeout(_romTransferResumeTimer);
+          _romTransferResumeTimer = null;
+          requestResumeTransfer();
+          updateRomSharingUI();
+        }
       });
     });
     socket.on('connect_error', (e) => {
@@ -451,6 +469,9 @@
 
         // Room full: auto-join as spectator with banner
         if (!isSpectator && roomData.player_count >= roomData.max_players) {
+          console.log(
+            `[play] auto-spectate: player_count=${roomData.player_count} >= max_players=${roomData.max_players}`,
+          );
           isSpectator = true;
           _autoSpectated = true;
         }
@@ -538,8 +559,16 @@
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
+              console.log(
+                `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
+              );
               gameRunning = true;
               _lateJoin = !isSpectator;
+              // Set matchId for late joiners — game-started event doesn't fire
+              // for them, so session logging would silently fail without this.
+              // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
+              if (joinData?.matchId) KNState.matchId = joinData.matchId;
+              else if (roomData.matchId) KNState.matchId = roomData.matchId;
               // Pick up the game mode — game-started event won't fire
               // since the game is already running. Try REST then join callback.
               if (roomData.mode) mode = roomData.mode;
@@ -1067,7 +1096,7 @@
     if (!gameRunning) {
       console.log('[play] ROM sharing accepted pre-game — requesting early transfer');
       registerRomSignalHandler();
-      socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
+      requestResumeTransfer();
       return;
     }
 
@@ -1112,6 +1141,11 @@
       if (_romAcceptPollInterval) {
         clearInterval(_romAcceptPollInterval);
         _romAcceptPollInterval = null;
+        // DC didn't open in time — fall back to Socket.IO with retry logic
+        if (_romTransferState === 'resuming' && !_romBlob) {
+          console.log('[play] waitForDCAndSendRomAccepted timed out — falling back to Socket.IO');
+          requestResumeTransfer();
+        }
       }
     }, 15000);
   };

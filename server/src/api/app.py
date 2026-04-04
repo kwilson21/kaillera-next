@@ -112,9 +112,9 @@ class SecurityHeadersMiddleware:
 
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob: https://ph.gumflappers.live https://ph.thesuperhuman.us https://*.posthog.com https://*.i.posthog.com; "
+        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "connect-src 'self' blob: https://ph.gumflappers.live https://ph.thesuperhuman.us https://*.posthog.com https://*.i.posthog.com; "
+        "connect-src 'self' blob:; "
         "img-src 'self' data: blob:; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
@@ -864,6 +864,29 @@ def create_app(lifespan=None) -> FastAPI:
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 entry["context"] = json.loads(entry["context"])
         return entry
+
+    # ── Screenshot routes ──────────────────────────────────────────────────
+
+    @app.get("/admin/api/screenshots/{match_id}")
+    async def admin_screenshots_list(request: Request, match_id: str, _auth: None = Depends(_require_admin)) -> dict:
+        """List all screenshots for a given match (metadata only, no blobs)."""
+        screenshots = await db.get_screenshots(match_id)
+        return {"matchId": match_id, "screenshots": screenshots}
+
+    @app.get("/admin/api/screenshots/img/{screenshot_id}")
+    async def admin_screenshot_image(request: Request, screenshot_id: int, key: str = "") -> Response:
+        """Serve a single screenshot JPEG from the database.
+        Accepts admin key via header OR ?key= query param (for <img src>)."""
+        admin_key = os.environ.get("ADMIN_KEY")
+        if not admin_key:
+            raise HTTPException(status_code=403, detail="Admin access disabled")
+        provided = request.headers.get("x-admin-key") or key
+        if not provided or not hmac.compare_digest(admin_key, provided):
+            raise HTTPException(status_code=401, detail="Invalid admin key")
+        data = await db.get_screenshot_data(screenshot_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Screenshot not found")
+        return Response(content=data, media_type="image/jpeg")
 
     # ── OG card routes ────────────────────────────────────────────────────
 

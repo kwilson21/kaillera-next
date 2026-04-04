@@ -34,10 +34,11 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "input": (120, 1),
     "rom-signal": (60, 1),
     "cache-state": (5, 60),
-    "session-log": (8, 30),  # 4 players × 1 flush per 30s + headroom
+    "session-log": (16, 30),  # 4 players × 1 flush per 30s + late-join bursts
     "client-event": (60, 60),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
+    "game-screenshot": (4, 3),  # 4 players × 1 per 5s + headroom
     "feedback": (5, 3600),  # 5 per hour per IP
     "admin": (30, 60),
 }

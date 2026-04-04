@@ -193,7 +193,15 @@
       .join('');
   };
 
+  const cleanupComparison = () => {
+    if (_compState?.timer) clearInterval(_compState.timer);
+    _compState = null;
+    const old = document.getElementById('screenshot-section');
+    if (old) old.remove();
+  };
+
   const viewSessionLog = async (id) => {
+    cleanupComparison();
     const viewer = $('#log-viewer');
     const content = $('#viewer-content');
     const title = $('#viewer-title');
@@ -210,7 +218,266 @@
     }
     const data = await res.json();
     content.textContent = JSON.stringify(data, null, 2);
-    viewer.scrollIntoView({ behavior: 'smooth' });
+
+    // Load screenshots for this match
+    if (data.match_id) {
+      const ssRes = await fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() });
+      if (ssRes.ok) {
+        const ssData = await ssRes.json();
+        if (ssData.screenshots?.length) {
+          // Group by slot
+          const bySlot = {};
+          for (const ss of ssData.screenshots) {
+            (bySlot[ss.slot] ??= []).push(ss);
+          }
+
+          // Timeline thumbnail rows — all players share the same x-axis
+          // so frames align vertically across slots
+          const _bucket = (f) => Math.round(f / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+
+          // Build unified timeline of all bucket positions
+          const allBuckets = new Set();
+          const slotBucketMaps = {};
+          for (const [slot, shots] of Object.entries(bySlot)) {
+            const bm = new Map();
+            for (const ss of shots) {
+              const b = _bucket(ss.frame);
+              bm.set(b, ss);
+              allBuckets.add(b);
+            }
+            slotBucketMaps[slot] = bm;
+          }
+          const timeline = [...allBuckets].sort((a, b) => a - b);
+
+          let html = '<div id="screenshot-section" style="margin-top:16px">';
+          html += '<h3 style="color:#94a3b8;margin-bottom:8px">Screenshots</h3>';
+          // Shared scrollable container so all rows scroll together
+          html += '<div id="ss-timeline" style="overflow-x:auto;padding-bottom:8px">';
+          for (const [slot] of Object.entries(bySlot).sort((a, b) => a[0] - b[0])) {
+            const bm = slotBucketMaps[slot];
+            html += `<div style="margin-bottom:8px"><div style="color:#64748b;font-size:12px;margin-bottom:4px">Player ${slot} (${bm.size} frames)</div>`;
+            html += '<div style="display:flex;gap:4px">';
+            for (const b of timeline) {
+              const ss = bm.get(b);
+              if (ss) {
+                const url = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
+                html += `<div style="flex-shrink:0;width:120px;text-align:center">`;
+                html += `<img src="${url}" title="Frame ${ss.frame}" style="height:90px;border-radius:4px;cursor:pointer;border:1px solid #1e293b" onclick="window.open('${url}','_blank')">`;
+                html += `<div style="font-size:9px;color:#475569;margin-top:2px">f${b}</div>`;
+                html += `</div>`;
+              } else {
+                html += `<div style="flex-shrink:0;width:120px;text-align:center">`;
+                html += `<div style="height:90px;border-radius:4px;border:1px dashed #1e293b"></div>`;
+                html += `<div style="font-size:9px;color:#333;margin-top:2px">f${b}</div>`;
+                html += `</div>`;
+              }
+            }
+            html += '</div></div>';
+          }
+          html += '</div>';
+
+          // Side-by-side comparison player (needs at least 2 slots)
+          const slotKeys = Object.keys(bySlot).sort((a, b) => a - b);
+          if (slotKeys.length >= 2) {
+            html += buildComparisonPlayer(bySlot, slotKeys);
+          }
+
+          html += '</div>';
+          content.insertAdjacentHTML('afterend', html);
+
+          if (slotKeys.length >= 2) {
+            initComparisonPlayer(bySlot, slotKeys);
+          }
+        }
+      }
+    }
+
+    viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // -- Screenshot Comparison Player ------------------------------------------
+
+  let _compState = null; // { frames, index, playing, timer, canvas, ctx, slotKeys, cols, rows }
+  const SCREENSHOT_BUCKET = 300; // must match SCREENSHOT_INTERVAL in lockstep
+
+  const buildComparisonPlayer = (bySlot, slotKeys) => {
+    const W = 160,
+      H = 120,
+      GAP = 4,
+      SCALE = 2;
+    const cols = slotKeys.length <= 2 ? slotKeys.length : 2;
+    const rows = Math.ceil(slotKeys.length / cols);
+    const cw = W * cols + GAP * (cols - 1);
+    const ch = H * rows + GAP * (rows - 1);
+    const labels = slotKeys
+      .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
+      .join('');
+    // For 2x2, show top row labels above canvas, bottom row below
+    const topLabels = slotKeys
+      .slice(0, cols)
+      .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
+      .join('');
+    const bottomLabels =
+      rows > 1
+        ? slotKeys
+            .slice(cols)
+            .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
+            .join('')
+        : '';
+    return `
+      <div style="margin-top:16px">
+        <h4 style="color:#94a3b8;margin-bottom:8px">Player Comparison (${slotKeys.map((s) => 'P' + s).join(' / ')})</h4>
+        <div style="background:#0a0a0a;border-radius:6px;padding:12px;display:inline-block">
+          <div style="display:flex;gap:${GAP}px;margin-bottom:4px">${topLabels}</div>
+          <canvas id="comp-canvas" width="${cw}" height="${ch}" style="width:${cw * SCALE}px;height:${ch * SCALE}px;border-radius:4px;image-rendering:pixelated;background:#000"></canvas>
+          ${bottomLabels ? `<div style="display:flex;gap:${GAP}px;margin-top:4px">${bottomLabels}</div>` : ''}
+          <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+            <button id="comp-prev" title="Previous frame" style="padding:4px 8px;cursor:pointer">&lt;</button>
+            <button id="comp-play" title="Play/Pause" style="padding:4px 10px;cursor:pointer">Play</button>
+            <button id="comp-next" title="Next frame" style="padding:4px 8px;cursor:pointer">&gt;</button>
+            <input id="comp-scrub" type="range" min="0" max="0" value="0" style="flex:1;cursor:pointer">
+            <span id="comp-frame-label" style="color:#64748b;font-size:11px;min-width:80px;text-align:right">f0 / 0</span>
+          </div>
+        </div>
+      </div>`;
+  };
+
+  const initComparisonPlayer = (bySlot, slotKeys) => {
+    const W = 160,
+      H = 120,
+      GAP = 4;
+    const cols = slotKeys.length <= 2 ? slotKeys.length : 2;
+    const rows = Math.ceil(slotKeys.length / cols);
+
+    // Bucket screenshots by nearest SCREENSHOT_BUCKET to align frames across
+    // players (frame numbers drift by +/-1 between peers in lockstep)
+    const bucketMaps = {}; // slot -> Map(bucket -> screenshot)
+    for (const slot of slotKeys) {
+      const bm = new Map();
+      for (const ss of bySlot[slot] || []) {
+        const bucket = Math.round(ss.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+        bm.set(bucket, ss);
+      }
+      bucketMaps[slot] = bm;
+    }
+
+    // Collect all unique buckets, sorted
+    const allBuckets = new Set();
+    for (const bm of Object.values(bucketMaps)) {
+      for (const b of bm.keys()) allBuckets.add(b);
+    }
+    const sortedBuckets = [...allBuckets].sort((a, b) => a - b);
+
+    // Build frame entries: one per bucket, with a screenshot per slot (or null)
+    const frames = sortedBuckets.map((bucket) => {
+      const slots = {};
+      for (const slot of slotKeys) {
+        slots[slot] = bucketMaps[slot].get(bucket) || null;
+      }
+      return { frame: bucket, slots };
+    });
+
+    if (!frames.length) return;
+
+    const canvas = document.getElementById('comp-canvas');
+    const ctx = canvas.getContext('2d');
+    const scrub = document.getElementById('comp-scrub');
+    const label = document.getElementById('comp-frame-label');
+    const playBtn = document.getElementById('comp-play');
+    const prevBtn = document.getElementById('comp-prev');
+    const nextBtn = document.getElementById('comp-next');
+
+    scrub.max = String(frames.length - 1);
+    _compState = {
+      frames,
+      index: 0,
+      playing: false,
+      timer: null,
+      canvas,
+      ctx,
+      slotKeys,
+      cols,
+      rows,
+      imageCache: new Map(),
+    };
+
+    const drawFrame = (idx) => {
+      if (idx < 0 || idx >= frames.length) return;
+      _compState.index = idx;
+      scrub.value = String(idx);
+      const entry = frames[idx];
+      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})`;
+
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Grid separators
+      ctx.fillStyle = '#333';
+      for (let c = 1; c < cols; c++) ctx.fillRect(c * W + (c - 1) * GAP, 0, GAP, canvas.height);
+      for (let r = 1; r < rows; r++) ctx.fillRect(0, r * H + (r - 1) * GAP, canvas.width, GAP);
+
+      const drawCell = (ss, col, row) => {
+        if (!ss) return;
+        const x = col * (W + GAP);
+        const y = row * (H + GAP);
+        const key = ss.id;
+        if (_compState.imageCache.has(key)) {
+          ctx.drawImage(_compState.imageCache.get(key), x, y, W, H);
+          return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          _compState.imageCache.set(key, img);
+          if (_compState.index === idx) ctx.drawImage(img, x, y, W, H);
+        };
+        img.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
+      };
+
+      slotKeys.forEach((slot, i) => {
+        drawCell(entry.slots[slot], i % cols, Math.floor(i / cols));
+      });
+
+      // Preload next 3 frames
+      for (let i = idx + 1; i < Math.min(idx + 4, frames.length); i++) {
+        for (const slot of slotKeys) {
+          const ss = frames[i].slots[slot];
+          if (ss && !_compState.imageCache.has(ss.id)) {
+            const pre = new Image();
+            pre.onload = () => _compState.imageCache.set(ss.id, pre);
+            pre.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
+          }
+        }
+      }
+    };
+
+    const step = (delta) => {
+      const next = _compState.index + delta;
+      if (next >= 0 && next < frames.length) drawFrame(next);
+      else if (_compState.playing) {
+        _compState.playing = false;
+        clearInterval(_compState.timer);
+        _compState.timer = null;
+        playBtn.textContent = 'Play';
+      }
+    };
+
+    playBtn.addEventListener('click', () => {
+      if (_compState.playing) {
+        _compState.playing = false;
+        clearInterval(_compState.timer);
+        _compState.timer = null;
+        playBtn.textContent = 'Play';
+      } else {
+        if (_compState.index >= frames.length - 1) _compState.index = -1;
+        _compState.playing = true;
+        playBtn.textContent = 'Pause';
+        _compState.timer = setInterval(() => step(1), 200);
+      }
+    });
+    prevBtn.addEventListener('click', () => step(-1));
+    nextBtn.addEventListener('click', () => step(1));
+    scrub.addEventListener('input', () => drawFrame(parseInt(scrub.value, 10)));
+
+    drawFrame(0);
   };
 
   // -- Client Events ---------------------------------------------------------
@@ -377,12 +644,13 @@
     $('#viewer-meta').innerHTML = fb.email ? `<span class="meta-tag">${escapeHtml(fb.email)}</span>` : '';
     $('#viewer-content').textContent = JSON.stringify(fb, null, 2);
     viewer.classList.remove('hidden');
-    viewer.scrollIntoView({ behavior: 'smooth' });
+    viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
   // -- Viewer ----------------------------------------------------------------
 
   $('#viewer-close').addEventListener('click', () => {
+    cleanupComparison();
     $('#log-viewer').classList.add('hidden');
   });
 
