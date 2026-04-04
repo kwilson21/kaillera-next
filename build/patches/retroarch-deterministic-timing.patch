@@ -1,5 +1,5 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..47d6ea0 100644
+index a626706..ceacc87 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
 @@ -126,7 +126,15 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
@@ -19,7 +19,7 @@ index a626706..47d6ea0 100644
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +228,9 @@ endif
+@@ -222,6 +230,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
@@ -29,18 +29,65 @@ index a626706..47d6ea0 100644
  else
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
+diff --git a/audio/audio_driver.c b/audio/audio_driver.c
+index a4a28cf..ae2b9a1 100644
+--- a/audio/audio_driver.c
++++ b/audio/audio_driver.c
+@@ -907,8 +907,25 @@ size_t audio_driver_sample_batch(const int16_t *data, size_t frames)
+    audio_driver_state_t *audio_st = &audio_driver_st;
+    float slowmotion_ratio         = config_get_ptr()->floats.slowmotion_ratio;
+ 
++#ifdef __EMSCRIPTEN__
++   /* kaillera-next: In deterministic mode, al_write() bypasses OpenAL and
++    * captures PCM directly to kn_audio_buffer. The SUSPENDED and PAUSED
++    * flags must not gate this path — RetroArch may suspend audio during
++    * state loads or pause/resume cycles, but the capture buffer is
++    * independent of OpenAL state. Only check frames < 1. */
++   {
++      extern int kn_deterministic_mode;
++      if (!kn_deterministic_mode)
++      {
++#endif
+    if ((audio_st->flags & AUDIO_FLAG_SUSPENDED) || (frames < 1))
+       return frames;
++#ifdef __EMSCRIPTEN__
++      }
++      else if (frames < 1)
++         return frames;
++   }
++#endif
+ 
+    runloop_flags                  = runloop_get_flags();
+    flush_audio                    = !((runloop_flags & RUNLOOP_FLAG_PAUSED)
+@@ -918,6 +935,16 @@ size_t audio_driver_sample_batch(const int16_t *data, size_t frames)
+            && record_st->driver
+            && record_st->driver->push_audio;
+ 
++#ifdef __EMSCRIPTEN__
++   /* kaillera-next: force audio flush in deterministic mode regardless of
++    * PAUSED/ACTIVE/SUSPENDED state — al_write() captures independently. */
++   {
++      extern int kn_deterministic_mode;
++      if (kn_deterministic_mode)
++         flush_audio = true;
++   }
++#endif
++
+    /* We want to run this loop at least once, so use a
+     * do...while (do...while has only a single conditional
+     * jump, as opposed to for and while which have a
 diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
-index be6c1f6..72f263e 100644
+index be6c1f6..6bc96e9 100644
 --- a/audio/drivers/openal.c
 +++ b/audio/drivers/openal.c
-@@ -14,6 +14,7 @@
-  *  If not, see <http://www.gnu.org/licenses/>.
+@@ -15,6 +15,7 @@
   */
  
-+#include <stdint.h>
  #include <stdlib.h>
++#include <stdint.h>
  #include <string.h>
  #include <time.h>
+ 
 @@ -178,6 +179,13 @@ static void *al_init(const char *device, unsigned rate, unsigned latency,
     al->rate  = rate;
     *new_rate = rate;
@@ -123,18 +170,18 @@ index be6c1f6..72f263e 100644
     return al->res_ptr * OPENAL_BUFSIZE;
  }
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
-index c9ceed1..d66e86b 100644
+index c9ceed1..1486a00 100644
 --- a/frontend/drivers/platform_emulatorjs.c
 +++ b/frontend/drivers/platform_emulatorjs.c
-@@ -18,6 +18,7 @@
+@@ -15,6 +15,7 @@
+  * If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <stdint.h>
  #include <emscripten/emscripten.h>
  #include <emscripten/html5.h>
  #include <emscripten/threading.h>
-+#include <stdint.h>
- #include <string.h>
- #include <malloc.h>
- #include <stdio.h>
-@@ -115,6 +116,41 @@ typedef struct
+@@ -115,6 +116,46 @@ typedef struct
  
  static emscripten_platform_data_t *emscripten_platform_data = NULL;
  
