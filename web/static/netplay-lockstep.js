@@ -1365,15 +1365,19 @@
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
-    if (msg.type === 'late-join-ready' && _lateJoinPaused) {
-      _lateJoinPaused = false;
-      _syncLog('late-join resume: joiner ready');
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send('late-join-resume');
-          } catch (_) {}
+    if (msg.type === 'late-join-ready') {
+      if (_lateJoinPaused) {
+        _lateJoinPaused = false;
+        _syncLog('late-join resume: joiner ready (via Socket.IO)');
+        for (const p of Object.values(_peers)) {
+          if (p.dc?.readyState === 'open') {
+            try {
+              p.dc.send('late-join-resume');
+            } catch (_) {}
+          }
         }
+      } else {
+        _syncLog('late-join-ready received but not paused (already resumed or timed out)');
       }
     }
   };
@@ -1573,14 +1577,16 @@
     return peer;
   };
 
-  async function sendOffer(remoteSid) {
+  async function sendOffer(remoteSid, { reconnect = false } = {}) {
     const peer = _peers[remoteSid];
     if (!peer) {
       _syncLog(`sendOffer: no peer for ${remoteSid}, skipping`);
       return;
     }
-    _syncLog(`sendOffer: sending to ${remoteSid} (slot ${peer.slot})`);
-    await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
+    _syncLog(`sendOffer: sending to ${remoteSid} (slot ${peer.slot})${reconnect ? ' [reconnect]' : ''}`);
+    const offer = await peer.pc.createOffer();
+    await peer.pc.setLocalDescription(offer);
+    socket.emit('webrtc-signal', { target: remoteSid, offer, reconnect });
   }
 
   async function onWebRTCSignal(data) {
@@ -1780,9 +1786,22 @@
         }
         if (e.data === 'late-join-pause') {
           _lateJoinPaused = true;
+          _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-resume') {
           _lateJoinPaused = false;
+          _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
+        }
+        if (e.data === 'late-join-ready' && _lateJoinPaused) {
+          _lateJoinPaused = false;
+          _syncLog('late-join resume: joiner ready (via DC)');
+          for (const p of Object.values(_peers)) {
+            if (p.dc?.readyState === 'open') {
+              try {
+                p.dc.send('late-join-resume');
+              } catch (_) {}
+            }
+          }
         }
         if (e.data === 'leaving') {
           peer._intentionalLeave = true;
@@ -2814,12 +2833,26 @@
   // -- Late join -------------------------------------------------------------
 
   async function sendLateJoinState(remoteSid) {
-    const peer = _peers[remoteSid];
-    if (!peer) return;
-    if (peer.slot === null || peer.slot === undefined) return;
+    // Look up slot from _peers first, fall back to _knownPlayers.
+    // The peer's WebRTC connection may have failed/disconnected (removed
+    // from _peers by handlePeerDisconnect), but the player is still in the
+    // Socket.IO room and can receive the state via Socket.IO relay.
+    let peerSlot = _peers[remoteSid]?.slot;
+    if (peerSlot === null || peerSlot === undefined) {
+      peerSlot = _knownPlayers[remoteSid]?.slot;
+    }
+    if (peerSlot === null || peerSlot === undefined) {
+      _syncLog(
+        `sendLateJoinState: no slot for ${remoteSid}, peers=[${Object.keys(_peers).join(',')}] known=[${Object.keys(_knownPlayers).join(',')}]`,
+      );
+      return;
+    }
 
     const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
+    if (!gm) {
+      _syncLog(`sendLateJoinState: gameManager not ready`);
+      return;
+    }
 
     try {
       const raw = gm.getState();
@@ -2880,8 +2913,16 @@
         if (_lateJoinPaused) {
           _lateJoinPaused = false;
           _syncLog('late-join pause timeout — resuming');
+          // Send resume to peers that are still paused
+          for (const p of Object.values(_peers)) {
+            if (p.dc?.readyState === 'open') {
+              try {
+                p.dc.send('late-join-resume');
+              } catch (_) {}
+            }
+          }
         }
-      }, 10000);
+      }, 5000);
 
       _syncLog(
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
@@ -3001,7 +3042,43 @@
       _syncLog(`late-join loaded at frame ${msg.frame}`);
       startLockstep();
 
-      // Tell host to resume
+      // Re-establish WebRTC connections to any players whose peer connections
+      // failed or are zombied (closed PC but still in _peers). During the
+      // pre-lockstep phase, connections may fail (NAT, timing) and either get
+      // removed by hardDisconnectPeer (_running was false) or left as zombies
+      // by the reconnect timeout (which closes PC but doesn't delete from _peers).
+      for (const [sid, info] of Object.entries(_knownPlayers)) {
+        if (sid === socket.id) continue;
+        const existing = _peers[sid];
+        const pcState = existing?.pc?.connectionState;
+        if (existing && pcState === 'connected' && existing.dc?.readyState === 'open') continue;
+        // Peer is missing, dead, or has no working DC — clean up and recreate
+        if (existing) {
+          _syncLog(
+            `late-join reconnect: replacing dead peer ${sid} slot=${info.slot} (pc=${pcState} dc=${existing.dc?.readyState ?? 'none'})`,
+          );
+          try {
+            existing.pc.close();
+          } catch (_) {}
+          delete _peers[sid];
+        } else {
+          _syncLog(`late-join reconnect: creating peer ${sid} slot=${info.slot}`);
+        }
+        createPeer(sid, info.slot, true);
+        sendOffer(sid, { reconnect: true });
+      }
+
+      // Tell host to resume — send via BOTH DC and Socket.IO for reliable
+      // delivery. Socket.IO relay can drop/delay the message (rate limiting,
+      // large queued payloads from the late-join-state broadcast), while the
+      // DC is a direct peer connection that's already open.
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send('late-join-ready');
+          } catch (_) {}
+        }
+      }
       socket.emit('data-message', { type: 'late-join-ready' });
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
@@ -4084,6 +4161,31 @@
         _pacingMaxAdv = 0;
         _pacingAdvSum = 0;
         _pacingAdvCount = 0;
+      }
+      // Mesh health check (~5s): reconcile _knownPlayers (server truth) against
+      // actual DC state. Re-initiate connections to players the server says are
+      // in the room but we have no working DC to. This catches zombie peers,
+      // failed initial connections, and silent DC deaths that no event fires for.
+      if (_frameNum % 300 === 0) {
+        for (const [sid, info] of Object.entries(_knownPlayers)) {
+          if (sid === socket.id) continue;
+          const p = _peers[sid];
+          if (p && p.dc?.readyState === 'open') continue; // healthy
+          if (p?.reconnecting) continue; // already in progress
+          if (_peerPhantom[info.slot]) continue; // confirmed dead during gameplay
+          const pcState = p?.pc?.connectionState;
+          _syncLog(
+            `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
+          );
+          if (p) {
+            try {
+              p.pc.close();
+            } catch (_) {}
+            delete _peers[sid];
+          }
+          createPeer(sid, info.slot, true);
+          sendOffer(sid, { reconnect: true });
+        }
       }
       // Zero disconnected player slots so loadState() can't restore stale input
       for (let zs = 0; zs < 4; zs++) {

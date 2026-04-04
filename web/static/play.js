@@ -2777,6 +2777,11 @@
       }
     }
 
+    // Ensure _lateJoin is set — dismissLateJoinPrompt only runs for mid-game
+    // joins. The flag may have been consumed by a prior initEngine() call
+    // (e.g., game-started handler for ROM sharing no-ROM path).
+    if (gameRunning) _lateJoin = true;
+
     // Now proceed with late join
     showToolbar();
     initEngine();
