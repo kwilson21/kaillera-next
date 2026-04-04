@@ -19,6 +19,10 @@
  *       host's offer arrives before the joiner has registered listeners).
  *     - Spectators: never initiate — players create connections TO them.
  *
+ *   The host (slot 0) is the roster authority — it broadcasts which player
+ *   slots are active over DataChannels. All peers apply the same roster to
+ *   ensure identical input application on every frame.
+ *
  * ── Startup Sequence ──────────────────────────────────────────────────────
  *
  *   1. All players boot EmulatorJS independently and wait for the WASM
@@ -2196,7 +2200,6 @@
         writeInputToMemory(peer.slot, 0);
       } catch (_) {}
       delete _remoteInputs[peer.slot];
-      delete _peerCatchingUp[peer.slot];
       // Only host modifies the input roster — non-hosts wait for
       // the host's roster broadcast to remove the slot
       if (_playerSlot === 0 || !_activeRoster) {
