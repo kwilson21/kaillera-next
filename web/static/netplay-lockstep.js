@@ -389,6 +389,7 @@
   let _localInputs = {}; // frame -> input object
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
+  let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
@@ -1756,6 +1757,14 @@
         }
       }
 
+      // Host: send current roster to newly connected/reconnected peer
+      if (_playerSlot === 0 && _activeRoster) {
+        const slots = [..._activeRoster].sort((a, b) => a - b);
+        try {
+          ch.send(`roster:${_frameNum}:${slots.join(',')}`);
+        } catch (_) {}
+      }
+
       if (!_gameStarted) startGameSequence();
     };
 
@@ -1802,6 +1811,13 @@
               } catch (_) {}
             }
           }
+        }
+        if (e.data.startsWith('roster:')) {
+          const parts = e.data.split(':');
+          const rosterFrame = parseInt(parts[1], 10);
+          const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          _activeRoster = new Set(slots);
+          _syncLog(`ROSTER received: frame=${rosterFrame} slots=[${slots.join(',')}]`);
         }
         if (e.data === 'leaving') {
           peer._intentionalLeave = true;
@@ -2187,6 +2203,9 @@
     delete _lockstepReadyPeers[remoteSid];
     KNState.peers = _peers;
     _syncLog(`peer hard-disconnected: ${remoteSid} slot: ${peer.slot}`);
+    if (_playerSlot === 0 && _running) {
+      _broadcastRoster();
+    }
 
     const known = _knownPlayers[remoteSid];
     const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
@@ -2832,6 +2851,27 @@
 
   // -- Late join -------------------------------------------------------------
 
+  const _broadcastRoster = () => {
+    if (_playerSlot !== 0) return;
+    const slots = [_playerSlot];
+    for (const p of Object.values(_peers)) {
+      if (p.slot !== null && p.slot !== undefined && !p._intentionalLeave) {
+        slots.push(p.slot);
+      }
+    }
+    slots.sort((a, b) => a - b);
+    _activeRoster = new Set(slots);
+    const msg = `roster:${_frameNum}:${slots.join(',')}`;
+    _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
+    for (const p of Object.values(_peers)) {
+      if (p.dc?.readyState === 'open') {
+        try {
+          p.dc.send(msg);
+        } catch (_) {}
+      }
+    }
+  };
+
   async function sendLateJoinState(remoteSid) {
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
@@ -2900,6 +2940,7 @@
 
       // Pause lockstep — freeze all players at this exact frame until
       // the late-joiner confirms ready. Zero frame gap = zero RNG drift.
+      _broadcastRoster();
       _lateJoinPaused = true;
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       for (const p of Object.values(_peers)) {
@@ -3457,6 +3498,7 @@
       _localInputs = {};
       _remoteInputs = {};
       _peerInputStarted = {};
+      _activeRoster = null;
       // _lastKnownInput is const (object), clear its entries
       for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];
     }
@@ -3583,6 +3625,7 @@
     const activePeers = getActivePeers();
     const peerSlots = activePeers.map((p) => p.slot);
     _syncLog(`lockstep started -- slot: ${_playerSlot} peerSlots: ${peerSlots.join(',')} delay: ${DELAY_FRAMES}`);
+    _broadcastRoster();
     _syncLog(`SYNC-MODE: RDRAM hash desync detection, knSync=${_hasKnSync}`);
 
     // Guest: skip RSP audio DRAM writes to prevent cross-platform divergence.
@@ -5225,6 +5268,7 @@
     // Reset lockstep state
     _remoteInputs = {};
     _peerInputStarted = {};
+    _activeRoster = null;
     _localInputs = {};
     _frameNum = 0;
     KNState.frameNum = 0;
