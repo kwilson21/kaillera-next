@@ -1155,6 +1155,11 @@
   let _pacingMaxAdv = 0;
   let _pacingAdvSum = 0;
   let _pacingAdvCount = 0;
+  // Proportional skip table: indexed by excess (frameAdvRaw - DELAY_FRAMES).
+  // Each entry is [divisor, skipCount] for modulo pattern, or null (no skip).
+  // excess=1 → skip 1 of 4 (25%), excess=2 → 1 of 2 (50%), excess=3 → 3 of 4 (75%).
+  const SKIP_TABLE = [null, [4, 1], [2, 1], [4, 3]];
+  let _pacingSkipCounter = 0;
 
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
   let _deterministicPerfNow = null; // saved override function
@@ -3993,6 +3998,7 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
+    _pacingSkipCounter = 0;
     // Remove diagnostic hooks
     if (_diagHookInstalled) {
       if (_diagVisHandler) {
@@ -4090,7 +4096,7 @@
         // If no active pacing peers remain, release any active cap
         if (activePacingPeers === 0 && _framePacingActive) {
           _framePacingActive = false;
-          _syncLog('FRAME-CAP released — all peers phantom');
+          _syncLog('PACING-THROTTLE released — all peers phantom');
         }
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
@@ -4102,23 +4108,33 @@
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
-          if (_frameAdvRaw >= DELAY_FRAMES + 1) {
-            // Too far ahead — skip this tick entirely.
-            // Don't send input (adds to pile remote can't consume).
-            // Don't step emulator (diverges further).
+          // Proportional throttle: skip a fraction of ticks based on how far ahead we are.
+          // excess=1 → 25% skip (~45fps), =2 → 50% (~30fps), =3 → 75% (~15fps), ≥4 → full stop.
+          const excess = _frameAdvRaw - DELAY_FRAMES;
+          let shouldSkip = false;
+          if (excess >= 4) {
+            shouldSkip = true;
+          } else if (excess >= 1) {
+            _pacingSkipCounter++;
+            const skip = SKIP_TABLE[excess];
+            shouldSkip = skip && _pacingSkipCounter % skip[0] < skip[1];
+          }
+          if (shouldSkip) {
             _pacingCapsFrames++;
             if (!_framePacingActive) {
               _framePacingActive = true;
               _pacingCapsCount++;
+              const ratio =
+                excess >= 4 ? '100%' : `${Math.round((SKIP_TABLE[excess][1] / SKIP_TABLE[excess][0]) * 100)}%`;
               _syncLog(
-                `FRAME-CAP start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
+                `PACING-THROTTLE start fAdv=${_frameAdvRaw} ratio=${ratio} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
               );
             }
             return;
           }
           if (_framePacingActive) {
             _framePacingActive = false;
-            _syncLog(`FRAME-CAP end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
+            _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
           }
         }
       }
@@ -5218,7 +5234,7 @@
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
-    // to catch up without FRAME-CAP fighting the recovery. Clear the EMA smoothing
+    // to catch up without PACING-THROTTLE fighting the recovery. Clear the EMA smoothing
     // so pacing starts fresh from the new synchronized state.
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
@@ -5228,6 +5244,7 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
+    _pacingSkipCounter = 0;
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
     const now = performance.now();
@@ -5431,6 +5448,7 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
+    _pacingSkipCounter = 0;
     _resyncCount = 0;
     _consecutiveResyncs = 0;
     _syncCheckInterval = _syncBaseInterval;
