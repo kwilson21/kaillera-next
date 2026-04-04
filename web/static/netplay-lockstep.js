@@ -1374,6 +1374,7 @@
     if (msg.type === 'late-join-ready') {
       if (_lateJoinPaused) {
         _lateJoinPaused = false;
+        _broadcastRoster();
         _syncLog('late-join resume: joiner ready (via Socket.IO)');
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
@@ -1808,6 +1809,10 @@
         }
         if (e.data === 'late-join-ready' && _lateJoinPaused) {
           _lateJoinPaused = false;
+          // Broadcast roster NOW — the joiner is ready to send input.
+          // Broadcasting earlier causes 5s stalls per frame while the
+          // joiner boots/loads state.
+          _broadcastRoster();
           _syncLog('late-join resume: joiner ready (via DC)');
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
@@ -2961,7 +2966,8 @@
 
       // Pause lockstep — freeze all players at this exact frame until
       // the late-joiner confirms ready. Zero frame gap = zero RNG drift.
-      _broadcastRoster();
+      // NOTE: roster broadcast moved to late-join-ready handler — adding
+      // the slot before the joiner can send input causes 5s stalls per frame.
       _lateJoinPaused = true;
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       for (const p of Object.values(_peers)) {
@@ -2974,6 +2980,7 @@
       setTimeout(() => {
         if (_lateJoinPaused) {
           _lateJoinPaused = false;
+          _broadcastRoster();
           _syncLog('late-join pause timeout — resuming');
           // Send resume to peers that are still paused
           for (const p of Object.values(_peers)) {
