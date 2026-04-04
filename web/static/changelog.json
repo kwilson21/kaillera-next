@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.32.0",
+    "date": "2026-04-04",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "per-frame RNG seed sync for Smash Remix deterministic netplay"
+      }
+    ]
+  },
+  {
     "version": "0.31.2",
     "date": "2026-04-04",
     "changes": [
