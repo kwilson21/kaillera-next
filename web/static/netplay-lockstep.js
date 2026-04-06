@@ -1,9 +1,13 @@
 /**
- * kaillera-next — Lockstep Netplay Engine
+ * kaillera-next — Lockstep + Rollback Netplay Engine
  *
- * Deterministic lockstep netplay for up to 4 players running EmulatorJS
- * (mupen64plus-next WASM core) in perfect sync. All players run their own
- * emulator instance and exchange inputs each frame — no single host.
+ * Deterministic netplay for up to 4 players running EmulatorJS
+ * (mupen64plus-next WASM core) in sync. All players run their own
+ * emulator instance and exchange inputs each frame.
+ *
+ * Two modes: Classic (pure lockstep — stalls for input) and Rollback
+ * (predicts input, replays on misprediction via C engine kn_rollback.c).
+ * Rollback activates automatically when the WASM core supports it.
  *
  * ── Network Topology ──────────────────────────────────────────────────────
  *
@@ -67,31 +71,32 @@
  *
  * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
  *
- *   Each tick at frame N:
- *     1. Apply pending resync state if buffered (async from previous sync)
- *     2. Proportional frame pacing check (see Frame Pacing below) —
- *        probabilistically skip ticks based on how far ahead of slowest peer
- *     3. Read local input (keyboard via keyCode tracking + gamepad via
- *        GamepadManager + VirtualGamepad on mobile) → 24-bit mask
- *     4. Send encoded input (16 bytes) to all peer DCs
- *     5. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
- *        inputs are ready to apply)
- *     6. Check if all "input peers" have sent input for applyFrame.
- *        Input peers = peers who have sent at least one input. During the
- *        first BOOT_GRACE_FRAMES (120), connected peers are also included
- *        before their first packet — prevents the host from racing ahead
- *        with fabricated zeros and seeding permanent hash divergence.
- *        After the grace window, unstarted peers are excluded (late-join).
- *        If input is missing, two-stage stall:
- *          Stage 1 (0 – 3000ms): stall, retry via setTimeout(1).
- *          Stage 2 (3000 – 5000ms): send "resend:<frame>" to the
- *            missing peer requesting retransmission, keep stalling.
- *          Timeout (5000ms+): inject zero input to unstick.
- *     7. Write all players' inputs to WASM memory via _simulate_input()
- *        (iterates 16 digital buttons + 4 analog axis pairs per player)
- *     8. Reset audio buffer, step one frame, feed audio samples to
- *        AudioWorklet (or ScriptProcessorNode fallback)
- *     9. Increment frame counter. Periodically update debug overlay.
+ *   Two modes: Classic (lockstep stall) or Rollback (predict + replay).
+ *   Rollback activates automatically when the WASM core exports kn_pre_tick.
+ *
+ *   CLASSIC (lockstep) — each tick at frame N:
+ *     1. Apply pending resync state if buffered
+ *     2. Proportional frame pacing check — skip ticks if ahead of slowest peer
+ *     3. Read local input → 24-bit mask, send to all peers
+ *     4. Compute applyFrame = N - DELAY_FRAMES
+ *     5. Stall until all peers' input for applyFrame arrives (two-stage:
+ *        3s wait, then resend request, then 5s hard timeout → inject zero)
+ *     6. Write inputs to WASM, step one frame, feed audio
+ *
+ *   ROLLBACK — each tick at frame N:
+ *     1-3. Same as Classic (pacing, read input, send to peers)
+ *     4. kn_pre_tick(): C engine saves state to ring buffer, stores local
+ *        input, predicts missing remote input (last-known). If a pending
+ *        misprediction was detected by kn_feed_input(), restores state and
+ *        replays 1 frame via C retro_run (amortized — catches up over
+ *        multiple ticks instead of burst-replaying all at once).
+ *        Returns 1 if catching up (JS skips normal step), 0 for normal.
+ *     5. Read inputs from C ring buffer via kn_get_input(), write to WASM
+ *        via writeInputToMemory (same path as Classic)
+ *     6. Step one frame via EJS runner, feed audio
+ *     7. kn_post_tick(): advance C frame counter
+ *     8. After replay catch-up completes, hash RDRAM and broadcast to
+ *        peer for determinism verification (rb-check).
  *
  * ── Frame Pacing (Proportional Throttle) ────────────────────────────────
  *

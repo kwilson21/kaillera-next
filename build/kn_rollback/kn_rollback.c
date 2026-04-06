@@ -1,14 +1,18 @@
 /*
- * kn_rollback.c — C-level rollback state + input manager for kaillera-next.
+ * kn_rollback.c — C-level rollback engine for kaillera-next.
  *
- * Manages a save state ring buffer and input prediction buffer. JS handles
- * all frame stepping (including replay) through the EJS/RetroArch pipeline.
- * C only manages: state snapshots, input storage, prediction tracking, and
- * misprediction detection. Replay is driven by JS using the existing
- * writeInputToMemory + stepOneFrame code path.
+ * Manages a save state ring buffer, input prediction, and amortized replay.
+ * Normal frame stepping is done by JS (writeInputToMemory + stepOneFrame).
+ * Replay on misprediction is done in C via retro_run (synchronous thanks to
+ * ASYNCIFY_REMOVE in the build). Amortized: 1 replay frame per tick to
+ * avoid exceeding the 16.67ms frame budget.
  *
- * retro_run() cannot be called from C in ASYNC mode (Emscripten asyncify
- * requires the JS event loop), so all emulation stepping stays in JS.
+ * C manages: state ring, input ring (frame-tagged), prediction tracking,
+ * misprediction detection, replay via retro_run, per-frame setup (frame
+ * time, audio reset, RNG seed sync).
+ *
+ * JS manages: normal frame step (EJS runner), input send/receive (WebRTC),
+ * audio playback, overlay, screenshot capture.
  */
 
 #include "kn_rollback.h"
