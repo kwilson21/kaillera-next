@@ -502,10 +502,13 @@ int kn_get_input(int slot, int frame, int *out_buttons,
 EMSCRIPTEN_KEEPALIVE
 #endif
 uint32_t kn_full_state_hash(void) {
-    if (!rb.initialized) return 0;
-    /* Hash the current frame's ring slot (saved by kn_pre_tick this tick) */
-    int idx = rb.frame % rb.ring_size;
-    if (rb.ring_frames[idx] != rb.frame) return 0;
+    if (!rb.initialized || rb.frame == 0) return 0;
+    /* Hash the most recently saved frame's ring slot.
+     * After kn_post_tick, rb.frame is already incremented, so the last
+     * saved state is at rb.frame - 1. */
+    int target = rb.frame - 1;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
     uint32_t hash = 2166136261u;
     const uint8_t *p = rb.ring_bufs[idx];
     size_t i;
