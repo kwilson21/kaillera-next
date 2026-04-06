@@ -4309,9 +4309,17 @@
       }
       for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
       if (applyFrame >= 0) {
+        // Log what we write for each slot — to compare with REPLAY-INPUT logs
+        const inputParts = [];
         for (let s = 0; s < rb_numPlayers; s++) {
           const inp = _rbGetInput(tickMod, s, applyFrame);
           writeInputToMemory(s, inp);
+          inputParts.push(`s${s}[${inp.buttons},${inp.lx},${inp.ly}]`);
+        }
+        // Only log sporadically to avoid flood — every 60 frames, or any frame with non-zero input
+        const anyNonZero = inputParts.some((p) => !p.includes('[0,0,0]'));
+        if (anyNonZero || _frameNum % 60 === 0) {
+          _syncLog(`NORMAL-INPUT f=${applyFrame} ${inputParts.join(' ')}`);
         }
       }
 

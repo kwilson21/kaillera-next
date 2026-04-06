@@ -161,21 +161,43 @@ static void setup_frame(int frame) {
 }
 
 /* ── Write inputs for all players for a given frame ────────────────── */
-static void write_frame_inputs(int frame) {
+/* During replay (is_replay=1), logs what's actually being written to catch
+ * input divergence between normal play and replay. */
+static void write_frame_inputs_logged(int frame, int is_replay) {
     int s, idx;
     idx = frame % KN_INPUT_RING_SIZE;
+    /* Build a compact log of all slot inputs: "s0[btn,lx,ly,P] s1[btn,lx,ly,P]" */
+    char inputs_str[256];
+    int pos = 0;
     for (s = 0; s < KN_MAX_PLAYERS; s++) {
+        int btn = 0, lx = 0, ly = 0, cx = 0, cy = 0;
+        char origin = '?';
         if (s < rb.num_players) {
             kn_input_t *inp = &rb.inputs[s][idx];
             if (inp->present && inp->frame == frame) {
-                kn_write_controller(s, inp->buttons, inp->lx, inp->ly, inp->cx, inp->cy);
+                btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
+                origin = rb.predicted[s][idx] ? 'P' : 'R'; /* Predicted or Real */
+                kn_write_controller(s, btn, lx, ly, cx, cy);
             } else {
+                origin = 'Z'; /* Zero — missing input */
                 kn_write_controller(s, 0, 0, 0, 0, 0);
             }
         } else {
+            origin = 'X'; /* Not a player slot */
             kn_write_controller(s, 0, 0, 0, 0, 0);
         }
+        if (pos < (int)sizeof(inputs_str) - 32) {
+            pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
+                "s%d[%d,%d,%d,%c] ", s, btn, lx, ly, origin);
+        }
     }
+    if (is_replay) {
+        rb_log("REPLAY-INPUT f=%d %s", frame, inputs_str);
+    }
+}
+
+static void write_frame_inputs(int frame) {
+    write_frame_inputs_logged(frame, 0);
 }
 
 /* ── Init / Shutdown ───────────────────────────────────────────────── */
@@ -345,9 +367,9 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
 
-        /* Write inputs for this replay frame */
+        /* Write inputs for this replay frame (logged for divergence detection) */
         if (replay_apply >= 0) {
-            write_frame_inputs(replay_apply);
+            write_frame_inputs_logged(replay_apply, 1);
         } else {
             int s;
             for (s = 0; s < KN_MAX_PLAYERS; s++)
