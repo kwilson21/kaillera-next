@@ -424,6 +424,7 @@
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
+  let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
 
   // Full RDRAM hash — hashes all 128 × 64KB blocks (8MB total) via kn_rdram_block_hashes.
   // Returns a single uint32 combining all block hashes. ~1-2ms on mobile.
@@ -3973,6 +3974,10 @@
         stopMod._free(_rbInputPtr);
         _rbInputPtr = 0;
       }
+      if (_rbRegionsBufPtr && stopMod?._free) {
+        stopMod._free(_rbRegionsBufPtr);
+        _rbRegionsBufPtr = 0;
+      }
       _useCRollback = false;
     }
 
@@ -4367,21 +4372,41 @@
         }
       }
 
-      // ── Periodic logging with timing + full state hash exchange ──
+      // ── Periodic logging with timing + per-region hash exchange ──
       if (_frameNum % 300 === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
         const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        // Hash the most recently saved state (frame _frameNum - 1)
         const hashFrame = _frameNum - 1;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
-        // Hidden state fingerprint — captures softfloat, AI fifo, rsp lock, etc.
         const hiddenFp = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
         const sfState = tickMod._kn_get_softfloat_state?.() ?? 0;
+        // Per-region hashes — splits state buffer into 32 chunks
+        const NUM_REGIONS = 32;
+        if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
+        let regionsHex = '';
+        if (_rbRegionsBufPtr && tickMod._kn_state_region_hashes) {
+          tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS);
+          const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
+          regionsHex = Array.from(regions)
+            .map((h) => h.toString(16))
+            .join(',');
+        }
         _syncLog(
           `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} hash=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
         );
+        if (regionsHex) {
+          _syncLog(`C-REGIONS f=${hashFrame} ${regionsHex}`);
+          // Broadcast regions for cross-player comparison
+          for (const p of Object.values(_peers)) {
+            if (p.dc?.readyState === 'open') {
+              try {
+                p.dc.send(`rb-regions:${hashFrame}:${regionsHex}`);
+              } catch (_) {}
+            }
+          }
+        }
         // Broadcast hash with the frame it was computed for
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
