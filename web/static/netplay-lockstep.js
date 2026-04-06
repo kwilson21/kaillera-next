@@ -4145,15 +4145,10 @@
         const _tReplay0 = performance.now();
         _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
 
-        // Skip GL rendering on intermediate replay frames (safe — doesn't affect game state).
-        // RSP audio must NOT be skipped: audio DMA writes to RDRAM must match original
-        // execution, otherwise replayed state diverges from the other player's state.
-        const hasHeadless = !!tickMod._kn_set_headless;
-        const lastReplay = replayStart + replayDepth - 1;
-
+        // Replay uses the exact same frame step as normal play — no optimizations.
+        // Headless/audio-skip cause GL state corruption or emulation divergence.
         for (let rf = replayStart; rf < replayStart + replayDepth; rf++) {
           const replayApply = rf - DELAY_FRAMES;
-          if (hasHeadless) tickMod._kn_set_headless(rf < lastReplay ? 1 : 0);
           for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
           if (replayApply >= 0) {
             for (let s = 0; s < rb_numPlayers; s++) {
@@ -4168,7 +4163,6 @@
           _inDeterministicStep = false;
           tickMod._kn_post_tick();
         }
-        if (hasHeadless) tickMod._kn_set_headless(0);
         _frameNum = replayStart + replayDepth;
         _syncLog(`C-REPLAY done: now at f=${_frameNum} took=${(performance.now() - _tReplay0).toFixed(1)}ms`);
       }
