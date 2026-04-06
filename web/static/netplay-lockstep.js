@@ -2716,7 +2716,9 @@
     if (readyCount < playerPeerSids.length) return;
 
     // Negotiate delay: ceiling of all players.
-    // Rollback mode: recalculate from RTT/2 since prediction handles late inputs.
+    // Rollback mode: both players independently compute from RTT/2, then take max.
+    // Peer delay values from lockstep-ready handshake use the old lockstep formula,
+    // so we recalculate them using peer RTT samples with the rollback formula.
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     let ownDelay;
     if (hasRollback && _rttMedian > 0) {
@@ -2726,8 +2728,19 @@
       ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
     }
     let maxDelay = ownDelay;
-    for (const p of Object.values(_peers)) {
-      if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
+    if (hasRollback) {
+      // In rollback mode, recalculate peer delay from their RTT using rollback formula
+      for (const p of Object.values(_peers)) {
+        if (p.rttSamples?.length > 0) {
+          const peerMedian = p.rttSamples[Math.floor(p.rttSamples.length / 2)];
+          const peerDelay = Math.min(9, Math.max(1, Math.ceil(peerMedian / 2 / 16.67)));
+          if (peerDelay > maxDelay) maxDelay = peerDelay;
+        }
+      }
+    } else {
+      for (const p of Object.values(_peers)) {
+        if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
+      }
     }
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
