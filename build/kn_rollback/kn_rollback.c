@@ -60,6 +60,10 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
+/* Forward declaration: SoftFloat globals (not in retro_serialize) */
+extern int softfloat_roundingMode;
+extern int softfloat_exceptionFlags;
+
 /* ── Constants ─────────────────────────────────────────────────────── */
 #define KN_MAX_PLAYERS      4
 #define KN_INPUT_RING_SIZE  256   /* ~4 seconds at 60fps */
@@ -623,6 +627,25 @@ int kn_get_max_depth(void) { return rb.max_depth; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_failed_rollbacks(void) { return rb.failed_rollbacks; }
+
+/* Get SoftFloat globals packed: high byte = roundingMode, low byte = exceptionFlags */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_softfloat_state(void) {
+    return ((softfloat_roundingMode & 0xFF) << 8) | (softfloat_exceptionFlags & 0xFF);
+}
+
+/* Diagnostic: hash of hidden state sources NOT in retro_serialize.
+ * Defined in main.c via build patch (needs access to g_dev internals). */
+extern uint32_t kn_get_hidden_state_fingerprint_impl(void);
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_get_hidden_state_fingerprint(void) {
+    return kn_get_hidden_state_fingerprint_impl();
+}
 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

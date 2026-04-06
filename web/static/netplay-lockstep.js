@@ -4376,8 +4376,11 @@
         // Hash the most recently saved state (frame _frameNum - 1)
         const hashFrame = _frameNum - 1;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
+        // Hidden state fingerprint — captures softfloat, AI fifo, rsp lock, etc.
+        const hiddenFp = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
+        const sfState = tickMod._kn_get_softfloat_state?.() ?? 0;
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} hash=0x${fullHash.toString(16)}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} hash=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
         );
         // Broadcast hash with the frame it was computed for
         for (const p of Object.values(_peers)) {

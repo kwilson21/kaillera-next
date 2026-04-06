@@ -88,7 +88,7 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_write_controller|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
 
@@ -165,6 +165,27 @@ if [ -d "${PATCHES_DIR}" ]; then
     sed -i 's/time_t now = time(NULL) \* 1000;/#ifdef __EMSCRIPTEN__\n        time_t now = 0;\n#else\n        time_t now = time(NULL) * 1000;\n#endif/' \
         mupen64plus-core/src/device/controllers/paks/biopak.c
     echo "    Done."
+
+    # Inject hidden state fingerprint function for determinism diagnostics
+    if ! grep -q "kn_get_hidden_state_fingerprint_impl" mupen64plus-core/src/main/main.c; then
+        cat >> mupen64plus-core/src/main/main.c <<'KNFP_EOF'
+
+EMSCRIPTEN_KEEPALIVE uint32_t kn_get_hidden_state_fingerprint_impl(void) {
+    uint32_t h = 2166136261u;
+    h ^= (uint32_t)softfloat_roundingMode; h *= 16777619u;
+    h ^= (uint32_t)softfloat_exceptionFlags; h *= 16777619u;
+    h ^= (uint32_t)g_dev.sp.rsp_task_locked; h *= 16777619u;
+    h ^= (uint32_t)g_dev.r4300.cp0.interrupt_unsafe_state; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[0].duration; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[0].length; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[1].duration; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[1].length; h *= 16777619u;
+    h ^= *r4300_cp0_last_addr(&g_dev.r4300.cp0); h *= 16777619u;
+    return h;
+}
+KNFP_EOF
+        echo "    Injected kn_get_hidden_state_fingerprint_impl"
+    fi
 
     # v3 kn_sync_read/write: complete state capture matching retro_serialize.
     # Must run AFTER kn-all.patch which creates the v1 functions.
