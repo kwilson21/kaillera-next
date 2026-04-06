@@ -4134,14 +4134,15 @@
       }
 
       // ── Pre-tick: save state, handle rollback restore, store input, predict ──
-      // kn_pre_tick handles rollback restore internally (retro_unserialize is sync).
-      // If a rollback occurred, kn_get_replay_depth() returns > 0 and we replay.
+      const _t0 = performance.now();
       tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+      const _tPreTick = performance.now();
 
       // ── JS-driven replay if rollback occurred ──
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
       if (replayDepth > 0) {
         const replayStart = tickMod._kn_get_replay_start();
+        const _tReplay0 = performance.now();
         _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
 
         // Enable headless for intermediate replay frames (skip GL rendering).
@@ -4173,7 +4174,7 @@
         // Ensure headless is off after replay
         if (hasHeadless) tickMod._kn_set_headless(0);
         _frameNum = replayStart + replayDepth;
-        _syncLog(`C-REPLAY done: now at f=${_frameNum}`);
+        _syncLog(`C-REPLAY done: now at f=${_frameNum} took=${(performance.now() - _tReplay0).toFixed(1)}ms`);
       }
 
       // ── Write inputs from C ring buffer via proven lockstep path ──
@@ -4189,18 +4190,29 @@
       // ── Step one frame — same path as pure lockstep ──
       if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
       _syncRNGSeed(tickMod, _frameNum);
+      const _tStep0 = performance.now();
       _inDeterministicStep = true;
       stepOneFrame();
       _inDeterministicStep = false;
+      const _tStep = performance.now();
       feedAudio();
 
       // ── Post-tick: advance C frame counter ──
       const newFrame = tickMod._kn_post_tick();
       _frameNum = newFrame;
       KNState.frameNum = _frameNum;
+      const _tTotal = performance.now();
 
-      // ── Periodic logging ──
-      if (_frameNum % 60 === 0) {
+      // ── Periodic logging with timing ──
+      if (_frameNum % 300 === 0) {
+        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
+        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
+        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
+        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+        _syncLog(
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`,
+        );
+      } else if (_frameNum % 60 === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
