@@ -77,9 +77,10 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
-    # Make retro_run/retro_serialize/retro_unserialize synchronous so C-level
-    # rollback replay can call them directly without asyncify yielding.
-    # These functions are pure computation (N64 emulation) — no JS event loop needed.
+    # ASYNCIFY_REMOVE: make retro_run/retro_serialize/retro_unserialize synchronous
+    # for deterministic C-level replay. co_switch uses emscripten_fiber_swap which
+    # needs asyncify — but works because retro_run's fiber context is pre-initialized.
+    # Intermittent freeze reported once; monitoring — do NOT revert without repro.
     if ! grep -q "ASYNCIFY_REMOVE" Makefile.emulatorjs; then
         sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize"]'\''|' Makefile.emulatorjs
         echo "    Added ASYNCIFY_REMOVE for synchronous retro_run"
