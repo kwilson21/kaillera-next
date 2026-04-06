@@ -14,11 +14,20 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
 /* Feed remote input. Call from JS when WebRTC delivers an input. */
 void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy);
 
-/* Tick: advance one frame. Call once per 16ms from JS.
- * Passes local player's input directly.
- * Returns current frame number after tick (may be > previous + 1 if replay occurred).
+/* Pre-tick: save state, store local input, predict remote inputs, write
+ * inputs to controller registers. If a misprediction is pending, performs
+ * the C-level replay (retro_unserialize + N x retro_run) BEFORE the
+ * normal frame step.
+ *
+ * Call BEFORE the JS runner steps the emulator (stepOneFrame).
+ * Returns current frame number.
  */
-int kn_tick(int buttons, int lx, int ly, int cx, int cy);
+int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy);
+
+/* Post-tick: advance frame counter. Call AFTER JS runner steps the emulator.
+ * Returns the new frame number.
+ */
+int kn_post_tick(void);
 
 /* Stats for UI overlay */
 int kn_get_frame(void);

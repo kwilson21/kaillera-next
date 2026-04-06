@@ -210,11 +210,14 @@ void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int
     rb.last_known[slot] = real_input;
 }
 
-/* ── Tick: advance one frame ───────────────────────────────────────── */
+/* ── Pre-tick: save state, predict, write inputs, replay if needed ── */
+/* Call BEFORE the JS runner steps the emulator. Replay (retro_run from C)
+ * only happens on misprediction — the normal frame step is done by JS
+ * via stepOneFrame() which goes through the full EJS/RetroArch pipeline. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int kn_tick(int buttons, int lx, int ly, int cx, int cy) {
+int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     int i, s, idx, apply_frame;
     if (!rb.initialized) return -1;
 
@@ -232,7 +235,7 @@ int kn_tick(int buttons, int lx, int ly, int cx, int cy) {
             /* Restore state to the mispredicted frame */
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
 
-            /* Replay from rb_frame to current frame */
+            /* Replay from rb_frame to current frame — tight C loop, no JS */
             for (i = 0; i < depth; i++) {
                 int rf = rb_frame + i;
                 int replay_apply = rf - rb.delay_frames;
@@ -250,7 +253,7 @@ int kn_tick(int buttons, int lx, int ly, int cx, int cy) {
                         kn_write_controller(s, 0, 0, 0, 0, 0);
                 }
 
-                /* Step one frame — SAME retro_run() as normal */
+                /* Step one frame — SAME retro_run() as normal play */
                 retro_run();
             }
 
@@ -293,7 +296,9 @@ int kn_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
     }
 
-    /* ── Write inputs and step ── */
+    /* ── Write inputs to controller registers ── */
+    /* JS will then call stepOneFrame() which triggers retro_run()
+     * through the full EJS/RetroArch pipeline. */
     if (apply_frame >= 0) {
         write_frame_inputs(apply_frame);
     } else {
@@ -303,9 +308,17 @@ int kn_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
     }
 
-    retro_run();
-    rb.frame++;
+    return rb.frame;
+}
 
+/* ── Post-tick: advance frame counter ── */
+/* Call AFTER JS runner has stepped the emulator. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_post_tick(void) {
+    if (!rb.initialized) return -1;
+    rb.frame++;
     return rb.frame;
 }
 

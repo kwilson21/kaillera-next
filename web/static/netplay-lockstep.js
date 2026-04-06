@@ -4083,26 +4083,15 @@
       }
     }
 
-    // ── C-level rollback path: kn_tick() handles prediction, replay, and stepping ──
-    // Input was already sent to peers above. kn_tick() saves state, predicts missing
-    // remote input, replays on misprediction, writes inputs, and calls retro_run().
-    // JS only needs to feed audio and advance the frame counter.
+    // ── C-level rollback path: pre_tick → stepOneFrame → post_tick ──
+    // pre_tick: save state, store input, predict, write inputs, replay if misprediction
+    // stepOneFrame: JS runner steps emulator through full EJS/RetroArch pipeline
+    // post_tick: advance C frame counter
     if (_useCRollback) {
       const tickMod = window.EJS_emulator?.gameManager?.Module;
-      if (tickMod?._kn_tick) {
-        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
-        _syncRNGSeed(tickMod, _frameNum);
-
-        // Set deterministic frame time — kn_tick() calls retro_run() internally,
-        // which needs the correct frame time for deterministic timing.
-        const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
-        window._kn_frameTime = frameTimeMs;
-        if (tickMod._kn_set_frame_time) tickMod._kn_set_frame_time(frameTimeMs);
-
-        // Consume the pending rAF runner so it doesn't accumulate.
-        // kn_tick() calls retro_run() directly — the runner isn't needed,
-        // but stepOneFrame() won't work if _pendingRunner piles up.
-        _pendingRunner = null;
+      if (tickMod?._kn_pre_tick) {
+        // Pre-tick: save state, predict inputs, write to controller registers,
+        // replay on misprediction (retro_run from C only during replay)
 
         // Log input going into kn_tick — every 60f normally, every frame if non-zero
         const hasInput =
@@ -4117,20 +4106,18 @@
           );
         }
 
+        tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+
+        // Normal frame step through the full EJS pipeline — same as pure lockstep
+        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+        _syncRNGSeed(tickMod, _frameNum);
         _inDeterministicStep = true;
-        const newFrame = tickMod._kn_tick(
-          localInput.buttons,
-          localInput.lx,
-          localInput.ly,
-          localInput.cx,
-          localInput.cy,
-        );
+        stepOneFrame();
         _inDeterministicStep = false;
-
-        // Force GL composite via real rAF (same as stepOneFrame)
-        APISandbox.nativeRAF(() => {});
-
         feedAudio();
+
+        // Post-tick: advance C frame counter
+        const newFrame = tickMod._kn_post_tick();
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
 
