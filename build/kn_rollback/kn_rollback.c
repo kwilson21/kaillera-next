@@ -266,48 +266,60 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
 
-    /* ── Handle pending rollback: restore + burst replay ── */
-    if (rb.pending_rollback >= 0) {
+    /* ── Handle pending rollback: restore state, start amortized catch-up ── */
+    if (rb.pending_rollback >= 0 && rb.replay_remaining == 0) {
         int rb_frame = rb.pending_rollback;
         int depth = rb.frame - rb_frame;
         int ring_idx = rb_frame % rb.ring_size;
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            int rf, s;
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
-
-            /* Burst replay: all frames in one go, full serialize each frame.
-             * retro_run + retro_serialize are synchronous (ASYNCIFY_REMOVE). */
-            for (rf = 0; rf < depth; rf++) {
-                int replay_f = rb_frame + rf;
-                int replay_apply = replay_f - rb.delay_frames;
-                int save_idx = replay_f % rb.ring_size;
-
-                /* Save state BEFORE stepping (same as normal pre_tick) */
-                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-                rb.ring_frames[save_idx] = replay_f;
-
-                if (replay_apply >= 0) {
-                    write_frame_inputs(replay_apply);
-                } else {
-                    for (s = 0; s < KN_MAX_PLAYERS; s++)
-                        kn_write_controller(s, 0, 0, 0, 0, 0);
-                }
-
-                setup_frame(replay_f);
-                retro_run();
-            }
-
-            rb.frame = rb_frame + depth;
+            rb.replay_remaining = depth;
+            rb.replay_target = rb.frame;
+            rb.frame = rb_frame;
             rb.replay_depth = depth;
             rb.replay_start = rb_frame;
-            rb_log("C-REPLAY f=%d depth=%d done=%d", rb_frame, depth, rb.frame);
+            rb_log("C-REPLAY-START f=%d depth=%d target=%d", rb_frame, depth, rb.replay_target);
         } else {
             rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d", rb_frame, ring_idx, rb.ring_frames[ring_idx], depth);
         }
+    }
+
+    /* ── Amortized catch-up: replay 1 frame per tick ── */
+    /* During catch-up, this tick IS the replay frame. No normal frame step.
+     * JS should NOT call stepOneFrame — kn_pre_tick handles the frame via
+     * retro_run (synchronous). Returns 1 to signal JS to skip normal step. */
+    if (rb.replay_remaining > 0) {
+        int replay_apply = rb.frame - rb.delay_frames;
+        int save_idx = rb.frame % rb.ring_size;
+
+        /* Save state for this frame */
+        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        rb.ring_frames[save_idx] = rb.frame;
+
+        /* Write inputs and step */
+        if (replay_apply >= 0) {
+            write_frame_inputs(replay_apply);
+        } else {
+            int s;
+            for (s = 0; s < KN_MAX_PLAYERS; s++)
+                kn_write_controller(s, 0, 0, 0, 0, 0);
+        }
+
+        setup_frame(rb.frame);
+        retro_run();
+        rb.frame++;
+        rb.replay_remaining--;
+
+        if (rb.replay_remaining == 0) {
+            rb_log("C-REPLAY-DONE f=%d", rb.frame);
+        }
+
+        /* Return 1 = catching up, JS should skip normal frame step */
+        return 1;
     }
 
     /* ── Save state for current frame ── */

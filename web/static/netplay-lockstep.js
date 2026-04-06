@@ -1841,6 +1841,15 @@
           return;
         }
         // FPU trace: cross-platform determinism verification from host
+        // Host-authoritative delay for rollback mode
+        if (e.data.startsWith('rb-delay:')) {
+          const hostDelay = parseInt(e.data.split(':')[1], 10);
+          if (hostDelay > 0 && hostDelay !== DELAY_FRAMES) {
+            _syncLog(`rb-delay: host set delay=${hostDelay} (was ${DELAY_FRAMES})`);
+            DELAY_FRAMES = hostDelay;
+          }
+          return;
+        }
         if (e.data.startsWith('fpu-trace:')) {
           if (!_fpuTraceEnabled) return;
           const parts = e.data.split(':');
@@ -2758,6 +2767,18 @@
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
     _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}${hasRollback ? ' (rollback)' : ''}`);
+
+    // Host broadcasts effective delay so all players use the same value.
+    // Independent calculation can disagree due to asymmetric RTT/jitter.
+    if (_playerSlot === 0) {
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send(`rb-delay:${maxDelay}`);
+          } catch (_) {}
+        }
+      }
+    }
 
     _syncLog(`${readyCount + 1} players lockstep-ready -- GO`);
 
@@ -4166,25 +4187,52 @@
         return;
       }
 
-      // ── Pre-tick: save state, burst replay if pending, store input, predict ──
-      // Replay is fully in C (synchronous retro_run via ASYNCIFY_REMOVE).
+      // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
+      // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
+      // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
       const _t0 = performance.now();
-      tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+      const catchingUp = tickMod._kn_pre_tick(
+        localInput.buttons,
+        localInput.lx,
+        localInput.ly,
+        localInput.cx,
+        localInput.cy,
+      );
       const _tPreTick = performance.now();
 
-      // Sync JS frame counter with C (replay may have advanced it)
+      // Sync JS frame counter with C
       _frameNum = tickMod._kn_get_frame();
+      KNState.frameNum = _frameNum;
 
-      // Log replay
+      // Log replay start/done
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
-      if (replayDepth > 0) {
-        const replayStart = tickMod._kn_get_replay_start?.() ?? 0;
-        _syncLog(
-          `C-REPLAY done: f=${replayStart} depth=${replayDepth} now=${_frameNum} took=${(_tPreTick - _t0).toFixed(1)}ms`,
-        );
+      if (replayDepth > 0 && !_rbReplayLogged) {
+        _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
+        _rbReplayLogged = true;
+      }
+      if (_rbReplayLogged && !catchingUp) {
+        _syncLog(`C-REPLAY done: caught up at f=${_frameNum}`);
+        _rbReplayLogged = false;
       }
 
-      // ── Write inputs from C ring buffer via proven lockstep path ──
+      if (catchingUp) {
+        // C already stepped 1 replay frame via retro_run. Skip normal frame step.
+        // _frameNum advanced by 1 (the replay frame). No gaps in input stream.
+        feedAudio();
+        // Still do overlay + screenshot
+        if (_frameNum % 15 === 0) {
+          const dbg = document.getElementById('np-debug');
+          if (dbg) {
+            dbg.style.display = '';
+            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
+            const remaining = tickMod._kn_get_replay_depth?.() ?? 0;
+            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} REPLAYING (${remaining} left) rb:${rb}`;
+          }
+        }
+        return;
+      }
+
+      // ── Normal tick: write inputs from C ring + step via EJS runner ──
       const applyFrame = _frameNum - DELAY_FRAMES;
       for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
       if (applyFrame >= 0) {
@@ -4194,7 +4242,6 @@
         }
       }
 
-      // ── Step one frame — same path as pure lockstep ──
       if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
       _syncRNGSeed(tickMod, _frameNum);
       const _tStep0 = performance.now();
