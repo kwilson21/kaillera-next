@@ -3681,6 +3681,13 @@
     {
       const rngMod = window.EJS_emulator?.gameManager?.Module;
       if (rngMod) _initRNGSync(rngMod);
+      // Configure C-level replay to do RNG sync too (same seed + RDRAM pointers)
+      if (_useCRollback && _rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
+        const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
+        const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
+        rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
+        _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
+      }
     }
 
     // Only install diagnostic hooks when explicitly enabled — they add

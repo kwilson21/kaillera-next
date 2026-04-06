@@ -30,9 +30,12 @@ extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
 extern void retro_run(void);
 
-/* Forward declaration: write full controller input for a slot.
- * Implemented in libretro.c — calls simulate_input() per button/axis. */
+/* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
+
+/* Forward declarations: per-frame setup (from RetroArch deterministic timing patch) */
+extern void kn_set_frame_time(double time_ms);
+extern void kn_reset_audio(void);
 
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
@@ -78,6 +81,11 @@ static struct {
     int replay_depth;     /* number of frames JS must replay (0 = none) */
     int replay_start;     /* frame to start replay from */
 
+    /* RNG sync: per-frame seed written to RDRAM (Smash Remix specific) */
+    uint32_t rng_base_seed; /* hash of match ID */
+    uint32_t *rng_ptr;      /* pointer to primary RNG RDRAM address */
+    uint32_t *rng_alt_ptr;  /* pointer to alternate RNG RDRAM address */
+
     /* Stats */
     int rollback_count;
     int prediction_count;
@@ -104,6 +112,27 @@ static void rb_log(const char *fmt, ...) {
         }
     }
     va_end(args);
+}
+
+/* ── Per-frame setup: RNG seed + frame time ────────────────────────── */
+/* Must be called before each retro_run() — both normal and replay frames. */
+static void setup_frame(int frame) {
+    /* Deterministic frame time: (frame + 1) * 16.666... ms */
+    kn_set_frame_time((double)(frame + 1) * 16.666666666666668);
+
+    /* Reset audio capture buffer */
+    kn_reset_audio();
+
+    /* RNG seed sync (Smash Remix): write deterministic per-frame seed to RDRAM.
+     * Same hash as JS _syncRNGSeed: h = baseSeed ^ (frameNum * 0x45d9f3b7),
+     * then mix via multiply-shift. */
+    if (rb.rng_ptr) {
+        uint32_t h = rb.rng_base_seed ^ ((uint32_t)frame * 0x45d9f3b7u);
+        h = (h ^ (h >> 16)) * 0x85ebca6bu;
+        h = h ^ (h >> 13);
+        *rb.rng_ptr = h;
+        if (rb.rng_alt_ptr) *rb.rng_alt_ptr = h;
+    }
 }
 
 /* ── Write inputs for all players for a given frame ────────────────── */
@@ -266,6 +295,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                         kn_write_controller(s, 0, 0, 0, 0, 0);
                 }
 
+                /* Per-frame setup: frame time + audio reset + RNG seed */
+                setup_frame(replay_f);
                 retro_run();
             }
 
@@ -330,6 +361,17 @@ int kn_post_tick(void) {
     if (!rb.initialized) return -1;
     rb.frame++;
     return rb.frame;
+}
+
+/* ── Configure RNG sync for C-level replay ─────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_rng_sync(uint32_t base_seed, uint32_t *rng_ptr, uint32_t *rng_alt_ptr) {
+    rb.rng_base_seed = base_seed;
+    rb.rng_ptr = rng_ptr;
+    rb.rng_alt_ptr = rng_alt_ptr;
+    rb_log("RNG sync configured: seed=0x%08x ptr=%p alt=%p", base_seed, rng_ptr, rng_alt_ptr);
 }
 
 /* ── Query: pending rollback frame (legacy — use kn_get_replay_depth) */

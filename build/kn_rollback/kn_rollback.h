@@ -72,6 +72,9 @@ int kn_rollback_self_test(void);
 /* Debug log ring buffer. Returns pointer to null-terminated string. */
 const char* kn_get_debug_log(void);
 
+/* Configure RNG sync for C-level replay. Pass RDRAM pointers for RNG seed addresses. */
+void kn_set_rng_sync(uint32_t base_seed, uint32_t *rng_ptr, uint32_t *rng_alt_ptr);
+
 /* Cleanup */
 void kn_rollback_shutdown(void);
 
