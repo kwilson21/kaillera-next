@@ -43,6 +43,10 @@ extern int kn_sync_write(const uint8_t *buf, uint32_t size);
 /* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
 
+/* Forward declaration: headless mode flag (skip GL in retro_run). */
+extern int kn_headless;
+extern void kn_set_headless(int enable);
+
 /* Forward declarations: per-frame setup (from RetroArch deterministic timing patch) */
 extern void kn_set_frame_time(double time_ms);
 extern void kn_reset_audio(void);
@@ -332,7 +336,12 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
 
         setup_frame(rb.frame);
+        /* Run with headless=1 to skip GL state bind/unbind in retro_run.
+         * GL state management can diverge between direct C call and EJS runner.
+         * Headless skips glsm_ctl calls but co_switch still executes normally. */
+        kn_headless = 1;
         retro_run();
+        kn_headless = 0;
         rb.frame++;
         rb.replay_remaining--;
 

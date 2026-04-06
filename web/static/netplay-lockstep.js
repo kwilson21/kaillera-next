@@ -4286,6 +4286,24 @@
 
       // ── Normal tick: write inputs from C ring + step via EJS runner ──
       const applyFrame = _frameNum - DELAY_FRAMES;
+      // Diagnostic: compare C ring input with JS _remoteInputs every 60 frames
+      if (_frameNum % 60 === 0 && applyFrame >= 0) {
+        for (let s = 0; s < rb_numPlayers; s++) {
+          if (s === _playerSlot) continue;
+          const cInp = _rbGetInput(tickMod, s, applyFrame);
+          const jsInp = _remoteInputs[s]?.[applyFrame];
+          if (jsInp && (cInp.buttons !== jsInp.buttons || cInp.lx !== jsInp.lx || cInp.ly !== jsInp.ly)) {
+            _syncLog(
+              `INPUT-DIFF f=${_frameNum} apply=${applyFrame} slot=${s} c=[${cInp.buttons},${cInp.lx},${cInp.ly}] js=[${jsInp.buttons},${jsInp.lx},${jsInp.ly}]`,
+            );
+          }
+          if (!jsInp && cInp !== KNShared.ZERO_INPUT && cInp.buttons !== 0) {
+            _syncLog(
+              `INPUT-MISSING f=${_frameNum} apply=${applyFrame} slot=${s} cHas=true jsHas=false c=[${cInp.buttons},${cInp.lx},${cInp.ly}]`,
+            );
+          }
+        }
+      }
       for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
       if (applyFrame >= 0) {
         for (let s = 0; s < rb_numPlayers; s++) {
