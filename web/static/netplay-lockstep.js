@@ -1,13 +1,9 @@
 /**
- * kaillera-next — Lockstep + Rollback Netplay Engine
+ * kaillera-next — Lockstep Netplay Engine
  *
- * Deterministic netplay for up to 4 players running EmulatorJS
- * (mupen64plus-next WASM core) in sync. All players run their own
- * emulator instance and exchange inputs each frame.
- *
- * Two modes: Classic (pure lockstep — stalls for input) and Rollback
- * (predicts input, replays on misprediction via C engine kn_rollback.c).
- * Rollback activates automatically when the WASM core supports it.
+ * Deterministic lockstep netplay for up to 4 players running EmulatorJS
+ * (mupen64plus-next WASM core) in perfect sync. All players run their own
+ * emulator instance and exchange inputs each frame — no single host.
  *
  * ── Network Topology ──────────────────────────────────────────────────────
  *
@@ -71,32 +67,31 @@
  *
  * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
  *
- *   Two modes: Classic (lockstep stall) or Rollback (predict + replay).
- *   Rollback activates automatically when the WASM core exports kn_pre_tick.
- *
- *   CLASSIC (lockstep) — each tick at frame N:
- *     1. Apply pending resync state if buffered
- *     2. Proportional frame pacing check — skip ticks if ahead of slowest peer
- *     3. Read local input → 24-bit mask, send to all peers
- *     4. Compute applyFrame = N - DELAY_FRAMES
- *     5. Stall until all peers' input for applyFrame arrives (two-stage:
- *        3s wait, then resend request, then 5s hard timeout → inject zero)
- *     6. Write inputs to WASM, step one frame, feed audio
- *
- *   ROLLBACK — each tick at frame N:
- *     1-3. Same as Classic (pacing, read input, send to peers)
- *     4. kn_pre_tick(): C engine saves state to ring buffer, stores local
- *        input, predicts missing remote input (last-known). If a pending
- *        misprediction was detected by kn_feed_input(), restores state and
- *        replays 1 frame via C retro_run (amortized — catches up over
- *        multiple ticks instead of burst-replaying all at once).
- *        Returns 1 if catching up (JS skips normal step), 0 for normal.
- *     5. Read inputs from C ring buffer via kn_get_input(), write to WASM
- *        via writeInputToMemory (same path as Classic)
- *     6. Step one frame via EJS runner, feed audio
- *     7. kn_post_tick(): advance C frame counter
- *     8. After replay catch-up completes, hash RDRAM and broadcast to
- *        peer for determinism verification (rb-check).
+ *   Each tick at frame N:
+ *     1. Apply pending resync state if buffered (async from previous sync)
+ *     2. Proportional frame pacing check (see Frame Pacing below) —
+ *        probabilistically skip ticks based on how far ahead of slowest peer
+ *     3. Read local input (keyboard via keyCode tracking + gamepad via
+ *        GamepadManager + VirtualGamepad on mobile) → 24-bit mask
+ *     4. Send encoded input (16 bytes) to all peer DCs
+ *     5. Compute applyFrame = N - DELAY_FRAMES (the delayed frame whose
+ *        inputs are ready to apply)
+ *     6. Check if all "input peers" have sent input for applyFrame.
+ *        Input peers = peers who have sent at least one input. During the
+ *        first BOOT_GRACE_FRAMES (120), connected peers are also included
+ *        before their first packet — prevents the host from racing ahead
+ *        with fabricated zeros and seeding permanent hash divergence.
+ *        After the grace window, unstarted peers are excluded (late-join).
+ *        If input is missing, two-stage stall:
+ *          Stage 1 (0 – 3000ms): stall, retry via setTimeout(1).
+ *          Stage 2 (3000 – 5000ms): send "resend:<frame>" to the
+ *            missing peer requesting retransmission, keep stalling.
+ *          Timeout (5000ms+): inject zero input to unstick.
+ *     7. Write all players' inputs to WASM memory via _simulate_input()
+ *        (iterates 16 digital buttons + 4 analog axis pairs per player)
+ *     8. Reset audio buffer, step one frame, feed audio samples to
+ *        AudioWorklet (or ScriptProcessorNode fallback)
+ *     9. Increment frame counter. Periodically update debug overlay.
  *
  * ── Frame Pacing (Proportional Throttle) ────────────────────────────────
  *
@@ -302,8 +297,6 @@
   let _onUnhandledMessage = null;
 
   let _rttSamples = [];
-  let _rttMedian = 0; // stored for rollback-aware delay recalculation at game start
-  let _rttJitter = 0; // max - min of RTT samples (measures delivery variance)
   let _rttComplete = false;
   let _rttPeersComplete = 0;
   let _rttPeersTotal = 0;
@@ -330,14 +323,10 @@
       if (_rttPeersComplete >= _rttPeersTotal) {
         _rttSamples.sort((a, b) => a - b);
         const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        const jitter = _rttSamples[_rttSamples.length - 1] - _rttSamples[0];
-        _rttMedian = median;
-        _rttJitter = jitter;
-        // Lockstep default — rollback-aware recalculation happens at game start
         const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms jitter: ${jitter.toFixed(1)}ms -> auto delay: ${delay}`);
+        _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
       }
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
@@ -420,29 +409,6 @@
   let socket = null;
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
-  let _useCRollback = false; // true when C-level rollback engine is active
-  let _rbReplayLogged = false; // prevents log spam during amortized replay
-  let rb_numPlayers = 2; // set during C-rollback init
-  let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
-
-  // Read input from C ring buffer for a given slot/frame.
-  // Returns input object compatible with writeInputToMemory.
-  const _rbGetInput = (mod, slot, frame) => {
-    if (!_rbInputPtr || !mod._kn_get_input) return KNShared.ZERO_INPUT;
-    const present = mod._kn_get_input(
-      slot,
-      frame,
-      _rbInputPtr,
-      _rbInputPtr + 4,
-      _rbInputPtr + 8,
-      _rbInputPtr + 12,
-      _rbInputPtr + 16,
-    );
-    if (!present) return KNShared.ZERO_INPUT;
-    const heap = new Int32Array(mod.HEAPU8.buffer, _rbInputPtr, 5);
-    return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
-  };
-
   // -- Audio bypass state --
   let _audioCtx = null;
   let _audioWorklet = null;
@@ -1823,12 +1789,6 @@
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
-          // Update C rollback engine with new player count
-          rb_numPlayers = slots.length;
-          const rosterMod = window.EJS_emulator?.gameManager?.Module;
-          if (_useCRollback && rosterMod?._kn_set_num_players) {
-            rosterMod._kn_set_num_players(rb_numPlayers);
-          }
           _syncLog(`ROSTER received: frame=${rosterFrame} slots=[${slots.join(',')}]`);
         }
         if (e.data === 'leaving') {
@@ -1852,33 +1812,6 @@
           return;
         }
         // FPU trace: cross-platform determinism verification from host
-        // Rollback state checksum verification
-        if (e.data.startsWith('rb-check:')) {
-          const parts = e.data.split(':');
-          const checkFrame = parseInt(parts[1], 10);
-          const peerHash = parseInt(parts[2], 10);
-          const hashMod = window.EJS_emulator?.gameManager?.Module;
-          if (hashMod?._kn_sync_hash) {
-            const localHash = hashMod._kn_sync_hash();
-            if (localHash === peerHash) {
-              _syncLog(`RB-CHECK f=${checkFrame} MATCH hash=0x${peerHash.toString(16)}`);
-            } else {
-              _syncLog(
-                `RB-CHECK f=${checkFrame} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`,
-              );
-            }
-          }
-          return;
-        }
-        // Host-authoritative delay for rollback mode
-        if (e.data.startsWith('rb-delay:')) {
-          const hostDelay = parseInt(e.data.split(':')[1], 10);
-          if (hostDelay > 0 && hostDelay !== DELAY_FRAMES) {
-            _syncLog(`rb-delay: host set delay=${hostDelay} (was ${DELAY_FRAMES})`);
-            DELAY_FRAMES = hostDelay;
-          }
-          return;
-        }
         if (e.data.startsWith('fpu-trace:')) {
           if (!_fpuTraceEnabled) return;
           const parts = e.data.split(':');
@@ -2077,21 +2010,6 @@
         }
         _remoteInputs[peer.slot][recvFrame] = recvInput;
         _lastKnownInput[peer.slot] = recvInput;
-        // Feed to C-level rollback engine for prediction correction
-        if (_useCRollback) {
-          const cMod = window.EJS_emulator?.gameManager?.Module;
-          if (cMod?._kn_feed_input) {
-            cMod._kn_feed_input(
-              peer.slot,
-              recvFrame,
-              recvInput.buttons,
-              recvInput.lx,
-              recvInput.ly,
-              recvInput.cx,
-              recvInput.cy,
-            );
-          }
-        }
         if (!_peerInputStarted[peer.slot]) {
           _peerInputStarted[peer.slot] = true;
           _syncLog(`INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
@@ -2745,58 +2663,15 @@
 
     if (readyCount < playerPeerSids.length) return;
 
-    // Negotiate delay: ceiling of all players.
-    // Rollback mode: both players independently compute from RTT/2, then take max.
-    // Peer delay values from lockstep-ready handshake use the old lockstep formula,
-    // so we recalculate them using peer RTT samples with the rollback formula.
-    const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
-    let ownDelay;
-    if (hasRollback && _rttMedian > 0) {
-      // Rollback delay: cover one-way latency + jitter.
-      // median/2 = expected one-way trip. jitter = delivery variance.
-      // Adding jitter ensures the delay buffer absorbs network spikes,
-      // preventing rollbacks that cause frame drops during replay.
-      const effectiveMs = _rttMedian / 2 + _rttJitter;
-      ownDelay = Math.min(9, Math.max(1, Math.ceil(effectiveMs / 16.67)));
-      _syncLog(
-        `rollback delay: RTT=${_rttMedian.toFixed(1)}ms jitter=${_rttJitter.toFixed(1)}ms effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
-      );
-    } else {
-      ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
-    }
+    // Negotiate delay: ceiling of all players
+    const ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
     let maxDelay = ownDelay;
-    if (hasRollback) {
-      // Recalculate peer delay from their RTT+jitter using rollback formula
-      for (const p of Object.values(_peers)) {
-        if (p.rttSamples?.length > 0) {
-          const sorted = p.rttSamples.slice().sort((a, b) => a - b);
-          const peerMedian = sorted[Math.floor(sorted.length / 2)];
-          const peerJitter = sorted[sorted.length - 1] - sorted[0];
-          const peerMs = peerMedian / 2 + peerJitter;
-          const peerDelay = Math.min(9, Math.max(1, Math.ceil(peerMs / 16.67)));
-          if (peerDelay > maxDelay) maxDelay = peerDelay;
-        }
-      }
-    } else {
-      for (const p of Object.values(_peers)) {
-        if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
-      }
+    for (const p of Object.values(_peers)) {
+      if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
     }
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
-    _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}${hasRollback ? ' (rollback)' : ''}`);
-
-    // Host broadcasts effective delay so all players use the same value.
-    // Independent calculation can disagree due to asymmetric RTT/jitter.
-    if (_playerSlot === 0) {
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send(`rb-delay:${maxDelay}`);
-          } catch (_) {}
-        }
-      }
-    }
+    _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}`);
 
     _syncLog(`${readyCount + 1} players lockstep-ready -- GO`);
 
@@ -2981,13 +2856,6 @@
     const slots = [...slotSet].sort((a, b) => a - b);
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
-    // Update C rollback engine with new player count
-    rb_numPlayers = slotSet.size;
-    const rbMod = window.EJS_emulator?.gameManager?.Module;
-    if (_useCRollback && rbMod?._kn_set_num_players) {
-      rbMod._kn_set_num_players(rb_numPlayers);
-      _syncLog(`C-ROLLBACK num_players updated to ${rb_numPlayers}`);
-    }
     const msg = `roster:${_frameNum}:${slots.join(',')}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
     for (const p of Object.values(_peers)) {
@@ -3670,20 +3538,6 @@
         _syncLog('FPU trace enabled for determinism verification');
       }
 
-      // Initialize C-level rollback engine if available
-      if (detMod?._kn_rollback_init) {
-        const numPlayers = getInputPeers().length + 1;
-        const rollbackMax = Math.min(12, Math.max(7, DELAY_FRAMES + 4));
-        detMod._kn_rollback_init(rollbackMax, DELAY_FRAMES, _playerSlot, numPlayers);
-        rb_numPlayers = numPlayers;
-        // Allocate WASM heap space for kn_get_input output (5 × int32 = 20 bytes)
-        if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
-        _useCRollback = true;
-        _syncLog(`C-ROLLBACK init: max=${rollbackMax} delay=${DELAY_FRAMES} slot=${_playerSlot} players=${numPlayers}`);
-      } else {
-        _useCRollback = false;
-      }
-
       // Override performance.now() during WASM frame steps for COMPLETE timing
       // determinism. Emscripten's _emscripten_get_now calls performance.now()
       // internally, and it's captured in a closure we can't override from outside.
@@ -3753,13 +3607,6 @@
     {
       const rngMod = window.EJS_emulator?.gameManager?.Module;
       if (rngMod) _initRNGSync(rngMod);
-      // Configure C-level replay to do RNG sync too (same seed + RDRAM pointers)
-      if (_useCRollback && _rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
-        const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
-        const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
-        rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
-        _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
-      }
     }
 
     // Only install diagnostic hooks when explicitly enabled — they add
@@ -3949,16 +3796,6 @@
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
-
-    // Shutdown C-level rollback
-    if (_useCRollback) {
-      if (stopMod?._kn_rollback_shutdown) stopMod._kn_rollback_shutdown();
-      if (_rbInputPtr && stopMod?._free) {
-        stopMod._free(_rbInputPtr);
-        _rbInputPtr = 0;
-      }
-      _useCRollback = false;
-    }
 
     // Disable FPU trace
     if (_fpuTraceEnabled) {
@@ -4200,129 +4037,6 @@
       } catch (_) {
         _sendFails++;
       }
-    }
-
-    // ── C-level rollback path ──────────────────────────────────────────
-    // C manages: state ring buffer, input storage, prediction, misprediction detection
-    // JS handles: all frame stepping (normal + replay) via writeInputToMemory + stepOneFrame
-    if (_useCRollback) {
-      const tickMod = window.EJS_emulator?.gameManager?.Module;
-      if (!tickMod?._kn_pre_tick) {
-        _useCRollback = false;
-        return;
-      }
-
-      // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
-      // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
-      // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
-      const _t0 = performance.now();
-      const catchingUp = tickMod._kn_pre_tick(
-        localInput.buttons,
-        localInput.lx,
-        localInput.ly,
-        localInput.cx,
-        localInput.cy,
-      );
-      const _tPreTick = performance.now();
-
-      // Sync JS frame counter with C
-      _frameNum = tickMod._kn_get_frame();
-      KNState.frameNum = _frameNum;
-
-      // Log replay start/done
-      const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
-      if (replayDepth > 0 && !_rbReplayLogged) {
-        _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
-        _rbReplayLogged = true;
-      }
-      if (_rbReplayLogged && !catchingUp) {
-        // Replay finished — checksum state and broadcast for cross-player verification
-        const replayHash = tickMod._kn_sync_hash?.() ?? 0;
-        _syncLog(`C-REPLAY done: caught up at f=${_frameNum} hash=0x${replayHash.toString(16)}`);
-        // Broadcast hash so peer can compare — detects replay non-determinism
-        for (const p of Object.values(_peers)) {
-          if (p.dc?.readyState === 'open') {
-            try {
-              p.dc.send(`rb-check:${_frameNum}:${replayHash}`);
-            } catch (_) {}
-          }
-        }
-        _rbReplayLogged = false;
-      }
-
-      if (catchingUp) {
-        // C already stepped 1 replay frame via retro_run. Skip normal frame step.
-        // _frameNum advanced by 1 (the replay frame). No gaps in input stream.
-        feedAudio();
-        // Still do overlay + screenshot
-        if (_frameNum % 15 === 0) {
-          const dbg = document.getElementById('np-debug');
-          if (dbg) {
-            dbg.style.display = '';
-            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
-            const remaining = tickMod._kn_get_replay_depth?.() ?? 0;
-            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} REPLAYING (${remaining} left) rb:${rb}`;
-          }
-        }
-        return;
-      }
-
-      // ── Normal tick: write inputs from C ring + step via EJS runner ──
-      const applyFrame = _frameNum - DELAY_FRAMES;
-      for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-      if (applyFrame >= 0) {
-        for (let s = 0; s < rb_numPlayers; s++) {
-          const inp = _rbGetInput(tickMod, s, applyFrame);
-          writeInputToMemory(s, inp);
-        }
-      }
-
-      if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
-      _syncRNGSeed(tickMod, _frameNum);
-      const _tStep0 = performance.now();
-      _inDeterministicStep = true;
-      stepOneFrame();
-      _inDeterministicStep = false;
-      const _tStep = performance.now();
-      feedAudio();
-
-      // ── Post-tick: advance C frame counter ──
-      const newFrame = tickMod._kn_post_tick();
-      _frameNum = newFrame;
-      KNState.frameNum = _frameNum;
-      const _tTotal = performance.now();
-
-      // ── Periodic logging with timing ──
-      if (_frameNum % 300 === 0) {
-        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
-        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
-        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
-        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`,
-        );
-      } else if (_frameNum % 60 === 0) {
-        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
-        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
-        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
-        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
-      }
-
-      // Debug overlay
-      if (_frameNum % 15 === 0) {
-        const dbg = document.getElementById('np-debug');
-        if (dbg) {
-          dbg.style.display = '';
-          const rb = tickMod._kn_get_rollback_count?.() ?? 0;
-          const pred = tickMod._kn_get_prediction_count?.() ?? 0;
-          const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
-          const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-          dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
-        }
-      }
-      if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) _captureAndSendScreenshot();
-      return;
     }
 
     // Check if all INPUT peers (peers who have sent at least 1 input)
@@ -5675,18 +5389,6 @@
         rtt: peer.rttSamples?.length > 0 ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)] : null,
         delayValue: peer.delayValue || null,
       }));
-      let rollbackInfo = null;
-      if (_useCRollback) {
-        const m = window.EJS_emulator?.gameManager?.Module;
-        if (m?._kn_get_rollback_count) {
-          rollbackInfo = {
-            rollbacks: m._kn_get_rollback_count(),
-            predictions: m._kn_get_prediction_count(),
-            correct: m._kn_get_correct_predictions(),
-            maxDepth: m._kn_get_max_depth(),
-          };
-        }
-      }
       return {
         fps: _fpsCurrent,
         frameDelay: DELAY_FRAMES,
@@ -5697,7 +5399,6 @@
         mode: 'lockstep',
         syncEnabled: _syncEnabled,
         resyncCount: _resyncCount,
-        rollback: rollbackInfo,
         peers: peerInfo,
       };
     },
@@ -5726,28 +5427,5 @@
         _syncLog(`dumped ${_debugLog.length} log entries to server`);
       }
     },
-    // C-level rollback diagnostics
-    selfTest: () => {
-      // Self-test requires retro_run from C which doesn't work in ASYNC mode.
-      // Use pure lockstep determinism verification instead.
-      return 'not available (ASYNC mode — use lockstep hash check)';
-    },
-    getRollbackStats: () => {
-      const m = window.EJS_emulator?.gameManager?.Module;
-      if (!m?._kn_get_rollback_count) return null;
-      return {
-        rollbacks: m._kn_get_rollback_count(),
-        predictions: m._kn_get_prediction_count(),
-        correctPredictions: m._kn_get_correct_predictions(),
-        maxDepth: m._kn_get_max_depth(),
-        frame: m._kn_get_frame(),
-        debugLog: m._kn_get_debug_log ? window.UTF8ToString(m._kn_get_debug_log()) : null,
-      };
-    },
-    isCRollback: () => _useCRollback,
   };
-
-  // Global console helpers
-  window.knSelfTest = () => window.NetplayLockstep?.selfTest?.() ?? 'not available';
-  window.knRollbackStats = () => window.NetplayLockstep?.getRollbackStats?.() ?? 'not available';
 })();
