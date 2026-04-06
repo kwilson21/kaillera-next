@@ -410,6 +410,27 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
+  let rb_numPlayers = 2; // set during C-rollback init
+  let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
+
+  // Read input from C ring buffer for a given slot/frame.
+  // Returns input object compatible with writeInputToMemory.
+  const _rbGetInput = (mod, slot, frame) => {
+    if (!_rbInputPtr || !mod._kn_get_input) return KNShared.ZERO_INPUT;
+    const present = mod._kn_get_input(
+      slot,
+      frame,
+      _rbInputPtr,
+      _rbInputPtr + 4,
+      _rbInputPtr + 8,
+      _rbInputPtr + 12,
+      _rbInputPtr + 16,
+    );
+    if (!present) return KNShared.ZERO_INPUT;
+    const heap = new Int32Array(mod.HEAPU8.buffer, _rbInputPtr, 5);
+    return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
+  };
+
   // -- Audio bypass state --
   let _audioCtx = null;
   let _audioWorklet = null;
@@ -3570,6 +3591,9 @@
         const numPlayers = getInputPeers().length + 1;
         const rollbackMax = Math.min(12, Math.max(7, DELAY_FRAMES + 4));
         detMod._kn_rollback_init(rollbackMax, DELAY_FRAMES, _playerSlot, numPlayers);
+        rb_numPlayers = numPlayers;
+        // Allocate WASM heap space for kn_get_input output (5 × int32 = 20 bytes)
+        if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
         _syncLog(`C-ROLLBACK init: max=${rollbackMax} delay=${DELAY_FRAMES} slot=${_playerSlot} players=${numPlayers}`);
       } else {
@@ -3838,6 +3862,10 @@
     // Shutdown C-level rollback
     if (_useCRollback) {
       if (stopMod?._kn_rollback_shutdown) stopMod._kn_rollback_shutdown();
+      if (_rbInputPtr && stopMod?._free) {
+        stopMod._free(_rbInputPtr);
+        _rbInputPtr = 0;
+      }
       _useCRollback = false;
     }
 
@@ -4083,87 +4111,101 @@
       }
     }
 
-    // ── C-level rollback path: pre_tick → stepOneFrame → post_tick ──
-    // pre_tick: save state, store input, predict, write inputs, replay if misprediction
-    // stepOneFrame: JS runner steps emulator through full EJS/RetroArch pipeline
-    // post_tick: advance C frame counter
+    // ── C-level rollback path ──────────────────────────────────────────
+    // C manages: state ring buffer, input storage, prediction, misprediction detection
+    // JS handles: all frame stepping (normal + replay) via writeInputToMemory + stepOneFrame
     if (_useCRollback) {
       const tickMod = window.EJS_emulator?.gameManager?.Module;
-      if (tickMod?._kn_pre_tick) {
-        // Pre-tick: save state, predict inputs, write to controller registers,
-        // replay on misprediction (retro_run from C only during replay)
+      if (!tickMod?._kn_pre_tick) {
+        _useCRollback = false;
+        return;
+      }
 
-        // Log input going into kn_tick — every 60f normally, every frame if non-zero
-        const hasInput =
-          localInput.buttons !== 0 ||
-          localInput.lx !== 0 ||
-          localInput.ly !== 0 ||
-          localInput.cx !== 0 ||
-          localInput.cy !== 0;
-        if (hasInput || _frameNum % 60 === 0) {
-          _syncLog(
-            `C-TICK f=${_frameNum} local=[btn=${localInput.buttons} lx=${localInput.lx} ly=${localInput.ly} cx=${localInput.cx} cy=${localInput.cy}]`,
-          );
-        }
+      // ── Check for pending rollback BEFORE this frame's pre_tick ──
+      const rbFrame = tickMod._kn_get_pending_rollback();
+      if (rbFrame >= 0 && rbFrame < _frameNum) {
+        const depth = _frameNum - rbFrame;
+        const restored = tickMod._kn_restore_frame(rbFrame);
+        if (restored) {
+          _syncLog(`C-REPLAY start: rbFrame=${rbFrame} depth=${depth} myF=${_frameNum}`);
 
-        tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+          // Replay N frames using the proven lockstep path
+          const savedFrame = _frameNum;
+          _frameNum = rbFrame;
 
-        // Normal frame step through the full EJS pipeline — same as pure lockstep
-        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
-        _syncRNGSeed(tickMod, _frameNum);
-        _inDeterministicStep = true;
-        stepOneFrame();
-        _inDeterministicStep = false;
-        feedAudio();
-
-        // Post-tick: advance C frame counter
-        const newFrame = tickMod._kn_post_tick();
-        _frameNum = newFrame;
-        KNState.frameNum = _frameNum;
-
-        // Log C engine state after tick ��� rollbacks and predictions
-        if (hasInput || _frameNum % 60 === 0) {
-          const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
-          const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
-          const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
-          const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-          _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
-        }
-
-        // Debug overlay — update every 15 frames
-        if (_frameNum % 15 === 0) {
-          const dbg = document.getElementById('np-debug');
-          if (dbg) {
-            dbg.style.display = '';
-            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
-            const pred = tickMod._kn_get_prediction_count?.() ?? 0;
-            const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
-            const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
+          for (let rf = rbFrame; rf < savedFrame; rf++) {
+            const replayApply = rf - DELAY_FRAMES;
+            // Write inputs from C ring buffer — same writeInputToMemory as lockstep
+            for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
+            if (replayApply >= 0) {
+              for (let s = 0; s < rb_numPlayers; s++) {
+                const inp = _rbGetInput(tickMod, s, replayApply);
+                writeInputToMemory(s, inp);
+              }
+            }
+            // Step one frame — same path as pure lockstep
+            if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+            _syncRNGSeed(tickMod, rf);
+            _inDeterministicStep = true;
+            stepOneFrame();
+            _inDeterministicStep = false;
+            // Don't feed audio during replay — silent replay
+            _frameNum = rf + 1;
           }
-        }
-
-        // Periodic gameplay screenshot for desync debugging
-        if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
-          _captureAndSendScreenshot();
-        }
-
-        // Dump C engine debug log every 5s
-        if (_frameNum % 300 === 0 && tickMod._kn_get_debug_log) {
-          const logPtr = tickMod._kn_get_debug_log();
-          if (logPtr) {
-            const cLog = typeof UTF8ToString === 'function' ? UTF8ToString(logPtr) : '';
-            if (cLog.length > 0) _syncLog(`C-DEBUG-LOG:\n${cLog}`);
-          }
-        }
-
-        // Auto self-test at ~30s: verify restore+replay determinism on this device
-        if (_frameNum === 1800 && tickMod._kn_rollback_self_test) {
-          const result = tickMod._kn_rollback_self_test();
-          const label = result === 1 ? 'DETERMINISTIC' : result === 0 ? 'NON-DETERMINISTIC' : 'ERROR';
-          _syncLog(`C-ROLLBACK SELF-TEST: ${label} (frame ${_frameNum})`);
+          _syncLog(`C-REPLAY done: now at f=${_frameNum}`);
+        } else {
+          _syncLog(`C-REPLAY failed: could not restore frame ${rbFrame}`);
         }
       }
+
+      // ── Pre-tick: save state, store local input, predict remote ──
+      tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+
+      // ── Write inputs from C ring buffer via proven lockstep path ──
+      const applyFrame = _frameNum - DELAY_FRAMES;
+      for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
+      if (applyFrame >= 0) {
+        for (let s = 0; s < rb_numPlayers; s++) {
+          const inp = _rbGetInput(tickMod, s, applyFrame);
+          writeInputToMemory(s, inp);
+        }
+      }
+
+      // ── Step one frame — same path as pure lockstep ──
+      if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+      _syncRNGSeed(tickMod, _frameNum);
+      _inDeterministicStep = true;
+      stepOneFrame();
+      _inDeterministicStep = false;
+      feedAudio();
+
+      // ── Post-tick: advance C frame counter ──
+      const newFrame = tickMod._kn_post_tick();
+      _frameNum = newFrame;
+      KNState.frameNum = _frameNum;
+
+      // ── Periodic logging ──
+      if (_frameNum % 60 === 0) {
+        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
+        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
+        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
+        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+        _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
+      }
+
+      // Debug overlay
+      if (_frameNum % 15 === 0) {
+        const dbg = document.getElementById('np-debug');
+        if (dbg) {
+          dbg.style.display = '';
+          const rb = tickMod._kn_get_rollback_count?.() ?? 0;
+          const pred = tickMod._kn_get_prediction_count?.() ?? 0;
+          const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
+          const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+          dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
+        }
+      }
+      if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) _captureAndSendScreenshot();
       return;
     }
 
@@ -5570,10 +5612,9 @@
     },
     // C-level rollback diagnostics
     selfTest: () => {
-      const m = window.EJS_emulator?.gameManager?.Module;
-      if (!m?._kn_rollback_self_test) return 'C-level rollback not available';
-      const result = m._kn_rollback_self_test();
-      return result === 1 ? 'DETERMINISTIC' : result === 0 ? 'NON-DETERMINISTIC' : 'ERROR';
+      // Self-test requires retro_run from C which doesn't work in ASYNC mode.
+      // Use pure lockstep determinism verification instead.
+      return 'not available (ASYNC mode — use lockstep hash check)';
     },
     getRollbackStats: () => {
       const m = window.EJS_emulator?.gameManager?.Module;

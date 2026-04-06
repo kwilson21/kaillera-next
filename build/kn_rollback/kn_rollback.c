@@ -1,11 +1,14 @@
 /*
- * kn_rollback.c — C-level rollback netplay engine for kaillera-next.
+ * kn_rollback.c — C-level rollback state + input manager for kaillera-next.
  *
- * Manages a save state ring buffer and input buffer. JS calls kn_tick()
- * once per 16ms. All prediction, save, and replay happens in C via
- * retro_serialize/retro_unserialize/retro_run() — no JS between replay
- * frames. This eliminates the JS/WASM boundary non-determinism that
- * caused cross-device desync in the JS-level rollback approach.
+ * Manages a save state ring buffer and input prediction buffer. JS handles
+ * all frame stepping (including replay) through the EJS/RetroArch pipeline.
+ * C only manages: state snapshots, input storage, prediction tracking, and
+ * misprediction detection. Replay is driven by JS using the existing
+ * writeInputToMemory + stepOneFrame code path.
+ *
+ * retro_run() cannot be called from C in ASYNC mode (Emscripten asyncify
+ * requires the JS event loop), so all emulation stepping stays in JS.
  */
 
 #include "kn_rollback.h"
@@ -23,11 +26,6 @@
 extern size_t retro_serialize_size(void);
 extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
-extern void retro_run(void);
-
-/* Forward declaration: write full controller input for a slot.
- * Implemented in libretro.c — calls simulate_input() per button/axis. */
-extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
 
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
@@ -96,24 +94,6 @@ static void rb_log(const char *fmt, ...) {
     va_end(args);
 }
 
-/* ── Write inputs for all players for a given frame ────────────────── */
-static void write_frame_inputs(int frame) {
-    int s, idx;
-    idx = frame % KN_INPUT_RING_SIZE;
-    for (s = 0; s < KN_MAX_PLAYERS; s++) {
-        if (s < rb.num_players) {
-            kn_input_t *inp = &rb.inputs[s][idx];
-            if (inp->present) {
-                kn_write_controller(s, inp->buttons, inp->lx, inp->ly, inp->cx, inp->cy);
-            } else {
-                kn_write_controller(s, 0, 0, 0, 0, 0);
-            }
-        } else {
-            kn_write_controller(s, 0, 0, 0, 0, 0);
-        }
-    }
-}
-
 /* ── Init / Shutdown ───────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
@@ -144,7 +124,6 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
         }
     }
 
-    /* Initialize last_known to zero input */
     for (i = 0; i < KN_MAX_PLAYERS; i++) {
         memset(&rb.last_known[i], 0, sizeof(kn_input_t));
     }
@@ -175,8 +154,9 @@ void kn_rollback_shutdown(void) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
-    if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return;
+int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
+    int misprediction = 0;
+    if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
 
     int idx = frame % KN_INPUT_RING_SIZE;
     kn_input_t real_input = {buttons, lx, ly, cx, cy, 1};
@@ -200,6 +180,9 @@ void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int
                         rb.pending_rollback = frame;
                         rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d", slot, frame, rb.frame, depth);
                     }
+                    misprediction = 1;
+                    rb.rollback_count++;
+                    if (depth > rb.max_depth) rb.max_depth = depth;
                 }
             }
         }
@@ -208,58 +191,16 @@ void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int
     /* Store real input */
     rb.inputs[slot][idx] = real_input;
     rb.last_known[slot] = real_input;
+    return misprediction;
 }
 
-/* ── Pre-tick: save state, predict, write inputs, replay if needed ── */
-/* Call BEFORE the JS runner steps the emulator. Replay (retro_run from C)
- * only happens on misprediction — the normal frame step is done by JS
- * via stepOneFrame() which goes through the full EJS/RetroArch pipeline. */
+/* ── Pre-tick: save state, store input, predict ──────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
-    int i, s, idx, apply_frame;
+    int s, idx, apply_frame;
     if (!rb.initialized) return -1;
-
-    /* ── Rollback replay if pending ── */
-    if (rb.pending_rollback >= 0) {
-        int rb_frame = rb.pending_rollback;
-        int depth = rb.frame - rb_frame;
-        int ring_idx = rb_frame % rb.ring_size;
-        rb.pending_rollback = -1;
-
-        if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            rb.rollback_count++;
-            if (depth > rb.max_depth) rb.max_depth = depth;
-
-            /* Restore state to the mispredicted frame */
-            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
-
-            /* Replay from rb_frame to current frame — tight C loop, no JS */
-            for (i = 0; i < depth; i++) {
-                int rf = rb_frame + i;
-                int replay_apply = rf - rb.delay_frames;
-
-                /* Re-save state for this replayed frame */
-                int save_idx = rf % rb.ring_size;
-                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-                rb.ring_frames[save_idx] = rf;
-
-                /* Write corrected inputs */
-                if (replay_apply >= 0) {
-                    write_frame_inputs(replay_apply);
-                } else {
-                    for (s = 0; s < KN_MAX_PLAYERS; s++)
-                        kn_write_controller(s, 0, 0, 0, 0, 0);
-                }
-
-                /* Step one frame — SAME retro_run() as normal play */
-                retro_run();
-            }
-
-            rb_log("REPLAY rb_frame=%d depth=%d now=%d", rb_frame, depth, rb.frame);
-        }
-    }
 
     /* ── Save state for current frame ── */
     {
@@ -296,23 +237,11 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
     }
 
-    /* ── Write inputs to controller registers ── */
-    /* JS will then call stepOneFrame() which triggers retro_run()
-     * through the full EJS/RetroArch pipeline. */
-    if (apply_frame >= 0) {
-        write_frame_inputs(apply_frame);
-    } else {
-        /* Before delay window fills: zero all inputs */
-        for (s = 0; s < KN_MAX_PLAYERS; s++) {
-            kn_write_controller(s, 0, 0, 0, 0, 0);
-        }
-    }
-
+    /* Input writing is done by JS using kn_get_input + writeInputToMemory */
     return rb.frame;
 }
 
 /* ── Post-tick: advance frame counter ── */
-/* Call AFTER JS runner has stepped the emulator. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -320,6 +249,64 @@ int kn_post_tick(void) {
     if (!rb.initialized) return -1;
     rb.frame++;
     return rb.frame;
+}
+
+/* ── Query: pending rollback frame ─────────────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_pending_rollback(void) {
+    int f = rb.pending_rollback;
+    rb.pending_rollback = -1;
+    return f;
+}
+
+/* ── Query: get state buffer for a frame ───────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint8_t* kn_get_state_for_frame(int frame) {
+    if (!rb.initialized) return NULL;
+    int ring_idx = frame % rb.ring_size;
+    if (rb.ring_frames[ring_idx] != frame) return NULL;
+    return rb.ring_bufs[ring_idx];
+}
+
+/* ── Restore state for a frame ─────────────────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_restore_frame(int frame) {
+    if (!rb.initialized) return 0;
+    int ring_idx = frame % rb.ring_size;
+    if (rb.ring_frames[ring_idx] != frame) return 0;
+    return retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;
+}
+
+/* ── Query: get state size ─────────────────────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_state_size(void) {
+    return (int)rb.state_size;
+}
+
+/* ── Query: get input for a slot/frame ─────────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_input(int slot, int frame, int *out_buttons,
+                 int *out_lx, int *out_ly, int *out_cx, int *out_cy) {
+    if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
+    int idx = frame % KN_INPUT_RING_SIZE;
+    kn_input_t *inp = &rb.inputs[slot][idx];
+    if (!inp->present) return 0;
+    *out_buttons = inp->buttons;
+    *out_lx = inp->lx;
+    *out_ly = inp->ly;
+    *out_cx = inp->cx;
+    *out_cy = inp->cy;
+    return 1;
 }
 
 /* ── Stat getters ──────────────────────────────────────────────────── */
@@ -354,41 +341,11 @@ EMSCRIPTEN_KEEPALIVE
 const char* kn_get_debug_log(void) { return rb.debug_log; }
 
 /* ── Determinism self-test ─────────────────────────────────────────── */
+/* NOTE: This test cannot call retro_run() from C in ASYNC mode.
+ * Self-test is now driven by JS — this stub returns -2 (unsupported). */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_rollback_self_test(void) {
-    uint8_t *buf;
-    uint32_t hash1, hash2;
-    size_t sz = retro_serialize_size();
-
-    buf = (uint8_t *)malloc(sz);
-    if (!buf) return -1;
-
-    /* Save current state */
-    retro_serialize(buf, sz);
-
-    /* Run one frame with zero input, hash RDRAM */
-    kn_write_controller(0, 0, 0, 0, 0, 0);
-    kn_write_controller(1, 0, 0, 0, 0, 0);
-    kn_write_controller(2, 0, 0, 0, 0, 0);
-    kn_write_controller(3, 0, 0, 0, 0, 0);
-    retro_run();
-    hash1 = kn_sync_hash();
-
-    /* Restore and run again with same zero input, hash RDRAM */
-    retro_unserialize(buf, sz);
-    kn_write_controller(0, 0, 0, 0, 0, 0);
-    kn_write_controller(1, 0, 0, 0, 0, 0);
-    kn_write_controller(2, 0, 0, 0, 0, 0);
-    kn_write_controller(3, 0, 0, 0, 0, 0);
-    retro_run();
-    hash2 = kn_sync_hash();
-
-    /* Restore original state */
-    retro_unserialize(buf, sz);
-    free(buf);
-
-    rb_log("SELF-TEST hash1=0x%08x hash2=0x%08x match=%d", hash1, hash2, hash1 == hash2);
-    return (hash1 == hash2) ? 1 : 0;
+    return -2; /* JS-driven self-test needed */
 }

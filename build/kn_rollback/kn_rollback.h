@@ -11,23 +11,47 @@
  */
 void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_players);
 
-/* Feed remote input. Call from JS when WebRTC delivers an input. */
-void kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy);
+/* Feed remote input. Call from JS when WebRTC delivers an input.
+ * Returns: 0 = normal, 1 = misprediction detected (JS should replay)
+ */
+int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy);
 
-/* Pre-tick: save state, store local input, predict remote inputs, write
- * inputs to controller registers. If a misprediction is pending, performs
- * the C-level replay (retro_unserialize + N x retro_run) BEFORE the
- * normal frame step.
- *
- * Call BEFORE the JS runner steps the emulator (stepOneFrame).
+/* Pre-tick: save state to ring buffer, store local input, predict
+ * missing remote inputs. Does NOT step the emulator.
  * Returns current frame number.
  */
 int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy);
 
-/* Post-tick: advance frame counter. Call AFTER JS runner steps the emulator.
+/* Post-tick: advance frame counter.
  * Returns the new frame number.
  */
 int kn_post_tick(void);
+
+/* Get the pending rollback frame, or -1 if none.
+ * JS calls this to check if replay is needed. Clears the pending flag.
+ */
+int kn_get_pending_rollback(void);
+
+/* Get pointer to saved state for a given frame.
+ * Returns NULL if frame not in ring buffer.
+ */
+uint8_t* kn_get_state_for_frame(int frame);
+
+/* Restore emulator state to a given frame from the ring buffer.
+ * Calls retro_unserialize directly (synchronous, no asyncify).
+ * Returns 1 on success, 0 on failure.
+ */
+int kn_restore_frame(int frame);
+
+/* Get the state buffer size (retro_serialize_size at init). */
+int kn_get_state_size(void);
+
+/* Get input for a given slot and frame.
+ * Writes to out_buttons, out_lx, out_ly, out_cx, out_cy.
+ * Returns 1 if present, 0 if not.
+ */
+int kn_get_input(int slot, int frame, int *out_buttons,
+                 int *out_lx, int *out_ly, int *out_cx, int *out_cy);
 
 /* Stats for UI overlay */
 int kn_get_frame(void);
