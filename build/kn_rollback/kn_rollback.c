@@ -363,7 +363,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
-    return rb.frame;
+    return 0; /* 0 = normal tick, JS should do stepOneFrame */
 }
 
 /* ── Post-tick: advance frame counter ── */
