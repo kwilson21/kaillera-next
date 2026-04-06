@@ -4154,24 +4154,22 @@
         return;
       }
 
-      // ── Pre-tick: save state, amortized replay (1 extra frame if catching up),
-      //    store input, predict. Replay is in C via synchronous retro_run. ──
+      // ── Pre-tick: save state, burst replay if pending, store input, predict ──
+      // Replay is fully in C (synchronous retro_run via ASYNCIFY_REMOVE).
       const _t0 = performance.now();
       tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
       const _tPreTick = performance.now();
 
-      // Sync JS frame counter with C (may have advanced by 1 replay frame)
+      // Sync JS frame counter with C (replay may have advanced it)
       _frameNum = tickMod._kn_get_frame();
 
-      // Log replay start/progress
+      // Log replay
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
-      if (replayDepth > 0 && !_rbReplayLogged) {
-        _syncLog(`C-REPLAY amortized: depth=${replayDepth} preTick=${(_tPreTick - _t0).toFixed(1)}ms`);
-        _rbReplayLogged = true;
-      }
-      if (replayDepth === 0 && _rbReplayLogged) {
-        _syncLog(`C-REPLAY caught up at f=${_frameNum}`);
-        _rbReplayLogged = false;
+      if (replayDepth > 0) {
+        const replayStart = tickMod._kn_get_replay_start?.() ?? 0;
+        _syncLog(
+          `C-REPLAY done: f=${replayStart} depth=${replayDepth} now=${_frameNum} took=${(_tPreTick - _t0).toFixed(1)}ms`,
+        );
       }
 
       // ── Write inputs from C ring buffer via proven lockstep path ──
