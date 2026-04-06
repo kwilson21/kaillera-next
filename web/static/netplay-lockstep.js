@@ -4245,25 +4245,35 @@
         _rbReplayLogged = true;
       }
       if (_rbReplayLogged && !catchingUp) {
-        // Replay finished — full state hash (retro_serialize output) for verification
-        const replayHash = tickMod._kn_full_state_hash?.() ?? 0;
+        // Replay finished — hash the most recently saved state
+        const hashFrame = _frameNum - 1;
+        const replayHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
         _syncLog(`C-REPLAY done: caught up at f=${_frameNum} fullHash=0x${replayHash.toString(16)}`);
-        // Broadcast hash so peer can compare — detects replay non-determinism
+        // Broadcast hash with the frame it was computed for
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${_frameNum}:${replayHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${replayHash}`);
             } catch (_) {}
           }
         }
         _rbReplayLogged = false;
       }
 
-      if (catchingUp) {
-        // C already stepped 1 replay frame via retro_run. Skip normal frame step.
-        // _frameNum advanced by 1 (the replay frame). No gaps in input stream.
+      if (catchingUp === 2) {
+        // C wrote inputs + saved state for the replay frame. JS now steps
+        // the emulator via stepOneFrame() — the SAME code path as normal play.
+        // This guarantees bit-identical execution between normal and replay.
+        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+        _inDeterministicStep = true;
+        stepOneFrame();
+        _inDeterministicStep = false;
         feedAudio();
-        // Still do overlay + screenshot
+        // Advance C frame counter
+        const newFrame = tickMod._kn_post_tick();
+        _frameNum = newFrame;
+        KNState.frameNum = _frameNum;
+        // Overlay
         if (_frameNum % 15 === 0) {
           const dbg = document.getElementById('np-debug');
           if (dbg) {
@@ -4325,31 +4335,39 @@
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
         const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        const fullHash = tickMod._kn_full_state_hash?.() ?? 0;
+        // Hash the most recently saved state (frame _frameNum - 1)
+        const hashFrame = _frameNum - 1;
+        const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hash=0x${fullHash.toString(16)}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} hash=0x${fullHash.toString(16)}`,
         );
-        // Broadcast full state hash for periodic desync detection
+        // Broadcast hash with the frame it was computed for
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${_frameNum}:${fullHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${fullHash}`);
             } catch (_) {}
           }
         }
       }
 
-      // Check pending peer hashes — compare at the SAME frame
-      if (window._rbPendingChecks?.[_frameNum] !== undefined) {
-        const peerHash = window._rbPendingChecks[_frameNum];
-        delete window._rbPendingChecks[_frameNum];
-        const localHash = tickMod._kn_full_state_hash?.() ?? 0;
-        if (localHash === peerHash) {
-          _syncLog(`RB-CHECK f=${_frameNum} MATCH hash=0x${peerHash.toString(16)}`);
-        } else {
-          _syncLog(
-            `RB-CHECK f=${_frameNum} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`,
-          );
+      // Check pending peer hashes — try to hash the same frame from our ring buffer
+      if (window._rbPendingChecks) {
+        for (const fStr of Object.keys(window._rbPendingChecks)) {
+          const f = parseInt(fStr);
+          // Only check if we've saved that frame's state (must be in ring buffer)
+          if (f < _frameNum && f >= _frameNum - 7) {
+            const peerHash = window._rbPendingChecks[fStr];
+            delete window._rbPendingChecks[fStr];
+            const localHash = tickMod._kn_full_state_hash?.(f) ?? 0;
+            if (localHash === 0) {
+              _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
+            } else if (localHash === peerHash) {
+              _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
+            } else {
+              _syncLog(`RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`);
+            }
+          }
         }
       }
       // Clean up old pending checks (older than 60 frames)

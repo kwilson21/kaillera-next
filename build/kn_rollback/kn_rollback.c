@@ -321,19 +321,20 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
     }
 
-    /* ── Amortized catch-up: replay 1 frame per tick ── */
-    /* During catch-up, this tick IS the replay frame. No normal frame step.
-     * JS should NOT call stepOneFrame — kn_pre_tick handles the frame via
-     * retro_run (synchronous). Returns 1 to signal JS to skip normal step. */
+    /* ── Amortized catch-up: prepare 1 replay frame, JS will step it ──
+     * During catch-up, C writes inputs + saves state, then returns 2.
+     * JS handles the actual emulator step via stepOneFrame() — same code
+     * path as normal play. This is the only way to guarantee bit-identical
+     * execution between normal play and replay. */
     if (rb.replay_remaining > 0) {
         int replay_apply = rb.frame - rb.delay_frames;
         int save_idx = rb.frame % rb.ring_size;
 
-        /* Save state for this frame */
+        /* Save state for this frame BEFORE stepping */
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
 
-        /* Write inputs and step */
+        /* Write inputs for this replay frame */
         if (replay_apply >= 0) {
             write_frame_inputs(replay_apply);
         } else {
@@ -343,19 +344,10 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
 
         setup_frame(rb.frame);
-        /* Call emscripten_mainloop directly — the EXACT function the EJS
-         * runner invokes via the captured rAF callback. NO headless: do
-         * everything normal play does, including GL state binding. */
-        emscripten_mainloop();
-        rb.frame++;
-        rb.replay_remaining--;
-
-        if (rb.replay_remaining == 0) {
-            rb_log("C-REPLAY-DONE f=%d", rb.frame);
-        }
-
-        /* Return 1 = catching up, JS should skip normal frame step */
-        return 1;
+        /* JS will call stepOneFrame() which goes through the rAF/runner
+         * pipeline — bit-identical to normal play. Then JS calls
+         * kn_post_tick which advances rb.frame and decrements replay_remaining. */
+        return 2; /* 2 = JS should step the emulator for a replay frame */
     }
 
     /* ── Save state for current frame ── */
@@ -403,13 +395,19 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     return 0; /* 0 = normal tick, JS should do stepOneFrame */
 }
 
-/* ── Post-tick: advance frame counter ── */
+/* ── Post-tick: advance frame counter, decrement replay if catching up ── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_post_tick(void) {
     if (!rb.initialized) return -1;
     rb.frame++;
+    if (rb.replay_remaining > 0) {
+        rb.replay_remaining--;
+        if (rb.replay_remaining == 0) {
+            rb_log("C-REPLAY-DONE f=%d", rb.frame);
+        }
+    }
     return rb.frame;
 }
 
