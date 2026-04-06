@@ -77,6 +77,12 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
+    # Add C-level rollback exports to EXPORTED_FUNCTIONS
+    if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_tick, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown, \\\n                     _kn_write_controller|' Makefile.emulatorjs
+        echo "    Added C-level rollback WASM exports"
+    fi
+
     # mupen64plus: full reset + apply patches.
     # kn-all.patch handles main.c (superset of timing + wasm-determinism patches).
     # deterministic-timing.patch handles features_cpu.c and profile.c (excluded main.c).
@@ -155,6 +161,15 @@ if [ -d "${PATCHES_DIR}" ]; then
     # Must run AFTER kn-all.patch which creates the v1 functions.
     echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
     python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
+
+    # C-level rollback engine: copy kn_rollback.c/h into the source tree
+    # and add to Makefile.common so it gets compiled with the core.
+    echo "    Installing kn_rollback.c/h..."
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
+    # Add kn_rollback.c to SOURCES_C in Makefile.common
+    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
+    echo "    Done."
 
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls
     # for bit-exact cross-platform determinism (Chrome V8 vs Safari JSC).
