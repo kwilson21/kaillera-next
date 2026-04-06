@@ -77,6 +77,21 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
+    # ASYNCIFY_REMOVE: make retro_run/retro_serialize/retro_unserialize synchronous
+    # for deterministic C-level replay. co_switch uses emscripten_fiber_swap which
+    # needs asyncify — but works because retro_run's fiber context is pre-initialized.
+    # Intermittent freeze reported once; monitoring — do NOT revert without repro.
+    if ! grep -q "ASYNCIFY_REMOVE" Makefile.emulatorjs; then
+        sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize"]'\''|' Makefile.emulatorjs
+        echo "    Added ASYNCIFY_REMOVE for synchronous retro_run"
+    fi
+
+    # Add C-level rollback exports to EXPORTED_FUNCTIONS
+    if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_write_controller|' Makefile.emulatorjs
+        echo "    Added C-level rollback WASM exports"
+    fi
+
     # mupen64plus: full reset + apply patches.
     # kn-all.patch handles main.c (superset of timing + wasm-determinism patches).
     # deterministic-timing.patch handles features_cpu.c and profile.c (excluded main.c).
@@ -132,6 +147,38 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Applied mupen64plus FPU trace patch (fpu.h)" || \
             echo "    WARN: FPU trace patch failed"
     fi
+
+    # headless tick: skip GL + video_cb in retro_run() for rollback benchmarking.
+    if [ -f "${PATCHES_DIR}/mupen64plus-headless-tick.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
+            echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
+            echo "    WARN: headless tick patch failed"
+    fi
+
+    # determinism fixes: srand(0), fixed MPK seed, fixed biopak time.
+    # Applied as sed because kn-all.patch modifies main.c (context conflict).
+    echo "    Applying determinism fixes (srand, mpk_seed, biopak)..."
+    sed -i 's/srand((unsigned int) time(NULL));/#ifdef __EMSCRIPTEN__\n    srand(0);\n#else\n    srand((unsigned int) time(NULL));\n#endif/' \
+        mupen64plus-core/src/device/r4300/r4300_core.c
+    sed -i 's/uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;/#ifdef __EMSCRIPTEN__\n    uint64_t mpk_seed = 0;\n#else\n    uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;\n#endif/' \
+        mupen64plus-core/src/main/main.c
+    sed -i 's/time_t now = time(NULL) \* 1000;/#ifdef __EMSCRIPTEN__\n        time_t now = 0;\n#else\n        time_t now = time(NULL) * 1000;\n#endif/' \
+        mupen64plus-core/src/device/controllers/paks/biopak.c
+    echo "    Done."
+
+    # v3 kn_sync_read/write: complete state capture matching retro_serialize.
+    # Must run AFTER kn-all.patch which creates the v1 functions.
+    echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
+    python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
+
+    # C-level rollback engine: copy kn_rollback.c/h into the source tree
+    # and add to Makefile.common so it gets compiled with the core.
+    echo "    Installing kn_rollback.c/h..."
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
+    # Add kn_rollback.c to SOURCES_C in Makefile.common
+    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
+    echo "    Done."
 
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls
     # for bit-exact cross-platform determinism (Chrome V8 vs Safari JSC).
