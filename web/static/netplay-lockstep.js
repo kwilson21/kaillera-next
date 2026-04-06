@@ -414,6 +414,7 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
+  let _rbReplayLogged = false; // prevents log spam during amortized replay
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
 
@@ -4153,21 +4154,24 @@
         return;
       }
 
-      // ── Pre-tick: save state, handle C-level replay if pending, store input, predict ──
-      // Replay happens entirely in C (retro_run is synchronous via ASYNCIFY_REMOVE).
-      // No JS between replay frames — deterministic, no browser callback interference.
+      // ── Pre-tick: save state, amortized replay (1 extra frame if catching up),
+      //    store input, predict. Replay is in C via synchronous retro_run. ──
       const _t0 = performance.now();
       tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
       const _tPreTick = performance.now();
 
-      // Check if C-level replay occurred — update JS frame counter
+      // Sync JS frame counter with C (may have advanced by 1 replay frame)
+      _frameNum = tickMod._kn_get_frame();
+
+      // Log replay start/progress
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
-      if (replayDepth > 0) {
-        const replayStart = tickMod._kn_get_replay_start?.() ?? 0;
-        _frameNum = replayStart + replayDepth;
-        _syncLog(
-          `C-REPLAY done: f=${replayStart} depth=${replayDepth} now=${_frameNum} took=${(_tPreTick - _t0).toFixed(1)}ms`,
-        );
+      if (replayDepth > 0 && !_rbReplayLogged) {
+        _syncLog(`C-REPLAY amortized: depth=${replayDepth} preTick=${(_tPreTick - _t0).toFixed(1)}ms`);
+        _rbReplayLogged = true;
+      }
+      if (replayDepth === 0 && _rbReplayLogged) {
+        _syncLog(`C-REPLAY caught up at f=${_frameNum}`);
+        _rbReplayLogged = false;
       }
 
       // ── Write inputs from C ring buffer via proven lockstep path ──

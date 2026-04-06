@@ -81,6 +81,10 @@ static struct {
     int replay_depth;     /* number of frames JS must replay (0 = none) */
     int replay_start;     /* frame to start replay from */
 
+    /* Amortized replay: replay 1 extra frame per tick instead of all at once */
+    int replay_remaining; /* frames still to replay (0 = not replaying) */
+    int replay_target;    /* frame to catch up to */
+
     /* RNG sync: per-frame seed written to RDRAM (Smash Remix specific) */
     uint32_t rng_base_seed; /* hash of match ID */
     uint32_t *rng_ptr;      /* pointer to primary RNG RDRAM address */
@@ -262,8 +266,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
 
-    /* ── Handle pending rollback BEFORE saving new state ── */
-    /* retro_unserialize is synchronous — no asyncify issue. */
+    /* ── Handle pending rollback: restore state + start amortized replay ── */
     if (rb.pending_rollback >= 0) {
         int rb_frame = rb.pending_rollback;
         int depth = rb.frame - rb_frame;
@@ -271,41 +274,49 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            int rf, s;
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
-
-            /* C-level replay: tight loop, no JS between frames.
-             * retro_run is synchronous (ASYNCIFY_REMOVE in build). */
-            for (rf = 0; rf < depth; rf++) {
-                int replay_f = rb_frame + rf;
-                int replay_apply = replay_f - rb.delay_frames;
-
-                /* Re-save state for this replayed frame */
-                int save_idx = replay_f % rb.ring_size;
-                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-                rb.ring_frames[save_idx] = replay_f;
-
-                /* Write corrected inputs */
-                if (replay_apply >= 0) {
-                    write_frame_inputs(replay_apply);
-                } else {
-                    for (s = 0; s < KN_MAX_PLAYERS; s++)
-                        kn_write_controller(s, 0, 0, 0, 0, 0);
-                }
-
-                /* Per-frame setup: frame time + audio reset + RNG seed */
-                setup_frame(replay_f);
-                retro_run();
-            }
-
-            rb.frame = rb_frame + depth;
+            rb.replay_remaining = depth;
+            rb.replay_target = rb.frame; /* catch up to where we were */
+            rb.frame = rb_frame;
             rb.replay_depth = depth;
             rb.replay_start = rb_frame;
-            rb_log("C-REPLAY f=%d depth=%d done=%d", rb_frame, depth, rb.frame);
+            rb_log("C-REPLAY-START f=%d depth=%d target=%d", rb_frame, depth, rb.replay_target);
         } else {
             rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d", rb_frame, ring_idx, rb.ring_frames[ring_idx], depth);
+        }
+    }
+
+    /* ── Amortized replay: step 1 extra frame per tick to catch up ── */
+    /* Each tick does: 1 replay frame + 1 normal frame = 2 frames per tick.
+     * Catches up in N ticks instead of N frames in 1 tick.
+     * Cost per tick: ~10ms (2 frames) instead of ~20ms (4 frames). */
+    if (rb.replay_remaining > 0) {
+        int replay_f = rb.replay_target - rb.replay_remaining;
+        int replay_apply = replay_f - rb.delay_frames;
+        int s;
+
+        /* Save state for this replayed frame */
+        int save_idx = replay_f % rb.ring_size;
+        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        rb.ring_frames[save_idx] = replay_f;
+
+        /* Write corrected inputs */
+        if (replay_apply >= 0) {
+            write_frame_inputs(replay_apply);
+        } else {
+            for (s = 0; s < KN_MAX_PLAYERS; s++)
+                kn_write_controller(s, 0, 0, 0, 0, 0);
+        }
+
+        setup_frame(replay_f);
+        retro_run();
+        rb.frame++;
+        rb.replay_remaining--;
+
+        if (rb.replay_remaining == 0) {
+            rb_log("C-REPLAY-DONE caught up at f=%d", rb.frame);
         }
     }
 
