@@ -2076,17 +2076,6 @@
         if (_useCRollback) {
           const cMod = window.EJS_emulator?.gameManager?.Module;
           if (cMod?._kn_feed_input) {
-            const remoteHasInput =
-              recvInput.buttons !== 0 ||
-              recvInput.lx !== 0 ||
-              recvInput.ly !== 0 ||
-              recvInput.cx !== 0 ||
-              recvInput.cy !== 0;
-            if (remoteHasInput || recvFrame % 60 === 0) {
-              _syncLog(
-                `C-FEED slot=${peer.slot} f=${recvFrame} myF=${_frameNum} btn=${recvInput.buttons} lx=${recvInput.lx} ly=${recvInput.ly} cx=${recvInput.cx} cy=${recvInput.cy}`,
-              );
-            }
             cMod._kn_feed_input(
               peer.slot,
               recvFrame,
