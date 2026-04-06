@@ -4081,6 +4081,18 @@
       if (tickMod?._kn_tick) {
         if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
         _syncRNGSeed(tickMod, _frameNum);
+
+        // Set deterministic frame time — kn_tick() calls retro_run() internally,
+        // which needs the correct frame time for deterministic timing.
+        const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+        window._kn_frameTime = frameTimeMs;
+        if (tickMod._kn_set_frame_time) tickMod._kn_set_frame_time(frameTimeMs);
+
+        // Consume the pending rAF runner so it doesn't accumulate.
+        // kn_tick() calls retro_run() directly — the runner isn't needed,
+        // but stepOneFrame() won't work if _pendingRunner piles up.
+        _pendingRunner = null;
+
         _inDeterministicStep = true;
         const newFrame = tickMod._kn_tick(
           localInput.buttons,
@@ -4090,6 +4102,10 @@
           localInput.cy,
         );
         _inDeterministicStep = false;
+
+        // Force GL composite via real rAF (same as stepOneFrame)
+        APISandbox.nativeRAF(() => {});
+
         feedAudio();
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
