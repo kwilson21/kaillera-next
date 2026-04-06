@@ -1871,20 +1871,12 @@
         // FPU trace: cross-platform determinism verification from host
         // Rollback state checksum verification
         if (e.data.startsWith('rb-check:')) {
+          // Store peer's hash — compare when we reach the same frame
           const parts = e.data.split(':');
           const checkFrame = parseInt(parts[1], 10);
           const peerHash = parseInt(parts[2], 10);
-          const hashMod = window.EJS_emulator?.gameManager?.Module;
-          if (hashMod?._kn_full_state_hash) {
-            const localHash = hashMod._kn_full_state_hash();
-            if (localHash === peerHash) {
-              _syncLog(`RB-CHECK f=${checkFrame} MATCH hash=0x${peerHash.toString(16)}`);
-            } else {
-              _syncLog(
-                `RB-CHECK f=${checkFrame} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`,
-              );
-            }
-          }
+          if (!window._rbPendingChecks) window._rbPendingChecks = {};
+          window._rbPendingChecks[checkFrame] = peerHash;
           return;
         }
         // Host-authoritative delay for rollback mode
@@ -4345,7 +4337,29 @@
             } catch (_) {}
           }
         }
-      } else if (_frameNum % 60 === 0) {
+      }
+
+      // Check pending peer hashes — compare at the SAME frame
+      if (window._rbPendingChecks?.[_frameNum] !== undefined) {
+        const peerHash = window._rbPendingChecks[_frameNum];
+        delete window._rbPendingChecks[_frameNum];
+        const localHash = tickMod._kn_full_state_hash?.() ?? 0;
+        if (localHash === peerHash) {
+          _syncLog(`RB-CHECK f=${_frameNum} MATCH hash=0x${peerHash.toString(16)}`);
+        } else {
+          _syncLog(
+            `RB-CHECK f=${_frameNum} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`,
+          );
+        }
+      }
+      // Clean up old pending checks (older than 60 frames)
+      if (window._rbPendingChecks && _frameNum % 300 === 0) {
+        for (const f of Object.keys(window._rbPendingChecks)) {
+          if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
+        }
+      }
+
+      if (_frameNum % 60 === 0 && !(_frameNum % 300 === 0)) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
