@@ -4111,6 +4111,13 @@
         if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
           _captureAndSendScreenshot();
         }
+
+        // Auto self-test at ~30s: verify restore+replay determinism on this device
+        if (_frameNum === 1800 && tickMod._kn_rollback_self_test) {
+          const result = tickMod._kn_rollback_self_test();
+          const label = result === 1 ? 'DETERMINISTIC' : result === 0 ? 'NON-DETERMINISTIC' : 'ERROR';
+          _syncLog(`C-ROLLBACK SELF-TEST: ${label} (frame ${_frameNum})`);
+        }
       }
       return;
     }
