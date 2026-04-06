@@ -4145,15 +4145,20 @@
         const _tReplay0 = performance.now();
         _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
 
-        // Enable headless for intermediate replay frames (skip GL rendering).
-        // Only the last replay frame needs to render — saves ~3-5ms per frame.
+        // Replay optimizations: skip GL rendering and RSP audio on intermediate frames.
+        // Only the last frame renders visually. Audio is discarded during replay anyway.
         const hasHeadless = !!tickMod._kn_set_headless;
+        const hasSkipAudio = !!tickMod._kn_set_skip_rsp_audio;
         const lastReplay = replayStart + replayDepth - 1;
+        if (hasSkipAudio) tickMod._kn_set_skip_rsp_audio(1);
 
         for (let rf = replayStart; rf < replayStart + replayDepth; rf++) {
+          const isLast = rf === lastReplay;
           const replayApply = rf - DELAY_FRAMES;
           // Skip GL rendering for all but the last replay frame
-          if (hasHeadless) tickMod._kn_set_headless(rf < lastReplay ? 1 : 0);
+          if (hasHeadless) tickMod._kn_set_headless(isLast ? 0 : 1);
+          // Restore RSP audio on last frame so normal playback resumes cleanly
+          if (isLast && hasSkipAudio) tickMod._kn_set_skip_rsp_audio(0);
           // Write inputs from C ring buffer — same writeInputToMemory as lockstep
           for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
           if (replayApply >= 0) {
@@ -4162,8 +4167,7 @@
               writeInputToMemory(s, inp);
             }
           }
-          // Step one frame — same path as pure lockstep
-          if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+          // Step one frame — skip audio reset during replay (nothing to capture)
           _syncRNGSeed(tickMod, rf);
           _inDeterministicStep = true;
           stepOneFrame();
@@ -4171,8 +4175,9 @@
           // Advance C frame counter
           tickMod._kn_post_tick();
         }
-        // Ensure headless is off after replay
+        // Ensure headless + RSP audio are restored after replay
         if (hasHeadless) tickMod._kn_set_headless(0);
+        if (hasSkipAudio) tickMod._kn_set_skip_rsp_audio(0);
         _frameNum = replayStart + replayDepth;
         _syncLog(`C-REPLAY done: now at f=${_frameNum} took=${(performance.now() - _tReplay0).toFixed(1)}ms`);
       }
