@@ -568,8 +568,11 @@
   const unpackX = (packed) => (packed << 16) >> 16;
   const unpackY = (packed) => packed >> 16;
 
-  const encodeInput = (frame, input) =>
-    new Int32Array([frame, input.buttons, packStick(input.lx, input.ly), packStick(input.cx, input.cy)]);
+  // Encode input as 5-int32 (20 bytes): [frame, buttons, lstick, cstick, ackFrame]
+  // ackFrame = highest frame received from peer (-1 if none).
+  // Old 4-int32 (16 byte) format still decodes — ackFrame defaults to -1.
+  const encodeInput = (frame, input, ackFrame = -1) =>
+    new Int32Array([frame, input.buttons, packStick(input.lx, input.ly), packStick(input.cx, input.cy), ackFrame]);
 
   const decodeInput = (buf) => {
     const arr = new Int32Array(buf);
@@ -580,6 +583,7 @@
       ly: unpackY(arr[2]),
       cx: unpackX(arr[3]),
       cy: unpackY(arr[3]),
+      ackFrame: arr.length >= 5 ? arr[4] : -1,
     };
   };
 

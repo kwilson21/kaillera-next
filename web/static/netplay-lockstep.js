@@ -2066,12 +2066,18 @@
         return;
       }
 
-      // Binary: encoded input -- 16 bytes. State chunks arrive on the sync-state DC.
-      if (e.data instanceof ArrayBuffer && e.data.byteLength === 16) {
+      // Binary: encoded input -- 16 bytes (legacy) or 20 bytes (with input ack)
+      if (e.data instanceof ArrayBuffer && (e.data.byteLength === 16 || e.data.byteLength === 20)) {
         if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
         const decoded = KNShared.decodeInput(e.data);
         const recvFrame = decoded.frame;
         const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
+        // Track peer's ack — highest frame they've received from us
+        if (decoded.ackFrame >= 0) {
+          peer.lastAckFromPeer = Math.max(peer.lastAckFromPeer ?? -1, decoded.ackFrame);
+        }
+        // Track highest frame we've received from this peer (for our outgoing acks)
+        peer.lastFrameFromPeer = Math.max(peer.lastFrameFromPeer ?? -1, recvFrame);
         if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
         // Log if we receive input for a frame we already applied (too late)
         const currentApply = _frameNum - DELAY_FRAMES;
@@ -4199,14 +4205,17 @@
       _fpsLastTime = now;
     }
 
-    // Send local input for current frame to ALL open peer DCs
+    // Send local input for current frame to ALL open peer DCs.
+    // Each packet includes an ack of the highest frame we've received from that peer.
     const localInput = readLocalInput();
     _localInputs[_frameNum] = localInput;
-    const buf = KNShared.encodeInput(_frameNum, localInput).buffer;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
       try {
-        activePeers[i].dc.send(buf);
+        const peer = activePeers[i];
+        const ackFrame = peer.lastFrameFromPeer ?? -1;
+        const peerBuf = KNShared.encodeInput(_frameNum, localInput, ackFrame).buffer;
+        peer.dc.send(peerBuf);
       } catch (_) {
         _sendFails++;
       }
@@ -4337,6 +4346,26 @@
       _frameNum = newFrame;
       KNState.frameNum = _frameNum;
       const _tTotal = performance.now();
+
+      // ── Periodic input ack logging — track confirmed frame ──
+      if (_frameNum % 60 === 0) {
+        let minAckFromPeer = Infinity;
+        let minRecvFromPeer = Infinity;
+        const peerInfo = [];
+        for (const p of Object.values(_peers)) {
+          if (p.slot === null || p.slot === undefined) continue;
+          const ack = p.lastAckFromPeer ?? -1;
+          const recv = p.lastFrameFromPeer ?? -1;
+          if (ack < minAckFromPeer) minAckFromPeer = ack;
+          if (recv < minRecvFromPeer) minRecvFromPeer = recv;
+          peerInfo.push(`s${p.slot}[ack=${ack},recv=${recv}]`);
+        }
+        const confirmed = Math.min(minAckFromPeer, minRecvFromPeer);
+        const lag = _frameNum - confirmed;
+        if (peerInfo.length > 0) {
+          _syncLog(`INPUT-ACK f=${_frameNum} confirmed=${confirmed} lag=${lag} ${peerInfo.join(' ')}`);
+        }
+      }
 
       // ── Periodic logging with timing + full state hash exchange ──
       if (_frameNum % 300 === 0) {
