@@ -4160,8 +4160,7 @@
           _inDeterministicStep = true;
           stepOneFrame();
           _inDeterministicStep = false;
-          // Save replayed state back to C ring
-          tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+          // Advance C frame counter (state is saved in next kn_pre_tick)
           tickMod._kn_post_tick();
         }
         _frameNum = replayStart + replayDepth;
