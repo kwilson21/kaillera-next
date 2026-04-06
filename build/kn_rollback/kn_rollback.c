@@ -40,6 +40,7 @@ typedef struct {
     int buttons;
     int lx, ly, cx, cy;
     int present;  /* 1 if real input received, 0 if not yet available */
+    int frame;    /* frame number this input belongs to (-1 if unused) */
 } kn_input_t;
 
 /* ── Rollback state ────────────────────────────────────────────────── */
@@ -159,7 +160,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
 
     int idx = frame % KN_INPUT_RING_SIZE;
-    kn_input_t real_input = {buttons, lx, ly, cx, cy, 1};
+    kn_input_t real_input = {buttons, lx, ly, cx, cy, 1, frame};
 
     /* Check if this corrects a prediction */
     if (rb.predicted[slot][idx]) {
@@ -218,6 +219,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.inputs[rb.local_slot][local_idx].cx = cx;
         rb.inputs[rb.local_slot][local_idx].cy = cy;
         rb.inputs[rb.local_slot][local_idx].present = 1;
+        rb.inputs[rb.local_slot][local_idx].frame = rb.frame;
     }
 
     /* ── Check remote inputs for apply frame ── */
@@ -226,10 +228,14 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         for (s = 0; s < rb.num_players; s++) {
             if (s == rb.local_slot) continue;
             idx = apply_frame % KN_INPUT_RING_SIZE;
-            if (!rb.inputs[s][idx].present) {
+            /* Guard against stale ring entries: the present flag from a
+             * previous cycle (256 frames ago) can still be set. Verify
+             * the stored frame number matches apply_frame. */
+            if (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame) {
                 /* Predict: use last known input */
                 rb.inputs[s][idx] = rb.last_known[s];
                 rb.inputs[s][idx].present = 1;
+                rb.inputs[s][idx].frame = apply_frame;
                 rb.predicted[s][idx] = 1;
                 rb.predicted_values[s][idx] = rb.last_known[s];
                 rb.prediction_count++;
@@ -300,7 +306,7 @@ int kn_get_input(int slot, int frame, int *out_buttons,
     if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
     int idx = frame % KN_INPUT_RING_SIZE;
     kn_input_t *inp = &rb.inputs[slot][idx];
-    if (!inp->present) return 0;
+    if (!inp->present || inp->frame != frame) return 0;
     *out_buttons = inp->buttons;
     *out_lx = inp->lx;
     *out_ly = inp->ly;
