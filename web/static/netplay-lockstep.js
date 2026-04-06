@@ -4133,38 +4133,21 @@
         return;
       }
 
-      // ── Pre-tick: save state, handle rollback restore, store input, predict ──
+      // ── Pre-tick: save state, handle C-level replay if pending, store input, predict ──
+      // Replay happens entirely in C (retro_run is synchronous via ASYNCIFY_REMOVE).
+      // No JS between replay frames — deterministic, no browser callback interference.
       const _t0 = performance.now();
       tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
       const _tPreTick = performance.now();
 
-      // ── JS-driven replay if rollback occurred ──
+      // Check if C-level replay occurred — update JS frame counter
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
       if (replayDepth > 0) {
-        const replayStart = tickMod._kn_get_replay_start();
-        const _tReplay0 = performance.now();
-        _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
-
-        // Replay uses the exact same frame step as normal play — no optimizations.
-        // Headless/audio-skip cause GL state corruption or emulation divergence.
-        for (let rf = replayStart; rf < replayStart + replayDepth; rf++) {
-          const replayApply = rf - DELAY_FRAMES;
-          for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-          if (replayApply >= 0) {
-            for (let s = 0; s < rb_numPlayers; s++) {
-              const inp = _rbGetInput(tickMod, s, replayApply);
-              writeInputToMemory(s, inp);
-            }
-          }
-          if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
-          _syncRNGSeed(tickMod, rf);
-          _inDeterministicStep = true;
-          stepOneFrame();
-          _inDeterministicStep = false;
-          tickMod._kn_post_tick();
-        }
+        const replayStart = tickMod._kn_get_replay_start?.() ?? 0;
         _frameNum = replayStart + replayDepth;
-        _syncLog(`C-REPLAY done: now at f=${_frameNum} took=${(performance.now() - _tReplay0).toFixed(1)}ms`);
+        _syncLog(
+          `C-REPLAY done: f=${replayStart} depth=${replayDepth} now=${_frameNum} took=${(_tPreTick - _t0).toFixed(1)}ms`,
+        );
       }
 
       // ── Write inputs from C ring buffer via proven lockstep path ──

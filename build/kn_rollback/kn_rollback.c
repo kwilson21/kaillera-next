@@ -22,10 +22,17 @@
 #include <emscripten.h>
 #endif
 
-/* Forward declarations from libretro API */
+/* Forward declarations from libretro API.
+ * retro_run, retro_serialize, retro_unserialize are excluded from asyncify
+ * via ASYNCIFY_REMOVE in the build — they run synchronously when called from C. */
 extern size_t retro_serialize_size(void);
 extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
+extern void retro_run(void);
+
+/* Forward declaration: write full controller input for a slot.
+ * Implemented in libretro.c — calls simulate_input() per button/axis. */
+extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
 
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
@@ -97,6 +104,24 @@ static void rb_log(const char *fmt, ...) {
         }
     }
     va_end(args);
+}
+
+/* ── Write inputs for all players for a given frame ────────────────── */
+static void write_frame_inputs(int frame) {
+    int s, idx;
+    idx = frame % KN_INPUT_RING_SIZE;
+    for (s = 0; s < KN_MAX_PLAYERS; s++) {
+        if (s < rb.num_players) {
+            kn_input_t *inp = &rb.inputs[s][idx];
+            if (inp->present && inp->frame == frame) {
+                kn_write_controller(s, inp->buttons, inp->lx, inp->ly, inp->cx, inp->cy);
+            } else {
+                kn_write_controller(s, 0, 0, 0, 0, 0);
+            }
+        } else {
+            kn_write_controller(s, 0, 0, 0, 0, 0);
+        }
+    }
 }
 
 /* ── Init / Shutdown ───────────────────────────────────────────────── */
@@ -217,13 +242,37 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
+            int rf, s;
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
-            rb.replay_depth = depth;
-            rb.replay_start = rb_frame;
-            rb.frame = rb_frame;
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
-            rb_log("RESTORE f=%d depth=%d (JS will replay)", rb_frame, depth);
+
+            /* C-level replay: tight loop, no JS between frames.
+             * retro_run is synchronous (ASYNCIFY_REMOVE in build). */
+            for (rf = 0; rf < depth; rf++) {
+                int replay_f = rb_frame + rf;
+                int replay_apply = replay_f - rb.delay_frames;
+
+                /* Re-save state for this replayed frame */
+                int save_idx = replay_f % rb.ring_size;
+                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+                rb.ring_frames[save_idx] = replay_f;
+
+                /* Write corrected inputs */
+                if (replay_apply >= 0) {
+                    write_frame_inputs(replay_apply);
+                } else {
+                    for (s = 0; s < KN_MAX_PLAYERS; s++)
+                        kn_write_controller(s, 0, 0, 0, 0, 0);
+                }
+
+                retro_run();
+            }
+
+            rb.frame = rb_frame + depth;
+            rb.replay_depth = depth;
+            rb.replay_start = rb_frame;
+            rb_log("C-REPLAY f=%d depth=%d done=%d", rb_frame, depth, rb.frame);
         } else {
             rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d", rb_frame, ring_idx, rb.ring_frames[ring_idx], depth);
         }
