@@ -1847,6 +1847,24 @@
           return;
         }
         // FPU trace: cross-platform determinism verification from host
+        // Rollback state checksum verification
+        if (e.data.startsWith('rb-check:')) {
+          const parts = e.data.split(':');
+          const checkFrame = parseInt(parts[1], 10);
+          const peerHash = parseInt(parts[2], 10);
+          const hashMod = window.EJS_emulator?.gameManager?.Module;
+          if (hashMod?._kn_sync_hash) {
+            const localHash = hashMod._kn_sync_hash();
+            if (localHash === peerHash) {
+              _syncLog(`RB-CHECK f=${checkFrame} MATCH hash=0x${peerHash.toString(16)}`);
+            } else {
+              _syncLog(
+                `RB-CHECK f=${checkFrame} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`,
+              );
+            }
+          }
+          return;
+        }
         // Host-authoritative delay for rollback mode
         if (e.data.startsWith('rb-delay:')) {
           const hostDelay = parseInt(e.data.split(':')[1], 10);
@@ -4224,7 +4242,17 @@
         _rbReplayLogged = true;
       }
       if (_rbReplayLogged && !catchingUp) {
-        _syncLog(`C-REPLAY done: caught up at f=${_frameNum}`);
+        // Replay finished — checksum state and broadcast for cross-player verification
+        const replayHash = tickMod._kn_sync_hash?.() ?? 0;
+        _syncLog(`C-REPLAY done: caught up at f=${_frameNum} hash=0x${replayHash.toString(16)}`);
+        // Broadcast hash so peer can compare — detects replay non-determinism
+        for (const p of Object.values(_peers)) {
+          if (p.dc?.readyState === 'open') {
+            try {
+              p.dc.send(`rb-check:${_frameNum}:${replayHash}`);
+            } catch (_) {}
+          }
+        }
         _rbReplayLogged = false;
       }
 
