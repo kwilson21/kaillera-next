@@ -1,8 +1,8 @@
 diff --git a/libretro/libretro.c b/libretro/libretro.c
-index cabae39..2334654 100644
+index cabae39..ee8ca7c 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -104,6 +104,45 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+@@ -104,6 +104,53 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
  
  retro_log_printf_t log_cb = NULL;
  retro_video_refresh_t video_cb = NULL;
@@ -20,8 +20,16 @@ index cabae39..2334654 100644
 + * Mirrors the JS applyInputToWasm() logic in shared.js. */
 +extern void simulate_input(int user, int key, int down);
 +
-+#define KN_N64_MAX 83
-+#define KN_SCALE (32767 / KN_N64_MAX)
++/* Scale N64 analog (+-83) to RetroArch range (+-32767).
++ * MUST match JS applyInputToWasm: Math.trunc(v * (32767.0 / 83.0))
++ * Uses float division + truncation, NOT integer division. */
++static int kn_clamp_analog(int v) {
++    double scaled = (double)v * (32767.0 / 83.0);
++    int result = (int)scaled; /* truncates toward zero like Math.trunc */
++    if (result > 32767) result = 32767;
++    if (result < -32767) result = -32767;
++    return result;
++}
 +
 +void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy) {
 +    int i;
@@ -30,17 +38,17 @@ index cabae39..2334654 100644
 +        simulate_input(slot, i, (buttons >> i) & 1);
 +    }
 +    /* L-stick: scale N64 range (+-83) to RetroArch range (+-32767) */
-+    simulate_input(slot, 16, lx > 0 ? lx * KN_SCALE : 0);  /* X+ right */
-+    simulate_input(slot, 17, lx < 0 ? -lx * KN_SCALE : 0); /* X- left */
-+    simulate_input(slot, 18, ly > 0 ? ly * KN_SCALE : 0);   /* Y+ down */
-+    simulate_input(slot, 19, ly < 0 ? -ly * KN_SCALE : 0);  /* Y- up */
++    simulate_input(slot, 16, lx > 0 ? kn_clamp_analog(lx) : 0);   /* X+ right */
++    simulate_input(slot, 17, lx < 0 ? kn_clamp_analog(-lx) : 0);  /* X- left */
++    simulate_input(slot, 18, ly > 0 ? kn_clamp_analog(ly) : 0);    /* Y+ down */
++    simulate_input(slot, 19, ly < 0 ? kn_clamp_analog(-ly) : 0);   /* Y- up */
 +    /* C-stick: axis values OR digital button bitmask (bits 20-23) */
 +    {
-+        int cmax = KN_N64_MAX * KN_SCALE;
-+        simulate_input(slot, 20, cx > 0 ? cx * KN_SCALE : ((buttons >> 20) & 1) ? cmax : 0);
-+        simulate_input(slot, 21, cx < 0 ? -cx * KN_SCALE : ((buttons >> 21) & 1) ? cmax : 0);
-+        simulate_input(slot, 22, cy > 0 ? cy * KN_SCALE : ((buttons >> 22) & 1) ? cmax : 0);
-+        simulate_input(slot, 23, cy < 0 ? -cy * KN_SCALE : ((buttons >> 23) & 1) ? cmax : 0);
++        int cmax = kn_clamp_analog(83); /* 32767 — matches JS clamp(N64_MAX) */
++        simulate_input(slot, 20, cx > 0 ? kn_clamp_analog(cx) : ((buttons >> 20) & 1) ? cmax : 0);
++        simulate_input(slot, 21, cx < 0 ? kn_clamp_analog(-cx) : ((buttons >> 21) & 1) ? cmax : 0);
++        simulate_input(slot, 22, cy > 0 ? kn_clamp_analog(cy) : ((buttons >> 22) & 1) ? cmax : 0);
++        simulate_input(slot, 23, cy < 0 ? kn_clamp_analog(-cy) : ((buttons >> 23) & 1) ? cmax : 0);
 +    }
 +}
 +#endif
@@ -48,7 +56,7 @@ index cabae39..2334654 100644
  retro_input_poll_t poll_cb = NULL;
  retro_input_state_t input_cb = NULL;
  retro_audio_sample_batch_t audio_batch_cb = NULL;
-@@ -2047,6 +2086,9 @@ void retro_run (void)
+@@ -2047,6 +2094,9 @@ void retro_run (void)
      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
         update_variables(false);
  
@@ -58,7 +66,7 @@ index cabae39..2334654 100644
      if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
      {
         if(EnableThreadedRenderer)
-@@ -2057,17 +2099,23 @@ void retro_run (void)
+@@ -2057,17 +2107,23 @@ void retro_run (void)
               emuThreadRunning = true;
            }
         }
@@ -84,7 +92,7 @@ index cabae39..2334654 100644
      if (libretro_swap_buffer)
      {
         if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
-@@ -2095,6 +2143,9 @@ void retro_run (void)
+@@ -2095,6 +2151,9 @@ void retro_run (void)
          // screen_pitch will be 0 for GLN
          video_cb(NULL, retro_screen_width, retro_screen_height, screen_pitch);
      }
