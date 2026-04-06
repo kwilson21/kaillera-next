@@ -344,11 +344,9 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
 
         setup_frame(rb.frame);
         /* Call emscripten_mainloop directly — the EXACT function the EJS
-         * runner invokes via the captured rAF callback. This is identical
-         * to lockstep's frame step for emulation purposes. Headless skips GL. */
-        kn_headless = 1;
+         * runner invokes via the captured rAF callback. NO headless: do
+         * everything normal play does, including GL state binding. */
         emscripten_mainloop();
-        kn_headless = 0;
         rb.frame++;
         rb.replay_remaining--;
 
