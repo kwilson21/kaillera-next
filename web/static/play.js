@@ -3173,7 +3173,11 @@
     parts.push(`Ping: ${pingStr}`);
 
     if (info.mode === 'lockstep') {
-      parts.push(`Delay: ${info.frameDelay}f`);
+      if (info.rollback) {
+        parts.push(`Delay: ${info.frameDelay}f (feels 0f)`);
+      } else {
+        parts.push(`Delay: ${info.frameDelay}f`);
+      }
       parts.push(`Players: ${info.playerCount}`);
       if (info.rollback) {
         parts.push(`Rollback: ${info.rollback.rollbacks}/${info.rollback.predictions}`);

@@ -4144,8 +4144,15 @@
         const replayStart = tickMod._kn_get_replay_start();
         _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
 
+        // Enable headless for intermediate replay frames (skip GL rendering).
+        // Only the last replay frame needs to render — saves ~3-5ms per frame.
+        const hasHeadless = !!tickMod._kn_set_headless;
+        const lastReplay = replayStart + replayDepth - 1;
+
         for (let rf = replayStart; rf < replayStart + replayDepth; rf++) {
           const replayApply = rf - DELAY_FRAMES;
+          // Skip GL rendering for all but the last replay frame
+          if (hasHeadless) tickMod._kn_set_headless(rf < lastReplay ? 1 : 0);
           // Write inputs from C ring buffer — same writeInputToMemory as lockstep
           for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
           if (replayApply >= 0) {
@@ -4160,9 +4167,11 @@
           _inDeterministicStep = true;
           stepOneFrame();
           _inDeterministicStep = false;
-          // Advance C frame counter (state is saved in next kn_pre_tick)
+          // Advance C frame counter
           tickMod._kn_post_tick();
         }
+        // Ensure headless is off after replay
+        if (hasHeadless) tickMod._kn_set_headless(0);
         _frameNum = replayStart + replayDepth;
         _syncLog(`C-REPLAY done: now at f=${_frameNum}`);
       }
