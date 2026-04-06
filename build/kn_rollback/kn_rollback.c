@@ -27,12 +27,18 @@
 #endif
 
 /* Forward declarations from libretro API.
- * retro_run, retro_serialize, retro_unserialize are excluded from asyncify
- * via ASYNCIFY_REMOVE in the build — they run synchronously when called from C. */
+ * retro_run is excluded from asyncify via ASYNCIFY_REMOVE. */
 extern size_t retro_serialize_size(void);
 extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
 extern void retro_run(void);
+
+/* Forward declarations: kn_sync_read/write (zero-malloc state capture).
+ * These write directly to the provided buffer — no intermediate malloc.
+ * retro_serialize calls savestates_save_m64p which mallocs 16MB internally,
+ * causing WASM heap growth and non-deterministic behavior on mobile. */
+extern uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size);
+extern int kn_sync_write(const uint8_t *buf, uint32_t size);
 
 /* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
@@ -176,7 +182,10 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.local_slot = local_slot;
     rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
     rb.pending_rollback = -1;
-    rb.state_size = retro_serialize_size();
+    /* Use kn_sync_read size (~8MB + 16KB) instead of retro_serialize_size (~16MB).
+     * kn_sync_read writes directly to buffer (zero malloc). retro_serialize
+     * internally mallocs 16MB which causes WASM heap growth + non-determinism. */
+    rb.state_size = 8 * 1024 * 1024 + 65536; /* RDRAM_MAX_SIZE + generous overhead */
     rb.ring_size = max_frames + 1;
 
     /* Allocate state ring */
@@ -287,7 +296,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
+            kn_sync_write(rb.ring_bufs[ring_idx], rb.state_size);
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -310,7 +319,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         int save_idx = rb.frame % rb.ring_size;
 
         /* Save state for this frame */
-        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        kn_sync_read(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
 
         /* Write inputs and step */
@@ -338,7 +347,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     /* ── Save state for current frame ── */
     {
         int save_idx = rb.frame % rb.ring_size;
-        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        kn_sync_read(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
     }
 
@@ -448,7 +457,7 @@ int kn_restore_frame(int frame) {
     if (!rb.initialized) return 0;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
-    return retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;
+    return kn_sync_write(rb.ring_bufs[ring_idx], rb.state_size) == 0 ? 1 : 0;
 }
 
 /* ── Query: get state size ─────────────────────────────────────────── */
@@ -477,9 +486,9 @@ int kn_get_input(int slot, int frame, int *out_buttons,
     return 1;
 }
 
-/* ── Full state hash: hash the last saved retro_serialize output ────── */
-/* Hashes the complete serialized state (~16MB) — covers RDRAM, CPU regs,
- * CP0, CP1, TLB, event queue, SP mem, PIF RAM, everything. */
+/* ── Full state hash: hash the last saved kn_sync_read output ────── */
+/* Hashes the complete serialized state (~8MB) — covers RDRAM, CPU regs,
+ * CP0, CP1, TLB, event queue, SP mem, PIF RAM, SoftFloat state. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
