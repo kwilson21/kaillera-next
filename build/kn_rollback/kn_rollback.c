@@ -115,6 +115,7 @@ static struct {
     int prediction_count;
     int correct_predictions;
     int max_depth;
+    int failed_rollbacks; /* mispredictions that couldn't roll back = silent desync */
 
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
@@ -277,7 +278,17 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
                         rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d", slot, frame, rb.frame, depth);
                     }
                     misprediction = 1;
+                } else {
+                    /* SILENT DESYNC: state for this frame was overwritten in the ring */
+                    rb.failed_rollbacks++;
+                    rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d ring[%d]=%d (stale)",
+                        slot, frame, rb.frame, depth, ring_idx, rb.ring_frames[ring_idx]);
                 }
+            } else {
+                /* SILENT DESYNC: misprediction too old to roll back */
+                rb.failed_rollbacks++;
+                rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d (exceeds max=%d)",
+                    slot, frame, rb.frame, depth, rb.max_frames);
             }
         }
     }
@@ -585,6 +596,11 @@ int kn_get_correct_predictions(void) { return rb.correct_predictions; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_max_depth(void) { return rb.max_depth; }
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_failed_rollbacks(void) { return rb.failed_rollbacks; }
 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

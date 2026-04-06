@@ -3682,7 +3682,8 @@
       // Initialize C-level rollback engine if available
       if (detMod?._kn_rollback_init) {
         const numPlayers = getInputPeers().length + 1;
-        const rollbackMax = Math.min(12, Math.max(7, DELAY_FRAMES + 4));
+        // Bigger ring for more rollback headroom — covers very late inputs
+        const rollbackMax = Math.min(20, Math.max(12, DELAY_FRAMES + 8));
         detMod._kn_rollback_init(rollbackMax, DELAY_FRAMES, _playerSlot, numPlayers);
         rb_numPlayers = numPlayers;
         // Allocate WASM heap space for kn_get_input output (5 × int32 = 20 bytes)
