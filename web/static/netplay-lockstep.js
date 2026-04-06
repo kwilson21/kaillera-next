@@ -5472,6 +5472,18 @@
         rtt: peer.rttSamples?.length > 0 ? peer.rttSamples[Math.floor(peer.rttSamples.length / 2)] : null,
         delayValue: peer.delayValue || null,
       }));
+      let rollbackInfo = null;
+      if (_useCRollback) {
+        const m = window.EJS_emulator?.gameManager?.Module;
+        if (m?._kn_get_rollback_count) {
+          rollbackInfo = {
+            rollbacks: m._kn_get_rollback_count(),
+            predictions: m._kn_get_prediction_count(),
+            correct: m._kn_get_correct_predictions(),
+            maxDepth: m._kn_get_max_depth(),
+          };
+        }
+      }
       return {
         fps: _fpsCurrent,
         frameDelay: DELAY_FRAMES,
@@ -5482,6 +5494,7 @@
         mode: 'lockstep',
         syncEnabled: _syncEnabled,
         resyncCount: _resyncCount,
+        rollback: rollbackInfo,
         peers: peerInfo,
       };
     },

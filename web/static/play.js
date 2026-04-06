@@ -3163,7 +3163,7 @@
 
     // Header: mode + input type
     const inputType = window.GamepadManager?.hasGamepad?.(mySlot) ? 'Gamepad' : 'Keyboard';
-    const modeLabel = info.mode === 'streaming' ? 'Streaming' : 'Lockstep';
+    const modeLabel = info.mode === 'streaming' ? 'Streaming' : info.rollback ? 'Rollback' : 'Lockstep';
     if (headerEl) headerEl.textContent = `${modeLabel} | ${inputType}`;
 
     // Stats line
@@ -3175,6 +3175,9 @@
     if (info.mode === 'lockstep') {
       parts.push(`Delay: ${info.frameDelay}f`);
       parts.push(`Players: ${info.playerCount}`);
+      if (info.rollback) {
+        parts.push(`Rollback: ${info.rollback.rollbacks}/${info.rollback.predictions}`);
+      }
       if (info.syncEnabled && info.resyncCount > 0) {
         parts.push(`Resyncs: ${info.resyncCount}`);
       }
