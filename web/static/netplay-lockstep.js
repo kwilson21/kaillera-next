@@ -425,6 +425,23 @@
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
 
+  // Full RDRAM hash — hashes all 128 × 64KB blocks (8MB total) via kn_rdram_block_hashes.
+  // Returns a single uint32 combining all block hashes. ~1-2ms on mobile.
+  let _rbHashBufPtr = 0;
+  const _rbFullHash = (mod) => {
+    if (!mod._kn_rdram_block_hashes) return 0;
+    if (!_rbHashBufPtr && mod._malloc) _rbHashBufPtr = mod._malloc(128 * 4);
+    if (!_rbHashBufPtr) return 0;
+    const count = mod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
+    const hashes = new Uint32Array(mod.HEAPU8.buffer, _rbHashBufPtr, count);
+    let h = 2166136261;
+    for (let i = 0; i < count; i++) {
+      h ^= hashes[i];
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  };
+
   // Read input from C ring buffer for a given slot/frame.
   // Returns input object compatible with writeInputToMemory.
   const _rbGetInput = (mod, slot, frame) => {
@@ -1858,8 +1875,8 @@
           const checkFrame = parseInt(parts[1], 10);
           const peerHash = parseInt(parts[2], 10);
           const hashMod = window.EJS_emulator?.gameManager?.Module;
-          if (hashMod?._kn_sync_hash) {
-            const localHash = hashMod._kn_sync_hash();
+          if (hashMod?._kn_full_state_hash) {
+            const localHash = hashMod._kn_full_state_hash();
             if (localHash === peerHash) {
               _syncLog(`RB-CHECK f=${checkFrame} MATCH hash=0x${peerHash.toString(16)}`);
             } else {
@@ -4236,9 +4253,9 @@
         _rbReplayLogged = true;
       }
       if (_rbReplayLogged && !catchingUp) {
-        // Replay finished — checksum state and broadcast for cross-player verification
-        const replayHash = tickMod._kn_sync_hash?.() ?? 0;
-        _syncLog(`C-REPLAY done: caught up at f=${_frameNum} hash=0x${replayHash.toString(16)}`);
+        // Replay finished — full state hash (retro_serialize output) for verification
+        const replayHash = tickMod._kn_full_state_hash?.() ?? 0;
+        _syncLog(`C-REPLAY done: caught up at f=${_frameNum} fullHash=0x${replayHash.toString(16)}`);
         // Broadcast hash so peer can compare — detects replay non-determinism
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
@@ -4292,15 +4309,24 @@
       KNState.frameNum = _frameNum;
       const _tTotal = performance.now();
 
-      // ── Periodic logging with timing ──
+      // ── Periodic logging with timing + full state hash exchange ──
       if (_frameNum % 300 === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
         const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+        const fullHash = tickMod._kn_full_state_hash?.() ?? 0;
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hash=0x${fullHash.toString(16)}`,
         );
+        // Broadcast full state hash for periodic desync detection
+        for (const p of Object.values(_peers)) {
+          if (p.dc?.readyState === 'open') {
+            try {
+              p.dc.send(`rb-check:${_frameNum}:${fullHash}`);
+            } catch (_) {}
+          }
+        }
       } else if (_frameNum % 60 === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;

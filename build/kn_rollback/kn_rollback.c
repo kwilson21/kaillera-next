@@ -477,6 +477,27 @@ int kn_get_input(int slot, int frame, int *out_buttons,
     return 1;
 }
 
+/* ── Full state hash: hash the last saved retro_serialize output ────── */
+/* Hashes the complete serialized state (~16MB) — covers RDRAM, CPU regs,
+ * CP0, CP1, TLB, event queue, SP mem, PIF RAM, everything. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_full_state_hash(void) {
+    if (!rb.initialized) return 0;
+    int idx = (rb.frame > 0 ? rb.frame - 1 : 0) % rb.ring_size;
+    if (rb.ring_frames[idx] < 0) return 0;
+    uint32_t hash = 2166136261u;
+    const uint8_t *p = rb.ring_bufs[idx];
+    size_t i;
+    /* Hash every 64th byte for speed (~256KB sampled from ~16MB, <1ms) */
+    for (i = 0; i < rb.state_size; i += 64) {
+        hash ^= p[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 /* ── Stat getters ──────────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
