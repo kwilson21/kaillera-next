@@ -33,6 +33,11 @@ extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
 extern void retro_run(void);
 
+/* RetroArch's runloop_iterate — the same path the EJS runner uses.
+ * Calling this instead of retro_run() ensures replay uses the IDENTICAL
+ * code path as normal play, including all RetroArch state updates. */
+extern int runloop_iterate(void);
+
 /* Forward declarations: kn_sync_read/write (zero-malloc state capture).
  * These write directly to the provided buffer — no intermediate malloc.
  * retro_serialize calls savestates_save_m64p which mallocs 16MB internally,
@@ -335,11 +340,11 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
 
         setup_frame(rb.frame);
-        /* Run with headless=1 to skip GL state bind/unbind in retro_run.
-         * GL state management can diverge between direct C call and EJS runner.
-         * Headless skips glsm_ctl calls but co_switch still executes normally. */
+        /* Use runloop_iterate (same as EJS runner) for IDENTICAL code path.
+         * Direct retro_run() call diverges from EJS runner because it skips
+         * RetroArch's runloop state updates. Keep headless to skip GL. */
         kn_headless = 1;
-        retro_run();
+        runloop_iterate();
         kn_headless = 0;
         rb.frame++;
         rb.replay_remaining--;
@@ -494,29 +499,63 @@ int kn_get_input(int slot, int frame, int *out_buttons,
     return 1;
 }
 
-/* ── Full state hash: hash the last saved kn_sync_read output ────── */
-/* Hashes the complete serialized state (~8MB) — covers RDRAM, CPU regs,
- * CP0, CP1, TLB, event queue, SP mem, PIF RAM, SoftFloat state. */
+/* ── Full state hash: hash the last saved retro_serialize output ──── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 uint32_t kn_full_state_hash(void) {
     if (!rb.initialized || rb.frame == 0) return 0;
-    /* Hash the most recently saved frame's ring slot.
-     * After kn_post_tick, rb.frame is already incremented, so the last
-     * saved state is at rb.frame - 1. */
     int target = rb.frame - 1;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
     uint32_t hash = 2166136261u;
     const uint8_t *p = rb.ring_bufs[idx];
     size_t i;
-    /* Hash every 64th byte for speed (~128KB sampled from ~8MB, <1ms) */
     for (i = 0; i < rb.state_size; i += 64) {
         hash ^= p[i];
         hash *= 16777619u;
     }
     return hash;
+}
+
+/* ── Get pointer to last saved state (for byte-level comparison) ──── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint8_t* kn_get_last_state(void) {
+    if (!rb.initialized || rb.frame == 0) return NULL;
+    int target = rb.frame - 1;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return NULL;
+    return rb.ring_bufs[idx];
+}
+
+/* ── Per-region hashes of last saved state ──────────────────────────
+ * Splits the state buffer into N equal-sized regions and hashes each.
+ * Lets JS compare regions to pinpoint exactly where divergence is.
+ * Writes count uint32 hashes into out_hashes. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_state_region_hashes(uint32_t *out_hashes, int count) {
+    if (!rb.initialized || rb.frame == 0 || !out_hashes || count <= 0) return 0;
+    int target = rb.frame - 1;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
+    const uint8_t *p = rb.ring_bufs[idx];
+    size_t region_size = rb.state_size / count;
+    for (int r = 0; r < count; r++) {
+        uint32_t hash = 2166136261u;
+        const uint8_t *rp = p + (r * region_size);
+        size_t end = (r == count - 1) ? rb.state_size : (r + 1) * region_size;
+        size_t len = end - (r * region_size);
+        for (size_t i = 0; i < len; i += 16) {  /* sample every 16th byte */
+            hash ^= rp[i];
+            hash *= 16777619u;
+        }
+        out_hashes[r] = hash;
+    }
+    return count;
 }
 
 /* ── Stat getters ──────────────────────────────────────────────────── */
