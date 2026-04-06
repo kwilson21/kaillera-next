@@ -1876,6 +1876,33 @@
           }
           return;
         }
+        // Rollback convergence: host sends RDRAM hash every ~30s.
+        // Guest compares and requests state push if hashes diverge.
+        if (e.data.startsWith('rb-hash:')) {
+          if (peer.slot !== 0 || !_useCRollback) return;
+          const parts = e.data.split(':');
+          const hostFrame = parseInt(parts[1], 10);
+          const hostHash = parseInt(parts[2], 10);
+          const hashMod = window.EJS_emulator?.gameManager?.Module;
+          if (!hashMod?._kn_sync_hash) return;
+          const localHash = hashMod._kn_sync_hash();
+          if (localHash === hostHash) {
+            _syncLog(`RB-CONVERGE f=${hostFrame} MATCH hash=0x${hostHash.toString(16)}`);
+          } else {
+            _syncLog(
+              `RB-CONVERGE f=${hostFrame} MISMATCH host=0x${hostHash.toString(16)} local=0x${localHash.toString(16)} — requesting state push`,
+            );
+            // Request full state from host to force convergence
+            const hostDc = peer.syncDc?.readyState === 'open' ? peer.syncDc : peer.dc;
+            if (hostDc?.readyState === 'open' && !_resyncRequestInFlight) {
+              _resyncRequestInFlight = true;
+              try {
+                hostDc.send('sync-request-full');
+              } catch (_) {}
+            }
+          }
+          return;
+        }
         // State sync: hash check from host
         // IMPORTANT: only compare when we're at the SAME frame as the host.
         // Comparing at different frames always shows a diff (not a real desync).
@@ -4223,6 +4250,30 @@
         }
       }
       if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) _captureAndSendScreenshot();
+
+      // Rollback convergence: periodic hash exchange to detect accumulated replay drift.
+      // Host broadcasts RDRAM hash every 1800 frames (~30s). Guest compares and requests
+      // full state push if hashes diverge. This catches the gradual desync from JS replay
+      // non-determinism (120+ rollbacks over long sessions).
+      if (_frameNum > 600 && _frameNum % 1800 === 0) {
+        const hashMod = window.EJS_emulator?.gameManager?.Module;
+        if (hashMod?._kn_sync_hash) {
+          const hash = hashMod._kn_sync_hash();
+          if (_playerSlot === 0) {
+            // Host: broadcast hash to all peers
+            for (const p of Object.values(_peers)) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-hash:${_frameNum}:${hash}`);
+                } catch (_) {}
+              }
+            }
+          }
+          // Store own hash for comparison when peer's hash arrives
+          window._rbLastHash = { frame: _frameNum, hash };
+        }
+      }
+
       return;
     }
 
