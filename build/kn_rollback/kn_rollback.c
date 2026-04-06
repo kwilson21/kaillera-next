@@ -255,8 +255,10 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     int idx = frame % KN_INPUT_RING_SIZE;
     kn_input_t real_input = {buttons, lx, ly, cx, cy, 1, frame};
 
-    /* Check if this corrects a prediction */
-    if (rb.predicted[slot][idx]) {
+    /* Check if this corrects a prediction.
+     * Validate the predicted_values entry has the right frame — the ring
+     * buffer at idx may contain stale predictions from 256 frames ago. */
+    if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
         int match = (pred->buttons == buttons && pred->lx == lx && pred->ly == ly
                      && pred->cx == cx && pred->cy == cy);
@@ -393,6 +395,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                 rb.inputs[s][idx].frame = apply_frame;
                 rb.predicted[s][idx] = 1;
                 rb.predicted_values[s][idx] = rb.last_known[s];
+                rb.predicted_values[s][idx].frame = apply_frame;
                 rb.prediction_count++;
             }
         }
