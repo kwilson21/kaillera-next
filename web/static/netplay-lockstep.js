@@ -323,10 +323,17 @@
       if (_rttPeersComplete >= _rttPeersTotal) {
         _rttSamples.sort((a, b) => a - b);
         const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
+        // Rollback mode: only need to cover one-way latency (RTT/2) since
+        // late inputs are handled by prediction+replay, not stalling.
+        // Lockstep mode: need full round-trip covered to avoid stalls.
+        const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
+        const effectiveLatency = hasRollback ? median / 2 : median;
+        const delay = Math.min(9, Math.max(hasRollback ? 1 : 2, Math.ceil(effectiveLatency / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
+        _syncLog(
+          `RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay} (${hasRollback ? 'rollback' : 'lockstep'} mode)`,
+        );
       }
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
