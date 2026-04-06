@@ -2015,6 +2015,17 @@
         if (_useCRollback) {
           const cMod = window.EJS_emulator?.gameManager?.Module;
           if (cMod?._kn_feed_input) {
+            const remoteHasInput =
+              recvInput.buttons !== 0 ||
+              recvInput.lx !== 0 ||
+              recvInput.ly !== 0 ||
+              recvInput.cx !== 0 ||
+              recvInput.cy !== 0;
+            if (remoteHasInput || recvFrame % 60 === 0) {
+              _syncLog(
+                `C-FEED slot=${peer.slot} f=${recvFrame} myF=${_frameNum} btn=${recvInput.buttons} lx=${recvInput.lx} ly=${recvInput.ly} cx=${recvInput.cx} cy=${recvInput.cy}`,
+              );
+            }
             cMod._kn_feed_input(
               peer.slot,
               recvFrame,
@@ -4093,6 +4104,19 @@
         // but stepOneFrame() won't work if _pendingRunner piles up.
         _pendingRunner = null;
 
+        // Log input going into kn_tick — every 60f normally, every frame if non-zero
+        const hasInput =
+          localInput.buttons !== 0 ||
+          localInput.lx !== 0 ||
+          localInput.ly !== 0 ||
+          localInput.cx !== 0 ||
+          localInput.cy !== 0;
+        if (hasInput || _frameNum % 60 === 0) {
+          _syncLog(
+            `C-TICK f=${_frameNum} local=[btn=${localInput.buttons} lx=${localInput.lx} ly=${localInput.ly} cx=${localInput.cx} cy=${localInput.cy}]`,
+          );
+        }
+
         _inDeterministicStep = true;
         const newFrame = tickMod._kn_tick(
           localInput.buttons,
@@ -4110,6 +4134,15 @@
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
 
+        // Log C engine state after tick ��� rollbacks and predictions
+        if (hasInput || _frameNum % 60 === 0) {
+          const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
+          const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
+          const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
+          const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+          _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
+        }
+
         // Debug overlay — update every 15 frames
         if (_frameNum % 15 === 0) {
           const dbg = document.getElementById('np-debug');
@@ -4126,6 +4159,15 @@
         // Periodic gameplay screenshot for desync debugging
         if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
           _captureAndSendScreenshot();
+        }
+
+        // Dump C engine debug log every 5s
+        if (_frameNum % 300 === 0 && tickMod._kn_get_debug_log) {
+          const logPtr = tickMod._kn_get_debug_log();
+          if (logPtr) {
+            const cLog = typeof UTF8ToString === 'function' ? UTF8ToString(logPtr) : '';
+            if (cLog.length > 0) _syncLog(`C-DEBUG-LOG:\n${cLog}`);
+          }
         }
 
         // Auto self-test at ~30s: verify restore+replay determinism on this device
