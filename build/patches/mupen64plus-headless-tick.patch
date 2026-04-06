@@ -1,0 +1,67 @@
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index d296f75..7e7e608 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -104,6 +104,16 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+ 
+ retro_log_printf_t log_cb = NULL;
+ retro_video_refresh_t video_cb = NULL;
++
++/* kaillera-next: Headless tick mode — skip all GL state management and video
++ * callbacks in retro_run(). CPU emulation (co_switch) still runs normally.
++ * Used to benchmark raw emulation speed for GGPO-style rollback feasibility. */
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++int kn_headless = 0;
++EMSCRIPTEN_KEEPALIVE void kn_set_headless(int enable) { kn_headless = enable; }
++#endif
++
+ retro_input_poll_t poll_cb = NULL;
+ retro_input_state_t input_cb = NULL;
+ retro_audio_sample_batch_t audio_batch_cb = NULL;
+@@ -2047,6 +2057,9 @@ void retro_run (void)
+     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+        update_variables(false);
+ 
++#ifdef __EMSCRIPTEN__
++    if (!kn_headless) {
++#endif
+     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
+     {
+        if(EnableThreadedRenderer)
+@@ -2057,17 +2070,23 @@ void retro_run (void)
+              emuThreadRunning = true;
+           }
+        }
+-       
++
+        glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
+     }
++#ifdef __EMSCRIPTEN__
++    }
++#endif
+ 
+     co_switch(game_thread);
+ 
++#ifdef __EMSCRIPTEN__
++    if (!kn_headless) {
++#endif
+     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
+     {
+        glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
+     }
+-    
++
+     if (libretro_swap_buffer)
+     {
+        if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
+@@ -2095,6 +2114,9 @@ void retro_run (void)
+         // screen_pitch will be 0 for GLN
+         video_cb(NULL, retro_screen_width, retro_screen_height, screen_pitch);
+     }
++#ifdef __EMSCRIPTEN__
++    }
++#endif
+ }
+ 
+ void retro_reset (void)

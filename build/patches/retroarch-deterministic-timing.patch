@@ -2,7 +2,7 @@ diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
 index a626706..ceacc87 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
-@@ -126,7 +126,15 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+@@ -126,7 +126,19 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
                       _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
@@ -15,11 +15,15 @@ index a626706..ceacc87 100644
 +                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_sync_hash_regions,_kn_rdram_block_hashes, \
 +                     _kn_sync_read_regions,_kn_sync_write_regions, \
 +                     _kn_frame_hash,_kn_set_skip_rsp_audio, \
-+                     _kn_fpu_trace_enable,_kn_fpu_trace_get_count,_kn_fpu_trace_get_buf
++                     _kn_fpu_trace_enable,_kn_fpu_trace_get_count,_kn_fpu_trace_get_buf, \
++                     _kn_set_headless, \
++                     _kn_set_native_fpu,_kn_get_native_fpu, \
++                     _kn_get_rom_ptr,_kn_get_rom_size, \
++                     _kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +230,9 @@ endif
+@@ -222,6 +231,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
@@ -102,12 +106,18 @@ index be6c1f6..6bc96e9 100644
     if (alIsExtensionPresent("AL_EXT_FLOAT32"))
     {
        al->format      = alGetEnumValue("AL_FORMAT_STEREO_FLOAT32");
-@@ -254,6 +262,47 @@ static ssize_t al_write(void *data, const void *s, size_t len)
+@@ -254,6 +262,53 @@ static ssize_t al_write(void *data, const void *s, size_t len)
     const uint8_t *buf = (const uint8_t*)s;
     size_t        _len = 0;
  
 +#ifdef __EMSCRIPTEN__
 +   {
++      /* kaillera-next: In headless mode, skip all audio processing entirely.
++       * Replay frames during rollback don't produce audible output. */
++      extern int kn_headless;
++      if (kn_headless)
++         return len;
++
 +      extern int kn_deterministic_mode;
 +      if (kn_deterministic_mode)
 +      {
@@ -150,7 +160,7 @@ index be6c1f6..6bc96e9 100644
     while (len)
     {
        ALint val;
-@@ -309,6 +358,18 @@ static bool al_start(void *data, bool is_shutdown)
+@@ -309,6 +364,18 @@ static bool al_start(void *data, bool is_shutdown)
  static size_t al_write_avail(void *data)
  {
     al_t *al = (al_t*)data;

@@ -133,6 +133,29 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    WARN: FPU trace patch failed"
     fi
 
+    # headless tick: skip GL + video_cb in retro_run() for rollback benchmarking.
+    if [ -f "${PATCHES_DIR}/mupen64plus-headless-tick.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
+            echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
+            echo "    WARN: headless tick patch failed"
+    fi
+
+    # determinism fixes: srand(0), fixed MPK seed, fixed biopak time.
+    # Applied as sed because kn-all.patch modifies main.c (context conflict).
+    echo "    Applying determinism fixes (srand, mpk_seed, biopak)..."
+    sed -i 's/srand((unsigned int) time(NULL));/#ifdef __EMSCRIPTEN__\n    srand(0);\n#else\n    srand((unsigned int) time(NULL));\n#endif/' \
+        mupen64plus-core/src/device/r4300/r4300_core.c
+    sed -i 's/uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;/#ifdef __EMSCRIPTEN__\n    uint64_t mpk_seed = 0;\n#else\n    uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;\n#endif/' \
+        mupen64plus-core/src/main/main.c
+    sed -i 's/time_t now = time(NULL) \* 1000;/#ifdef __EMSCRIPTEN__\n        time_t now = 0;\n#else\n        time_t now = time(NULL) * 1000;\n#endif/' \
+        mupen64plus-core/src/device/controllers/paks/biopak.c
+    echo "    Done."
+
+    # v3 kn_sync_read/write: complete state capture matching retro_serialize.
+    # Must run AFTER kn-all.patch which creates the v1 functions.
+    echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
+    python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
+
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls
     # for bit-exact cross-platform determinism (Chrome V8 vs Safari JSC).
     # Modifies fpu.h (arithmetic + conversions + rounding) and Makefile
