@@ -67,6 +67,10 @@ static struct {
     kn_input_t predicted_values[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
     int pending_rollback;  /* earliest frame needing correction, -1 if none */
 
+    /* Replay: set by kn_pre_tick when rollback occurs, read+cleared by JS */
+    int replay_depth;     /* number of frames JS must replay (0 = none) */
+    int replay_start;     /* frame to start replay from */
+
     /* Stats */
     int rollback_count;
     int prediction_count;
@@ -182,8 +186,6 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
                         rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d", slot, frame, rb.frame, depth);
                     }
                     misprediction = 1;
-                    rb.rollback_count++;
-                    if (depth > rb.max_depth) rb.max_depth = depth;
                 }
             }
         }
@@ -196,12 +198,36 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
 }
 
 /* ── Pre-tick: save state, store input, predict ──────────────────── */
+/* Returns: >= 0 = current frame (normal), < -1 = rollback occurred,
+ * replay needed from frame (-return - 2) to current frame.
+ * e.g., return -5 means replay 3 frames starting from (current - 3). */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
+
+    /* ── Handle pending rollback BEFORE saving new state ── */
+    /* retro_unserialize is synchronous — no asyncify issue. */
+    if (rb.pending_rollback >= 0) {
+        int rb_frame = rb.pending_rollback;
+        int depth = rb.frame - rb_frame;
+        int ring_idx = rb_frame % rb.ring_size;
+        rb.pending_rollback = -1;
+
+        if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
+            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
+            rb.replay_depth = depth;
+            rb.replay_start = rb_frame;
+            rb.frame = rb_frame;
+            rb.rollback_count++;
+            if (depth > rb.max_depth) rb.max_depth = depth;
+            rb_log("RESTORE f=%d depth=%d (JS will replay)", rb_frame, depth);
+        } else {
+            rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d", rb_frame, ring_idx, rb.ring_frames[ring_idx], depth);
+        }
+    }
 
     /* ── Save state for current frame ── */
     {
@@ -257,7 +283,7 @@ int kn_post_tick(void) {
     return rb.frame;
 }
 
-/* ── Query: pending rollback frame ─────────────────────────────────── */
+/* ── Query: pending rollback frame (legacy — use kn_get_replay_depth) */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -265,6 +291,25 @@ int kn_get_pending_rollback(void) {
     int f = rb.pending_rollback;
     rb.pending_rollback = -1;
     return f;
+}
+
+/* ── Query: replay depth after kn_pre_tick ─────────────────────────── */
+/* Returns number of frames to replay (0 = none). Clears the flag. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_replay_depth(void) {
+    int d = rb.replay_depth;
+    rb.replay_depth = 0;
+    return d;
+}
+
+/* ── Query: replay start frame ─────────────────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_replay_start(void) {
+    return rb.replay_start;
 }
 
 /* ── Query: get state buffer for a frame ───────────────────────────── */

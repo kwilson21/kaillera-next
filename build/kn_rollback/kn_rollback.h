@@ -43,6 +43,12 @@ uint8_t* kn_get_state_for_frame(int frame);
  */
 int kn_restore_frame(int frame);
 
+/* Get replay depth after kn_pre_tick. Returns frames to replay (0=none). Clears flag. */
+int kn_get_replay_depth(void);
+
+/* Get replay start frame (valid when kn_get_replay_depth > 0). */
+int kn_get_replay_start(void);
+
 /* Get the state buffer size (retro_serialize_size at init). */
 int kn_get_state_size(void);
 

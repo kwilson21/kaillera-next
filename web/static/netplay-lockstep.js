@@ -4121,45 +4121,40 @@
         return;
       }
 
-      // ── Check for pending rollback BEFORE this frame's pre_tick ──
-      const rbFrame = tickMod._kn_get_pending_rollback();
-      if (rbFrame >= 0 && rbFrame < _frameNum) {
-        const depth = _frameNum - rbFrame;
-        const restored = tickMod._kn_restore_frame(rbFrame);
-        if (restored) {
-          _syncLog(`C-REPLAY start: rbFrame=${rbFrame} depth=${depth} myF=${_frameNum}`);
-
-          // Replay N frames using the proven lockstep path
-          const savedFrame = _frameNum;
-          _frameNum = rbFrame;
-
-          for (let rf = rbFrame; rf < savedFrame; rf++) {
-            const replayApply = rf - DELAY_FRAMES;
-            // Write inputs from C ring buffer — same writeInputToMemory as lockstep
-            for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-            if (replayApply >= 0) {
-              for (let s = 0; s < rb_numPlayers; s++) {
-                const inp = _rbGetInput(tickMod, s, replayApply);
-                writeInputToMemory(s, inp);
-              }
-            }
-            // Step one frame — same path as pure lockstep
-            if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
-            _syncRNGSeed(tickMod, rf);
-            _inDeterministicStep = true;
-            stepOneFrame();
-            _inDeterministicStep = false;
-            // Don't feed audio during replay — silent replay
-            _frameNum = rf + 1;
-          }
-          _syncLog(`C-REPLAY done: now at f=${_frameNum}`);
-        } else {
-          _syncLog(`C-REPLAY failed: could not restore frame ${rbFrame}`);
-        }
-      }
-
-      // ── Pre-tick: save state, store local input, predict remote ──
+      // ── Pre-tick: save state, handle rollback restore, store input, predict ──
+      // kn_pre_tick handles rollback restore internally (retro_unserialize is sync).
+      // If a rollback occurred, kn_get_replay_depth() returns > 0 and we replay.
       tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+
+      // ── JS-driven replay if rollback occurred ──
+      const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
+      if (replayDepth > 0) {
+        const replayStart = tickMod._kn_get_replay_start();
+        _syncLog(`C-REPLAY start: rbFrame=${replayStart} depth=${replayDepth} myF=${_frameNum}`);
+
+        for (let rf = replayStart; rf < replayStart + replayDepth; rf++) {
+          const replayApply = rf - DELAY_FRAMES;
+          // Write inputs from C ring buffer — same writeInputToMemory as lockstep
+          for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
+          if (replayApply >= 0) {
+            for (let s = 0; s < rb_numPlayers; s++) {
+              const inp = _rbGetInput(tickMod, s, replayApply);
+              writeInputToMemory(s, inp);
+            }
+          }
+          // Step one frame — same path as pure lockstep
+          if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+          _syncRNGSeed(tickMod, rf);
+          _inDeterministicStep = true;
+          stepOneFrame();
+          _inDeterministicStep = false;
+          // Save replayed state back to C ring
+          tickMod._kn_pre_tick(localInput.buttons, localInput.lx, localInput.ly, localInput.cx, localInput.cy);
+          tickMod._kn_post_tick();
+        }
+        _frameNum = replayStart + replayDepth;
+        _syncLog(`C-REPLAY done: now at f=${_frameNum}`);
+      }
 
       // ── Write inputs from C ring buffer via proven lockstep path ──
       const applyFrame = _frameNum - DELAY_FRAMES;
