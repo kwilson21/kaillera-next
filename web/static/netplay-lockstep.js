@@ -409,6 +409,7 @@
   let socket = null;
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
+  let _useCRollback = false; // true when C-level rollback engine is active
   // -- Audio bypass state --
   let _audioCtx = null;
   let _audioWorklet = null;
@@ -2010,6 +2011,21 @@
         }
         _remoteInputs[peer.slot][recvFrame] = recvInput;
         _lastKnownInput[peer.slot] = recvInput;
+        // Feed to C-level rollback engine for prediction correction
+        if (_useCRollback) {
+          const cMod = window.EJS_emulator?.gameManager?.Module;
+          if (cMod?._kn_feed_input) {
+            cMod._kn_feed_input(
+              peer.slot,
+              recvFrame,
+              recvInput.buttons,
+              recvInput.lx,
+              recvInput.ly,
+              recvInput.cx,
+              recvInput.cy,
+            );
+          }
+        }
         if (!_peerInputStarted[peer.slot]) {
           _peerInputStarted[peer.slot] = true;
           _syncLog(`INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
@@ -3538,6 +3554,17 @@
         _syncLog('FPU trace enabled for determinism verification');
       }
 
+      // Initialize C-level rollback engine if available
+      if (detMod?._kn_rollback_init) {
+        const numPlayers = getInputPeers().length + 1;
+        const rollbackMax = Math.min(12, Math.max(7, DELAY_FRAMES + 4));
+        detMod._kn_rollback_init(rollbackMax, DELAY_FRAMES, _playerSlot, numPlayers);
+        _useCRollback = true;
+        _syncLog(`C-ROLLBACK init: max=${rollbackMax} delay=${DELAY_FRAMES} slot=${_playerSlot} players=${numPlayers}`);
+      } else {
+        _useCRollback = false;
+      }
+
       // Override performance.now() during WASM frame steps for COMPLETE timing
       // determinism. Emscripten's _emscripten_get_now calls performance.now()
       // internally, and it's captured in a closure we can't override from outside.
@@ -3797,6 +3824,12 @@
     const stopMod = window.EJS_emulator?.gameManager?.Module;
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
 
+    // Shutdown C-level rollback
+    if (_useCRollback) {
+      if (stopMod?._kn_rollback_shutdown) stopMod._kn_rollback_shutdown();
+      _useCRollback = false;
+    }
+
     // Disable FPU trace
     if (_fpuTraceEnabled) {
       if (stopMod?._kn_fpu_trace_enable) stopMod._kn_fpu_trace_enable(0);
@@ -4037,6 +4070,49 @@
       } catch (_) {
         _sendFails++;
       }
+    }
+
+    // ── C-level rollback path: kn_tick() handles prediction, replay, and stepping ──
+    // Input was already sent to peers above. kn_tick() saves state, predicts missing
+    // remote input, replays on misprediction, writes inputs, and calls retro_run().
+    // JS only needs to feed audio and advance the frame counter.
+    if (_useCRollback) {
+      const tickMod = window.EJS_emulator?.gameManager?.Module;
+      if (tickMod?._kn_tick) {
+        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+        _syncRNGSeed(tickMod, _frameNum);
+        _inDeterministicStep = true;
+        const newFrame = tickMod._kn_tick(
+          localInput.buttons,
+          localInput.lx,
+          localInput.ly,
+          localInput.cx,
+          localInput.cy,
+        );
+        _inDeterministicStep = false;
+        feedAudio();
+        _frameNum = newFrame;
+        KNState.frameNum = _frameNum;
+
+        // Debug overlay — update every 15 frames
+        if (_frameNum % 15 === 0) {
+          const dbg = document.getElementById('np-debug');
+          if (dbg) {
+            dbg.style.display = '';
+            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
+            const pred = tickMod._kn_get_prediction_count?.() ?? 0;
+            const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
+            const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
+          }
+        }
+
+        // Periodic gameplay screenshot for desync debugging
+        if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
+          _captureAndSendScreenshot();
+        }
+      }
+      return;
     }
 
     // Check if all INPUT peers (peers who have sent at least 1 input)
@@ -5427,5 +5503,29 @@
         _syncLog(`dumped ${_debugLog.length} log entries to server`);
       }
     },
+    // C-level rollback diagnostics
+    selfTest: () => {
+      const m = window.EJS_emulator?.gameManager?.Module;
+      if (!m?._kn_rollback_self_test) return 'C-level rollback not available';
+      const result = m._kn_rollback_self_test();
+      return result === 1 ? 'DETERMINISTIC' : result === 0 ? 'NON-DETERMINISTIC' : 'ERROR';
+    },
+    getRollbackStats: () => {
+      const m = window.EJS_emulator?.gameManager?.Module;
+      if (!m?._kn_get_rollback_count) return null;
+      return {
+        rollbacks: m._kn_get_rollback_count(),
+        predictions: m._kn_get_prediction_count(),
+        correctPredictions: m._kn_get_correct_predictions(),
+        maxDepth: m._kn_get_max_depth(),
+        frame: m._kn_get_frame(),
+        debugLog: m._kn_get_debug_log ? window.UTF8ToString(m._kn_get_debug_log()) : null,
+      };
+    },
+    isCRollback: () => _useCRollback,
   };
+
+  // Global console helpers
+  window.knSelfTest = () => window.NetplayLockstep?.selfTest?.() ?? 'not available';
+  window.knRollbackStats = () => window.NetplayLockstep?.getRollbackStats?.() ?? 'not available';
 })();
