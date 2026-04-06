@@ -171,6 +171,15 @@ if [ -d "${PATCHES_DIR}" ]; then
     echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
     python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
 
+    # static save scratch: replace malloc/free in savestates_save_m64p with
+    # a static reusable buffer. retro_serialize is called 60×/sec by the
+    # rollback engine; the malloc was suspected to cause WASM heap growth.
+    if [ -f "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" && \
+            echo "    Applied static save scratch patch" || \
+            echo "    WARN: static save scratch patch failed"
+    fi
+
     # C-level rollback engine: copy kn_rollback.c/h into the source tree
     # and add to Makefile.common so it gets compiled with the core.
     echo "    Installing kn_rollback.c/h..."

@@ -186,10 +186,9 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.local_slot = local_slot;
     rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
     rb.pending_rollback = -1;
-    /* Use kn_sync_read size (~8MB + 16KB) instead of retro_serialize_size (~16MB).
-     * kn_sync_read writes directly to buffer (zero malloc). retro_serialize
-     * internally mallocs 16MB which causes WASM heap growth + non-determinism. */
-    rb.state_size = 8 * 1024 * 1024 + 65536; /* RDRAM_MAX_SIZE + generous overhead */
+    /* retro_serialize is now safe (static scratch buffer patch eliminates the
+     * 16MB malloc per call). Same code path used by gm.getState() and resync. */
+    rb.state_size = retro_serialize_size();
     rb.ring_size = max_frames + 1;
 
     /* Allocate state ring */
@@ -300,7 +299,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            kn_sync_write(rb.ring_bufs[ring_idx], rb.state_size);
+            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -323,7 +322,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         int save_idx = rb.frame % rb.ring_size;
 
         /* Save state for this frame */
-        kn_sync_read(rb.ring_bufs[save_idx], rb.state_size);
+        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
 
         /* Write inputs and step */
@@ -356,7 +355,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     /* ── Save state for current frame ── */
     {
         int save_idx = rb.frame % rb.ring_size;
-        kn_sync_read(rb.ring_bufs[save_idx], rb.state_size);
+        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_frames[save_idx] = rb.frame;
     }
 
@@ -466,7 +465,7 @@ int kn_restore_frame(int frame) {
     if (!rb.initialized) return 0;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
-    return kn_sync_write(rb.ring_bufs[ring_idx], rb.state_size) == 0 ? 1 : 0;
+    return retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;
 }
 
 /* ── Query: get state size ─────────────────────────────────────────── */

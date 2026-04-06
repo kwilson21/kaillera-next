@@ -1,0 +1,46 @@
+diff --git a/mupen64plus-core/src/main/savestates.c b/mupen64plus-core/src/main/savestates.c
+index b0b9cf4..57f0351 100644
+--- a/mupen64plus-core/src/main/savestates.c
++++ b/mupen64plus-core/src/main/savestates.c
+@@ -1624,8 +1624,10 @@ static void savestates_save_m64p_work(struct work_struct *work)
+ #else
+     memcpy(save->mempointer, save->data, save->size);
+ #endif
+-    free(save->data);
++    /* kaillera-next: save->data is a static scratch buffer in libretro mode;
++     * do NOT free it (reused across calls). */
+ #ifndef __LIBRETRO__
++    free(save->data);
+     free(save->filepath);
+ #endif
+     free(save);
+@@ -1673,9 +1675,27 @@ int savestates_save_m64p(const struct device* dev, void *data)
+ 
+     save_eventqueue_infos(&dev->r4300.cp0, queue);
+ 
+-    // Allocate memory for the save state data
++    // Allocate memory for the save state data.
++    // kaillera-next: use static scratch buffer to avoid malloc/free every save.
++    // Rollback engine calls retro_serialize 60×/sec; the malloc was suspected
++    // (not confirmed) to cause WASM heap growth and non-determinism on mobile.
+     save->size = 16788288 + sizeof(queue) + 4 + 4096;
+-    save->data = curr = malloc(save->size);
++    {
++        static uint8_t *kn_save_scratch = NULL;
++        static size_t kn_save_scratch_size = 0;
++        static int kn_save_alloc_count = 0;
++        static int kn_save_call_count = 0;
++        kn_save_call_count++;
++        if (kn_save_scratch == NULL || kn_save_scratch_size < save->size) {
++            if (kn_save_scratch) free(kn_save_scratch);
++            kn_save_scratch = (uint8_t*)malloc(save->size);
++            kn_save_scratch_size = save->size;
++            kn_save_alloc_count++;
++            DebugMessage(M64MSG_INFO, "[KN] save_scratch alloc #%d call=%d size=%zu",
++                kn_save_alloc_count, kn_save_call_count, save->size);
++        }
++        save->data = curr = (char*)kn_save_scratch;
++    }
+     if (save->data == NULL)
+     {
+         free(save->filepath);
