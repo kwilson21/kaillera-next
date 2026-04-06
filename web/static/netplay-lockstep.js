@@ -298,6 +298,7 @@
 
   let _rttSamples = [];
   let _rttMedian = 0; // stored for rollback-aware delay recalculation at game start
+  let _rttJitter = 0; // max - min of RTT samples (measures delivery variance)
   let _rttComplete = false;
   let _rttPeersComplete = 0;
   let _rttPeersTotal = 0;
@@ -324,13 +325,14 @@
       if (_rttPeersComplete >= _rttPeersTotal) {
         _rttSamples.sort((a, b) => a - b);
         const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
+        const jitter = _rttSamples[_rttSamples.length - 1] - _rttSamples[0];
         _rttMedian = median;
+        _rttJitter = jitter;
         // Lockstep default — rollback-aware recalculation happens at game start
-        // when WASM module is loaded (it isn't loaded during RTT probing)
         const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms -> auto delay: ${delay}`);
+        _syncLog(`RTT median: ${median.toFixed(1)}ms jitter: ${jitter.toFixed(1)}ms -> auto delay: ${delay}`);
       }
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
@@ -2723,18 +2725,28 @@
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     let ownDelay;
     if (hasRollback && _rttMedian > 0) {
-      ownDelay = Math.min(9, Math.max(1, Math.ceil(_rttMedian / 2 / 16.67)));
-      _syncLog(`rollback delay: RTT=${_rttMedian.toFixed(1)}ms -> ${ownDelay}f (one-way)`);
+      // Rollback delay: cover one-way latency + jitter.
+      // median/2 = expected one-way trip. jitter = delivery variance.
+      // Adding jitter ensures the delay buffer absorbs network spikes,
+      // preventing rollbacks that cause frame drops during replay.
+      const effectiveMs = _rttMedian / 2 + _rttJitter;
+      ownDelay = Math.min(9, Math.max(1, Math.ceil(effectiveMs / 16.67)));
+      _syncLog(
+        `rollback delay: RTT=${_rttMedian.toFixed(1)}ms jitter=${_rttJitter.toFixed(1)}ms effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
+      );
     } else {
       ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
     }
     let maxDelay = ownDelay;
     if (hasRollback) {
-      // In rollback mode, recalculate peer delay from their RTT using rollback formula
+      // Recalculate peer delay from their RTT+jitter using rollback formula
       for (const p of Object.values(_peers)) {
         if (p.rttSamples?.length > 0) {
-          const peerMedian = p.rttSamples[Math.floor(p.rttSamples.length / 2)];
-          const peerDelay = Math.min(9, Math.max(1, Math.ceil(peerMedian / 2 / 16.67)));
+          const sorted = p.rttSamples.slice().sort((a, b) => a - b);
+          const peerMedian = sorted[Math.floor(sorted.length / 2)];
+          const peerJitter = sorted[sorted.length - 1] - sorted[0];
+          const peerMs = peerMedian / 2 + peerJitter;
+          const peerDelay = Math.min(9, Math.max(1, Math.ceil(peerMs / 16.67)));
           if (peerDelay > maxDelay) maxDelay = peerDelay;
         }
       }
