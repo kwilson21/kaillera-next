@@ -33,10 +33,11 @@ extern bool retro_serialize(void *data, size_t size);
 extern bool retro_unserialize(const void *data, size_t size);
 extern void retro_run(void);
 
-/* RetroArch's runloop_iterate — the same path the EJS runner uses.
- * Calling this instead of retro_run() ensures replay uses the IDENTICAL
- * code path as normal play, including all RetroArch state updates. */
-extern int runloop_iterate(void);
+/* RetroArch's emscripten_mainloop — the EXACT function the EJS runner calls.
+ * Calling this from C ensures replay uses the IDENTICAL code path as normal
+ * play: emscripten_mainloop → runloop_iterate → core_run → retro_run, plus
+ * task_queue_check after. Same as lockstep frame step. */
+extern void emscripten_mainloop(void);
 
 /* Forward declarations: kn_sync_read/write (zero-malloc state capture).
  * These write directly to the provided buffer — no intermediate malloc.
@@ -340,11 +341,11 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
 
         setup_frame(rb.frame);
-        /* Use runloop_iterate (same as EJS runner) for IDENTICAL code path.
-         * Direct retro_run() call diverges from EJS runner because it skips
-         * RetroArch's runloop state updates. Keep headless to skip GL. */
+        /* Call emscripten_mainloop directly — the EXACT function the EJS
+         * runner invokes via the captured rAF callback. This is identical
+         * to lockstep's frame step for emulation purposes. Headless skips GL. */
         kn_headless = 1;
-        runloop_iterate();
+        emscripten_mainloop();
         kn_headless = 0;
         rb.frame++;
         rb.replay_remaining--;
@@ -499,13 +500,15 @@ int kn_get_input(int slot, int frame, int *out_buttons,
     return 1;
 }
 
-/* ── Full state hash: hash the last saved retro_serialize output ──── */
+/* ── Full state hash: hash the saved state for a specific frame ──── */
+/* If frame == -1, hashes the most recently saved state. Otherwise hashes
+ * the state saved for that specific frame from the ring buffer. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-uint32_t kn_full_state_hash(void) {
+uint32_t kn_full_state_hash(int frame) {
     if (!rb.initialized || rb.frame == 0) return 0;
-    int target = rb.frame - 1;
+    int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
     uint32_t hash = 2166136261u;

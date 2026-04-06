@@ -66,8 +66,9 @@ int kn_get_prediction_count(void);
 int kn_get_correct_predictions(void);
 int kn_get_max_depth(void);
 
-/* Full state hash — hashes the last retro_serialize output from the ring buffer. */
-uint32_t kn_full_state_hash(void);
+/* Full state hash — hashes the saved state for a specific frame from the
+ * ring buffer. Pass -1 to hash the most recent saved state. */
+uint32_t kn_full_state_hash(int frame);
 
 /* Determinism self-test. Returns 1 if restore+replay is deterministic, 0 if not. */
 int kn_rollback_self_test(void);

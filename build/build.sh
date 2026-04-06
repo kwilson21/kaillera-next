@@ -82,7 +82,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     # needs asyncify — but works because retro_run's fiber context is pre-initialized.
     # Intermittent freeze reported once; monitoring — do NOT revert without repro.
     if ! grep -q "ASYNCIFY_REMOVE" Makefile.emulatorjs; then
-        sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run"]'\''|' Makefile.emulatorjs
+        sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop"]'\''|' Makefile.emulatorjs
         echo "    Added ASYNCIFY_REMOVE for synchronous retro_run"
     fi
 
