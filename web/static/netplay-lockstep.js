@@ -1818,6 +1818,12 @@
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
+          // Update C rollback engine with new player count
+          rb_numPlayers = slots.length;
+          const rosterMod = window.EJS_emulator?.gameManager?.Module;
+          if (_useCRollback && rosterMod?._kn_set_num_players) {
+            rosterMod._kn_set_num_players(rb_numPlayers);
+          }
           _syncLog(`ROSTER received: frame=${rosterFrame} slots=[${slots.join(',')}]`);
         }
         if (e.data === 'leaving') {
@@ -2963,6 +2969,13 @@
     const slots = [...slotSet].sort((a, b) => a - b);
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
+    // Update C rollback engine with new player count
+    rb_numPlayers = slotSet.size;
+    const rbMod = window.EJS_emulator?.gameManager?.Module;
+    if (_useCRollback && rbMod?._kn_set_num_players) {
+      rbMod._kn_set_num_players(rb_numPlayers);
+      _syncLog(`C-ROLLBACK num_players updated to ${rb_numPlayers}`);
+    }
     const msg = `roster:${_frameNum}:${slots.join(',')}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
     for (const p of Object.values(_peers)) {

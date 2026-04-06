@@ -213,6 +213,15 @@ void kn_rollback_shutdown(void) {
     rb_log("kn_rollback_shutdown");
 }
 
+/* ── Update player count (e.g., late join) ─────────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_num_players(int num_players) {
+    rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
+    rb_log("num_players updated to %d", rb.num_players);
+}
+
 /* ── Feed remote input ─────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
