@@ -1,5 +1,131 @@
 [
   {
+    "version": "0.35.0",
+    "date": "2026-04-07",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "C-level rollback netcode (#3)"
+      },
+      {
+        "type": "feat",
+        "message": "C-level rollback netplay engine"
+      },
+      {
+        "type": "feat",
+        "message": "proportional frame pacing for smoother 3+ player lockstep"
+      },
+      {
+        "type": "feat",
+        "message": "per-frame RNG seed sync for Smash Remix deterministic netplay"
+      },
+      {
+        "type": "fix",
+        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
+      },
+      {
+        "type": "fix",
+        "message": "evict zombie peers to prevent roster duplication and CSS desync"
+      },
+      {
+        "type": "feat",
+        "message": "HMAC time-limited TURN credentials for coturn"
+      },
+      {
+        "type": "fix",
+        "message": "broadcast roster after late-join-ready, not before state transfer"
+      },
+      {
+        "type": "feat",
+        "message": "add 4-player roster coordination E2E test"
+      },
+      {
+        "type": "feat",
+        "message": "rewrite input application to use host-authoritative roster"
+      },
+      {
+        "type": "feat",
+        "message": "add host-authoritative roster state, broadcast, and message handling"
+      },
+      {
+        "type": "fix",
+        "message": "late-join mesh reliability + coordinated roster design"
+      },
+      {
+        "type": "feat",
+        "message": "screenshot capture, admin panel, 3+ player late-join fixes"
+      },
+      {
+        "type": "fix",
+        "message": "EJS_gameID must be a number, not a string"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS gameId fallback in ejs-loader.js (no server cache)"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS_gameID from ROM hash at hash time, not boot time"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS_gameID placeholder before EJS loads"
+      },
+      {
+        "type": "fix",
+        "message": "force preserveDrawingBuffer for PostHog canvas capture"
+      },
+      {
+        "type": "fix",
+        "message": "suppress WebGL texParameteri warnings from mupen64plus core"
+      },
+      {
+        "type": "fix",
+        "message": "silence EJS console warnings (en-US locale, gameID)"
+      },
+      {
+        "type": "fix",
+        "message": "block Emscripten SDL gamepad while preserving native access"
+      },
+      {
+        "type": "fix",
+        "message": "gamepad rebind uses rAF, skip cheats for non-SSB64 ROMs"
+      },
+      {
+        "type": "fix",
+        "message": "C-buttons from digital button mappings now reach the emulator"
+      },
+      {
+        "type": "fix",
+        "message": "sync EJS keyboard defaults with WASD, rebuild controller panel on open"
+      },
+      {
+        "type": "fix",
+        "message": "PostHog CSP wildcards and local dev support"
+      },
+      {
+        "type": "fix",
+        "message": "allow PostHog proxy domains in CSP script-src and connect-src"
+      },
+      {
+        "type": "feat",
+        "message": "PostHog client-side analytics via reverse proxy"
+      },
+      {
+        "type": "fix",
+        "message": "C-button remap, invite dropdown, ready text, mobile log flush"
+      },
+      {
+        "type": "fix",
+        "message": "controller settings UX — analog labels, gamepad status, toolbar overflow"
+      },
+      {
+        "type": "fix",
+        "message": "controller settings remapping, C-stick viz, and gamepad hot-plug"
+      }
+    ]
+  },
+  {
     "version": "0.34.0",
     "date": "2026-04-06",
     "changes": [
