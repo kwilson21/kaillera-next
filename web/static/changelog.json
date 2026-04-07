@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.36.1",
+    "date": "2026-04-07",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "restore isN64Core in core-redirector.js after auto-discovery refactor"
+      }
+    ]
+  },
+  {
     "version": "0.36.0",
     "date": "2026-04-07",
     "changes": [
