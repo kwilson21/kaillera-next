@@ -77,6 +77,21 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
+    # ASYNCIFY_REMOVE: make retro_run/retro_serialize/retro_unserialize synchronous
+    # for deterministic C-level replay. co_switch uses emscripten_fiber_swap which
+    # needs asyncify — but works because retro_run's fiber context is pre-initialized.
+    # Intermittent freeze reported once; monitoring — do NOT revert without repro.
+    if ! grep -q "ASYNCIFY_REMOVE" Makefile.emulatorjs; then
+        sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop"]'\''|' Makefile.emulatorjs
+        echo "    Added ASYNCIFY_REMOVE for synchronous retro_run"
+    fi
+
+    # Add C-level rollback exports to EXPORTED_FUNCTIONS
+    if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size|' Makefile.emulatorjs
+        echo "    Added C-level rollback WASM exports"
+    fi
+
     # mupen64plus: full reset + apply patches.
     # kn-all.patch handles main.c (superset of timing + wasm-determinism patches).
     # deterministic-timing.patch handles features_cpu.c and profile.c (excluded main.c).
@@ -132,6 +147,85 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Applied mupen64plus FPU trace patch (fpu.h)" || \
             echo "    WARN: FPU trace patch failed"
     fi
+
+    # headless tick: skip GL + video_cb in retro_run() for rollback benchmarking.
+    if [ -f "${PATCHES_DIR}/mupen64plus-headless-tick.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
+            echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
+            echo "    WARN: headless tick patch failed"
+    fi
+
+    # determinism fixes: srand(0), fixed MPK seed, fixed biopak time.
+    # Applied as sed because kn-all.patch modifies main.c (context conflict).
+    echo "    Applying determinism fixes (srand, mpk_seed, biopak)..."
+    sed -i 's/srand((unsigned int) time(NULL));/#ifdef __EMSCRIPTEN__\n    srand(0);\n#else\n    srand((unsigned int) time(NULL));\n#endif/' \
+        mupen64plus-core/src/device/r4300/r4300_core.c
+    sed -i 's/uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;/#ifdef __EMSCRIPTEN__\n    uint64_t mpk_seed = 0;\n#else\n    uint64_t mpk_seed = !netplay_is_init() ? (uint64_t)time(NULL) : 0;\n#endif/' \
+        mupen64plus-core/src/main/main.c
+    sed -i 's/time_t now = time(NULL) \* 1000;/#ifdef __EMSCRIPTEN__\n        time_t now = 0;\n#else\n        time_t now = time(NULL) * 1000;\n#endif/' \
+        mupen64plus-core/src/device/controllers/paks/biopak.c
+    echo "    Done."
+
+    # Inject hidden state fingerprint function for determinism diagnostics
+    if ! grep -q "kn_get_hidden_state_fingerprint_impl" mupen64plus-core/src/main/main.c; then
+        cat >> mupen64plus-core/src/main/main.c <<'KNFP_EOF'
+
+EMSCRIPTEN_KEEPALIVE uint32_t kn_get_hidden_state_fingerprint_impl(void) {
+    uint32_t h = 2166136261u;
+    h ^= (uint32_t)softfloat_roundingMode; h *= 16777619u;
+    h ^= (uint32_t)softfloat_exceptionFlags; h *= 16777619u;
+    h ^= (uint32_t)g_dev.sp.rsp_task_locked; h *= 16777619u;
+    h ^= (uint32_t)g_dev.r4300.cp0.interrupt_unsafe_state; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[0].duration; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[0].length; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[1].duration; h *= 16777619u;
+    h ^= (uint32_t)g_dev.ai.fifo[1].length; h *= 16777619u;
+    h ^= *r4300_cp0_last_addr(&g_dev.r4300.cp0); h *= 16777619u;
+    return h;
+}
+KNFP_EOF
+        echo "    Injected kn_get_hidden_state_fingerprint_impl"
+    fi
+
+    # v3 kn_sync_read/write: complete state capture matching retro_serialize.
+    # Must run AFTER kn-all.patch which creates the v1 functions.
+    echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
+    python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
+
+    # static save scratch: replace malloc/free in savestates_save_m64p with
+    # a static reusable buffer. retro_serialize is called 60×/sec by the
+    # rollback engine; the malloc was suspected to cause WASM heap growth.
+    # Also records kn_rdram_offset_in_state for taint-aware hashing.
+    if [ -f "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" && \
+            echo "    Applied static save scratch patch" || \
+            echo "    WARN: static save scratch patch failed"
+    fi
+
+    # RSP HLE taint hook: every dram_store_u* call flags the written 64 KB
+    # RDRAM block(s) as non-deterministic so kn_game_state_hash can skip them.
+    if [ -f "${PATCHES_DIR}/mupen64plus-rsp-taint.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-rsp-taint.patch" && \
+            echo "    Applied RSP HLE taint patch" || \
+            echo "    WARN: RSP HLE taint patch failed"
+    fi
+
+    # GLideN64 taint hook: ColorBufferToRDRAM and DepthBufferToRDRAM call
+    # kn_taint_rdram before writing GL readback bytes into RDRAM.
+    if [ -f "${PATCHES_DIR}/gliden64-rdram-taint.patch" ]; then
+        git apply "${PATCHES_DIR}/gliden64-rdram-taint.patch" && \
+            echo "    Applied GLideN64 taint patch" || \
+            echo "    WARN: GLideN64 taint patch failed"
+    fi
+
+    # C-level rollback engine: copy kn_rollback.c/h into the source tree
+    # and add to Makefile.common so it gets compiled with the core.
+    echo "    Installing kn_rollback.c/h..."
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
+    cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
+    # Add kn_rollback.c to SOURCES_C in Makefile.common
+    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
+    echo "    Done."
 
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls
     # for bit-exact cross-platform determinism (Chrome V8 vs Safari JSC).

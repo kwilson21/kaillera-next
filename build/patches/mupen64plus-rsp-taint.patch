@@ -1,0 +1,138 @@
+diff --git a/mupen64plus-rsp-hle/src/alist.c b/mupen64plus-rsp-hle/src/alist.c
+index 84860e7..7b7f2ee 100644
+--- a/mupen64plus-rsp-hle/src/alist.c
++++ b/mupen64plus-rsp-hle/src/alist.c
+@@ -33,6 +33,12 @@
+ #include "hle_internal.h"
+ #include "memory.h"
+ 
++/* kaillera-next: taint hook for direct hle->dram writes that bypass the
++ * memory.h store_u* helpers. These direct memcpys are how audio output is
++ * DMAed from the alist buffer into RDRAM — missing them left audio bytes
++ * untainted and poisoned the full-state hash. */
++extern void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ struct ramp_t
+ {
+     int64_t value;
+@@ -167,6 +173,7 @@ void alist_save(struct hle_t* hle, uint16_t dmem, uint32_t address, uint16_t cou
+     dmem    &= ~3;
+     address &= ~7;
+     count = align(count, 8);
++    kn_taint_rdram(address & 0xffffff, count);
+     memcpy(hle->dram + address, hle->alist_buffer + dmem, count);
+ }
+ 
+@@ -354,6 +361,7 @@ void alist_envmix_exp(
+     *(int32_t *)(save_buffer + 14) = exp_seq[1];        /* 14-15 */
+     *(int32_t *)(save_buffer + 16) = (int32_t)ramps[0].value;    /* 12-13 */
+     *(int32_t *)(save_buffer + 18) = (int32_t)ramps[1].value;    /* 14-15 */
++    kn_taint_rdram(address & 0xffffff, sizeof(save_buffer));
+     memcpy(hle->dram + address, (uint8_t *)save_buffer, sizeof(save_buffer));
+ }
+ 
+@@ -433,6 +441,7 @@ void alist_envmix_ge(
+     /**(int32_t *)(save_buffer + 14);*/                 /* 14-15 */
+     *(int32_t *)(save_buffer + 16) = (int32_t)ramps[0].value;    /* 12-13 */
+     *(int32_t *)(save_buffer + 18) = (int32_t)ramps[1].value;    /* 14-15 */
++    kn_taint_rdram(address & 0xffffff, 80);
+     memcpy(hle->dram + address, (uint8_t *)save_buffer, 80);
+ }
+ 
+@@ -506,6 +515,7 @@ void alist_envmix_lin(
+     *(int32_t *)(save_buffer + 10) = (int32_t)ramps[1].step;  /* 10-11 */
+     *(int32_t *)(save_buffer + 16) = (int32_t)ramps[0].value; /* 16-17 */
+     *(int32_t *)(save_buffer + 18) = (int32_t)ramps[1].value; /* 18-19 */
++    kn_taint_rdram(address & 0xffffff, 80);
+     memcpy(hle->dram + address, (uint8_t *)save_buffer, 80);
+ }
+ 
+@@ -902,6 +912,7 @@ void alist_filter(
+         outp += 8;
+     }
+ 
++    kn_taint_rdram(address & 0xffffff, 16);
+     memcpy(hle->dram + address, in2 - 8, 16);
+     memcpy(hle->alist_buffer + dmem, outbuff, count);
+ }
+diff --git a/mupen64plus-rsp-hle/src/cicx105.c b/mupen64plus-rsp-hle/src/cicx105.c
+index bda5eca..6265222 100644
+--- a/mupen64plus-rsp-hle/src/cicx105.c
++++ b/mupen64plus-rsp-hle/src/cicx105.c
+@@ -33,6 +33,8 @@
+  *
+  * Found in Banjo-Tooie, Zelda, Perfect Dark, ...)
+  **/
++extern void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ void cicx105_ucode(struct hle_t* hle)
+ {
+     /* memcpy is okay to use because access constrains are met (alignment, size) */
+@@ -43,6 +45,11 @@ void cicx105_ucode(struct hle_t* hle)
+     /* dma_read(0x1120, 0x1e8, 0x1e8) */
+     memcpy(hle->imem + 0x120, hle->dram + 0x1e8, 0x1f0);
+ 
++    /* kaillera-next: taint the dma_write range below. 24 iterations × 8
++     * bytes each at strides of 0xff0, covering ~0x17FA8 bytes total from
++     * base 0x2fb1f0. */
++    kn_taint_rdram(0x2fb1f0, 24 * 0xff0 + 8);
++
+     /* dma_write(0x1120, 0x2fb1f0, 0xfe817000) */
+     for (i = 0; i < 24; ++i) {
+         memcpy(dst, src, 8);
+diff --git a/mupen64plus-rsp-hle/src/memory.h b/mupen64plus-rsp-hle/src/memory.h
+index 9c85104..b48cd79 100644
+--- a/mupen64plus-rsp-hle/src/memory.h
++++ b/mupen64plus-rsp-hle/src/memory.h
+@@ -166,18 +166,29 @@ static inline void dram_load_u32(struct hle_t* hle, uint32_t* dst, uint32_t addr
+     load_u32(dst, hle->dram, address & 0xffffff, count);
+ }
+ 
++/* kaillera-next: taint hook. Every RSP HLE write to main RDRAM flags the
++ * written 64 KB block(s) as non-deterministic so kn_game_state_hash can
++ * skip them. RSP HLE emulates audio/video microcode on the host CPU — the
++ * host's FPU, JIT, and memory layout produce per-device differences in the
++ * bytes DMAed back to RDRAM. Those bytes never influence game logic, but
++ * they poison any naive full-RAM hash. */
++extern void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ static inline void dram_store_u8(struct hle_t* hle, const uint8_t* src, uint32_t address, size_t count)
+ {
++    kn_taint_rdram(address & 0xffffff, (uint32_t)count);
+     store_u8(hle->dram, address & 0xffffff, src, count);
+ }
+ 
+ static inline void dram_store_u16(struct hle_t* hle, const uint16_t* src, uint32_t address, size_t count)
+ {
++    kn_taint_rdram(address & 0xffffff, (uint32_t)(count * sizeof(uint16_t)));
+     store_u16(hle->dram, address & 0xffffff, src, count);
+ }
+ 
+ static inline void dram_store_u32(struct hle_t* hle, const uint32_t* src, uint32_t address, size_t count)
+ {
++    kn_taint_rdram(address & 0xffffff, (uint32_t)(count * sizeof(uint32_t)));
+     store_u32(hle->dram, address & 0xffffff, src, count);
+ }
+ 
+diff --git a/mupen64plus-rsp-hle/src/mp3.c b/mupen64plus-rsp-hle/src/mp3.c
+index 4e8ea14..9a2ed33 100644
+--- a/mupen64plus-rsp-hle/src/mp3.c
++++ b/mupen64plus-rsp-hle/src/mp3.c
+@@ -28,6 +28,9 @@
+ #include "hle_internal.h"
+ #include "memory.h"
+ 
++/* kaillera-next: taint for direct hle->dram writes in mp3 decode path. */
++extern void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ static void InnerLoop(struct hle_t* hle,
+                       uint32_t outPtr, uint32_t inPtr,
+                       uint32_t t6, uint32_t t5, uint32_t t4);
+@@ -247,6 +250,7 @@ void mp3_task(struct hle_t* hle, unsigned int index, uint32_t address)
+             outPtr += 0x40;
+         }
+ /* --------------- Inner Loop End -------------------- */
++        kn_taint_rdram(writePtr & 0xffffff, 0x180);
+         memcpy(hle->dram + writePtr, hle->mp3_buffer + 0xe70, 0x180);
+         writePtr += 0x180;
+         readPtr  += 0x180;

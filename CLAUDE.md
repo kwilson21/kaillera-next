@@ -95,6 +95,7 @@ kaillera-next/
 | EmulatorJS embed + ROM drag-and-drop | done |
 | Lockstep netplay (up to 4 players, mesh WebRTC) | done |
 | Streaming netplay (host video → guests) | done |
+| Rollback netcode with input prediction (C-level, amortized replay) | done |
 | Spectators (canvas video stream from host) | done |
 | Gamepad support (profiles, remapping wizard) | done |
 | Late join (mid-game join with state sync) | done |

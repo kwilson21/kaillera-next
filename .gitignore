@@ -39,8 +39,11 @@ package-lock.json
 # Git worktrees
 .worktrees/
 
-# Runtime logs
+# Runtime logs + local data directories
 server/logs/
+server/data/
+data/
+logs/
 tests/diag-screenshots/
 
 # Screenshots (dev artifacts)

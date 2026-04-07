@@ -14,7 +14,7 @@ kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://
 
 ### Netplay modes
 
-**Lockstep** — All players run the emulator in perfect sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) for frame-accurate synchronization. Auto frame delay is negotiated via RTT measurement at game start.
+**Lockstep** — All players run the emulator in perfect sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
 
 **Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC MediaStream. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator instance exists. SDP is optimized for low-latency gaming (VP9/H264 preference, high bitrate floor, minimal jitter buffer).
 
