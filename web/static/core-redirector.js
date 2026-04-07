@@ -34,25 +34,52 @@
     'parallel_n64-legacy-wasm.data',
   ];
 
-  // ── IDB cache clear + HTTP cache bust ──────────────────────────────
-  // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL,
-  // AND append CORE_VERSION as a query param to the WASM URL so the HTTP cache
-  // (and Cloudflare's edge cache) treats each new core as a fresh URL.
+  // ── Auto-discovery: ask the server for the current core URL ────────
   //
-  // Without the query param, the WASM is served with `Cache-Control: immutable`
-  // which means browsers will never re-fetch — and any edge cache (Cloudflare)
-  // will pin the file at the edge until manually purged. Bumping CORE_VERSION
-  // here is the ONE place needed to force a new WASM rollout to all clients.
-  const CORE_VERSION = '14'; // v14: cache-bust WASM URL after rollback fix
-  const LOCAL_CORE_URL = '/static/ejs/cores/mupen64plus_next-wasm.data?v=' + CORE_VERSION;
-  const isN64Core = (url) => N64_CORE_NAMES.some((name) => url.includes(name));
-  let idbClearPromise;
-  try {
-    if (KNState.safeGet('localStorage', 'kn-core-version') === CORE_VERSION) {
-      idbClearPromise = Promise.resolve();
-    } else if (typeof indexedDB !== 'undefined' && indexedDB.databases) {
-      // NOTE: intentionally .then() chain — result IS the promise assigned to window._knCoreReady
-      idbClearPromise = indexedDB
+  // The patched WASM core is served with `Cache-Control: immutable, max-age=1y`
+  // (since the URL is now content-addressed). The server's /api/core-info
+  // endpoint hashes the file contents and returns a URL with `?h=<sha256-prefix>`,
+  // so a new WASM at the origin gets a brand-new URL that bypasses every
+  // cache layer automatically. NO human bookkeeping required.
+  //
+  // We fetch /api/core-info ONCE at boot, before injecting the EJS loader,
+  // and use the returned URL for both the fetch and XHR intercepts. If the
+  // endpoint is unavailable, we fall back to the canonical un-hashed URL.
+  const FALLBACK_CORE_URL = '/static/ejs/cores/mupen64plus_next-wasm.data';
+  let LOCAL_CORE_URL = FALLBACK_CORE_URL;
+  let CORE_HASH = '';
+
+  const coreInfoPromise = fetch('/api/core-info', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((info) => {
+      if (info?.url) {
+        LOCAL_CORE_URL = info.url;
+        CORE_HASH = info.hash || '';
+        console.log(`[core-redirector] Core URL resolved: ${LOCAL_CORE_URL} (size=${info.size}, hash=${CORE_HASH})`);
+      } else {
+        console.warn('[core-redirector] /api/core-info returned no URL — using fallback');
+      }
+    })
+    .catch((err) => {
+      console.warn('[core-redirector] /api/core-info fetch failed — using fallback:', err);
+    });
+
+  // ── IDB cache clear ────────────────────────────────────────────────
+  // Clear EmulatorJS IDB cache once per content-hash so it re-downloads
+  // through our intercept whenever the core file changes. The CORE_HASH
+  // we read above is content-addressed, so this also handles the "WASM
+  // rebuilt" case automatically — no manual constant to bump.
+  let idbClearPromise = coreInfoPromise.then(() => {
+    try {
+      const cacheKey = CORE_HASH || 'unknown';
+      if (KNState.safeGet('localStorage', 'kn-core-hash') === cacheKey) {
+        return null;
+      }
+      if (typeof indexedDB === 'undefined' || !indexedDB.databases) {
+        KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+        return null;
+      }
+      return indexedDB
         .databases()
         .then((databases) => {
           const deletes = databases
@@ -76,17 +103,17 @@
           return Promise.all(deletes);
         })
         .then(() => {
-          KNState.safeSet('localStorage', 'kn-core-version', CORE_VERSION);
-          console.log('[core-redirector] IDB cache cleared');
+          KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+          console.log('[core-redirector] IDB cache cleared for new core hash');
         });
-    } else {
-      idbClearPromise = Promise.resolve();
+    } catch (_) {
+      return null;
     }
-  } catch (_) {
-    idbClearPromise = Promise.resolve();
-  }
+  });
 
-  // Expose for play.js to await before booting EJS
+  // Expose for play.js to await before booting EJS. The promise resolves
+  // once both /api/core-info has returned AND the IDB cache (if needed)
+  // has been cleared. After this, LOCAL_CORE_URL is the final, hashed URL.
   window._knCoreReady = idbClearPromise;
 
   // ── Fetch/XHR intercept ────────────────────────────────────────────

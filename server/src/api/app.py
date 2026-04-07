@@ -159,9 +159,12 @@ class SecurityHeadersMiddleware:
     def _cache_control(self, path: str) -> str:
         if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
-        # WASM core + data — versioned, cache aggressively (7 days)
+        # WASM core + data — content-addressed via /api/core-info?h=<hash>,
+        # so the URL itself changes when the file changes. Safe to cache for
+        # a year (browsers + Cloudflare both treat ?h=… as part of the cache
+        # key, so a new file = new URL = guaranteed cache miss).
         if path.startswith("/static/ejs/cores/"):
-            return "public, max-age=604800, immutable"
+            return "public, max-age=31536000, immutable"
         # JS/CSS — always revalidate via ETag (304 if unchanged)
         if path.endswith((".js", ".css")):
             return "no-cache"
@@ -212,6 +215,64 @@ def _asset_version() -> str:
     except Exception:
         pass
     return "dev"
+
+
+# ── WASM core auto-discovery + content hash ──────────────────────────────────
+#
+# The patched WASM core is served with `Cache-Control: immutable, max-age=1y`
+# so browsers and Cloudflare edge nodes will never refetch it on their own.
+# To force a rollout when the WASM changes, the URL itself must change.
+#
+# We compute a SHA-256 prefix from the file contents at server startup and
+# expose it via /api/core-info as `?h=<hash>`. The client (core-redirector.js)
+# fetches that URL once at boot and uses it as the canonical core URL.
+# Different content -> different hash -> different URL -> guaranteed cache miss
+# at every layer (browser, Cloudflare, IDB). No human bookkeeping required.
+#
+# Re-checked on every request via mtime so a new file dropped into prod is
+# picked up automatically without needing to restart the server.
+
+_CORE_RELATIVE_PATH = "static/ejs/cores/mupen64plus_next-wasm.data"
+_core_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", _CORE_RELATIVE_PATH)
+_core_info_cache: dict | None = None
+_core_info_mtime: float = 0.0
+
+
+def _compute_core_info() -> dict:
+    """Read the WASM core file and compute a content-addressed URL."""
+    try:
+        st = os.stat(_core_path)
+    except FileNotFoundError:
+        return {
+            "url": "/" + _CORE_RELATIVE_PATH,
+            "hash": "",
+            "size": 0,
+            "available": False,
+        }
+    h = hashlib.sha256()
+    with open(_core_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    hash_prefix = h.hexdigest()[:16]
+    return {
+        "url": f"/{_CORE_RELATIVE_PATH}?h={hash_prefix}",
+        "hash": hash_prefix,
+        "size": st.st_size,
+        "available": True,
+    }
+
+
+def _get_core_info() -> dict:
+    """Returns cached core info, recomputing if the WASM file's mtime changes."""
+    global _core_info_cache, _core_info_mtime
+    try:
+        mtime = os.stat(_core_path).st_mtime
+    except FileNotFoundError:
+        mtime = 0.0
+    if _core_info_cache is None or mtime != _core_info_mtime:
+        _core_info_cache = _compute_core_info()
+        _core_info_mtime = mtime
+    return _core_info_cache
 
 
 class CacheBustMiddleware:
@@ -399,6 +460,13 @@ def create_app(lifespan=None) -> FastAPI:
             "rooms": len(rooms),
             "players": sum(len(r.players) for r in rooms.values()),
         }
+
+    # Patched WASM core auto-discovery. Returns the canonical URL of the
+    # current core file with a content-hash query param so cache-busting
+    # is automatic. See `_compute_core_info` for the rationale.
+    @app.get("/api/core-info")
+    async def core_info() -> dict:
+        return _get_core_info()
 
     @app.get("/ice-servers")
     def ice_servers(request: Request) -> list:
