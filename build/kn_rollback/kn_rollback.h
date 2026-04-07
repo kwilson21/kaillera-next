@@ -70,8 +70,26 @@ int kn_get_max_depth(void);
  * ring buffer. Pass -1 to hash the most recent saved state. */
 uint32_t kn_full_state_hash(int frame);
 
+/* Game-state hash — same as kn_full_state_hash but skips 64 KB RDRAM blocks
+ * flagged as tainted by non-deterministic subsystems (RSP HLE audio, GLideN64
+ * copyback). This is the hash RB-CHECK should compare. */
+uint32_t kn_game_state_hash(int frame);
+
+/* Taint API — mark an RDRAM range as non-deterministic. Called from
+ * RSP HLE dram_store_* and GLideN64 ColorBufferToRDRAM::_copy. */
+void kn_taint_rdram(uint32_t addr, uint32_t size);
+uint32_t kn_get_taint_blocks(uint8_t *out);  /* copies 128 bytes out */
+int kn_get_tainted_block_count(void);
+void kn_reset_taint(void);
+
 /* Determinism self-test. Returns 1 if restore+replay is deterministic, 0 if not. */
 int kn_rollback_self_test(void);
+
+/* Replay determinism self-test. Saves current state, runs n_frames forward,
+ * hashes, restores, runs n_frames again, hashes, compares. Writes both hashes
+ * to out_hashes (must be uint32_t[2]). Returns 1 if deterministic, 0 if not,
+ * or negative on error (-1 OOM, -2 serialize fail, -3 unserialize fail). */
+int kn_replay_self_test(int n_frames, uint32_t *out_hashes);
 
 /* Debug log ring buffer. Returns pointer to null-terminated string. */
 const char* kn_get_debug_log(void);

@@ -1,8 +1,51 @@
+diff --git a/libretro/libretro.c b/libretro/libretro.c
+index cabae39..d296f75 100644
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -2200,6 +2200,38 @@ bool retro_unserialize(const void *data, size_t size)
+    return true;
+ }
+ 
++// kaillera-next: synchronous state load bypassing co_switch/task queue
++// Input data is in RASTATE format (RetroArch wrapper). The core state
++// starts after the 8-byte RASTATE header + 8-byte MEM block header.
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#include <string.h>
++EMSCRIPTEN_KEEPALIVE
++int kn_load_state_immediate(const void *data, int size) {
++   const unsigned char *p = (const unsigned char *)data;
++   if (initializing || size < 16) return 0;
++   // Skip RASTATE header (8 bytes)
++   if (memcmp(p, "RASTATE", 7) != 0) {
++      // Try raw M64+SAVE format
++      return savestates_load_m64p(&g_dev, data);
++   }
++   p += 8;
++   // Find MEM block
++   while (p + 8 <= (const unsigned char *)data + size) {
++      if (memcmp(p, "MEM ", 4) == 0) {
++         p += 8; // skip block header (4 marker + 4 size)
++         return savestates_load_m64p(&g_dev, p);
++      }
++      if (memcmp(p, "END ", 4) == 0) break;
++      // Skip unknown block: 4 marker + 4 size + aligned data
++      uint32_t block_size;
++      memcpy(&block_size, p + 4, 4);
++      p += 8 + ((block_size + 7) & ~7); // 8-byte aligned
++   }
++   return 0;
++}
++#endif
++
+ //Needed to be able to detach controllers for Lylat Wars multiplayer
+ //Only sets if controller struct is initialised as addon paks do.
+ void retro_set_controller_port_device(unsigned in_port, unsigned device) {
 diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
-index 3ef61a2..83ba6f1 100644
+index 3ef61a2..d755552 100644
 --- a/mupen64plus-core/src/main/main.c
 +++ b/mupen64plus-core/src/main/main.c
-@@ -129,6 +129,133 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+@@ -129,6 +129,139 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
  
  struct device g_dev;
  
@@ -101,6 +144,12 @@ index 3ef61a2..83ba6f1 100644
 +/* kaillera-next: ROM access for runtime patching (overlay code). */
 +EMSCRIPTEN_KEEPALIVE void *kn_get_rom_ptr(void) { return g_dev.cart.cart_rom.rom; }
 +EMSCRIPTEN_KEEPALIVE uint32_t kn_get_rom_size(void) { return g_dev.cart.cart_rom.rom_size; }
++/* kaillera-next: live RDRAM base for JS-side raw byte inspection. JS uses
++ * this to construct a Uint8Array view over Module.HEAPU8.buffer at the
++ * returned offset, so it can dump the contents of any 64KB block to logs
++ * for desync diagnosis. Read-only — JS must not write through this view. */
++EMSCRIPTEN_KEEPALIVE void *kn_get_rdram_ptr(void) { return g_dev.rdram.dram; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_rdram_size(void) { return RDRAM_MAX_SIZE; }
 +/* kaillera-next: Expose emulator struct addresses for JS-level state
 + * capture via HEAPU8. Called once at startup — no runtime malloc. */
 +EMSCRIPTEN_KEEPALIVE void kn_get_state_ptrs(uint32_t *out) {
@@ -136,7 +185,7 @@ index 3ef61a2..83ba6f1 100644
  m64p_media_loader g_media_loader;
  
  int g_gs_vi_counter = 0;
-@@ -1687,7 +1780,7 @@ m64p_error main_run(void)
+@@ -1687,7 +1820,7 @@ m64p_error main_run(void)
                  no_compiled_jump,
                  randomize_interrupt,
                  g_start_address,
@@ -145,45 +194,3 @@ index 3ef61a2..83ba6f1 100644
                  si_dma_duration,
                  rdram_size,
                  joybus_devices, ijoybus_devices,
-diff --git a/libretro/libretro.c b/libretro/libretro.c
---- a/libretro/libretro.c
-+++ b/libretro/libretro.c
-@@ -2200,6 +2200,38 @@
-    return true;
- }
- 
-+// kaillera-next: synchronous state load bypassing co_switch/task queue
-+// Input data is in RASTATE format (RetroArch wrapper). The core state
-+// starts after the 8-byte RASTATE header + 8-byte MEM block header.
-+#ifdef __EMSCRIPTEN__
-+#include <emscripten.h>
-+#include <string.h>
-+EMSCRIPTEN_KEEPALIVE
-+int kn_load_state_immediate(const void *data, int size) {
-+   const unsigned char *p = (const unsigned char *)data;
-+   if (initializing || size < 16) return 0;
-+   // Skip RASTATE header (8 bytes)
-+   if (memcmp(p, "RASTATE", 7) != 0) {
-+      // Try raw M64+SAVE format
-+      return savestates_load_m64p(&g_dev, data);
-+   }
-+   p += 8;
-+   // Find MEM block
-+   while (p + 8 <= (const unsigned char *)data + size) {
-+      if (memcmp(p, "MEM ", 4) == 0) {
-+         p += 8; // skip block header (4 marker + 4 size)
-+         return savestates_load_m64p(&g_dev, p);
-+      }
-+      if (memcmp(p, "END ", 4) == 0) break;
-+      // Skip unknown block: 4 marker + 4 size + aligned data
-+      uint32_t block_size;
-+      memcpy(&block_size, p + 4, 4);
-+      p += 8 + ((block_size + 7) & ~7); // 8-byte aligned
-+   }
-+   return 0;
-+}
-+#endif
-+
- //Needed to be able to detach controllers for Lylat Wars multiplayer
- //Only sets if controller struct is initialised as addon paks do.
- void retro_set_controller_port_device(unsigned in_port, unsigned device) {

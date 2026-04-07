@@ -425,6 +425,287 @@
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
+  let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
+
+  // ── window.knDiag — interactive diagnostics for devtools console ──
+  //
+  // Gated behind a debug flag so production users don't have an easily
+  // discoverable surface for poking at emulator internals. Enable via:
+  //   - ?knDiag=1 URL parameter (ephemeral, one page load)
+  //   - localStorage.setItem('kn-debug', '1') (persistent)
+  //
+  // Once enabled, e.g.:
+  //   knDiag.replaySelfTest(30)        // is rollback replay deterministic?
+  //   knDiag.replaySelfTest(30, 5)     // run 5 trials
+  //   knDiag.tainted()                 // current taint bitmap summary
+  //   knDiag.blockHashes()             // 128 RDRAM block hashes
+  //   knDiag.dumpBlock(7)              // hex-dump a 64KB block
+  const _knDiagEnabled = (() => {
+    try {
+      if (new URLSearchParams(window.location.search).has('knDiag')) return true;
+      if (localStorage.getItem('kn-debug') === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
+
+  window.knDiag =
+    _knDiagEnabled &&
+    (window.knDiag ||
+      (() => {
+        const getMod = () => window.EJS_emulator?.gameManager?.Module;
+        let _hashBuf = 0;
+        let _taintBuf = 0;
+        let _resultBuf = 0;
+        const ensureBufs = (mod) => {
+          if (!mod?._malloc) return false;
+          if (!_hashBuf) _hashBuf = mod._malloc(128 * 4);
+          if (!_taintBuf) _taintBuf = mod._malloc(128);
+          if (!_resultBuf) _resultBuf = mod._malloc(8); // 2 × uint32
+          return _hashBuf && _taintBuf && _resultBuf;
+        };
+        const api = {
+          // Save → run N → hash → restore → run N → hash → compare.
+          // n = frames to advance per trial. trials = how many trial pairs to run.
+          // Returns array of {trial, deterministic, hashB, hashBprime}.
+          replaySelfTest(n = 30, trials = 1) {
+            const mod = getMod();
+            if (!mod?._kn_replay_self_test) {
+              const msg = 'knDiag: _kn_replay_self_test export missing — rebuild WASM core.';
+              console.error(msg);
+              api._showOverlay(`ERR\n${msg}`);
+              if (typeof _syncLog === 'function') _syncLog(`SELFTEST ERROR ${msg}`);
+              return null;
+            }
+            if (!ensureBufs(mod)) return null;
+            const results = [];
+            const fnow = mod._kn_get_frame?.() ?? -1;
+            for (let t = 0; t < trials; t++) {
+              const t0 = performance.now();
+              const ret = mod._kn_replay_self_test(n, _resultBuf);
+              const dt = performance.now() - t0;
+              const view = new Uint32Array(mod.HEAPU8.buffer, _resultBuf, 2);
+              const hashB = view[0] >>> 0;
+              const hashBp = view[1] >>> 0;
+              const ok = ret === 1;
+              const errs = { '-1': 'OOM', '-2': 'serialize failed', '-3': 'unserialize failed' };
+              let line;
+              if (ret < 0) {
+                line = `SELFTEST trial=${t + 1}/${trials} n=${n} frame=${fnow} ERROR ${errs[String(ret)] ?? ret}`;
+                console.error(line);
+              } else {
+                line = `SELFTEST trial=${t + 1}/${trials} n=${n} frame=${fnow} ${ok ? 'DETERMINISTIC' : 'NON-DETERMINISTIC'} ms=${dt.toFixed(0)} hashB=0x${hashB.toString(16)} hashBprime=0x${hashBp.toString(16)}`;
+                console.log(line);
+              }
+              // Stream to server-side session log so we can pull via admin API.
+              if (typeof _syncLog === 'function') _syncLog(line);
+              results.push({ trial: t + 1, deterministic: ok, hashB, hashBprime: hashBp, ms: dt, ret });
+            }
+            const wins = results.filter((r) => r.deterministic).length;
+            const summary = `SELFTEST SUMMARY ${wins}/${trials} deterministic n=${n} frame=${fnow}`;
+            console.log(summary);
+            if (typeof _syncLog === 'function') _syncLog(summary);
+            // On-screen result so the user doesn't need devtools.
+            const allOk = wins === trials;
+            const detail = results
+              .map((r) =>
+                r.ret < 0
+                  ? `T${r.trial}: ERR ${r.ret}`
+                  : `T${r.trial}: ${r.deterministic ? '✓' : '✗'} B=${r.hashB.toString(16).slice(-6)} B'=${r.hashBprime.toString(16).slice(-6)}`,
+              )
+              .join('\n');
+            api._showOverlay(
+              `${allOk ? '✓ DETERMINISTIC' : '✗ NON-DETERMINISTIC'}\n` +
+                `${wins}/${trials} ok | n=${n}f | frame=${fnow}\n${detail}`,
+              allOk ? '#0f0' : '#f44',
+            );
+            return results;
+          },
+          // Show a result overlay div in the corner of the game page. Mobile-
+          // friendly read-out so devtools/USB cable aren't needed.
+          _showOverlay(text, color = '#fff') {
+            let div = document.getElementById('kn-selftest-overlay');
+            if (!div) {
+              div = document.createElement('div');
+              div.id = 'kn-selftest-overlay';
+              div.style.cssText = [
+                'position:fixed',
+                'top:8px',
+                'right:8px',
+                'background:rgba(0,0,0,0.85)',
+                'color:#fff',
+                'font:12px/1.3 monospace',
+                'padding:8px 10px',
+                'border-radius:6px',
+                'border:1px solid #444',
+                'z-index:99999',
+                'white-space:pre',
+                'max-width:90vw',
+                'max-height:80vh',
+                'overflow:auto',
+                'pointer-events:auto',
+              ].join(';');
+              // Tap to dismiss.
+              div.onclick = () => div.remove();
+              document.body.appendChild(div);
+            }
+            div.style.color = color;
+            div.textContent = String(text);
+          },
+          // Read taint bitmap. Returns array of tainted block indices and the
+          // raw bitmap as a string of '0'/'1'.
+          tainted() {
+            const mod = getMod();
+            if (!mod?._kn_get_taint_blocks) {
+              console.error('knDiag: _kn_get_taint_blocks missing.');
+              return null;
+            }
+            if (!ensureBufs(mod)) return null;
+            mod._kn_get_taint_blocks(_taintBuf);
+            const view = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, 128);
+            const tainted = [];
+            const bitmap = [];
+            for (let i = 0; i < 128; i++) {
+              bitmap.push(view[i] ? '1' : '0');
+              if (view[i]) tainted.push(i);
+            }
+            const out = { count: tainted.length, blocks: tainted, bitmap: bitmap.join('') };
+            console.log(`knDiag.tainted: ${out.count}/128 blocks tainted: [${tainted.join(',')}]`);
+            return out;
+          },
+          // Get all 128 block hashes (one uint32 per 64KB block).
+          blockHashes() {
+            const mod = getMod();
+            if (!mod?._kn_rdram_block_hashes) {
+              console.error('knDiag: _kn_rdram_block_hashes missing.');
+              return null;
+            }
+            if (!ensureBufs(mod)) return null;
+            mod._kn_rdram_block_hashes(_hashBuf, 128);
+            const view = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, 128);
+            const hashes = Array.from(view).map((h) => (h >>> 0).toString(16).padStart(8, '0'));
+            console.log(`knDiag.blockHashes (128 blocks):`);
+            for (let i = 0; i < 128; i += 8) {
+              console.log(
+                `  blk${i.toString().padStart(3, ' ')}-${(i + 7).toString().padStart(3, ' ')}: ${hashes.slice(i, i + 8).join(' ')}`,
+              );
+            }
+            return hashes;
+          },
+          // Hex-dump the first `bytes` bytes of a 64KB RDRAM block. Returns
+          // an object containing hex, ascii, float interpretations, and the
+          // raw Uint8Array. Logs a formatted view to console for visual scan.
+          dumpBlock(blockIdx, bytes = 256) {
+            const mod = getMod();
+            if (!mod?._kn_get_rdram_ptr) {
+              console.error('knDiag.dumpBlock: _kn_get_rdram_ptr export missing — rebuild WASM core.');
+              return null;
+            }
+            const rdramPtr = mod._kn_get_rdram_ptr();
+            const offset = rdramPtr + blockIdx * 0x10000;
+            const u8 = new Uint8Array(mod.HEAPU8.buffer, offset, bytes);
+            // Snapshot copy so subsequent emulator writes don't mutate it.
+            const snap = new Uint8Array(u8);
+            const hex = Array.from(snap)
+              .map((b) => b.toString(16).padStart(2, '0'))
+              .join('');
+            const ascii = Array.from(snap)
+              .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.'))
+              .join('');
+            // Interpret first 32 bytes as 8 little-endian floats — useful for
+            // spotting player coords / physics state.
+            const floats = [];
+            const dv = new DataView(snap.buffer, snap.byteOffset, snap.byteLength);
+            for (let i = 0; i + 4 <= Math.min(snap.byteLength, 32); i += 4) {
+              floats.push(dv.getFloat32(i, true).toExponential(3));
+            }
+            console.log(`knDiag.dumpBlock(${blockIdx}, 0x${(blockIdx * 0x10000).toString(16)}, ${bytes}B):`);
+            for (let i = 0; i < snap.length; i += 16) {
+              const row = Array.from(snap.slice(i, i + 16))
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join(' ');
+              const aRow = ascii.slice(i, i + 16);
+              console.log(`  ${i.toString(16).padStart(4, '0')}: ${row}  ${aRow}`);
+            }
+            console.log(`  floats[0..7]: ${floats.join(' ')}`);
+            return { hex, ascii, floats, bytes: snap };
+          },
+          // Comprehensive snapshot — captures everything we have access to in
+          // a single call. Returns an object you can stash, share, or compare.
+          // Optionally dumps raw bytes from `dumpBlocks` (array of block indices).
+          snapshot(opts = {}) {
+            const mod = getMod();
+            if (!mod) return null;
+            if (!ensureBufs(mod)) return null;
+            const { dumpBlocks = [], byteCount = 256 } = opts;
+            const out = {
+              frame: mod._kn_get_frame?.() ?? null,
+              rollbackCount: mod._kn_get_rollback_count?.() ?? null,
+              predictionCount: mod._kn_get_prediction_count?.() ?? null,
+              correctPredictions: mod._kn_get_correct_predictions?.() ?? null,
+              maxDepth: mod._kn_get_max_depth?.() ?? null,
+              failedRollbacks: mod._kn_get_failed_rollbacks?.() ?? null,
+              softfloatState: mod._kn_get_softfloat_state?.() ?? null,
+              hiddenFingerprint: mod._kn_get_hidden_state_fingerprint?.() ?? null,
+              gameStateHash: mod._kn_game_state_hash?.(-1) ?? null,
+              fullStateHash: mod._kn_full_state_hash?.(-1) ?? null,
+              taintBlocks: null,
+              taintCount: null,
+              blockHashes: null,
+              rawBlocks: {},
+            };
+            if (mod._kn_get_taint_blocks) {
+              mod._kn_get_taint_blocks(_taintBuf);
+              const t = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, 128);
+              out.taintBlocks = Array.from(t);
+              out.taintCount = out.taintBlocks.filter((x) => x).length;
+            }
+            if (mod._kn_rdram_block_hashes) {
+              mod._kn_rdram_block_hashes(_hashBuf, 128);
+              const h = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, 128);
+              out.blockHashes = Array.from(h).map((v) => (v >>> 0).toString(16).padStart(8, '0'));
+            }
+            if (mod._kn_get_rdram_ptr) {
+              const rdramPtr = mod._kn_get_rdram_ptr();
+              for (const idx of dumpBlocks) {
+                const off = rdramPtr + idx * 0x10000;
+                const slice = new Uint8Array(mod.HEAPU8.buffer, off, byteCount);
+                out.rawBlocks[idx] = Array.from(slice)
+                  .map((b) => b.toString(16).padStart(2, '0'))
+                  .join('');
+              }
+            }
+            console.log('knDiag.snapshot:', out);
+            return out;
+          },
+          // Returns the current frame counter.
+          frame() {
+            const mod = getMod();
+            return mod?._kn_get_frame?.() ?? null;
+          },
+          // Helper: are we even running with the rollback core? Useful sanity check.
+          ready() {
+            const mod = getMod();
+            const ok = !!mod?._kn_replay_self_test && !!mod?._kn_rdram_block_hashes && !!mod?._kn_get_taint_blocks;
+            console.log(
+              `knDiag.ready: ${ok ? 'YES' : 'NO'} ` +
+                `(replay_self_test=${!!mod?._kn_replay_self_test}, ` +
+                `block_hashes=${!!mod?._kn_rdram_block_hashes}, ` +
+                `taint_blocks=${!!mod?._kn_get_taint_blocks})`,
+            );
+            return ok;
+          },
+        };
+        return api;
+      })());
+
+  // Pending peer block-hash snapshots for desync localization. Key: frame.
+  window._rbPendingBlocks = window._rbPendingBlocks || {};
+  // Our own block-hash snapshots, sampled at the SAME time we sent them to
+  // the peer. Used for frame-exact diff on mismatch — comparing live RDRAM
+  // at diff-processing time would introduce temporal skew and produce false
+  // "diffs" that are just the game advancing between sample and compare.
+  window._rbLocalBlocks = window._rbLocalBlocks || {};
+  window._rbLocalTaint = window._rbLocalTaint || {};
 
   // Full RDRAM hash — hashes all 128 × 64KB blocks (8MB total) via kn_rdram_block_hashes.
   // Returns a single uint32 combining all block hashes. ~1-2ms on mobile.
@@ -492,6 +773,60 @@
   let _frameNum = 0; // current logical frame number
   let _localInputs = {}; // frame -> input object
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
+  // ── Input audit buffers (Option G) ─────────────────────────────────
+  // Delta-encoded grow-only log of inputs. A new entry is recorded ONLY
+  // when the input differs from the previously recorded value for that
+  // stream. Both peers run identical encoding logic, so if their input
+  // histories are truly equivalent, their delta sequences will be
+  // byte-identical and trivially comparable. Uploaded at match end as
+  // part of the session-log flush.
+  //
+  // Format: array of { f, b, lx, ly, cx, cy } — "f" is the frame at
+  // which the input CHANGED to these values (it remains this value until
+  // the next entry's frame). Typical match produces ~2-5k entries (10
+  // minutes × ~300 transitions/min), well under the 2 MB log cap.
+  const _auditLocalInputs = [];
+  const _auditRemoteInputs = {}; // slot -> entry array
+  const _auditLastLocal = { b: null, lx: null, ly: null, cx: null, cy: null };
+  const _auditLastRemote = {}; // slot -> last-value object
+  const _inputEq = (a, b) => a.buttons === b.b && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy;
+  const _auditRecordLocal = (frame, input) => {
+    if (_auditLocalInputs.length > 0 && _inputEq(input, _auditLastLocal)) return;
+    _auditLocalInputs.push({
+      f: frame,
+      b: input.buttons,
+      lx: input.lx,
+      ly: input.ly,
+      cx: input.cx,
+      cy: input.cy,
+    });
+    _auditLastLocal.b = input.buttons;
+    _auditLastLocal.lx = input.lx;
+    _auditLastLocal.ly = input.ly;
+    _auditLastLocal.cx = input.cx;
+    _auditLastLocal.cy = input.cy;
+  };
+  const _auditRecordRemote = (slot, frame, input) => {
+    if (!_auditRemoteInputs[slot]) {
+      _auditRemoteInputs[slot] = [];
+      _auditLastRemote[slot] = { b: null, lx: null, ly: null, cx: null, cy: null };
+    }
+    if (_auditRemoteInputs[slot].length > 0 && _inputEq(input, _auditLastRemote[slot])) return;
+    _auditRemoteInputs[slot].push({
+      f: frame,
+      b: input.buttons,
+      lx: input.lx,
+      ly: input.ly,
+      cx: input.cx,
+      cy: input.cy,
+    });
+    const last = _auditLastRemote[slot];
+    last.b = input.buttons;
+    last.lx = input.lx;
+    last.ly = input.ly;
+    last.cx = input.cx;
+    last.cy = input.cy;
+  };
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
@@ -652,6 +987,16 @@
       ua: navigator.userAgent,
       mobile: /Mobi|Android/i.test(navigator.userAgent),
       forkedCore: !!window.Module?._kn_set_deterministic,
+    },
+    // Input audit (Option G). Included in every flush so we always have
+    // something to compare even if the match ends abruptly. Delta-encoded
+    // to keep size reasonable — we only record the count here and the full
+    // data in a separate field that the server stores as log context.
+    inputAudit: {
+      localCount: _auditLocalInputs.length,
+      remoteCount: Object.fromEntries(Object.entries(_auditRemoteInputs).map(([s, a]) => [s, a.length])),
+      local: _auditLocalInputs,
+      remote: _auditRemoteInputs,
     },
   });
 
@@ -1880,12 +2225,47 @@
           window._rbPendingChecks[checkFrame] = peerHash;
           return;
         }
-        // Host-authoritative delay for rollback mode
+        if (e.data.startsWith('rb-blocks:')) {
+          // Peer's per-64KB-block RDRAM hashes. Diff against our own on
+          // mismatch to localize divergence to a specific block index.
+          const firstColon = e.data.indexOf(':');
+          const secondColon = e.data.indexOf(':', firstColon + 1);
+          const checkFrame = parseInt(e.data.slice(firstColon + 1, secondColon), 10);
+          const peerBlocksHex = e.data.slice(secondColon + 1);
+          if (!window._rbPendingBlocks) window._rbPendingBlocks = {};
+          window._rbPendingBlocks[checkFrame] = peerBlocksHex;
+          return;
+        }
+        // Host-authoritative delay for rollback mode.
+        //
+        // CRITICAL: this message is the source of truth for delay across all
+        // peers. Two cases:
+        //   1. Init has not happened yet (deferred) → run init now with
+        //      this delay. Both peers end up symmetric.
+        //   2. Init already happened → can only update DELAY_FRAMES variable;
+        //      C engine is locked in. This is the legacy buggy path —
+        //      kept here only for the case where init somehow happened
+        //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
           const hostDelay = parseInt(e.data.split(':')[1], 10);
-          if (hostDelay > 0 && hostDelay !== DELAY_FRAMES) {
-            _syncLog(`rb-delay: host set delay=${hostDelay} (was ${DELAY_FRAMES})`);
-            DELAY_FRAMES = hostDelay;
+          if (hostDelay > 0) {
+            // Cache for guests that haven't reached the init code yet.
+            window._rbHostDelay = hostDelay;
+            if (window._rbPendingInit && window._rbDoInit) {
+              // Deferred init was waiting for this. Run it now.
+              window._rbPendingInit = false;
+              DELAY_FRAMES = hostDelay;
+              _syncLog(`rb-delay: deferred init triggered with host delay=${hostDelay}`);
+              window._rbDoInit(hostDelay);
+            } else if (hostDelay !== DELAY_FRAMES) {
+              // Init already ran (e.g. host, or race). C engine can't be
+              // updated mid-flight; only the JS variable is changed, which
+              // is the legacy buggy path. Log loudly so we notice.
+              _syncLog(
+                `rb-delay: WARN host set delay=${hostDelay} but JS was ${DELAY_FRAMES}; C engine NOT updated (already inited)`,
+              );
+              DELAY_FRAMES = hostDelay;
+            }
           }
           return;
         }
@@ -2093,6 +2473,7 @@
         }
         _remoteInputs[peer.slot][recvFrame] = recvInput;
         _lastKnownInput[peer.slot] = recvInput;
+        _auditRecordRemote(peer.slot, recvFrame, recvInput);
         // Feed to C-level rollback engine for prediction correction
         if (_useCRollback) {
           const cMod = window.EJS_emulator?.gameManager?.Module;
@@ -3686,17 +4067,50 @@
         _syncLog('FPU trace enabled for determinism verification');
       }
 
-      // Initialize C-level rollback engine if available
-      if (detMod?._kn_rollback_init) {
+      // Initialize C-level rollback engine if available.
+      //
+      // CRITICAL: both peers MUST init kn_rollback_init with the SAME delay
+      // value, or one peer ends up running rollback (predicting + replaying
+      // missing inputs) while the other runs lockstep (waiting for inputs
+      // before stepping). That asymmetric protocol cascades into divergence.
+      //
+      // The host computes a delay (maxDelay), broadcasts `rb-delay:N`, and
+      // is the authoritative source. Guests must wait for that broadcast
+      // before initializing — initializing first with locally-computed delay
+      // and then "updating DELAY_FRAMES" later only fixes the JS-side
+      // variable, not the C engine's internal delay.
+      const doRollbackInit = (effectiveDelay) => {
+        if (!detMod?._kn_rollback_init) {
+          _useCRollback = false;
+          return;
+        }
         const numPlayers = getInputPeers().length + 1;
-        // Bigger ring for more rollback headroom — covers very late inputs
-        const rollbackMax = Math.min(20, Math.max(12, DELAY_FRAMES + 8));
-        detMod._kn_rollback_init(rollbackMax, DELAY_FRAMES, _playerSlot, numPlayers);
+        const rollbackMax = Math.min(20, Math.max(12, effectiveDelay + 8));
+        detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         rb_numPlayers = numPlayers;
-        // Allocate WASM heap space for kn_get_input output (5 × int32 = 20 bytes)
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
-        _syncLog(`C-ROLLBACK init: max=${rollbackMax} delay=${DELAY_FRAMES} slot=${_playerSlot} players=${numPlayers}`);
+        _syncLog(
+          `C-ROLLBACK init: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers}`,
+        );
+      };
+      window._rbDoInit = doRollbackInit;
+
+      if (detMod?._kn_rollback_init) {
+        if (_playerSlot === 0) {
+          // Host: init immediately with the value we just broadcast.
+          doRollbackInit(DELAY_FRAMES);
+        } else {
+          // Guest: if host's rb-delay broadcast already arrived, init now.
+          // Otherwise defer init to the rb-delay handler (see top of file).
+          if (window._rbHostDelay !== undefined && window._rbHostDelay > 0) {
+            DELAY_FRAMES = window._rbHostDelay;
+            doRollbackInit(window._rbHostDelay);
+          } else {
+            window._rbPendingInit = true;
+            _syncLog(`C-ROLLBACK deferred: waiting for host rb-delay broadcast (own delay=${DELAY_FRAMES})`);
+          }
+        }
       } else {
         _useCRollback = false;
       }
@@ -4087,6 +4501,13 @@
   const tick = () => {
     if (!_running) return;
     if (_lateJoinPaused) return; // frozen while late-joiner loads state
+    // Guests defer the entire tick loop until the host's authoritative
+    // rb-delay broadcast arrives and the C rollback engine is initialized
+    // with the agreed delay. Without this, the guest would advance frames
+    // 0..N in pure-lockstep mode, then the C engine would init at frame 0
+    // (its internal counter), and JS would jump backwards from frame N to
+    // frame 0 — corrupting input ring frame tags and the rollback ring.
+    if (window._rbPendingInit) return;
 
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
@@ -4214,6 +4635,7 @@
     // Each packet includes an ack of the highest frame we've received from that peer.
     const localInput = readLocalInput();
     _localInputs[_frameNum] = localInput;
+    _auditRecordLocal(_frameNum, localInput);
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
       try {
@@ -4379,7 +4801,12 @@
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
         const maxD = tickMod._kn_get_max_depth?.() ?? 0;
         const hashFrame = _frameNum - 1;
+        // Use taint-filtered hash for RB-CHECK: excludes 64 KB RDRAM blocks
+        // written to by non-deterministic subsystems (RSP HLE audio, GLideN64
+        // framebuffer copyback). kn_full_state_hash kept alongside for diff.
+        const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
+        const taintedCount = tickMod._kn_get_tainted_block_count?.() ?? 0;
         const hiddenFp = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
         const sfState = tickMod._kn_get_softfloat_state?.() ?? 0;
         // Per-region hashes — splits state buffer into 32 chunks
@@ -4394,7 +4821,7 @@
             .join(',');
         }
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} hash=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
         );
         if (regionsHex) {
           _syncLog(`C-REGIONS f=${hashFrame} ${regionsHex}`);
@@ -4407,12 +4834,52 @@
             }
           }
         }
-        // Broadcast hash with the frame it was computed for
+        // Broadcast taint-filtered game-state hash for peer comparison.
+        // This is the hash that governs RB-CHECK — full hash kept for diagnostics.
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${hashFrame}:${fullHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
             } catch (_) {}
+          }
+        }
+
+        // Block-level diagnostic: hash every 64 KB of RDRAM (128 blocks) and
+        // dump the taint bitmap. Share with peer so that when RB-CHECK misses
+        // we can pinpoint which untainted block is diverging and map it back
+        // to the subsystem that owns that address.
+        if (tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
+          if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(128 * 4);
+          if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(128);
+          if (_rbHashBufPtr && _rbTaintBufPtr) {
+            tickMod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
+            tickMod._kn_get_taint_blocks(_rbTaintBufPtr);
+            const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, 128);
+            const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, 128);
+            // Snapshot — use Array.from so later mutation of HEAPU8 can't
+            // corrupt what we stored for comparison against the peer.
+            const blocksSnap = Array.from(blocks);
+            const taintSnap = Array.from(taint);
+            // Compact hex representation (8 chars per block → 1024 chars total)
+            const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
+            const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
+            // Taint bitmap is 128 chars — tiny. Full block hashes are
+            // 1024 chars per line; we keep them out of the steady-state log
+            // and only dump via RB-BYTES on actual mismatch.
+            _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex}`);
+            // Cache our own snapshot keyed by hashFrame so RB-DIFF can
+            // compare frame-exactly against the peer's snapshot instead of
+            // re-sampling live RDRAM (which would be frames ahead by then).
+            window._rbLocalBlocks[hashFrame] = blocksSnap;
+            window._rbLocalTaint[hashFrame] = taintSnap;
+            // Broadcast block hashes to peer for per-block divergence diff
+            for (const p of Object.values(_peers)) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-blocks:${hashFrame}:${blocksHex}`);
+                } catch (_) {}
+              }
+            }
           }
         }
       }
@@ -4425,14 +4892,69 @@
           if (f < _frameNum && f >= _frameNum - 7) {
             const peerHash = window._rbPendingChecks[fStr];
             delete window._rbPendingChecks[fStr];
-            const localHash = tickMod._kn_full_state_hash?.(f) ?? 0;
+            const localHash = tickMod._kn_game_state_hash?.(f) ?? 0;
             if (localHash === 0) {
               _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
             } else if (localHash === peerHash) {
               _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
             } else {
               _syncLog(`RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)}`);
+              // On mismatch, diff our cached block-hash snapshot (sampled at
+              // the same frame we sent it to the peer) against the peer's
+              // snapshot (sampled at their same frame). This is frame-exact
+              // — no temporal skew. If peer hasn't arrived yet, the diff
+              // will run when the message comes in (see rb-blocks handler).
+              const peerBlocksHex = window._rbPendingBlocks?.[fStr];
+              const localSnap = window._rbLocalBlocks?.[f];
+              const localTaint = window._rbLocalTaint?.[f];
+              if (peerBlocksHex && localSnap && localTaint) {
+                const diffs = [];
+                for (let b = 0; b < 128; b++) {
+                  const hexStart = b * 8;
+                  const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
+                  const peerVal = parseInt(peerHex, 16) >>> 0;
+                  const localVal = localSnap[b] >>> 0;
+                  if (peerVal !== localVal) {
+                    diffs.push(
+                      `blk${b}(0x${(b * 0x10000).toString(16)}${localTaint[b] ? ' TAINTED' : ''})=peer:${peerHex}/local:${localVal.toString(16).padStart(8, '0')}`,
+                    );
+                  }
+                }
+                if (diffs.length) {
+                  _syncLog(
+                    `RB-DIFF f=${f} ${diffs.length}/128 blocks differ: ${diffs.slice(0, 24).join(' ')}${diffs.length > 24 ? ` …+${diffs.length - 24}` : ''}`,
+                  );
+                  // Auto-dump first 256 bytes of each diverging UNTAINTED
+                  // block. Tainted blocks are expected to differ — we don't
+                  // need their bytes. Untainted divergence is the smoking
+                  // gun and we want byte-level evidence.
+                  if (tickMod._kn_get_rdram_ptr) {
+                    const rdramPtr = tickMod._kn_get_rdram_ptr();
+                    for (let b = 0; b < 128; b++) {
+                      if (localTaint[b]) continue;
+                      const hexStart = b * 8;
+                      const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
+                      const peerVal = parseInt(peerHex, 16) >>> 0;
+                      const localVal = localSnap[b] >>> 0;
+                      if (peerVal === localVal) continue;
+                      const off = rdramPtr + b * 0x10000;
+                      const slice = new Uint8Array(tickMod.HEAPU8.buffer, off, 256);
+                      const hex = Array.from(slice)
+                        .map((x) => x.toString(16).padStart(2, '0'))
+                        .join('');
+                      _syncLog(`RB-BYTES f=${f} blk${b}(0x${(b * 0x10000).toString(16)}): ${hex}`);
+                    }
+                  }
+                } else {
+                  _syncLog(`RB-DIFF f=${f} NO block diffs (hash mismatch must be outside RDRAM)`);
+                }
+              } else if (!peerBlocksHex) {
+                _syncLog(`RB-DIFF f=${f} (peer blocks not yet received)`);
+              } else if (!localSnap) {
+                _syncLog(`RB-DIFF f=${f} (local snapshot missing — non-checkpoint mismatch)`);
+              }
             }
+            if (window._rbPendingBlocks) delete window._rbPendingBlocks[fStr];
           }
         }
       }
@@ -4440,6 +4962,19 @@
       if (window._rbPendingChecks && _frameNum % 300 === 0) {
         for (const f of Object.keys(window._rbPendingChecks)) {
           if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
+        }
+        if (window._rbPendingBlocks) {
+          for (const f of Object.keys(window._rbPendingBlocks)) {
+            if (parseInt(f) < _frameNum - 60) delete window._rbPendingBlocks[f];
+          }
+        }
+        if (window._rbLocalBlocks) {
+          for (const f of Object.keys(window._rbLocalBlocks)) {
+            if (parseInt(f) < _frameNum - 60) {
+              delete window._rbLocalBlocks[f];
+              delete window._rbLocalTaint[f];
+            }
+          }
         }
       }
 

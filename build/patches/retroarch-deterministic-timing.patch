@@ -1,5 +1,5 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..ceacc87 100644
+index a626706..f083991 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
 @@ -126,7 +126,19 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
@@ -23,7 +23,7 @@ index a626706..ceacc87 100644
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +231,9 @@ endif
+@@ -222,6 +234,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
@@ -81,7 +81,7 @@ index a4a28cf..ae2b9a1 100644
      * do...while (do...while has only a single conditional
      * jump, as opposed to for and while which have a
 diff --git a/audio/drivers/openal.c b/audio/drivers/openal.c
-index be6c1f6..6bc96e9 100644
+index be6c1f6..dcf3fa1 100644
 --- a/audio/drivers/openal.c
 +++ b/audio/drivers/openal.c
 @@ -15,6 +15,7 @@
@@ -180,7 +180,7 @@ index be6c1f6..6bc96e9 100644
     return al->res_ptr * OPENAL_BUFSIZE;
  }
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
-index c9ceed1..1486a00 100644
+index c9ceed1..9ef5d8b 100644
 --- a/frontend/drivers/platform_emulatorjs.c
 +++ b/frontend/drivers/platform_emulatorjs.c
 @@ -15,6 +15,7 @@
@@ -238,6 +238,22 @@ index c9ceed1..1486a00 100644
  /* defined here since implementation is frontend dependent */
  
  void retro_sleep(unsigned msec)
+@@ -328,6 +369,15 @@ bool platform_emscripten_is_window_hidden(void)
+ 
+ bool platform_emscripten_should_drop_iter(void)
+ {
++   /* kaillera-next: In lockstep/rollback netplay the JS side drives frame
++    * stepping and must never silently drop a tick — if iOS reports the page
++    * as hidden or a transient GL context loss occurs on one device, the
++    * other device keeps running and the two diverge by one+ frames with
++    * no visible cause. Force-return false so core_run always executes when
++    * called. The JS engine is responsible for not calling stepOneFrame
++    * when it shouldn't. */
++   if (kn_deterministic_mode)
++      return false;
+    return (emscripten_platform_data->gl_context_lost || (emscripten_platform_data->window_hidden && emscripten_platform_data->raf_interval));
+ }
+ 
 diff --git a/libretro-common/features/features_cpu.c b/libretro-common/features/features_cpu.c
 index a4f92f2..328c952 100644
 --- a/libretro-common/features/features_cpu.c

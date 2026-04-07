@@ -64,6 +64,67 @@ extern uint32_t kn_sync_hash(void);
 extern int softfloat_roundingMode;
 extern int softfloat_exceptionFlags;
 
+/* ── Taint tracking ─────────────────────────────────────────────────
+ * Level-2 mark-and-sweep taint map for RDRAM. Any RDRAM byte written by a
+ * subsystem known to be non-deterministic cross-device (RSP HLE audio DMAs,
+ * GLideN64 framebuffer copybacks, anything else we discover) is flagged by
+ * calling kn_taint_rdram(addr, size). kn_game_state_hash() then skips any
+ * 64KB block with a set flag, giving us a hash over deterministic state
+ * only. Never cleared — once tainted, a block stays tainted for the session.
+ *
+ * 8 MB RDRAM / 64 KB = 128 blocks. One byte per block for simplicity. */
+#define KN_TAINT_BLOCKS 128
+#define KN_TAINT_BLOCK_SHIFT 16   /* 64 KB per block */
+uint8_t kn_rdram_taint[KN_TAINT_BLOCKS] = {0};
+
+/* Set by savestates_save_m64p — byte offset of dev->rdram.dram inside the
+ * serialized save buffer. Used by kn_game_state_hash to skip tainted blocks
+ * when iterating the saved RDRAM region. */
+size_t kn_rdram_offset_in_state = 0;
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_taint_rdram(uint32_t addr, uint32_t size) {
+    /* RDRAM is 8 MB. Mask off N64 virtual/physical base bits, ignore OOB. */
+    addr &= 0x7FFFFFu;
+    if (size == 0) return;
+    uint32_t end = addr + size;
+    if (end > 0x800000u) end = 0x800000u;
+    uint32_t start_block = addr >> KN_TAINT_BLOCK_SHIFT;
+    uint32_t end_block = (end - 1u) >> KN_TAINT_BLOCK_SHIFT;
+    if (end_block >= KN_TAINT_BLOCKS) end_block = KN_TAINT_BLOCKS - 1u;
+    for (uint32_t b = start_block; b <= end_block; b++) {
+        kn_rdram_taint[b] = 1;
+    }
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_get_taint_blocks(uint8_t *out) {
+    if (!out) return 0;
+    memcpy(out, kn_rdram_taint, KN_TAINT_BLOCKS);
+    return KN_TAINT_BLOCKS;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_reset_taint(void) {
+    memset(kn_rdram_taint, 0, KN_TAINT_BLOCKS);
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_tainted_block_count(void) {
+    int count = 0;
+    for (int i = 0; i < KN_TAINT_BLOCKS; i++)
+        if (kn_rdram_taint[i]) count++;
+    return count;
+}
+
 /* ── Constants ─────────────────────────────────────────────────────── */
 #define KN_MAX_PLAYERS      4
 #define KN_INPUT_RING_SIZE  256   /* ~4 seconds at 60fps */
@@ -557,6 +618,56 @@ uint32_t kn_full_state_hash(int frame) {
     return hash;
 }
 
+/* ── Game-state hash (Level 2 taint-filtered) ───────────────────────
+ * Hashes the saved state buffer for a frame, but SKIPS 64 KB RDRAM blocks
+ * that have been flagged as tainted by non-deterministic subsystems (RSP
+ * HLE audio, GLideN64 framebuffer copybacks, etc). This is what RB-CHECK
+ * uses — it cares about game-logic determinism, not audio/video transient
+ * bytes. CPU state, cp0, cp1, TLB, pif, sp_mem, event queue, fb tracker
+ * are all still included (they're outside the RDRAM region in the save
+ * buffer and are hashed normally). Falls back to full hash if the RDRAM
+ * offset hasn't been recorded yet (safety — shouldn't happen in practice). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_game_state_hash(int frame) {
+    if (!rb.initialized || rb.frame == 0) return 0;
+    int target = (frame < 0) ? (rb.frame - 1) : frame;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
+    if (kn_rdram_offset_in_state == 0) return kn_full_state_hash(frame);
+
+    const uint8_t *p = rb.ring_bufs[idx];
+    const size_t rdram_start = kn_rdram_offset_in_state;
+    const size_t rdram_end = rdram_start + 0x800000u;  /* 8 MB */
+    uint32_t hash = 2166136261u;
+    size_t i;
+
+    /* Pre-RDRAM: headers + registers + DMA regs. */
+    for (i = 0; i < rdram_start && i < rb.state_size; i += 16) {
+        hash ^= p[i];
+        hash *= 16777619u;
+    }
+
+    /* RDRAM: skip tainted 64 KB blocks. */
+    size_t actual_rdram_end = rdram_end < rb.state_size ? rdram_end : rb.state_size;
+    for (i = rdram_start; i < actual_rdram_end; i += 16) {
+        uint32_t rdram_off = (uint32_t)(i - rdram_start);
+        uint32_t block = rdram_off >> KN_TAINT_BLOCK_SHIFT;
+        if (block < KN_TAINT_BLOCKS && kn_rdram_taint[block]) continue;
+        hash ^= p[i];
+        hash *= 16777619u;
+    }
+
+    /* Post-RDRAM: SP mem, PIF, TLB LUT, cp0/cp1/cp2, event queue, fb state. */
+    for (i = actual_rdram_end; i < rb.state_size; i += 16) {
+        hash ^= p[i];
+        hash *= 16777619u;
+    }
+
+    return hash;
+}
+
 /* ── Get pointer to last saved state (for byte-level comparison) ──── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
@@ -660,4 +771,108 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_rollback_self_test(void) {
     return -2; /* JS-driven self-test needed */
+}
+
+/* ── Replay determinism self-test ──────────────────────────────────
+ * Tests whether (save → N×run → hash) is byte-identical when repeated
+ * from the same starting state. This is the core invariant rollback
+ * replay relies on — if it doesn't hold, every misprediction introduces
+ * permanent drift.
+ *
+ * Procedure:
+ *   1. retro_serialize → state buffer A
+ *   2. retro_run × n_frames → hash B
+ *   3. retro_unserialize ← state buffer A
+ *   4. retro_run × n_frames → hash B'
+ *   5. Compare B vs B'
+ *
+ * Returns:
+ *    1  → DETERMINISTIC (B == B')
+ *    0  → NON-DETERMINISTIC (B != B')
+ *   -1  → out of memory
+ *   -2  → retro_serialize failed
+ *   -3  → retro_unserialize failed
+ *
+ * Hashes are written to out_hashes[0]=B, out_hashes[1]=B'.
+ *
+ * Sets kn_headless during the test so GL state isn't perturbed. The EJS
+ * main loop should be paused around this call (set EJS_PAUSED true) so
+ * the canvas isn't rendering frames mid-test. */
+extern int kn_headless;
+extern void kn_set_headless(int enable);
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_replay_self_test(int n_frames, uint32_t *out_hashes) {
+    static uint8_t *scratch_a = NULL;
+    static uint8_t *scratch_b = NULL;
+    static size_t scratch_capacity = 0;
+
+    size_t state_size = retro_serialize_size();
+    if (state_size == 0) return -1;
+
+    if (scratch_capacity < state_size) {
+        free(scratch_a);
+        free(scratch_b);
+        scratch_a = (uint8_t *)malloc(state_size);
+        scratch_b = (uint8_t *)malloc(state_size);
+        scratch_capacity = state_size;
+        if (!scratch_a || !scratch_b) {
+            scratch_capacity = 0;
+            return -1;
+        }
+    }
+
+    int prev_headless = kn_headless;
+    kn_set_headless(1);
+
+    /* Save A */
+    if (!retro_serialize(scratch_a, state_size)) {
+        kn_set_headless(prev_headless);
+        return -2;
+    }
+
+    /* Run N frames forward */
+    for (int i = 0; i < n_frames; i++) retro_run();
+
+    /* Hash B */
+    if (!retro_serialize(scratch_b, state_size)) {
+        kn_set_headless(prev_headless);
+        return -2;
+    }
+    uint32_t hash_b = 2166136261u;
+    for (size_t i = 0; i < state_size; i += 16) {
+        hash_b ^= scratch_b[i];
+        hash_b *= 16777619u;
+    }
+
+    /* Restore A */
+    if (!retro_unserialize(scratch_a, state_size)) {
+        kn_set_headless(prev_headless);
+        return -3;
+    }
+
+    /* Run N frames forward AGAIN */
+    for (int i = 0; i < n_frames; i++) retro_run();
+
+    /* Hash B' */
+    if (!retro_serialize(scratch_b, state_size)) {
+        kn_set_headless(prev_headless);
+        return -2;
+    }
+    uint32_t hash_bprime = 2166136261u;
+    for (size_t i = 0; i < state_size; i += 16) {
+        hash_bprime ^= scratch_b[i];
+        hash_bprime *= 16777619u;
+    }
+
+    kn_set_headless(prev_headless);
+
+    if (out_hashes) {
+        out_hashes[0] = hash_b;
+        out_hashes[1] = hash_bprime;
+    }
+
+    return (hash_b == hash_bprime) ? 1 : 0;
 }

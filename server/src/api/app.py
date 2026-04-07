@@ -605,12 +605,25 @@ def create_app(lifespan=None) -> FastAPI:
 
         summary = data.get("summary", {})
         context = data.get("context", {})
+        # kaillera-next: include inputAudit in the context column. The audit
+        # is a delta-encoded dict of the local + remote input histories used
+        # for cross-peer diffing. See Option G in the rollback diagnostics.
+        input_audit = data.get("inputAudit")
+        if isinstance(input_audit, dict) and isinstance(context, dict):
+            context["inputAudit"] = input_audit
         summary_str = json.dumps(summary) if isinstance(summary, dict) else "{}"
         context_str = json.dumps(context) if isinstance(context, dict) else "{}"
         if len(summary_str) > 4096:
             summary_str = "{}"
-        if len(context_str) > 4096:
-            context_str = "{}"
+        # context may contain inputAudit (Option G), which can reach up to
+        # ~1 MB per side. Allow up to 2 MB — same budget as log_data.
+        if len(context_str) > 2 * 1024 * 1024:
+            # Drop the audit rather than the whole context.
+            if isinstance(context, dict) and "inputAudit" in context:
+                context.pop("inputAudit", None)
+            context_str = json.dumps(context)
+            if len(context_str) > 4096:
+                context_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
         await db.upsert_session_log(
@@ -812,6 +825,107 @@ def create_app(lifespan=None) -> FastAPI:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
         return entry
+
+    # ── Admin input-audit diff (Option G) ────────────────────────────────
+    # Pulls the delta-encoded input history from both peers of a given match
+    # and diffs them. Each peer uploads:
+    #   context.inputAudit.local  = array of { f, b, lx, ly, cx, cy }
+    #   context.inputAudit.remote = { slot: [ ... ] }
+    # "local" = inputs this peer generated. "remote" = inputs this peer
+    # received from each other peer. For a 2-player match, peer 0's local
+    # should equal peer 1's remote[0], and peer 1's local should equal
+    # peer 0's remote[1]. If they don't match, the input protocol is
+    # dropping or reordering packets — the emulator determinism hypothesis
+    # is wrong.
+    @app.get("/admin/api/input-audit/{match_id}")
+    async def admin_input_audit(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
+        rows = await db.query(
+            "SELECT slot, player_name, context FROM session_logs WHERE match_id = ? ORDER BY slot",
+            (match_id,),
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="No session logs for match")
+
+        peers: dict = {}
+        for row in rows:
+            ctx = row.get("context") or "{}"
+            if isinstance(ctx, str):
+                try:
+                    ctx = json.loads(ctx)
+                except json.JSONDecodeError:
+                    ctx = {}
+            audit = ctx.get("inputAudit") if isinstance(ctx, dict) else None
+            peers[row["slot"]] = {
+                "player_name": row.get("player_name"),
+                "audit": audit,
+            }
+
+        def inputs_eq(a, b):
+            return (
+                a.get("f") == b.get("f")
+                and a.get("b") == b.get("b")
+                and a.get("lx") == b.get("lx")
+                and a.get("ly") == b.get("ly")
+                and a.get("cx") == b.get("cx")
+                and a.get("cy") == b.get("cy")
+            )
+
+        diffs = []
+        for sender_slot, sender in peers.items():
+            sender_audit = sender.get("audit") or {}
+            sender_local = sender_audit.get("local") or []
+            for receiver_slot, receiver in peers.items():
+                if receiver_slot == sender_slot:
+                    continue
+                receiver_audit = receiver.get("audit") or {}
+                remote_map = receiver_audit.get("remote") or {}
+                receiver_remote = remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or []
+                min_len = min(len(sender_local), len(receiver_remote))
+                mismatches = []
+                for i in range(min_len):
+                    if not inputs_eq(sender_local[i], receiver_remote[i]):
+                        mismatches.append(
+                            {
+                                "index": i,
+                                "sender": sender_local[i],
+                                "receiver": receiver_remote[i],
+                            }
+                        )
+                        if len(mismatches) >= 20:
+                            break
+                verdict = "IDENTICAL"
+                if mismatches:
+                    verdict = "MISMATCH"
+                elif len(sender_local) != len(receiver_remote):
+                    verdict = "PARTIAL"
+                diffs.append(
+                    {
+                        "sender_slot": sender_slot,
+                        "receiver_slot": receiver_slot,
+                        "sender_entries": len(sender_local),
+                        "receiver_entries": len(receiver_remote),
+                        "compared": min_len,
+                        "mismatch_count": len(mismatches),
+                        "first_mismatches": mismatches[:20],
+                        "verdict": verdict,
+                    }
+                )
+
+        return {
+            "match_id": match_id,
+            "peer_count": len(peers),
+            "peers": {
+                s: {
+                    "player_name": p["player_name"],
+                    "local_entries": len((p.get("audit") or {}).get("local") or []),
+                    "remote_entries": {
+                        k: len(v or []) for k, v in ((p.get("audit") or {}).get("remote") or {}).items()
+                    },
+                }
+                for s, p in peers.items()
+            },
+            "diffs": diffs,
+        }
 
     # ── Admin client events API ──────────────────────────────────────────
 

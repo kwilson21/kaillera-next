@@ -1,0 +1,53 @@
+diff --git a/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp b/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
+index 66c8f62..b0c8c1b 100644
+--- a/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
++++ b/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
+@@ -4,6 +4,9 @@
+ #include "ColorBufferToRDRAM.h"
+ #include "WriteToRDRAM.h"
+ 
++/* kaillera-next: taint hook. See kn_rollback.c for rationale. */
++extern "C" void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ #include <FrameBuffer.h>
+ #include <FrameBufferInfo.h>
+ #include <Config.h>
+@@ -186,6 +189,13 @@ u32 ColorBufferToRDRAM::_RGBAtoRGBA32(u32 _c, u32 x, u32 y) {
+ 
+ void ColorBufferToRDRAM::_copy(u32 _startAddress, u32 _endAddress, bool _sync)
+ {
++	/* kaillera-next: every byte GLideN64 is about to write into [_startAddress,
++	 * _endAddress) comes from a GL texture readback whose bytes differ across
++	 * GPU drivers, GLES implementations, and even iOS minor versions. Flag the
++	 * range as tainted before we touch it. */
++	if (_endAddress > _startAddress)
++		kn_taint_rdram(_startAddress, _endAddress - _startAddress);
++
+ 	const u32 stride = m_pCurFrameBuffer->m_width << m_pCurFrameBuffer->m_size >> 1;
+ 	const u32 max_height = std::min((u32)VI_GetMaxBufferHeight(m_pCurFrameBuffer->m_width), cutHeight(_startAddress, m_pCurFrameBuffer->m_height, stride));
+ 
+diff --git a/GLideN64/src/BufferCopy/DepthBufferToRDRAM.cpp b/GLideN64/src/BufferCopy/DepthBufferToRDRAM.cpp
+index 8cf3913..a9059f2 100644
+--- a/GLideN64/src/BufferCopy/DepthBufferToRDRAM.cpp
++++ b/GLideN64/src/BufferCopy/DepthBufferToRDRAM.cpp
+@@ -7,6 +7,9 @@
+ #include "WriteToRDRAM.h"
+ #include "MemoryStatus.h"
+ 
++/* kaillera-next: taint hook. See kn_rollback.c for rationale. */
++extern "C" void kn_taint_rdram(uint32_t addr, uint32_t size);
++
+ #include <FrameBuffer.h>
+ #include <DepthBuffer.h>
+ #include <Textures.h>
+@@ -222,6 +225,10 @@ u16 DepthBufferToRDRAM::_FloatToUInt16(f32 _z, u32 x, u32 y)
+ 
+ bool DepthBufferToRDRAM::_copy(u32 _startAddress, u32 _endAddress)
+ {
++	/* kaillera-next: taint the depth-buffer copyback range. */
++	if (_endAddress > _startAddress)
++		kn_taint_rdram(_startAddress, _endAddress - _startAddress);
++
+ 	DepthBuffer * pDepthBuffer = m_pCurFrameBuffer->m_pDepthBuffer;
+ 	const u32 stride = m_pCurFrameBuffer->m_width << 1;
+ 	const u32 max_height = cutHeight(_startAddress, m_pCurFrameBuffer->m_height, stride);

@@ -88,7 +88,7 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
 
@@ -195,10 +195,27 @@ KNFP_EOF
     # static save scratch: replace malloc/free in savestates_save_m64p with
     # a static reusable buffer. retro_serialize is called 60×/sec by the
     # rollback engine; the malloc was suspected to cause WASM heap growth.
+    # Also records kn_rdram_offset_in_state for taint-aware hashing.
     if [ -f "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-static-save-scratch.patch" && \
             echo "    Applied static save scratch patch" || \
             echo "    WARN: static save scratch patch failed"
+    fi
+
+    # RSP HLE taint hook: every dram_store_u* call flags the written 64 KB
+    # RDRAM block(s) as non-deterministic so kn_game_state_hash can skip them.
+    if [ -f "${PATCHES_DIR}/mupen64plus-rsp-taint.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-rsp-taint.patch" && \
+            echo "    Applied RSP HLE taint patch" || \
+            echo "    WARN: RSP HLE taint patch failed"
+    fi
+
+    # GLideN64 taint hook: ColorBufferToRDRAM and DepthBufferToRDRAM call
+    # kn_taint_rdram before writing GL readback bytes into RDRAM.
+    if [ -f "${PATCHES_DIR}/gliden64-rdram-taint.patch" ]; then
+        git apply "${PATCHES_DIR}/gliden64-rdram-taint.patch" && \
+            echo "    Applied GLideN64 taint patch" || \
+            echo "    WARN: GLideN64 taint patch failed"
     fi
 
     # C-level rollback engine: copy kn_rollback.c/h into the source tree

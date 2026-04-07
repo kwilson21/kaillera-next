@@ -1,8 +1,44 @@
 diff --git a/mupen64plus-core/src/main/savestates.c b/mupen64plus-core/src/main/savestates.c
-index b0b9cf4..3b4bb24 100644
+index b0b9cf4..d9a2edf 100644
 --- a/mupen64plus-core/src/main/savestates.c
 +++ b/mupen64plus-core/src/main/savestates.c
-@@ -1048,6 +1048,16 @@ int savestates_load_m64p(struct device* dev, const void *data)
+@@ -972,6 +972,25 @@ int savestates_load_m64p(struct device* dev, const void *data)
+             *r4300_cp0_latch(&dev->r4300.cp0) = GETDATA(curr, uint64_t);
+             *r4300_cp2_latch(&dev->r4300.cp2) = GETDATA(curr, uint64_t);
+         }
++
++        /* kaillera-next: framebuffer tracker state.
++         * dp.fb.dirty_page + infos + once are mutated during normal play and
++         * were previously reset to zero on load (via poweron_fb below). That
++         * reset caused divergent code invalidation behavior between original
++         * execution and rollback replay. Save/restore them here. Always read
++         * — kaillera-next always builds and loads with the same patched core,
++         * so version mismatch isn't a concern. */
++        COPYARRAY(dev->dp.fb.dirty_page, curr, unsigned char, FB_DIRTY_PAGES_COUNT);
++        {
++            unsigned int k;
++            for (k = 0; k < FB_INFOS_COUNT; ++k) {
++                dev->dp.fb.infos[k].addr   = GETDATA(curr, uint32_t);
++                dev->dp.fb.infos[k].size   = GETDATA(curr, uint32_t);
++                dev->dp.fb.infos[k].width  = GETDATA(curr, uint32_t);
++                dev->dp.fb.infos[k].height = GETDATA(curr, uint32_t);
++            }
++        }
++        dev->dp.fb.once = GETDATA(curr, uint32_t);
+     }
+     else
+     {
+@@ -1040,14 +1059,24 @@ int savestates_load_m64p(struct device* dev, const void *data)
+         input.controllerCommand(-1, NULL);
+     }
+ 
+-    /* reset fb state */
+-    poweron_fb(&dev->dp.fb);
++    /* kaillera-next: fb state was restored from the save buffer above; do
++     * NOT call poweron_fb here — that reset caused replay divergence. */
+ 
+     dev->sp.rsp_task_locked = 0;
+     dev->r4300.cp0.interrupt_unsafe_state = 0;
  
      *r4300_cp0_last_addr(&dev->r4300.cp0) = *r4300_pc(&dev->r4300);
  
@@ -19,7 +55,7 @@ index b0b9cf4..3b4bb24 100644
      free(savestateData);
  
  #ifndef __LIBRETRO__
-@@ -1624,8 +1634,10 @@ static void savestates_save_m64p_work(struct work_struct *work)
+@@ -1624,8 +1653,10 @@ static void savestates_save_m64p_work(struct work_struct *work)
  #else
      memcpy(save->mempointer, save->data, save->size);
  #endif
@@ -31,7 +67,7 @@ index b0b9cf4..3b4bb24 100644
      free(save->filepath);
  #endif
      free(save);
-@@ -1673,9 +1685,27 @@ int savestates_save_m64p(const struct device* dev, void *data)
+@@ -1673,9 +1704,27 @@ int savestates_save_m64p(const struct device* dev, void *data)
  
      save_eventqueue_infos(&dev->r4300.cp0, queue);
  
@@ -61,3 +97,38 @@ index b0b9cf4..3b4bb24 100644
      if (save->data == NULL)
      {
          free(save->filepath);
+@@ -1838,6 +1887,14 @@ int savestates_save_m64p(const struct device* dev, void *data)
+     PUTDATA(curr, uint32_t, dev->dp.dps_regs[DPS_BUFTEST_ADDR_REG]);
+     PUTDATA(curr, uint32_t, dev->dp.dps_regs[DPS_BUFTEST_DATA_REG]);
+ 
++    /* kaillera-next: record RDRAM offset inside save buffer so the rollback
++     * engine (kn_game_state_hash) can iterate RDRAM bytes separately and
++     * skip tainted 64 KB blocks. Set every save so it tracks layout changes
++     * and stays correct even if the static buffer grows. */
++    {
++        extern size_t kn_rdram_offset_in_state;
++        kn_rdram_offset_in_state = (size_t)((char*)curr - (char*)save->data);
++    }
+     PUTARRAY(dev->rdram.dram, curr, uint32_t, RDRAM_MAX_SIZE/4);
+     PUTARRAY(dev->sp.mem, curr, uint32_t, SP_MEM_SIZE/4);
+     PUTARRAY(dev->pif.ram, curr, uint8_t, PIF_RAM_SIZE);
+@@ -2044,6 +2101,19 @@ int savestates_save_m64p(const struct device* dev, void *data)
+     PUTDATA(curr, uint64_t, *r4300_cp0_latch((struct cp0*)&dev->r4300.cp0));
+     PUTDATA(curr, uint64_t, *r4300_cp2_latch((struct cp2*)&dev->r4300.cp2));
+ 
++    /* kaillera-next: framebuffer tracker state (see load path for rationale). */
++    PUTARRAY(dev->dp.fb.dirty_page, curr, unsigned char, FB_DIRTY_PAGES_COUNT);
++    {
++        unsigned int k;
++        for (k = 0; k < FB_INFOS_COUNT; ++k) {
++            PUTDATA(curr, uint32_t, dev->dp.fb.infos[k].addr);
++            PUTDATA(curr, uint32_t, dev->dp.fb.infos[k].size);
++            PUTDATA(curr, uint32_t, dev->dp.fb.infos[k].width);
++            PUTDATA(curr, uint32_t, dev->dp.fb.infos[k].height);
++        }
++    }
++    PUTDATA(curr, uint32_t, dev->dp.fb.once);
++
+     init_work(&save->work, savestates_save_m64p_work);
+     queue_work(&save->work);
+ 
