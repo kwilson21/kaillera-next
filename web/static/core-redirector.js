@@ -33,16 +33,22 @@
     'parallel_n64-wasm.data',
     'parallel_n64-legacy-wasm.data',
   ];
-  const LOCAL_CORE_URL = '/static/ejs/cores/mupen64plus_next-wasm.data';
-  const isN64Core = (url) => N64_CORE_NAMES.some((name) => url.includes(name));
 
-  // ── IDB cache clear (awaitable) ────────────────────────────────────
-  // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL.
-  // Tracked via localStorage to avoid deadlocking multi-tab scenarios.
-  const CORE_VERSION = '13'; // v13: fix parallel_n64 core redirect for mobile Safari
+  // ── IDB cache clear + HTTP cache bust ──────────────────────────────
+  // Clear EmulatorJS IDB cache once so it re-downloads from our intercepted URL,
+  // AND append CORE_VERSION as a query param to the WASM URL so the HTTP cache
+  // (and Cloudflare's edge cache) treats each new core as a fresh URL.
+  //
+  // Without the query param, the WASM is served with `Cache-Control: immutable`
+  // which means browsers will never re-fetch — and any edge cache (Cloudflare)
+  // will pin the file at the edge until manually purged. Bumping CORE_VERSION
+  // here is the ONE place needed to force a new WASM rollout to all clients.
+  const CORE_VERSION = '14'; // v14: cache-bust WASM URL after rollback fix
+  const LOCAL_CORE_URL = '/static/ejs/cores/mupen64plus_next-wasm.data?v=' + CORE_VERSION;
+  const isN64Core = (url) => N64_CORE_NAMES.some((name) => url.includes(name));
   let idbClearPromise;
   try {
-    if (KNState.safeGet("localStorage", 'kn-core-version') === CORE_VERSION) {
+    if (KNState.safeGet('localStorage', 'kn-core-version') === CORE_VERSION) {
       idbClearPromise = Promise.resolve();
     } else if (typeof indexedDB !== 'undefined' && indexedDB.databases) {
       // NOTE: intentionally .then() chain — result IS the promise assigned to window._knCoreReady
@@ -70,7 +76,7 @@
           return Promise.all(deletes);
         })
         .then(() => {
-          KNState.safeSet("localStorage", 'kn-core-version', CORE_VERSION);
+          KNState.safeSet('localStorage', 'kn-core-version', CORE_VERSION);
           console.log('[core-redirector] IDB cache cleared');
         });
     } else {
