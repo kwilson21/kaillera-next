@@ -33,6 +33,7 @@
     'parallel_n64-wasm.data',
     'parallel_n64-legacy-wasm.data',
   ];
+  const isN64Core = (url) => N64_CORE_NAMES.some((name) => url.includes(name));
 
   // ── Auto-discovery: ask the server for the current core URL ────────
   //
