@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.36.0",
+    "date": "2026-04-07",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "auto-discover WASM core URL via /api/core-info content hash"
+      }
+    ]
+  },
+  {
     "version": "0.35.1",
     "date": "2026-04-07",
     "changes": [
