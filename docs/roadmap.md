@@ -89,3 +89,42 @@ tracking, exportable CSV logs via `debug-sync` Socket.IO event.
 
 **Files:** `web/static/netplay-lockstep.js`, `server/src/api/signaling.py` (debug-sync,
 debug-logs events), `server/src/api/app.py` (POST /api/sync-logs).
+
+---
+
+## Phase 6: C-level Rollback Netcode [done]
+
+Lockstep + frame delay is responsive up to ~100 ms RTT; past that, input lag becomes
+painful. Rollback adds speculative execution: the local client predicts remote inputs
+(last-known value), steps forward, and if the real input arrives differently, rewinds
+via state restore + replay. Built entirely in C for bit-exact replay semantics.
+
+**C engine (`build/kn_rollback/`):** state ring buffer, frame-tagged input ring,
+prediction tracking, amortized replay (1 frame per tick), taint bitmap for RDRAM
+write tracking. Exposes `kn_pre_tick` / `kn_post_tick` / `kn_feed_input` /
+`kn_game_state_hash` / `kn_taint_rdram`.
+
+**Cross-device determinism fixes required to make mobile↔mobile work:**
+- `invalidate_cached_code_hacktarux` after `retro_unserialize` (JIT cache stale)
+- SoftFloat FPU for bit-exact cross-browser floating-point (separate shipped earlier)
+- `platform_emscripten_should_drop_iter` forced false in deterministic mode (Safari
+  was silently skipping frames on transient tab-hidden events)
+- `dp.fb` framebuffer tracker serialized across save/load
+- RSP HLE taint hooks for direct `memcpy(hle->dram + addr, ...)` writes that bypass
+  `memory.h` store helpers (alist_save, envelope saves, cicx105, mp3 decoder)
+- GLideN64 taint hooks for ColorBuffer/DepthBuffer → RDRAM copybacks
+- Symmetric delay negotiation: guests defer `kn_rollback_init` until the host's
+  authoritative `rb-delay:` broadcast arrives, preventing asymmetric rollback/lockstep
+  protocol mismatch across peers
+
+**Final mobile↔mobile test:** 80/80 RB-CHECK matches over 7m 53s with bit-identical
+16 MB save buffers across iPhone and iPad. Match terminated by WebRTC DC drop, not
+desync. Rollback activates automatically when the WASM core exports `kn_pre_tick`
+(current patched core does); no UI mode selector needed.
+
+**Files:** `build/kn_rollback/kn_rollback.{c,h}`, `build/patches/mupen64plus-rsp-taint.patch`,
+`build/patches/gliden64-rdram-taint.patch`, `build/patches/mupen64plus-static-save-scratch.patch`,
+`web/static/netplay-lockstep.js` (deferred init, RB-CHECK, input audit, knDiag).
+
+**Followup:** WebRTC DC reconnect when Socket.IO signaling survives — today a DC drop
+ends the match even though room state is still alive. Tracked separately.
