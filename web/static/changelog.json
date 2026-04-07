@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.35.1",
+    "date": "2026-04-07",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "cache-bust WASM core URL to force rollback fix rollout"
+      },
+      {
+        "type": "feat",
+        "message": "C-level rollback netcode (#3)"
+      }
+    ]
+  },
+  {
     "version": "0.35.0",
     "date": "2026-04-07",
     "changes": [
