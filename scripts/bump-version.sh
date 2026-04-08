@@ -1,67 +1,78 @@
 #!/usr/bin/env bash
+#
+# bump-version.sh — invoked by `just deploy`, NOT by a git hook.
+#
+# Scans all unpushed commits on main since origin/main, infers a version
+# bump from conventional commit prefixes, writes one chore(version)
+# commit + tag containing one changelog bullet per substantive commit,
+# and exits. The caller (`just deploy`) handles `git push --follow-tags`.
+#
+# Bump rule:
+#   any feat:  → minor
+#   any fix:   → patch
+#   neither    → no bump (exit 0, no commit)
+#
+# Idempotent: re-running when there's nothing new to bump is a no-op.
+#
 set -euo pipefail
 
-LOCKFILE="/tmp/kn-bump.lock"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 VERSION_FILE="$REPO_ROOT/web/static/version.json"
 CHANGELOG_FILE="$REPO_ROOT/web/static/changelog.json"
 
-# Always clean up lockfile on exit
-cleanup() { rm -f "$LOCKFILE"; }
-trap cleanup EXIT
+cd "$REPO_ROOT"
 
-# Re-entry guard: lockfile
-if [ -f "$LOCKFILE" ]; then
-  exit 0
-fi
-
-# Only bump on main branch
+# ── Safety checks ────────────────────────────────────────────────────────
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$BRANCH" != "main" ]; then
+  echo "bump-version: refusing to bump on branch '$BRANCH' (must be main)"
+  exit 1
+fi
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "bump-version: working tree is dirty — commit or stash first"
+  exit 1
+fi
+
+# Need an up-to-date view of origin/main to compute the unpushed range.
+git fetch --quiet origin main
+
+UNPUSHED_RANGE="origin/main..HEAD"
+TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
+if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
+  echo "bump-version: nothing to bump (HEAD is at origin/main)"
   exit 0
 fi
 
-# Read last commit message
-MSG=$(git log -1 --format=%s)
-
-# Skip version bump commits (secondary guard)
-case "$MSG" in
-  chore\(version\):*) exit 0 ;;
-esac
-
-# Squash-style: scan all commits since last version bump, not just the latest.
-# This way 3 feat: commits → 1 minor bump, 5 fix: commits → 1 patch bump.
-LAST_BUMP=$(git log --oneline --grep='^chore(version):' -1 --format=%H 2>/dev/null || true)
-if [ -n "$LAST_BUMP" ]; then
-  RANGE="${LAST_BUMP}..HEAD"
+# Idempotency: if there's already an unpushed chore(version) commit, the
+# user has already bumped this release. Only count feat/fix commits ADDED
+# after that point — if there are none, no new bump is needed.
+LAST_VERSION_COMMIT=$(git log --format=%H --grep='^chore(version):' "$UNPUSHED_RANGE" -1 || true)
+if [ -n "$LAST_VERSION_COMMIT" ]; then
+  RANGE="${LAST_VERSION_COMMIT}..HEAD"
 else
-  RANGE="HEAD"
+  RANGE="$UNPUSHED_RANGE"
 fi
-MSGS=$(git log --format=%s "$RANGE" --)
 
+# ── Detect bump level ────────────────────────────────────────────────────
+MSGS=$(git log --format=%s "$RANGE")
 BUMP=""
 while IFS= read -r line; do
   case "$line" in
-    feat:*|feat\(*) BUMP="minor"; break ;;  # minor is highest, stop early
+    feat:*|feat\(*) BUMP="minor"; break ;;  # minor wins, stop scanning
     fix:*|fix\(*)   BUMP="patch" ;;
   esac
 done <<< "$MSGS"
 
-# Nothing to bump
 if [ -z "$BUMP" ]; then
+  echo "bump-version: no feat/fix commits in $RANGE — nothing to bump"
   exit 0
 fi
 
-# Create lockfile
-touch "$LOCKFILE"
-
-cd "$REPO_ROOT"
-
-# Read current version
+# ── Compute new version ──────────────────────────────────────────────────
 CURRENT=$(grep -o '"version": *"[^"]*"' "$VERSION_FILE" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
 
-# Bump
 if [ "$BUMP" = "minor" ]; then
   MINOR=$((MINOR + 1))
   PATCH=0
@@ -70,62 +81,78 @@ else
 fi
 NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
-# Check if tag already exists (e.g. amend)
 if git tag -l "v${NEW_VERSION}" | grep -q .; then
-  exit 0
+  echo "bump-version: tag v${NEW_VERSION} already exists — refusing to overwrite"
+  exit 1
 fi
 
-# Commit hash of the developer's commit
-COMMIT_HASH=$(git rev-parse --short HEAD)
+# ── Write version.json (commit hash filled in after the commit lands) ────
+# We use a placeholder, then rewrite-and-amend so the file accurately
+# reports its own commit. Two-step is unavoidable: the hash is not known
+# until after the commit is made.
+cat > "$VERSION_FILE" << EOF
+{
+  "version": "${NEW_VERSION}",
+  "commit": "pending"
+}
+EOF
 
-# Write version.json
+# ── Build changelog entry ────────────────────────────────────────────────
+node -e "
+const fs = require('fs');
+const { execSync } = require('child_process');
+
+const changelogPath = '${CHANGELOG_FILE}';
+const newVersion = '${NEW_VERSION}';
+const range = '${RANGE}';
+
+const changelog = JSON.parse(fs.readFileSync(changelogPath, 'utf8'));
+const log = execSync('git log --format=%s ' + range).toString().trim();
+
+const changes = [];
+for (const msg of log.split('\n').reverse()) {
+  if (!msg) continue;
+  if (msg.startsWith('feat:') || msg.startsWith('feat(')) {
+    changes.push({ type: 'feat', message: msg.replace(/^feat(\([^)]*\))?: /, '') });
+  } else if (msg.startsWith('fix:') || msg.startsWith('fix(')) {
+    changes.push({ type: 'fix', message: msg.replace(/^fix(\([^)]*\))?: /, '') });
+  }
+  // chore/docs/test/build/refactor are intentionally excluded from the
+  // user-facing changelog.
+}
+
+if (changes.length === 0) {
+  console.error('bump-version: no feat/fix bullets found in range — aborting');
+  process.exit(1);
+}
+
+const entry = {
+  version: newVersion,
+  date: new Date().toISOString().split('T')[0],
+  changes,
+};
+changelog.unshift(entry);
+fs.writeFileSync(changelogPath, JSON.stringify(changelog, null, 2) + '\n');
+console.log('bump-version: wrote ' + changes.length + ' changelog bullets for v' + newVersion);
+"
+
+# ── Commit + tag ─────────────────────────────────────────────────────────
+git add "$VERSION_FILE" "$CHANGELOG_FILE"
+git commit --no-verify -m "chore(version): v${NEW_VERSION}"
+
+# Now backfill the actual commit hash into version.json and amend.
+COMMIT_HASH=$(git rev-parse --short HEAD)
 cat > "$VERSION_FILE" << EOF
 {
   "version": "${NEW_VERSION}",
   "commit": "${COMMIT_HASH}"
 }
 EOF
+git add "$VERSION_FILE"
+git commit --amend --no-verify --no-edit > /dev/null
 
-# Generate new changelog entry and prepend to existing changelog
-# Uses node since it's available (prettier dependency) and JSON manipulation in bash is painful
-node -e "
-const fs = require('fs');
-const { execSync } = require('child_process');
-
-const changelogPath = '${CHANGELOG_FILE}';
-const changelog = JSON.parse(fs.readFileSync(changelogPath, 'utf8'));
-
-// Get commits since last tag
-const lastTag = execSync('git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo \"\"').toString().trim();
-const range = lastTag ? lastTag + '..HEAD' : 'HEAD';
-const log = execSync('git log --oneline ' + range + ' --').toString().trim();
-
-const changes = [];
-for (const line of log.split('\n')) {
-  if (!line) continue;
-  const msg = line.replace(/^[a-f0-9]+ /, '');
-  if (msg.startsWith('feat:') || msg.startsWith('feat(')) {
-    changes.push({ type: 'feat', message: msg.replace(/^feat(\([^)]*\))?: /, '') });
-  } else if (msg.startsWith('fix:') || msg.startsWith('fix(')) {
-    changes.push({ type: 'fix', message: msg.replace(/^fix(\([^)]*\))?: /, '') });
-  }
-}
-
-if (changes.length > 0) {
-  const entry = {
-    version: '${NEW_VERSION}',
-    date: new Date().toISOString().split('T')[0],
-    changes
-  };
-  changelog.unshift(entry);
-}
-
-fs.writeFileSync(changelogPath, JSON.stringify(changelog, null, 2) + '\n');
-"
-
-# Stage and commit
-git add "$VERSION_FILE" "$CHANGELOG_FILE"
-git commit -m "chore(version): v${NEW_VERSION}"
 git tag "v${NEW_VERSION}"
 
-echo "Bumped to v${NEW_VERSION}"
+echo ""
+echo "✓ bumped to v${NEW_VERSION} (${COMMIT_COUNT} commits in range)"
+echo "  next: git push origin main --follow-tags"
