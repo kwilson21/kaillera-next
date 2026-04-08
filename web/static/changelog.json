@@ -58,18 +58,12 @@
     "date": "2026-04-07",
     "changes": [
       {
-        "type": "fix",
-        "message": "restore isN64Core in core-redirector.js after auto-discovery refactor"
-      }
-    ]
-  },
-  {
-    "version": "0.36.0",
-    "date": "2026-04-07",
-    "changes": [
-      {
         "type": "feat",
         "message": "auto-discover WASM core URL via /api/core-info content hash"
+      },
+      {
+        "type": "fix",
+        "message": "restore isN64Core in core-redirector.js after auto-discovery refactor"
       }
     ]
   },
@@ -78,26 +72,12 @@
     "date": "2026-04-07",
     "changes": [
       {
-        "type": "fix",
-        "message": "cache-bust WASM core URL to force rollback fix rollout"
+        "type": "feat",
+        "message": "C-level rollback netcode engine (#3) \u2014 replaces JS-level resync with prediction + replay in WASM"
       },
       {
         "type": "feat",
-        "message": "C-level rollback netcode (#3)"
-      }
-    ]
-  },
-  {
-    "version": "0.35.0",
-    "date": "2026-04-07",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "C-level rollback netcode (#3)"
-      },
-      {
-        "type": "feat",
-        "message": "C-level rollback netplay engine"
+        "message": "host-authoritative roster \u2014 per-frame input application uses canonical roster"
       },
       {
         "type": "feat",
@@ -108,108 +88,40 @@
         "message": "per-frame RNG seed sync for Smash Remix deterministic netplay"
       },
       {
-        "type": "fix",
-        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
+        "type": "feat",
+        "message": "HMAC time-limited TURN credentials for coturn"
+      },
+      {
+        "type": "feat",
+        "message": "spectator UI improvements: live stream + late-join state catch-up"
+      },
+      {
+        "type": "feat",
+        "message": "screenshot capture path for admin timeline"
+      },
+      {
+        "type": "feat",
+        "message": "session log streaming + alembic migrations for client_events table"
+      },
+      {
+        "type": "feat",
+        "message": "4-player roster coordination E2E test"
       },
       {
         "type": "fix",
         "message": "evict zombie peers to prevent roster duplication and CSS desync"
       },
       {
-        "type": "feat",
-        "message": "HMAC time-limited TURN credentials for coturn"
+        "type": "fix",
+        "message": "broadcast roster after late-join-ready (not before state transfer)"
       },
       {
         "type": "fix",
-        "message": "broadcast roster after late-join-ready, not before state transfer"
-      },
-      {
-        "type": "feat",
-        "message": "add 4-player roster coordination E2E test"
-      },
-      {
-        "type": "feat",
-        "message": "rewrite input application to use host-authoritative roster"
-      },
-      {
-        "type": "feat",
-        "message": "add host-authoritative roster state, broadcast, and message handling"
+        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
       },
       {
         "type": "fix",
-        "message": "late-join mesh reliability + coordinated roster design"
-      },
-      {
-        "type": "feat",
-        "message": "screenshot capture, admin panel, 3+ player late-join fixes"
-      },
-      {
-        "type": "fix",
-        "message": "EJS_gameID must be a number, not a string"
-      },
-      {
-        "type": "fix",
-        "message": "set EJS gameId fallback in ejs-loader.js (no server cache)"
-      },
-      {
-        "type": "fix",
-        "message": "set EJS_gameID from ROM hash at hash time, not boot time"
-      },
-      {
-        "type": "fix",
-        "message": "set EJS_gameID placeholder before EJS loads"
-      },
-      {
-        "type": "fix",
-        "message": "force preserveDrawingBuffer for PostHog canvas capture"
-      },
-      {
-        "type": "fix",
-        "message": "suppress WebGL texParameteri warnings from mupen64plus core"
-      },
-      {
-        "type": "fix",
-        "message": "silence EJS console warnings (en-US locale, gameID)"
-      },
-      {
-        "type": "fix",
-        "message": "block Emscripten SDL gamepad while preserving native access"
-      },
-      {
-        "type": "fix",
-        "message": "gamepad rebind uses rAF, skip cheats for non-SSB64 ROMs"
-      },
-      {
-        "type": "fix",
-        "message": "C-buttons from digital button mappings now reach the emulator"
-      },
-      {
-        "type": "fix",
-        "message": "sync EJS keyboard defaults with WASD, rebuild controller panel on open"
-      },
-      {
-        "type": "fix",
-        "message": "PostHog CSP wildcards and local dev support"
-      },
-      {
-        "type": "fix",
-        "message": "allow PostHog proxy domains in CSP script-src and connect-src"
-      },
-      {
-        "type": "feat",
-        "message": "PostHog client-side analytics via reverse proxy"
-      },
-      {
-        "type": "fix",
-        "message": "C-button remap, invite dropdown, ready text, mobile log flush"
-      },
-      {
-        "type": "fix",
-        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
-      },
-      {
-        "type": "fix",
-        "message": "controller settings remapping, C-stick viz, and gamepad hot-plug"
+        "message": "cache-bust WASM core URL to force rollback fix rollout"
       }
     ]
   },
@@ -248,28 +160,16 @@
     "date": "2026-04-04",
     "changes": [
       {
-        "type": "fix",
-        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
-      }
-    ]
-  },
-  {
-    "version": "0.31.1",
-    "date": "2026-04-04",
-    "changes": [
+        "type": "feat",
+        "message": "HMAC time-limited TURN credentials for coturn"
+      },
       {
         "type": "fix",
         "message": "evict zombie peers to prevent roster duplication and CSS desync"
-      }
-    ]
-  },
-  {
-    "version": "0.31.0",
-    "date": "2026-04-04",
-    "changes": [
+      },
       {
-        "type": "feat",
-        "message": "HMAC time-limited TURN credentials for coturn"
+        "type": "fix",
+        "message": "bypass AUDIO_FLAG_SUSPENDED in deterministic mode for reliable lockstep audio"
       }
     ]
   },
@@ -278,18 +178,12 @@
     "date": "2026-04-04",
     "changes": [
       {
-        "type": "fix",
-        "message": "broadcast roster after late-join-ready, not before state transfer"
-      }
-    ]
-  },
-  {
-    "version": "0.30.0",
-    "date": "2026-04-04",
-    "changes": [
-      {
         "type": "feat",
         "message": "add 4-player roster coordination E2E test"
+      },
+      {
+        "type": "fix",
+        "message": "broadcast roster after late-join-ready, not before state transfer"
       }
     ]
   },
@@ -318,18 +212,12 @@
     "date": "2026-04-04",
     "changes": [
       {
-        "type": "fix",
-        "message": "late-join mesh reliability + coordinated roster design"
-      }
-    ]
-  },
-  {
-    "version": "0.27.0",
-    "date": "2026-04-04",
-    "changes": [
-      {
         "type": "feat",
         "message": "screenshot capture, admin panel, 3+ player late-join fixes"
+      },
+      {
+        "type": "fix",
+        "message": "late-join mesh reliability + coordinated roster design"
       }
     ]
   },
@@ -338,194 +226,66 @@
     "date": "2026-04-03",
     "changes": [
       {
+        "type": "feat",
+        "message": "PostHog client-side analytics via reverse proxy"
+      },
+      {
+        "type": "fix",
+        "message": "allow PostHog proxy domains in CSP script-src and connect-src"
+      },
+      {
+        "type": "fix",
+        "message": "PostHog CSP wildcards and local dev support"
+      },
+      {
+        "type": "fix",
+        "message": "sync EJS keyboard defaults with WASD, rebuild controller panel on open"
+      },
+      {
+        "type": "fix",
+        "message": "C-buttons from digital button mappings now reach the emulator"
+      },
+      {
+        "type": "fix",
+        "message": "gamepad rebind uses rAF, skip cheats for non-SSB64 ROMs"
+      },
+      {
+        "type": "fix",
+        "message": "block Emscripten SDL gamepad while preserving native access"
+      },
+      {
+        "type": "fix",
+        "message": "silence EJS console warnings (en-US locale, gameID)"
+      },
+      {
+        "type": "fix",
+        "message": "suppress WebGL texParameteri warnings from mupen64plus core"
+      },
+      {
+        "type": "fix",
+        "message": "force preserveDrawingBuffer for PostHog canvas capture"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS_gameID placeholder before EJS loads"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS_gameID from ROM hash at hash time, not boot time"
+      },
+      {
+        "type": "fix",
+        "message": "set EJS gameId fallback in ejs-loader.js (no server cache)"
+      },
+      {
         "type": "fix",
         "message": "EJS_gameID must be a number, not a string"
       }
     ]
   },
   {
-    "version": "0.26.12",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "set EJS gameId fallback in ejs-loader.js (no server cache)"
-      }
-    ]
-  },
-  {
-    "version": "0.26.11",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "set EJS_gameID from ROM hash at hash time, not boot time"
-      }
-    ]
-  },
-  {
-    "version": "0.26.10",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "set EJS_gameID placeholder before EJS loads"
-      }
-    ]
-  },
-  {
-    "version": "0.26.9",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "force preserveDrawingBuffer for PostHog canvas capture"
-      }
-    ]
-  },
-  {
-    "version": "0.26.8",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "suppress WebGL texParameteri warnings from mupen64plus core"
-      }
-    ]
-  },
-  {
-    "version": "0.26.7",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "silence EJS console warnings (en-US locale, gameID)"
-      }
-    ]
-  },
-  {
-    "version": "0.26.6",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "block Emscripten SDL gamepad while preserving native access"
-      }
-    ]
-  },
-  {
-    "version": "0.26.5",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "gamepad rebind uses rAF, skip cheats for non-SSB64 ROMs"
-      }
-    ]
-  },
-  {
-    "version": "0.26.4",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "C-buttons from digital button mappings now reach the emulator"
-      }
-    ]
-  },
-  {
-    "version": "0.26.3",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "sync EJS keyboard defaults with WASD, rebuild controller panel on open"
-      }
-    ]
-  },
-  {
-    "version": "0.26.2",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "PostHog CSP wildcards and local dev support"
-      }
-    ]
-  },
-  {
-    "version": "0.26.1",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "allow PostHog proxy domains in CSP script-src and connect-src"
-      }
-    ]
-  },
-  {
-    "version": "0.26.0",
-    "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "PostHog client-side analytics via reverse proxy"
-      }
-    ]
-  },
-  {
     "version": "0.25.5",
     "date": "2026-04-03",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "C-button remap, invite dropdown, ready text, mobile log flush"
-      }
-    ]
-  },
-  {
-    "version": "0.25.4",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
-      }
-    ]
-  },
-  {
-    "version": "0.25.3",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "controller settings remapping, C-stick viz, and gamepad hot-plug"
-      }
-    ]
-  },
-  {
-    "version": "0.25.2",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "auto-recover from orphaned Alembic revision on startup"
-      }
-    ]
-  },
-  {
-    "version": "0.25.1",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "rebuild full changelog from git history, remove 20-entry cap"
-      }
-    ]
-  },
-  {
-    "version": "0.25.0",
-    "date": "2026-04-02",
     "changes": [
       {
         "type": "fix",
@@ -538,6 +298,26 @@
       {
         "type": "feat",
         "message": "controller settings UI panel, session log reliability fixes"
+      },
+      {
+        "type": "fix",
+        "message": "rebuild full changelog from git history, remove 20-entry cap"
+      },
+      {
+        "type": "fix",
+        "message": "auto-recover from orphaned Alembic revision on startup"
+      },
+      {
+        "type": "fix",
+        "message": "controller settings remapping, C-stick viz, and gamepad hot-plug"
+      },
+      {
+        "type": "fix",
+        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
+      },
+      {
+        "type": "fix",
+        "message": "C-button remap, invite dropdown, ready text, mobile log flush"
       }
     ]
   },
@@ -547,91 +327,43 @@
     "changes": [
       {
         "type": "fix",
-        "message": "save state relay cap and mobile guest audio unlock"
-      }
-    ]
-  },
-  {
-    "version": "0.24.8",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "Playwright shutdown crash, add 15 tests for security/feedback/logging/audit"
-      }
-    ]
-  },
-  {
-    "version": "0.24.7",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "test infrastructure overhaul \u2014 SSL tolerance, unique rooms, socket hooks, new UX tests"
-      }
-    ]
-  },
-  {
-    "version": "0.24.6",
-    "date": "2026-04-02",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "codebase health audit \u2014 25 quick wins for hygiene and correctness"
-      }
-    ]
-  },
-  {
-    "version": "0.24.5",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "pre-launch UX polish \u2014 validation, meta tags, console cleanup, copy improvements"
-      }
-    ]
-  },
-  {
-    "version": "0.24.4",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "comprehensive security hardening \u2014 session hijack, relay abuse, XSS, rate limiting"
-      }
-    ]
-  },
-  {
-    "version": "0.24.3",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "prompt feedback after game-end and leave"
-      }
-    ]
-  },
-  {
-    "version": "0.24.2",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "add first-visit callout animation on feedback FAB button"
-      }
-    ]
-  },
-  {
-    "version": "0.24.1",
-    "date": "2026-04-01",
-    "changes": [
-      {
-        "type": "fix",
         "message": "session-log rate limit too strict, ended_by overwrite on game-end"
       },
       {
         "type": "feat",
         "message": "v0.24.0 \u2014 feedback system, guaranteed session logging, PostHog integration"
+      },
+      {
+        "type": "fix",
+        "message": "add first-visit callout animation on feedback FAB button"
+      },
+      {
+        "type": "fix",
+        "message": "prompt feedback after game-end and leave"
+      },
+      {
+        "type": "fix",
+        "message": "comprehensive security hardening \u2014 session hijack, relay abuse, XSS, rate limiting"
+      },
+      {
+        "type": "fix",
+        "message": "pre-launch UX polish \u2014 validation, meta tags, console cleanup, copy improvements"
+      },
+      {
+        "type": "fix",
+        "message": "codebase health audit \u2014 25 quick wins for hygiene and correctness"
+      },
+      {
+        "type": "fix",
+        "message": "test infrastructure overhaul \u2014 SSL tolerance, unique rooms, socket hooks, new UX tests"
+      },
+      {
+        "type": "fix",
+        "message": "Playwright shutdown crash, add 15 tests for security/feedback/logging/audit"
+      },
+      {
+        "type": "fix",
+        "message": "save state relay cap and mobile guest audio unlock"
       }
     ]
   },
@@ -640,18 +372,12 @@
     "date": "2026-04-01",
     "changes": [
       {
-        "type": "fix",
-        "message": "security hardening \u2014 CF-Connecting-IP, CSP tightening, input validation"
-      }
-    ]
-  },
-  {
-    "version": "0.23.0",
-    "date": "2026-04-01",
-    "changes": [
-      {
         "type": "feat",
         "message": "SoftFloat FPU determinism \u2014 bit-exact cross-platform lockstep"
+      },
+      {
+        "type": "fix",
+        "message": "security hardening \u2014 CF-Connecting-IP, CSP tightening, input validation"
       }
     ]
   },
@@ -671,7 +397,79 @@
     "changes": [
       {
         "type": "feat",
-        "message": "v0.21.0 \u2014 Agent's Version (#2)"
+        "message": "Agent's Version (#2) \u2014 named release marking the second AI-collaboration milestone"
+      },
+      {
+        "type": "feat",
+        "message": "proactive state push for near-instant desync corrections (separate sync DC, no delta corruption)"
+      },
+      {
+        "type": "feat",
+        "message": "partial RDRAM-region resync to eliminate visible state snaps"
+      },
+      {
+        "type": "feat",
+        "message": "ROM_SHARING_ENABLED and GAME_IMAGES_ENABLED env vars + per-domain feature flags"
+      },
+      {
+        "type": "feat",
+        "message": "About / Credits modal with Kaillera lineage and version dedications"
+      },
+      {
+        "type": "feat",
+        "message": "mobile share button, compact gamepad layout, full accessibility sweep"
+      },
+      {
+        "type": "feat",
+        "message": "Agent 21 lobby badge easter egg (with name-variant detection)"
+      },
+      {
+        "type": "fix",
+        "message": "9-region kn_sync_hash \u2014 exclude volatile ps0/ps1/ps2 RDRAM regions to stop iOS/desktop false-positive desyncs"
+      },
+      {
+        "type": "fix",
+        "message": "shape-accurate VGP touch hit testing (circular buttons get circular hit areas)"
+      },
+      {
+        "type": "fix",
+        "message": "VGP responsive sizing overhaul: larger analog stick, lower A/B/Z in portrait, floating stick center, hide for spectators"
+      },
+      {
+        "type": "fix",
+        "message": "vgp-z-portrait stacking-context bug \u2014 Z button no longer intercepts A taps"
+      },
+      {
+        "type": "fix",
+        "message": "ROM sharing prompt on join + cache received ROM"
+      },
+      {
+        "type": "fix",
+        "message": "init VGP for mobile host in streaming mode + streaming layout/lag fixes"
+      },
+      {
+        "type": "fix",
+        "message": "rename rollback \u2192 resync across the codebase to match what it actually does"
+      },
+      {
+        "type": "fix",
+        "message": "remove dynamic frame delay \u2014 keep delay fixed for muscle memory consistency"
+      },
+      {
+        "type": "fix",
+        "message": "force full resync on reconnect, fix sync-state DC race condition"
+      },
+      {
+        "type": "fix",
+        "message": "improve disconnect / reconnect messaging for users"
+      },
+      {
+        "type": "fix",
+        "message": "raise client-event rate limit to 60/min"
+      },
+      {
+        "type": "fix",
+        "message": "Invite menu replaces Share with Play / Watch options in overlay and toolbar"
       }
     ]
   },
@@ -690,28 +488,16 @@
     "date": "2026-03-29",
     "changes": [
       {
-        "type": "fix",
-        "message": "pass game_id in share URLs so OG cards show game background"
-      }
-    ]
-  },
-  {
-    "version": "0.19.1",
-    "date": "2026-03-29",
-    "changes": [
+        "type": "feat",
+        "message": "add observability \u2014 client event beacon, health check, admin errors tab"
+      },
       {
         "type": "fix",
         "message": "crash protection + frontend observability instrumentation"
-      }
-    ]
-  },
-  {
-    "version": "0.19.0",
-    "date": "2026-03-29",
-    "changes": [
+      },
       {
-        "type": "feat",
-        "message": "add observability \u2014 client event beacon, health check, admin errors tab"
+        "type": "fix",
+        "message": "pass game_id in share URLs so OG cards show game background"
       }
     ]
   },
@@ -720,78 +506,40 @@
     "date": "2026-03-29",
     "changes": [
       {
-        "type": "fix",
-        "message": "lobby landscape layout \u2014 scrollable with visible footer"
-      }
-    ]
-  },
-  {
-    "version": "0.18.6",
-    "date": "2026-03-29",
-    "changes": [
+        "type": "feat",
+        "message": "custom error pages and HMAC upload tokens (#1)"
+      },
+      {
+        "type": "feat",
+        "message": "OG image generation for shareable room URLs"
+      },
+      {
+        "type": "feat",
+        "message": "Playwright-based screenshot pipeline for OG cards"
+      },
       {
         "type": "fix",
-        "message": "revert lobby to fixed footer, hide in landscape instead"
-      }
-    ]
-  },
-  {
-    "version": "0.18.5",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "landscape layout overlap in lobby"
-      }
-    ]
-  },
-  {
-    "version": "0.18.4",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
-      }
-    ]
-  },
-  {
-    "version": "0.18.3",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "switch Playwright OG generation to async API"
-      }
-    ]
-  },
-  {
-    "version": "0.18.2",
-    "date": "2026-03-29",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "safe storage fallback for privacy browsers (Brave mobile)"
-      }
-    ]
-  },
-  {
-    "version": "0.18.1",
-    "date": "2026-03-29",
-    "changes": [
+        "message": "CSP headers updated to permit OG card serving"
+      },
       {
         "type": "fix",
         "message": "exempt /static/og/ from COEP, add og:image dimensions"
-      }
-    ]
-  },
-  {
-    "version": "0.18.0",
-    "date": "2026-03-28",
-    "changes": [
+      },
       {
-        "type": "feat",
-        "message": "custom error pages, HMAC upload tokens, CSP fix (#1)"
+        "type": "fix",
+        "message": "safe storage fallback for privacy browsers (Brave mobile)"
+      },
+      {
+        "type": "fix",
+        "message": "switch Playwright OG generation to async API"
+      },
+      {
+        "type": "fix",
+        "message": "set PLAYWRIGHT_BROWSERS_PATH so non-root user finds Chromium"
+      },
+      {
+        "type": "fix",
+        "message": "lobby landscape layout \u2014 scrollable with visible footer"
       }
     ]
   },
@@ -800,18 +548,12 @@
     "date": "2026-03-28",
     "changes": [
       {
-        "type": "fix",
-        "message": "warm up Playwright browser on startup for fast first OG image"
-      }
-    ]
-  },
-  {
-    "version": "0.17.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
         "type": "feat",
         "message": "finalize OG cards with Playwright HTML screenshots"
+      },
+      {
+        "type": "fix",
+        "message": "warm up Playwright browser on startup for fast first OG image"
       }
     ]
   },
@@ -830,18 +572,12 @@
     "date": "2026-03-28",
     "changes": [
       {
-        "type": "fix",
-        "message": "scale OG card fonts larger, fix version footer alignment"
-      }
-    ]
-  },
-  {
-    "version": "0.15.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
         "type": "feat",
         "message": "scale up OG card text, arcade-style copy, spectate player matchups"
+      },
+      {
+        "type": "fix",
+        "message": "scale OG card fonts larger, fix version footer alignment"
       }
     ]
   },
@@ -890,28 +626,16 @@
     "date": "2026-03-28",
     "changes": [
       {
-        "type": "fix",
-        "message": "only bump version on main branch"
-      }
-    ]
-  },
-  {
-    "version": "0.10.1",
-    "date": "2026-03-28",
-    "changes": [
+        "type": "feat",
+        "message": "EmuLinker easter eggs \u2014 admin welcome + MOTD console log"
+      },
       {
         "type": "fix",
         "message": "add knitephox, near, and firo to admin easter egg names"
-      }
-    ]
-  },
-  {
-    "version": "0.10.0",
-    "date": "2026-03-28",
-    "changes": [
+      },
       {
-        "type": "feat",
-        "message": "EmuLinker easter eggs \u2014 admin welcome + MOTD console log"
+        "type": "fix",
+        "message": "only bump version on main branch"
       }
     ]
   },
@@ -920,33 +644,17 @@
     "date": "2026-03-28",
     "changes": [
       {
+        "type": "feat",
+        "message": "Konami Code easter egg \u2014 HELLOD00D protocol tribute"
+      },
+      {
         "type": "fix",
         "message": "swap Konami Code for HELLO protocol trigger, enhance CRT effect"
       }
     ]
   },
   {
-    "version": "0.9.0",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "feat",
-        "message": "Konami Code easter egg \u2014 HELLOD00D protocol tribute"
-      }
-    ]
-  },
-  {
     "version": "0.8.1",
-    "date": "2026-03-28",
-    "changes": [
-      {
-        "type": "fix",
-        "message": "vertical alignment of version badge in lobby footer"
-      }
-    ]
-  },
-  {
-    "version": "0.8.0",
     "date": "2026-03-28",
     "changes": [
       {
@@ -960,6 +668,10 @@
       {
         "type": "feat",
         "message": "support multiple CORS origins via comma-separated ALLOWED_ORIGIN"
+      },
+      {
+        "type": "fix",
+        "message": "vertical alignment of version badge in lobby footer"
       }
     ]
   },
@@ -1014,820 +726,104 @@
     "date": "2026-03-27",
     "changes": [
       {
-        "type": "fix",
-        "message": "all 23 E2E tests passing \u2014 test isolation and rate limit fixes"
+        "type": "feat",
+        "message": "deploy resilience: persist room state to Redis, hydrate on startup, silent reconnect across deploys"
       },
       {
         "type": "feat",
-        "message": "Socket.IO Redis adapter for cross-instance event routing"
-      },
-      {
-        "type": "fix",
-        "message": "pin Redis to manager node in Docker Swarm"
+        "message": "Socket.IO Redis adapter for cross-instance event routing in Swarm"
       },
       {
         "type": "feat",
-        "message": "self-host EmulatorJS + socket.io for cross-origin isolation"
-      },
-      {
-        "type": "fix",
-        "message": "navigator.getGamepads guard for non-secure contexts (mobile HTTP)"
-      },
-      {
-        "type": "fix",
-        "message": "crypto.randomUUID fallback for non-secure contexts (mobile HTTP)"
+        "message": "deploy-resilient sessions with persistent client IDs and reconnect tokens"
       },
       {
         "type": "feat",
-        "message": "COOP/COEP headers for crossOriginIsolated + faster resync"
+        "message": "self-hosted EmulatorJS + socket.io for cross-origin isolation (COOP/COEP)"
       },
       {
         "type": "feat",
         "message": "true analog gamepad input (Phase 1)"
       },
       {
-        "type": "fix",
-        "message": "shutdown race \u2014 set _shutting_down via signal handler, safe room deletion"
+        "type": "feat",
+        "message": "virtual gamepad for mobile streaming guests with circular hit testing"
       },
       {
         "type": "feat",
-        "message": "in-game server down shows info banner instead of hard error"
-      },
-      {
-        "type": "fix",
-        "message": "mid-game reconnect skips lobby UI, show spinner during games"
-      },
-      {
-        "type": "fix",
-        "message": "hide reconnecting banner on connect event"
-      },
-      {
-        "type": "fix",
-        "message": "guard 30s error timer in disconnect handler to prevent duplicates"
+        "message": "GGPO-style frame advantage cap to keep peers in sync"
       },
       {
         "type": "feat",
-        "message": "reconnecting spinner banner replaces toast spam"
-      },
-      {
-        "type": "fix",
-        "message": "add failure_action rollback, remove obsolete version attribute"
-      },
-      {
-        "type": "fix",
-        "message": "connect_error uses soft toast at 5s, hard error only at 30s"
-      },
-      {
-        "type": "fix",
-        "message": "delay connect_error display to avoid false alarms"
-      },
-      {
-        "type": "fix",
-        "message": "use uv run in just serve-redis command"
-      },
-      {
-        "type": "fix",
-        "message": "circular import between state.py and signaling.py"
+        "message": "audio streaming from host to guests in streaming mode"
       },
       {
         "type": "feat",
+        "message": "set-mode event for switching between lockstep and streaming"
+      },
+      {
+        "type": "feat",
+        "message": "admin page with sync log management and pin/cleanup"
+      },
+      {
+        "type": "feat",
+        "message": "automatic sync log capture on browser close via sendBeacon"
+      },
+      {
+        "type": "feat",
+        "message": "per-region RDRAM hashing for fine-grained desync detection"
+      },
+      {
+        "type": "feat",
+        "message": "delta-based incremental state transfer (XOR sync)"
+      },
+      {
+        "type": "feat",
+        "message": "drift rate tracker with exponential summary logging"
+      },
+      {
+        "type": "feat",
+        "message": "C-level resync exports for lockstep netplay (kn-sync patch)"
+      },
+      {
+        "type": "feat",
+        "message": "iOS audio routing + mobile touch guard"
+      },
+      {
+        "type": "feat",
+        "message": "WASM determinism patches: strict IEEE 754, RNG seeds, NaN canonicalization"
+      },
+      {
+        "type": "feat",
+        "message": "configurable PORT, MAX_ROOMS, MAX_SPECTATORS via env vars + .env support"
+      },
+      {
+        "type": "feat",
+        "message": "Kaillera Easter eggs and credit footer across the frontend"
+      },
+      {
+        "type": "fix",
+        "message": "Safari streaming black screen (captureStream requestFrame)"
+      },
+      {
+        "type": "fix",
+        "message": "iOS streaming video display + audio autoplay compatibility"
+      },
+      {
+        "type": "fix",
+        "message": "mid-game reconnect skips lobby UI and shows spinner"
+      },
+      {
+        "type": "fix",
         "message": "silent reconnection during games \u2014 no scary toasts"
       },
       {
-        "type": "feat",
-        "message": "persistent client ID in play.js for deploy-resilient reconnect"
-      },
-      {
-        "type": "feat",
-        "message": "zombie room cleanup \u2014 delete rooms with no live sockets after 5min"
-      },
-      {
-        "type": "feat",
-        "message": "persistent client ID + reconnect-aware open/join handlers"
-      },
-      {
-        "type": "feat",
-        "message": "persist room state to Redis on every mutation"
-      },
-      {
-        "type": "feat",
-        "message": "hydrate rooms from Redis on startup, shutdown guard prevents disconnect cascade"
-      },
-      {
-        "type": "feat",
-        "message": "add Redis state persistence module with serialization"
-      },
-      {
-        "type": "fix",
-        "message": "Swarm-compatible docker-compose in deploy resilience plan"
-      },
-      {
-        "type": "fix",
-        "message": "'no ROM' shown after refresh despite cached ROM"
-      },
-      {
-        "type": "fix",
-        "message": "ROM sharing checkbox not enabled on cached ROM reload"
-      },
-      {
-        "type": "fix",
-        "message": "JS/CSS cache policy \u2014 always revalidate via ETag"
-      },
-      {
-        "type": "feat",
-        "message": "editable player name in room lobby"
-      },
-      {
-        "type": "fix",
-        "message": "Safari streaming black screen (captureStream requestFrame broken)"
-      },
-      {
-        "type": "fix",
-        "message": "guest boot race condition + solo lockstep support"
-      },
-      {
-        "type": "fix",
-        "message": "request full resync when guest has no delta base"
-      },
-      {
-        "type": "fix",
-        "message": "add count-based log rotation (max 500 files)"
-      },
-      {
-        "type": "fix",
-        "message": "streaming late-join + log cleanup"
-      },
-      {
-        "type": "fix",
-        "message": "unmute captureStream track before sending offers"
-      },
-      {
-        "type": "fix",
-        "message": "force preserveDrawingBuffer for 60fps canvas capture"
-      },
-      {
-        "type": "fix",
-        "message": "switch back to captureStream(30) + add track state diagnostics"
-      },
-      {
-        "type": "fix",
-        "message": "use video-only stream for iOS autoplay compatibility"
-      },
-      {
-        "type": "fix",
-        "message": "use window.requestAnimationFrame for blit loop, not nativeRAF"
-      },
-      {
-        "type": "fix",
-        "message": "prefer H264 codec and restore manual frame capture"
-      },
-      {
-        "type": "fix",
-        "message": "use APISandbox.nativeRAF for blit loop instead of setInterval"
-      },
-      {
-        "type": "fix",
-        "message": "bump captureStream from 30fps to 60fps"
-      },
-      {
-        "type": "fix",
-        "message": "eliminate WebRTC renegotiation for streaming video"
-      },
-      {
-        "type": "fix",
-        "message": "use setInterval for blit loop instead of rAF"
-      },
-      {
-        "type": "fix",
-        "message": "switch canvas capture from manual to auto 30fps"
-      },
-      {
-        "type": "fix",
-        "message": "auto-declare ROM when switching from lockstep to streaming"
-      },
-      {
-        "type": "fix",
-        "message": "streaming black screen on mode switch from lockstep"
-      },
-      {
-        "type": "fix",
-        "message": "UX polish for demo readiness"
-      },
-      {
-        "type": "fix",
-        "message": "reliability hardening for long sessions and quick restarts"
-      },
-      {
-        "type": "fix",
-        "message": "streaming video not displaying on iOS + add sync logging"
-      },
-      {
-        "type": "fix",
-        "message": "virtual gamepad alignment \u2014 center D-pad, diagonal A/B, push C-buttons right"
-      },
-      {
-        "type": "fix",
-        "message": "late-join bugs, cheat application, and DRY up shared engine code"
-      },
-      {
-        "type": "feat",
-        "message": "deployment readiness \u2014 admin page, log capture, env vars"
-      },
-      {
-        "type": "feat",
-        "message": "add python-dotenv for .env file support"
-      },
-      {
-        "type": "fix",
-        "message": "resolve TDZ error in admin.js by reordering loadAll definition"
-      },
-      {
-        "type": "feat",
-        "message": "update Dockerfile with configurable env vars and logs directory"
-      },
-      {
-        "type": "feat",
-        "message": "add admin page for sync log management"
-      },
-      {
-        "type": "feat",
-        "message": "add admin API endpoints for log management with pin/cleanup"
-      },
-      {
-        "type": "feat",
-        "message": "recover and upload pending sync logs on page load"
-      },
-      {
-        "type": "feat",
-        "message": "capture sync logs on browser close via sendBeacon + localStorage"
-      },
-      {
-        "type": "feat",
-        "message": "add dedicated rate limits for debug-sync, debug-logs, sync-logs"
-      },
-      {
-        "type": "feat",
-        "message": "extract PORT, MAX_ROOMS, MAX_SPECTATORS to env vars with defaults"
-      },
-      {
-        "type": "fix",
-        "message": "pin Kaillera credit footer to bottom of lobby page"
-      },
-      {
-        "type": "feat",
-        "message": "add Kaillera Easter eggs across frontend"
-      },
-      {
-        "type": "feat",
-        "message": "use port 27888 (Kaillera client port) everywhere"
-      },
-      {
-        "type": "feat",
-        "message": "change default port to 27886 (original Kaillera port)"
-      },
-      {
-        "type": "feat",
-        "message": "iOS audio routing, ROM hash algorithm tagging, mobile touch guard"
-      },
-      {
-        "type": "fix",
-        "message": "enable --denan build pipeline with strict IEEE 754 + kn_sync exports"
-      },
-      {
-        "type": "fix",
-        "message": "restore known-good --denan core, disable denan in build pipeline"
-      },
-      {
-        "type": "fix",
-        "message": "deploy known-good --denan core from wasm-determinism branch"
-      },
-      {
-        "type": "feat",
-        "message": "add wasm-opt --denan + fix-denan.py to build pipeline"
-      },
-      {
-        "type": "fix",
-        "message": "remove guest freeze during resync \u2014 let gameplay continue"
-      },
-      {
-        "type": "fix",
-        "message": "frame cap threshold >= instead of > to actually trigger"
-      },
-      {
-        "type": "fix",
-        "message": "use raw frame advantage for cap decision, not smoothed EMA"
-      },
-      {
-        "type": "fix",
-        "message": "delta base buffer detached by Web Worker transfer"
-      },
-      {
-        "type": "feat",
-        "message": "add frame advantage to INPUT-LOG and periodic pacing summary"
-      },
-      {
-        "type": "fix",
-        "message": "raise minimum delay floor to 2 for frame pacing headroom"
-      },
-      {
-        "type": "feat",
-        "message": "frame advantage cap \u2014 skip tick when too far ahead of slowest peer"
-      },
-      {
-        "type": "feat",
-        "message": "add frame pacing state variables (GGPO-style advantage cap)"
-      },
-      {
-        "type": "feat",
-        "message": "upload sync logs to server on game end and manual dump"
-      },
-      {
-        "type": "feat",
-        "message": "add kn_sync_hash_regions WASM export to C patch"
-      },
-      {
-        "type": "feat",
-        "message": "log per-region RDRAM hashes on desync (graceful if WASM export missing)"
-      },
-      {
-        "type": "feat",
-        "message": "add cycle time to sync-hash protocol for drift diagnosis"
-      },
-      {
-        "type": "feat",
-        "message": "wire drift tracker into desync detection and sync-ok paths"
-      },
-      {
-        "type": "feat",
-        "message": "add drift rate tracker with exponential summary logging"
-      },
-      {
-        "type": "fix",
-        "message": "slice fallback getState result to prevent buffer aliasing"
-      },
-      {
-        "type": "fix",
-        "message": "guard _lastSyncState mutations \u2014 host delta base survives peer reconnects"
-      },
-      {
-        "type": "feat",
-        "message": "add _setLastSyncState helper with diagnostic logging"
-      },
-      {
-        "type": "feat",
-        "message": "auto-dump sync log on resync wait timeout"
-      },
-      {
-        "type": "feat",
-        "message": "add Logs toolbar button for mobile sync log download"
-      },
-      {
-        "type": "feat",
-        "message": "expose exportSyncLog on NetplayLockstep public API"
-      },
-      {
-        "type": "feat",
-        "message": "add sync log ring buffer and _syncLog for mobile diagnostics"
-      },
-      {
-        "type": "feat",
-        "message": "pause guest emulator during resync wait + fix host delta base"
-      },
-      {
-        "type": "fix",
-        "message": "defer 8MB WASM buffer allocation until sync is enabled"
-      },
-      {
-        "type": "fix",
-        "message": "reduce resync cooldown for C-level path, add console.log diagnostics"
-      },
-      {
-        "type": "fix",
-        "message": "smarter patch application \u2014 check for existing edits, apply main.c only"
-      },
-      {
-        "type": "fix",
-        "message": "regenerate kn-all patch against post-timing base state"
-      },
-      {
-        "type": "fix",
-        "message": "consolidate mupen64plus patches for reliable build"
-      },
-      {
-        "type": "feat",
-        "message": "integrate C-level resync into lockstep netplay JS"
-      },
-      {
-        "type": "feat",
-        "message": "add kn-sync patch \u2014 C-level resync exports for lockstep netplay"
-      },
-      {
-        "type": "fix",
-        "message": "streaming mode bugs + defer gesture prompt during ROM download"
-      },
-      {
-        "type": "fix",
-        "message": "mobile virtual gamepad broken on late join due to shared reference breakage"
-      },
-      {
-        "type": "feat",
-        "message": "production-aware cache control and reverse proxy support"
-      },
-      {
-        "type": "fix",
-        "message": "clean up iOS audio element on lockstep stop to prevent mobile audio glitch"
-      },
-      {
-        "type": "fix",
-        "message": "audio capture before peer negotiation, remove cheat verification"
-      },
-      {
-        "type": "fix",
-        "message": "await IDB cache clear before EJS boot, restore fetch/XHR on destroy"
-      },
-      {
-        "type": "feat",
-        "message": "stream emulator audio to guests in streaming mode"
-      },
-      {
-        "type": "feat",
-        "message": "set-mode event, WASM core update, build scripts, and cleanup"
-      },
-      {
-        "type": "feat",
-        "message": "mobile gamepad UX \u2014 center screen, indicator, in-game remap"
-      },
-      {
-        "type": "fix",
-        "message": "force text rendering for left/right arrows on iOS (U+FE0E)"
-      },
-      {
-        "type": "fix",
-        "message": "use consistent-sized arrow characters for D-pad (\u25b2\u25bc\u25c0\u25b6)"
-      },
-      {
         "type": "fix",
-        "message": "add Enter key as Start button in default keyboard mapping"
+        "message": "zombie room cleanup after 5 minutes of no live sockets"
       },
       {
         "type": "fix",
-        "message": "gamepad v5 \u2014 equal A/B size, bigger buttons, solid arrow icons"
-      },
-      {
-        "type": "fix",
-        "message": "ROM size mismatch on transfer + add retry button"
-      },
-      {
-        "type": "fix",
-        "message": "gamepad layout v4 \u2014 shoulders at top, C-buttons clear of R/Z, A/B gap from Start"
-      },
-      {
-        "type": "fix",
-        "message": "disable uvicorn websocket keepalive pings to avoid race condition"
-      },
-      {
-        "type": "fix",
-        "message": "virtual gamepad layout + button mapping fixes"
-      },
-      {
-        "type": "feat",
-        "message": "alpha launch prep \u2014 virtual gamepad, security hardening, QOL fixes"
-      },
-      {
-        "type": "feat",
-        "message": "add standalone virtual gamepad module for mobile streaming guests"
-      },
-      {
-        "type": "fix",
-        "message": "remove stall retry setTimeout(tick, 1) to prevent frame bursting"
-      },
-      {
-        "type": "fix",
-        "message": "remove stall retry setTimeout(tick, 1) to prevent frame bursting"
-      },
-      {
-        "type": "fix",
-        "message": "sync timeout recovery + OpenAL audio cleanup on game end"
-      },
-      {
-        "type": "fix",
-        "message": "enable lockstep audio on iOS mobile (WKWebView/FxiOS)"
-      },
-      {
-        "type": "fix",
-        "message": "start spectator video muted to bypass browser autoplay policy"
-      },
-      {
-        "type": "fix",
-        "message": "include game mode in users-updated payload and join callback"
-      },
-      {
-        "type": "fix",
-        "message": "disable EJS gamepad polling in streaming mode host"
-      },
-      {
-        "type": "fix",
-        "message": "streaming mode guests skip ROM check and emulator boot"
-      },
-      {
-        "type": "fix",
-        "message": "dismiss loading spinner for streaming mode guests"
-      },
-      {
-        "type": "fix",
-        "message": "spectator canvas stream retry and blit loop robustness"
-      },
-      {
-        "type": "fix",
-        "message": "allow spectators in lockstep mode (host streams canvas to them)"
-      },
-      {
-        "type": "fix",
-        "message": "use simple assignment for window._isSpectator to avoid TypeError"
-      },
-      {
-        "type": "fix",
-        "message": "spectator watch link now shows stream instead of single-player game"
-      },
-      {
-        "type": "fix",
-        "message": "input resend protocol and cached state sync to prevent desync"
-      },
-      {
-        "type": "feat",
-        "message": "pre-game ROM preloading, guest gesture gate, input resend protocol"
-      },
-      {
-        "type": "fix",
-        "message": "add analog deadzone and diagonal normalization for mobile virtual joystick"
-      },
-      {
-        "type": "fix",
-        "message": "resolve mobile ROM mismatch errors and virtual joystick cardinal directions"
-      },
-      {
-        "type": "feat",
-        "message": "add NaN canonicalization to MIPS FPU load/store/move instructions"
-      },
-      {
-        "type": "feat",
-        "message": "add comprehensive per-frame diagnostic logger for desync investigation"
-      },
-      {
-        "type": "feat",
-        "message": "add performance.now() interception for deterministic frame steps"
-      },
-      {
-        "type": "feat",
-        "message": "add -fno-tree-vectorize and deterministic RTC to WASM patch"
-      },
-      {
-        "type": "feat",
-        "message": "add WASM determinism patch (strict IEEE 754, RNG seeds, NaN canon)"
-      },
-      {
-        "type": "fix",
-        "message": "refresh HEAPU8 after loadState \u2014 memory growth detaches buffer"
-      },
-      {
-        "type": "feat",
-        "message": "VS mode RDRAM regions verified via visual Playwright MCP scan"
-      },
-      {
-        "type": "feat",
-        "message": "scan-verified RDRAM regions for desync detection"
-      },
-      {
-        "type": "feat",
-        "message": "RDRAM scanner \u2014 automated game state memory mapping via Playwright"
-      },
-      {
-        "type": "feat",
-        "message": "performance diagnostics \u2014 measure every sync operation"
-      },
-      {
-        "type": "fix",
-        "message": "increase sync check to 10s \u2014 getState() every 2s freezes mobile"
-      },
-      {
-        "type": "fix",
-        "message": "abandon direct RDRAM reads \u2014 use getState() RDRAM section instead"
-      },
-      {
-        "type": "feat",
-        "message": "device type detection + fix mobile input type defaults"
-      },
-      {
-        "type": "fix",
-        "message": "revert to new Uint8Array(buffer) \u2014 mod.HEAPU8 is stale after growth"
-      },
-      {
-        "type": "fix",
-        "message": "mobile memory/perf \u2014 stop allocating 256MB typed array every 2s"
-      },
-      {
-        "type": "fix",
-        "message": "check _lastRemoteFrame for late-join detection, not emuReady"
-      },
-      {
-        "type": "fix",
-        "message": "use late-join path when host is already running (ROM sharing case)"
-      },
-      {
-        "type": "fix",
-        "message": "add no-cache headers \u2014 prevents stale JS in incognito sessions"
-      },
-      {
-        "type": "fix",
-        "message": "drop config region from hash \u2014 drifts over longer sessions"
-      },
-      {
-        "type": "fix",
-        "message": "skip ROM hash check when ROM sharing accepted \u2014 ROM comes from host"
-      },
-      {
-        "type": "fix",
-        "message": "cache bust netplay-lockstep.js to force browsers to load latest"
-      },
-      {
-        "type": "fix",
-        "message": "drop 768K region from hash \u2014 intermittent false positive on mobile"
-      },
-      {
-        "type": "fix",
-        "message": "10s cooldown between resyncs \u2014 constant loadState froze all players"
-      },
-      {
-        "type": "fix",
-        "message": "copy state before storing as delta baseline \u2014 buffer was detached"
-      },
-      {
-        "type": "feat",
-        "message": "delta sync \u2014 XOR-based incremental state transfer"
-      },
-      {
-        "type": "fix",
-        "message": "instant resync \u2014 check every 2s, no backoff, no cooldown"
-      },
-      {
-        "type": "fix",
-        "message": "finalize deterministic RDRAM hash \u2014 zero false positives confirmed"
-      },
-      {
-        "type": "fix",
-        "message": "hash only deterministic RDRAM regions \u2014 eliminates false positives"
-      },
-      {
-        "type": "fix",
-        "message": "narrow hash to 0xC0000-0xD0000 \u2014 0x80000 has non-deterministic data"
-      },
-      {
-        "type": "feat",
-        "message": "real-time sync streaming to logs/live.log"
-      },
-      {
-        "type": "fix",
-        "message": "hash correct RDRAM region \u2014 game state at 0x80000-0xD0000, not 0x0A4D00"
-      },
-      {
-        "type": "feat",
-        "message": "RDRAM region scanner \u2014 find where SSB64 stores active game data"
-      },
-      {
-        "type": "fix",
-        "message": "reduce sync check frequency and add 30s resync cooldown"
-      },
-      {
-        "type": "fix",
-        "message": "reduce MAX_STALL_MS to 500ms \u2014 fighting game needs tight timing"
-      },
-      {
-        "type": "fix",
-        "message": "reduce MAX_STALL_MS from 30s to 3s \u2014 prevents long game freezes"
-      },
-      {
-        "type": "fix",
-        "message": "always try AudioWorklet instead of requiring isSecureContext"
-      },
-      {
-        "type": "fix",
-        "message": "try multiple WASM memory access methods, remove sync disable"
-      },
-      {
-        "type": "feat",
-        "message": "SSB64-targeted RDRAM hash with diagnostic byte sampling"
-      },
-      {
-        "type": "fix",
-        "message": "read live RDRAM via wasmMemory.buffer, hash game heap region only"
-      },
-      {
-        "type": "fix",
-        "message": "stop resync storm \u2014 disable sync after 10 consecutive failures"
-      },
-      {
-        "type": "fix",
-        "message": "remove 64KB cap from FNV-1a worker \u2014 was hashing only static header"
-      },
-      {
-        "type": "fix",
-        "message": "use getState() for hash instead of stale HEAPU8 direct access"
-      },
-      {
-        "type": "fix",
-        "message": "re-discover RDRAM pointer on every hash check \u2014 was caching stale address"
-      },
-      {
-        "type": "fix",
-        "message": "hash full 8MB RDRAM instead of 64KB \u2014 was missing most game state"
-      },
-      {
-        "type": "feat",
-        "message": "enhanced sync and reconnect logging for mobile desync debugging"
-      },
-      {
-        "type": "feat",
-        "message": "debug log capture and server dump for mobile desync debugging"
-      },
-      {
-        "type": "fix",
-        "message": "add 30s sync timeout with helpful message on restart stall"
-      },
-      {
-        "type": "fix",
-        "message": "remove _paused flag entirely \u2014 let background tabs tick at 1fps"
-      },
-      {
-        "type": "fix",
-        "message": "remove peer-paused broadcast \u2014 silent pause with fast-forward resume"
-      },
-      {
-        "type": "fix",
-        "message": "game freeze on alt-tab return \u2014 fast-forward _frameNum to catch up"
-      },
-      {
-        "type": "fix",
-        "message": "remove reconnect overlay \u2014 use toast notifications instead"
-      },
-      {
-        "type": "fix",
-        "message": "reconnect overlay CSS \u2014 was always visible due to missing .hidden rule"
-      },
-      {
-        "type": "fix",
-        "message": "test stability \u2014 unique room IDs, context isolation, clean disconnect"
-      },
-      {
-        "type": "fix",
-        "message": "clear reconnect overlay on game end, fix tests to use real ROM"
-      },
-      {
-        "type": "fix",
-        "message": "reconnect overlay only shows when local player has no DCs, debounce pause broadcast"
-      },
-      {
-        "type": "fix",
-        "message": "reset _paused in stop(), fix ROM transfer resume race condition"
-      },
-      {
-        "type": "feat",
-        "message": "resumable ROM transfer with staleness watchdog"
-      },
-      {
-        "type": "feat",
-        "message": "robust ROM send loop with backpressure timeout and retries"
-      },
-      {
-        "type": "feat",
-        "message": "reconnect overlay UI and intentional leave broadcast"
-      },
-      {
-        "type": "feat",
-        "message": "DC auto-reconnect via new offer/answer exchange"
-      },
-      {
-        "type": "feat",
-        "message": "reconnect state in handlePeerDisconnect with 15s timeout"
-      },
-      {
-        "type": "feat",
-        "message": "handle peer pause/resume messages, exclude paused peers from input"
-      },
-      {
-        "type": "feat",
-        "message": "broadcast pause/resume on visibilitychange"
-      },
-      {
-        "type": "feat",
-        "message": "add pause state and tick guard for background tabs"
-      },
-      {
-        "type": "feat",
-        "message": "lockstep sync performance \u2014 RDRAM hashing, async resync, star topology"
-      },
-      {
-        "type": "feat",
-        "message": "resync fix, share button, auto-spectate, mobile stability"
+        "message": "shutdown race \u2014 safe room deletion via signal handler"
       }
     ]
   },
@@ -1837,23 +833,47 @@
     "changes": [
       {
         "type": "feat",
-        "message": "enhanced info overlay, per-player delay, worker base64"
+        "message": "P2P ROM sharing \u2014 host shares ROM to guests over WebRTC, no server upload"
       },
       {
         "type": "feat",
-        "message": "input type tracking per player (keyboard/gamepad)"
-      },
-      {
-        "type": "fix",
-        "message": "loading overlay non-blocking with pointer-events: none"
+        "message": "ROM readiness tracking + sharing prompt UI"
       },
       {
         "type": "feat",
-        "message": "loading overlay during game boot/sync"
+        "message": "loading overlay during game boot/sync with progress states"
+      },
+      {
+        "type": "feat",
+        "message": "input type tracking per player (keyboard / gamepad / touch)"
+      },
+      {
+        "type": "feat",
+        "message": "per-player frame delay configuration"
+      },
+      {
+        "type": "feat",
+        "message": "enhanced info overlay with sync stats and peer details"
+      },
+      {
+        "type": "feat",
+        "message": "worker-based base64 encoding to keep main thread responsive"
+      },
+      {
+        "type": "feat",
+        "message": "deterministic timing patches for mupen64plus-next core"
+      },
+      {
+        "type": "feat",
+        "message": "save state delta sync to reduce resync bandwidth"
+      },
+      {
+        "type": "feat",
+        "message": "lockstep / streaming mode toggle in lobby"
       },
       {
         "type": "fix",
-        "message": "refresh start button when ROM sharing state changes"
+        "message": "ROM transfer reliability \u2014 resumable with backpressure timeout and retries"
       },
       {
         "type": "fix",
@@ -1861,191 +881,11 @@
       },
       {
         "type": "fix",
-        "message": "ROM transfer now works pre-game via deferred WebRTC signaling"
+        "message": "deferred WebRTC signaling so ROM transfer works pre-game"
       },
       {
         "type": "fix",
-        "message": "ROM sharing prompt not appearing + ROM readiness tracking"
-      },
-      {
-        "type": "feat",
-        "message": "implement P2P ROM sharing in play.js"
-      },
-      {
-        "type": "feat",
-        "message": "add ROM sharing UI markup and styles"
-      },
-      {
-        "type": "feat",
-        "message": "delegate unrecognized DataChannel messages to play.js callback"
-      },
-      {
-        "type": "feat",
-        "message": "add DataChannel and message delegation hooks to lockstep engine"
-      },
-      {
-        "type": "feat",
-        "message": "add rom-sharing-toggle event and ownership-transfer reset"
-      },
-      {
-        "type": "feat",
-        "message": "add rom_sharing field to Room and REST endpoint"
-      },
-      {
-        "type": "fix",
-        "message": "eliminate resync stalls and reduce sync overhead"
-      },
-      {
-        "type": "fix",
-        "message": "rebuild desync detection and resync pipeline for reliable rollback"
-      },
-      {
-        "type": "feat",
-        "message": "mobile support, UX improvements, and bug fixes"
-      },
-      {
-        "type": "fix",
-        "message": "prevent network error when restarting game in same room"
-      },
-      {
-        "type": "fix",
-        "message": "correct N64 button mapping to match mupen64plus core"
-      },
-      {
-        "type": "fix",
-        "message": "block WASM core's internal gamepad reading via navigator.getGamepads"
-      },
-      {
-        "type": "fix",
-        "message": "disable EJS gamepad handler \u2014 stop 10ms polling loop"
-      },
-      {
-        "type": "fix",
-        "message": "override Navigator.prototype.getGamepads to block EJS gamepad"
-      },
-      {
-        "type": "fix",
-        "message": "block EJS gamepad polling during emulator step"
-      },
-      {
-        "type": "fix",
-        "message": "use _simulate_input for all buttons (fixes A/Z/L/R/C not working)"
-      },
-      {
-        "type": "fix",
-        "message": "both peers measure RTT for auto delay (guest was stuck at default 2)"
-      },
-      {
-        "type": "feat",
-        "message": "RTT measurement, lockstep-ready JSON migration, delay negotiation"
-      },
-      {
-        "type": "feat",
-        "message": "frame delay picker UI with auto/manual toggle"
-      },
-      {
-        "type": "feat",
-        "message": "load custom keyboard mapping from localStorage in both engines"
-      },
-      {
-        "type": "feat",
-        "message": "remapping wizard \u2014 gamepad + keyboard capture with localStorage save"
-      },
-      {
-        "type": "feat",
-        "message": "add remap wizard HTML elements to play.html"
-      },
-      {
-        "type": "feat",
-        "message": "GamepadManager localStorage profile resolution and save/clear helpers"
-      },
-      {
-        "type": "fix",
-        "message": "restore original gamepad profile mappings after failed inversion fixes"
-      },
-      {
-        "type": "fix",
-        "message": "block EJS from reading gamepads \u2014 prevents input conflict"
-      },
-      {
-        "type": "fix",
-        "message": "invert analog Y-axis mapping for left stick and C-buttons"
-      },
-      {
-        "type": "feat",
-        "message": "lobby gamepad UI \u2014 detection, profile display, click-to-reassign"
-      },
-      {
-        "type": "feat",
-        "message": "use GamepadManager in streaming readLocalInput()"
-      },
-      {
-        "type": "feat",
-        "message": "use GamepadManager in lockstep readLocalInput()"
-      },
-      {
-        "type": "feat",
-        "message": "load gamepad-manager.js before netplay engines"
-      },
-      {
-        "type": "feat",
-        "message": "add GamepadManager \u2014 profile-based gamepad detection and mapping"
-      },
-      {
-        "type": "feat",
-        "message": "restore working foundation \u2014 patched core, security hardening, gamepad spec"
-      },
-      {
-        "type": "fix",
-        "message": "add socket.io CDN to CSP connect-src for source map"
-      },
-      {
-        "type": "fix",
-        "message": "CSP blocking EmulatorJS \u2014 add blob: and CDN to style-src/connect-src"
-      },
-      {
-        "type": "fix",
-        "message": "only click EJS start button via DOM, not API"
-      },
-      {
-        "type": "fix",
-        "message": "defer EmulatorJS loader until ROM is dropped"
-      },
-      {
-        "type": "fix",
-        "message": "prevent browser default drag behavior, improve drop zone reliability"
-      },
-      {
-        "type": "feat",
-        "message": "cache user-supplied ROM in IndexedDB for persistence"
-      },
-      {
-        "type": "feat",
-        "message": "add Dockerfile for production deployment"
-      },
-      {
-        "type": "feat",
-        "message": "remove server-hosted ROM, add drag-and-drop ROM loading"
-      },
-      {
-        "type": "feat",
-        "message": "use crypto.getRandomValues for 8-char room codes"
-      },
-      {
-        "type": "feat",
-        "message": "XSS prevention \u2014 escapeHtml, safe showError, remove domain field"
-      },
-      {
-        "type": "feat",
-        "message": "add security headers middleware (CSP, X-Frame-Options, nosniff)"
-      },
-      {
-        "type": "fix",
-        "message": "strip join codes from /list, minimize /room response, remove /sessions"
-      },
-      {
-        "type": "feat",
-        "message": "late-join, room auto-close, cleanup old netplay files"
+        "message": "refresh start button when ROM sharing state changes"
       }
     ]
   },
@@ -2054,276 +894,52 @@
     "date": "2026-03-20",
     "changes": [
       {
-        "type": "fix",
-        "message": "snap audio scheduling to prevent latency accumulation"
+        "type": "feat",
+        "message": "lockstep determinism foundation: shared RNG, frame counter, audio scheduling rework"
       },
       {
         "type": "feat",
-        "message": "AudioBufferSourceNode fallback for non-secure contexts"
-      },
-      {
-        "type": "fix",
-        "message": "override OpenAL AudioContext.resume() to prevent auto-resume"
-      },
-      {
-        "type": "fix",
-        "message": "close OpenAL AudioContext instead of suspend"
+        "message": "OpenAL bypass + clean audio re-implementation to eliminate async callback desyncs"
       },
       {
         "type": "feat",
-        "message": "resume audio on first click/keypress after game start"
-      },
-      {
-        "type": "fix",
-        "message": "kill OpenAL sources + suspend AudioContext for zero desyncs"
-      },
-      {
-        "type": "fix",
-        "message": "suspend OpenAL's AudioContext to prevent async callback desyncs"
-      },
-      {
-        "type": "fix",
-        "message": "revert format force \u2014 use Option B (float32\u2192int16 conversion)"
+        "message": "AudioBufferSourceNode fallback for non-secure contexts (mobile HTTP)"
       },
       {
         "type": "feat",
-        "message": "audio bypass \u2014 clean re-implementation from plan"
-      },
-      {
-        "type": "fix",
-        "message": "separate AudioContext \u2014 don't resume OpenAL's"
-      },
-      {
-        "type": "fix",
-        "message": "make data channel reliable for lockstep input delivery"
-      },
-      {
-        "type": "fix",
-        "message": "clean OpenAL bypass + reuse existing AudioContext"
-      },
-      {
-        "type": "fix",
-        "message": "capture audio without skipping OpenAL + fix AudioContext resume"
+        "message": "robust resync protocol with state hashing + cooldown"
       },
       {
         "type": "feat",
-        "message": "audio bypass playback in lockstep engine"
+        "message": "guest pause/resume on background tab + visibility events"
       },
       {
         "type": "feat",
-        "message": "add AudioWorklet processor for lockstep audio playback"
+        "message": "automatic spectator stream from host canvas"
       },
       {
         "type": "feat",
-        "message": "C-level audio capture bypass for deterministic lockstep"
-      },
-      {
-        "type": "fix",
-        "message": "CDN core + audio toggle (audio OFF by default for zero desyncs)"
+        "message": "ROM hash verification on join to prevent mismatched-ROM desyncs"
       },
       {
         "type": "feat",
-        "message": "compiled core with relative cycle counter for audio + sync"
-      },
-      {
-        "type": "fix",
-        "message": "double loadState \u2014 before and after enterManualMode"
-      },
-      {
-        "type": "fix",
-        "message": "loadState AFTER enterManualMode \u2014 eliminates free frame desync"
+        "message": "per-player ping/RTT display"
       },
       {
         "type": "feat",
-        "message": "relative cycle counter \u2014 deterministic + advancing time"
+        "message": "in-game chat with /commands"
       },
       {
         "type": "fix",
-        "message": "freeze time before loadState to prevent transitional desync"
-      },
-      {
-        "type": "feat",
-        "message": "use N64 CPU cycle counter for deterministic timing"
+        "message": "audio resume on first click after game start (browser autoplay policy)"
       },
       {
         "type": "fix",
-        "message": "_kn_inStep now respects audio toggle + JS patch on compiled core"
+        "message": "keep audio context alive across mode switches"
       },
       {
         "type": "fix",
-        "message": "deploy actual RWEBAUDIO compiled core (was deploying CDN core)"
-      },
-      {
-        "type": "feat",
-        "message": "call-counting deterministic timer \u2014 audio + determinism"
-      },
-      {
-        "type": "fix",
-        "message": "broadcast audio/rollback settings to all players via server"
-      },
-      {
-        "type": "feat",
-        "message": "RWEBAUDIO + FAKE_BLOCK for synchronous audio pipeline"
-      },
-      {
-        "type": "feat",
-        "message": "EMSCRIPTEN_AUDIO_FAKE_BLOCK \u2014 synchronous audio with frame steps"
-      },
-      {
-        "type": "feat",
-        "message": "pre-game audio and rollback options"
-      },
-      {
-        "type": "feat",
-        "message": "audio toggle \u2014 player chooses audio vs perfect sync"
-      },
-      {
-        "type": "fix",
-        "message": "audio driver reports fixed buffer space but still plays audio"
-      },
-      {
-        "type": "feat",
-        "message": "patch OpenAL audio driver to bypass real-time buffer queries"
-      },
-      {
-        "type": "feat",
-        "message": "proper C-level fork with latest Emscripten (async module)"
-      },
-      {
-        "type": "feat",
-        "message": "audio-aware deterministic timing"
-      },
-      {
-        "type": "feat",
-        "message": "C-level only determinism \u2014 preserves audio"
-      },
-      {
-        "type": "fix",
-        "message": "restore audio by toggling JS timing per-frame"
-      },
-      {
-        "type": "fix",
-        "message": "accept save state metadata differences as non-issues"
-      },
-      {
-        "type": "fix",
-        "message": "keep deterministic timing always-on during lockstep session"
-      },
-      {
-        "type": "feat",
-        "message": "forked core with C-level deterministic timing + auto INPUT_BASE"
-      },
-      {
-        "type": "feat",
-        "message": "deterministic lockstep timing \u2014 patched core + frame-aware sync"
-      },
-      {
-        "type": "fix",
-        "message": "also patch _emscripten_date_now for deterministic timing"
-      },
-      {
-        "type": "fix",
-        "message": "illegal invocation on performance.now in FPS counter"
-      },
-      {
-        "type": "feat",
-        "message": "patched EmulatorJS core for deterministic timing in lockstep"
-      },
-      {
-        "type": "feat",
-        "message": "strict input blocking (Kaillera-style) \u2014 never step without peer input"
-      },
-      {
-        "type": "fix",
-        "message": "clear engine status text on game end"
-      },
-      {
-        "type": "fix",
-        "message": "disable rollback by default \u2014 game state stays in sync naturally"
-      },
-      {
-        "type": "feat",
-        "message": "smart desync detection \u2014 hash game state only, not audio buffers"
-      },
-      {
-        "type": "fix",
-        "message": "hot-swap state without stopping tick loop \u2014 eliminates stutter"
-      },
-      {
-        "type": "feat",
-        "message": "Worker-based state sync via DataChannel \u2014 near-zero stutter"
-      },
-      {
-        "type": "fix",
-        "message": "pause emulator on boot + increase resync frequency to 2s"
-      },
-      {
-        "type": "fix",
-        "message": "pre-fill input buffers after resync to prevent stall"
-      },
-      {
-        "type": "feat",
-        "message": "proper resync \u2014 guest fully stops tick loop before loading state"
-      },
-      {
-        "type": "feat",
-        "message": "proper mid-game resync with host pause coordination"
-      },
-      {
-        "type": "fix",
-        "message": "desync detection restarts game instead of hot-loading state"
-      },
-      {
-        "type": "fix",
-        "message": "enable desync detection by default, check every 5s, debug end-game"
-      },
-      {
-        "type": "fix",
-        "message": "probe during gameplay not boot, guest always responds to sync"
-      },
-      {
-        "type": "feat",
-        "message": "probe HEAPU8 for dynamic regions instead of using getState()"
-      },
-      {
-        "type": "fix",
-        "message": "use getState() for desync hash instead of static HEAPU8 regions"
-      },
-      {
-        "type": "fix",
-        "message": "only show Sync toggle for host (guests can't trigger it)"
-      },
-      {
-        "type": "fix",
-        "message": "make desync detection opt-in with cheap hash"
-      },
-      {
-        "type": "feat",
-        "message": "add desync detection with on-demand resync + fix clipboard copy"
-      },
-      {
-        "type": "fix",
-        "message": "leave-room handler accepts optional data payload"
-      },
-      {
-        "type": "fix",
-        "message": "UI feedback \u2014 mode label/tooltips, centered 4:3 game, toolbar at bottom, better error handling"
-      },
-      {
-        "type": "fix",
-        "message": "spectator mid-game join now shows toolbar and sets gameRunning"
-      },
-      {
-        "type": "feat",
-        "message": "add play page controller (play.html + play.js + play.css)"
-      },
-      {
-        "type": "feat",
-        "message": "add lobby system (index.html + lobby.js + lobby.css)"
-      },
-      {
-        "type": "feat",
-        "message": "add start-game/end-game events and GET /room/{id} endpoint"
+        "message": "stable framepacing under variable network conditions"
       }
     ]
   }
