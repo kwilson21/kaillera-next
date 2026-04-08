@@ -1343,7 +1343,10 @@
     context: {
       ua: navigator.userAgent,
       mobile: /Mobi|Android/i.test(navigator.userAgent),
-      forkedCore: !!window.Module?._kn_set_deterministic,
+      // The actual emulator Module lives at window.EJS_emulator.gameManager.Module
+      // (a stale window.Module reference would always report false, mis-tagging
+      // every match as running the stock CDN core).
+      forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
       // T4: expose the transport mode in the per-match context so the
       // session log analyzer can group matches by mode without parsing logs.
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
@@ -1444,7 +1447,11 @@
             duration_sec: Math.round((performance.now() - _startTime) / 1000),
             peers: 0,
           },
-          context: { ua: navigator.userAgent, mobile: /Mobi|Android/i.test(navigator.userAgent), forkedCore: false },
+          context: {
+            ua: navigator.userAgent,
+            mobile: /Mobi|Android/i.test(navigator.userAgent),
+            forkedCore: !!window.EJS_emulator?.gameManager?.Module?._kn_set_deterministic,
+          },
         });
       } catch (_2) {}
     }
@@ -5670,6 +5677,10 @@
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         if (gameHash !== 0) {
           _syncLog(`RB-POST-RB f=${hashFrame} hash=0x${gameHash.toString(16)} (verifying restoration)`);
+          // Cache for RB-CHECK comparison (see periodic broadcast below for
+          // why — same race window applies on the post-rollback path).
+          if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
+          window._rbLocalGameHashes[hashFrame] = gameHash;
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
@@ -5742,6 +5753,26 @@
         }
         // Broadcast taint-filtered game-state hash for peer comparison.
         // This is the hash that governs RB-CHECK — full hash kept for diagnostics.
+        //
+        // Cache the hash we sent so RB-CHECK can compare against it instead
+        // of re-hashing the ring buffer when the peer's reply arrives. Without
+        // this cache, a rollback that occurs between broadcast and receipt
+        // would invalidate the local state for that frame, producing a
+        // phantom MISMATCH (host hash post-rollback vs peer hash from before
+        // the rollback). The peer's hash IS the canonical "what did this frame
+        // look like at the moment of broadcast" — so the right comparison is
+        // "what we broadcast" vs "what they broadcast" at the same instant.
+        if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
+        window._rbLocalGameHashes[hashFrame] = gameHash;
+        // Trim — keep only the most recent ~16 frames to bound memory.
+        const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
+          .map(Number)
+          .sort((a, b) => a - b);
+        if (_rbHashKeys.length > 16) {
+          for (const k of _rbHashKeys.slice(0, _rbHashKeys.length - 16)) {
+            delete window._rbLocalGameHashes[k];
+          }
+        }
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
@@ -5790,7 +5821,12 @@
         }
       }
 
-      // Check pending peer hashes — try to hash the same frame from our ring buffer
+      // Check pending peer hashes — compare against the hash we cached at
+      // broadcast time, NOT a fresh re-hash. A rollback between broadcast
+      // and receipt would change the ring buffer's state for the same frame,
+      // producing a phantom MISMATCH even though both peers agreed at the
+      // moment they broadcast. Falls back to re-hashing if we somehow don't
+      // have a cached hash (shouldn't happen on the periodic 300-frame path).
       if (window._rbPendingChecks) {
         for (const fStr of Object.keys(window._rbPendingChecks)) {
           const f = parseInt(fStr);
@@ -5798,7 +5834,8 @@
           if (f < _frameNum && f >= _frameNum - 7) {
             const peerHash = window._rbPendingChecks[fStr];
             delete window._rbPendingChecks[fStr];
-            const localHash = tickMod._kn_game_state_hash?.(f) ?? 0;
+            const cachedLocalHash = window._rbLocalGameHashes?.[f];
+            const localHash = cachedLocalHash != null ? cachedLocalHash : (tickMod._kn_game_state_hash?.(f) ?? 0);
             if (localHash === 0) {
               _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
             } else if (localHash === peerHash) {
