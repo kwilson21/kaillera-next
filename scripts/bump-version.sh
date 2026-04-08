@@ -154,5 +154,5 @@ git commit --amend --no-verify --no-edit > /dev/null
 git tag "v${NEW_VERSION}"
 
 echo ""
-echo "✓ bumped to v${NEW_VERSION} (${COMMIT_COUNT} commits in range)"
+echo "✓ bumped to v${NEW_VERSION} (${TOTAL_UNPUSHED} commits in unpushed range)"
 echo "  next: git push origin main --follow-tags"
