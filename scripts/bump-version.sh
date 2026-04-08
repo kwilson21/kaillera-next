@@ -151,7 +151,8 @@ EOF
 git add "$VERSION_FILE"
 git commit --amend --no-verify --no-edit > /dev/null
 
-git tag "v${NEW_VERSION}"
+# Annotated tag (not lightweight) so `git push --follow-tags` will pick it up.
+git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
 
 echo ""
 echo "✓ bumped to v${NEW_VERSION} (${TOTAL_UNPUSHED} commits in unpushed range)"
