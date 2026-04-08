@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 
 from src import db, state
 from src.api.og import (
@@ -70,6 +70,16 @@ _VALID_EVENT_TYPES = {
     "unhandled",
     "compat",
     "session-end",
+    # Funnel telemetry stages (P0-1) — see project_launch_readiness_plan
+    "room_created",
+    "peer_joined",
+    "webrtc_connected",
+    "rom_loaded",
+    "emulator_booted",
+    "first_frame_rendered",
+    "milestone_reached",
+    "peer_left",
+    "peer_reconnected",
 }
 
 _FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
@@ -178,15 +188,12 @@ class SecurityHeadersMiddleware:
 # ── Cache busting middleware ──────────────────────────────────────────────────
 
 
-def _asset_version() -> str:
-    """Derive a version string for cache busting static assets.
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", "static")
+_VERSION_CACHE: dict = {"key": None, "value": "dev"}
 
-    Resolution order:
-      1. GIT_VERSION env var (explicit override)
-      2. git rev-parse --short HEAD (local dev with .git)
-      3. SHA-256 of static JS/CSS file contents (Docker without .git)
-      4. "dev" fallback
-    """
+
+def _git_head_version() -> str:
+    """Resolve git HEAD short hash, or empty string if unavailable."""
     v = os.environ.get("GIT_VERSION", "").strip()
     if v:
         return v
@@ -202,19 +209,71 @@ def _asset_version() -> str:
             return result.stdout.strip()
     except Exception:
         pass
-    # Hash static file contents — works in Docker without .git
-    static_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", "static")
+    return ""
+
+
+def _static_mtime_signature() -> tuple[int, int]:
+    """Cheap signature of static asset state — (max mtime, file count).
+
+    Stat-only, no content reads. Recomputed every request, but stat is fast
+    enough that walking ~30 files is sub-millisecond on local SSD.
+    """
+    max_mtime = 0
+    count = 0
     try:
-        h = hashlib.sha256()
-        for root, _, files in sorted(os.walk(static_dir)):
-            for f in sorted(files):
-                if f.endswith((".js", ".css")):
-                    with open(os.path.join(root, f), "rb") as fh:
-                        h.update(fh.read())
-        return h.hexdigest()[:8]
+        for root, _, files in os.walk(_STATIC_DIR):
+            for f in files:
+                if f.endswith((".js", ".css", ".html", ".json")):
+                    try:
+                        st = os.stat(os.path.join(root, f))
+                        if st.st_mtime_ns > max_mtime:
+                            max_mtime = st.st_mtime_ns
+                        count += 1
+                    except OSError:
+                        pass
     except Exception:
         pass
-    return "dev"
+    return (max_mtime, count)
+
+
+def _asset_version() -> str:
+    """Derive a cache-busting version that reflects ACTUAL file state.
+
+    The CacheBustMiddleware appends `?v=<this>` to every /static/ URL in
+    served HTML. To force browsers to refetch JS/CSS after a file change,
+    this string MUST change whenever the file contents change.
+
+    Resolution order:
+      1. GIT_VERSION env var (explicit override, e.g. CI/CD pipeline)
+      2. git HEAD short hash combined with static-asset mtime signature.
+         The mtime signature catches local edits that haven't been committed
+         (the original git-HEAD-only version was stale across hot reloads
+         and caused the 2026-04-07 dev test to silently serve cached JS
+         despite a verified disk update).
+      3. Pure mtime/count signature when git is unavailable.
+      4. "dev" fallback.
+
+    Cached by mtime signature so the cost of repeated calls is just a
+    handful of stat() syscalls per request — no file reads.
+    """
+    sig = _static_mtime_signature()
+    cached = _VERSION_CACHE
+    if cached["key"] == sig:
+        return cached["value"]
+
+    git = _git_head_version()
+    if sig[0] > 0:
+        # 8-char base36 of mtime_ns is plenty unique for cache busting.
+        mtime_tag = format(sig[0] & 0xFFFFFFFFFF, "x")[-8:]
+        version = f"{git}-{mtime_tag}" if git else f"dev-{mtime_tag}"
+    elif git:
+        version = git
+    else:
+        version = "dev"
+
+    _VERSION_CACHE["key"] = sig
+    _VERSION_CACHE["value"] = version
+    return version
 
 
 # ── WASM core auto-discovery + content hash ──────────────────────────────────
@@ -276,13 +335,18 @@ def _get_core_info() -> dict:
 
 
 class CacheBustMiddleware:
-    """Appends ?v=<git-hash> to /static/ asset references in HTML responses."""
+    """Appends ?v=<version> to /static/ asset references in HTML responses.
+
+    The version is recomputed per-request via the `version_fn` callback so
+    that hot-edited files in dev (and any production rolling restart) get a
+    fresh URL immediately, without needing the server to restart.
+    """
 
     _STATIC_REF = re.compile(rb'((?:src|href)=["\'])(/static/[^"\'?\s]+)(["\'])')
 
-    def __init__(self, app, version: str) -> None:  # noqa: ANN001
+    def __init__(self, app, version_fn) -> None:  # noqa: ANN001
         self.app = app
-        self._version = version.encode()
+        self._version_fn = version_fn
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
         if scope["type"] != "http":
@@ -314,8 +378,9 @@ class CacheBustMiddleware:
                     body_chunks.append(message.get("body", b""))
                     if not message.get("more_body", False):
                         body = b"".join(body_chunks)
+                        version_bytes = self._version_fn().encode()
                         body = self._STATIC_REF.sub(
-                            lambda m: m.group(1) + m.group(2) + b"?v=" + self._version + m.group(3),
+                            lambda m: m.group(1) + m.group(2) + b"?v=" + version_bytes + m.group(3),
                             body,
                         )
                         new_headers = [
@@ -408,7 +473,9 @@ def create_app(lifespan=None) -> FastAPI:
     )
     production = os.environ.get("ALLOWED_ORIGIN", "*") != "*"
     version = _asset_version()
-    app.add_middleware(CacheBustMiddleware, version=version)
+    # Pass the function (not the value) so the middleware re-evaluates
+    # per-request — file edits propagate without a server restart.
+    app.add_middleware(CacheBustMiddleware, version_fn=_asset_version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
 
     # Load error page template
@@ -849,6 +916,7 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = request.query_params.get("match_id")
         mode = request.query_params.get("mode")
         has_desyncs = request.query_params.get("has_desyncs")
+        player_name = request.query_params.get("player_name")
         days = int(request.query_params.get("days", "30"))
         limit = min(int(request.query_params.get("limit", "50")), 200)
         offset = int(request.query_params.get("offset", "0"))
@@ -866,6 +934,9 @@ def create_app(lifespan=None) -> FastAPI:
             params.append(mode)
         if has_desyncs == "true":
             conditions.append("json_extract(summary, '$.desyncs') > 0")
+        if player_name:
+            conditions.append("player_name LIKE ?")
+            params.append(f"%{player_name}%")
 
         where = " AND ".join(conditions)
         total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM session_logs WHERE {where}", tuple(params))
@@ -893,6 +964,98 @@ def create_app(lifespan=None) -> FastAPI:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
         return entry
+
+    @app.get("/admin/api/session-logs/{log_id}/export")
+    async def admin_session_log_export(
+        log_id: int,
+        format: str = "jsonl",
+        _auth: None = Depends(_require_admin),
+    ) -> StreamingResponse:
+        """Stream a session log's entries as newline-delimited JSON.
+
+        Designed for analysis tools that load the data via Polars
+        `pl.scan_ndjson` or DuckDB `read_json_auto` — line-oriented
+        formats avoid loading the entire log_data array into memory
+        on either side and let downstream tools push down filters and
+        aggregations efficiently.
+
+        Each line is one entry from `log_data` augmented with the
+        parent session metadata (id, match_id, room, slot, player_name,
+        mode) so the analyzer can do cross-peer joins without a second
+        request. The first line is a metadata header marked
+        `{"_kind":"meta", ...}` containing the session-level summary.
+        """
+        if format != "jsonl":
+            raise HTTPException(status_code=400, detail="Only format=jsonl is supported")
+        rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        entry = rows[0]
+
+        # Pre-parse the JSON-stored fields. log_data is a JSON array of
+        # entries; summary and context are JSON objects.
+        log_data = entry.get("log_data") or "[]"
+        if isinstance(log_data, str):
+            try:
+                log_data = json.loads(log_data)
+            except json.JSONDecodeError:
+                log_data = []
+        if not isinstance(log_data, list):
+            log_data = []
+
+        summary = entry.get("summary") or "{}"
+        if isinstance(summary, str):
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                summary = json.loads(summary)
+
+        context_obj = entry.get("context") or "{}"
+        if isinstance(context_obj, str):
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                context_obj = json.loads(context_obj)
+
+        meta = {
+            "_kind": "meta",
+            "id": entry.get("id"),
+            "match_id": entry.get("match_id"),
+            "room": entry.get("room"),
+            "slot": entry.get("slot"),
+            "player_name": entry.get("player_name"),
+            "mode": entry.get("mode"),
+            "ended_by": entry.get("ended_by"),
+            "created_at": str(entry.get("created_at")),
+            "updated_at": str(entry.get("updated_at")),
+            "summary": summary,
+            "context": context_obj,
+            "entry_count": len(log_data),
+        }
+
+        # Stable per-line metadata included on every entry so the
+        # downstream analyzer can group by match/peer without joining
+        # back to the meta line.
+        per_line_meta = {
+            "session_id": entry.get("id"),
+            "match_id": entry.get("match_id"),
+            "slot": entry.get("slot"),
+        }
+
+        async def generate():
+            yield (json.dumps(meta) + "\n").encode("utf-8")
+            for row_entry in log_data:
+                if not isinstance(row_entry, dict):
+                    continue
+                # Merge per-line metadata into each entry. Don't mutate
+                # the original dict — make a shallow copy.
+                merged = {**per_line_meta, **row_entry}
+                yield (json.dumps(merged, separators=(",", ":")) + "\n").encode("utf-8")
+
+        return StreamingResponse(
+            generate(),
+            media_type="application/x-ndjson",
+            headers={
+                "content-disposition": f'attachment; filename="session-{log_id}.jsonl"',
+                "x-entry-count": str(len(log_data)),
+            },
+        )
 
     # ── Admin input-audit diff (Option G) ────────────────────────────────
     # Pulls the delta-encoded input history from both peers of a given match
@@ -1083,6 +1246,48 @@ def create_app(lifespan=None) -> FastAPI:
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 entry["context"] = json.loads(entry["context"])
         return entry
+
+    # ── Session timeline (P0-1 reliability telemetry) ────────────────────
+    # Returns all client_events for a single session (correlated by room and
+    # match_id) in chronological order. Consumed by the admin session detail
+    # view to render the per-session funnel checklist + event timeline.
+    # See docs/superpowers/specs/2026-04-07-reliability-funnel-telemetry-design.md
+
+    @app.get("/admin/api/session-timeline")
+    async def admin_session_timeline(request: Request, _auth: None = Depends(_require_admin)) -> dict:
+        match_id = request.query_params.get("match_id")
+        room = request.query_params.get("room")
+        if not match_id and not room:
+            raise HTTPException(status_code=400, detail="match_id or room required")
+
+        # A session's events span both pre-game (keyed by room, no match_id in
+        # meta) and in-game (match_id present in meta). We union both paths so
+        # the timeline shows the full sequence from room_created through
+        # milestone_reached plus any failure events.
+        conditions = []
+        params: list = []
+        if match_id:
+            conditions.append("json_extract(meta, '$.match_id') = ?")
+            params.append(match_id)
+        if room:
+            conditions.append("room = ?")
+            params.append(room)
+        where = " OR ".join(conditions)
+
+        rows = await db.query(
+            f"""SELECT id, type, message, meta, room, slot, created_at
+                FROM client_events
+                WHERE {where}
+                ORDER BY created_at ASC, id ASC
+                LIMIT 500""",
+            tuple(params),
+        )
+        # Parse meta JSON for client consumption; tolerate malformed rows.
+        for row in rows:
+            if row.get("meta") and isinstance(row["meta"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    row["meta"] = json.loads(row["meta"])
+        return {"events": rows, "count": len(rows)}
 
     # ── Screenshot routes ──────────────────────────────────────────────────
 

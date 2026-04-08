@@ -63,7 +63,7 @@
     const style = document.createElement('style');
     style.textContent = `
       .kn-feedback-fab {
-        position: fixed; bottom: 20px; right: 20px; z-index: 99999;
+        position: fixed; bottom: 20px; right: 20px; z-index: 150;
         width: 48px; height: 48px; border-radius: 50%;
         background: #e94560; color: #fff; border: none; cursor: pointer;
         font-size: 20px; display: flex; align-items: center; justify-content: center;
@@ -97,7 +97,7 @@
       .kn-feedback-callout.show { opacity: 1; }
 
       .kn-feedback-backdrop {
-        position: fixed; inset: 0; z-index: 100000;
+        position: fixed; inset: 0; z-index: 301;
         background: rgba(0,0,0,0.6); display: flex;
         align-items: center; justify-content: center;
         opacity: 0; transition: opacity 0.15s;

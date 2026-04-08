@@ -137,7 +137,7 @@ def run() -> None:
     if os.path.exists(cert_file) and os.path.exists(key_file) and not os.environ.get("DISABLE_HTTPS"):
         ssl_kwargs["ssl_certfile"] = cert_file
         ssl_kwargs["ssl_keyfile"] = key_file
-        # Extract hostname from cert for dev convenience (Tailscale HTTPS)
+        # Extract hostname from cert for dev convenience
         try:
             import subprocess as _sp
 

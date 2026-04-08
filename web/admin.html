@@ -32,6 +32,14 @@
       <div class="log-section" id="tab-logs">
         <div class="log-header">
           <h2>Session Logs</h2>
+          <div class="log-actions">
+            <input
+              id="session-search"
+              type="text"
+              placeholder="Search room code, player name, or match ID…"
+              style="width: 320px; padding: 6px 10px"
+            />
+          </div>
         </div>
         <div id="session-log-list"></div>
         <p id="no-session-logs" class="dim hidden">No session logs found.</p>
@@ -52,6 +60,13 @@
               <option value="unhandled">unhandled</option>
               <option value="compat">compat</option>
               <option value="session-end">session-end</option>
+              <option value="room_created">room_created</option>
+              <option value="peer_joined">peer_joined</option>
+              <option value="webrtc_connected">webrtc_connected</option>
+              <option value="rom_loaded">rom_loaded</option>
+              <option value="emulator_booted">emulator_booted</option>
+              <option value="first_frame_rendered">first_frame_rendered</option>
+              <option value="milestone_reached">milestone_reached</option>
             </select>
           </div>
         </div>
@@ -86,6 +101,7 @@
             <button id="viewer-close">Close</button>
           </div>
         </div>
+        <div id="viewer-extras"></div>
         <pre id="viewer-content"></pre>
       </div>
     </div>

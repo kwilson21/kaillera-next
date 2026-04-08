@@ -294,27 +294,19 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
         log.info("Room %s deleted (empty)", session_id)
         return
 
-    # Host left mid-game: close the room for everyone
-    if room.owner == sid and room.status == "playing":
-        await sio.emit("room-closed", {"reason": "host-left"}, room=session_id)
-        # Clean up all remaining members
-        for remaining_sid, (rsess, _, _) in list(_sid_to_room.items()):
-            if rsess == session_id:
-                del _sid_to_room[remaining_sid]
-                await sio.leave_room(remaining_sid, session_id)
-        rooms.pop(session_id, None)
-        await state.delete_room(session_id)
-        log.info("Room %s closed (host left mid-game)", session_id)
-        return
-
-    # Transfer ownership if the owner left (lobby only)
+    # Transfer ownership if the owner left.
+    # Mid-game: keep the room alive so the host can reconnect (persistentId path)
+    # AND so remaining peers continue play under a new owner. The previous behavior
+    # of force-closing the room on any host disconnect punished tab backgrounding,
+    # WiFi roams, and Playwright multi-tab orchestration.
     if room.owner == sid and room.players:
         new_owner_pid, new_owner_info = next(iter(room.players.items()))
         new_owner_sid = new_owner_info["socketId"]
         room.owner = new_owner_sid
         room.rom_sharing = False
-        # Move new owner to slot 0 (P1) if they're not already there
-        if new_owner_pid and room.slots.get(0) != new_owner_pid:
+        # Move new owner to slot 0 (P1) only in lobby — never reshuffle slots mid-game
+        # (would break input routing for the in-progress match).
+        if room.status != "playing" and new_owner_pid and room.slots.get(0) != new_owner_pid:
             # Remove their old slot
             old_slot = None
             for s, pid in room.slots.items():

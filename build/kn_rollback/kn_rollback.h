@@ -65,6 +65,25 @@ int kn_get_rollback_count(void);
 int kn_get_prediction_count(void);
 int kn_get_correct_predictions(void);
 int kn_get_max_depth(void);
+int kn_get_failed_rollbacks(void);
+/* T2: Misprediction breakdown by category.
+ * Writes 3 ints to out: [button_only, stick_only, both]. Returns 3. */
+int kn_get_mispred_breakdown(int *out);
+
+/* Experiment A: count of tolerance hits (rollbacks skipped due to
+ * stick tolerance window). Returns cumulative count since rollback init. */
+int kn_get_tolerance_hits(void);
+
+/* Region hashes for a specific frame's saved state (RB-CHECK divergence
+ * diagnosis). Like kn_state_region_hashes but operates on the ring slot
+ * for `frame` instead of the most recent. Returns count on success, 0 if
+ * the frame is no longer in the ring buffer. */
+int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count);
+
+/* State buffer layout: byte offset of RDRAM in the savestate buffer, and
+ * total state buffer size. Lets JS map region indices back to subsystems. */
+int kn_get_rdram_offset_in_state(void);
+int kn_get_state_buffer_size(void);
 
 /* Full state hash — hashes the saved state for a specific frame from the
  * ring buffer. Pass -1 to hash the most recent saved state. */

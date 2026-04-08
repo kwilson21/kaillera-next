@@ -125,6 +125,7 @@
   }
 
   let _bootPromise = null; // deduplication: only one poll loop at a time
+  let _funnelLastBootedMatchId = null; // P0-1 funnel: emulator_booted fires once per match
 
   function resetBootState() {
     _bootPromise = null;
@@ -163,6 +164,21 @@
           console.log(`[netplay] emulator running (frames=${frames})`);
           _bootPromise = null;
           enableMobileTouch();
+          // P0-1 funnel: emit emulator_booted once per match, and only when
+          // the core has actually run a frame (Module can exist before the
+          // game loop starts — frames=0 resolves don't represent a real boot).
+          // The match_id guard also protects against waitForEmulator being
+          // called multiple times in the same session, while still allowing
+          // a new match in the same tab to fire the event again.
+          if (
+            typeof frames === 'number' &&
+            frames >= 1 &&
+            KNState.matchId &&
+            _funnelLastBootedMatchId !== KNState.matchId
+          ) {
+            _funnelLastBootedMatchId = KNState.matchId;
+            KNEvent('emulator_booted', '', { frames });
+          }
           resolve(gm);
           return;
         }
@@ -568,15 +584,41 @@
   const unpackX = (packed) => (packed << 16) >> 16;
   const unpackY = (packed) => packed >> 16;
 
-  // Encode input as 5-int32 (20 bytes): [frame, buttons, lstick, cstick, ackFrame]
-  // ackFrame = highest frame received from peer (-1 if none).
-  // Old 4-int32 (16 byte) format still decodes — ackFrame defaults to -1.
-  const encodeInput = (frame, input, ackFrame = -1) =>
-    new Int32Array([frame, input.buttons, packStick(input.lx, input.ly), packStick(input.cx, input.cy), ackFrame]);
+  // Encode input as Int32:
+  //   Header (6 ints, 24 bytes): [frame, buttons, lstick, cstick, ackFrame, redCount]
+  //   Followed by redCount × 4 ints: [relFrameOffset, buttons, lstick, cstick]
+  //   where absoluteFrame = header.frame - relFrameOffset (always positive).
+  //
+  // Backward-compatible with the old 5-int32 format: old decoders read the
+  // first 5 fields correctly and ignore redCount. New decoders detect and
+  // process the redundancy region.
+  //
+  // Rollback redundancy (P2): each input packet carries the last N frames
+  // of local inputs. Receivers dedupe by frame tag via kn_feed_input's
+  // existing present/frame check, so duplicates are idempotent corrections.
+  const encodeInput = (frame, input, ackFrame = -1, redundantFrames = null) => {
+    const redCount = redundantFrames ? redundantFrames.length : 0;
+    const arr = new Int32Array(6 + redCount * 4);
+    arr[0] = frame;
+    arr[1] = input.buttons;
+    arr[2] = packStick(input.lx, input.ly);
+    arr[3] = packStick(input.cx, input.cy);
+    arr[4] = ackFrame;
+    arr[5] = redCount;
+    for (let i = 0; i < redCount; i++) {
+      const r = redundantFrames[i];
+      const base = 6 + i * 4;
+      arr[base] = frame - r.frame;
+      arr[base + 1] = r.buttons;
+      arr[base + 2] = packStick(r.lx, r.ly);
+      arr[base + 3] = packStick(r.cx, r.cy);
+    }
+    return arr;
+  };
 
   const decodeInput = (buf) => {
     const arr = new Int32Array(buf);
-    return {
+    const out = {
       frame: arr[0],
       buttons: arr[1],
       lx: unpackX(arr[2]),
@@ -585,6 +627,24 @@
       cy: unpackY(arr[3]),
       ackFrame: arr.length >= 5 ? arr[4] : -1,
     };
+    if (arr.length >= 6 && arr[5] > 0) {
+      const redCount = arr[5];
+      const redundant = [];
+      for (let i = 0; i < redCount; i++) {
+        const base = 6 + i * 4;
+        if (base + 4 > arr.length) break;
+        redundant.push({
+          frame: arr[0] - arr[base],
+          buttons: arr[base + 1],
+          lx: unpackX(arr[base + 2]),
+          ly: unpackY(arr[base + 2]),
+          cx: unpackX(arr[base + 3]),
+          cy: unpackY(arr[base + 3]),
+        });
+      }
+      out.redundant = redundant;
+    }
+    return out;
   };
 
   // ── Client event beacon ───────────────────────────────────────────────
@@ -592,10 +652,15 @@
   // Events land in the server's /api/client-event endpoint.
   window.KNEvent = (type, msg, meta = {}) => {
     if (!KNState?.uploadToken) return;
+    // Auto-include match_id so funnel telemetry and existing diagnostic events
+    // can correlate by match. Pre-game events (KNState.matchId === null) just
+    // omit the field; in-game events get it for free without each call site
+    // having to pass it explicitly.
+    const enrichedMeta = KNState.matchId ? { ...meta, match_id: KNState.matchId } : meta;
     const body = JSON.stringify({
       type,
       msg,
-      meta,
+      meta: enrichedMeta,
       room: KNState.room || '',
       slot: KNState.slot ?? -1,
       ua: navigator.userAgent,

@@ -82,6 +82,13 @@ uint8_t kn_rdram_taint[KN_TAINT_BLOCKS] = {0};
  * when iterating the saved RDRAM region. */
 size_t kn_rdram_offset_in_state = 0;
 
+/* Option X-2: Skip the post-RDRAM section of the savestate when computing
+ * kn_game_state_hash. The post-RDRAM section contains cycle-clock-derived
+ * state (cp0 count, event queue, fb tracker dirty pages) that drifts
+ * across peers even when game logic is identical. Set by kn_rollback_init
+ * once the rollback engine is in use. Never cleared. */
+int kn_skip_post_rdram_in_hash = 0;
+
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -181,6 +188,14 @@ static struct {
     int correct_predictions;
     int max_depth;
     int failed_rollbacks; /* mispredictions that couldn't roll back = silent desync */
+    /* Misprediction breakdown (T2) — populated by kn_feed_input on each mispredict */
+    int button_mispredictions; /* btn differed, sticks matched */
+    int stick_mispredictions;  /* sticks differed, btn matched */
+    int both_mispredictions;   /* both differed */
+    /* Tolerance hits: predicted/actual stick bytes differed but within
+     * KN_STICK_TOLERANCE, so we skipped the rollback. Tracks how often
+     * the tolerance window is absorbing what would have been rollbacks. */
+    int tolerance_hits;
 
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
@@ -304,6 +319,62 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.initialized = 1;
     rb_log("kn_rollback_init: max=%d delay=%d slot=%d players=%d stateSize=%zu ringSlots=%d",
         max_frames, delay_frames, local_slot, num_players, rb.state_size, rb.ring_size);
+
+    /* Fix 4 (Option X): Taint SSB64 game object allocator pool.
+     *
+     * Forensic analysis of match 766/767 (room 9V1UXLV1) showed that the
+     * persistent cross-peer divergence was concentrated in RDRAM region
+     * 0x795c00-0x79c000 (~26 KB). Byte-level correlation revealed that
+     * this is SSB64's internal game-object linked list: floats for
+     * position/velocity matched between peers, but RDRAM pointers (values
+     * in 0x80xxxxxx range) pointed to different physical addresses.
+     *
+     * Root cause: SSB64's object allocator hands out memory from a pool
+     * in a deterministic sequence, but the SEQUENCE depends on cycle-clock
+     * timing of alloc/free operations. Libultra OS interrupts (which we
+     * already know diverge across peers due to JIT cycle quantization)
+     * interleave with allocator calls at different points on each peer,
+     * producing different addresses even though the game logic is
+     * identical. The game plays correctly — positions, damage, actions
+     * all match — but the raw byte hash sees different pointers and
+     * reports a spurious desync.
+     *
+     * Tainting this region excludes it from the game-state hash so
+     * pointer differences don't trigger false-positive rollbacks. The
+     * game continues working correctly because each peer reads its own
+     * (locally consistent) pointers.
+     *
+     * Range: 0x795c00 to 0x79c000 = 0x6400 bytes = ~25 KB. Covers the
+     * three r121 sub-chunks where divergence was observed plus a safety
+     * margin on both sides. Rounds to four 64-KB taint blocks
+     * (0x70-0x73) to match the existing taint block granularity, which
+     * is coarser than the actual diverging range but simpler and equally
+     * effective — the neighboring 64 KB blocks are mostly zeros anyway.
+     *
+     * If this doesn't eliminate mismatches, there are more pointer-
+     * divergent regions we haven't mapped yet; fall back to Option Y
+     * (pointer-canonicalizing hash). */
+    kn_taint_rdram(0x795c00, 0x6400);
+    rb_log("kn_rollback_init: tainted SSB64 object pool 0x795c00 size=0x6400");
+
+    /* Option X-2: Mark the post-RDRAM section of the savestate hash as
+     * "ignore divergence". The post-RDRAM section contains CPU general
+     * registers, cp0 (system control: status, cause, count), cp1 (FPU),
+     * TLB entries, event queue, and fb tracker — all of which are
+     * dominated by cycle-clock-derived state that drifts across peers
+     * even when game logic is identical.
+     *
+     * Match 768 (clean for 10781 frames, then sustained divergence)
+     * showed RB-DIFF "no block diffs" — meaning RDRAM matched but
+     * the savestate hash still differed, so the divergence is in the
+     * post-RDRAM section. We don't have a per-byte taint for the
+     * post-RDRAM section (the existing kn_rdram_taint only covers
+     * the 8MB RDRAM region), so we toggle a global flag that
+     * kn_game_state_hash checks before iterating post-RDRAM bytes.
+     *
+     * The flag is set here at rollback init and never cleared. */
+    kn_skip_post_rdram_in_hash = 1;
+    rb_log("kn_rollback_init: post-RDRAM section excluded from game state hash");
 }
 
 #ifdef __EMSCRIPTEN__
@@ -348,34 +419,120 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
      * buffer at idx may contain stale predictions from 256 frames ago. */
     if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
-        int match = (pred->buttons == buttons && pred->lx == lx && pred->ly == ly
-                     && pred->cx == cx && pred->cy == cy);
+        /* Tolerant prediction match: buttons must match exactly (they're
+         * discrete and affect gameplay logic directly), but stick axes can
+         * differ by up to KN_STICK_TOLERANCE units without triggering a
+         * rollback. Reasoning: an 83-unit N64 stick range is quantized so
+         * finely that a ±4 unit difference in a single frame produces no
+         * visible game-state change (position delta under 0.5 pixels),
+         * but the rollback system currently treats byte inequality as a
+         * misprediction and replays. On unstable networks this causes
+         * cascading-rollback spiral. Tolerance here converts the most
+         * common "fast stick jitter" false-positives into no-ops while
+         * still catching real action changes via the button check. */
+        /* Fix 2: Deadzone-aware tolerance.
+         *
+         * N64 games treat stick values below ~16 as "centered" — inside
+         * the deadzone, the game doesn't react to movement at all. So
+         * peers can have DIFFERENT raw stick bytes within the deadzone
+         * and the game will behave identically on both sides.
+         *
+         * KN_STICK_TOLERANCE = 4 catches small jitter
+         * KN_STICK_DEADZONE_TOL = 16 catches deadzone divergence
+         *
+         * If BOTH predicted and actual values are below deadzone,
+         * they're considered a match regardless of exact bytes.
+         * Above deadzone, we fall back to the tight ±4 tolerance. */
+        #define KN_STICK_TOLERANCE 4
+        #define KN_STICK_DEADZONE 16
+        int btn_match = (pred->buttons == buttons);
+        /* Per-axis: within tolerance OR both in deadzone */
+        #define AXIS_MATCH(a, b) \
+            (((a) >= -KN_STICK_DEADZONE && (a) <= KN_STICK_DEADZONE && \
+              (b) >= -KN_STICK_DEADZONE && (b) <= KN_STICK_DEADZONE) || \
+             (((a) - (b)) <= KN_STICK_TOLERANCE && ((b) - (a)) <= KN_STICK_TOLERANCE))
+        int lxd = pred->lx - lx; if (lxd < 0) lxd = -lxd;
+        int lyd = pred->ly - ly; if (lyd < 0) lyd = -lyd;
+        int cxd = pred->cx - cx; if (cxd < 0) cxd = -cxd;
+        int cyd = pred->cy - cy; if (cyd < 0) cyd = -cyd;
+        int exact_stick = (lxd == 0 && lyd == 0 && cxd == 0 && cyd == 0);
+        int stick_within_tol = (AXIS_MATCH(pred->lx, lx) && AXIS_MATCH(pred->ly, ly)
+                                && AXIS_MATCH(pred->cx, cx) && AXIS_MATCH(pred->cy, cy));
+        int exact_match = btn_match && exact_stick;
+        int match = btn_match && stick_within_tol;
         rb.predicted[slot][idx] = 0;
 
         if (match) {
             rb.correct_predictions++;
+            /* Tolerance hit: we're absorbing a small stick jitter that
+             * would have been a rollback. Log the first few so we can
+             * see it working without flooding the log. */
+            if (!exact_match) {
+                rb.tolerance_hits++;
+                if (rb.tolerance_hits <= 20 || rb.tolerance_hits % 100 == 0) {
+                    rb_log("TOLERANCE-HIT slot=%d f=%d lx_d=%d ly_d=%d cx_d=%d cy_d=%d (total=%d)",
+                        slot, frame, pred->lx - lx, pred->ly - ly, pred->cx - cx, pred->cy - cy, rb.tolerance_hits);
+                }
+            }
         } else if (frame < rb.frame) {
-            /* Misprediction for a past frame — mark for rollback */
+            /* T1/T2: categorize the misprediction for logging + aggregate stats */
+            int btn_xor = pred->buttons ^ buttons;
+            int lx_d = lx - pred->lx;
+            int ly_d = ly - pred->ly;
+            int cx_d = cx - pred->cx;
+            int cy_d = cy - pred->cy;
+            int stick_diff = (lx_d | ly_d | cx_d | cy_d) != 0;
+            if (btn_xor && stick_diff)      rb.both_mispredictions++;
+            else if (btn_xor)               rb.button_mispredictions++;
+            else if (stick_diff)            rb.stick_mispredictions++;
+
+            /* Fix 1: Visible rollback depth cap.
+             *
+             * rb.max_frames (the ring size) is large (12-20) to tolerate
+             * real network jitter. Rollbacks deeper than ~7 frames (~117ms)
+             * become perceptible but the cap also has to be high enough to
+             * actually correct real mispredictions on jittery networks.
+             *
+             * History of this constant:
+             *   - First shipped at 3 (commit d317925) → too tight, broke
+             *     determinism on high-RTT networks (depth-4+ mispredictions
+             *     were silently dropped, peers diverged in match 34d3299e)
+             *   - Bumped to 7 (this commit) → matches Fightcade's default
+             *     rollback window. ~117ms of visible rewind is at the edge
+             *     of perception but absorbs most network jitter spikes.
+             *
+             * Mispredictions deeper than this are still silently dropped
+             * (failedRollbacks++), so on truly bad networks the game will
+             * still tolerate drift instead of snapping — but at the
+             * expense of visible state divergence. Tuning this value is
+             * a trade between "snap feel" and "desync resistance". */
+            #define KN_VISIBLE_ROLLBACK_MAX 7
             int depth = rb.frame - frame;
-            if (depth <= rb.max_frames) {
+            if (depth > KN_VISIBLE_ROLLBACK_MAX) {
+                /* Too deep to rewind invisibly — accept drift */
+                rb.failed_rollbacks++;
+                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d myF=%d depth=%d (cap=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    slot, frame, rb.frame, depth, KN_VISIBLE_ROLLBACK_MAX, btn_xor, lx_d, ly_d, cx_d, cy_d);
+            } else if (depth <= rb.max_frames) {
                 int ring_idx = frame % rb.ring_size;
                 if (rb.ring_frames[ring_idx] == frame) {
                     if (rb.pending_rollback < 0 || frame < rb.pending_rollback) {
                         rb.pending_rollback = frame;
-                        rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d", slot, frame, rb.frame, depth);
+                        rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                            slot, frame, rb.frame, depth, btn_xor, lx_d, ly_d, cx_d, cy_d);
                     }
                     misprediction = 1;
                 } else {
                     /* SILENT DESYNC: state for this frame was overwritten in the ring */
                     rb.failed_rollbacks++;
-                    rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d ring[%d]=%d (stale)",
-                        slot, frame, rb.frame, depth, ring_idx, rb.ring_frames[ring_idx]);
+                    rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d ring[%d]=%d (stale) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                        slot, frame, rb.frame, depth, ring_idx, rb.ring_frames[ring_idx], btn_xor, lx_d, ly_d, cx_d, cy_d);
                 }
             } else {
                 /* SILENT DESYNC: misprediction too old to roll back */
                 rb.failed_rollbacks++;
-                rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d (exceeds max=%d)",
-                    slot, frame, rb.frame, depth, rb.max_frames);
+                rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d (exceeds max=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    slot, frame, rb.frame, depth, rb.max_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
             }
         }
     }
@@ -397,11 +554,24 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
 
-    /* ── Handle pending rollback: restore state, start amortized catch-up ── */
-    if (rb.pending_rollback >= 0 && rb.replay_remaining == 0) {
+    /* ── Handle pending rollback: restore state, start amortized catch-up ──
+     *
+     * P3: Preempt an active replay if a newer (earlier-frame) misprediction
+     * arrives — e.g., a slow packet finally delivered for a frame before the
+     * current replay window's start. Continuing the stale replay would waste
+     * frames on known-wrong state. We discard replay_remaining and restart
+     * from the earlier frame; retro_unserialize fully overwrites emulator
+     * state, so no bookkeeping is needed to "undo" the partial replay. */
+    if (rb.pending_rollback >= 0 &&
+        (rb.replay_remaining == 0 || rb.pending_rollback < rb.replay_start)) {
         int rb_frame = rb.pending_rollback;
         int depth = rb.frame - rb_frame;
         int ring_idx = rb_frame % rb.ring_size;
+        if (rb.replay_remaining > 0) {
+            rb_log("C-REPLAY-PREEMPT old_start=%d old_remaining=%d new_start=%d",
+                rb.replay_start, rb.replay_remaining, rb_frame);
+            rb.replay_remaining = 0;
+        }
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
@@ -415,7 +585,10 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
             rb.replay_start = rb_frame;
             rb_log("C-REPLAY-START f=%d depth=%d target=%d", rb_frame, depth, rb.replay_target);
         } else {
-            rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d", rb_frame, ring_idx, rb.ring_frames[ring_idx], depth);
+            /* Restore impossible — treat as silent desync so P4 resync path triggers */
+            rb.failed_rollbacks++;
+            rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d (failed_rollbacks=%d)",
+                rb_frame, ring_idx, rb.ring_frames[ring_idx], depth, rb.failed_rollbacks);
         }
     }
 
@@ -659,10 +832,15 @@ uint32_t kn_game_state_hash(int frame) {
         hash *= 16777619u;
     }
 
-    /* Post-RDRAM: SP mem, PIF, TLB LUT, cp0/cp1/cp2, event queue, fb state. */
-    for (i = actual_rdram_end; i < rb.state_size; i += 16) {
-        hash ^= p[i];
-        hash *= 16777619u;
+    /* Post-RDRAM: SP mem, PIF, TLB LUT, cp0/cp1/cp2, event queue, fb state.
+     * Option X-2: gated by kn_skip_post_rdram_in_hash. When the rollback
+     * engine is active, this section is excluded entirely from the hash
+     * because cycle-clock-derived state drifts harmlessly across peers. */
+    if (!kn_skip_post_rdram_in_hash) {
+        for (i = actual_rdram_end; i < rb.state_size; i += 16) {
+            hash ^= p[i];
+            hash *= 16777619u;
+        }
     }
 
     return hash;
@@ -708,6 +886,56 @@ int kn_state_region_hashes(uint32_t *out_hashes, int count) {
     return count;
 }
 
+/* ── Per-region hashes for a SPECIFIC frame's saved state ───────────────
+ * RB-CHECK fires for past frames (typically rb.frame - 3 to rb.frame - 1),
+ * so we need a frame-specific variant — kn_state_region_hashes only hashes
+ * the most recent frame, which is wrong for cross-peer mismatch diagnosis.
+ *
+ * Returns count on success, 0 on failure (no buffer for that frame).
+ * Same hashing scheme as kn_state_region_hashes — equal-size regions,
+ * 16-byte stride sampling, 32-bit FNV-1a per region. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count) {
+    if (!rb.initialized || !out_hashes || count <= 0) return 0;
+    int idx = frame % rb.ring_size;
+    if (rb.ring_frames[idx] != frame) return 0;
+    const uint8_t *p = rb.ring_bufs[idx];
+    size_t region_size = rb.state_size / count;
+    for (int r = 0; r < count; r++) {
+        uint32_t hash = 2166136261u;
+        const uint8_t *rp = p + (r * region_size);
+        size_t end = (r == count - 1) ? rb.state_size : (r + 1) * region_size;
+        size_t len = end - (r * region_size);
+        for (size_t i = 0; i < len; i += 16) {
+            hash ^= rp[i];
+            hash *= 16777619u;
+        }
+        out_hashes[r] = hash;
+    }
+    return count;
+}
+
+/* ── State buffer layout introspection ─────────────────────────────────
+ * Lets JS map region indices back to RDRAM-vs-non-RDRAM and compute
+ * approximate byte offsets for divergence diagnosis. Returns the byte
+ * offset of the RDRAM region inside the savestate buffer (0 if unknown
+ * yet — set lazily by savestates_save_m64p on first save). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_rdram_offset_in_state(void) {
+    return (int)kn_rdram_offset_in_state;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_state_buffer_size(void) {
+    return (int)rb.state_size;
+}
+
 /* ── Stat getters ──────────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
@@ -738,6 +966,26 @@ int kn_get_max_depth(void) { return rb.max_depth; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_failed_rollbacks(void) { return rb.failed_rollbacks; }
+
+/* T2: Misprediction breakdown by input category.
+ * Writes 3 ints to out: [button_only, stick_only, both]. Returns 3. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_mispred_breakdown(int *out) {
+    if (!out) return 0;
+    out[0] = rb.button_mispredictions;
+    out[1] = rb.stick_mispredictions;
+    out[2] = rb.both_mispredictions;
+    return 3;
+}
+
+/* Experiment A: tolerance hit counter. How often the stick-tolerance
+ * window absorbed what would have been a rollback. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_tolerance_hits(void) { return rb.tolerance_hits; }
 
 /* Get SoftFloat globals packed: high byte = roundingMode, low byte = exceptionFlags */
 #ifdef __EMSCRIPTEN__

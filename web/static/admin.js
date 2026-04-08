@@ -73,6 +73,12 @@
       document.querySelectorAll('[id^="tab-"]').forEach((el) => {
         el.classList.toggle('hidden', el.id !== `tab-${target}`);
       });
+      // Close the log viewer modal when switching tabs — it's a sibling of
+      // the tab containers, so it would otherwise linger from a previous tab.
+      const viewer = document.getElementById('log-viewer');
+      if (viewer && !viewer.classList.contains('hidden')) {
+        viewer.classList.add('hidden');
+      }
     });
   });
 
@@ -136,7 +142,16 @@
   let currentSessionLogs = [];
 
   const loadSessionLogs = async () => {
-    const res = await fetch('/admin/api/session-logs?days=30&limit=100', { headers: headers() });
+    const q = ($('#session-search')?.value || '').trim();
+    const params = new URLSearchParams({ days: '30', limit: '100' });
+    if (q) {
+      // Unified server-side search across room, player_name, and match_id.
+      // Server uses LIKE so partial matches work — searching "kaz" finds
+      // "kazon", "Kazon Wilson", "KAZ123" room codes, etc. No client-side
+      // classification — let the server search all three fields.
+      params.set('q', q);
+    }
+    const res = await fetch(`/admin/api/session-logs?${params}`, { headers: headers() });
     if (!res.ok) return;
     const data = await res.json();
     currentSessionLogs = data.entries || [];
@@ -187,11 +202,15 @@
           })
           .join('');
 
+        const auditLink =
+          matchId && matchId !== 'unknown'
+            ? `<a href="#" class="input-audit-link" data-match-id="${escapeHtml(matchId)}" title="View raw input audit JSON">input audit</a>`
+            : '';
         return `<div class="room-group">
         <div class="room-header">
           <div class="room-info">
             <span class="room-code">${escapeHtml(room)}</span>
-            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}</span>
+            <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}${auditLink ? ' &middot; ' + auditLink : ''}</span>
           </div>
         </div>
         <table>
@@ -214,10 +233,12 @@
     cleanupComparison();
     const viewer = $('#log-viewer');
     const content = $('#viewer-content');
+    const extras = $('#viewer-extras');
     const title = $('#viewer-title');
     const meta = $('#viewer-meta');
     title.textContent = `Session Log #${id}`;
     meta.innerHTML = '';
+    if (extras) extras.innerHTML = '';
     content.textContent = 'Loading...';
     viewer.classList.remove('hidden');
 
@@ -229,73 +250,56 @@
     const data = await res.json();
     content.textContent = JSON.stringify(data, null, 2);
 
-    // Load screenshots for this match
+    // Load the unified session view: horizontal overview strip (events +
+    // screenshots anchored on a common time axis) + session header summary
+    // + vertical detail timeline. Screenshots are fetched in parallel with
+    // the timeline so the horizontal overview can include them inline.
+    // See project_session_timeline_vision for the direction.
+    if (extras && (data.match_id || data.room)) {
+      const [tl, ssData] = await Promise.all([
+        fetchSessionTimeline(data.match_id, data.room),
+        data.match_id
+          ? fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() })
+              .then((r) => (r.ok ? r.json() : { screenshots: [] }))
+              .catch(() => ({ screenshots: [] }))
+          : Promise.resolve({ screenshots: [] }),
+      ]);
+      const screenshots = ssData.screenshots || [];
+      if (tl?._error) {
+        extras.innerHTML = `<p style="color:#e89; margin:12px 0">Failed to load session timeline: ${escapeHtml(tl._error)}. If the endpoint is missing, the dev server may need a restart.</p>`;
+        _currentSessionContext = { data, events: [], screenshots: [] };
+      } else if (tl?.events?.length || screenshots.length) {
+        const events = tl?.events || [];
+        extras.innerHTML =
+          renderHorizontalTimeline(events, screenshots) + renderSessionHeader(events) + renderEventTimeline(events);
+        _currentSessionContext = { data, events, screenshots };
+      } else {
+        extras.innerHTML = `<p class="dim" style="margin:12px 0">No timeline events recorded for this session (session may predate funnel telemetry).</p>`;
+        _currentSessionContext = { data, events: [], screenshots: [] };
+      }
+    }
+
+    // The new horizontal Session overview (rendered in #viewer-extras above)
+    // shows screenshots inline with events on a single time axis, replacing
+    // the old per-slot grid that used to live here. We still render the
+    // side-by-side comparison player below the JSON dump because frame-by-
+    // frame visual diff is genuinely useful for desync diagnosis.
     if (data.match_id) {
       const ssRes = await fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() });
       if (ssRes.ok) {
         const ssData = await ssRes.json();
         if (ssData.screenshots?.length) {
-          // Group by slot
           const bySlot = {};
           for (const ss of ssData.screenshots) {
             (bySlot[ss.slot] ??= []).push(ss);
           }
-
-          // Timeline thumbnail rows — all players share the same x-axis
-          // so frames align vertically across slots
-          const _bucket = (f) => Math.round(f / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-
-          // Build unified timeline of all bucket positions
-          const allBuckets = new Set();
-          const slotBucketMaps = {};
-          for (const [slot, shots] of Object.entries(bySlot)) {
-            const bm = new Map();
-            for (const ss of shots) {
-              const b = _bucket(ss.frame);
-              bm.set(b, ss);
-              allBuckets.add(b);
-            }
-            slotBucketMaps[slot] = bm;
-          }
-          const timeline = [...allBuckets].sort((a, b) => a - b);
-
-          let html = '<div id="screenshot-section" style="margin-top:16px">';
-          html += '<h3 style="color:#94a3b8;margin-bottom:8px">Screenshots</h3>';
-          // Shared scrollable container so all rows scroll together
-          html += '<div id="ss-timeline" style="overflow-x:auto;padding-bottom:8px">';
-          for (const [slot] of Object.entries(bySlot).sort((a, b) => a[0] - b[0])) {
-            const bm = slotBucketMaps[slot];
-            html += `<div style="margin-bottom:8px"><div style="color:#64748b;font-size:12px;margin-bottom:4px">Player ${slot} (${bm.size} frames)</div>`;
-            html += '<div style="display:flex;gap:4px">';
-            for (const b of timeline) {
-              const ss = bm.get(b);
-              if (ss) {
-                const url = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
-                html += `<div style="flex-shrink:0;width:120px;text-align:center">`;
-                html += `<img src="${url}" title="Frame ${ss.frame}" style="height:90px;border-radius:4px;cursor:pointer;border:1px solid #1e293b" onclick="window.open('${url}','_blank')">`;
-                html += `<div style="font-size:9px;color:#475569;margin-top:2px">f${b}</div>`;
-                html += `</div>`;
-              } else {
-                html += `<div style="flex-shrink:0;width:120px;text-align:center">`;
-                html += `<div style="height:90px;border-radius:4px;border:1px dashed #1e293b"></div>`;
-                html += `<div style="font-size:9px;color:#333;margin-top:2px">f${b}</div>`;
-                html += `</div>`;
-              }
-            }
-            html += '</div></div>';
-          }
-          html += '</div>';
-
-          // Side-by-side comparison player (needs at least 2 slots)
           const slotKeys = Object.keys(bySlot).sort((a, b) => a - b);
           if (slotKeys.length >= 2) {
-            html += buildComparisonPlayer(bySlot, slotKeys);
-          }
-
-          html += '</div>';
-          content.insertAdjacentHTML('afterend', html);
-
-          if (slotKeys.length >= 2) {
+            const html =
+              '<div id="screenshot-section" style="margin-top:16px">' +
+              buildComparisonPlayer(bySlot, slotKeys) +
+              '</div>';
+            content.insertAdjacentHTML('afterend', html);
             initComparisonPlayer(bySlot, slotKeys);
           }
         }
@@ -603,7 +607,10 @@
         const metaParts = [];
         if (ctx.playerName) metaParts.push(escapeHtml(ctx.playerName));
         if (ctx.page) metaParts.push(escapeHtml(ctx.page));
-        if (ctx.roomCode) metaParts.push(`Room: ${escapeHtml(ctx.roomCode)}`);
+        if (ctx.roomCode)
+          metaParts.push(
+            `Room: <a href="#" class="feedback-session-link" data-session-search="${escapeHtml(ctx.roomCode)}">${escapeHtml(ctx.roomCode)}</a>`,
+          );
         if (ctx.mode) metaParts.push(escapeHtml(ctx.mode));
         if (ctx.peerCount != null)
           metaParts.push(`${escapeHtml(String(ctx.peerCount))} peer${ctx.peerCount !== 1 ? 's' : ''}`);
@@ -643,6 +650,20 @@
   }
 
   $('#feedback-list')?.addEventListener('click', (e) => {
+    // Room-code link → jump to Session Logs tab and search for this room
+    const sessionLink = e.target.closest('.feedback-session-link');
+    if (sessionLink) {
+      e.preventDefault();
+      e.stopPropagation();
+      const query = sessionLink.dataset.sessionSearch || '';
+      document.querySelector('.tab-bar .tab[data-tab="logs"]')?.click();
+      const searchInput = $('#session-search');
+      if (searchInput) {
+        searchInput.value = query;
+        loadSessionLogs();
+      }
+      return;
+    }
     const card = e.target.closest('.feedback-card');
     if (!card) return;
     const id = card.dataset.feedbackId;
@@ -652,8 +673,627 @@
     const viewer = $('#log-viewer');
     $('#viewer-title').textContent = `Feedback #${fb.id} — ${fb.category}`;
     $('#viewer-meta').innerHTML = fb.email ? `<span class="meta-tag">${escapeHtml(fb.email)}</span>` : '';
+    $('#viewer-extras').innerHTML = '';
     $('#viewer-content').textContent = JSON.stringify(fb, null, 2);
     viewer.classList.remove('hidden');
+    viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  // Session Logs search — debounced reload on input
+  {
+    let _searchDebounce = null;
+    $('#session-search')?.addEventListener('input', () => {
+      clearTimeout(_searchDebounce);
+      _searchDebounce = setTimeout(loadSessionLogs, 250);
+    });
+  }
+
+  // Horizontal timeline → vertical row jump. Clicking an event marker on the
+  // overview bar scrolls the matching row in the vertical timeline into view
+  // and briefly flashes it. Scrolling is done manually on the inner
+  // `#tl-scroll-container` so the outer page doesn't move — the horizontal
+  // overview stays pinned in view while the detail list scrolls independently.
+  $('#viewer-extras')?.addEventListener('click', (e) => {
+    const marker = e.target.closest('.tl-marker');
+    if (!marker) return;
+    const ts = marker.dataset.ts;
+    if (!ts) return;
+    const row = document.querySelector(`.tl-row[data-ts="${ts}"]`);
+    if (!row) return;
+    const container = document.getElementById('tl-scroll-container');
+    if (container) {
+      // Compute scroll position manually so only the inner container scrolls
+      const targetScrollTop = row.offsetTop - container.clientHeight / 2 + row.offsetHeight / 2;
+      container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+    }
+    // Brief flash highlight so the operator sees where the click landed
+    const originalOutline = row.style.outline;
+    row.style.outline = '2px solid #f5c542';
+    row.style.transition = 'outline 0.3s';
+    setTimeout(() => {
+      row.style.outline = originalOutline;
+    }, 1200);
+  });
+
+  // -- Session timeline (P0-1 reliability telemetry) ------------------------
+  // Primary view: a single chronological timeline of every signal about the
+  // session. Everything with a timestamp (events now; screenshots, input
+  // audit, feedback, sync log in future iterations) hangs off the same
+  // timeline. See memory/project_session_timeline_vision.md.
+
+  // Cached context of the last viewSessionLog render, used by the Copy button
+  // to serialize everything visible into a single shareable text blob.
+  let _currentSessionContext = null;
+
+  // Event type categories — used for colorization only, not for structural
+  // decisions. The timeline is the source of truth; these are presentation.
+  const STAGE_EVENTS = new Set([
+    'room_created',
+    'peer_joined',
+    'webrtc_connected',
+    'rom_loaded',
+    'emulator_booted',
+    'first_frame_rendered',
+    'milestone_reached',
+  ]);
+  const LIFECYCLE_EVENTS = new Set(['peer_left', 'peer_reconnected']);
+  const ERROR_TYPES = new Set([
+    'webrtc-fail',
+    'wasm-fail',
+    'stall',
+    'desync',
+    'audio-fail',
+    'unhandled',
+    'compat',
+    'reconnect',
+  ]);
+
+  // Smart relative-timestamp formatter. Keeps the display readable across
+  // sessions whose durations vary from milliseconds to minutes.
+  const formatRelTime = (ms) => {
+    if (ms == null || !Number.isFinite(ms)) return '';
+    if (ms < 1000) return `+${ms}ms`;
+    if (ms < 60000) return `+${(ms / 1000).toFixed(1)}s`;
+    const mins = Math.floor(ms / 60000);
+    const secs = Math.round((ms % 60000) / 1000);
+    return secs === 0 ? `+${mins}m` : `+${mins}m ${secs}s`;
+  };
+
+  // Slot colorization — stable per-slot color for the slot badge and row tint.
+  const SLOT_COLORS = ['#4a9eff', '#2ecc71', '#f39c12', '#e74c3c'];
+  const SLOT_ROW_TINTS = ['#10233a', '#0f2a1a', '#2a200f', '#2a0f15'];
+  const slotColor = (slot) => (slot != null && slot >= 0 && slot < SLOT_COLORS.length ? SLOT_COLORS[slot] : '#888');
+  const slotRowTint = (slot) =>
+    slot != null && slot >= 0 && slot < SLOT_ROW_TINTS.length ? SLOT_ROW_TINTS[slot] : 'transparent';
+
+  // Determine the participant slot a given event should be attributed to.
+  // Most events use `slot` directly. Lifecycle events are emitted by the host
+  // but logically belong to the peer that left/reconnected, so we pull
+  // `meta.peer_slot` for those.
+  const attributedSlot = (ev) => {
+    if (LIFECYCLE_EVENTS.has(ev.type)) {
+      return ev.meta?.peer_slot ?? null;
+    }
+    return ev.slot != null && ev.slot !== -1 ? ev.slot : null;
+  };
+
+  const fetchSessionTimeline = async (matchId, room) => {
+    const params = new URLSearchParams();
+    if (matchId) params.set('match_id', matchId);
+    if (room) params.set('room', room);
+    const res = await fetch(`/admin/api/session-timeline?${params}`, { headers: headers() });
+    if (!res.ok) {
+      return { _error: `HTTP ${res.status}: ${res.statusText || 'request failed'}` };
+    }
+    return res.json();
+  };
+
+  // Session header — a one-line summary computed from the raw timeline events.
+  // Shows room, match, duration, participants, error counts. Pure function
+  // of the event list; no state machine, no per-stage rules.
+  const renderSessionHeader = (events) => {
+    if (!events.length) return '';
+    const sorted = [...events].sort(
+      (a, b) => new Date(a.created_at + 'Z').getTime() - new Date(b.created_at + 'Z').getTime(),
+    );
+    const firstTs = new Date(sorted[0].created_at + 'Z').getTime();
+    const lastTs = new Date(sorted[sorted.length - 1].created_at + 'Z').getTime();
+    const duration = formatRelTime(lastTs - firstTs);
+
+    const participants = new Set();
+    for (const ev of sorted) {
+      const s = attributedSlot(ev);
+      if (s != null) participants.add(s);
+    }
+    // Host is implicitly participant 0 if room_created exists
+    if (sorted.some((e) => e.type === 'room_created')) participants.add(0);
+
+    const errorCounts = {};
+    let totalErrors = 0;
+    for (const ev of sorted) {
+      if (ERROR_TYPES.has(ev.type)) {
+        errorCounts[ev.type] = (errorCounts[ev.type] || 0) + 1;
+        totalErrors++;
+      }
+    }
+    const errorSummary = totalErrors
+      ? Object.entries(errorCounts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([t, n]) => `<span style="color:#e89">${escapeHtml(t)}×${n}</span>`)
+          .join(', ')
+      : '<span class="dim">no errors</span>';
+
+    const participantBadges = [...participants]
+      .sort((a, b) => a - b)
+      .map(
+        (s) =>
+          `<span style="display:inline-block; padding:2px 8px; background:${slotColor(s)}; color:#000; border-radius:3px; font-weight:bold; font-size:11px; margin-right:4px">P${s}</span>`,
+      )
+      .join('');
+
+    return `<div style="background:#0f0f1e; border:1px solid #2a2a40; border-radius:6px; padding:12px; margin:12px 0">
+      <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:13px">
+        <div><strong>Duration:</strong> ${escapeHtml(duration || '—')}</div>
+        <div><strong>Events:</strong> ${escapeHtml(String(sorted.length))}</div>
+        <div><strong>Participants:</strong> ${participantBadges || '<span class="dim">none</span>'}</div>
+        <div><strong>Errors:</strong> ${errorSummary}</div>
+      </div>
+    </div>`;
+  };
+
+  // Horizontal overview timeline — DAW-style. Linear time scale: gridlines
+  // are at fixed uniform intervals (every N seconds), and events/screenshots
+  // land at their actual time positions relative to the grid. The pixel/sec
+  // scale is adaptive: short sessions get a generous scale so events spread
+  // out, long sessions get a compact scale so total scroll distance stays
+  // manageable. Tuned so screenshots (taken every 5s) don't overlap.
+  // Left pad needs to clear the sticky slot label badge (~36px wide + 8px
+  // gutter on each side ≈ 60px). 80px gives the first thumbnail extra
+  // breathing room so it isn't visually crowded by the badge.
+  const TIMELINE_PAD_LEFT = 80;
+  const TIMELINE_PAD_RIGHT = 120;
+  const THUMB_HEIGHT = 100;
+  const MARKER_SIZE = 14;
+
+  // Choose px/sec by total session duration.
+  // Constraint: screenshots come every 5 seconds and thumbs are ~133px wide.
+  // To have a visible gap (~50px) between adjacent thumbs we need at least
+  // (133+50)/5 = 37 px/sec. The floor below ensures thumbs always have
+  // breathing room regardless of session duration. Long sessions just have
+  // longer total scroll distance — that's the honest tradeoff.
+  const pickPxPerSec = (spanSec) => {
+    if (spanSec < 30) return 100;
+    if (spanSec < 120) return 60;
+    return 40;
+  };
+
+  // Choose tick interval so ticks land roughly every 200-300px on screen,
+  // regardless of session length. Multiplied with px/sec to get pixel spacing.
+  const pickTickIntervalSec = (spanSec, pxPerSec) => {
+    // Aim for ticks every ~250 px
+    const idealSec = 250 / pxPerSec;
+    // Snap to a clean human-readable interval
+    const clean = [1, 2, 5, 10, 15, 30, 60, 120, 300];
+    for (const c of clean) {
+      if (c >= idealSec) return c;
+    }
+    return clean[clean.length - 1];
+  };
+
+  const renderHorizontalTimeline = (events, screenshots) => {
+    if (!events.length && !screenshots.length) return '';
+
+    // Compute the session time span from both events and screenshots so the
+    // bar always spans the full session.
+    const allTs = [];
+    for (const ev of events) allTs.push(new Date(ev.created_at + 'Z').getTime());
+    for (const ss of screenshots) allTs.push(new Date(ss.created_at + 'Z').getTime());
+    const minTs = Math.min(...allTs);
+    const maxTs = Math.max(...allTs);
+    const span = Math.max(maxTs - minTs, 1);
+    const spanSec = span / 1000;
+
+    // Adaptive scale: chosen by session duration. See pickPxPerSec.
+    const TIMELINE_PX_PER_SEC = pickPxPerSec(spanSec);
+
+    // Linear time→pixel mapping. Every timestamp has a deterministic x
+    // position independent of any other event.
+    const contentWidth = Math.max(
+      1200,
+      Math.ceil(spanSec * TIMELINE_PX_PER_SEC) + TIMELINE_PAD_LEFT + TIMELINE_PAD_RIGHT,
+    );
+    const posLeft = (ts) => TIMELINE_PAD_LEFT + ((ts - minTs) / 1000) * TIMELINE_PX_PER_SEC;
+
+    // Group screenshots by slot so each player gets their own stacked row.
+    const bySlot = {};
+    for (const ss of screenshots) {
+      (bySlot[ss.slot ?? 0] ??= []).push(ss);
+    }
+    const slotKeys = Object.keys(bySlot)
+      .map((s) => Number(s))
+      .sort((a, b) => a - b);
+
+    // Render one screenshot row per slot. Thumbnails are LEFT-aligned at
+    // their timestamp (the left edge of the image = the moment the shot was
+    // taken) — intuitive to read, and avoids the negative-left truncation
+    // that centered thumbs had at the start of the timeline.
+    // Slot labels are 0-indexed (P0, P1, P2, P3) to match the rest of the
+    // admin UI (session log table, comparison player).
+    //
+    // Dedup: pre-fix sessions sometimes captured the same logical frame
+    // twice (off-by-1 frame numbers, same slot). Collapse adjacent shots
+    // within 2 seconds of each other in the same slot so they don't render
+    // on top of each other. New sessions don't have this issue.
+    const DEDUP_WINDOW_MS = 2000;
+    const screenshotRows = slotKeys
+      .map((slot) => {
+        const sortedShots = bySlot[slot].sort(
+          (a, b) => new Date(a.created_at + 'Z').getTime() - new Date(b.created_at + 'Z').getTime(),
+        );
+        const shots = [];
+        let lastTs = -Infinity;
+        for (const s of sortedShots) {
+          const ts = new Date(s.created_at + 'Z').getTime();
+          if (ts - lastTs >= DEDUP_WINDOW_MS) {
+            shots.push(s);
+            lastTs = ts;
+          }
+        }
+        const border = slotColor(slot);
+        const thumbs = shots
+          .map((ss) => {
+            const ts = new Date(ss.created_at + 'Z').getTime();
+            const left = posLeft(ts);
+            const url = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
+            const relLabel = formatRelTime(ts - minTs);
+            const title = `P${slot} · frame ${ss.frame} · ${relLabel}`;
+            return `<div
+              class="tl-thumb-wrap"
+              data-ts="${ts}"
+              title="${escapeHtml(title)}"
+              style="position:absolute; left:${left}px; top:4px; z-index:2"
+            >
+              <img
+                src="${url}"
+                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${border}; border-radius:4px; cursor:pointer"
+                onclick="window.open('${url}','_blank')"
+              />
+              <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums; max-width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">f${escapeHtml(String(ss.frame))}</div>
+            </div>`;
+          })
+          .join('');
+        return `<div style="position:relative; height:${THUMB_HEIGHT + 24}px; margin-bottom:8px">
+          <div style="position:sticky; left:8px; z-index:4; display:inline-block; padding:3px 12px; background:${border}; color:#000; font-weight:bold; font-size:12px; border-radius:3px">P${slot}</div>
+          ${thumbs}
+        </div>`;
+      })
+      .join('');
+
+    // Event markers — circles centered on the axis line. Timestamps are
+    // carried by the tick labels below, so markers stay visually clean
+    // (tooltip still shows full details on hover).
+    const MARKER_BAR_HEIGHT = 72;
+    const AXIS_Y = 20; // axis line y position inside the marker bar
+    const eventMarkers = events
+      .map((ev) => {
+        const ts = new Date(ev.created_at + 'Z').getTime();
+        const left = posLeft(ts);
+        const isStage = STAGE_EVENTS.has(ev.type);
+        const isLifecycle = LIFECYCLE_EVENTS.has(ev.type);
+        const isErr = ERROR_TYPES.has(ev.type);
+        const fill = isStage ? '#2ecc71' : isLifecycle ? '#f5c542' : isErr ? '#e74c3c' : '#888';
+        const slot = attributedSlot(ev);
+        const border = slot != null ? slotColor(slot) : '#444';
+        const slotLabel = slot != null ? ` (P${slot})` : '';
+        const rel = formatRelTime(ts - minTs);
+        const title = `${ev.type}${slotLabel} ${rel}${ev.message ? ' — ' + ev.message : ''}`;
+        return `<div
+          class="tl-marker"
+          data-ts="${ts}"
+          title="${escapeHtml(title)}"
+          style="position:absolute; left:${left}px; top:${AXIS_Y}px; transform:translate(-50%, -50%); width:${MARKER_SIZE}px; height:${MARKER_SIZE}px; background:${fill}; border:2px solid ${border}; border-radius:50%; cursor:pointer; box-shadow:0 0 0 2px #0f0f1e; z-index:3"
+        ></div>`;
+      })
+      .join('');
+
+    // DAW-style ruler with major+minor ticks. Shows elapsed time and, when
+    // frame correlation is available, the inferred frame number. Tick marks
+    // are distributed across "real time" segments (non-compressed stretches);
+    // compressed gap regions show a single labeled band instead of ticks.
+    //
+    // Frame correlation: use the screenshots' actual frame numbers as the
+    // ground truth. For each pair of adjacent screenshot observations we
+    // know (ts, frame), and can linearly interpolate frame-at-time in
+    // between. Falls back to the emulator_booted event (frames=1) + 60fps
+    // if no screenshots exist. If neither, ruler only shows time.
+    const frameAnchors = []; // { ts, frame } sorted by ts
+    for (const ss of screenshots) {
+      frameAnchors.push({ ts: new Date(ss.created_at + 'Z').getTime(), frame: ss.frame });
+    }
+    for (const ev of events) {
+      if (ev.type === 'emulator_booted' && typeof ev.meta?.frames === 'number') {
+        frameAnchors.push({ ts: new Date(ev.created_at + 'Z').getTime(), frame: ev.meta.frames });
+      }
+    }
+    frameAnchors.sort((a, b) => a.ts - b.ts);
+    // Dedup exact-timestamp duplicates keeping the lowest frame
+    const dedupAnchors = [];
+    for (const a of frameAnchors) {
+      if (!dedupAnchors.length || dedupAnchors[dedupAnchors.length - 1].ts !== a.ts) {
+        dedupAnchors.push(a);
+      }
+    }
+    // frameAtTs: linear interpolation between nearest anchors. Returns null
+    // outside the anchored range — pre-game time has no frame number, and
+    // extrapolating past the end is misleading. Only frame numbers we can
+    // actually correlate to data should be displayed on the ruler.
+    const frameAtTs = (ts) => {
+      if (!dedupAnchors.length) return null;
+      if (ts < dedupAnchors[0].ts) return null;
+      if (ts > dedupAnchors[dedupAnchors.length - 1].ts) return null;
+      for (let i = 1; i < dedupAnchors.length; i++) {
+        if (dedupAnchors[i].ts >= ts) {
+          const a = dedupAnchors[i - 1];
+          const b = dedupAnchors[i];
+          if (b.ts === a.ts) return a.frame;
+          const frac = (ts - a.ts) / (b.ts - a.ts);
+          return Math.round(a.frame + (b.frame - a.frame) * frac);
+        }
+      }
+      return null;
+    };
+
+    // Build tick marks at fixed uniform intervals relative to minTs. Each
+    // tick sits at an exact `minTs + i * interval` timestamp, placed at its
+    // linearly-mapped x position. Events and screenshots land between ticks
+    // at their actual time positions — exactly like a DAW ruler. Interval
+    // is chosen to land roughly every ~250 px on screen.
+    const TICK_INTERVAL_SEC = pickTickIntervalSec(spanSec, TIMELINE_PX_PER_SEC);
+    const ticks = [];
+    const tickIntervalMs = TICK_INTERVAL_SEC * 1000;
+    // Start at tick 0 (minTs itself, i.e. T+0) and emit every interval up
+    // to and including the end of the session.
+    for (let i = 0; i * tickIntervalMs <= span; i++) {
+      const ts = minTs + i * tickIntervalMs;
+      ticks.push({ x: posLeft(ts), ts });
+    }
+    // Ensure the absolute end-of-session gets a tick even if it doesn't fall
+    // on an interval boundary (nice for "this is where the data ends").
+    const lastTickTs = minTs + (ticks.length - 1) * tickIntervalMs;
+    if (lastTickTs < maxTs) {
+      ticks.push({ x: posLeft(maxTs), ts: maxTs });
+    }
+
+    // Render ruler ticks INSIDE the marker bar, positioned below the axis
+    // line. Each tick is a short vertical notch under the axis plus a
+    // two-line label: elapsed time (top) and frame number (bottom).
+    const TICK_NOTCH_TOP = AXIS_Y + MARKER_SIZE / 2 + 4;
+    const TICK_NOTCH_HEIGHT = 6;
+    const TICK_TIME_LABEL_Y = TICK_NOTCH_TOP + TICK_NOTCH_HEIGHT + 2;
+    const TICK_FRAME_LABEL_Y = TICK_TIME_LABEL_Y + 13;
+    const ruler = ticks
+      .map((t) => {
+        const rel = formatRelTime(t.ts - minTs);
+        const frame = frameAtTs(t.ts);
+        const frameLabel = frame != null ? `f${frame}` : '';
+        return `<div style="position:absolute; left:${t.x}px; top:${TICK_NOTCH_TOP}px; width:1px; height:${TICK_NOTCH_HEIGHT}px; background:#666; pointer-events:none"></div>
+          <div style="position:absolute; left:${t.x}px; top:${TICK_TIME_LABEL_Y}px; transform:translateX(-50%); font-size:10px; color:#aaa; white-space:nowrap; font-variant-numeric:tabular-nums; pointer-events:none">${escapeHtml(rel)}</div>
+          ${frameLabel ? `<div style="position:absolute; left:${t.x}px; top:${TICK_FRAME_LABEL_Y}px; transform:translateX(-50%); font-size:9px; color:#666; white-space:nowrap; font-variant-numeric:tabular-nums; pointer-events:none">${escapeHtml(frameLabel)}</div>` : ''}`;
+      })
+      .join('');
+    // Full-height faint gridlines at each tick position. Rendered as a
+    // background layer spanning every row (screenshots + marker bar), so
+    // events and screenshots can be visually aligned to the ruler above.
+    const gridlines = ticks
+      .map(
+        (t) =>
+          `<div style="position:absolute; left:${t.x}px; top:0; bottom:0; width:1px; background:#1a1a2e; pointer-events:none; z-index:0"></div>`,
+      )
+      .join('');
+
+    const eventCount = events.length;
+    const ssCount = screenshots.length;
+    const viewportWidth = window.innerWidth || 1200;
+    const scrollNote = contentWidth > viewportWidth - 100 ? ' (scroll horizontally →)' : '';
+
+    return `<div style="background:#0f0f1e; border:1px solid #2a2a40; border-radius:6px; padding:16px; margin:12px 0">
+      <div style="font-weight:bold; margin-bottom:6px; font-size:14px">Session overview</div>
+      <div class="dim" style="font-size:12px; margin-bottom:12px">
+        ${escapeHtml(String(eventCount))} event${eventCount === 1 ? '' : 's'} ·
+        ${escapeHtml(String(ssCount))} screenshot${ssCount === 1 ? '' : 's'} across ${escapeHtml(String(slotKeys.length))} slot${slotKeys.length === 1 ? '' : 's'} ·
+        click a marker to jump to its row below${scrollNote}
+      </div>
+
+      <div style="overflow-x:auto; overflow-y:hidden; padding-bottom:8px; border:1px solid #1a1a2e; border-radius:4px; background:#07070f">
+        <div style="position:relative; width:${contentWidth}px; min-width:100%">
+          ${gridlines}
+
+          ${screenshotRows}
+
+          <div style="position:relative; height:${MARKER_BAR_HEIGHT}px; margin-top:8px; background:#131326; border-top:1px solid #2a2a40; border-bottom:1px solid #2a2a40">
+            <div style="position:absolute; left:0; right:0; top:${AXIS_Y}px; height:2px; background:#2a2a40"></div>
+            ${eventMarkers}
+            ${ruler}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  };
+
+  // Primary vertical timeline renderer. Pure function of the event list —
+  // no state machine, no per-stage rules. Every event becomes a row, in
+  // order, with slot-colored background and a clear type badge.
+  //
+  // Future extension points (see project_session_timeline_vision):
+  //   - feedback:    interleave rows with {type:'feedback', message, ts}
+  //   - input audit: anchor at first_frame_rendered with a collapsible block
+  //   - sync log:    interleave per-frame sync entries
+  // The renderer already operates on a flat chronological list, so adding
+  // new row types is a matter of giving them a timestamp and a renderer
+  // branch in the map below.
+  const renderEventTimeline = (events) => {
+    if (!events.length) return '';
+    const sorted = [...events].sort(
+      (a, b) => new Date(a.created_at + 'Z').getTime() - new Date(b.created_at + 'Z').getTime(),
+    );
+    const firstTs = new Date(sorted[0].created_at + 'Z').getTime();
+
+    const rows = sorted
+      .map((ev) => {
+        const ts = new Date(ev.created_at + 'Z').getTime();
+        const rel = formatRelTime(ts - firstTs);
+        const isStage = STAGE_EVENTS.has(ev.type);
+        const isLifecycle = LIFECYCLE_EVENTS.has(ev.type);
+        const isErr = ERROR_TYPES.has(ev.type);
+
+        // Type badge color by category
+        const badgeColor = isStage ? '#2ecc71' : isLifecycle ? '#f5c542' : isErr ? '#e74c3c' : '#888';
+
+        // Row tint by slot (pre-game events with no slot get no tint)
+        const slot = attributedSlot(ev);
+        const rowBg = isErr ? '#2a0f15' : slot != null ? slotRowTint(slot) : 'transparent';
+
+        const slotBadge =
+          slot != null
+            ? `<span style="display:inline-block; padding:1px 6px; background:${slotColor(slot)}; color:#000; border-radius:3px; font-weight:bold; font-size:11px">P${slot}</span>`
+            : '';
+
+        // Meta preview: show key fields inline (bytes, peer_slot, frame, etc.)
+        const metaPreview =
+          ev.meta && typeof ev.meta === 'object'
+            ? Object.entries(ev.meta)
+                .filter(([k]) => k !== 'match_id') // redundant with the session context
+                .map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`)
+                .join(' ')
+            : '';
+
+        return `<tr class="tl-row" data-ts="${ts}" style="background:${rowBg}">
+          <td class="dim" style="white-space:nowrap; padding:6px 10px; font-variant-numeric:tabular-nums; border-left:3px solid ${slot != null ? slotColor(slot) : 'transparent'}">${escapeHtml(rel)}</td>
+          <td style="padding:6px 10px">${slotBadge}</td>
+          <td style="color:${badgeColor}; padding:6px 10px; white-space:nowrap"><strong>${escapeHtml(ev.type)}</strong></td>
+          <td style="padding:6px 10px">
+            ${escapeHtml(ev.message || '')}
+            ${metaPreview ? `<span class="dim" style="margin-left:8px; font-size:11px">${metaPreview}</span>` : ''}
+          </td>
+        </tr>`;
+      })
+      .join('');
+
+    return `<div style="margin:12px 0">
+      <div style="font-weight:bold; margin-bottom:8px">Session timeline (${sorted.length} event${sorted.length === 1 ? '' : 's'})</div>
+      <div id="tl-scroll-container" style="max-height:420px; overflow-y:auto; border:1px solid #2a2a40; border-radius:4px">
+        <table style="width:100%; border-collapse:collapse; font-size:13px">
+          <thead style="position:sticky; top:0; background:#1a1a2e; z-index:1">
+            <tr style="border-bottom:1px solid #2a2a40">
+              <th style="text-align:left; padding:6px 10px">Time</th>
+              <th style="text-align:left; padding:6px 10px">Who</th>
+              <th style="text-align:left; padding:6px 10px">Event</th>
+              <th style="text-align:left; padding:6px 10px">Detail</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+  };
+
+  // Serialize the currently viewed session into a single plain-text blob
+  // suitable for pasting to Claude or elsewhere. Captures the session header
+  // summary, the full chronological timeline, a screenshot manifest, and
+  // the raw session_logs JSON at the end.
+  const serializeSessionForCopy = () => {
+    const ctx = _currentSessionContext;
+    if (!ctx) return null;
+    const { data, events, screenshots } = ctx;
+
+    const lines = [];
+    lines.push(`=== SESSION LOG #${data.id} ===`);
+    if (data.match_id) lines.push(`Match: ${data.match_id}`);
+    if (data.room) lines.push(`Room: ${data.room}`);
+    if (data.mode) lines.push(`Mode: ${data.mode}`);
+    if (data.player_name != null) lines.push(`Player: ${data.player_name} (slot P${data.slot ?? 0})`);
+    if (data.created_at) lines.push(`Created: ${data.created_at}`);
+    if (data.ended_by) lines.push(`Ended by: ${data.ended_by}`);
+
+    if (events.length) {
+      const sorted = [...events].sort(
+        (a, b) => new Date(a.created_at + 'Z').getTime() - new Date(b.created_at + 'Z').getTime(),
+      );
+      const firstTs = new Date(sorted[0].created_at + 'Z').getTime();
+      const lastTs = new Date(sorted[sorted.length - 1].created_at + 'Z').getTime();
+      lines.push('');
+      lines.push(`Duration: ${formatRelTime(lastTs - firstTs)}, ${sorted.length} events`);
+
+      const errorCounts = {};
+      for (const ev of sorted) {
+        if (ERROR_TYPES.has(ev.type)) errorCounts[ev.type] = (errorCounts[ev.type] || 0) + 1;
+      }
+      const errorKeys = Object.keys(errorCounts);
+      if (errorKeys.length) {
+        lines.push(`Errors: ${errorKeys.map((k) => `${k}×${errorCounts[k]}`).join(', ')}`);
+      } else {
+        lines.push('Errors: none');
+      }
+
+      lines.push('');
+      lines.push('=== TIMELINE ===');
+      for (const ev of sorted) {
+        const ts = new Date(ev.created_at + 'Z').getTime();
+        const rel = formatRelTime(ts - firstTs).padEnd(10);
+        const slot = attributedSlot(ev);
+        const slotStr = slot != null ? `[P${slot}]` : '[--]';
+        const meta =
+          ev.meta && typeof ev.meta === 'object'
+            ? Object.entries(ev.meta)
+                .filter(([k]) => k !== 'match_id')
+                .map(([k, v]) => `${k}=${v}`)
+                .join(' ')
+            : '';
+        const msg = ev.message || '';
+        const detail = [msg, meta].filter(Boolean).join(' | ');
+        lines.push(`${rel} ${slotStr} ${ev.type}${detail ? ' — ' + detail : ''}`);
+      }
+    }
+
+    if (screenshots.length) {
+      lines.push('');
+      lines.push('=== SCREENSHOTS ===');
+      const bySlot = {};
+      for (const ss of screenshots) (bySlot[ss.slot ?? 0] ??= []).push(ss);
+      for (const slot of Object.keys(bySlot).sort((a, b) => a - b)) {
+        const frames = bySlot[slot].map((s) => s.frame).sort((a, b) => a - b);
+        lines.push(`P${slot}: ${frames.length} screenshots (frames ${frames[0]}–${frames[frames.length - 1]})`);
+      }
+    }
+
+    lines.push('');
+    lines.push('=== RAW SESSION DATA ===');
+    lines.push(JSON.stringify(data, null, 2));
+
+    return lines.join('\n');
+  };
+
+  // Input audit link (bundled with P0-1) — fetch JSON and display in viewer
+  $('#session-log-list')?.addEventListener('click', async (e) => {
+    const link = e.target.closest('.input-audit-link');
+    if (!link) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const matchId = link.dataset.matchId;
+    if (!matchId) return;
+    cleanupComparison();
+    const viewer = $('#log-viewer');
+    $('#viewer-title').textContent = `Input Audit — ${matchId.substring(0, 12)}`;
+    $('#viewer-meta').innerHTML = '';
+    $('#viewer-content').textContent = 'Loading...';
+    viewer.classList.remove('hidden');
+    const res = await fetch(`/admin/api/input-audit/${encodeURIComponent(matchId)}`, { headers: headers() });
+    if (!res.ok) {
+      $('#viewer-content').textContent = `Error loading input audit: ${res.status}`;
+      return;
+    }
+    const data = await res.json();
+    $('#viewer-content').textContent = JSON.stringify(data, null, 2);
     viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
@@ -665,9 +1305,13 @@
   });
 
   $('#viewer-copy').addEventListener('click', async () => {
-    const content = $('#viewer-content').textContent;
+    // Prefer the rich serialization when we have session context. Falls back
+    // to the raw viewer content for other kinds of logs (feedback, etc.)
+    // that don't populate _currentSessionContext.
+    const serialized = serializeSessionForCopy();
+    const content = serialized || $('#viewer-content').textContent;
     if (content && (await copyText(content))) {
-      showToast('Log copied');
+      showToast(serialized ? 'Session copied (timeline + events + data)' : 'Log copied');
     }
   });
 

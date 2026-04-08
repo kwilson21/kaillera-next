@@ -42,7 +42,7 @@ setup:
 check:
     pre-commit run --all-files
 
-# Start dev server (Redis + HTTPS via Tailscale certs)
+# Start dev server (Redis + HTTPS via Let's Encrypt certs)
 dev:
     docker compose -f docker-compose.dev.yml up -d
     REDIS_URL=redis://:${REDIS_PASSWORD:-devpass}@localhost:6379/0 uv run kaillera-server
@@ -62,26 +62,39 @@ serve-redis: dev
 redis-stop:
     docker compose -f docker-compose.dev.yml down
 
-# Generate Tailscale HTTPS certs (run once, renew every ~90 days)
+# Issue / renew Let's Encrypt HTTPS certs via lego (Cloudflare DNS-01)
+# Requires LEGO_EMAIL, LEGO_DOMAIN, CLOUDFLARE_DNS_API_TOKEN in server/.env
+# Idempotent: issues if missing, renews if within 30 days of expiry, no-op otherwise.
 certs:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -z "${TAILSCALE_HOSTNAME:-}" ]; then
-        echo "Error: Set TAILSCALE_HOSTNAME in .env (e.g. your-machine.tail1234.ts.net)"
-        echo "Find yours at: https://login.tailscale.com/admin/machines"
+    if ! command -v lego >/dev/null 2>&1; then
+        echo "Error: lego not found. Install with: brew install lego"
         exit 1
     fi
-    mkdir -p certs
-    if [[ "$(uname)" == "Darwin" ]]; then
-        TAILSCALE_BIN="/Applications/Tailscale.localized/Tailscale.app/Contents/MacOS/Tailscale"
-        SANDBOX_DIR="$HOME/Library/Containers/io.tailscale.ipn.macos/Data"
-        "$TAILSCALE_BIN" cert "$TAILSCALE_HOSTNAME"
-        cp "$SANDBOX_DIR/$TAILSCALE_HOSTNAME.crt" certs/cert.pem
-        cp "$SANDBOX_DIR/$TAILSCALE_HOSTNAME.key" certs/key.pem
+    # Load server/.env
+    set -a
+    # shellcheck disable=SC1091
+    source server/.env
+    set +a
+    : "${LEGO_EMAIL:?LEGO_EMAIL must be set in server/.env}"
+    : "${LEGO_DOMAIN:?LEGO_DOMAIN must be set in server/.env}"
+    : "${CLOUDFLARE_DNS_API_TOKEN:?CLOUDFLARE_DNS_API_TOKEN must be set in server/.env}"
+    mkdir -p certs/lego
+    LEGO_PATH="$(pwd)/certs/lego"
+    CRT="$LEGO_PATH/certificates/$LEGO_DOMAIN.crt"
+    KEY="$LEGO_PATH/certificates/$LEGO_DOMAIN.key"
+    if [ -f "$CRT" ] && [ -f "$KEY" ]; then
+        echo "Renewing cert for $LEGO_DOMAIN (no-op if >30 days remain)..."
+        lego --email "$LEGO_EMAIL" --dns cloudflare --domains "$LEGO_DOMAIN" \
+             --path "$LEGO_PATH" --accept-tos renew --days 30
     else
-        tailscale cert "$TAILSCALE_HOSTNAME"
-        mv "$TAILSCALE_HOSTNAME.crt" certs/cert.pem
-        mv "$TAILSCALE_HOSTNAME.key" certs/key.pem
+        echo "Issuing new cert for $LEGO_DOMAIN..."
+        lego --email "$LEGO_EMAIL" --dns cloudflare --domains "$LEGO_DOMAIN" \
+             --path "$LEGO_PATH" --accept-tos run
     fi
+    cp "$CRT" certs/cert.pem
+    cp "$KEY" certs/key.pem
     echo "Certs written to certs/cert.pem and certs/key.pem"
     echo "Server will auto-detect HTTPS on next start"
+    echo "Access at: https://$LEGO_DOMAIN:27888/"

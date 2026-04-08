@@ -156,6 +156,7 @@
   const ROM_BUFFER_THRESHOLD = 1024 * 1024; // 1MB — DC handles this fine on mobile
   let _romTransferBytesReceived = 0;
   let _romTransferLastChunkAt = 0;
+  let _funnelRomLoadedSent = false; // P0-1 funnel: fire rom_loaded once per session
   let _preGamePC = null; // guest: pre-game RTCPeerConnection for ROM preload
   let _preGamePCs = {}; // host: pre-game RTCPeerConnections (sid → pc)
   let _romSignalHandler = null; // pre-game rom-signal Socket.IO listener
@@ -392,17 +393,70 @@
     socket.on('rom-sharing-updated', onRomSharingUpdated);
     socket.on('data-message', onDataMessage);
 
-    // Lockstep peer-phantom notifications
+    // Lockstep peer-phantom notifications — P1-6: replaced with a persistent
+    // corner status indicator instead of transient center-screen toasts.
+    // The indicator stays visible for as long as the peer is disconnected
+    // and clears when they reconnect, so it's much less distracting during
+    // gameplay than a flash-toast that disappears in 2.7s.
     window.addEventListener('kn-peer-phantom', (e) => {
       const slot = e.detail?.slot;
-      const name = getPlayerNameBySlot(slot) || `Player ${slot + 1}`;
-      showToast(`${name} is unresponsive — continuing without them`);
+      const name = getPlayerNameBySlot(slot) || '';
+      addPeerStatusEntry(slot, name, 'unresponsive');
     });
     window.addEventListener('kn-peer-recovered', (e) => {
       const slot = e.detail?.slot;
-      const name = getPlayerNameBySlot(slot) || `Player ${slot + 1}`;
-      showToast(`${name} reconnected`);
+      removePeerStatusEntry(slot);
     });
+  };
+
+  // ── Peer status indicator (P1-6) ───────────────────────────────────────
+  // Persistent corner element listing disconnected peers. Replaces the
+  // transient phantom-peer toasts that were "more distracting than helpful
+  // to the gaming experience" per the launch readiness audit.
+  const _peerStatusEntries = new Map(); // slot -> { name, state }
+  const _ensurePeerStatusEl = () => {
+    let el = document.getElementById('kn-peer-status');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'kn-peer-status';
+    el.style.cssText =
+      'position:fixed; top:64px; right:12px; z-index:120; ' +
+      'display:flex; flex-direction:column; gap:4px; pointer-events:none;';
+    document.body.appendChild(el);
+    return el;
+  };
+  const _renderPeerStatus = () => {
+    const el = _ensurePeerStatusEl();
+    if (_peerStatusEntries.size === 0) {
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = [..._peerStatusEntries.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([slot, info]) => {
+        const dotColor = info.state === 'unresponsive' ? '#e74c3c' : '#f5c542';
+        // Show "P2 jimmy unresponsive" if we have a name, "P2 unresponsive"
+        // if we don't (avoids the redundant "P2 P2" when no name is known).
+        const label = info.name ? `P${slot} ${escapeHtml(info.name)}` : `P${slot}`;
+        return (
+          '<div style="background:rgba(15,15,30,0.92); border:1px solid #2a2a40; ' +
+          'border-radius:6px; padding:4px 10px; font-size:12px; color:#eee; ' +
+          'display:flex; align-items:center; gap:6px; ' +
+          'box-shadow:0 2px 8px rgba(0,0,0,0.4)">' +
+          `<span style="width:8px; height:8px; border-radius:50%; background:${dotColor}"></span>` +
+          `<span>${label} ${escapeHtml(info.state)}</span>` +
+          '</div>'
+        );
+      })
+      .join('');
+  };
+  const addPeerStatusEntry = (slot, name, state) => {
+    _peerStatusEntries.set(slot, { name, state });
+    _renderPeerStatus();
+  };
+  const removePeerStatusEntry = (slot) => {
+    _peerStatusEntries.delete(slot);
+    _renderPeerStatus();
   };
 
   const sendDeviceType = () => {
@@ -467,6 +521,7 @@
             return;
           }
           mySlot = 0;
+          KNEvent('room_created', '', { mode });
           sendDeviceType();
           // If ROM was already loaded from cache, notify server immediately
           if (_romBlob || _romBlobUrl) notifyRomReady();
@@ -531,6 +586,7 @@
                     mySlot = null;
                     if (joinData2) lastUsersData = joinData2;
                     sendDeviceType();
+                    KNEvent('peer_joined', '', { slot: -1, is_spectator: true });
                     showRoomFullBanner();
                     showOverlay();
                   },
@@ -554,6 +610,10 @@
             }
 
             sendDeviceType();
+            KNEvent('peer_joined', '', {
+              slot: mySlot ?? -1,
+              is_spectator: !!isSpectator,
+            });
             crumb('join-ack', {
               host: isHost,
               spectator: isSpectator,
@@ -1239,7 +1299,7 @@
     _romTransferRetries = 0;
     cleanupPreGameConnections();
     updateRomSharingUI();
-    showToast('ROM transfer cancelled');
+    setRomTransferState('idle');
   };
 
   const retryRomTransfer = () => {
@@ -1247,7 +1307,7 @@
     _romTransferRetries = 0;
     _romTransferState = 'resuming';
     updateRomSharingUI();
-    showToast('Retrying ROM transfer...');
+    setRomTransferState('retrying', 'Retrying ROM transfer…');
     requestResumeTransfer();
   };
 
@@ -1532,7 +1592,7 @@
                 'retries at offset',
                 offset,
               );
-              showToast('ROM transfer failed — load ROM manually');
+              setRomTransferState('failed', 'ROM transfer failed — load ROM manually');
               return;
             }
             console.log('[play] ROM send: backpressure retry', backpressureRetries);
@@ -1551,7 +1611,7 @@
       const retryChunk = (chunkStart, chunkEnd, attempt) => {
         if (attempt >= 3) {
           console.log('[play] ROM send: chunk retry exhausted at offset', chunkStart);
-          showToast('ROM transfer failed — load ROM manually');
+          setRomTransferState('failed', 'ROM transfer failed — load ROM manually');
           return;
         }
         setTimeout(() => {
@@ -1624,7 +1684,7 @@
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-header') {
             if (msg.size > ROM_MAX_SIZE) {
-              showToast('ROM too large — loading manually');
+              setRomTransferState('failed', 'ROM too large — loading manually');
               channel.close();
               cancelRomTransfer();
               return;
@@ -1649,13 +1709,13 @@
         _romTransferChunks.push(new Uint8Array(e.data));
         _romTransferBytesReceived += e.data.byteLength;
         if (_romTransferBytesReceived > ROM_MAX_SIZE) {
-          showToast('ROM transfer too large — aborting');
+          setRomTransferState('failed', 'ROM transfer too large — aborting');
           channel.close();
           cancelRomTransfer();
           return;
         }
         if (_romTransferHeader && _romTransferBytesReceived > _romTransferHeader.size * 1.1) {
-          showToast('ROM transfer size mismatch — aborting');
+          setRomTransferState('failed', 'ROM transfer size mismatch — aborting');
           channel.close();
           cancelRomTransfer();
           return;
@@ -1677,7 +1737,7 @@
         console.log('[play] ROM transfer DC closed, retry', _romTransferRetries, '/ 3');
 
         if (_romTransferRetries <= 3 && _romTransferBytesReceived > 0) {
-          showToast(`ROM transfer interrupted — retry ${_romTransferRetries}/3`);
+          setRomTransferState('retrying', `ROM transfer interrupted — retry ${_romTransferRetries}/3`);
           // Auto-retry after backoff
           _romTransferResumeTimer = setTimeout(() => {
             if (_romTransferState !== 'paused') return;
@@ -1686,7 +1746,7 @@
             requestResumeTransfer();
           }, 2000);
         } else if (_romTransferRetries > 3) {
-          showToast('ROM transfer stalled — cancel or wait for host');
+          setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
         }
         updateRomSharingUI();
       }
@@ -1705,7 +1765,7 @@
       _romTransferRetries++;
       console.log('[play] ROM resume timed out, retry', _romTransferRetries);
       if (_romTransferRetries <= 3) {
-        showToast('ROM transfer resume timed out — will retry');
+        setRomTransferState('retrying', 'ROM transfer resume timed out — will retry');
         // Schedule another attempt
         _romTransferResumeTimer = setTimeout(() => {
           if (_romTransferState !== 'paused') return;
@@ -1714,7 +1774,7 @@
           requestResumeTransfer();
         }, 2000);
       } else {
-        showToast('ROM transfer stalled — cancel or wait for host');
+        setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
       }
       updateRomSharingUI();
     }, 15000);
@@ -1751,6 +1811,46 @@
       const totMB = (total / (1024 * 1024)).toFixed(1);
       text.textContent = `Receiving ROM... ${pct}% (${recMB} / ${totMB} MB)`;
     }
+    setRomTransferState('receiving');
+  };
+
+  // P1-5: Single source of truth for ROM transfer status. Replaces the 11+
+  // separate showToast calls that flashed during a transfer. The persistent
+  // progress UI updates its text/border/buttons in place instead of a stream
+  // of disappearing toasts.
+  // States: 'receiving', 'paused', 'retrying', 'stalled', 'failed', 'idle'
+  const setRomTransferState = (state, message) => {
+    const wrap = document.getElementById('rom-transfer-progress');
+    const text = document.getElementById('rom-progress-text');
+    const retryBtn = document.getElementById('rom-transfer-retry');
+    const cancelBtn = document.getElementById('rom-transfer-cancel');
+    if (!wrap) return;
+
+    if (state === 'idle') {
+      wrap.style.display = 'none';
+      wrap.style.borderColor = '';
+      return;
+    }
+
+    wrap.style.display = '';
+    if (message && text) text.textContent = message;
+
+    // Border color hint by severity (uses inline style so it overrides
+    // whatever the existing CSS sets without needing a new class).
+    const borderColor =
+      state === 'failed'
+        ? '#e74c3c'
+        : state === 'stalled' || state === 'paused'
+          ? '#f5c542'
+          : state === 'retrying'
+            ? '#4a9eff'
+            : '';
+    wrap.style.borderColor = borderColor;
+
+    // Retry button visible only when the user can act on it
+    if (retryBtn) retryBtn.style.display = state === 'failed' || state === 'stalled' ? '' : 'none';
+    // Cancel button always visible while a transfer state exists
+    if (cancelBtn) cancelBtn.style.display = '';
   };
 
   const finishRomTransfer = () => {
@@ -1760,7 +1860,7 @@
     }
 
     if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
-      showToast('ROM transfer size mismatch — load manually');
+      setRomTransferState('failed', 'ROM transfer size mismatch — load manually');
       _romTransferState = 'idle';
       _romTransferChunks = [];
       updateRomSharingUI();
@@ -1828,7 +1928,9 @@
       dismissLateJoinPrompt();
     }
 
-    showToast('ROM loaded from host');
+    // Success — clear the persistent transfer status. The rom-status (above
+    // the progress UI) already shows "Loaded: <name>" so the user knows.
+    setRomTransferState('idle');
 
     // Clean up pre-game WebRTC connections (ROM delivered, no longer needed)
     cleanupPreGameConnections();
@@ -1837,6 +1939,10 @@
   const notifyRomReady = () => {
     if (socket?.connected) {
       socket.emit('rom-ready', { ready: true, hash: _romHash || undefined });
+      if (!_funnelRomLoadedSent) {
+        _funnelRomLoadedSent = true;
+        KNEvent('rom_loaded', '', { bytes: _romBlob?.size || 0 });
+      }
     }
   };
 
@@ -2195,9 +2301,32 @@
     const romShareCb = document.getElementById('opt-rom-sharing');
     if (romShareCb && isHost) romShareCb.disabled = false;
 
-    // Compute ROM hash and proceed with any pending late-join
+    // Compute ROM hash and proceed with any pending late-join.
+    // P1-3: ROM hash now has a 15-second timeout and an onerror handler so
+    // a stuck FileReader / digest call surfaces a user-visible failure
+    // instead of leaving the player on a silent "loaded" state with no hash
+    // (which would later block ROM ready broadcasting and game start).
     const reader = new FileReader();
+    let _hashTimedOut = false;
+    const _hashTimer = setTimeout(() => {
+      _hashTimedOut = true;
+      try {
+        reader.abort();
+      } catch (_) {}
+      console.log('[play] ROM hash timed out after 15s');
+      KNEvent('compat', 'ROM hash computation timed out', { size: file.size });
+      showToast('ROM hash failed — try a smaller ROM or different browser');
+    }, 15000);
+    reader.onerror = () => {
+      clearTimeout(_hashTimer);
+      if (_hashTimedOut) return;
+      console.log('[play] FileReader error:', reader.error);
+      KNEvent('compat', 'ROM FileReader failed', { error: String(reader.error) });
+      showToast('Could not read ROM file — try dropping it again');
+    };
     reader.onload = async () => {
+      clearTimeout(_hashTimer);
+      if (_hashTimedOut) return;
       try {
         const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
@@ -2207,6 +2336,8 @@
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
       } catch (err) {
         console.log('[play] hash failed:', err);
+        KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
+        showToast('ROM hash failed — game may not work');
       }
       notifyRomReady();
       // Always proceed with late-join, even if hash computation failed
@@ -2716,13 +2847,39 @@
     _lateJoin = false;
 
     // Connection timeout: if the game-loading overlay is still visible after
-    // 30 seconds, the WebRTC handshake likely failed (NAT/firewall).
+    // 30 seconds, the WebRTC handshake likely failed.
+    // P1-3: include the specific connection state of each peer in the
+    // failure message so the operator (and the user) can tell whether it was
+    // NAT traversal failure (state=failed), peer never started (state=new),
+    // or signaling stalled (no peers in KNState at all).
     setTimeout(() => {
       const loadingEl = document.getElementById('game-loading');
       if (loadingEl && !loadingEl.classList.contains('hidden') && gameRunning) {
         const text = document.getElementById('game-loading-text');
-        if (text) text.textContent = 'Connection timed out — check your network or firewall';
-        showToast('Could not connect to other players');
+        // Inspect peer connection states to give a specific reason
+        const peers = KNState.peers || {};
+        const peerEntries = Object.values(peers);
+        let reason = 'Connection timed out';
+        let detail = 'check your network or firewall';
+        if (peerEntries.length === 0) {
+          reason = 'No peers connected';
+          detail = 'the other players never showed up — they may have left or the signaling server is unreachable';
+        } else {
+          const states = peerEntries.map((p) => p.pc?.connectionState || 'unknown');
+          const failed = states.filter((s) => s === 'failed').length;
+          const stuck = states.filter((s) => s === 'new' || s === 'connecting').length;
+          if (failed > 0) {
+            reason = 'WebRTC connection failed';
+            detail = `${failed} of ${states.length} peer connection${states.length === 1 ? '' : 's'} failed (likely NAT/firewall — try a different network or enable a TURN server)`;
+          } else if (stuck > 0) {
+            reason = 'WebRTC handshake stalled';
+            detail = `${stuck} of ${states.length} peer connection${states.length === 1 ? '' : 's'} stuck in ${states.includes('new') ? 'new' : 'connecting'} state — ICE may not be reaching candidates`;
+          }
+          // Report to telemetry so funnel timeline shows the specific reason
+          KNEvent('webrtc-fail', `${reason}: ${detail}`, { states });
+        }
+        if (text) text.textContent = `${reason} — ${detail}`;
+        showToast(reason);
       }
     }, 30000);
 
@@ -3234,6 +3391,11 @@
     }, 2700);
   };
 
+  // Expose toast/error for cross-module UI surfacing (P1-3). Other modules
+  // (shared.js, netplay-lockstep.js) can call these to show user-visible
+  // messages instead of failing silently.
+  window.knShowToast = showToast;
+
   // ── UI: Error ──────────────────────────────────────────────────────────
 
   const showError = (msg) => {
@@ -3257,6 +3419,9 @@
     card.appendChild(p);
     card.appendChild(a);
   };
+
+  // Expose for cross-module UI surfacing — see knShowToast comment above.
+  window.knShowError = showError;
 
   const showRoomFullBanner = () => {
     const banner = document.createElement('div');

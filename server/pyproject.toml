@@ -23,6 +23,14 @@ dev = [
     "Pillow>=10.0.0",
     "ruff>=0.8.0",
 ]
+analysis = [
+    # tools/analyze_match.py — DuckDB + Polars stack for diagnosing
+    # cross-peer state divergence from session log JSONL exports.
+    "duckdb>=1.0",
+    "polars>=1.0",
+    "pyarrow>=15.0",  # required for DuckDB ↔ Polars zero-copy conversion
+    "requests>=2.31",
+]
 
 [project.scripts]
 kaillera-server = "src.main:run"
