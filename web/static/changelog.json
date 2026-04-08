@@ -1,5 +1,59 @@
 [
   {
+    "version": "0.37.0",
+    "date": "2026-04-08",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "rollback: jitter buffer, unreliable DC + redundancy, stick tolerance window, peer-stall freeze"
+      },
+      {
+        "type": "feat",
+        "message": "rollback determinism: SSB64 allocator pool taint, post-RDRAM hash exclusion, visible-rewind cap raised to 7"
+      },
+      {
+        "type": "feat",
+        "message": "diagnostics: knDiag.netsim / setTransport / replayBisect / replaySelfTest + C debug log flush"
+      },
+      {
+        "type": "feat",
+        "message": "reliability funnel telemetry + admin session timeline view"
+      },
+      {
+        "type": "feat",
+        "message": "JSONL session log export endpoint + DuckDB/Polars match analyzer (tools/analyze_match.py)"
+      },
+      {
+        "type": "feat",
+        "message": "screenshot capture path for admin timeline"
+      },
+      {
+        "type": "fix",
+        "message": "keep room alive when host disconnects mid-game (ownership transfers without reshuffling slot 0)"
+      },
+      {
+        "type": "fix",
+        "message": "ensure short / crashed matches still leave a session log row"
+      },
+      {
+        "type": "fix",
+        "message": "mtime-aware asset cache busting so hot reload works in local dev"
+      },
+      {
+        "type": "fix",
+        "message": "admin search uses unified server-side LIKE across room/player/match"
+      },
+      {
+        "type": "fix",
+        "message": "P0-2 + P1 launch-readiness UX polish + peer status indicator label dedup"
+      },
+      {
+        "type": "fix",
+        "message": "dev HTTPS migrated from Tailscale to Let's Encrypt via lego (Cloudflare DNS-01)"
+      }
+    ]
+  },
+  {
     "version": "0.36.1",
     "date": "2026-04-07",
     "changes": [
@@ -151,7 +205,7 @@
       },
       {
         "type": "fix",
-        "message": "controller settings UX — analog labels, gamepad status, toolbar overflow"
+        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
       },
       {
         "type": "fix",
@@ -435,7 +489,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "controller settings UX — analog labels, gamepad status, toolbar overflow"
+        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
       }
     ]
   },
@@ -513,7 +567,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "test infrastructure overhaul — SSL tolerance, unique rooms, socket hooks, new UX tests"
+        "message": "test infrastructure overhaul \u2014 SSL tolerance, unique rooms, socket hooks, new UX tests"
       }
     ]
   },
@@ -523,7 +577,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "codebase health audit — 25 quick wins for hygiene and correctness"
+        "message": "codebase health audit \u2014 25 quick wins for hygiene and correctness"
       }
     ]
   },
@@ -533,7 +587,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "pre-launch UX polish — validation, meta tags, console cleanup, copy improvements"
+        "message": "pre-launch UX polish \u2014 validation, meta tags, console cleanup, copy improvements"
       }
     ]
   },
@@ -543,7 +597,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "comprehensive security hardening — session hijack, relay abuse, XSS, rate limiting"
+        "message": "comprehensive security hardening \u2014 session hijack, relay abuse, XSS, rate limiting"
       }
     ]
   },
@@ -577,7 +631,7 @@
       },
       {
         "type": "feat",
-        "message": "v0.24.0 — feedback system, guaranteed session logging, PostHog integration"
+        "message": "v0.24.0 \u2014 feedback system, guaranteed session logging, PostHog integration"
       }
     ]
   },
@@ -587,7 +641,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "security hardening — CF-Connecting-IP, CSP tightening, input validation"
+        "message": "security hardening \u2014 CF-Connecting-IP, CSP tightening, input validation"
       }
     ]
   },
@@ -597,7 +651,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "SoftFloat FPU determinism — bit-exact cross-platform lockstep"
+        "message": "SoftFloat FPU determinism \u2014 bit-exact cross-platform lockstep"
       }
     ]
   },
@@ -617,7 +671,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "v0.21.0 — Agent's Version (#2)"
+        "message": "v0.21.0 \u2014 Agent's Version (#2)"
       }
     ]
   },
@@ -657,7 +711,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "add observability — client event beacon, health check, admin errors tab"
+        "message": "add observability \u2014 client event beacon, health check, admin errors tab"
       }
     ]
   },
@@ -667,7 +721,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "lobby landscape layout — scrollable with visible footer"
+        "message": "lobby landscape layout \u2014 scrollable with visible footer"
       }
     ]
   },
@@ -857,7 +911,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "EmuLinker easter eggs — admin welcome + MOTD console log"
+        "message": "EmuLinker easter eggs \u2014 admin welcome + MOTD console log"
       }
     ]
   },
@@ -877,7 +931,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "Konami Code easter egg — HELLOD00D protocol tribute"
+        "message": "Konami Code easter egg \u2014 HELLOD00D protocol tribute"
       }
     ]
   },
@@ -923,7 +977,7 @@
       },
       {
         "type": "feat",
-        "message": "admin page — group by room, copy logs, device info"
+        "message": "admin page \u2014 group by room, copy logs, device info"
       },
       {
         "type": "fix",
@@ -939,7 +993,7 @@
       },
       {
         "type": "feat",
-        "message": "emulator hibernate — keep WASM alive between games"
+        "message": "emulator hibernate \u2014 keep WASM alive between games"
       },
       {
         "type": "fix",
@@ -961,7 +1015,7 @@
     "changes": [
       {
         "type": "fix",
-        "message": "all 23 E2E tests passing — test isolation and rate limit fixes"
+        "message": "all 23 E2E tests passing \u2014 test isolation and rate limit fixes"
       },
       {
         "type": "feat",
@@ -993,7 +1047,7 @@
       },
       {
         "type": "fix",
-        "message": "shutdown race — set _shutting_down via signal handler, safe room deletion"
+        "message": "shutdown race \u2014 set _shutting_down via signal handler, safe room deletion"
       },
       {
         "type": "feat",
@@ -1037,7 +1091,7 @@
       },
       {
         "type": "feat",
-        "message": "silent reconnection during games — no scary toasts"
+        "message": "silent reconnection during games \u2014 no scary toasts"
       },
       {
         "type": "feat",
@@ -1045,7 +1099,7 @@
       },
       {
         "type": "feat",
-        "message": "zombie room cleanup — delete rooms with no live sockets after 5min"
+        "message": "zombie room cleanup \u2014 delete rooms with no live sockets after 5min"
       },
       {
         "type": "feat",
@@ -1077,7 +1131,7 @@
       },
       {
         "type": "fix",
-        "message": "JS/CSS cache policy — always revalidate via ETag"
+        "message": "JS/CSS cache policy \u2014 always revalidate via ETag"
       },
       {
         "type": "feat",
@@ -1169,7 +1223,7 @@
       },
       {
         "type": "fix",
-        "message": "virtual gamepad alignment — center D-pad, diagonal A/B, push C-buttons right"
+        "message": "virtual gamepad alignment \u2014 center D-pad, diagonal A/B, push C-buttons right"
       },
       {
         "type": "fix",
@@ -1177,7 +1231,7 @@
       },
       {
         "type": "feat",
-        "message": "deployment readiness — admin page, log capture, env vars"
+        "message": "deployment readiness \u2014 admin page, log capture, env vars"
       },
       {
         "type": "feat",
@@ -1253,7 +1307,7 @@
       },
       {
         "type": "fix",
-        "message": "remove guest freeze during resync — let gameplay continue"
+        "message": "remove guest freeze during resync \u2014 let gameplay continue"
       },
       {
         "type": "fix",
@@ -1277,7 +1331,7 @@
       },
       {
         "type": "feat",
-        "message": "frame advantage cap — skip tick when too far ahead of slowest peer"
+        "message": "frame advantage cap \u2014 skip tick when too far ahead of slowest peer"
       },
       {
         "type": "feat",
@@ -1313,7 +1367,7 @@
       },
       {
         "type": "fix",
-        "message": "guard _lastSyncState mutations — host delta base survives peer reconnects"
+        "message": "guard _lastSyncState mutations \u2014 host delta base survives peer reconnects"
       },
       {
         "type": "feat",
@@ -1349,7 +1403,7 @@
       },
       {
         "type": "fix",
-        "message": "smarter patch application — check for existing edits, apply main.c only"
+        "message": "smarter patch application \u2014 check for existing edits, apply main.c only"
       },
       {
         "type": "fix",
@@ -1365,7 +1419,7 @@
       },
       {
         "type": "feat",
-        "message": "add kn-sync patch — C-level resync exports for lockstep netplay"
+        "message": "add kn-sync patch \u2014 C-level resync exports for lockstep netplay"
       },
       {
         "type": "fix",
@@ -1401,7 +1455,7 @@
       },
       {
         "type": "feat",
-        "message": "mobile gamepad UX — center screen, indicator, in-game remap"
+        "message": "mobile gamepad UX \u2014 center screen, indicator, in-game remap"
       },
       {
         "type": "fix",
@@ -1409,7 +1463,7 @@
       },
       {
         "type": "fix",
-        "message": "use consistent-sized arrow characters for D-pad (▲▼◀▶)"
+        "message": "use consistent-sized arrow characters for D-pad (\u25b2\u25bc\u25c0\u25b6)"
       },
       {
         "type": "fix",
@@ -1417,7 +1471,7 @@
       },
       {
         "type": "fix",
-        "message": "gamepad v5 — equal A/B size, bigger buttons, solid arrow icons"
+        "message": "gamepad v5 \u2014 equal A/B size, bigger buttons, solid arrow icons"
       },
       {
         "type": "fix",
@@ -1425,7 +1479,7 @@
       },
       {
         "type": "fix",
-        "message": "gamepad layout v4 — shoulders at top, C-buttons clear of R/Z, A/B gap from Start"
+        "message": "gamepad layout v4 \u2014 shoulders at top, C-buttons clear of R/Z, A/B gap from Start"
       },
       {
         "type": "fix",
@@ -1437,7 +1491,7 @@
       },
       {
         "type": "feat",
-        "message": "alpha launch prep — virtual gamepad, security hardening, QOL fixes"
+        "message": "alpha launch prep \u2014 virtual gamepad, security hardening, QOL fixes"
       },
       {
         "type": "feat",
@@ -1533,7 +1587,7 @@
       },
       {
         "type": "fix",
-        "message": "refresh HEAPU8 after loadState — memory growth detaches buffer"
+        "message": "refresh HEAPU8 after loadState \u2014 memory growth detaches buffer"
       },
       {
         "type": "feat",
@@ -1545,19 +1599,19 @@
       },
       {
         "type": "feat",
-        "message": "RDRAM scanner — automated game state memory mapping via Playwright"
+        "message": "RDRAM scanner \u2014 automated game state memory mapping via Playwright"
       },
       {
         "type": "feat",
-        "message": "performance diagnostics — measure every sync operation"
+        "message": "performance diagnostics \u2014 measure every sync operation"
       },
       {
         "type": "fix",
-        "message": "increase sync check to 10s — getState() every 2s freezes mobile"
+        "message": "increase sync check to 10s \u2014 getState() every 2s freezes mobile"
       },
       {
         "type": "fix",
-        "message": "abandon direct RDRAM reads — use getState() RDRAM section instead"
+        "message": "abandon direct RDRAM reads \u2014 use getState() RDRAM section instead"
       },
       {
         "type": "feat",
@@ -1565,11 +1619,11 @@
       },
       {
         "type": "fix",
-        "message": "revert to new Uint8Array(buffer) — mod.HEAPU8 is stale after growth"
+        "message": "revert to new Uint8Array(buffer) \u2014 mod.HEAPU8 is stale after growth"
       },
       {
         "type": "fix",
-        "message": "mobile memory/perf — stop allocating 256MB typed array every 2s"
+        "message": "mobile memory/perf \u2014 stop allocating 256MB typed array every 2s"
       },
       {
         "type": "fix",
@@ -1581,15 +1635,15 @@
       },
       {
         "type": "fix",
-        "message": "add no-cache headers — prevents stale JS in incognito sessions"
+        "message": "add no-cache headers \u2014 prevents stale JS in incognito sessions"
       },
       {
         "type": "fix",
-        "message": "drop config region from hash — drifts over longer sessions"
+        "message": "drop config region from hash \u2014 drifts over longer sessions"
       },
       {
         "type": "fix",
-        "message": "skip ROM hash check when ROM sharing accepted — ROM comes from host"
+        "message": "skip ROM hash check when ROM sharing accepted \u2014 ROM comes from host"
       },
       {
         "type": "fix",
@@ -1597,35 +1651,35 @@
       },
       {
         "type": "fix",
-        "message": "drop 768K region from hash — intermittent false positive on mobile"
+        "message": "drop 768K region from hash \u2014 intermittent false positive on mobile"
       },
       {
         "type": "fix",
-        "message": "10s cooldown between resyncs — constant loadState froze all players"
+        "message": "10s cooldown between resyncs \u2014 constant loadState froze all players"
       },
       {
         "type": "fix",
-        "message": "copy state before storing as delta baseline — buffer was detached"
+        "message": "copy state before storing as delta baseline \u2014 buffer was detached"
       },
       {
         "type": "feat",
-        "message": "delta sync — XOR-based incremental state transfer"
+        "message": "delta sync \u2014 XOR-based incremental state transfer"
       },
       {
         "type": "fix",
-        "message": "instant resync — check every 2s, no backoff, no cooldown"
+        "message": "instant resync \u2014 check every 2s, no backoff, no cooldown"
       },
       {
         "type": "fix",
-        "message": "finalize deterministic RDRAM hash — zero false positives confirmed"
+        "message": "finalize deterministic RDRAM hash \u2014 zero false positives confirmed"
       },
       {
         "type": "fix",
-        "message": "hash only deterministic RDRAM regions — eliminates false positives"
+        "message": "hash only deterministic RDRAM regions \u2014 eliminates false positives"
       },
       {
         "type": "fix",
-        "message": "narrow hash to 0xC0000-0xD0000 — 0x80000 has non-deterministic data"
+        "message": "narrow hash to 0xC0000-0xD0000 \u2014 0x80000 has non-deterministic data"
       },
       {
         "type": "feat",
@@ -1633,11 +1687,11 @@
       },
       {
         "type": "fix",
-        "message": "hash correct RDRAM region — game state at 0x80000-0xD0000, not 0x0A4D00"
+        "message": "hash correct RDRAM region \u2014 game state at 0x80000-0xD0000, not 0x0A4D00"
       },
       {
         "type": "feat",
-        "message": "RDRAM region scanner — find where SSB64 stores active game data"
+        "message": "RDRAM region scanner \u2014 find where SSB64 stores active game data"
       },
       {
         "type": "fix",
@@ -1645,11 +1699,11 @@
       },
       {
         "type": "fix",
-        "message": "reduce MAX_STALL_MS to 500ms — fighting game needs tight timing"
+        "message": "reduce MAX_STALL_MS to 500ms \u2014 fighting game needs tight timing"
       },
       {
         "type": "fix",
-        "message": "reduce MAX_STALL_MS from 30s to 3s — prevents long game freezes"
+        "message": "reduce MAX_STALL_MS from 30s to 3s \u2014 prevents long game freezes"
       },
       {
         "type": "fix",
@@ -1669,11 +1723,11 @@
       },
       {
         "type": "fix",
-        "message": "stop resync storm — disable sync after 10 consecutive failures"
+        "message": "stop resync storm \u2014 disable sync after 10 consecutive failures"
       },
       {
         "type": "fix",
-        "message": "remove 64KB cap from FNV-1a worker — was hashing only static header"
+        "message": "remove 64KB cap from FNV-1a worker \u2014 was hashing only static header"
       },
       {
         "type": "fix",
@@ -1681,11 +1735,11 @@
       },
       {
         "type": "fix",
-        "message": "re-discover RDRAM pointer on every hash check — was caching stale address"
+        "message": "re-discover RDRAM pointer on every hash check \u2014 was caching stale address"
       },
       {
         "type": "fix",
-        "message": "hash full 8MB RDRAM instead of 64KB — was missing most game state"
+        "message": "hash full 8MB RDRAM instead of 64KB \u2014 was missing most game state"
       },
       {
         "type": "feat",
@@ -1701,27 +1755,27 @@
       },
       {
         "type": "fix",
-        "message": "remove _paused flag entirely — let background tabs tick at 1fps"
+        "message": "remove _paused flag entirely \u2014 let background tabs tick at 1fps"
       },
       {
         "type": "fix",
-        "message": "remove peer-paused broadcast — silent pause with fast-forward resume"
+        "message": "remove peer-paused broadcast \u2014 silent pause with fast-forward resume"
       },
       {
         "type": "fix",
-        "message": "game freeze on alt-tab return — fast-forward _frameNum to catch up"
+        "message": "game freeze on alt-tab return \u2014 fast-forward _frameNum to catch up"
       },
       {
         "type": "fix",
-        "message": "remove reconnect overlay — use toast notifications instead"
+        "message": "remove reconnect overlay \u2014 use toast notifications instead"
       },
       {
         "type": "fix",
-        "message": "reconnect overlay CSS — was always visible due to missing .hidden rule"
+        "message": "reconnect overlay CSS \u2014 was always visible due to missing .hidden rule"
       },
       {
         "type": "fix",
-        "message": "test stability — unique room IDs, context isolation, clean disconnect"
+        "message": "test stability \u2014 unique room IDs, context isolation, clean disconnect"
       },
       {
         "type": "fix",
@@ -1769,7 +1823,7 @@
       },
       {
         "type": "feat",
-        "message": "lockstep sync performance — RDRAM hashing, async resync, star topology"
+        "message": "lockstep sync performance \u2014 RDRAM hashing, async resync, star topology"
       },
       {
         "type": "feat",
@@ -1863,7 +1917,7 @@
       },
       {
         "type": "fix",
-        "message": "disable EJS gamepad handler — stop 10ms polling loop"
+        "message": "disable EJS gamepad handler \u2014 stop 10ms polling loop"
       },
       {
         "type": "fix",
@@ -1895,7 +1949,7 @@
       },
       {
         "type": "feat",
-        "message": "remapping wizard — gamepad + keyboard capture with localStorage save"
+        "message": "remapping wizard \u2014 gamepad + keyboard capture with localStorage save"
       },
       {
         "type": "feat",
@@ -1911,7 +1965,7 @@
       },
       {
         "type": "fix",
-        "message": "block EJS from reading gamepads — prevents input conflict"
+        "message": "block EJS from reading gamepads \u2014 prevents input conflict"
       },
       {
         "type": "fix",
@@ -1919,7 +1973,7 @@
       },
       {
         "type": "feat",
-        "message": "lobby gamepad UI — detection, profile display, click-to-reassign"
+        "message": "lobby gamepad UI \u2014 detection, profile display, click-to-reassign"
       },
       {
         "type": "feat",
@@ -1935,11 +1989,11 @@
       },
       {
         "type": "feat",
-        "message": "add GamepadManager — profile-based gamepad detection and mapping"
+        "message": "add GamepadManager \u2014 profile-based gamepad detection and mapping"
       },
       {
         "type": "feat",
-        "message": "restore working foundation — patched core, security hardening, gamepad spec"
+        "message": "restore working foundation \u2014 patched core, security hardening, gamepad spec"
       },
       {
         "type": "fix",
@@ -1947,7 +2001,7 @@
       },
       {
         "type": "fix",
-        "message": "CSP blocking EmulatorJS — add blob: and CDN to style-src/connect-src"
+        "message": "CSP blocking EmulatorJS \u2014 add blob: and CDN to style-src/connect-src"
       },
       {
         "type": "fix",
@@ -1979,7 +2033,7 @@
       },
       {
         "type": "feat",
-        "message": "XSS prevention — escapeHtml, safe showError, remove domain field"
+        "message": "XSS prevention \u2014 escapeHtml, safe showError, remove domain field"
       },
       {
         "type": "feat",
@@ -2029,15 +2083,15 @@
       },
       {
         "type": "fix",
-        "message": "revert format force — use Option B (float32→int16 conversion)"
+        "message": "revert format force \u2014 use Option B (float32\u2192int16 conversion)"
       },
       {
         "type": "feat",
-        "message": "audio bypass — clean re-implementation from plan"
+        "message": "audio bypass \u2014 clean re-implementation from plan"
       },
       {
         "type": "fix",
-        "message": "separate AudioContext — don't resume OpenAL's"
+        "message": "separate AudioContext \u2014 don't resume OpenAL's"
       },
       {
         "type": "fix",
@@ -2073,15 +2127,15 @@
       },
       {
         "type": "fix",
-        "message": "double loadState — before and after enterManualMode"
+        "message": "double loadState \u2014 before and after enterManualMode"
       },
       {
         "type": "fix",
-        "message": "loadState AFTER enterManualMode — eliminates free frame desync"
+        "message": "loadState AFTER enterManualMode \u2014 eliminates free frame desync"
       },
       {
         "type": "feat",
-        "message": "relative cycle counter — deterministic + advancing time"
+        "message": "relative cycle counter \u2014 deterministic + advancing time"
       },
       {
         "type": "fix",
@@ -2101,7 +2155,7 @@
       },
       {
         "type": "feat",
-        "message": "call-counting deterministic timer — audio + determinism"
+        "message": "call-counting deterministic timer \u2014 audio + determinism"
       },
       {
         "type": "fix",
@@ -2113,7 +2167,7 @@
       },
       {
         "type": "feat",
-        "message": "EMSCRIPTEN_AUDIO_FAKE_BLOCK — synchronous audio with frame steps"
+        "message": "EMSCRIPTEN_AUDIO_FAKE_BLOCK \u2014 synchronous audio with frame steps"
       },
       {
         "type": "feat",
@@ -2121,7 +2175,7 @@
       },
       {
         "type": "feat",
-        "message": "audio toggle — player chooses audio vs perfect sync"
+        "message": "audio toggle \u2014 player chooses audio vs perfect sync"
       },
       {
         "type": "fix",
@@ -2141,7 +2195,7 @@
       },
       {
         "type": "feat",
-        "message": "C-level only determinism — preserves audio"
+        "message": "C-level only determinism \u2014 preserves audio"
       },
       {
         "type": "fix",
@@ -2161,7 +2215,7 @@
       },
       {
         "type": "feat",
-        "message": "deterministic lockstep timing — patched core + frame-aware sync"
+        "message": "deterministic lockstep timing \u2014 patched core + frame-aware sync"
       },
       {
         "type": "fix",
@@ -2177,7 +2231,7 @@
       },
       {
         "type": "feat",
-        "message": "strict input blocking (Kaillera-style) — never step without peer input"
+        "message": "strict input blocking (Kaillera-style) \u2014 never step without peer input"
       },
       {
         "type": "fix",
@@ -2185,19 +2239,19 @@
       },
       {
         "type": "fix",
-        "message": "disable rollback by default — game state stays in sync naturally"
+        "message": "disable rollback by default \u2014 game state stays in sync naturally"
       },
       {
         "type": "feat",
-        "message": "smart desync detection — hash game state only, not audio buffers"
+        "message": "smart desync detection \u2014 hash game state only, not audio buffers"
       },
       {
         "type": "fix",
-        "message": "hot-swap state without stopping tick loop — eliminates stutter"
+        "message": "hot-swap state without stopping tick loop \u2014 eliminates stutter"
       },
       {
         "type": "feat",
-        "message": "Worker-based state sync via DataChannel — near-zero stutter"
+        "message": "Worker-based state sync via DataChannel \u2014 near-zero stutter"
       },
       {
         "type": "fix",
@@ -2209,7 +2263,7 @@
       },
       {
         "type": "feat",
-        "message": "proper resync — guest fully stops tick loop before loading state"
+        "message": "proper resync \u2014 guest fully stops tick loop before loading state"
       },
       {
         "type": "feat",
@@ -2253,7 +2307,7 @@
       },
       {
         "type": "fix",
-        "message": "UI feedback — mode label/tooltips, centered 4:3 game, toolbar at bottom, better error handling"
+        "message": "UI feedback \u2014 mode label/tooltips, centered 4:3 game, toolbar at bottom, better error handling"
       },
       {
         "type": "fix",
