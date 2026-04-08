@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.37.1",
+    "date": "2026-04-08",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "three diagnostic fixes from v0.37.0 match audit"
+      }
+    ]
+  },
+  {
     "version": "0.37.0",
     "date": "2026-04-08",
     "changes": [
@@ -73,11 +83,11 @@
     "changes": [
       {
         "type": "feat",
-        "message": "C-level rollback netcode engine (#3) \u2014 replaces JS-level resync with prediction + replay in WASM"
+        "message": "C-level rollback netcode engine (#3) — replaces JS-level resync with prediction + replay in WASM"
       },
       {
         "type": "feat",
-        "message": "host-authoritative roster \u2014 per-frame input application uses canonical roster"
+        "message": "host-authoritative roster — per-frame input application uses canonical roster"
       },
       {
         "type": "feat",
@@ -313,7 +323,7 @@
       },
       {
         "type": "fix",
-        "message": "controller settings UX \u2014 analog labels, gamepad status, toolbar overflow"
+        "message": "controller settings UX — analog labels, gamepad status, toolbar overflow"
       },
       {
         "type": "fix",
@@ -331,7 +341,7 @@
       },
       {
         "type": "feat",
-        "message": "v0.24.0 \u2014 feedback system, guaranteed session logging, PostHog integration"
+        "message": "v0.24.0 — feedback system, guaranteed session logging, PostHog integration"
       },
       {
         "type": "fix",
@@ -343,19 +353,19 @@
       },
       {
         "type": "fix",
-        "message": "comprehensive security hardening \u2014 session hijack, relay abuse, XSS, rate limiting"
+        "message": "comprehensive security hardening — session hijack, relay abuse, XSS, rate limiting"
       },
       {
         "type": "fix",
-        "message": "pre-launch UX polish \u2014 validation, meta tags, console cleanup, copy improvements"
+        "message": "pre-launch UX polish — validation, meta tags, console cleanup, copy improvements"
       },
       {
         "type": "fix",
-        "message": "codebase health audit \u2014 25 quick wins for hygiene and correctness"
+        "message": "codebase health audit — 25 quick wins for hygiene and correctness"
       },
       {
         "type": "fix",
-        "message": "test infrastructure overhaul \u2014 SSL tolerance, unique rooms, socket hooks, new UX tests"
+        "message": "test infrastructure overhaul — SSL tolerance, unique rooms, socket hooks, new UX tests"
       },
       {
         "type": "fix",
@@ -373,11 +383,11 @@
     "changes": [
       {
         "type": "feat",
-        "message": "SoftFloat FPU determinism \u2014 bit-exact cross-platform lockstep"
+        "message": "SoftFloat FPU determinism — bit-exact cross-platform lockstep"
       },
       {
         "type": "fix",
-        "message": "security hardening \u2014 CF-Connecting-IP, CSP tightening, input validation"
+        "message": "security hardening — CF-Connecting-IP, CSP tightening, input validation"
       }
     ]
   },
@@ -397,7 +407,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "Agent's Version (#2) \u2014 named release marking the second AI-collaboration milestone"
+        "message": "Agent's Version (#2) — named release marking the second AI-collaboration milestone"
       },
       {
         "type": "feat",
@@ -425,7 +435,7 @@
       },
       {
         "type": "fix",
-        "message": "9-region kn_sync_hash \u2014 exclude volatile ps0/ps1/ps2 RDRAM regions to stop iOS/desktop false-positive desyncs"
+        "message": "9-region kn_sync_hash — exclude volatile ps0/ps1/ps2 RDRAM regions to stop iOS/desktop false-positive desyncs"
       },
       {
         "type": "fix",
@@ -437,7 +447,7 @@
       },
       {
         "type": "fix",
-        "message": "vgp-z-portrait stacking-context bug \u2014 Z button no longer intercepts A taps"
+        "message": "vgp-z-portrait stacking-context bug — Z button no longer intercepts A taps"
       },
       {
         "type": "fix",
@@ -449,11 +459,11 @@
       },
       {
         "type": "fix",
-        "message": "rename rollback \u2192 resync across the codebase to match what it actually does"
+        "message": "rename rollback → resync across the codebase to match what it actually does"
       },
       {
         "type": "fix",
-        "message": "remove dynamic frame delay \u2014 keep delay fixed for muscle memory consistency"
+        "message": "remove dynamic frame delay — keep delay fixed for muscle memory consistency"
       },
       {
         "type": "fix",
@@ -489,7 +499,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "add observability \u2014 client event beacon, health check, admin errors tab"
+        "message": "add observability — client event beacon, health check, admin errors tab"
       },
       {
         "type": "fix",
@@ -539,7 +549,7 @@
       },
       {
         "type": "fix",
-        "message": "lobby landscape layout \u2014 scrollable with visible footer"
+        "message": "lobby landscape layout — scrollable with visible footer"
       }
     ]
   },
@@ -627,7 +637,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "EmuLinker easter eggs \u2014 admin welcome + MOTD console log"
+        "message": "EmuLinker easter eggs — admin welcome + MOTD console log"
       },
       {
         "type": "fix",
@@ -645,7 +655,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "Konami Code easter egg \u2014 HELLOD00D protocol tribute"
+        "message": "Konami Code easter egg — HELLOD00D protocol tribute"
       },
       {
         "type": "fix",
@@ -689,7 +699,7 @@
       },
       {
         "type": "feat",
-        "message": "admin page \u2014 group by room, copy logs, device info"
+        "message": "admin page — group by room, copy logs, device info"
       },
       {
         "type": "fix",
@@ -705,7 +715,7 @@
       },
       {
         "type": "feat",
-        "message": "emulator hibernate \u2014 keep WASM alive between games"
+        "message": "emulator hibernate — keep WASM alive between games"
       },
       {
         "type": "fix",
@@ -815,7 +825,7 @@
       },
       {
         "type": "fix",
-        "message": "silent reconnection during games \u2014 no scary toasts"
+        "message": "silent reconnection during games — no scary toasts"
       },
       {
         "type": "fix",
@@ -823,7 +833,7 @@
       },
       {
         "type": "fix",
-        "message": "shutdown race \u2014 safe room deletion via signal handler"
+        "message": "shutdown race — safe room deletion via signal handler"
       }
     ]
   },
@@ -833,7 +843,7 @@
     "changes": [
       {
         "type": "feat",
-        "message": "P2P ROM sharing \u2014 host shares ROM to guests over WebRTC, no server upload"
+        "message": "P2P ROM sharing — host shares ROM to guests over WebRTC, no server upload"
       },
       {
         "type": "feat",
@@ -873,7 +883,7 @@
       },
       {
         "type": "fix",
-        "message": "ROM transfer reliability \u2014 resumable with backpressure timeout and retries"
+        "message": "ROM transfer reliability — resumable with backpressure timeout and retries"
       },
       {
         "type": "fix",
