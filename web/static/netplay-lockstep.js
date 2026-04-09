@@ -5538,6 +5538,33 @@
       }
     }
 
+    // ── DC health monitor: detect stuck unreliable DC, rotate if needed ──
+    if (_useCRollback && _rbTransport === 'unreliable') {
+      const nowDc = performance.now();
+      for (const [sid, peer] of Object.entries(_peers)) {
+        if (!peer.rbDc || peer.rbDc.readyState !== 'open') continue;
+
+        // Signal 1: bufferedAmount growth (local SCTP congestion)
+        if (peer.rbDc.bufferedAmount > DC_BUFFER_THRESHOLD) {
+          _dcBufferStaleStreak[sid] = (_dcBufferStaleStreak[sid] || 0) + 1;
+          if (_dcBufferStaleStreak[sid] >= DC_BUFFER_STALE_FRAMES) {
+            rotateDc(sid, 'buffer');
+          }
+        } else {
+          _dcBufferStaleStreak[sid] = 0;
+        }
+
+        // Signal 2: ack staleness (remote silent drop)
+        if (
+          peer.lastAckAdvanceTime &&
+          nowDc - peer.lastAckAdvanceTime > DC_ACK_STALE_MS &&
+          _frameNum > 60 // skip during early convergence
+        ) {
+          rotateDc(sid, 'ack-stale');
+        }
+      }
+    }
+
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
     if (_skipFrameAdvance) return;
 
