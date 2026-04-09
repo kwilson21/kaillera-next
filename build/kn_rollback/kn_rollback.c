@@ -61,9 +61,11 @@ extern void kn_reset_audio(void);
 extern uint32_t kn_sync_hash(void);
 
 /* Forward declaration: SoftFloat globals (not in retro_serialize — saved
- * alongside ring buffer snapshots by sf_pack/sf_restore below) */
-extern int softfloat_roundingMode;
-extern int softfloat_exceptionFlags;
+ * alongside ring buffer snapshots by sf_pack/sf_restore below).
+ * Type must match softfloat.h: uint_fast8_t (1 byte on WASM). */
+#include <stdint.h>
+extern uint_fast8_t softfloat_roundingMode;
+extern uint_fast8_t softfloat_exceptionFlags;
 
 /* ── Taint tracking ─────────────────────────────────────────────────
  * Level-2 mark-and-sweep taint map for RDRAM. Any RDRAM byte written by a
