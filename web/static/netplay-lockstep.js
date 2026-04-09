@@ -1094,6 +1094,7 @@
   let _guestStateBytes = null; // decompressed state bytes to load
   let _frameNum = 0; // current logical frame number
   let _syncPhase = false; // GGPO-style sync: true while exchanging sync handshake
+  let _syncDone = false; // true once sync completes or times out — stops ping/pong flood
   let _syncPingSent = 0; // timestamp of last sync-ping
   let _syncPongsReceived = 0; // count of sync-pong round-trips completed
   const _SYNC_ROUNDS = 3; // require 3 round-trips before starting (like GGPO)
@@ -2832,17 +2833,21 @@
         }
         // ── GGPO-style sync handshake ──────────────────────────────────
         if (e.data.startsWith('sync-ping:')) {
-          // Peer is probing — reply immediately so they can measure RTT
-          try {
-            peer.dc.send(e.data.replace('sync-ping:', 'sync-pong:'));
-          } catch (_) {}
+          // Peer is probing — reply once sync is done, stop replying to avoid flood
+          if (!_syncDone) {
+            try {
+              peer.dc.send(e.data.replace('sync-ping:', 'sync-pong:'));
+            } catch (_) {}
+          }
           return;
         }
         if (e.data.startsWith('sync-pong:')) {
+          if (_syncDone) return; // ignore late pongs after sync completed
           _syncPongsReceived++;
           const rtt = performance.now() - _syncPingSent;
           _syncLog(`SYNC-PONG #${_syncPongsReceived}/${_SYNC_ROUNDS} RTT=${rtt.toFixed(1)}ms`);
           if (_syncPongsReceived >= _SYNC_ROUNDS && _syncPhase) {
+            _syncDone = true;
             _syncPhase = false;
             _syncLog('SYNC-PHASE complete — input pipeline confirmed, starting frames');
             setStatus('Connected -- game on!');
@@ -5041,8 +5046,9 @@
     // when one peer races ahead before the other's inputs are flowing.
     _syncPhase = true;
     _syncPongsReceived = 0;
+    _syncDone = false;
     const _syncSendPing = () => {
-      if (!_syncPhase) return;
+      if (_syncDone) return;
       _syncPingSent = performance.now();
       for (const p of Object.values(_peers)) {
         if (p.dc?.readyState === 'open') {
@@ -5051,8 +5057,8 @@
           } catch (_) {}
         }
       }
-      if (_syncPongsReceived < _SYNC_ROUNDS) {
-        setTimeout(_syncSendPing, 50);
+      if (!_syncDone) {
+        setTimeout(_syncSendPing, 100);
       }
     };
     _syncSendPing();
@@ -5062,6 +5068,7 @@
     // This handles edge cases like a peer with a blocked pong reply.
     setTimeout(() => {
       if (_syncPhase) {
+        _syncDone = true;
         _syncPhase = false;
         _syncLog(`SYNC-PHASE timeout — starting with ${_syncPongsReceived}/${_SYNC_ROUNDS} pongs`);
         setStatus('Connected -- game on!');
