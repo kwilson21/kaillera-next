@@ -152,7 +152,7 @@ def run() -> None:
             cn = result.stdout.strip().split("CN=")[-1] if "CN=" in result.stdout else None
             if cn and cn != "localhost":
                 log.info("Listening on :%d (HTTPS)", port)
-                log.info("  https://%s:%d/", cn, port)
+                log.info("  https://%s/", cn)
             else:
                 log.info("Listening on :%d (HTTPS)", port)
         except Exception:
