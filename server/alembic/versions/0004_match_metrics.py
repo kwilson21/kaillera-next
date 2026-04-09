@@ -47,11 +47,13 @@ def upgrade() -> None:
         sa.Column("entry_count", sa.Integer),
         sa.Column("rotated_at", sa.Text, server_default=sa.text("(datetime('now'))")),
         sa.Column("created_at", sa.Text, server_default=sa.text("(datetime('now'))")),
+        if_not_exists=True,
     )
     op.create_index(
         "idx_match_metrics_created_at",
         "match_metrics",
         [sa.text("created_at DESC")],
+        if_not_exists=True,
     )
 
 
