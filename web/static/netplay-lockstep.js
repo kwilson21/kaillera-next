@@ -1093,6 +1093,10 @@
   let _selfLockstepReady = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _frameNum = 0; // current logical frame number
+  let _syncPhase = false; // GGPO-style sync: true while exchanging sync handshake
+  let _syncPingSent = 0; // timestamp of last sync-ping
+  let _syncPongsReceived = 0; // count of sync-pong round-trips completed
+  const _SYNC_ROUNDS = 3; // require 3 round-trips before starting (like GGPO)
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
   let _localInputs = {}; // frame -> input object
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
@@ -2824,6 +2828,25 @@
           const known = _knownPlayers[remoteSid];
           const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
           _config?.onToast?.(`${name} returned`);
+          return;
+        }
+        // ── GGPO-style sync handshake ──────────────────────────────────
+        if (e.data.startsWith('sync-ping:')) {
+          // Peer is probing — reply immediately so they can measure RTT
+          try {
+            peer.dc.send(e.data.replace('sync-ping:', 'sync-pong:'));
+          } catch (_) {}
+          return;
+        }
+        if (e.data.startsWith('sync-pong:')) {
+          _syncPongsReceived++;
+          const rtt = performance.now() - _syncPingSent;
+          _syncLog(`SYNC-PONG #${_syncPongsReceived}/${_SYNC_ROUNDS} RTT=${rtt.toFixed(1)}ms`);
+          if (_syncPongsReceived >= _SYNC_ROUNDS && _syncPhase) {
+            _syncPhase = false;
+            _syncLog('SYNC-PHASE complete — input pipeline confirmed, starting frames');
+            setStatus('Connected -- game on!');
+          }
           return;
         }
         // FPU trace: cross-platform determinism verification from host
@@ -4968,7 +4991,39 @@
     //   }
     // }
 
-    setStatus('Connected -- game on!');
+    // ── GGPO-style sync phase ──────────────────────────────────────
+    // Before running any game frames, confirm the input DataChannel is
+    // bidirectionally live by exchanging sync-ping/pong round-trips.
+    // This prevents the safety freeze from triggering during startup
+    // when one peer races ahead before the other's inputs are flowing.
+    _syncPhase = true;
+    _syncPongsReceived = 0;
+    const _syncSendPing = () => {
+      if (!_syncPhase) return;
+      _syncPingSent = performance.now();
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send(`sync-ping:${_syncPingSent}`);
+          } catch (_) {}
+        }
+      }
+      if (_syncPongsReceived < _SYNC_ROUNDS) {
+        setTimeout(_syncSendPing, 50);
+      }
+    };
+    _syncSendPing();
+    _syncLog('SYNC-PHASE started — exchanging handshake before game frames');
+    setStatus('Synchronizing...');
+    // Safety timeout: if sync doesn't complete in 5s, start anyway.
+    // This handles edge cases like a peer with a blocked pong reply.
+    setTimeout(() => {
+      if (_syncPhase) {
+        _syncPhase = false;
+        _syncLog(`SYNC-PHASE timeout — starting with ${_syncPongsReceived}/${_SYNC_ROUNDS} pongs`);
+        setStatus('Connected -- game on!');
+      }
+    }, 5000);
     _startTime = performance.now();
     _cachedMatchId = KNState.matchId;
     _cachedRoom = KNState.room;
@@ -5273,6 +5328,7 @@
     // (its internal counter), and JS would jump backwards from frame N to
     // frame 0 — corrupting input ring frame tags and the rollback ring.
     if (window._rbPendingInit) return;
+    if (_syncPhase) return; // waiting for sync handshake to complete
 
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
