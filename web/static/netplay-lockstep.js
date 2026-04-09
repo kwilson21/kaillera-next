@@ -423,6 +423,7 @@
   let _useCRollback = false; // true when C-level rollback engine is active
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let rb_numPlayers = 2; // set during C-rollback init
+  let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
@@ -430,8 +431,15 @@
   //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
   //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
   let _rbTransport = 'reliable';
-  // P2: ring of last N local inputs, included as redundancy in each packet.
-  const RB_REDUNDANCY_FRAMES = 8;
+  // P2: GGPO-style ack-driven redundancy — every packet carries ALL inputs
+  // since the peer's last acknowledged frame. This guarantees no input is
+  // permanently lost unless the connection drops entirely: even if 50
+  // packets are lost in a row, the 51st carries the full unconfirmed
+  // history. Capped at the rollback window depth (inputs older than that
+  // can't be rolled back anyway). Fixed 8-frame window was too small —
+  // match 002ad0f6 lost inputs at f=3441-3444 during a ~133ms WiFi drop
+  // and never recovered them, causing permanent state divergence.
+  const RB_REDUNDANCY_MAX = 30; // hard cap (rollback window + margin)
   const _rbLocalHistory = []; // {frame, buttons, lx, ly, cx, cy} — newest last
   // T4: transport stats — periodic flush counts packets and dedup rate.
   let _rbTransportPacketsSent = 0;
@@ -4736,6 +4744,7 @@
         const rollbackMax = Math.min(20, Math.max(12, effectiveDelay + 8));
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         rb_numPlayers = numPlayers;
+        _rbRollbackMax = rollbackMax;
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
         // T3: explicit mode marker so the server-side log analyzer knows
@@ -5314,17 +5323,31 @@
         }
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
-          // P1 defensive: warn if raw advantage is approaching the rollback
-          // ring window. The existing proportional throttle caps excess at
-          // DELAY_FRAMES + 4, which is well inside rollbackMax (>= 12), so
-          // this should never trigger in practice. If it does, something is
-          // wrong (stale _lastRemoteFramePerSlot, pacing disabled, etc.) and
-          // we'd be flirting with FAILED-ROLLBACK silent desync.
-          if (_useCRollback && _frameAdvRaw >= 10 && _frameNum % 60 === 0) {
-            _syncLog(
-              `RB-RING-NEAR-FULL warning: fAdvRaw=${_frameAdvRaw} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
-            );
+
+          // ── GGPO safety freeze ────────────────────────────────────────
+          // Hard cap: never advance past rollbackMax - 2 frames ahead of
+          // the oldest confirmed remote input. This makes DEEP-MISPREDICT-
+          // SKIP and FAILED-ROLLBACK unreachable — any misprediction will
+          // always have a valid ring slot to restore from. The -2 margin
+          // accounts for the 1-frame pipeline delay between detecting a
+          // misprediction and acting on it in kn_pre_tick.
+          //
+          // This fires BEFORE the soft proportional throttle below.
+          // On good networks it never triggers (soft throttle keeps
+          // advantage at delay+1..2). On bad WiFi it causes a brief
+          // freeze instead of a permanent desync.
+          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2) {
+            if (!_framePacingActive) {
+              _framePacingActive = true;
+              _pacingCapsCount++;
+              _syncLog(
+                `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — hard freeze to prevent unrecoverable desync`,
+              );
+            }
+            _pacingCapsFrames++;
+            return;
           }
+
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
 
@@ -5333,25 +5356,15 @@
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
-          // Fix 3: Tighter proportional throttle.
-          // Previously: excess=1→25%, =2→50%, =3→75%, ≥4→100%.
-          // Now:        excess=1→50%, ≥2→100%.
-          // Rationale: at excess≥2 the host is 2 frames past its own delay
-          // budget, meaning mispredictions will have depth 2+ when they hit.
-          // Depth-2 rollbacks are right at the edge of perception; depth-3+
-          // are visible snaps. Hard-stalling at excess=2 prevents the ring
-          // from filling up to the point where rollbacks have to rewind 5+
-          // frames (which used to happen in the previous match: depth=11).
-          // Cost: more stalls → lower fps under network stress, but the
-          // stalls are soft (next frame runs normally) whereas the snaps
-          // are jarring (visible rewind). Soft > snap.
+          // Proportional throttle: soft pacing for normal jitter.
+          // excess=1→50% skip, ≥2→100% skip. This handles the common
+          // case (one peer slightly faster) without a jarring freeze.
           const excess = _frameAdvRaw - DELAY_FRAMES;
           let shouldSkip = false;
           if (excess >= 2) {
             shouldSkip = true;
           } else if (excess >= 1) {
             _pacingSkipCounter++;
-            /* 50% skip ratio at excess=1 (was 25%) */
             shouldSkip = (_pacingSkipCounter & 1) === 0;
           }
           if (shouldSkip) {
@@ -5388,15 +5401,15 @@
     // Send local input for current frame to ALL open peer DCs.
     // Each packet includes an ack of the highest frame we've received from that peer.
     //
-    // P2: in rollback mode we carry the last RB_REDUNDANCY_FRAMES of local
-    // inputs as redundancy. Combined with an unordered DC (when the host
-    // broadcasts rb-transport:unreliable) this defeats WebRTC head-of-line
-    // blocking: a delayed packet is recovered by the next packet's redundant
-    // slot, limited only by the per-frame tick cadence.
+    // P2: GGPO-style ack-driven redundancy. Every packet carries all
+    // unconfirmed inputs (from the peer's last ACK to _frameNum - 1).
+    // This guarantees recovery from arbitrary packet loss bursts — even
+    // if N packets drop in a row, the (N+1)-th carries the full backlog.
     const localInput = readLocalInput();
     _localInputs[_frameNum] = localInput;
     _auditRecordLocal(_frameNum, localInput);
-    // Maintain redundancy ring (newest last). Cap at RB_REDUNDANCY_FRAMES.
+    // Append to history ring; trim entries already acked by ALL peers
+    // (or older than the hard cap, whichever is tighter).
     _rbLocalHistory.push({
       frame: _frameNum,
       buttons: localInput.buttons,
@@ -5405,11 +5418,23 @@
       cx: localInput.cx,
       cy: localInput.cy,
     });
-    while (_rbLocalHistory.length > RB_REDUNDANCY_FRAMES) _rbLocalHistory.shift();
-    // Slice excludes the current frame (it's already in the header). Only
-    // emit redundancy when we have rollback + unreliable transport negotiated —
-    // otherwise it's wasted bandwidth on the reliable DC.
     const shouldSendRedundancy = _useCRollback && _rbTransport === 'unreliable';
+    let minPeerAck = _frameNum; // conservative: assume all acked up to now
+    if (shouldSendRedundancy) {
+      for (const p of activePeers) {
+        const ack = p.lastAckFromPeer ?? -1;
+        if (ack < minPeerAck) minPeerAck = ack;
+      }
+    }
+    // Trim: keep everything after minPeerAck (peer hasn't confirmed these),
+    // but never more than RB_REDUNDANCY_MAX to bound packet size.
+    while (
+      _rbLocalHistory.length > 0 &&
+      (_rbLocalHistory[0].frame <= minPeerAck || _rbLocalHistory.length > RB_REDUNDANCY_MAX)
+    ) {
+      _rbLocalHistory.shift();
+    }
+    // Tail excludes the current frame (it's already in the packet header).
     const redundantTail = shouldSendRedundancy ? _rbLocalHistory.slice(0, _rbLocalHistory.length - 1) : null;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
@@ -5471,8 +5496,11 @@
         const hashFrame = _frameNum - 1;
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
+        const hiddenFpDone = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
+        const sfStateDone = tickMod._kn_get_softfloat_state?.() ?? 0;
+        const taintedCountDone = tickMod._kn_get_tainted_block_count?.() ?? 0;
         _syncLog(
-          `C-REPLAY done: caught up at f=${_frameNum} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)}`,
+          `C-REPLAY done: caught up at f=${_frameNum} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
         );
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
@@ -5671,12 +5699,26 @@
       // a "toxic" rollback (one that introduces divergence) is invisible
       // until the next 300-frame checkpoint, making it impossible to
       // attribute the divergence to a specific rollback event.
+      //
+      // We ALSO broadcast per-64KB RDRAM block hashes + the per-region
+      // savestate digest here, so the 2026-04-08 audit path (match
+      // 002ad0f6) can pinpoint which block diverges AT the rollback
+      // boundary instead of inferring it from the next 300-frame
+      // checkpoint 180 frames later. Without per-rollback block data, we
+      // can see divergence has happened by f=3599 but not whether it was
+      // introduced at f=3420, f=3440, or f=3460.
       if (_rbPendingPostRollbackHash) {
         _rbPendingPostRollbackHash = false;
         const hashFrame = _frameNum - 1;
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
+        const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
+        const hiddenFp = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
+        const sfState = tickMod._kn_get_softfloat_state?.() ?? 0;
+        const taintedCount = tickMod._kn_get_tainted_block_count?.() ?? 0;
         if (gameHash !== 0) {
-          _syncLog(`RB-POST-RB f=${hashFrame} hash=0x${gameHash.toString(16)} (verifying restoration)`);
+          _syncLog(
+            `RB-POST-RB f=${hashFrame} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+          );
           // Cache for RB-CHECK comparison (see periodic broadcast below for
           // why — same race window applies on the post-rollback path).
           if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
@@ -5686,6 +5728,61 @@
               try {
                 p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
               } catch (_) {}
+            }
+          }
+
+          // Block-level snapshot + broadcast (duplicates the 300-frame
+          // periodic logic at a per-rollback cadence). Cache locally and
+          // broadcast so the peer can diff at this exact frame. Skips if
+          // the WASM exports or malloc aren't available (old core).
+          if (tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
+            if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(128 * 4);
+            if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(128);
+            if (_rbHashBufPtr && _rbTaintBufPtr) {
+              tickMod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
+              tickMod._kn_get_taint_blocks(_rbTaintBufPtr);
+              const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, 128);
+              const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, 128);
+              const blocksSnap = Array.from(blocks);
+              const taintSnap = Array.from(taint);
+              const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
+              const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
+              _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
+              window._rbLocalBlocks[hashFrame] = blocksSnap;
+              window._rbLocalTaint[hashFrame] = taintSnap;
+              for (const p of Object.values(_peers)) {
+                if (p.dc?.readyState === 'open') {
+                  try {
+                    p.dc.send(`rb-blocks:${hashFrame}:${blocksHex}`);
+                  } catch (_) {}
+                }
+              }
+            }
+          }
+
+          // Per-region savestate digest (frame-specific variant so the
+          // regions match the post-rollback state of hashFrame, not the
+          // most recent ring slot). This is what lets the peer see which
+          // slice of the savestate — RDRAM r0..r31 vs post-RDRAM r32 —
+          // drifted at the rollback boundary.
+          const NUM_REGIONS_POSTRB = 256;
+          if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_POSTRB * 4);
+          if (_rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
+            const ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
+            if (ok > 0) {
+              const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
+              const regionsHex = Array.from(regions)
+                .map((h) => h.toString(16))
+                .join(',');
+              if (!window._rbLocalRegions) window._rbLocalRegions = {};
+              window._rbLocalRegions[hashFrame] = regionsHex;
+              for (const p of Object.values(_peers)) {
+                if (p.dc?.readyState === 'open') {
+                  try {
+                    p.dc.send(`rb-regions:${hashFrame}:${regionsHex}`);
+                  } catch (_) {}
+                }
+              }
             }
           }
         }
