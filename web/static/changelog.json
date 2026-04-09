@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.39.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add rotateDc function for DC health recovery"
+      },
+      {
+        "type": "fix",
+        "message": "close old rbDc before assigning new one in ondatachannel"
+      },
+      {
+        "type": "feat",
+        "message": "track ack advance time for DC health detection"
+      },
+      {
+        "type": "feat",
+        "message": "DC health detection — bufferedAmount + ack staleness"
+      }
+    ]
+  },
+  {
     "version": "0.42.4",
     "date": "2026-04-09",
     "changes": [
