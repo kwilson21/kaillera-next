@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.41.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "GGPO-style sync phase before game frames"
+      }
+    ]
+  },
+  {
     "version": "0.40.3",
     "date": "2026-04-09",
     "changes": [
