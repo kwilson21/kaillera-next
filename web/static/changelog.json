@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.40.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add boot pipeline telemetry for diagnosing intermittent boot failures"
+      },
+      {
+        "type": "fix",
+        "message": "correct SoftFloat extern types to uint_fast8_t"
+      },
+      {
+        "type": "feat",
+        "message": "rebuild WASM core with corrected SoftFloat types"
+      }
+    ]
+  },
+  {
     "version": "0.39.0",
     "date": "2026-04-09",
     "changes": [
