@@ -890,9 +890,6 @@
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
   const onGameStarted = (data) => {
-    // Boot timeline: record game-started so we can measure the gap between
-    // the Socket.IO event and bootEmulator() / initEngine() calls.
-    if (window._knBootLog) window._knBootLog('game-started-event', { mode: data.mode });
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
@@ -2096,7 +2093,7 @@
           if (ctx?.audioCtx && ctx.audioCtx.state !== 'closed') {
             try {
               if (proto.resume) ctx.audioCtx.resume = proto.resume;
-              ctx.audioCtx.resume().catch(() => {});
+              ctx.audioCtx.resume();
             } catch (_) {}
           }
         }
@@ -2105,7 +2102,7 @@
       // Resume SDL2 AudioContext if present
       if (mod.SDL2?.audioContext && mod.SDL2.audioContext.state !== 'closed') {
         try {
-          mod.SDL2.audioContext.resume().catch(() => {});
+          mod.SDL2.audioContext.resume();
         } catch (_) {}
       }
     }
@@ -2121,29 +2118,12 @@
 
   const bootEmulator = () => {
     if (window.__test_skipBoot) return;
-
-    // ── Boot timeline: shared diagnostic array ──────────────────────────
-    // Every boot-critical codepath appends {stage, t, ...detail} entries.
-    // On success or timeout the lockstep engine emits the full timeline as
-    // a KNEvent so we can see exactly where intermittent boots stall.
-    window._knBootTimeline = [];
-    window._knBootStart = performance.now();
-    const bt = (stage, detail) => {
-      const entry = { stage, t: Math.round(performance.now() - window._knBootStart) };
-      if (detail) Object.assign(entry, detail);
-      window._knBootTimeline.push(entry);
-      console.log(`[boot] +${entry.t}ms ${stage}`, detail || '');
-    };
-    window._knBootLog = bt;
-
     // Re-initialize EmulatorJS if it was destroyed
     if (window.EJS_emulator) {
-      bt('skip-ejs-exists');
       console.log('[play] bootEmulator: EJS already exists, skipping');
       return;
     }
     if (!_romBlob && !_romBlobUrl) {
-      bt('skip-no-rom');
       console.log('[play] bootEmulator: no ROM loaded');
       showToast('Please load a ROM file first');
       return;
@@ -2160,16 +2140,16 @@
     // start button within a real user gesture context.
     if (!isHost) {
       window.EJS_startOnLoaded = false;
-      bt('guest-auto-start-disabled');
+      console.log('[play] bootEmulator: guest — disabled auto-start for gesture gate');
     }
 
-    bt('boot-start', { isHost, hasBlob: !!_romBlob, hasBlobUrl: !!_romBlobUrl });
+    console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
 
     // If EmulatorJS class is already loaded (game restart), instantiate
     // directly to avoid const re-declaration errors from re-injecting scripts
     if (typeof EmulatorJS === 'function') {
-      bt('reuse-ejs-class');
+      console.log('[play] bootEmulator: reusing existing EmulatorJS class');
       window.EJS_gameUrl = _romBlobUrl;
       window.EJS_emulator = new EmulatorJS(window.EJS_player || '#game', {
         gameUrl: _romBlobUrl,
@@ -2183,33 +2163,20 @@
     // Wait for IDB cache clear (core-redirector) before loading EJS.
     // If the clear hasn't finished, EJS might use stale cached core data.
     const injectLoader = () => {
-      bt('inject-loader');
       const script = document.createElement('script');
       script.src = '/static/ejs-loader.js';
       script.onload = () => {
-        bt('loader-loaded');
+        console.log('[play] loader.js loaded');
       };
       script.onerror = () => {
-        bt('loader-error');
         console.log('[play] loader.js FAILED to load');
       };
       document.body.appendChild(script);
     };
     if (window._knCoreReady) {
-      bt('core-ready-wait');
       // NOTE: intentionally .then() — dual resolve/reject handler, cleaner than try/finally
-      window._knCoreReady.then(
-        () => {
-          bt('core-ready-resolved');
-          injectLoader();
-        },
-        () => {
-          bt('core-ready-rejected');
-          injectLoader();
-        },
-      );
+      window._knCoreReady.then(injectLoader, injectLoader);
     } else {
-      bt('core-ready-absent');
       injectLoader();
     }
   };
@@ -2754,7 +2721,6 @@
   };
 
   const initEngine = () => {
-    if (window._knBootLog) window._knBootLog('initEngine', { mode, isHost, isSpectator });
     // Guard against double-init (e.g., race between game-started events).
     // Stop the previous engine so its socket listeners are removed first.
     if (engine) {

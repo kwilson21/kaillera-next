@@ -444,6 +444,19 @@
   // T4: transport stats — periodic flush counts packets and dedup rate.
   let _rbTransportPacketsSent = 0;
   let _rbTransportDupsRecv = 0;
+  // DC health monitor: detect stuck unreliable SCTP streams and rotate
+  // to a fresh DataChannel on the same PeerConnection. iOS Safari's
+  // usrsctp silently stops delivering on unordered streams after ~14
+  // packets. Rotation gives a fresh SCTP stream; GGPO redundancy fills
+  // any gap (each packet carries all unACKed frames).
+  let _dcRotationCount = 0;
+  let _dcRotationCooldownUntil = 0;
+  const _dcBufferStaleStreak = {}; // sid -> consecutive frames above threshold
+  const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
+  const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before rotation
+  const DC_ACK_STALE_MS = 500; // ms without ack advance before rotation
+  const DC_ROTATION_COOLDOWN_MS = 2000;
+  const DC_MAX_ROTATIONS = 10;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -1093,11 +1106,6 @@
   let _selfLockstepReady = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _frameNum = 0; // current logical frame number
-  let _syncPhase = false; // GGPO-style sync: true while exchanging sync handshake
-  let _syncDone = false; // true once sync completes or times out — stops ping/pong flood
-  let _syncPingSent = 0; // timestamp of last sync-ping
-  let _syncPongsReceived = 0; // count of sync-pong round-trips completed
-  const _SYNC_ROUNDS = 3; // require 3 round-trips before starting (like GGPO)
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
   let _localInputs = {}; // frame -> input object
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
@@ -2624,22 +2632,6 @@
     };
   };
 
-  // Decide which DC to use for outgoing rollback input packets. The lockstep
-  // DC is always a valid fallback; the unordered DC is only used when the
-  // host has broadcast rb-transport:unreliable AND the channel negotiated
-  // with the exact unordered/no-retransmit config we asked for.
-  const _pickInputDc = (peer) => {
-    if (
-      _rbTransport === 'unreliable' &&
-      peer.rbDc?.readyState === 'open' &&
-      peer.rbDc.ordered === false &&
-      peer.rbDc.maxRetransmits === 0
-    ) {
-      return peer.rbDc;
-    }
-    return peer.dc;
-  };
-
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
@@ -2743,10 +2735,7 @@
         } catch (_) {}
       }
 
-      if (!_gameStarted) {
-        if (window._knBootLog) window._knBootLog('dc-open-trigger', { remoteSid });
-        startGameSequence();
-      }
+      if (!_gameStarted) startGameSequence();
     };
 
     ch.onclose = () => {
@@ -2829,29 +2818,6 @@
           const known = _knownPlayers[remoteSid];
           const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
           _config?.onToast?.(`${name} returned`);
-          return;
-        }
-        // ── GGPO-style sync handshake ──────────────────────────────────
-        if (e.data.startsWith('sync-ping:')) {
-          // Peer is probing — reply once sync is done, stop replying to avoid flood
-          if (!_syncDone) {
-            try {
-              peer.dc.send(e.data.replace('sync-ping:', 'sync-pong:'));
-            } catch (_) {}
-          }
-          return;
-        }
-        if (e.data.startsWith('sync-pong:')) {
-          if (_syncDone) return; // ignore late pongs after sync completed
-          _syncPongsReceived++;
-          const rtt = performance.now() - _syncPingSent;
-          _syncLog(`SYNC-PONG #${_syncPongsReceived}/${_SYNC_ROUNDS} RTT=${rtt.toFixed(1)}ms`);
-          if (_syncPongsReceived >= _SYNC_ROUNDS && _syncPhase) {
-            _syncDone = true;
-            _syncPhase = false;
-            _syncLog('SYNC-PHASE complete — input pipeline confirmed, starting frames');
-            setStatus('Connected -- game on!');
-          }
           return;
         }
         // FPU trace: cross-platform determinism verification from host
@@ -3343,7 +3309,7 @@
     setupDataChannel(remoteSid, peer.dc);
     peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: true, maxRetransmits: 0 });
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
 
     try {
@@ -3407,45 +3373,9 @@
   // Minimum frames the emulator must run before we consider it ready.
   const MIN_BOOT_FRAMES = 120; // ~2 seconds at 60fps
 
-  // Emit the full boot timeline as a KNEvent for server-side analysis.
-  // Called once on boot success or timeout — includes every stage with
-  // relative timestamps so we can see exactly where intermittent boots stall.
-  const _emitBootTimeline = (outcome, extra) => {
-    const timeline = window._knBootTimeline || [];
-    const totalMs = window._knBootStart ? Math.round(performance.now() - window._knBootStart) : -1;
-    const meta = {
-      outcome,
-      totalMs,
-      stages: timeline.length,
-      slot: _playerSlot ?? -1,
-      ...extra,
-    };
-    // Include the full timeline as a compact array (stage names + relative times).
-    // Truncate to 30 entries to stay within sendBeacon size limits.
-    meta.timeline = timeline.slice(-30).map((e) => `+${e.t}ms ${e.stage}`);
-    KNEvent('boot-timeline', `${outcome} in ${totalMs}ms`, meta);
-    _syncLog(`boot-timeline: ${outcome} totalMs=${totalMs} stages=${timeline.length}`);
-  };
-
   const startGameSequence = () => {
     if (_gameStarted) return;
     _gameStarted = true;
-    const bt = window._knBootLog || (() => {});
-    bt('startGameSequence', { slot: _playerSlot, spectator: _isSpectator });
-
-    // Start flushing session logs NOW — don't wait for startLockstep().
-    // Pre-lockstep events (boot, state sync, ready handshake) are critical
-    // for diagnosing connection failures but were previously lost because
-    // the flush interval only started after lockstep was running.
-    if (!_flushInterval) {
-      _cachedMatchId = _cachedMatchId || KNState.matchId;
-      _cachedRoom = _cachedRoom || KNState.room;
-      _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
-      _socketFlushFails = 0;
-      _startTime = _startTime || performance.now();
-      _flushInterval = setInterval(_flushSyncLog, 30000);
-      setTimeout(() => _flushSyncLog(), 5000);
-    }
 
     // P0-1 funnel: lockstep handshake complete, input exchange beginning.
     // This is the meaningful "the player can play now" signal.
@@ -3472,11 +3402,10 @@
     const _needsGesture = _playerSlot !== 0;
 
     if (!_needsGesture) {
-      // Host: proceed immediately — AudioContext pre-created by play.js.
-      // Install the same constructor hijack as guests so EJS gets the
-      // gesture-unlocked context instead of creating a new (suspended) one.
-      // Without this, EJS boot on iOS takes >1s after the tap, the gesture
-      // window expires, and EJS's AudioContext stalls at frame 6.
+      // Host: install AudioContext constructor hijack so EJS gets the
+      // gesture-unlocked context. Without this, EJS boot on iOS takes
+      // >1s after the tap, the gesture window expires, and EJS's
+      // AudioContext stalls at frame 6.
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC && window._kn_preloadedAudioCtx) {
         const _preCtx = window._kn_preloadedAudioCtx;
@@ -3497,7 +3426,6 @@
         if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
       }
       _bootGestureReceived = true;
-      bt('host-auto-boot', { audioCtxState: window._kn_preloadedAudioCtx?.state ?? 'none' });
       _syncLog('host auto-boot (slot=0)');
       setStatus('Loading emulator...');
       KNShared.bootWithCheats('lockstep');
@@ -3577,7 +3505,6 @@
             if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
           // Start emulator within gesture context so audio works
-          bt('guest-gesture-received');
           KNShared.bootWithCheats('lockstep');
           setStatus('Loading emulator...');
           _syncLog('gesture received — emulator starting');
@@ -3603,7 +3530,6 @@
       }
     }
 
-    let _lastWaitState = ''; // track state transitions
     const waitForEmu = () => {
       // Wait for gesture before polling
       if (!_bootGestureReceived) {
@@ -3616,31 +3542,12 @@
         _syncLog(`boot timed out after ${_bootPollCount} polls`);
         setStatus('Emulator failed to start — try reloading the page');
         _config?.onStatus?.('Emulator failed to start — try reloading');
-        // Emit full boot timeline so we can diagnose the stall
-        const snapshot = {
-          ejs: !!window.EJS_emulator,
-          gameManager: !!window.EJS_emulator?.gameManager,
-          module: !!window.EJS_emulator?.gameManager?.Module,
-          frames: window.EJS_emulator?.gameManager?.Module?._get_current_frame_count?.() ?? -1,
-          hasSimInput: !!window.EJS_emulator?.gameManager?.Module?._simulate_input,
-          btn: !!document.querySelector('.ejs_start_button'),
-          audioCtxState: window.EJS_emulator?.gameManager?.Module?.SDL2?.audioContext?.state ?? 'n/a',
-          preloadAudioState: window._kn_preloadedAudioCtx?.state ?? 'none',
-        };
-        bt('waitForEmu-timeout', snapshot);
-        _emitBootTimeline('timeout', snapshot);
         return;
       }
 
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         _bootPollCount++;
-        // Log state transitions, not just every 10th poll
-        const ws = 'no-gameManager';
-        if (ws !== _lastWaitState) {
-          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, ejs: !!window.EJS_emulator });
-          _lastWaitState = ws;
-        }
         if (_bootPollCount % 10 === 0) setStatus('Loading emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -3655,35 +3562,21 @@
           _syncLog(`boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
         }
-        // Log state transitions: frame progress and stall detection
-        const ws = `frames=${frames}`;
-        if (ws !== _lastWaitState) {
-          const audioState = mod?.SDL2?.audioContext?.state ?? 'n/a';
-          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, audioState });
-          _lastWaitState = ws;
-        }
         // Stuck at frame 0: try clicking the EJS start button (may not have been
         // clicked by waitForEmulator if Module loaded before the button appeared)
         if (frames === 0 && _bootPollCount % 20 === 0) {
           const btn = document.querySelector('.ejs_start_button');
           if (btn) {
             _syncLog('boot stuck at f=0 — clicking EJS start button');
-            bt('waitForEmu-click-start-btn');
             btn.click();
           } else if (!hasFrameCount) {
             _syncLog('boot stuck at f=0 — _get_current_frame_count missing (stock core?)');
-            bt('waitForEmu-no-frame-count');
           }
         }
         setTimeout(waitForEmu, 100);
         return;
       }
       if (!mod._simulate_input) {
-        const ws = 'no-simulate-input';
-        if (ws !== _lastWaitState) {
-          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, frames });
-          _lastWaitState = ws;
-        }
         if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -3730,8 +3623,6 @@
 
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
-      bt('waitForEmu-ready', { frames, polls: _bootPollCount });
-      _emitBootTimeline('success', { frames, polls: _bootPollCount });
       _syncLog(`emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
 
       // Set up key tracking now that ejs.controls is available
@@ -4017,19 +3908,6 @@
     _frameNum = 0;
     startLockstep();
 
-    // Detect lockstep start failure — fires if _running stays false
-    setTimeout(() => {
-      if (!_running && _gameStarted) {
-        _syncLog('lockstep-failed: _running still false after 15s');
-        KNEvent('lockstep-failed', 'startLockstep did not activate within 15s', {
-          slot: _playerSlot,
-          syncPhase: _syncPhase,
-          rbPendingInit: !!window._rbPendingInit,
-          peers: Object.keys(_peers).length,
-        });
-      }
-    }, 15000);
-
     // Spectator stream starts lazily — only when a spectator actually connects.
     // Eager start wastes CPU (drawImage + video encode every frame) which causes
     // thermal throttling on mobile hosts even with zero spectators.
@@ -4041,10 +3919,8 @@
     const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
     try {
-      // Timeout after 30s — the 16MB state download takes 10-15s even on
-      // fast connections. The previous 10s timeout was shorter than the
-      // actual transfer time, causing the host to abort its own cached
-      // state fetch and enter a stalled sync loop.
+      // Timeout after 30s — 16MB state download takes 10-15s even on
+      // fast connections; 10s was aborting before completion.
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 30000);
       const resp = await fetch(url, { signal: ac.signal });
@@ -4102,30 +3978,27 @@
       // data channels (SCTP limit with maxRetransmits).
       socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
 
-      // Upload raw bytes to cache, then fetch from cache — host goes
-      // through the same path as all other players. Using locally-captured
-      // bytes directly causes host-only desync (residual internal state).
-      const romHash = _config?.romHash;
-      if (romHash) {
-        const cacheParams = new URLSearchParams({ room: _config.sessionId, token: _config.uploadToken || '' });
-        await fetch(`/api/cache-state/${encodeURIComponent(romHash)}?${cacheParams}`, {
-          method: 'POST',
-          body: cacheBytes,
-        });
-        _syncLog('state cached — host fetching from cache');
-        fetchCachedState(romHash);
-        return; // fetchCachedState handles _selfLockstepReady
-      }
-
-      // Fallback: no ROM hash, use direct bytes
-      // NOTE: `bytes` is detached after compressAndEncode (worker transfer).
-      // Use `cacheBytes` (the pre-transfer copy) to avoid loading an empty buffer.
+      // Use local state immediately so the host isn't blocked by the
+      // cache round-trip. The blocking await fetch(POST 16MB) was causing
+      // the host to stall for 10-30s while the guest started normally.
       _guestStateBytes = cacheBytes;
       _selfLockstepReady = true;
       if (_rttComplete) {
         broadcastLockstepReady();
       }
       checkAllLockstepReady();
+
+      // Background: upload to cache for future guests (fire-and-forget)
+      const romHash = _config?.romHash;
+      if (romHash) {
+        const cacheParams = new URLSearchParams({ room: _config.sessionId, token: _config.uploadToken || '' });
+        fetch(`/api/cache-state/${encodeURIComponent(romHash)}?${cacheParams}`, {
+          method: 'POST',
+          body: cacheBytes,
+        })
+          .then(() => _syncLog('state cached in background'))
+          .catch((e) => _syncLog(`background cache failed: ${e.message || e}`));
+      }
     } catch (err) {
       _syncLog(`failed to send initial state: ${err}`);
     }
@@ -4394,31 +4267,6 @@
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
-
-      // Re-show gesture prompt if AudioContext expired (iOS reconnect)
-      if (_playerSlot !== 0 && _audioCtx?.state === 'suspended') {
-        const promptEl = document.getElementById('gesture-prompt');
-        if (promptEl) {
-          _syncLog('reconnect: AudioContext suspended — re-showing gesture prompt');
-          promptEl.classList.remove('hidden');
-          await new Promise((resolve) => {
-            const onTap = () => {
-              promptEl.classList.add('hidden');
-              _audioCtx.resume().catch(() => {});
-              promptEl.removeEventListener('click', onTap);
-              promptEl.removeEventListener('touchend', onTap);
-              resolve();
-            };
-            promptEl.addEventListener('click', onTap);
-            promptEl.addEventListener('touchend', onTap);
-            // Auto-resolve after 10s to not block forever
-            setTimeout(() => {
-              promptEl.classList.add('hidden');
-              resolve();
-            }, 10000);
-          });
-        }
-      }
 
       startLockstep();
 
@@ -4817,11 +4665,6 @@
   const startLockstep = () => {
     if (_running) return;
     _running = true;
-    KNEvent('lockstep-started', '', {
-      slot: _playerSlot,
-      delay: DELAY_FRAMES,
-      mode: _useCRollback ? 'rollback' : 'lockstep',
-    });
 
     // Ensure session log flushing is active. startGameSequence() sets this
     // up for normal joins, but late-joiners return early from that function
@@ -5079,41 +4922,7 @@
     //   }
     // }
 
-    // ── GGPO-style sync phase ──────────────────────────────────────
-    // Before running any game frames, confirm the input DataChannel is
-    // bidirectionally live by exchanging sync-ping/pong round-trips.
-    // This prevents the safety freeze from triggering during startup
-    // when one peer races ahead before the other's inputs are flowing.
-    _syncPhase = true;
-    _syncPongsReceived = 0;
-    _syncDone = false;
-    const _syncSendPing = () => {
-      if (_syncDone) return;
-      _syncPingSent = performance.now();
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send(`sync-ping:${_syncPingSent}`);
-          } catch (_) {}
-        }
-      }
-      if (!_syncDone) {
-        setTimeout(_syncSendPing, 100);
-      }
-    };
-    _syncSendPing();
-    _syncLog('SYNC-PHASE started — exchanging handshake before game frames');
-    setStatus('Synchronizing...');
-    // Safety timeout: if sync doesn't complete in 5s, start anyway.
-    // This handles edge cases like a peer with a blocked pong reply.
-    setTimeout(() => {
-      if (_syncPhase) {
-        _syncDone = true;
-        _syncPhase = false;
-        _syncLog(`SYNC-PHASE timeout — starting with ${_syncPongsReceived}/${_SYNC_ROUNDS} pongs`);
-        setStatus('Connected -- game on!');
-      }
-    }, 5000);
+    setStatus('Connected -- game on!');
     _startTime = performance.now();
     _cachedMatchId = KNState.matchId;
     _cachedRoom = KNState.room;
@@ -5408,7 +5217,6 @@
     }
   };
 
-  let minRemoteFrame = Infinity; // hoisted for prediction barrier (after input send)
   const tick = () => {
     if (!_running) return;
     if (_lateJoinPaused) return; // frozen while late-joiner loads state
@@ -5419,7 +5227,6 @@
     // (its internal counter), and JS would jump backwards from frame N to
     // frame 0 — corrupting input ring frame tags and the rollback ring.
     if (window._rbPendingInit) return;
-    if (_syncPhase) return; // waiting for sync handshake to complete
 
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
@@ -5457,6 +5264,11 @@
     }
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
+    // Pacing decisions (stall, safety freeze, soft throttle) skip frame
+    // advance but must NOT skip input send — otherwise both peers starve
+    // each other and deadlock. Set this flag, send inputs, then check it.
+    let _skipFrameAdvance = false;
+
     // If any input peer hasn't advanced for ROLLBACK_STALL_MS, freeze the
     // local simulation instead of predicting forward. This is essentially
     // "lockstep stall, but only when rollback prediction would be hopeless"
@@ -5485,7 +5297,8 @@
               `ROLLBACK-STALL start slot=${p.slot} staleMs=${stale.toFixed(0)} — freezing sim until input returns`,
             );
           }
-          return; // hard freeze
+          _skipFrameAdvance = true;
+          break;
         }
       }
       // If we reach here, no peer is stalled. Release the freeze if it was active.
@@ -5518,7 +5331,7 @@
           }
         }
         // Exclude phantom peers from frame pacing — they're dead and shouldn't throttle us
-        minRemoteFrame = Infinity;
+        let minRemoteFrame = Infinity;
         let activePacingPeers = 0;
         for (const p of inputPeersForPacing) {
           if (_peerPhantom[p.slot]) continue; // skip dead peers
@@ -5542,17 +5355,21 @@
           // accounts for the 1-frame pipeline delay between detecting a
           // misprediction and acting on it in kn_pre_tick.
           //
-          // Gated on input pipeline convergence: minRemoteFrame must reach
-          // at least rbMax before the freeze activates. This mirrors GGPO's
-          // synchronization phase — GGPO blocks AddLocalInput() until sync
-          // handshakes complete, ensuring the input pipeline is live before
-          // game frames run. Here, we let the soft proportional throttle
-          // pace during the convergence window and only arm the hard freeze
-          // once the peer has confirmed enough frames to fill the ring.
-          // Safety freeze check is deferred to AFTER input send (below)
-          // so the peer keeps receiving our inputs even when we're frozen.
-          // GGPO's prediction barrier blocks AddLocalInput() but the
-          // network layer keeps running — same principle here.
+          // This fires BEFORE the soft proportional throttle below.
+          // On good networks it never triggers (soft throttle keeps
+          // advantage at delay+1..2). On bad WiFi it causes a brief
+          // freeze instead of a permanent desync.
+          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2) {
+            if (!_framePacingActive) {
+              _framePacingActive = true;
+              _pacingCapsCount++;
+              _syncLog(
+                `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — skipping frame advance (inputs still sent)`,
+              );
+            }
+            _pacingCapsFrames++;
+            _skipFrameAdvance = true;
+          }
 
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
@@ -5583,7 +5400,7 @@
                 `PACING-THROTTLE start fAdv=${_frameAdvRaw} ratio=${ratio} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
               );
             }
-            return;
+            _skipFrameAdvance = true;
           }
           if (_framePacingActive) {
             _framePacingActive = false;
@@ -5648,10 +5465,19 @@
         const peer = activePeers[i];
         const ackFrame = peer.lastFrameFromPeer ?? -1;
         const peerBuf = KNShared.encodeInput(_frameNum, localInput, ackFrame, redundantTail).buffer;
-        const inputDc = _pickInputDc(peer);
-        if (inputDc && inputDc.readyState === 'open') {
+        // Use unreliable rb-input DC when available, fall back to primary DC
+        const inputDc =
+          _rbTransport === 'unreliable' &&
+          peer.rbDc?.readyState === 'open' &&
+          peer.rbDc.ordered === false &&
+          peer.rbDc.maxRetransmits === 0
+            ? peer.rbDc
+            : peer.dc;
+        if (inputDc?.readyState === 'open') {
           inputDc.send(peerBuf);
           _rbTransportPacketsSent++;
+          // Initialize ack tracking on first send to avoid false positive
+          if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = performance.now();
         } else {
           _sendFails++;
         }
@@ -5660,27 +5486,8 @@
       }
     }
 
-    // ── GGPO prediction barrier (after input send) ─────────────────────
-    // Block frame advance when too far ahead of the peer's confirmed input.
-    // Placed AFTER input send so the peer keeps receiving our inputs even
-    // while we're frozen — matching GGPO where AddLocalInput() returns
-    // false but the network layer keeps processing packets. Without this,
-    // a hard freeze before input send deadlocks both peers.
-    if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && minRemoteFrame >= _rbRollbackMax) {
-      if (!_framePacingActive) {
-        _framePacingActive = true;
-        _pacingCapsCount++;
-        _syncLog(
-          `PACING-BARRIER fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — blocking frame advance (inputs still flowing)`,
-        );
-      }
-      _pacingCapsFrames++;
-      return; // skip frame advance, but inputs were already sent above
-    }
-    if (_framePacingActive && _frameAdvRaw < _rbRollbackMax - 2) {
-      _framePacingActive = false;
-      _syncLog(`PACING-BARRIER released fAdv=${_frameAdvRaw}`);
-    }
+    // ── Pacing gate: skip frame advance but inputs were sent above ──────
+    if (_skipFrameAdvance) return;
 
     // ── C-level rollback path ──────────────────────────────────────────
     // C manages: state ring buffer, input storage, prediction, misprediction detection
