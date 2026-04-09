@@ -5399,7 +5399,7 @@
           // On good networks it never triggers (soft throttle keeps
           // advantage at delay+1..2). On bad WiFi it causes a brief
           // freeze instead of a permanent desync.
-          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && _frameNum > _rbRollbackMax * 3) {
+          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && _frameNum > 300) {
             if (!_framePacingActive) {
               _framePacingActive = true;
               _pacingCapsCount++;
