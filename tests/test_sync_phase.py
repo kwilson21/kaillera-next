@@ -67,6 +67,13 @@ def test_sync_phase_and_barrier_deployed(browser):
                         // Search for SAFETY-FREEZE (old pattern) before encodeInput
                         const oldFreezeBeforeSend = src.substring(0, encodeIdx).includes("SAFETY-FREEZE");
 
+                        // 5. Telemetry events for lockstep lifecycle
+                        const hasLockstepStarted = src.includes("lockstep-started");
+                        const hasLockstepFailed = src.includes("lockstep-failed");
+
+                        // 6. Gesture re-prompt on reconnect
+                        const hasGestureReprompt = src.includes("reconnect: AudioContext suspended");
+
                         return {
                             hasSyncPing,
                             hasSyncPong,
@@ -75,6 +82,9 @@ def test_sync_phase_and_barrier_deployed(browser):
                             hasConvergenceGate,
                             barrierAfterSend,
                             oldFreezeBeforeSend,
+                            hasLockstepStarted,
+                            hasLockstepFailed,
+                            hasGestureReprompt,
                             encodeIdx,
                             barrierIdx,
                         };
@@ -95,6 +105,9 @@ def test_sync_phase_and_barrier_deployed(browser):
         assert not result.get("oldFreezeBeforeSend"), (
             "Old SAFETY-FREEZE pattern still exists before input send — deadlock risk"
         )
+        assert result.get("hasLockstepStarted"), "lockstep-started telemetry event missing"
+        assert result.get("hasLockstepFailed"), "lockstep-failed telemetry event missing"
+        assert result.get("hasGestureReprompt"), "gesture re-prompt on reconnect missing"
 
         print("[sync-test] All checks passed")
 

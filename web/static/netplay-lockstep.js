@@ -3975,6 +3975,19 @@
     _frameNum = 0;
     startLockstep();
 
+    // Detect lockstep start failure — fires if _running stays false
+    setTimeout(() => {
+      if (!_running && _gameStarted) {
+        _syncLog('lockstep-failed: _running still false after 15s');
+        KNEvent('lockstep-failed', 'startLockstep did not activate within 15s', {
+          slot: _playerSlot,
+          syncPhase: _syncPhase,
+          rbPendingInit: !!window._rbPendingInit,
+          peers: Object.keys(_peers).length,
+        });
+      }
+    }, 15000);
+
     // Spectator stream starts lazily — only when a spectator actually connects.
     // Eager start wastes CPU (drawImage + video encode every frame) which causes
     // thermal throttling on mobile hosts even with zero spectators.
@@ -4336,6 +4349,31 @@
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
+
+      // Re-show gesture prompt if AudioContext expired (iOS reconnect)
+      if (_playerSlot !== 0 && _audioCtx?.state === 'suspended') {
+        const promptEl = document.getElementById('gesture-prompt');
+        if (promptEl) {
+          _syncLog('reconnect: AudioContext suspended — re-showing gesture prompt');
+          promptEl.classList.remove('hidden');
+          await new Promise((resolve) => {
+            const onTap = () => {
+              promptEl.classList.add('hidden');
+              _audioCtx.resume().catch(() => {});
+              promptEl.removeEventListener('click', onTap);
+              promptEl.removeEventListener('touchend', onTap);
+              resolve();
+            };
+            promptEl.addEventListener('click', onTap);
+            promptEl.addEventListener('touchend', onTap);
+            // Auto-resolve after 10s to not block forever
+            setTimeout(() => {
+              promptEl.classList.add('hidden');
+              resolve();
+            }, 10000);
+          });
+        }
+      }
 
       startLockstep();
 
@@ -4734,6 +4772,11 @@
   const startLockstep = () => {
     if (_running) return;
     _running = true;
+    KNEvent('lockstep-started', '', {
+      slot: _playerSlot,
+      delay: DELAY_FRAMES,
+      mode: _useCRollback ? 'rollback' : 'lockstep',
+    });
 
     // Ensure session log flushing is active. startGameSequence() sets this
     // up for normal joins, but late-joiners return early from that function

@@ -2096,7 +2096,7 @@
           if (ctx?.audioCtx && ctx.audioCtx.state !== 'closed') {
             try {
               if (proto.resume) ctx.audioCtx.resume = proto.resume;
-              ctx.audioCtx.resume();
+              ctx.audioCtx.resume().catch(() => {});
             } catch (_) {}
           }
         }
@@ -2105,7 +2105,7 @@
       // Resume SDL2 AudioContext if present
       if (mod.SDL2?.audioContext && mod.SDL2.audioContext.state !== 'closed') {
         try {
-          mod.SDL2.audioContext.resume();
+          mod.SDL2.audioContext.resume().catch(() => {});
         } catch (_) {}
       }
     }
