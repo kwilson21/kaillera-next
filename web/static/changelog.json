@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.39.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "save/restore SoftFloat state in ring buffer snapshots"
+      },
+      {
+        "type": "feat",
+        "message": "rebuild WASM core with SoftFloat rollback state fix"
+      }
+    ]
+  },
+  {
     "version": "0.38.3",
     "date": "2026-04-09",
     "changes": [
