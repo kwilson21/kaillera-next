@@ -133,15 +133,18 @@
   }
 
   function waitForEmulator(timeoutMs) {
+    const bt = window._knBootLog || (() => {});
     if (_bootPromise) {
-      console.log('[netplay] waitForEmulator: reusing existing _bootPromise');
+      bt('waitForEmulator-reuse');
       return _bootPromise;
     }
     timeoutMs = timeoutMs || 30000;
+    bt('waitForEmulator-start', { timeoutMs });
 
     _bootPromise = new Promise((resolve, reject) => {
       let attempts = 0;
       const maxAttempts = Math.ceil(timeoutMs / 200);
+      let _lastState = ''; // track state transitions to log only changes
 
       const attempt = () => {
         const ejs = window.EJS_emulator;
@@ -151,9 +154,11 @@
         const btn = document.querySelector('.ejs_start_button');
         if (btn) {
           const btnVisible = btn.offsetParent !== null;
-          console.log(
-            `[netplay] triggerEmulatorStart: clicking start button (visible=${btnVisible} display=${getComputedStyle(btn).display})`,
-          );
+          if (attempts === 0 || attempts % 10 === 0) {
+            console.log(
+              `[netplay] triggerEmulatorStart: clicking start button (visible=${btnVisible} display=${getComputedStyle(btn).display})`,
+            );
+          }
           if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
           btn.click();
         }
@@ -161,7 +166,9 @@
         const gm = ejs?.gameManager;
         if (gm?.Module) {
           const frames = gm.Module._get_current_frame_count ? gm.Module._get_current_frame_count() : 'n/a';
-          console.log(`[netplay] emulator running (frames=${frames})`);
+          const audioState = gm.Module.SDL2?.audioContext?.state ?? 'n/a';
+          bt('waitForEmulator-resolved', { attempts, frames, audioState });
+          console.log(`[netplay] emulator running (frames=${frames} audio=${audioState})`);
           _bootPromise = null;
           enableMobileTouch();
           // P0-1 funnel: emit emulator_booted once per match, and only when
@@ -183,6 +190,14 @@
           return;
         }
 
+        // Log state transitions (not just every 10th poll) so we can see
+        // exactly when each boot stage is reached vs when it stalls.
+        const curState = `ejs=${!!ejs}|gm=${!!gm}|btn=${!!btn}`;
+        if (curState !== _lastState) {
+          bt('waitForEmulator-state', { poll: attempts, ejs: !!ejs, gm: !!gm, btn: !!btn });
+          _lastState = curState;
+        }
+
         if (attempts % 10 === 0) {
           const ejsKeys = ejs
             ? Object.keys(ejs)
@@ -196,10 +211,15 @@
         }
         if (++attempts >= maxAttempts) {
           _bootPromise = null;
-          KNEvent('wasm-fail', `Emulator boot timed out after ${timeoutMs}ms`, {
+          const snapshot = {
             ejs: !!window.EJS_emulator,
             gameManager: !!window.EJS_emulator?.gameManager,
-          });
+            module: !!window.EJS_emulator?.gameManager?.Module,
+            btn: !!document.querySelector('.ejs_start_button'),
+            audioCtxState: window._kn_preloadedAudioCtx?.state ?? 'none',
+          };
+          bt('waitForEmulator-timeout', snapshot);
+          KNEvent('wasm-fail', `Emulator boot timed out after ${timeoutMs}ms`, snapshot);
           reject(new Error(`Emulator boot timed out after ${timeoutMs}ms`));
           return;
         }

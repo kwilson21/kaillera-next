@@ -2738,7 +2738,10 @@
         } catch (_) {}
       }
 
-      if (!_gameStarted) startGameSequence();
+      if (!_gameStarted) {
+        if (window._knBootLog) window._knBootLog('dc-open-trigger', { remoteSid });
+        startGameSequence();
+      }
     };
 
     ch.onclose = () => {
@@ -3376,9 +3379,31 @@
   // Minimum frames the emulator must run before we consider it ready.
   const MIN_BOOT_FRAMES = 120; // ~2 seconds at 60fps
 
+  // Emit the full boot timeline as a KNEvent for server-side analysis.
+  // Called once on boot success or timeout — includes every stage with
+  // relative timestamps so we can see exactly where intermittent boots stall.
+  const _emitBootTimeline = (outcome, extra) => {
+    const timeline = window._knBootTimeline || [];
+    const totalMs = window._knBootStart ? Math.round(performance.now() - window._knBootStart) : -1;
+    const meta = {
+      outcome,
+      totalMs,
+      stages: timeline.length,
+      slot: _playerSlot ?? -1,
+      ...extra,
+    };
+    // Include the full timeline as a compact array (stage names + relative times).
+    // Truncate to 30 entries to stay within sendBeacon size limits.
+    meta.timeline = timeline.slice(-30).map((e) => `+${e.t}ms ${e.stage}`);
+    KNEvent('boot-timeline', `${outcome} in ${totalMs}ms`, meta);
+    _syncLog(`boot-timeline: ${outcome} totalMs=${totalMs} stages=${timeline.length}`);
+  };
+
   const startGameSequence = () => {
     if (_gameStarted) return;
     _gameStarted = true;
+    const bt = window._knBootLog || (() => {});
+    bt('startGameSequence', { slot: _playerSlot, spectator: _isSpectator });
 
     // P0-1 funnel: lockstep handshake complete, input exchange beginning.
     // This is the meaningful "the player can play now" signal.
@@ -3407,6 +3432,7 @@
     if (!_needsGesture) {
       // Host: proceed immediately — AudioContext pre-created by play.js
       _bootGestureReceived = true;
+      bt('host-auto-boot', { audioCtxState: window._kn_preloadedAudioCtx?.state ?? 'none' });
       _syncLog('host auto-boot (slot=0)');
       setStatus('Loading emulator...');
       KNShared.bootWithCheats('lockstep');
@@ -3486,6 +3512,7 @@
             if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
           // Start emulator within gesture context so audio works
+          bt('guest-gesture-received');
           KNShared.bootWithCheats('lockstep');
           setStatus('Loading emulator...');
           _syncLog('gesture received — emulator starting');
@@ -3511,6 +3538,7 @@
       }
     }
 
+    let _lastWaitState = ''; // track state transitions
     const waitForEmu = () => {
       // Wait for gesture before polling
       if (!_bootGestureReceived) {
@@ -3523,12 +3551,31 @@
         _syncLog(`boot timed out after ${_bootPollCount} polls`);
         setStatus('Emulator failed to start — try reloading the page');
         _config?.onStatus?.('Emulator failed to start — try reloading');
+        // Emit full boot timeline so we can diagnose the stall
+        const snapshot = {
+          ejs: !!window.EJS_emulator,
+          gameManager: !!window.EJS_emulator?.gameManager,
+          module: !!window.EJS_emulator?.gameManager?.Module,
+          frames: window.EJS_emulator?.gameManager?.Module?._get_current_frame_count?.() ?? -1,
+          hasSimInput: !!window.EJS_emulator?.gameManager?.Module?._simulate_input,
+          btn: !!document.querySelector('.ejs_start_button'),
+          audioCtxState: window.EJS_emulator?.gameManager?.Module?.SDL2?.audioContext?.state ?? 'n/a',
+          preloadAudioState: window._kn_preloadedAudioCtx?.state ?? 'none',
+        };
+        bt('waitForEmu-timeout', snapshot);
+        _emitBootTimeline('timeout', snapshot);
         return;
       }
 
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         _bootPollCount++;
+        // Log state transitions, not just every 10th poll
+        const ws = 'no-gameManager';
+        if (ws !== _lastWaitState) {
+          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, ejs: !!window.EJS_emulator });
+          _lastWaitState = ws;
+        }
         if (_bootPollCount % 10 === 0) setStatus('Loading emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -3543,21 +3590,35 @@
           _syncLog(`boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
         }
+        // Log state transitions: frame progress and stall detection
+        const ws = `frames=${frames}`;
+        if (ws !== _lastWaitState) {
+          const audioState = mod?.SDL2?.audioContext?.state ?? 'n/a';
+          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, audioState });
+          _lastWaitState = ws;
+        }
         // Stuck at frame 0: try clicking the EJS start button (may not have been
         // clicked by waitForEmulator if Module loaded before the button appeared)
         if (frames === 0 && _bootPollCount % 20 === 0) {
           const btn = document.querySelector('.ejs_start_button');
           if (btn) {
             _syncLog('boot stuck at f=0 — clicking EJS start button');
+            bt('waitForEmu-click-start-btn');
             btn.click();
           } else if (!hasFrameCount) {
             _syncLog('boot stuck at f=0 — _get_current_frame_count missing (stock core?)');
+            bt('waitForEmu-no-frame-count');
           }
         }
         setTimeout(waitForEmu, 100);
         return;
       }
       if (!mod._simulate_input) {
+        const ws = 'no-simulate-input';
+        if (ws !== _lastWaitState) {
+          bt('waitForEmu-state', { state: ws, poll: _bootPollCount, frames });
+          _lastWaitState = ws;
+        }
         if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -3604,6 +3665,8 @@
 
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
+      bt('waitForEmu-ready', { frames, polls: _bootPollCount });
+      _emitBootTimeline('success', { frames, polls: _bootPollCount });
       _syncLog(`emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
 
       // Set up key tracking now that ejs.controls is available
