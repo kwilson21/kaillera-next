@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.42.4",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "increase cached state fetch timeout from 10s to 30s"
+      }
+    ]
+  },
+  {
     "version": "0.42.3",
     "date": "2026-04-09",
     "changes": [
