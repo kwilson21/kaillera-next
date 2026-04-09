@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.40.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "taint HUD sprite heap to eliminate last RDRAM divergence"
+      },
+      {
+        "type": "feat",
+        "message": "rebuild WASM core with HUD sprite heap taint"
+      },
+      {
+        "type": "feat",
+        "message": "screenshot capture diagnostic logging + DC rotation spec/plan docs"
+      }
+    ]
+  },
+  {
     "version": "0.39.0",
     "date": "2026-04-09",
     "changes": [
