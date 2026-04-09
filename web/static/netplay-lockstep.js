@@ -2632,6 +2632,38 @@
     };
   };
 
+  // DC health rotation: close the stuck unreliable DC and create a fresh
+  // one on the same PeerConnection. GGPO redundancy (each packet carries
+  // all unACKed frames) ensures zero input loss during the ~50ms gap.
+  const rotateDc = (remoteSid, reason) => {
+    const peer = _peers[remoteSid];
+    if (!peer?.pc) return;
+    if (_dcRotationCount >= DC_MAX_ROTATIONS) {
+      _rbTransport = 'reliable';
+      _syncLog(`DC-ROTATE-EXHAUSTED rotations=${_dcRotationCount} — falling back to reliable DC`);
+      return;
+    }
+    const now = performance.now();
+    if (now < _dcRotationCooldownUntil) return;
+
+    _dcRotationCount++;
+    _dcRotationCooldownUntil = now + DC_ROTATION_COOLDOWN_MS;
+    _syncLog(`DC-ROTATE reason=${reason} sid=${remoteSid} rotations=${_dcRotationCount}`);
+
+    // Close old DC
+    try {
+      peer.rbDc?.close();
+    } catch (_) {}
+
+    // Create fresh DC on same PeerConnection — new SCTP stream
+    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    setupRollbackInputDataChannel(remoteSid, peer.rbDc);
+
+    // Reset detection counters
+    _dcBufferStaleStreak[remoteSid] = 0;
+    peer.lastAckAdvanceTime = now;
+  };
+
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
