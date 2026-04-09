@@ -5318,6 +5318,7 @@
     }
   };
 
+  let minRemoteFrame = Infinity; // hoisted for prediction barrier (after input send)
   const tick = () => {
     if (!_running) return;
     if (_lateJoinPaused) return; // frozen while late-joiner loads state
@@ -5427,7 +5428,7 @@
           }
         }
         // Exclude phantom peers from frame pacing — they're dead and shouldn't throttle us
-        let minRemoteFrame = Infinity;
+        minRemoteFrame = Infinity;
         let activePacingPeers = 0;
         for (const p of inputPeersForPacing) {
           if (_peerPhantom[p.slot]) continue; // skip dead peers
@@ -5458,22 +5459,10 @@
           // game frames run. Here, we let the soft proportional throttle
           // pace during the convergence window and only arm the hard freeze
           // once the peer has confirmed enough frames to fill the ring.
-          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && minRemoteFrame >= _rbRollbackMax) {
-            if (!_framePacingActive) {
-              _framePacingActive = true;
-              _pacingCapsCount++;
-              _syncLog(
-                `PACING-SAFETY-CAP fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — throttling to let peer catch up`,
-              );
-            }
-            _pacingCapsFrames++;
-            // Skip this frame but DON'T return — fall through to the
-            // input send path so the peer keeps receiving our inputs.
-            // A hard freeze (return) deadlocks: host stops sending →
-            // guest stalls waiting for host → neither advances.
-            // Instead, let 1 in 4 frames through to drain the gap slowly.
-            if (_pacingCapsFrames % 4 !== 0) return;
-          }
+          // Safety freeze check is deferred to AFTER input send (below)
+          // so the peer keeps receiving our inputs even when we're frozen.
+          // GGPO's prediction barrier blocks AddLocalInput() but the
+          // network layer keeps running — same principle here.
 
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
@@ -5579,6 +5568,28 @@
       } catch (_) {
         _sendFails++;
       }
+    }
+
+    // ── GGPO prediction barrier (after input send) ─────────────────────
+    // Block frame advance when too far ahead of the peer's confirmed input.
+    // Placed AFTER input send so the peer keeps receiving our inputs even
+    // while we're frozen — matching GGPO where AddLocalInput() returns
+    // false but the network layer keeps processing packets. Without this,
+    // a hard freeze before input send deadlocks both peers.
+    if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && minRemoteFrame >= _rbRollbackMax) {
+      if (!_framePacingActive) {
+        _framePacingActive = true;
+        _pacingCapsCount++;
+        _syncLog(
+          `PACING-BARRIER fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — blocking frame advance (inputs still flowing)`,
+        );
+      }
+      _pacingCapsFrames++;
+      return; // skip frame advance, but inputs were already sent above
+    }
+    if (_framePacingActive && _frameAdvRaw < _rbRollbackMax - 2) {
+      _framePacingActive = false;
+      _syncLog(`PACING-BARRIER released fAdv=${_frameAdvRaw}`);
     }
 
     // ── C-level rollback path ──────────────────────────────────────────
