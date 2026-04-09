@@ -3458,7 +3458,30 @@
     const _needsGesture = _playerSlot !== 0;
 
     if (!_needsGesture) {
-      // Host: proceed immediately — AudioContext pre-created by play.js
+      // Host: proceed immediately — AudioContext pre-created by play.js.
+      // Install the same constructor hijack as guests so EJS gets the
+      // gesture-unlocked context instead of creating a new (suspended) one.
+      // Without this, EJS boot on iOS takes >1s after the tap, the gesture
+      // window expires, and EJS's AudioContext stalls at frame 6.
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && window._kn_preloadedAudioCtx) {
+        const _preCtx = window._kn_preloadedAudioCtx;
+        const _RealAC = AC;
+        let _hijacked = false;
+        const _HijackAC = function () {
+          if (!_hijacked) {
+            _hijacked = true;
+            if (window.AudioContext === _HijackAC) window.AudioContext = _RealAC;
+            if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealAC;
+            _syncLog('AudioContext hijack (host): returning pre-created context');
+            return _preCtx;
+          }
+          return new _RealAC();
+        };
+        _HijackAC.prototype = _RealAC.prototype;
+        if (window.AudioContext) window.AudioContext = _HijackAC;
+        if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
+      }
       _bootGestureReceived = true;
       bt('host-auto-boot', { audioCtxState: window._kn_preloadedAudioCtx?.state ?? 'none' });
       _syncLog('host auto-boot (slot=0)');
