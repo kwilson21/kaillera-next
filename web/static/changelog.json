@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.42.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "lockstep lifecycle telemetry + gesture re-prompt on reconnect"
+      }
+    ]
+  },
+  {
     "version": "0.41.2",
     "date": "2026-04-09",
     "changes": [
