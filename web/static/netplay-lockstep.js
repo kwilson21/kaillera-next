@@ -4041,9 +4041,12 @@
     const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
     try {
-      // Timeout after 10s — mobile fetching 16MB can hang indefinitely
+      // Timeout after 30s — the 16MB state download takes 10-15s even on
+      // fast connections. The previous 10s timeout was shorter than the
+      // actual transfer time, causing the host to abort its own cached
+      // state fetch and enter a stalled sync loop.
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 10000);
+      const timer = setTimeout(() => ac.abort(), 30000);
       const resp = await fetch(url, { signal: ac.signal });
       clearTimeout(timer);
       if (!resp.ok) throw new Error('no cached state');
