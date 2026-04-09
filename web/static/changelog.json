@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.38.1",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "use polars-lts-cpu to avoid SIGILL on non-AVX2 swarm nodes"
+      }
+    ]
+  },
+  {
     "version": "0.38.0",
     "date": "2026-04-09",
     "changes": [
