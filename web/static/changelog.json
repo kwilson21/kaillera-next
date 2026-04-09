@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.38.0",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "GGPO-style ack-driven redundancy + safety freeze"
+      },
+      {
+        "type": "feat",
+        "message": "JSONL→Parquet match rotation + precomputed match_metrics table"
+      }
+    ]
+  },
+  {
     "version": "0.37.1",
     "date": "2026-04-08",
     "changes": [
