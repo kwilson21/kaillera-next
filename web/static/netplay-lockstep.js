@@ -2507,6 +2507,10 @@
     }
     const prevHighest = peer.lastFrameFromPeer ?? -1;
     peer.lastFrameFromPeer = Math.max(prevHighest, recvFrame);
+    // DC health: track when peer's delivered frame last advanced
+    if (peer.lastFrameFromPeer > prevHighest) {
+      peer.lastAckAdvanceTime = performance.now();
+    }
     if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
     const currentApply = _frameNum - DELAY_FRAMES;
     if (_running && recvFrame < currentApply) {
