@@ -376,6 +376,25 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     kn_taint_rdram(0x795c00, 0x6400);
     rb_log("kn_rollback_init: tainted SSB64 object pool 0x795c00 size=0x6400");
 
+    /* Taint HUD sprite object heap region (RDRAM block 113: 0x710000-0x71FFFF).
+     *
+     * Match 8e03e6ed analysis: the ONLY RDRAM divergence was in savestate
+     * region 112 (0x700000), sub-chunks 233-235 (~0x710490-0x710690).
+     * Cross-referencing with the SSB64 decomp (ssb-decomp-re), these bytes
+     * are GObj.anim_frame (f32 at offset 0x60) in SObj (Sprite Object)
+     * linked-list nodes allocated on the heap. The sprite structs contain
+     * HUD display data: damage % color (0xFF1515E0), scale factors (1.0),
+     * dimensions (28x30), and a per-frame animation timer that drifts
+     * between peers due to CP0 cycle-clock quantization differences.
+     *
+     * This is purely cosmetic — the animation timer drives HUD sprite
+     * transitions (blinking, fading) not game logic (hitboxes, knockback,
+     * positioning). Tainting block 113 eliminates the last RDRAM-level
+     * divergence source, making the game-state hash fully deterministic
+     * across peers for the first time. */
+    kn_taint_rdram(0x710000, 0x10000);
+    rb_log("kn_rollback_init: tainted HUD sprite heap 0x710000 size=0x10000");
+
     /* Option X-2: Mark the post-RDRAM section of the savestate hash as
      * "ignore divergence". The post-RDRAM section contains CPU general
      * registers, cp0 (system control: status, cause, count), cp1 (FPU),
