@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.40.1",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "skip safety freeze during initial input convergence"
+      }
+    ]
+  },
+  {
     "version": "0.40.0",
     "date": "2026-04-09",
     "changes": [
