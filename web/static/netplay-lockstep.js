@@ -2359,6 +2359,10 @@
           peer.syncDc = e.channel;
           setupSyncDataChannel(remoteSid, peer.syncDc);
         } else if (e.channel.label === 'rollback-input') {
+          if (peer.rbDc)
+            try {
+              peer.rbDc.close();
+            } catch (_) {}
           peer.rbDc = e.channel;
           setupRollbackInputDataChannel(remoteSid, peer.rbDc);
         } else if (_onExtraDataChannel) {
@@ -2374,6 +2378,10 @@
           peer.syncDc = e.channel;
           setupSyncDataChannel(remoteSid, peer.syncDc);
         } else if (e.channel.label === 'rollback-input') {
+          if (peer.rbDc)
+            try {
+              peer.rbDc.close();
+            } catch (_) {}
           peer.rbDc = e.channel;
           setupRollbackInputDataChannel(remoteSid, peer.rbDc);
         } else if (_onExtraDataChannel) {
@@ -2454,6 +2462,10 @@
               existingPeer.syncDc = e.channel;
               setupSyncDataChannel(senderSid, existingPeer.syncDc);
             } else if (e.channel.label === 'rollback-input') {
+              if (existingPeer.rbDc)
+                try {
+                  existingPeer.rbDc.close();
+                } catch (_) {}
               existingPeer.rbDc = e.channel;
               setupRollbackInputDataChannel(senderSid, existingPeer.rbDc);
             } else if (_onExtraDataChannel) {
@@ -3329,6 +3341,10 @@
         peer.syncDc = e.channel;
         setupSyncDataChannel(remoteSid, peer.syncDc);
       } else if (e.channel.label === 'rollback-input') {
+        if (peer.rbDc)
+          try {
+            peer.rbDc.close();
+          } catch (_) {}
         peer.rbDc = e.channel;
         setupRollbackInputDataChannel(remoteSid, peer.rbDc);
       } else if (_onExtraDataChannel) {
@@ -3341,7 +3357,7 @@
     setupDataChannel(remoteSid, peer.dc);
     peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: true, maxRetransmits: 0 });
+    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
 
     try {
