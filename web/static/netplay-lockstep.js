@@ -5395,11 +5395,14 @@
           // accounts for the 1-frame pipeline delay between detecting a
           // misprediction and acting on it in kn_pre_tick.
           //
-          // This fires BEFORE the soft proportional throttle below.
-          // On good networks it never triggers (soft throttle keeps
-          // advantage at delay+1..2). On bad WiFi it causes a brief
-          // freeze instead of a permanent desync.
-          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && _frameNum > 300) {
+          // Gated on input pipeline convergence: minRemoteFrame must reach
+          // at least rbMax before the freeze activates. This mirrors GGPO's
+          // synchronization phase — GGPO blocks AddLocalInput() until sync
+          // handshakes complete, ensuring the input pipeline is live before
+          // game frames run. Here, we let the soft proportional throttle
+          // pace during the convergence window and only arm the hard freeze
+          // once the peer has confirmed enough frames to fill the ring.
+          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2 && minRemoteFrame >= _rbRollbackMax) {
             if (!_framePacingActive) {
               _framePacingActive = true;
               _pacingCapsCount++;
