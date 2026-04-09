@@ -1560,17 +1560,37 @@
   let _screenshotSrcCtx = null;
   let _lastScreenshotFrame = -1;
 
+  let _screenshotDebugLogged = false;
   const _captureAndSendScreenshot = () => {
     // Snapshot the frame at capture entry so async encoding can't race.
     const capturedFrame = _frameNum;
     if (capturedFrame === _lastScreenshotFrame) return; // guard double-capture
     _lastScreenshotFrame = capturedFrame;
     const canvas = document.querySelector('#game canvas');
-    if (!canvas || !canvas.width || !canvas.height) return;
+    if (!canvas || !canvas.width || !canvas.height) {
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _syncLog(`screenshot: no canvas (sel=${!!canvas} w=${canvas?.width} h=${canvas?.height})`);
+      }
+      return;
+    }
     const gl =
       canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
       canvas.getContext('webgl', { preserveDrawingBuffer: true });
-    if (!gl) return;
+    if (!gl) {
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _syncLog('screenshot: getContext returned null');
+      }
+      return;
+    }
+    if (!_screenshotDebugLogged) {
+      _screenshotDebugLogged = true;
+      const attrs = gl.getContextAttributes();
+      _syncLog(
+        `screenshot: ok preserve=${attrs?.preserveDrawingBuffer} w=${gl.drawingBufferWidth} h=${gl.drawingBufferHeight}`,
+      );
+    }
 
     const w = gl.drawingBufferWidth;
     const h = gl.drawingBufferHeight;
