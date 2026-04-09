@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.38.2",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "use polars[rtcompat] instead of polars-lts-cpu for latest API"
+      }
+    ]
+  },
+  {
     "version": "0.38.1",
     "date": "2026-04-09",
     "changes": [
