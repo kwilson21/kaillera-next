@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.40.2",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "extend safety freeze grace period to 300 frames"
+      }
+    ]
+  },
+  {
     "version": "0.40.1",
     "date": "2026-04-09",
     "changes": [
