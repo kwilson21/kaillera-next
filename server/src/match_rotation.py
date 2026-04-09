@@ -217,11 +217,11 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
 
     try:
         import polars as pl
-    except ImportError:
+    except (ImportError, Exception) as exc:
         log.warning(
-            "polars not installed — skipping Parquet write for match %s. "
-            "Install with: uv pip install -e 'server[analysis]'",
+            "polars unavailable — skipping Parquet write for match %s: %s",
             match_id[:8],
+            exc,
         )
         return None
 

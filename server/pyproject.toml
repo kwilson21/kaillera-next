@@ -16,7 +16,7 @@ dependencies = [
     # Parquet rotation (src/match_rotation.py) — turns finished matches
     # into Parquet files + precomputed metrics so admin queries and
     # analyze_match.py don't re-parse the session_logs JSON blob.
-    "polars>=1.0",
+    "polars-lts-cpu>=1.0",
     "pyarrow>=15.0",
 ]
 
