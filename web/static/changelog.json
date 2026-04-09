@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.42.2",
+    "date": "2026-04-09",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "install AudioContext constructor hijack for host on iOS"
+      }
+    ]
+  },
+  {
     "version": "0.42.1",
     "date": "2026-04-09",
     "changes": [
