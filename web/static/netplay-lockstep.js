@@ -3433,6 +3433,20 @@
     const bt = window._knBootLog || (() => {});
     bt('startGameSequence', { slot: _playerSlot, spectator: _isSpectator });
 
+    // Start flushing session logs NOW — don't wait for startLockstep().
+    // Pre-lockstep events (boot, state sync, ready handshake) are critical
+    // for diagnosing connection failures but were previously lost because
+    // the flush interval only started after lockstep was running.
+    if (!_flushInterval) {
+      _cachedMatchId = _cachedMatchId || KNState.matchId;
+      _cachedRoom = _cachedRoom || KNState.room;
+      _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
+      _socketFlushFails = 0;
+      _startTime = _startTime || performance.now();
+      _flushInterval = setInterval(_flushSyncLog, 30000);
+      setTimeout(() => _flushSyncLog(), 5000);
+    }
+
     // P0-1 funnel: lockstep handshake complete, input exchange beginning.
     // This is the meaningful "the player can play now" signal.
     KNEvent('first_frame_rendered', '', { player_slot: _playerSlot ?? -1 });
