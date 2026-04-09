@@ -5463,11 +5463,16 @@
               _framePacingActive = true;
               _pacingCapsCount++;
               _syncLog(
-                `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — hard freeze to prevent unrecoverable desync`,
+                `PACING-SAFETY-CAP fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — throttling to let peer catch up`,
               );
             }
             _pacingCapsFrames++;
-            return;
+            // Skip this frame but DON'T return — fall through to the
+            // input send path so the peer keeps receiving our inputs.
+            // A hard freeze (return) deadlocks: host stops sending →
+            // guest stalls waiting for host → neither advances.
+            // Instead, let 1 in 4 frames through to drain the gap slowly.
+            if (_pacingCapsFrames % 4 !== 0) return;
           }
 
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
