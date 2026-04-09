@@ -60,7 +60,8 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
-/* Forward declaration: SoftFloat globals (not in retro_serialize) */
+/* Forward declaration: SoftFloat globals (not in retro_serialize — saved
+ * alongside ring buffer snapshots by sf_pack/sf_restore below) */
 extern int softfloat_roundingMode;
 extern int softfloat_exceptionFlags;
 
@@ -158,6 +159,7 @@ static struct {
     int ring_size;        /* max_frames + 1 */
     uint8_t **ring_bufs;  /* ring_bufs[i] = malloc'd buffer */
     int *ring_frames;     /* frame number stored in each slot */
+    int *ring_sf_state;   /* SoftFloat state per slot (not in retro_serialize) */
     size_t state_size;    /* retro_serialize_size() */
 
     /* Input ring: per-player, per-frame */
@@ -201,6 +203,20 @@ static struct {
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
 } rb;
+
+/* ── SoftFloat state save/restore ──────────────────────────────────── */
+/* SoftFloat globals are NOT part of retro_serialize. Pack them into one
+ * int per ring slot so rollback replay starts with the correct rounding
+ * mode and exception flags. Without this, a rollback that restores a
+ * savestate leaves SoftFloat at the *current* frame's values, causing
+ * replay to compute different floats than the original execution. */
+static inline int sf_pack(void) {
+    return (softfloat_roundingMode << 8) | (softfloat_exceptionFlags & 0xFF);
+}
+static inline void sf_restore(int packed) {
+    softfloat_roundingMode = (packed >> 8) & 0xFF;
+    softfloat_exceptionFlags = packed & 0xFF;
+}
 
 /* ── Debug logging ─────────────────────────────────────────────────── */
 static void rb_log(const char *fmt, ...) {
@@ -303,6 +319,7 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     /* Allocate state ring */
     rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
     rb.ring_frames = (int *)calloc(rb.ring_size, sizeof(int));
+    rb.ring_sf_state = (int *)calloc(rb.ring_size, sizeof(int));
     for (i = 0; i < rb.ring_size; i++) {
         rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
         rb.ring_frames[i] = -1;
@@ -390,6 +407,7 @@ void kn_rollback_shutdown(void) {
         free(rb.ring_bufs);
     }
     free(rb.ring_frames);
+    free(rb.ring_sf_state);
     rb.initialized = 0;
     rb_log("kn_rollback_shutdown");
 }
@@ -576,6 +594,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
+            sf_restore(rb.ring_sf_state[ring_idx]);
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -603,6 +622,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
 
         /* Save state for this frame BEFORE stepping */
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        rb.ring_sf_state[save_idx] = sf_pack();
         rb.ring_frames[save_idx] = rb.frame;
 
         /* Write inputs for this replay frame (logged for divergence detection) */
@@ -625,6 +645,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     {
         int save_idx = rb.frame % rb.ring_size;
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+        rb.ring_sf_state[save_idx] = sf_pack();
         rb.ring_frames[save_idx] = rb.frame;
     }
 
@@ -741,7 +762,9 @@ int kn_restore_frame(int frame) {
     if (!rb.initialized) return 0;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
-    return retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;
+    if (!retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size)) return 0;
+    sf_restore(rb.ring_sf_state[ring_idx]);
+    return 1;
 }
 
 /* ── Query: get state size ─────────────────────────────────────────── */
