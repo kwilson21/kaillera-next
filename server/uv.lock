@@ -445,6 +445,8 @@ dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
     { name = "playwright" },
+    { name = "polars" },
+    { name = "pyarrow" },
     { name = "python-dotenv" },
     { name = "python-socketio" },
     { name = "redis", extra = ["hiredis"] },
@@ -455,8 +457,6 @@ dependencies = [
 [package.optional-dependencies]
 analysis = [
     { name = "duckdb" },
-    { name = "polars" },
-    { name = "pyarrow" },
     { name = "requests" },
 ]
 dev = [
@@ -475,8 +475,8 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.0.0" },
     { name = "playwright", specifier = ">=1.40.0" },
-    { name = "polars", marker = "extra == 'analysis'", specifier = ">=1.0" },
-    { name = "pyarrow", marker = "extra == 'analysis'", specifier = ">=15.0" },
+    { name = "polars", specifier = ">=1.0" },
+    { name = "pyarrow", specifier = ">=15.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-playwright", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "python-dotenv", specifier = ">=1.0.0" },

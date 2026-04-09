@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 import socketio
 import uvicorn
 
-from src import db, state
+from src import db, match_rotation, state
 from src.api.app import cleanup_old_data, create_app
 from src.api.signaling import _cleanup_empty_rooms, configure_cors, rooms, set_shutting_down, sio
 
@@ -41,6 +41,7 @@ async def lifespan(_app):
         log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
     log_task = asyncio.create_task(cleanup_old_data())
+    rotation_task = match_rotation.start_sweeper()
     # Warm up Playwright browser so the first OG image request isn't slow
     try:
         from src.api.og import _get_browser
@@ -52,6 +53,7 @@ async def lifespan(_app):
     set_shutting_down()
     task.cancel()
     log_task.cancel()
+    rotation_task.cancel()
     if rooms:
         log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
     from src.api.og import close_browser

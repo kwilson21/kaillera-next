@@ -56,6 +56,31 @@ except ImportError as exc:
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
 
 
+def _fetch_match_metrics(base: str, key: str, match_id: str) -> dict | None:
+    """Fetch the precomputed match_metrics row from the admin endpoint.
+
+    Returns None if the match hasn't been rotated yet (sweeper runs on a
+    60-second tick, so a just-ended match may not be there yet) or if
+    the server is too old to have the endpoint. The analyzer still works
+    in both cases — the metrics section just prints a hint.
+    """
+    try:
+        r = requests.get(
+            f"{base}/admin/api/matches/{match_id}",
+            headers={"X-Admin-Key": key},
+            verify=False,
+            timeout=10,
+        )
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        return r.json()
+    except ValueError:
+        return None
+
+
 def _list_sessions_for_match(base: str, key: str, match_id: str) -> list[dict]:
     """Find every session_log row for a given match (typically 2: host + guest)."""
     r = requests.get(
@@ -265,6 +290,46 @@ def query_diverging_regions(df: pl.DataFrame) -> None:
         print(f"  r{ri:>3}: {n} occurrences")
 
 
+def query_precomputed_metrics(base: str, key: str, match_id: str) -> None:
+    """Show the rotated match_metrics row — one cheap SELECT, no JSON re-parse.
+
+    Served by the /admin/api/matches/{id} endpoint backed by the
+    match_metrics table. Populated by src/match_rotation.py running as
+    a background sweeper on the server (60s tick). If the match hasn't
+    been rotated yet we just say so and skip — the rest of the analyzer
+    still works from the JSONL export below.
+    """
+    _print_section("MATCH METRICS (precomputed)")
+    m = _fetch_match_metrics(base, key, match_id)
+    if not m:
+        print("(match not rotated yet — sweeper runs every 60s; retry shortly)")
+        return
+    print(f"  match_id:    {m.get('match_id')}")
+    print(f"  mode:        {m.get('mode')}  peers={m.get('peer_count')}  ended_by={m.get('ended_by')}")
+    print(f"  frames:      {m.get('frames')}  duration={m.get('duration_sec')}s  entries={m.get('entry_count')}")
+    print(
+        f"  determinism: mismatches={m.get('mismatch_count')} "
+        f"first_divergence={m.get('first_divergence_frame')} "
+        f"last_clean={m.get('last_clean_frame')}"
+    )
+    rb_preds = m.get("predictions") or 0
+    rb_correct = m.get("correct_predictions") or 0
+    accuracy = f"{(rb_correct / rb_preds * 100):.1f}%" if rb_preds else "n/a"
+    print(
+        f"  rollback:    rollbacks={m.get('rollbacks')} predictions={rb_preds} "
+        f"correct={rb_correct} ({accuracy}) max_depth={m.get('max_rollback_depth')} "
+        f"failed={m.get('failed_rollbacks')} tol_hits={m.get('tolerance_hits')}"
+    )
+    print(f"  pacing:      throttle_events={m.get('pacing_throttle_count')}")
+    pq = m.get("parquet_path")
+    if pq:
+        size = m.get("parquet_bytes") or 0
+        print(f"  parquet:     {pq} ({size:,} bytes)")
+    else:
+        print("  parquet:     (not written — polars missing on server?)")
+    print(f"  rotated_at:  {m.get('rotated_at')}")
+
+
 def query_rollback_summary(meta_paths: list[Path]) -> None:
     """Pull rollback stats from the meta header line of each JSONL file."""
     import json
@@ -392,6 +457,7 @@ def main() -> None:
     print(f"[analyze] loaded {df.height} entries, columns: {df.columns[:10]}...")
 
     # Run all queries
+    query_precomputed_metrics(args.base, args.key, args.match_id)
     query_rollback_summary(jsonl_paths)
     query_event_counts(df)
     query_mismatch_timing(df)

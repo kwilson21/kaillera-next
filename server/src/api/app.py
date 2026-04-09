@@ -1057,6 +1057,56 @@ def create_app(lifespan=None) -> FastAPI:
             },
         )
 
+    # ── Admin match metrics (precomputed by src.match_rotation) ─────────
+    # These endpoints read from the `match_metrics` table, which is
+    # populated by the background rotation sweeper (see match_rotation.py).
+    # They exist to keep listings/detail cheap — no JSON blob re-parsing
+    # on every request. If a match hasn't been rotated yet (e.g. sweep
+    # hasn't fired since game-end), the listing simply won't include it;
+    # the detail endpoint returns 404 and the caller can retry shortly.
+
+    @app.get("/admin/api/matches")
+    async def admin_matches_list(request: Request, _auth: None = Depends(_require_admin)) -> dict:
+        """List recently-rotated matches with their precomputed metrics."""
+        try:
+            days = int(request.query_params.get("days", "7"))
+        except ValueError:
+            days = 7
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 500)
+        except ValueError:
+            limit = 50
+
+        rows = await db.query(
+            """
+            SELECT match_id, mode, peer_count, frames, duration_sec, ended_by,
+                   mismatch_count, first_divergence_frame, last_clean_frame,
+                   rollbacks, predictions, correct_predictions, max_rollback_depth,
+                   failed_rollbacks, tolerance_hits, pacing_throttle_count,
+                   parquet_path, parquet_bytes, entry_count, rotated_at, created_at
+            FROM match_metrics
+            WHERE created_at > datetime('now', ?)
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (f"-{days} days", limit),
+        )
+        return {"matches": rows, "count": len(rows)}
+
+    @app.get("/admin/api/matches/{match_id}")
+    async def admin_match_detail(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
+        """Return one match's precomputed metrics row."""
+        rows = await db.query("SELECT * FROM match_metrics WHERE match_id = ?", (match_id,))
+        if not rows:
+            # Fall back to prefix match so CLI tools can pass a short id.
+            rows = await db.query(
+                "SELECT * FROM match_metrics WHERE match_id LIKE ? LIMIT 1",
+                (f"{match_id}%",),
+            )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Match not rotated yet")
+        return rows[0]
+
     # ── Admin input-audit diff (Option G) ────────────────────────────────
     # Pulls the delta-encoded input history from both peers of a given match
     # and diffs them. Each peer uploads:
