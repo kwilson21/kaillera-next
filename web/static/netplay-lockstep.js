@@ -5821,8 +5821,11 @@
       if (catchingUp === 2) {
         // C wrote inputs + saved state for the replay frame. JS now steps
         // the emulator via stepOneFrame() — the SAME code path as normal play.
-        // This guarantees bit-identical execution between normal and replay.
+        // Pre-frame setup (reset audio, RNG sync) must match the normal path
+        // exactly — setup_frame() was removed from C to avoid double-calling
+        // normalize/reset which caused progressive state divergence.
         if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+        _syncRNGSeed(tickMod, _frameNum);
         _inDeterministicStep = true;
         stepOneFrame();
         _inDeterministicStep = false;

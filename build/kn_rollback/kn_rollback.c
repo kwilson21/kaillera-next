@@ -707,15 +707,13 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                 kn_write_controller(s, 0, 0, 0, 0, 0);
         }
 
-        setup_frame(rb.frame);
-        /* Freeze non-essential interrupts during replay to prevent mid-frame
-         * timing drift from compounding across replayed frames. Cleared in
-         * kn_post_tick after the replay step completes. */
-        {
-            /* kn_replay_freeze_interrupts defined at file scope */
-            kn_replay_freeze_interrupts = 1;
-        }
-        /* JS will call stepOneFrame() which goes through the rAF/runner
+        /* Pre-frame setup (frame time, event queue normalization, audio
+         * reset, RNG sync) is handled by JS stepOneFrame() — the same code
+         * path as normal play. Calling setup_frame() HERE would double-call
+         * normalize/reset and introduce ordering differences between replay
+         * and normal play, causing progressive state divergence.
+         *
+         * JS will call stepOneFrame() which goes through the rAF/runner
          * pipeline — bit-identical to normal play. Then JS calls
          * kn_post_tick which advances rb.frame and decrements replay_remaining. */
         return 2; /* 2 = JS should step the emulator for a replay frame */
@@ -773,11 +771,6 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_post_tick(void) {
     if (!rb.initialized) return -1;
-    /* Clear replay interrupt freeze after each step */
-    {
-        extern int kn_replay_freeze_interrupts;
-        kn_replay_freeze_interrupts = 0;
-    }
     rb.frame++;
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
