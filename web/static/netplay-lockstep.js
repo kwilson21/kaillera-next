@@ -2166,7 +2166,12 @@
           }
         }
       } else {
-        _syncLog('late-join-ready received but not paused (already resumed or timed out)');
+        // Timeout already resumed us, but the joiner is now ready.
+        // Reset pacing again — the timeout reset may have expired by now,
+        // causing phantom detection on peers that were paused longer.
+        _resetPacingAfterLateJoin();
+        _broadcastRoster();
+        _syncLog('late-join-ready after timeout — pacing reset + roster broadcast');
       }
     }
   };
@@ -2799,20 +2804,26 @@
           _resetPacingAfterLateJoin();
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
-        if (e.data === 'late-join-ready' && _lateJoinPaused) {
-          _lateJoinPaused = false;
-          _resetPacingAfterLateJoin();
-          // Broadcast roster NOW — the joiner is ready to send input.
-          // Broadcasting earlier causes 5s stalls per frame while the
-          // joiner boots/loads state.
-          _broadcastRoster();
-          _syncLog('late-join resume: joiner ready (via DC)');
-          for (const p of Object.values(_peers)) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send('late-join-resume');
-              } catch (_) {}
+        if (e.data === 'late-join-ready') {
+          if (_lateJoinPaused) {
+            _lateJoinPaused = false;
+            _resetPacingAfterLateJoin();
+            // Broadcast roster NOW — the joiner is ready to send input.
+            // Broadcasting earlier causes 5s stalls per frame while the
+            // joiner boots/loads state.
+            _broadcastRoster();
+            _syncLog('late-join resume: joiner ready (via DC)');
+            for (const p of Object.values(_peers)) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send('late-join-resume');
+                } catch (_) {}
+              }
             }
+          } else {
+            _resetPacingAfterLateJoin();
+            _broadcastRoster();
+            _syncLog('late-join-ready (DC) after timeout — pacing reset + roster broadcast');
           }
         }
         if (e.data.startsWith('roster:')) {
@@ -4172,7 +4183,7 @@
             }
           }
         }
-      }, 5000);
+      }, 15000);
 
       _syncLog(
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
