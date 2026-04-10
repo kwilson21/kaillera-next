@@ -1,5 +1,55 @@
 [
   {
+    "version": "0.41.1",
+    "date": "2026-04-10",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "eliminate replay/normal pre-frame setup divergence"
+      },
+      {
+        "type": "fix",
+        "message": "use max_slot+1 for C engine num_players, not slot count"
+      },
+      {
+        "type": "fix",
+        "message": "use KN_MAX_PLAYERS (4) instead of max_slot+1"
+      },
+      {
+        "type": "fix",
+        "message": "reset pacing state after late-join pause"
+      },
+      {
+        "type": "fix",
+        "message": "re-apply cheats after late-join state load"
+      },
+      {
+        "type": "fix",
+        "message": "gate cheat re-application to vanilla SSB64 only"
+      },
+      {
+        "type": "fix",
+        "message": "clear stale EJS cheats for Smash Remix at game start"
+      },
+      {
+        "type": "fix",
+        "message": "remove skip_serialize diagnostic, clean up cheat logging"
+      },
+      {
+        "type": "fix",
+        "message": "reset pacing on late-join-resume for non-host peers"
+      },
+      {
+        "type": "fix",
+        "message": "increase late-join timeout to 15s, reset pacing on late ready"
+      },
+      {
+        "type": "fix",
+        "message": "skip boot convergence for late joiners"
+      }
+    ]
+  },
+  {
     "version": "0.41.0",
     "date": "2026-04-10",
     "changes": [
