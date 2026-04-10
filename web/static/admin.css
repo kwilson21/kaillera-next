@@ -412,3 +412,27 @@ tbody tr {
   color: #f39c12;
   margin-top: 2px;
 }
+
+@keyframes pulse-red {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.ssim-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin: 2px auto 0;
+}
+.ssim-dot.desync {
+  background: #e74c3c;
+  box-shadow: 0 0 4px #e74c3c;
+}
+.ssim-dot.clean {
+  background: #2ecc71;
+}

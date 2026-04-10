@@ -951,6 +951,22 @@ def create_app(lifespan=None) -> FastAPI:
             if entry.get("summary") and isinstance(entry["summary"], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry["summary"] = json.loads(entry["summary"])
+
+        # Enrich with visual desync counts from screenshot_comparisons
+        match_ids = {e["match_id"] for e in entries if e.get("match_id")}
+        desync_counts: dict[str, int] = {}
+        for mid in match_ids:
+            rows = await db.query(
+                "SELECT COUNT(*) as cnt FROM screenshot_comparisons WHERE match_id = ? AND is_desync = 1",
+                (mid,),
+            )
+            if rows and rows[0]["cnt"]:
+                desync_counts[mid] = rows[0]["cnt"]
+        for entry in entries:
+            mid = entry.get("match_id")
+            if mid and mid in desync_counts:
+                entry["visual_desync_count"] = desync_counts[mid]
+
         return {"total": total, "entries": entries}
 
     @app.get("/admin/api/session-logs/{log_id}")

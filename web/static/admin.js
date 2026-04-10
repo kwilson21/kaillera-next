@@ -206,10 +206,14 @@
           matchId && matchId !== 'unknown'
             ? `<a href="#" class="input-audit-link" data-match-id="${escapeHtml(matchId)}" title="View raw input audit JSON">input audit</a>`
             : '';
+        const vdc = logs.find((l) => l.visual_desync_count)?.visual_desync_count || 0;
+        const desyncBadge = vdc
+          ? `<span style="background:#e74c3c;color:#fff;font-size:11px;font-weight:bold;padding:2px 8px;border-radius:3px;margin-left:8px;animation:pulse-red 1.5s infinite">VISUAL DESYNC &times;${vdc}</span>`
+          : '';
         return `<div class="room-group">
         <div class="room-header">
           <div class="room-info">
-            <span class="room-code">${escapeHtml(room)}</span>
+            <span class="room-code">${escapeHtml(room)}</span>${desyncBadge}
             <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}${auditLink ? ' &middot; ' + auditLink : ''}</span>
           </div>
         </div>
@@ -256,26 +260,34 @@
     // the timeline so the horizontal overview can include them inline.
     // See project_session_timeline_vision for the direction.
     if (extras && (data.match_id || data.room)) {
-      const [tl, ssData] = await Promise.all([
+      const [tl, ssData, compData] = await Promise.all([
         fetchSessionTimeline(data.match_id, data.room),
         data.match_id
           ? fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() })
               .then((r) => (r.ok ? r.json() : { screenshots: [] }))
               .catch(() => ({ screenshots: [] }))
           : Promise.resolve({ screenshots: [] }),
+        data.match_id
+          ? fetch(`/admin/api/screenshots/${data.match_id}/comparisons`, { headers: headers() })
+              .then((r) => (r.ok ? r.json() : { comparisons: [] }))
+              .catch(() => ({ comparisons: [] }))
+          : Promise.resolve({ comparisons: [] }),
       ]);
       const screenshots = ssData.screenshots || [];
+      const comparisons = compData.comparisons || [];
       if (tl?._error) {
         extras.innerHTML = `<p style="color:#e89; margin:12px 0">Failed to load session timeline: ${escapeHtml(tl._error)}. If the endpoint is missing, the dev server may need a restart.</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [] };
+        _currentSessionContext = { data, events: [], screenshots: [], comparisons: [] };
       } else if (tl?.events?.length || screenshots.length) {
         const events = tl?.events || [];
         extras.innerHTML =
-          renderHorizontalTimeline(events, screenshots) + renderSessionHeader(events) + renderEventTimeline(events);
-        _currentSessionContext = { data, events, screenshots };
+          renderHorizontalTimeline(events, screenshots, comparisons) +
+          renderSessionHeader(events) +
+          renderEventTimeline(events);
+        _currentSessionContext = { data, events, screenshots, comparisons };
       } else {
         extras.innerHTML = `<p class="dim" style="margin:12px 0">No timeline events recorded for this session (session may predate funnel telemetry).</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [] };
+        _currentSessionContext = { data, events: [], screenshots: [], comparisons: [] };
       }
     }
 
@@ -295,12 +307,13 @@
           }
           const slotKeys = Object.keys(bySlot).sort((a, b) => a - b);
           if (slotKeys.length >= 2) {
+            const playerComps = _currentSessionContext?.comparisons || [];
             const html =
               '<div id="screenshot-section" style="margin-top:16px">' +
               buildComparisonPlayer(bySlot, slotKeys) +
               '</div>';
             content.insertAdjacentHTML('afterend', html);
-            initComparisonPlayer(bySlot, slotKeys);
+            initComparisonPlayer(bySlot, slotKeys, playerComps);
           }
         }
       }
@@ -356,7 +369,7 @@
       </div>`;
   };
 
-  const initComparisonPlayer = (bySlot, slotKeys) => {
+  const initComparisonPlayer = (bySlot, slotKeys, comparisons = []) => {
     const W = 160,
       H = 120,
       GAP = 4;
@@ -393,6 +406,13 @@
 
     if (!frames.length) return;
 
+    // Build comparison lookup by frame bucket
+    const compLookup = {};
+    for (const c of comparisons) {
+      const bucket = Math.round(c.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+      compLookup[bucket] = c;
+    }
+
     const canvas = document.getElementById('comp-canvas');
     const ctx = canvas.getContext('2d');
     const scrub = document.getElementById('comp-scrub');
@@ -420,7 +440,10 @@
       _compState.index = idx;
       scrub.value = String(idx);
       const entry = frames[idx];
-      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})`;
+      const comp = compLookup[entry.frame];
+      const ssimText = comp ? ` · SSIM ${comp.ssim.toFixed(3)}${comp.is_desync ? ' ⚠ DESYNC' : ''}` : '';
+      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})${ssimText}`;
+      label.style.color = comp?.is_desync ? '#e74c3c' : '#64748b';
 
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -880,8 +903,15 @@
     return clean[clean.length - 1];
   };
 
-  const renderHorizontalTimeline = (events, screenshots) => {
+  const renderHorizontalTimeline = (events, screenshots, comparisons = []) => {
     if (!events.length && !screenshots.length) return '';
+
+    // Build a lookup: frame bucket → comparison for quick dot rendering
+    const compByFrame = {};
+    for (const c of comparisons) {
+      const bucket = Math.round(c.frame / 300) * 300;
+      compByFrame[bucket] = c;
+    }
 
     // Compute the session time span from both events and screenshots so the
     // bar always spans the full session.
@@ -946,7 +976,13 @@
             const left = posLeft(ts);
             const url = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
             const relLabel = formatRelTime(ts - minTs);
-            const title = `P${slot} · frame ${ss.frame} · ${relLabel}`;
+            const frameBucket = Math.round(ss.frame / 300) * 300;
+            const comp = compByFrame[frameBucket];
+            const ssimLabel = comp ? ` · SSIM ${comp.ssim.toFixed(3)}` : '';
+            const title = `P${slot} · frame ${ss.frame} · ${relLabel}${ssimLabel}`;
+            const dotHtml = comp
+              ? `<div class="ssim-dot ${comp.is_desync ? 'desync' : 'clean'}" title="SSIM ${comp.ssim.toFixed(3)}${comp.is_desync ? ' — DESYNC' : ''}"></div>`
+              : '';
             return `<div
               class="tl-thumb-wrap"
               data-ts="${ts}"
@@ -955,10 +991,11 @@
             >
               <img
                 src="${url}"
-                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${border}; border-radius:4px; cursor:pointer"
+                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${comp?.is_desync ? '#e74c3c' : border}; border-radius:4px; cursor:pointer"
                 onclick="window.open('${url}','_blank')"
               />
               <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums; max-width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">f${escapeHtml(String(ss.frame))}</div>
+              ${dotHtml}
             </div>`;
           })
           .join('');
@@ -1093,11 +1130,27 @@
 
     const eventCount = events.length;
     const ssCount = screenshots.length;
+    const desyncFrames = comparisons.filter((c) => c.is_desync);
+    const compCount = comparisons.length;
     const viewportWidth = window.innerWidth || 1200;
     const scrollNote = contentWidth > viewportWidth - 100 ? ' (scroll horizontally →)' : '';
 
+    const desyncBanner = desyncFrames.length
+      ? `<div style="background:#3b1111; border:1px solid #e74c3c; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
+          <span style="color:#e74c3c; font-weight:bold">VISUAL DESYNC DETECTED</span>
+          <span style="color:#ccc"> — ${desyncFrames.length} of ${compCount} compared frame${compCount === 1 ? '' : 's'} mismatched (SSIM &lt; 0.95).
+          Lowest: ${Math.min(...desyncFrames.map((c) => c.ssim)).toFixed(3)}</span>
+        </div>`
+      : compCount
+        ? `<div style="background:#0f2b1a; border:1px solid #2ecc71; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
+            <span style="color:#2ecc71; font-weight:bold">VISUALLY IN SYNC</span>
+            <span style="color:#ccc"> — ${compCount} frame${compCount === 1 ? '' : 's'} compared, all clean</span>
+          </div>`
+        : '';
+
     return `<div style="background:#0f0f1e; border:1px solid #2a2a40; border-radius:6px; padding:16px; margin:12px 0">
       <div style="font-weight:bold; margin-bottom:6px; font-size:14px">Session overview</div>
+      ${desyncBanner}
       <div class="dim" style="font-size:12px; margin-bottom:12px">
         ${escapeHtml(String(eventCount))} event${eventCount === 1 ? '' : 's'} ·
         ${escapeHtml(String(ssCount))} screenshot${ssCount === 1 ? '' : 's'} across ${escapeHtml(String(slotKeys.length))} slot${slotKeys.length === 1 ? '' : 's'} ·
