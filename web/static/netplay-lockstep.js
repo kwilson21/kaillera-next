@@ -1556,8 +1556,6 @@
   const SCREENSHOT_HEIGHT = 120;
   let _screenshotCanvas = null;
   let _screenshotCtx = null;
-  let _screenshotSrcCanvas = null;
-  let _screenshotSrcCtx = null;
   let _lastScreenshotFrame = -1;
 
   let _screenshotDebugLogged = false;
@@ -1574,53 +1572,18 @@
       }
       return;
     }
-    const gl =
-      canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
-      canvas.getContext('webgl', { preserveDrawingBuffer: true });
-    if (!gl) {
-      if (!_screenshotDebugLogged) {
-        _screenshotDebugLogged = true;
-        _syncLog('screenshot: getContext returned null');
-      }
-      return;
-    }
     if (!_screenshotDebugLogged) {
       _screenshotDebugLogged = true;
-      const attrs = gl.getContextAttributes();
-      _syncLog(
-        `screenshot: ok preserve=${attrs?.preserveDrawingBuffer} w=${gl.drawingBufferWidth} h=${gl.drawingBufferHeight}`,
-      );
+      _syncLog(`screenshot: using drawImage w=${canvas.width} h=${canvas.height}`);
     }
 
-    const w = gl.drawingBufferWidth;
-    const h = gl.drawingBufferHeight;
+    const w = canvas.width;
+    const h = canvas.height;
 
-    // Read pixels from GPU
-    if (!_glPixelBuf || _glPixelBuf.length !== w * h * 4) {
-      _glPixelBuf = new Uint8Array(w * h * 4);
-    }
-    // Unbind PIXEL_PACK buffer (Emscripten WebGL2 binds one)
-    const pbo = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
-    if (pbo) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
-    if (pbo) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
-
-    // Copy to full-size source canvas (flipped vertically)
-    if (!_screenshotSrcCanvas || _screenshotSrcCanvas.width !== w || _screenshotSrcCanvas.height !== h) {
-      _screenshotSrcCanvas = document.createElement('canvas');
-      _screenshotSrcCanvas.width = w;
-      _screenshotSrcCanvas.height = h;
-      _screenshotSrcCtx = _screenshotSrcCanvas.getContext('2d', { willReadFrequently: true });
-    }
-    const imgData = _screenshotSrcCtx.createImageData(w, h);
-    for (let row = 0; row < h; row++) {
-      const srcOff = (h - 1 - row) * w * 4;
-      const dstOff = row * w * 4;
-      imgData.data.set(_glPixelBuf.subarray(srcOff, srcOff + w * 4), dstOff);
-    }
-    _screenshotSrcCtx.putImageData(imgData, 0, 0);
-
-    // Center-crop to 4:3 (N64 native) then scale to thumbnail
+    // Center-crop to 4:3 (N64 native) then scale to thumbnail.
+    // Uses drawImage directly from the WebGL canvas — works regardless
+    // of preserveDrawingBuffer (reads presentation buffer, not GL FB).
+    // The old readPixels path returned black when preserve=false.
     if (!_screenshotCanvas) {
       _screenshotCanvas = document.createElement('canvas');
       _screenshotCanvas.width = SCREENSHOT_WIDTH;
@@ -1634,15 +1597,13 @@
       sw = w,
       sh = h;
     if (srcRatio > targetRatio) {
-      // Source is wider than 4:3 — crop sides
       sw = Math.round(h * targetRatio);
       sx = Math.round((w - sw) / 2);
     } else if (srcRatio < targetRatio) {
-      // Source is taller than 4:3 — crop top/bottom
       sh = Math.round(w / targetRatio);
       sy = Math.round((h - sh) / 2);
     }
-    _screenshotCtx.drawImage(_screenshotSrcCanvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+    _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
 
     // Encode as JPEG and send. Use the snapshotted frame number, NOT the
     // current _frameNum, so the server stamps the frame the image was
