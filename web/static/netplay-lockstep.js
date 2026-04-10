@@ -2800,11 +2800,10 @@
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
-          // Update C rollback engine with new player count.
-          // Use max_slot+1 (not count) because slots can be non-contiguous
-          // (e.g. [0,1,3] when slot 2 disconnected). The C engine iterates
-          // for(s=0; s<num_players; s++) so it must cover the highest slot.
-          rb_numPlayers = Math.max(...slots) + 1;
+          // Always use 4 (KN_MAX_PLAYERS) so the C engine covers all
+          // slots regardless of gaps (e.g. roster [0,1,3]). Empty slots
+          // get zero predictions — harmless since no input arrives.
+          rb_numPlayers = 4;
           const rosterMod = window.EJS_emulator?.gameManager?.Module;
           if (_useCRollback && rosterMod?._kn_set_num_players) {
             rosterMod._kn_set_num_players(rb_numPlayers);
@@ -4031,9 +4030,8 @@
     const slots = [...slotSet].sort((a, b) => a - b);
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
-    // Update C rollback engine: use max_slot+1 (not count) because slots
-    // can be non-contiguous (e.g. [0,1,3]). C iterates for(s=0;s<n;s++).
-    rb_numPlayers = Math.max(...slotSet) + 1;
+    // Always 4 — see roster DC handler comment for rationale.
+    rb_numPlayers = 4;
     const rbMod = window.EJS_emulator?.gameManager?.Module;
     if (_useCRollback && rbMod?._kn_set_num_players) {
       rbMod._kn_set_num_players(rb_numPlayers);
@@ -4888,12 +4886,8 @@
           _useCRollback = false;
           return;
         }
-        // Use max_slot+1 (not peer count) — slots can be non-contiguous
-        // (e.g. [0,1,3] after a disconnect). C iterates for(s=0;s<n;s++).
-        const peerSlots = getInputPeers()
-          .map((p) => p.slot)
-          .filter((s) => s != null);
-        const numPlayers = Math.max(_playerSlot, ...peerSlots) + 1;
+        // Always 4 (KN_MAX_PLAYERS) — avoids contiguous slot assumption.
+        const numPlayers = 4;
         const rollbackMax = Math.min(20, Math.max(12, effectiveDelay + 8));
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         // Late join: C engine starts at frame 0 (memset), but we need it at
