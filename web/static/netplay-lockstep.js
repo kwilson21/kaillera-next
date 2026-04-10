@@ -3914,8 +3914,10 @@
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
     // Only for vanilla SSB64 — Smash Remix has different memory layout.
+    _syncLog(`cheat-gate: romHash=${_config?.romHash?.substring(0, 16) || 'null'} isSmashRemix=${_isSmashRemix()}`);
     if (!_isSmashRemix()) {
       KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+      _syncLog('applied SSB64 cheats (non-Remix ROM)');
     }
 
     // Both sides reset and start true lockstep sync
