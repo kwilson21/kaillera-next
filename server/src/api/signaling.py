@@ -1032,15 +1032,22 @@ async def game_screenshot(sid: str, data: dict) -> None:
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
     # ── SSIM comparison: check if the other slot already submitted this frame ──
-    paired = await db.get_paired_screenshot(match_id, frame, exclude_slot=slot)
-    if paired is not None:
-        ssim_score = await _compute_ssim(img_bytes, paired)
-        if ssim_score is not None:
-            is_desync = ssim_score < 0.95
-            slot_a, slot_b = sorted([slot, 0 if slot != 0 else 1])
-            await db.insert_screenshot_comparison(match_id, frame, slot_a, slot_b, ssim_score, is_desync)
-            if is_desync:
-                log.warning("Visual desync detected: match=%s frame=%d SSIM=%.4f", match_id, frame, ssim_score)
+    # Skip if a comparison for this frame already exists (avoids duplicate
+    # warnings when both slots arrive near-simultaneously).
+    existing = await db.query(
+        "SELECT 1 FROM screenshot_comparisons WHERE match_id = ? AND frame = ? LIMIT 1",
+        (match_id, frame),
+    )
+    if not existing:
+        paired = await db.get_paired_screenshot(match_id, frame, exclude_slot=slot)
+        if paired is not None:
+            ssim_score = await _compute_ssim(img_bytes, paired)
+            if ssim_score is not None:
+                is_desync = ssim_score < 0.95
+                slot_a, slot_b = sorted([slot, 0 if slot != 0 else 1])
+                await db.insert_screenshot_comparison(match_id, frame, slot_a, slot_b, ssim_score, is_desync)
+                if is_desync:
+                    log.warning("Visual desync detected: match=%s frame=%d SSIM=%.4f", match_id, frame, ssim_score)
 
 
 _SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data
