@@ -2796,6 +2796,7 @@
         }
         if (e.data === 'late-join-resume') {
           _lateJoinPaused = false;
+          _resetPacingAfterLateJoin();
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-ready' && _lateJoinPaused) {
