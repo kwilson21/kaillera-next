@@ -303,7 +303,7 @@
 
   let _rttSamples = [];
   let _rttMedian = 0; // stored for rollback-aware delay recalculation at game start
-  let _rttJitter = 0; // max - min of RTT samples (measures delivery variance)
+  // _rttJitter removed — IQR-based jitter computed inline where needed
   let _rttComplete = false;
   let _rttPeersComplete = 0;
   let _rttPeersTotal = 0;
@@ -317,7 +317,7 @@
   };
 
   const sendNextPing = (peer) => {
-    if (peer._rttPingCount >= 3) {
+    if (peer._rttPingCount >= 10) {
       peer._rttComplete = true;
       // Copy per-peer samples into peer.rttSamples for getInfo()
       peer.rttSamples = peer._rttSamples.slice().sort((a, b) => a - b);
@@ -330,14 +330,12 @@
       if (_rttPeersComplete >= _rttPeersTotal) {
         _rttSamples.sort((a, b) => a - b);
         const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        const jitter = _rttSamples[_rttSamples.length - 1] - _rttSamples[0];
         _rttMedian = median;
-        _rttJitter = jitter;
         // Lockstep default — rollback-aware recalculation happens at game start
         const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
         _rttComplete = true;
         if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms jitter: ${jitter.toFixed(1)}ms -> auto delay: ${delay}`);
+        _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay}`);
       }
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
@@ -354,8 +352,11 @@
 
   const handleDelayPong = (ts, peer) => {
     const rtt = performance.now() - ts;
-    peer._rttSamples.push(rtt);
     peer._rttPingCount++;
+    // Discard first 2 samples (WebRTC connection warmup / ICE overhead)
+    if (peer._rttPingCount > 2) {
+      peer._rttSamples.push(rtt);
+    }
     sendNextPing(peer);
     if (_rttComplete && _selfLockstepReady) {
       broadcastLockstepReady();
@@ -421,9 +422,12 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
+  let _anyMobilePeer = false; // true if any player in the room is on mobile
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
+  let _rbInitFrame = -1; // frame at which C-rollback was initialized (convergence guard)
+  let _rbConvergedLogged = false; // one-shot log when convergence window ends
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
@@ -978,6 +982,7 @@
               failedRollbacks: mod._kn_get_failed_rollbacks?.() ?? null,
               softfloatState: mod._kn_get_softfloat_state?.() ?? null,
               hiddenFingerprint: mod._kn_get_hidden_state_fingerprint?.() ?? null,
+              gameplayHash: mod._kn_gameplay_hash?.(-1) ?? null,
               gameStateHash: mod._kn_game_state_hash?.(-1) ?? null,
               fullStateHash: mod._kn_full_state_hash?.(-1) ?? null,
               taintBlocks: null,
@@ -2171,6 +2176,7 @@
     }
 
     const otherPlayers = Object.values(players).filter((p) => p.socketId !== socket.id);
+    _anyMobilePeer = Object.values(players).some((p) => p.deviceType === 'mobile');
     const existingPeerSids = Object.keys(_peers);
     _syncLog(
       `onUsersUpdated: ${Object.keys(players).length} players, ${otherPlayers.length} others, ` +
@@ -3787,27 +3793,45 @@
       // "snap rollback feel" — this is enacting that preference at the
       // delay-budget level.
       const sorted = _rttSamples.slice().sort((a, b) => a - b);
-      const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+      const q1 = sorted[Math.floor(sorted.length * 0.25)];
+      const q3 = sorted[Math.floor(sorted.length * 0.75)];
+      const iqr = q3 - q1;
       const median = sorted[Math.floor(sorted.length / 2)];
-      const jitterMargin = Math.max(p95 - median, 0);
-      const effectiveMs = _rttMedian / 2 + jitterMargin + 16.67; // +1 frame safety
+      // Filter outliers: keep only samples within [Q1 - 1.5*IQR, Q3 + 1.5*IQR]
+      const lower = q1 - 1.5 * iqr;
+      const upper = q3 + 1.5 * iqr;
+      const filtered = sorted.filter((s) => s >= lower && s <= upper);
+      const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
+      const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
+      const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
+      const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67; // +1 frame safety
       ownDelay = Math.min(15, Math.max(2, Math.ceil(effectiveMs / 16.67)));
       _syncLog(
-        `rollback delay: RTT=${_rttMedian.toFixed(1)}ms jitter=${_rttJitter.toFixed(1)}ms p95=${p95?.toFixed(1) ?? '?'}ms effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
+        `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +
+          `IQR=[${q1.toFixed(1)},${q3.toFixed(1)}] samples=${sorted.length} ` +
+          `effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
       );
     } else {
       ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
     }
     let maxDelay = ownDelay;
     if (hasRollback) {
-      // Recalculate peer delay from their RTT+jitter using rollback formula
+      // Recalculate peer delay from their RTT+jitter using IQR-filtered formula
       for (const p of Object.values(_peers)) {
         if (p.rttSamples?.length > 0) {
-          const sorted = p.rttSamples.slice().sort((a, b) => a - b);
-          const peerMedian = sorted[Math.floor(sorted.length / 2)];
-          const peerJitter = sorted[sorted.length - 1] - sorted[0];
-          const peerMs = peerMedian / 2 + peerJitter;
-          const peerDelay = Math.min(9, Math.max(1, Math.ceil(peerMs / 16.67)));
+          const pSorted = p.rttSamples.slice().sort((a, b) => a - b);
+          const pQ1 = pSorted[Math.floor(pSorted.length * 0.25)];
+          const pQ3 = pSorted[Math.floor(pSorted.length * 0.75)];
+          const pIqr = pQ3 - pQ1;
+          const pMedian = pSorted[Math.floor(pSorted.length / 2)];
+          const pLower = pQ1 - 1.5 * pIqr;
+          const pUpper = pQ3 + 1.5 * pIqr;
+          const pFiltered = pSorted.filter((s) => s >= pLower && s <= pUpper);
+          const fMedian = pFiltered[Math.floor(pFiltered.length / 2)] || pMedian;
+          const fMax = pFiltered[pFiltered.length - 1] || pSorted[pSorted.length - 1];
+          const pJitter = Math.max(fMax - fMedian, 0);
+          const peerMs = fMedian / 2 + pJitter + 16.67;
+          const peerDelay = Math.min(15, Math.max(2, Math.ceil(peerMs / 16.67)));
           if (peerDelay > maxDelay) maxDelay = peerDelay;
         }
       }
@@ -4614,6 +4638,15 @@
       if (frameModule?._kn_normalize_event_queue && frameModule?._kn_get_normalize_events?.()) {
         frameModule._kn_normalize_event_queue();
       }
+      if (frameModule?._kn_drain_pending_interrupts && frameModule?._kn_get_drain_interrupts?.()) {
+        frameModule._kn_drain_pending_interrupts();
+      }
+    }
+
+    // Tag interrupt trace entries with current frame
+    if (_hasForkedCore) {
+      const trMod = window.EJS_emulator?.gameManager?.Module;
+      if (trMod?._kn_int_trace_set_frame) trMod._kn_int_trace_set_frame(_frameNum);
     }
 
     runner(frameTimeMs);
@@ -4621,11 +4654,81 @@
     // Periodic gameplay screenshot for desync debugging
     if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
       _captureAndSendScreenshot();
-      // Log event queue hash for cross-peer comparison
+      // Log event queue hash + interrupt trace for cross-peer comparison
       const eqMod = window.EJS_emulator?.gameManager?.Module;
       if (eqMod?._kn_eventqueue_hash) {
         const eqH = (eqMod._kn_eventqueue_hash() >>> 0).toString(16);
         _syncLog(`EQ-HASH f=${_frameNum} eq=${eqH}`);
+      }
+      // Dump interrupt trace: which interrupts fired since last dump
+      if (eqMod?._kn_int_trace_get_count) {
+        const n = eqMod._kn_int_trace_get_count();
+        if (n > 0) {
+          const ptr = eqMod._kn_int_trace_get_buf();
+          const intNames = {
+            1: 'VI',
+            2: 'CMP',
+            4: 'CHK',
+            8: 'SI',
+            16: 'PI',
+            32: 'SPC',
+            64: 'AI',
+            128: 'SP',
+            256: 'DP',
+            2048: 'RSP',
+          };
+          const entries = [];
+          const limit = Math.min(n, 256);
+          for (let i = 0; i < limit; i++) {
+            const base = (ptr >> 2) + i * 2; // 8 bytes per entry = 2 uint32s
+            const w0 = eqMod.HEAPU32[base];
+            const w1 = eqMod.HEAPU32[base + 1];
+            const type = w0 & 0xff;
+            const deferred = (w0 >> 8) & 0xff;
+            const frameLo = (w0 >> 16) & 0xffff;
+            const count = w1;
+            const name = intNames[type] || type.toString(16);
+            entries.push(`${name}${deferred ? 'd' : ''}@${count}`);
+          }
+          _syncLog(`INT-TRACE f=${_frameNum} n=${n} ${entries.join(' ')}`);
+          eqMod._kn_int_trace_enable(1); // reset for next period
+        }
+      }
+      // Input hash: FNV-1a over all inputs (local + remote) for last 300 frames.
+      // Compare across peers to definitively prove whether inputs match.
+      {
+        const startF = _frameNum - SCREENSHOT_INTERVAL;
+        let ih = 2166136261 >>> 0;
+        const slots = [
+          _playerSlot,
+          ...Object.values(_peers)
+            .filter((p) => p.slot != null)
+            .map((p) => p.slot),
+        ].sort();
+        for (let f = startF; f < _frameNum; f++) {
+          for (const s of slots) {
+            let inp = null;
+            if (s === _playerSlot) {
+              inp = _localInputs[f];
+            } else {
+              inp = _remoteInputs[s]?.[f];
+            }
+            const b = inp?.buttons ?? 0;
+            const lx = inp?.lx ?? 0;
+            const ly = inp?.ly ?? 0;
+            ih = (ih ^ (b & 0xff)) >>> 0;
+            ih = Math.imul(ih, 16777619) >>> 0;
+            ih = (ih ^ ((b >> 8) & 0xff)) >>> 0;
+            ih = Math.imul(ih, 16777619) >>> 0;
+            ih = (ih ^ (lx & 0xff)) >>> 0;
+            ih = Math.imul(ih, 16777619) >>> 0;
+            ih = (ih ^ (ly & 0xff)) >>> 0;
+            ih = Math.imul(ih, 16777619) >>> 0;
+          }
+        }
+        _syncLog(
+          `INPUT-HASH f=${_frameNum} range=${startF}-${_frameNum} slots=${slots.join(',')} hash=${(ih >>> 0).toString(16)}`,
+        );
       }
     }
 
@@ -4662,7 +4765,7 @@
   // 60fps) once inputs stop arriving. Anything past 500ms of silence means
   // cascading prediction-replay work is eating the frame budget, so we
   // freeze the local sim until inputs return. See ROLLBACK-STALL logic.
-  const ROLLBACK_STALL_MS = 500;
+  const ROLLBACK_STALL_MS = 3000; // was 500 — keep predicting through drops
   let _rollbackStallActive = false;
   let _rollbackStallStart = 0;
   let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
@@ -4740,6 +4843,16 @@
         detMod._kn_set_normalize_events(1);
         _syncLog('C-level event queue normalization enabled');
       }
+      // Enable pre-frame interrupt drain for cross-device determinism
+      if (detMod?._kn_set_drain_interrupts) {
+        detMod._kn_set_drain_interrupts(1);
+        _syncLog('C-level pre-frame interrupt drain enabled');
+      }
+      // Enable interrupt trace for diagnostics
+      if (detMod?._kn_int_trace_enable) {
+        detMod._kn_int_trace_enable(1);
+        _syncLog('C-level interrupt trace enabled');
+      }
 
       // Enable FPU trace for cross-platform determinism verification
       if (detMod?._kn_fpu_trace_enable) {
@@ -4763,6 +4876,9 @@
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
       const doRollbackInit = (effectiveDelay) => {
+        // Mobile peers: keep rollback but with longer stall tolerance.
+        // The unreliable DC occasionally drops packets on iOS — rollback
+        // should predict through them, not freeze.
         if (!detMod?._kn_rollback_init) {
           _useCRollback = false;
           return;
@@ -4774,6 +4890,8 @@
         _rbRollbackMax = rollbackMax;
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
+        _rbInitFrame = _frameNum;
+        _rbConvergedLogged = false;
         // T3: explicit mode marker so the server-side log analyzer knows
         // which netplay mode captured the input audit payload.
         _syncLog(
@@ -4923,14 +5041,16 @@
     // ARM (Safari/iPhone) vs x86 (Chrome/Mac) WASM JIT engines. Skipping the
     // writes keeps guest DRAM identical to the state-sync baseline. The guest
     // receives audio via the lockstep audio bypass, not from DRAM.
-    // RSP audio skip DISABLED — testing SoftFloat FPU determinism.
-    // if (_playerSlot !== 0) {
-    //   const skipMod = window.EJS_emulator?.gameManager?.Module;
-    //   if (skipMod?._kn_set_skip_rsp_audio) {
-    //     skipMod._kn_set_skip_rsp_audio(1);
-    //     _syncLog('RSP audio DRAM writes disabled (guest — lockstep audio bypass)');
-    //   }
-    // }
+    // Skip RSP audio processing on guest — eliminates audio DMA RDRAM writes
+    // that diverge cross-platform due to mid-frame interrupt timing differences.
+    // Host produces audio; guest gets it via the lockstep audio bypass.
+    if (_playerSlot !== 0) {
+      const skipMod = window.EJS_emulator?.gameManager?.Module;
+      if (skipMod?._kn_set_skip_rsp_audio) {
+        skipMod._kn_set_skip_rsp_audio(1);
+        _syncLog('RSP audio DRAM writes disabled (guest — cross-platform determinism)');
+      }
+    }
 
     setStatus('Connected -- game on!');
     _startTime = performance.now();
@@ -5138,6 +5258,7 @@
       const mod = window.EJS_emulator?.gameManager?.Module;
       if (mod?._kn_set_deterministic) mod._kn_set_deterministic(0);
       if (mod?._kn_set_normalize_events) mod._kn_set_normalize_events(0);
+      if (mod?._kn_set_drain_interrupts) mod._kn_set_drain_interrupts(0);
     }
     // Restore speed-control functions
     if (_origToggleFF) {
@@ -5312,8 +5433,10 @@
           break;
         }
       }
-      // If we reach here, no peer is stalled. Release the freeze if it was active.
-      if (_rollbackStallActive) {
+      // Release stall only if no peer triggered it this frame.
+      // (If the for-loop broke out after setting _skipFrameAdvance, a peer
+      // IS stalled and we must NOT release.)
+      if (_rollbackStallActive && !_skipFrameAdvance) {
         const stallDuration = nowStall - _rollbackStallStart;
         _rollbackStallActive = false;
         _rollbackStallStart = 0;
@@ -5370,7 +5493,19 @@
           // On good networks it never triggers (soft throttle keeps
           // advantage at delay+1..2). On bad WiFi it causes a brief
           // freeze instead of a permanent desync.
-          if (_useCRollback && _frameAdvRaw >= _rbRollbackMax - 2) {
+          // Skip safety freeze during initial boot convergence (first 300
+          // frames after rollback init). During boot, both emulators run ~120
+          // frames independently before input exchange begins — the host can
+          // race 100+ frames ahead, which would permanently trigger the freeze
+          // even though the input pipeline hasn't converged yet.
+          const _rbConverged = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > 300;
+          if (_rbConverged && !_rbConvergedLogged) {
+            _rbConvergedLogged = true;
+            _syncLog(
+              `PACING-CONVERGED f=${_frameNum} initF=${_rbInitFrame} fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax}`,
+            );
+          }
+          if (_useCRollback && _rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
             if (!_framePacingActive) {
               _framePacingActive = true;
               _pacingCapsCount++;
@@ -5393,7 +5528,9 @@
           // Proportional throttle: soft pacing for normal jitter.
           // excess=1→50% skip, ≥2→100% skip. This handles the common
           // case (one peer slightly faster) without a jarring freeze.
-          const excess = _frameAdvRaw - DELAY_FRAMES;
+          // During boot convergence, disable throttle (excess=-1) so the
+          // host isn't starved while the input pipeline stabilizes.
+          const excess = _rbConverged ? _frameAdvRaw - DELAY_FRAMES : -1;
           let shouldSkip = false;
           if (excess >= 2) {
             shouldSkip = true;
@@ -5413,7 +5550,7 @@
             }
             _skipFrameAdvance = true;
           }
-          if (_framePacingActive) {
+          if (_framePacingActive && !_skipFrameAdvance) {
             _framePacingActive = false;
             _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
           }
@@ -5578,24 +5715,24 @@
         _rbReplayLogged = true;
       }
       if (_rbReplayLogged && !catchingUp) {
-        // Replay finished — broadcast the taint-filtered game hash so the
-        // peer can verify the rollback restoration produced bit-identical
-        // state. We send the same kind of hash the periodic RB-CHECK uses
-        // (game_hash, not full_hash) so the peer's comparison is apples-
-        // to-apples.
+        // Replay finished — broadcast the gameplay hash so the peer can
+        // verify the rollback restoration produced identical game state.
+        // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
+        // stocks, timer, RNG) — immune to audio/video/heap noise.
         const hashFrame = _frameNum - 1;
+        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
         const hiddenFpDone = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
         const sfStateDone = tickMod._kn_get_softfloat_state?.() ?? 0;
         const taintedCountDone = tickMod._kn_get_tainted_block_count?.() ?? 0;
         _syncLog(
-          `C-REPLAY done: caught up at f=${_frameNum} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
+          `C-REPLAY done: caught up at f=${_frameNum} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
         );
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
             } catch (_) {}
           }
         }
@@ -5742,12 +5879,12 @@
         // bisect mode needs to send region snapshots per frame too.
         // Cost: ~2 KB extra per bisect frame for at most 30 frames.
         const hashFrame = _frameNum - 1;
-        const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
-        if (gameHash !== 0) {
+        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
+        if (gpHash !== 0) {
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
-                p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
+                p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
               } catch (_) {}
             }
           }
@@ -5800,23 +5937,24 @@
       if (_rbPendingPostRollbackHash) {
         _rbPendingPostRollbackHash = false;
         const hashFrame = _frameNum - 1;
+        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
         const hiddenFp = tickMod._kn_get_hidden_state_fingerprint?.() ?? 0;
         const sfState = tickMod._kn_get_softfloat_state?.() ?? 0;
         const taintedCount = tickMod._kn_get_tainted_block_count?.() ?? 0;
-        if (gameHash !== 0) {
+        if (gpHash !== 0) {
           _syncLog(
-            `RB-POST-RB f=${hashFrame} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+            `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
           );
           // Cache for RB-CHECK comparison (see periodic broadcast below for
           // why — same race window applies on the post-rollback path).
           if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-          window._rbLocalGameHashes[hashFrame] = gameHash;
+          window._rbLocalGameHashes[hashFrame] = gpHash;
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
-                p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
+                p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
               } catch (_) {}
             }
           }
@@ -5885,9 +6023,11 @@
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
         const maxD = tickMod._kn_get_max_depth?.() ?? 0;
         const hashFrame = _frameNum - 1;
-        // Use taint-filtered hash for RB-CHECK: excludes 64 KB RDRAM blocks
-        // written to by non-deterministic subsystems (RSP HLE audio, GLideN64
-        // framebuffer copyback). kn_full_state_hash kept alongside for diff.
+        // Gameplay hash for RB-CHECK: hashes ONLY game-relevant RDRAM
+        // addresses (damage, stocks, timer, RNG seeds). Immune to audio/
+        // video/heap noise. game_state_hash + full_state_hash kept for
+        // diagnostic monitoring.
+        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
         const gameHash = tickMod._kn_game_state_hash?.(hashFrame) ?? 0;
         const fullHash = tickMod._kn_full_state_hash?.(hashFrame) ?? 0;
         const taintedCount = tickMod._kn_get_tainted_block_count?.() ?? 0;
@@ -5910,7 +6050,7 @@
             .join(',');
         }
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)}`,
         );
         if (regionsHex) {
           _syncLog(`C-REGIONS f=${hashFrame} ${regionsHex}`);
@@ -5938,8 +6078,9 @@
             }
           }
         }
-        // Broadcast taint-filtered game-state hash for peer comparison.
-        // This is the hash that governs RB-CHECK — full hash kept for diagnostics.
+        // Broadcast gameplay hash for peer comparison.
+        // This is the authoritative desync detection hash — only game-relevant
+        // RDRAM addresses. game_state_hash kept for diagnostic monitoring.
         //
         // Cache the hash we sent so RB-CHECK can compare against it instead
         // of re-hashing the ring buffer when the peer's reply arrives. Without
@@ -5950,7 +6091,7 @@
         // look like at the moment of broadcast" — so the right comparison is
         // "what we broadcast" vs "what they broadcast" at the same instant.
         if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-        window._rbLocalGameHashes[hashFrame] = gameHash;
+        window._rbLocalGameHashes[hashFrame] = gpHash;
         // Trim — keep only the most recent ~16 frames to bound memory.
         const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
           .map(Number)
@@ -5963,7 +6104,7 @@
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${hashFrame}:${gameHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
             } catch (_) {}
           }
         }
@@ -6022,7 +6163,7 @@
             const peerHash = window._rbPendingChecks[fStr];
             delete window._rbPendingChecks[fStr];
             const cachedLocalHash = window._rbLocalGameHashes?.[f];
-            const localHash = cachedLocalHash != null ? cachedLocalHash : (tickMod._kn_game_state_hash?.(f) ?? 0);
+            const localHash = cachedLocalHash != null ? cachedLocalHash : (tickMod._kn_gameplay_hash?.(f) ?? 0);
             if (localHash === 0) {
               _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
             } else if (localHash === peerHash) {
