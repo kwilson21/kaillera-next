@@ -444,19 +444,16 @@
   // T4: transport stats — periodic flush counts packets and dedup rate.
   let _rbTransportPacketsSent = 0;
   let _rbTransportDupsRecv = 0;
-  // DC health monitor: detect stuck unreliable SCTP streams and rotate
-  // to a fresh DataChannel on the same PeerConnection. iOS Safari's
-  // usrsctp silently stops delivering on unordered streams after ~14
-  // packets. Rotation gives a fresh SCTP stream; GGPO redundancy fills
-  // any gap (each packet carries all unACKed frames).
-  let _dcRotationCount = 0;
-  let _dcRotationCooldownUntil = 0;
+  // DC health monitor: detect stuck unreliable SCTP streams and fall
+  // back to the reliable primary DC. iOS Safari's usrsctp silently
+  // stops delivering on unordered streams — and the bug is at the
+  // association level, so DC rotation doesn't help. Immediate fallback
+  // to the reliable DC keeps inputs flowing; GGPO redundancy covers
+  // the brief gap.
   const _dcBufferStaleStreak = {}; // sid -> consecutive frames above threshold
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
-  const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before rotation
-  const DC_ACK_STALE_MS = 500; // ms without ack advance before rotation
-  const DC_ROTATION_COOLDOWN_MS = 2000;
-  const DC_MAX_ROTATIONS = 10;
+  const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
+  const DC_ACK_STALE_MS = 500; // ms without ack advance before fallback
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -1572,62 +1569,60 @@
       }
       return;
     }
-    if (!_screenshotDebugLogged) {
-      _screenshotDebugLogged = true;
-      _syncLog(`screenshot: using drawImage w=${canvas.width} h=${canvas.height}`);
-    }
 
-    const w = canvas.width;
-    const h = canvas.height;
-
-    // Center-crop to 4:3 (N64 native) then scale to thumbnail.
-    // Uses drawImage directly from the WebGL canvas — works regardless
-    // of preserveDrawingBuffer (reads presentation buffer, not GL FB).
-    // The old readPixels path returned black when preserve=false.
-    if (!_screenshotCanvas) {
-      _screenshotCanvas = document.createElement('canvas');
-      _screenshotCanvas.width = SCREENSHOT_WIDTH;
-      _screenshotCanvas.height = SCREENSHOT_HEIGHT;
-      _screenshotCtx = _screenshotCanvas.getContext('2d');
+    // Scale down to thumbnail, then toDataURL. The full-res canvas
+    // produces ~175KB JPEG which exceeds the server's 50KB limit.
+    // drawImage from a WebGL canvas works in the same JS task as the
+    // render (before browser composites). No EJS hijacking needed.
+    try {
+      if (!_screenshotCanvas) {
+        _screenshotCanvas = document.createElement('canvas');
+        _screenshotCanvas.width = SCREENSHOT_WIDTH;
+        _screenshotCanvas.height = SCREENSHOT_HEIGHT;
+        _screenshotCtx = _screenshotCanvas.getContext('2d');
+      }
+      const w = canvas.width;
+      const h = canvas.height;
+      const targetRatio = 4 / 3;
+      const srcRatio = w / h;
+      let sx = 0,
+        sy = 0,
+        sw = w,
+        sh = h;
+      if (srcRatio > targetRatio) {
+        sw = Math.round(h * targetRatio);
+        sx = Math.round((w - sw) / 2);
+      } else if (srcRatio < targetRatio) {
+        sh = Math.round(w / targetRatio);
+        sy = Math.round((h - sh) / 2);
+      }
+      _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+      const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
+      if (!dataUrl || dataUrl.length < 100) {
+        if (!_screenshotDebugLogged) {
+          _screenshotDebugLogged = true;
+          _syncLog(`screenshot: toDataURL too small (${dataUrl?.length || 0})`);
+        }
+        return;
+      }
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _syncLog(`screenshot: ok ${SCREENSHOT_WIDTH}x${SCREENSHOT_HEIGHT} size=${dataUrl.length}`);
+      }
+      const base64 = dataUrl.split(',')[1];
+      if (!socket?.connected) return;
+      socket.emit('game-screenshot', {
+        matchId: _cachedMatchId || KNState.matchId,
+        slot: _playerSlot,
+        frame: capturedFrame,
+        data: base64,
+      });
+    } catch (e) {
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _syncLog(`screenshot: error: ${e.message}`);
+      }
     }
-    const targetRatio = 4 / 3;
-    const srcRatio = w / h;
-    let sx = 0,
-      sy = 0,
-      sw = w,
-      sh = h;
-    if (srcRatio > targetRatio) {
-      sw = Math.round(h * targetRatio);
-      sx = Math.round((w - sw) / 2);
-    } else if (srcRatio < targetRatio) {
-      sh = Math.round(w / targetRatio);
-      sy = Math.round((h - sh) / 2);
-    }
-    _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
-
-    // Encode as JPEG and send. Use the snapshotted frame number, NOT the
-    // current _frameNum, so the server stamps the frame the image was
-    // actually from — critical for cross-peer comparison in desync diagnosis.
-    _screenshotCanvas.toBlob(
-      (blob) => {
-        if (!blob) return;
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64 = reader.result.split(',')[1]; // strip data:image/jpeg;base64,
-          if (socket?.connected) {
-            socket.emit('game-screenshot', {
-              matchId: _cachedMatchId || KNState.matchId,
-              slot: _playerSlot,
-              frame: capturedFrame,
-              data: base64,
-            });
-          }
-        };
-        reader.readAsDataURL(blob);
-      },
-      'image/jpeg',
-      0.6,
-    );
   };
 
   // Read block 25 (0x190000) hash from kn_rdram_block_hashes.
@@ -2627,38 +2622,6 @@
         _processInputPacket(remoteSid, peer, e.data);
       }
     };
-  };
-
-  // DC health rotation: close the stuck unreliable DC and create a fresh
-  // one on the same PeerConnection. GGPO redundancy (each packet carries
-  // all unACKed frames) ensures zero input loss during the ~50ms gap.
-  const rotateDc = (remoteSid, reason) => {
-    const peer = _peers[remoteSid];
-    if (!peer?.pc) return;
-    if (_dcRotationCount >= DC_MAX_ROTATIONS) {
-      _rbTransport = 'reliable';
-      _syncLog(`DC-ROTATE-EXHAUSTED rotations=${_dcRotationCount} — falling back to reliable DC`);
-      return;
-    }
-    const now = performance.now();
-    if (now < _dcRotationCooldownUntil) return;
-
-    _dcRotationCount++;
-    _dcRotationCooldownUntil = now + DC_ROTATION_COOLDOWN_MS;
-    _syncLog(`DC-ROTATE reason=${reason} sid=${remoteSid} rotations=${_dcRotationCount}`);
-
-    // Close old DC
-    try {
-      peer.rbDc?.close();
-    } catch (_) {}
-
-    // Create fresh DC on same PeerConnection — new SCTP stream
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
-    setupRollbackInputDataChannel(remoteSid, peer.rbDc);
-
-    // Reset detection counters
-    _dcBufferStaleStreak[remoteSid] = 0;
-    peer.lastAckAdvanceTime = now;
   };
 
   const setupDataChannel = (remoteSid, ch) => {
@@ -5519,17 +5482,25 @@
       }
     }
 
-    // ── DC health monitor: detect stuck unreliable DC, rotate if needed ──
+    // ── DC health monitor: detect stuck unreliable DC, fall back immediately ──
+    // iOS Safari's SCTP bug affects ALL unordered streams on the association,
+    // so DC rotation doesn't help — new streams die too. Instead, detect the
+    // failure and switch to the reliable primary DC immediately. The GGPO
+    // redundancy layer covers the brief gap (first reliable packet carries
+    // all unACKed frames).
     if (_useCRollback && _rbTransport === 'unreliable') {
       const nowDc = performance.now();
       for (const [sid, peer] of Object.entries(_peers)) {
         if (!peer.rbDc || peer.rbDc.readyState !== 'open') continue;
 
+        let shouldFallback = false;
+
         // Signal 1: bufferedAmount growth (local SCTP congestion)
         if (peer.rbDc.bufferedAmount > DC_BUFFER_THRESHOLD) {
           _dcBufferStaleStreak[sid] = (_dcBufferStaleStreak[sid] || 0) + 1;
           if (_dcBufferStaleStreak[sid] >= DC_BUFFER_STALE_FRAMES) {
-            rotateDc(sid, 'buffer');
+            shouldFallback = true;
+            _syncLog(`DC-FALLBACK reason=buffer sid=${sid} buffered=${peer.rbDc.bufferedAmount}`);
           }
         } else {
           _dcBufferStaleStreak[sid] = 0;
@@ -5537,11 +5508,20 @@
 
         // Signal 2: ack staleness (remote silent drop)
         if (
+          !shouldFallback &&
           peer.lastAckAdvanceTime &&
           nowDc - peer.lastAckAdvanceTime > DC_ACK_STALE_MS &&
-          _frameNum > 60 // skip during early convergence
+          _frameNum > 60
         ) {
-          rotateDc(sid, 'ack-stale');
+          shouldFallback = true;
+          _syncLog(`DC-FALLBACK reason=ack-stale sid=${sid} staleMs=${(nowDc - peer.lastAckAdvanceTime).toFixed(0)}`);
+        }
+
+        if (shouldFallback) {
+          _rbTransport = 'reliable';
+          _syncLog('DC-FALLBACK: switched to reliable DC — inputs now via primary channel');
+          // Reset ack tracking so peer isn't immediately marked phantom
+          peer.lastAckAdvanceTime = nowDc;
         }
       }
     }
