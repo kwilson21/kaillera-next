@@ -2129,6 +2129,24 @@
     _syncLog(msg);
   };
 
+  // Reset pacing state after late-join pause. Wall clock time advances
+  // during the pause but the tick loop is frozen — without this reset,
+  // the phantom detector sees the pause duration as "peer went silent"
+  // and permanently excludes the late joiner from pacing, allowing the
+  // host to run unchecked ahead.
+  const _resetPacingAfterLateJoin = () => {
+    const now = performance.now();
+    for (const slot of Object.keys(_peerLastAdvanceTime)) {
+      _peerLastAdvanceTime[slot] = now;
+    }
+    for (const slot of Object.keys(_peerPhantom)) {
+      if (_peerPhantom[slot]) {
+        _syncLog(`late-join resume: clearing phantom for slot ${slot}`);
+        _peerPhantom[slot] = false;
+      }
+    }
+  };
+
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
@@ -2137,6 +2155,7 @@
     if (msg.type === 'late-join-ready') {
       if (_lateJoinPaused) {
         _lateJoinPaused = false;
+        _resetPacingAfterLateJoin();
         _broadcastRoster();
         _syncLog('late-join resume: joiner ready (via Socket.IO)');
         for (const p of Object.values(_peers)) {
@@ -2781,6 +2800,7 @@
         }
         if (e.data === 'late-join-ready' && _lateJoinPaused) {
           _lateJoinPaused = false;
+          _resetPacingAfterLateJoin();
           // Broadcast roster NOW — the joiner is ready to send input.
           // Broadcasting earlier causes 5s stalls per frame while the
           // joiner boots/loads state.
@@ -4130,6 +4150,7 @@
       setTimeout(() => {
         if (_lateJoinPaused) {
           _lateJoinPaused = false;
+          _resetPacingAfterLateJoin();
           _broadcastRoster();
           _syncLog('late-join pause timeout — resuming');
           // Send resume to peers that are still paused
