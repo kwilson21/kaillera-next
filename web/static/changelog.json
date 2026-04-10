@@ -1,5 +1,55 @@
 [
   {
+    "version": "0.41.0",
+    "date": "2026-04-10",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "force preserveDrawingBuffer, screenshot error logging, immediate DC fallback"
+      },
+      {
+        "type": "fix",
+        "message": "taint N64 OS kernel area to eliminate cross-platform divergence"
+      },
+      {
+        "type": "feat",
+        "message": "rebuild WASM core with N64 OS kernel area taint"
+      },
+      {
+        "type": "feat",
+        "message": "event queue normalization + cross-engine taint blocks"
+      },
+      {
+        "type": "feat",
+        "message": "automated visual desync detection via server-side SSIM comparison"
+      },
+      {
+        "type": "feat",
+        "message": "surface SSIM visual desync detection in admin UI"
+      },
+      {
+        "type": "fix",
+        "message": "boot pacing freeze + stall/throttle release bugs"
+      },
+      {
+        "type": "fix",
+        "message": "prevent duplicate SSIM comparison when both slots arrive simultaneously"
+      },
+      {
+        "type": "feat",
+        "message": "interrupt quantization, boot stall, audio fix, session observability"
+      },
+      {
+        "type": "fix",
+        "message": "raise soft throttle thresholds to prevent steady-state framerate drops"
+      },
+      {
+        "type": "fix",
+        "message": "late join black screen — C engine frame counter started at 0"
+      }
+    ]
+  },
+  {
     "version": "0.40.1",
     "date": "2026-04-10",
     "changes": [
