@@ -334,7 +334,7 @@
   };
 
   const sendNextPing = (peer) => {
-    if (peer._rttPingCount >= 10) {
+    if (peer._rttPingCount >= 22) {
       peer._rttComplete = true;
       // Copy per-peer samples into peer.rttSamples for getInfo()
       peer.rttSamples = peer._rttSamples.slice().sort((a, b) => a - b);
