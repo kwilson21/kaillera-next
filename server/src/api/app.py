@@ -178,9 +178,11 @@ class SecurityHeadersMiddleware:
         # JS/CSS — always revalidate via ETag (304 if unchanged)
         if path.endswith((".js", ".css")):
             return "no-cache"
-        # HTML pages — always revalidate (ETag still avoids re-download)
+        # HTML pages — never cache. HTML is small and served locally.
+        # no-store prevents aggressive browsers (Brave) from using stale
+        # HTML that has outdated ?v= cache-bust params on script tags.
         if path.endswith(".html") or path == "/":
-            return "no-cache"
+            return "no-store"
         # API responses and everything else
         return "no-store"
 
