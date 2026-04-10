@@ -4230,6 +4230,13 @@
       }
 
       _setLastSyncState(bytes.slice(), 'late-join');
+
+      // Re-apply cheats after state load — loadState can clear the cheat
+      // table, losing cheats applied during boot (same fix as normal start
+      // at line 3916). Without this, late joiners lose "Timer On", "Stock
+      // Mode", "Items Off" etc., causing immediate game state divergence.
+      KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+
       enterManualMode();
 
       // Write game-specific RNG/settings values (gated to Smash Remix)
@@ -4916,6 +4923,13 @@
         // JS frame counter is reset from 4574→0, causing permanent stall.
         if (_frameNum > 0 && detMod._kn_set_frame) {
           detMod._kn_set_frame(_frameNum);
+          // DIAGNOSTIC: skip retro_serialize for late joiners to test
+          // whether serialize side effects cause state divergence.
+          // Late joiners have 0 rollbacks so the ring buffer is unused.
+          if (detMod._kn_set_skip_serialize) {
+            detMod._kn_set_skip_serialize(1);
+            _syncLog('C-ROLLBACK late-join: serialize SKIPPED (diagnostic)');
+          }
           _syncLog(`C-ROLLBACK late-join: set C frame to ${_frameNum}`);
         } else if (_frameNum > 0) {
           // WASM doesn't have kn_set_frame yet — disable C rollback so the

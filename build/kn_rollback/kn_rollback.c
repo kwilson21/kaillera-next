@@ -206,6 +206,9 @@ static struct {
      * the tolerance window is absorbing what would have been rollbacks. */
     int tolerance_hits;
 
+    /* Diagnostic: skip retro_serialize on normal frames (late-join test) */
+    int skip_serialize;
+
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
@@ -720,7 +723,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     }
 
     /* ── Save state for current frame ── */
-    {
+    if (!rb.skip_serialize) {
         int save_idx = rb.frame % rb.ring_size;
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_sf_state[save_idx] = sf_pack();
@@ -1118,6 +1121,14 @@ EMSCRIPTEN_KEEPALIVE
 void kn_set_frame(int frame) {
     rb.frame = frame;
     rb_log("kn_set_frame: %d", frame);
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_skip_serialize(int enable) {
+    rb.skip_serialize = enable;
+    rb_log("skip_serialize: %d", enable);
 }
 
 #ifdef __EMSCRIPTEN__
