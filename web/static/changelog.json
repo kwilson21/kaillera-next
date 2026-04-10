@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.40.1",
+    "date": "2026-04-10",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "screenshot capture uses drawImage instead of readPixels"
+      }
+    ]
+  },
+  {
     "version": "0.40.0",
     "date": "2026-04-09",
     "changes": [
