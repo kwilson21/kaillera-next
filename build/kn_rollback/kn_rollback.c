@@ -395,6 +395,18 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     kn_taint_rdram(0x710000, 0x10000);
     rb_log("kn_rollback_init: tainted HUD sprite heap 0x710000 size=0x10000");
 
+    /* Taint N64 OS kernel/thread area (RDRAM block 4: 0x40000-0x4FFFF).
+     *
+     * Match 099c65b5 (desktop↔iPhone): hashes matched for 600 frames,
+     * then region 4 sub-chunk 13 (address 0x40D00) diverged. By frame
+     * 3599 the divergence spread across 22 sub-chunks in region 4-5.
+     * Address 0x800465D0 in this range is screen_interrupt (Global.asm).
+     * The area contains OS thread scheduling state, interrupt handlers,
+     * and timer contexts — all driven by CP0 Count which drifts between
+     * WASM JIT engines (V8 vs JSC). Not game-logic-relevant. */
+    kn_taint_rdram(0x40000, 0x20000);
+    rb_log("kn_rollback_init: tainted N64 OS kernel area 0x40000 size=0x20000");
+
     /* Option X-2: Mark the post-RDRAM section of the savestate hash as
      * "ignore divergence". The post-RDRAM section contains CPU general
      * registers, cp0 (system control: status, cause, count), cp1 (FPU),
