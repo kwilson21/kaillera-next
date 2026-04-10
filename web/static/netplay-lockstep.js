@@ -31,8 +31,10 @@
  *
  *   1. All players boot EmulatorJS independently and wait for the WASM
  *      core to be ready (MIN_BOOT_FRAMES = 120 frames for all players).
- *   2. Standard online cheats applied automatically via KNShared
- *      (SSB64 GameShark codes: all characters, items off, etc.).
+ *   2. Standard online cheats applied automatically via KNShared for
+ *      vanilla SSB64 only (gated by ROM hash — Smash Remix and other
+ *      mods are excluded to avoid RDRAM corruption from mismatched
+ *      memory layouts).
  *   3. INPUT_BASE auto-discovery: calls _simulate_input(0, 0, 1) and scans
  *      the first 4MB of HEAPU8 for the changed byte. This locates the core's
  *      internal input_state array, which varies per WASM compilation.
@@ -90,7 +92,7 @@
  *        misprediction was detected by kn_feed_input(), restores state and
  *        replays 1 frame via C retro_run (amortized — catches up over
  *        multiple ticks instead of burst-replaying all at once).
- *        Returns 1 if catching up (JS skips normal step), 0 for normal.
+ *        Returns 2 if catching up (JS steps emulator), 0 for normal.
  *     5. Read inputs from C ring buffer via kn_get_input(), write to WASM
  *        via writeInputToMemory (same path as Classic)
  *     6. Step one frame via EJS runner, feed audio
@@ -198,6 +200,11 @@
  *   marked as phantom and excluded from pacing calculations. On recovery
  *   (frame arrives), phantom state clears and a resync is triggered.
  *
+ *   Pacing state (phantom flags, advance timestamps) is reset at all
+ *   late-join resume paths — the host's late-join-ready handler, the
+ *   non-host peers' late-join-resume DC handler, and the safety timeout.
+ *   Without this reset, the 5-15s pause triggers phantom detection.
+ *
  * ── Mesh Health Check (~5s) ──────────────────────────────────────────────
  *
  *   Every 300 frames, the host reconciles _knownPlayers (server truth
@@ -222,12 +229,22 @@
  *   Pull model — the joiner requests state when ready:
  *     1. Joiner boots emulator minimally, enters manual mode
  *     2. Sends "request-late-join" via Socket.IO data-message
- *     3. Host captures + compresses state, sends "late-join-state" with
- *        the current frame number and effective delay
- *     4. Joiner loads state, syncs frame counter to hostFrame, pre-fills
- *        delay gap with zero input, starts lockstep tick loop
+ *     3. Host captures + compresses state, pauses all players' tick loops
+ *        (late-join-pause via DC), sends "late-join-state" with the current
+ *        frame number, effective delay, and rollback transport mode
+ *     4. Joiner loads state via kn_load_state_immediate, syncs C rollback
+ *        engine frame counter (kn_set_frame), pre-fills delay gap with
+ *        zero input, starts lockstep tick loop
+ *     5. Joiner sends "late-join-ready" — host resumes all tick loops,
+ *        resets pacing/phantom state (wall-clock time advances during
+ *        the pause but tick loops are frozen — without reset, phantom
+ *        detection would immediately exclude the joiner)
+ *     6. Late joiners skip boot convergence (300-frame lockstep window)
+ *        and enter rollback prediction mode immediately — they loaded
+ *        the host's state directly, no boot race to protect against
  *   The late-joiner always initiates WebRTC connections to avoid the
- *   offer-before-listener race condition.
+ *   offer-before-listener race condition. Safety timeout (15s) resumes
+ *   all players if the joiner fails to send late-join-ready.
  *
  * ── Drop Handling ─────────────────────────────────────────────────────────
  *
