@@ -4150,6 +4150,7 @@
         frame: _frameNum,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
+        rbTransport: _rbTransport,
         rngValues,
         saveData,
       });
@@ -4257,6 +4258,17 @@
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
+
+      // Ensure rollback init can proceed — the late joiner missed the
+      // host's rb-delay broadcast over DataChannel (sent at game start).
+      // Without this, startLockstep sets _rbPendingInit=true and the
+      // tick loop is completely gated, causing a black screen.
+      if (msg.effectiveDelay) {
+        window._rbHostDelay = msg.effectiveDelay;
+      }
+      if (msg.rbTransport) {
+        _rbTransport = msg.rbTransport === 'unreliable' ? 'unreliable' : 'reliable';
+      }
 
       startLockstep();
 
@@ -4875,6 +4887,19 @@
         const numPlayers = getInputPeers().length + 1;
         const rollbackMax = Math.min(20, Math.max(12, effectiveDelay + 8));
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        // Late join: C engine starts at frame 0 (memset), but we need it at
+        // the host's frame. Without this, kn_get_frame() returns 0 and the
+        // JS frame counter is reset from 4574→0, causing permanent stall.
+        if (_frameNum > 0 && detMod._kn_set_frame) {
+          detMod._kn_set_frame(_frameNum);
+          _syncLog(`C-ROLLBACK late-join: set C frame to ${_frameNum}`);
+        } else if (_frameNum > 0) {
+          // WASM doesn't have kn_set_frame yet — disable C rollback so the
+          // tick loop doesn't sync _frameNum from the C engine's stale 0.
+          _syncLog(`C-ROLLBACK late-join: no _kn_set_frame, disabling C rollback`);
+          _useCRollback = false;
+          return;
+        }
         rb_numPlayers = numPlayers;
         _rbRollbackMax = rollbackMax;
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);

@@ -1122,6 +1122,14 @@ int kn_get_frame(void) { return rb.frame; }
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
+void kn_set_frame(int frame) {
+    rb.frame = frame;
+    rb_log("kn_set_frame: %d", frame);
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
 int kn_get_rollback_count(void) { return rb.rollback_count; }
 
 #ifdef __EMSCRIPTEN__

@@ -61,6 +61,9 @@ int kn_get_input(int slot, int frame, int *out_buttons,
 
 /* Stats for UI overlay */
 int kn_get_frame(void);
+
+/* Set the C engine's frame counter (for late join — start at host's frame). */
+void kn_set_frame(int frame);
 int kn_get_rollback_count(void);
 int kn_get_prediction_count(void);
 int kn_get_correct_predictions(void);
