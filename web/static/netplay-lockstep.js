@@ -5515,15 +5515,17 @@
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
           // Proportional throttle: soft pacing for normal jitter.
-          // excess=1→50% skip, ≥2→100% skip. This handles the common
-          // case (one peer slightly faster) without a jarring freeze.
+          // The faster peer naturally sits at fAdv ≈ delay+1 in steady
+          // state — that's normal GGPO operation, not something to throttle.
+          // Only start skipping when excess reaches +2 above delay (the peer
+          // is actually pulling away), and hard-skip at +3.
           // During boot convergence, disable throttle (excess=-1) so the
           // host isn't starved while the input pipeline stabilizes.
           const excess = _rbConverged ? _frameAdvRaw - DELAY_FRAMES : -1;
           let shouldSkip = false;
-          if (excess >= 2) {
+          if (excess >= 3) {
             shouldSkip = true;
-          } else if (excess >= 1) {
+          } else if (excess >= 2) {
             _pacingSkipCounter++;
             shouldSkip = (_pacingSkipCounter & 1) === 0;
           }
