@@ -26,6 +26,11 @@
 #include <emscripten.h>
 #endif
 
+/* Global flag: when set, gen_interrupt() in the core skips non-essential
+ * interrupts during rollback replay. Defined here so both kn_rollback.c
+ * and the patched interrupt.c can reference it. */
+int kn_replay_freeze_interrupts = 0;
+
 /* Forward declarations from libretro API.
  * retro_run is excluded from asyncify via ASYNCIFY_REMOVE. */
 extern size_t retro_serialize_size(void);
@@ -250,6 +255,9 @@ static void setup_frame(int frame) {
         if (kn_normalize_events_flag)
             kn_normalize_event_queue();
     }
+
+    /* Quantization is now built into kn_normalize_event_queue —
+     * relative offsets are rounded to 2048-cycle granularity. */
 
     /* Reset audio capture buffer */
     kn_reset_audio();
@@ -585,13 +593,17 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
              * still tolerate drift instead of snapping — but at the
              * expense of visible state divergence. Tuning this value is
              * a trade between "snap feel" and "desync resistance". */
-            #define KN_VISIBLE_ROLLBACK_MAX 7
+            /* Dynamic cap: delay_frames + 4 ensures rollback can always
+             * correct mispredictions at the apply frame. With delay=11,
+             * a misprediction has depth=11 at minimum — the old hardcoded
+             * cap of 7 silently dropped every single rollback. */
+            int visible_rb_max = rb.delay_frames + 4;
             int depth = rb.frame - frame;
-            if (depth > KN_VISIBLE_ROLLBACK_MAX) {
+            if (depth > visible_rb_max) {
                 /* Too deep to rewind invisibly — accept drift */
                 rb.failed_rollbacks++;
-                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d myF=%d depth=%d (cap=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
-                    slot, frame, rb.frame, depth, KN_VISIBLE_ROLLBACK_MAX, btn_xor, lx_d, ly_d, cx_d, cy_d);
+                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d myF=%d depth=%d (cap=%d delay=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    slot, frame, rb.frame, depth, visible_rb_max, rb.delay_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
             } else if (depth <= rb.max_frames) {
                 int ring_idx = frame % rb.ring_size;
                 if (rb.ring_frames[ring_idx] == frame) {
@@ -696,6 +708,13 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
 
         setup_frame(rb.frame);
+        /* Freeze non-essential interrupts during replay to prevent mid-frame
+         * timing drift from compounding across replayed frames. Cleared in
+         * kn_post_tick after the replay step completes. */
+        {
+            /* kn_replay_freeze_interrupts defined at file scope */
+            kn_replay_freeze_interrupts = 1;
+        }
         /* JS will call stepOneFrame() which goes through the rAF/runner
          * pipeline — bit-identical to normal play. Then JS calls
          * kn_post_tick which advances rb.frame and decrements replay_remaining. */
@@ -754,6 +773,11 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_post_tick(void) {
     if (!rb.initialized) return -1;
+    /* Clear replay interrupt freeze after each step */
+    {
+        extern int kn_replay_freeze_interrupts;
+        kn_replay_freeze_interrupts = 0;
+    }
     rb.frame++;
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
@@ -900,10 +924,16 @@ uint32_t kn_game_state_hash(int frame) {
     uint32_t hash = 2166136261u;
     size_t i;
 
-    /* Pre-RDRAM: headers + registers + DMA regs. */
-    for (i = 0; i < rdram_start && i < rb.state_size; i += 16) {
-        hash ^= p[i];
-        hash *= 16777619u;
+    /* Pre-RDRAM: headers + registers + DMA regs.
+     * When rollback is active (kn_skip_post_rdram_in_hash), skip this
+     * section — it contains cycle-clock-derived register state (CP0 Count
+     * residuals in header) that drifts harmlessly across WASM JIT engines.
+     * The gameplay_hash addresses the detection gap. */
+    if (!kn_skip_post_rdram_in_hash) {
+        for (i = 0; i < rdram_start && i < rb.state_size; i += 16) {
+            hash ^= p[i];
+            hash *= 16777619u;
+        }
     }
 
     /* RDRAM: skip tainted 64 KB blocks. */
@@ -927,6 +957,69 @@ uint32_t kn_game_state_hash(int frame) {
         }
     }
 
+    return hash;
+}
+
+/* ── Gameplay hash — precise game-relevant RDRAM addresses ─────────
+ * Hashes ONLY specific gameplay-relevant RDRAM addresses from a saved
+ * state in the ring buffer: damage %, stocks, timer, RNG seeds, screen
+ * state, character IDs. Immune to non-deterministic audio/video/heap
+ * noise. This is the authoritative desync detection hash for rollback. */
+
+typedef struct {
+    uint32_t rdram_offset;
+    uint32_t size;
+} kn_gameplay_addr_t;
+
+static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
+    /* Screen + game status */
+    { 0xA4AD0, 1 },   /* current_screen */
+    { 0xA4D19, 1 },   /* game_status (0=wait,1=ongoing,2=paused,5=end) */
+    /* VS settings block */
+    { 0xA4D08, 28 },  /* stage, mode, teams, time, stocks, handicap, ... timer, elapsed */
+    /* VS player stocks (offset 0x2B within each 0x74-byte player entry) */
+    { 0xA4D53, 1 },   /* P1 stock count */
+    { 0xA4DC7, 1 },   /* P2 stock count */
+    { 0xA4E3B, 1 },   /* P3 stock count */
+    { 0xA4EAF, 1 },   /* P4 stock count */
+    /* In-game player struct: character ID (offset 0x08, 4 bytes) */
+    { 0x130D8C, 4 },  /* P1 char_id */
+    { 0x1318DC, 4 },  /* P2 char_id */
+    { 0x13242C, 4 },  /* P3 char_id */
+    { 0x132F7C, 4 },  /* P4 char_id */
+    /* In-game player struct: damage % (offset 0x2C, 4 bytes) */
+    { 0x130DB0, 4 },  /* P1 damage */
+    { 0x131900, 4 },  /* P2 damage */
+    { 0x132450, 4 },  /* P3 damage */
+    { 0x132FA0, 4 },  /* P4 damage */
+    /* RNG seeds */
+    { 0x05B940, 4 },  /* primary LCG seed */
+    { 0x0A0578, 4 },  /* alternate seed */
+};
+#define KN_GAMEPLAY_ADDR_COUNT (sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]))
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_gameplay_hash(int frame) {
+    if (!rb.initialized || rb.frame == 0) return 0;
+    if (kn_rdram_offset_in_state == 0) return 0;
+    int target = (frame < 0) ? (rb.frame - 1) : frame;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
+
+    const uint8_t *state = rb.ring_bufs[idx];
+    uint32_t hash = 2166136261u;
+
+    for (int a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
+        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        uint32_t sz = kn_gameplay_addrs[a].size;
+        if (off + sz > rb.state_size) continue; /* bounds check */
+        for (uint32_t b = 0; b < sz; b++) {
+            hash ^= state[off + b];
+            hash *= 16777619u;
+        }
+    }
     return hash;
 }
 

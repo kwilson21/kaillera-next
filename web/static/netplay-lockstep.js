@@ -428,6 +428,7 @@
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
   let _rbInitFrame = -1; // frame at which C-rollback was initialized (convergence guard)
   let _rbConvergedLogged = false; // one-shot log when convergence window ends
+  let _rbStallLogged = 0; // frame at which last RB-INPUT-STALL was logged (rate limit)
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
@@ -1897,7 +1898,7 @@
       // after the gesture — past iOS's trust window.
       if (!_audioCtx || _audioCtx.state === 'closed') {
         const preloaded = window._kn_preloadedAudioCtx;
-        if (preloaded && preloaded.state !== 'closed') {
+        if (preloaded && preloaded.state === 'running' && preloaded.currentTime < 5) {
           _audioCtx = preloaded;
           delete window._kn_preloadedAudioCtx;
           _syncLog(
@@ -2031,66 +2032,74 @@
 
   let _audioFeedCount = 0;
   let _audioEmptyCount = 0;
+  let _audioErrorLogged = false;
   const feedAudio = () => {
-    if (!_audioReady || !_audioCtx) return;
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod) return;
+    try {
+      if (!_audioReady || !_audioCtx) return;
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (!mod) return;
 
-    const n = mod._kn_get_audio_samples();
-    if (n <= 0) {
-      _audioEmptyCount++;
-      // Log first 30 empty frames for diagnostics on fresh boot
-      if (_audioEmptyCount <= 30) {
-        const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
-        const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'none';
-        _syncLog(
-          `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState}`,
-        );
-      }
-      // Log once after 300 consecutive empty frames (~5s) to detect silent audio
-      if (_audioEmptyCount === 300) {
-        const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
-        const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
-        _syncLog(
-          `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState})`,
-        );
-      }
-      return;
-    }
-    _audioEmptyCount = 0;
-
-    // Log audio state periodically (every 600 frames ≈ 10s)
-    _audioFeedCount++;
-    if (_audioFeedCount === 1 || _audioFeedCount % 600 === 0) {
-      // Check PCM level (RMS of first 100 samples)
-      const pcmCheck = new Int16Array(mod.HEAPU8.buffer, _audioPtr, Math.min(n * 2, 200));
-      let rms = 0;
-      for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
-      rms = Math.sqrt(rms / pcmCheck.length);
-      _syncLog(
-        `audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`,
-      );
-    }
-
-    const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
-
-    if (_audioWorklet) {
-      // AudioWorklet path
-      const copy = new Int16Array(pcm);
-      _audioWorklet.port.postMessage(copy, [copy.buffer]);
-    } else {
-      // ScriptProcessorNode fallback — push PCM to ring buffer.
-      // The ScriptProcessorNode's onaudioprocess callback pulls from it.
-      const ring = window._kn_audioRing;
-      if (ring) {
-        const rSize = ring.length;
-        for (let i = 0; i < n; i++) {
-          ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
-          ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
-          window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
+      const n = mod._kn_get_audio_samples();
+      if (n <= 0) {
+        _audioEmptyCount++;
+        // Log first 30 empty frames for diagnostics on fresh boot
+        if (_audioEmptyCount <= 30) {
+          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+          const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'none';
+          _syncLog(
+            `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState}`,
+          );
         }
-        window._kn_audioRingCount += n * 2;
-        if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
+        // Log once after 300 consecutive empty frames (~5s) to detect silent audio
+        if (_audioEmptyCount === 300) {
+          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+          const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
+          _syncLog(
+            `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState})`,
+          );
+        }
+        return;
+      }
+      _audioEmptyCount = 0;
+
+      // Log audio state periodically (every 600 frames ≈ 10s)
+      _audioFeedCount++;
+      if (_audioFeedCount === 1 || _audioFeedCount % 600 === 0) {
+        // Check PCM level (RMS of first 100 samples)
+        const pcmCheck = new Int16Array(mod.HEAPU8.buffer, _audioPtr, Math.min(n * 2, 200));
+        let rms = 0;
+        for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
+        rms = Math.sqrt(rms / pcmCheck.length);
+        _syncLog(
+          `audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`,
+        );
+      }
+
+      const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
+
+      if (_audioWorklet) {
+        // AudioWorklet path
+        const copy = new Int16Array(pcm);
+        _audioWorklet.port.postMessage(copy, [copy.buffer]);
+      } else {
+        // ScriptProcessorNode fallback — push PCM to ring buffer.
+        // The ScriptProcessorNode's onaudioprocess callback pulls from it.
+        const ring = window._kn_audioRing;
+        if (ring) {
+          const rSize = ring.length;
+          for (let i = 0; i < n; i++) {
+            ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
+            ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
+            window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
+          }
+          window._kn_audioRingCount += n * 2;
+          if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
+        }
+      }
+    } catch (audioErr) {
+      if (!_audioErrorLogged) {
+        _syncLog(`AUDIO-ERROR: ${audioErr.message}`);
+        _audioErrorLogged = true;
       }
     }
   };
@@ -2282,6 +2291,7 @@
       }
       if (s === 'failed') {
         // Failed is terminal — disconnect immediately
+        _syncLog(`WEBRTC-FAILED slot=${peer.slot} sid=${remoteSid} — PeerConnection terminal failure`);
         KNEvent('webrtc-fail', 'Peer connection failed', { slot: peer.slot, remoteSid });
         if (peer._disconnectTimer) {
           clearTimeout(peer._disconnectTimer);
@@ -3391,54 +3401,16 @@
       return;
     }
 
-    // The emulator halts at ~frame 6 without a user gesture (AudioContext
-    // blocked → Asyncify stalls permanently). The host already has a gesture
-    // (ROM drag-drop auto-starts the emulator). For guests, we delay start
-    // until a tap provides the gesture, so the emulator starts with audio.
     let _bootPollCount = 0;
     let _bootGestureReceived = false;
 
-    // Guests need a gesture prompt before booting: iOS blocks AudioContext
-    // without a direct user gesture, causing WASM to stall at frame 6.
-    // Hosts skip the prompt — play.js pre-creates the AudioContext in the
-    // startGame() click handler (window._kn_preloadedAudioCtx) before the
-    // Socket.IO round-trip that calls start(), keeping it within the gesture window.
-    const _needsGesture = _playerSlot !== 0;
-
-    if (!_needsGesture) {
-      // Host: install AudioContext constructor hijack so EJS gets the
-      // gesture-unlocked context. Without this, EJS boot on iOS takes
-      // >1s after the tap, the gesture window expires, and EJS's
-      // AudioContext stalls at frame 6.
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && window._kn_preloadedAudioCtx) {
-        const _preCtx = window._kn_preloadedAudioCtx;
-        const _RealAC = AC;
-        let _hijacked = false;
-        const _HijackAC = function () {
-          if (!_hijacked) {
-            _hijacked = true;
-            if (window.AudioContext === _HijackAC) window.AudioContext = _RealAC;
-            if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealAC;
-            _syncLog('AudioContext hijack (host): returning pre-created context');
-            return _preCtx;
-          }
-          return new _RealAC();
-        };
-        _HijackAC.prototype = _RealAC.prototype;
-        if (window.AudioContext) window.AudioContext = _HijackAC;
-        if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
-      }
-      _bootGestureReceived = true;
-      _syncLog('host auto-boot (slot=0)');
-      setStatus('Loading emulator...');
-      KNShared.bootWithCheats('lockstep');
-    } else {
-      // Guest: show full-screen gesture prompt (above EmulatorJS overlay)
-      // Defer until ROM is loaded — the prompt covers the entire screen
-      // (z-index 10000) and would hide the ROM download progress bar.
+    // All players (host + guest) get a gesture prompt before boot.
+    // This ensures the AudioContext is created fresh inside the click
+    // handler — Safari suspends AudioContexts created outside a gesture
+    // after ~10s, which caused the host's pre-created context to go stale.
+    {
       const showGesturePrompt = () => {
-        _syncLog(`guest — showing gesture prompt (slot=${_playerSlot})`);
+        _syncLog(`showing gesture prompt (slot=${_playerSlot})`);
         const promptEl = document.getElementById('gesture-prompt');
         if (!promptEl) return;
         promptEl.classList.remove('hidden');
@@ -3522,7 +3494,7 @@
       if (window.EJS_gameUrl) {
         showGesturePrompt();
       } else {
-        _syncLog('guest — ROM not loaded yet, deferring gesture prompt');
+        _syncLog('ROM not loaded yet, deferring gesture prompt');
         setStatus('Waiting for ROM...');
         _romWaitInterval = setInterval(() => {
           if (window.EJS_gameUrl) {
@@ -3862,11 +3834,7 @@
     if (_playerSlot === 0) {
       const transportOverride = window._knTransportOverride;
       const transportMode =
-        transportOverride === 'reliable' || transportOverride === 'unreliable'
-          ? transportOverride
-          : hasRollback
-            ? 'unreliable'
-            : 'reliable';
+        transportOverride === 'reliable' || transportOverride === 'unreliable' ? transportOverride : 'reliable';
       _rbTransport = transportMode;
       for (const p of Object.values(_peers)) {
         if (p.dc?.readyState === 'open') {
@@ -4660,6 +4628,26 @@
         const eqH = (eqMod._kn_eventqueue_hash() >>> 0).toString(16);
         _syncLog(`EQ-HASH f=${_frameNum} eq=${eqH}`);
       }
+      // Log event queue normalization quantization data
+      if (eqMod?._kn_eq_norm_get_count) {
+        const normCount = eqMod._kn_eq_norm_get_count();
+        if (normCount > 0) {
+          const normPtr = eqMod._kn_eq_norm_get_log();
+          const intNames = { 1: 'VI', 4: 'CHK', 8: 'SI', 16: 'PI', 64: 'AI', 128: 'SP', 256: 'DP' };
+          const entries = [];
+          for (let qi = 0; qi < normCount && qi < 16; qi++) {
+            // struct: int type (4), uint32 raw_rel (4), uint32 quant_rel (4) = 12 bytes
+            const base = (normPtr >> 2) + qi * 3;
+            const type = eqMod.HEAP32[base];
+            const rawRel = eqMod.HEAPU32[base + 1];
+            const quantRel = eqMod.HEAPU32[base + 2];
+            const delta = rawRel - quantRel;
+            const name = intNames[type] || type.toString();
+            entries.push(`${name}:${rawRel}→${quantRel}(Δ${delta})`);
+          }
+          _syncLog(`EQ-QUANT f=${_frameNum} n=${normCount} ${entries.join(' ')}`);
+        }
+      }
       // Dump interrupt trace: which interrupts fired since last dump
       if (eqMod?._kn_int_trace_get_count) {
         const n = eqMod._kn_int_trace_get_count();
@@ -4843,11 +4831,12 @@
         detMod._kn_set_normalize_events(1);
         _syncLog('C-level event queue normalization enabled');
       }
-      // Enable pre-frame interrupt drain for cross-device determinism
-      if (detMod?._kn_set_drain_interrupts) {
-        detMod._kn_set_drain_interrupts(1);
-        _syncLog('C-level pre-frame interrupt drain enabled');
-      }
+      // Interrupt drain disabled — causes silent WASM crashes when
+      // handler callbacks fire out of context. Using event queue
+      // quantization (KN_EQ_QUANT in normalize) instead.
+      // if (detMod?._kn_set_drain_interrupts) {
+      //   detMod._kn_set_drain_interrupts(1);
+      // }
       // Enable interrupt trace for diagnostics
       if (detMod?._kn_int_trace_enable) {
         detMod._kn_int_trace_enable(1);
@@ -5684,11 +5673,69 @@
     // ── C-level rollback path ──────────────────────────────────────────
     // C manages: state ring buffer, input storage, prediction, misprediction detection
     // JS handles: all frame stepping (normal + replay) via writeInputToMemory + stepOneFrame
+    //
+    // Boot convergence: during the first 300 frames after rollback init,
+    // fall through to the lockstep path (which stalls for remote input).
+    // This prevents the boot race where both emulators predict through
+    // ~120 boot frames independently and end up permanently desynced.
+    // After convergence, the rollback path takes over with prediction.
     if (_useCRollback) {
       const tickMod = window.EJS_emulator?.gameManager?.Module;
       if (!tickMod?._kn_pre_tick) {
         _useCRollback = false;
         return;
+      }
+
+      // ── Hybrid input stall ───────────────────────────────────────────
+      // Two modes, one goal: never let the local peer run so far ahead
+      // that rollback can't correct a misprediction.
+      //
+      // BOOT (first 300 frames): pure lockstep stall — wait for remote
+      // input before every frame. Prevents the boot race where both
+      // emulators predict through ~120 boot frames and desync.
+      //
+      // GAMEPLAY (after 300 frames): let rollback predict through the
+      // first few frames of missing input (hides jitter). But if frame
+      // advantage exceeds DELAY_FRAMES + 4, stall to wait — prevents
+      // runaway prediction → phantom → disconnect. Rollback handles
+      // small gaps, lockstep stall handles big ones.
+      const _rbBootConverged = _rbInitFrame < 0 || _frameNum - _rbInitFrame > 300;
+      const rbApplyFrame = _frameNum - DELAY_FRAMES;
+      if (!_rbBootConverged) {
+        // Boot: pure lockstep stall
+        if (rbApplyFrame >= 0) {
+          const bootInputPeers = getInputPeers();
+          for (const p of bootInputPeers) {
+            if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
+              return;
+            }
+          }
+        }
+        if (_frameNum % 60 === 0) {
+          _syncLog(`BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} — stalling for remote input`);
+        }
+      } else if (rbApplyFrame >= 0) {
+        // Gameplay: stall only when too far ahead for rollback to help
+        const rbInputPeers = getInputPeers();
+        for (const p of rbInputPeers) {
+          if (_peerPhantom[p.slot]) continue;
+          if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
+            // Input missing — check how far ahead we are
+            const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
+            const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
+            if (adv >= DELAY_FRAMES + 4) {
+              // Too far ahead — stall to let peer catch up
+              if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
+                _syncLog(
+                  `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} adv=${adv} — stalling (rollback budget exhausted)`,
+                );
+                _rbStallLogged = _frameNum;
+              }
+              return;
+            }
+            // Within rollback budget — let C engine predict through it
+          }
+        }
       }
 
       // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
@@ -5770,7 +5817,6 @@
         return;
       }
 
-      // ── Normal tick: write inputs from C ring + step via EJS runner ──
       const applyFrame = _frameNum - DELAY_FRAMES;
       // Diagnostic: compare C ring input with JS _remoteInputs every 60 frames
       if (_frameNum % 60 === 0 && applyFrame >= 0) {

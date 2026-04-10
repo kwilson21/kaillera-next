@@ -288,6 +288,28 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     await sio.leave_room(sid, session_id)
     log.info("SIO %s left room %s (playerId=%s, spectator=%s)", sid, session_id, player_id, is_spectator)
 
+    # Log server-side disconnect to client_events so the session log
+    # shows the full picture (previously only went to stdout).
+    await db.insert_client_event(
+        {
+            "type": "server_disconnect",
+            "message": reason,
+            "meta": json.dumps(
+                {
+                    "playerId": player_id,
+                    "sid": sid,
+                    "spectator": is_spectator,
+                    "match_id": room.match_id,
+                    "slot": rm_slot,
+                }
+            ),
+            "room": session_id,
+            "slot": rm_slot if rm_slot is not None else -1,
+            "ip_hash": "",
+            "user_agent": "server",
+        }
+    )
+
     if not room.players and not room.spectators:
         rooms.pop(session_id, None)
         await state.delete_room(session_id)
@@ -639,6 +661,17 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
     )
     await state.save_room(session_id, room)
     log.info("Game started in room %s (mode=%s)", session_id, room.mode)
+    await db.insert_client_event(
+        {
+            "type": "server_game_started",
+            "message": room.mode,
+            "meta": json.dumps({"match_id": room.match_id, "mode": room.mode}),
+            "room": session_id,
+            "slot": -1,
+            "ip_hash": "",
+            "user_agent": "server",
+        }
+    )
     return None
 
 
@@ -652,6 +685,7 @@ async def end_game(sid: str, payload: EndGamePayload) -> str | None:
     if room.owner != sid:
         return "Only the host can end the game"
 
+    ended_match_id = room.match_id
     if room.match_id:
         await db.set_session_ended(room.match_id, None, "game-end")
         room.match_id = None
@@ -664,6 +698,17 @@ async def end_game(sid: str, payload: EndGamePayload) -> str | None:
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
     log.info("Game ended in room %s", session_id)
+    await db.insert_client_event(
+        {
+            "type": "server_game_ended",
+            "message": "",
+            "meta": json.dumps({"match_id": ended_match_id}),
+            "room": session_id,
+            "slot": -1,
+            "ip_hash": "",
+            "user_agent": "server",
+        }
+    )
     return None
 
 

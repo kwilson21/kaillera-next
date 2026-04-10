@@ -979,6 +979,51 @@ def create_app(lifespan=None) -> FastAPI:
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
+
+        # Bundle client events for the same match/room so the full picture
+        # is visible in one API call (DC failures, WebRTC state, milestones).
+        match_id = entry.get("match_id")
+        room = entry.get("room")
+        conditions = []
+        params: list = []
+        if match_id:
+            conditions.append("json_extract(meta, '$.match_id') = ?")
+            params.append(match_id)
+        if room:
+            conditions.append("room = ?")
+            params.append(room)
+        if conditions:
+            where = " OR ".join(conditions)
+            event_rows = await db.query(
+                f"""SELECT id, type, message, meta, slot, created_at
+                    FROM client_events
+                    WHERE {where}
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 200""",
+                tuple(params),
+            )
+            for row in event_rows:
+                if row.get("meta") and isinstance(row["meta"], str):
+                    with contextlib.suppress(json.JSONDecodeError, TypeError):
+                        row["meta"] = json.loads(row["meta"])
+            entry["client_events"] = event_rows
+        else:
+            entry["client_events"] = []
+
+        # Bundle SSIM comparisons for this match
+        if match_id:
+            ssim_rows = await db.query(
+                """SELECT frame, ssim, is_desync, created_at
+                   FROM screenshot_comparisons
+                   WHERE match_id = ?
+                   ORDER BY frame ASC
+                   LIMIT 200""",
+                (match_id,),
+            )
+            entry["ssim"] = ssim_rows
+        else:
+            entry["ssim"] = []
+
         return entry
 
     @app.get("/admin/api/session-logs/{log_id}/export")

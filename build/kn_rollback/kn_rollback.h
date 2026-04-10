@@ -122,4 +122,10 @@ void kn_set_rng_sync(uint32_t base_seed, uint32_t *rng_ptr, uint32_t *rng_alt_pt
 /* Cleanup */
 void kn_rollback_shutdown(void);
 
+/* Gameplay hash — hashes ONLY specific game-relevant RDRAM addresses
+ * (damage %, stocks, timer, RNG seeds, screen state) from the saved state
+ * for a given frame. Immune to non-deterministic audio/video/heap noise.
+ * This is the authoritative desync detection hash. */
+uint32_t kn_gameplay_hash(int frame);
+
 #endif /* KN_ROLLBACK_H */

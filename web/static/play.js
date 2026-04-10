@@ -124,11 +124,11 @@
     (navigator.maxTouchPoints > 0 && /Macintosh/i.test(navigator.userAgent)) ||
     navigator.userAgentData?.mobile;
 
-  // Pre-unlock AudioContext for mobile within a gesture callstack.
-  // iOS rejects AudioContext.resume() called >~1s after the user's tap.
+  // Pre-unlock AudioContext within a gesture callstack.
+  // Browsers block AudioContext.resume() outside user gestures — desktop
+  // included (Chrome autoplay policy). iOS is stricter (~1s window).
   // Must be called from a click/tap handler (Start Game, Accept ROM, ROM drop).
   const _preloadAudioCtx = () => {
-    if (!_isMobile) return;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC || (window._kn_preloadedAudioCtx && window._kn_preloadedAudioCtx.state !== 'closed')) return;
     try {
