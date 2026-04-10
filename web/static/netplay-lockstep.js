@@ -2970,7 +2970,8 @@
             _consecutiveResyncs = 0;
             _syncMismatchStreak = 0;
             if (_frameNum % (_syncCheckInterval * 10) === 0) {
-              _syncLog(`sync OK frame=${syncFrame} hash=${hostHash}`);
+              const eqHash = gMod._kn_eventqueue_hash?.() ?? 0;
+              _syncLog(`sync OK frame=${syncFrame} hash=${hostHash} eq=${(eqHash >>> 0).toString(16)}`);
             }
             return;
           }
@@ -3000,8 +3001,9 @@
               regionLog = ` local-regions=[${localRegions.map((h, i) => `${names[i]}=${h}`).join(' ')}]`;
             }
           }
+          const eqHashMM = gMod._kn_eventqueue_hash?.() ?? 0;
           _syncLog(
-            `RDRAM-DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash} myFrame=${_frameNum}${regionLog}`,
+            `RDRAM-DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash} eq=${(eqHashMM >>> 0).toString(16)} myFrame=${_frameNum}${regionLog}`,
           );
           KNState.sessionStats.desyncs++;
           _syncMismatchStreak++;
@@ -4609,6 +4611,9 @@
       if (frameModule?._kn_set_frame_time) {
         frameModule._kn_set_frame_time(frameTimeMs);
       }
+      if (frameModule?._kn_normalize_event_queue && frameModule?._kn_get_normalize_events?.()) {
+        frameModule._kn_normalize_event_queue();
+      }
     }
 
     runner(frameTimeMs);
@@ -4616,6 +4621,12 @@
     // Periodic gameplay screenshot for desync debugging
     if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
       _captureAndSendScreenshot();
+      // Log event queue hash for cross-peer comparison
+      const eqMod = window.EJS_emulator?.gameManager?.Module;
+      if (eqMod?._kn_eventqueue_hash) {
+        const eqH = (eqMod._kn_eventqueue_hash() >>> 0).toString(16);
+        _syncLog(`EQ-HASH f=${_frameNum} eq=${eqH}`);
+      }
     }
 
     // Force GL composite via real rAF no-op
@@ -4724,8 +4735,11 @@
         _syncLog('C-level deterministic timing enabled (session-wide)');
       }
 
-      // CP0_COUNT reset disabled — translate_event_queue corrupts host state.
-      // The --denan WASM pass handles NaN determinism without needing cycle sync.
+      // Enable event queue normalization for cross-platform determinism
+      if (detMod?._kn_set_normalize_events) {
+        detMod._kn_set_normalize_events(1);
+        _syncLog('C-level event queue normalization enabled');
+      }
 
       // Enable FPU trace for cross-platform determinism verification
       if (detMod?._kn_fpu_trace_enable) {
@@ -5123,6 +5137,7 @@
     if (_hasForkedCore) {
       const mod = window.EJS_emulator?.gameManager?.Module;
       if (mod?._kn_set_deterministic) mod._kn_set_deterministic(0);
+      if (mod?._kn_set_normalize_events) mod._kn_set_normalize_events(0);
     }
     // Restore speed-control functions
     if (_origToggleFF) {

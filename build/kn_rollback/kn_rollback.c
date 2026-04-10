@@ -243,6 +243,14 @@ static void setup_frame(int frame) {
     /* Deterministic frame time: (frame + 1) * 16.666... ms */
     kn_set_frame_time((double)(frame + 1) * 16.666666666666668);
 
+    /* Normalize event queue for cross-platform determinism */
+    {
+        extern int kn_normalize_events_flag;
+        extern void kn_normalize_event_queue(void);
+        if (kn_normalize_events_flag)
+            kn_normalize_event_queue();
+    }
+
     /* Reset audio capture buffer */
     kn_reset_audio();
 
@@ -406,6 +414,26 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
      * WASM JIT engines (V8 vs JSC). Not game-logic-relevant. */
     kn_taint_rdram(0x40000, 0x20000);
     rb_log("kn_rollback_init: tainted N64 OS kernel area 0x40000 size=0x20000");
+
+    /* Taint libultra OS data + audio DMA regions (blocks 8-10: 0x80000-0xAFFFF).
+     * Cross-engine (V8 vs JSC) analysis shows 1-LSB audio sample differences
+     * from RSP HLE floating-point rounding. Not game-logic-relevant. */
+    kn_taint_rdram(0x80000, 0x30000);
+    rb_log("kn_rollback_init: tainted libultra/audio DMA 0x80000 size=0x30000");
+
+    /* Taint heap fill-pattern region (blocks 57-62: 0x390000-0x3EFFFF).
+     * V8 fills freed heap with 0xFEEDFEED, JSC with 0xFF67FF67.
+     * These are N64 OS heap free-blocks or RSP audio double-buffers —
+     * not game state. */
+    kn_taint_rdram(0x390000, 0x60000);
+    rb_log("kn_rollback_init: tainted heap/audio fill region 0x390000 size=0x60000");
+
+    /* Taint block 19-20 (0x130000-0x14FFFF): cross-engine divergence detected
+     * but sampled sub-chunks were identical — divergent bytes not yet located.
+     * PROVISIONAL taint: if game-relevant state lives here, remove this and
+     * fix at source. Needs byte-level diff to confirm. */
+    kn_taint_rdram(0x130000, 0x20000);
+    rb_log("kn_rollback_init: tainted match runtime 0x130000 size=0x20000 (provisional)");
 
     /* Option X-2: Mark the post-RDRAM section of the savestate hash as
      * "ignore divergence". The post-RDRAM section contains CPU general
