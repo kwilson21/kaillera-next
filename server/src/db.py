@@ -206,6 +206,51 @@ async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     return row[0] if row else None
 
 
+async def get_paired_screenshot(match_id: str, frame: int, exclude_slot: int) -> bytes | None:
+    """Return JPEG bytes for the other slot's screenshot at the same frame."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        "SELECT data FROM screenshots WHERE match_id = ? AND frame = ? AND slot != ? LIMIT 1",
+        (match_id, frame, exclude_slot),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def insert_screenshot_comparison(
+    match_id: str, frame: int, slot_a: int, slot_b: int, ssim: float, is_desync: bool
+) -> int:
+    """Insert an SSIM comparison result. Returns row ID."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        """INSERT INTO screenshot_comparisons (match_id, frame, slot_a, slot_b, ssim, is_desync)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(match_id, frame) DO UPDATE SET
+             ssim=excluded.ssim, is_desync=excluded.is_desync""",
+        (match_id, frame, slot_a, slot_b, ssim, is_desync),
+    )
+    await _db.commit()
+    return cursor.lastrowid
+
+
+async def get_screenshot_comparisons(match_id: str) -> list[dict]:
+    """Return all SSIM comparisons for a match, ordered by frame."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        "SELECT id, match_id, frame, slot_a, slot_b, ssim, is_desync, created_at "
+        "FROM screenshot_comparisons WHERE match_id = ? ORDER BY frame",
+        (match_id,),
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return []
+    columns = [desc[0] for desc in cursor.description]
+    return [dict(zip(columns, row, strict=False)) for row in rows]
+
+
 async def query(sql: str, params: tuple) -> list[dict]:
     """Run a read query and return results as a list of dicts."""
     if _db is None:

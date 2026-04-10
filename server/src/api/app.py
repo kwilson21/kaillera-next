@@ -1347,6 +1347,20 @@ def create_app(lifespan=None) -> FastAPI:
         screenshots = await db.get_screenshots(match_id)
         return {"matchId": match_id, "screenshots": screenshots}
 
+    @app.get("/admin/api/screenshots/{match_id}/comparisons")
+    async def admin_screenshot_comparisons(
+        request: Request, match_id: str, _auth: None = Depends(_require_admin)
+    ) -> dict:
+        """List SSIM comparison results for a match."""
+        comparisons = await db.get_screenshot_comparisons(match_id)
+        desync_count = sum(1 for c in comparisons if c["is_desync"])
+        return {
+            "matchId": match_id,
+            "comparisons": comparisons,
+            "desyncCount": desync_count,
+            "totalComparisons": len(comparisons),
+        }
+
     @app.get("/admin/api/screenshots/img/{screenshot_id}")
     async def admin_screenshot_image(request: Request, screenshot_id: int, key: str = "") -> Response:
         """Serve a single screenshot JPEG from the database.

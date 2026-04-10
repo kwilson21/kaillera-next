@@ -938,6 +938,66 @@ async def debug_logs(sid: str, data: dict) -> None:
         log.info("Debug logs also written to: %s", out)
 
 
+def _ssim_sync(img_a_bytes: bytes, img_b_bytes: bytes) -> float | None:
+    """Compute SSIM between two JPEG images (blocking). Returns 0.0–1.0 or None."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    img_a = Image.open(BytesIO(img_a_bytes)).convert("L")
+    img_b = Image.open(BytesIO(img_b_bytes)).convert("L")
+    # Downscale to 160px wide for fast comparison (screenshots are small JPEGs already)
+    target_w = 160
+    for img in (img_a, img_b):
+        if img.width > target_w:
+            ratio = target_w / img.width
+            img_a = img_a.resize((target_w, int(img_a.height * ratio)), Image.LANCZOS)
+            img_b = img_b.resize((target_w, int(img_b.height * ratio)), Image.LANCZOS)
+            break
+    # Ensure same size
+    if img_a.size != img_b.size:
+        target = (min(img_a.width, img_b.width), min(img_a.height, img_b.height))
+        img_a = img_a.resize(target, Image.LANCZOS)
+        img_b = img_b.resize(target, Image.LANCZOS)
+    a_data = img_a.tobytes()
+    b_data = img_b.tobytes()
+    w, h = img_a.size
+    block = 8
+    c1 = (0.01 * 255) ** 2
+    c2 = (0.03 * 255) ** 2
+    ssim_sum = 0.0
+    count = 0
+    for by in range(0, h - block + 1, block):
+        for bx in range(0, w - block + 1, block):
+            a_vals = []
+            b_vals = []
+            for dy in range(block):
+                off = (by + dy) * w + bx
+                a_vals.extend(a_data[off : off + block])
+                b_vals.extend(b_data[off : off + block])
+            n = len(a_vals)
+            mu_a = sum(a_vals) / n
+            mu_b = sum(b_vals) / n
+            var_a = sum((v - mu_a) ** 2 for v in a_vals) / n
+            var_b = sum((v - mu_b) ** 2 for v in b_vals) / n
+            cov = sum((a_vals[i] - mu_a) * (b_vals[i] - mu_b) for i in range(n)) / n
+            num = (2 * mu_a * mu_b + c1) * (2 * cov + c2)
+            den = (mu_a**2 + mu_b**2 + c1) * (var_a + var_b + c2)
+            ssim_sum += num / den
+            count += 1
+    return ssim_sum / count if count > 0 else None
+
+
+async def _compute_ssim(img_a_bytes: bytes, img_b_bytes: bytes) -> float | None:
+    """Compute SSIM in a thread pool to avoid blocking the event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _ssim_sync, img_a_bytes, img_b_bytes)
+    except Exception:
+        log.exception("SSIM computation failed")
+        return None
+
+
 @sio.on("game-screenshot")
 async def game_screenshot(sid: str, data: dict) -> None:
     """Receive periodic gameplay screenshot from client for desync debugging."""
@@ -970,6 +1030,17 @@ async def game_screenshot(sid: str, data: dict) -> None:
     if len(img_bytes) > 50_000:
         return
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
+
+    # ── SSIM comparison: check if the other slot already submitted this frame ──
+    paired = await db.get_paired_screenshot(match_id, frame, exclude_slot=slot)
+    if paired is not None:
+        ssim_score = await _compute_ssim(img_bytes, paired)
+        if ssim_score is not None:
+            is_desync = ssim_score < 0.95
+            slot_a, slot_b = sorted([slot, 0 if slot != 0 else 1])
+            await db.insert_screenshot_comparison(match_id, frame, slot_a, slot_b, ssim_score, is_desync)
+            if is_desync:
+                log.warning("Visual desync detected: match=%s frame=%d SSIM=%.4f", match_id, frame, ssim_score)
 
 
 _SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data
