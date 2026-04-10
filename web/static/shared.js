@@ -56,6 +56,18 @@
     }
   }
 
+  async function clearCheats() {
+    try {
+      const gm = await waitForEmulator();
+      SSB64_ONLINE_CHEATS.forEach((c, i) => {
+        gm.setCheat(i, 0, c.code);
+      });
+      console.log('[netplay] cleared all cheats');
+    } catch (e) {
+      console.error('[netplay] cheat clear failed:', e?.message);
+    }
+  }
+
   let _listenersAdded = false;
   let _activeHeldKeys = null;
   let _keydownHandler = null;
@@ -738,6 +750,7 @@
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     DEFAULT_N64_KEYMAP: DEFAULT_N64_KEYMAP,
     applyStandardCheats: applyStandardCheats,
+    clearCheats: clearCheats,
     bootWithCheats: bootWithCheats,
     drainCandidates: drainCandidates,
     createBasePeer: createBasePeer,
