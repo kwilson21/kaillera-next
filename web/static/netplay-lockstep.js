@@ -3913,7 +3913,10 @@
 
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
-    KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+    // Only for vanilla SSB64 — Smash Remix has different memory layout.
+    if (!_isSmashRemix()) {
+      KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+    }
 
     // Both sides reset and start true lockstep sync
     // (Warmup removed — deterministic timing patch makes it unnecessary)
@@ -4232,10 +4235,10 @@
       _setLastSyncState(bytes.slice(), 'late-join');
 
       // Re-apply cheats after state load — loadState can clear the cheat
-      // table, losing cheats applied during boot (same fix as normal start
-      // at line 3916). Without this, late joiners lose "Timer On", "Stock
-      // Mode", "Items Off" etc., causing immediate game state divergence.
-      KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+      // table, losing cheats applied during boot. Only for vanilla SSB64.
+      if (!_isSmashRemix()) {
+        KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+      }
 
       enterManualMode();
 
