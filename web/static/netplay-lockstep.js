@@ -5778,7 +5778,12 @@
       // advantage exceeds DELAY_FRAMES + 4, stall to wait — prevents
       // runaway prediction → phantom → disconnect. Rollback handles
       // small gaps, lockstep stall handles big ones.
-      const _rbBootConverged = _rbInitFrame < 0 || _frameNum - _rbInitFrame > 300;
+      // Late joiners skip boot convergence — they loaded the host's state
+      // directly, no 120-frame boot race to protect against. Without this,
+      // late joiners stall in pure-lockstep waiting for ALL peers' input
+      // every frame, which is fatal on mobile with 3+ peers.
+      const _isLateJoinStart = _rbInitFrame > 0;
+      const _rbBootConverged = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > 300;
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
       if (!_rbBootConverged) {
         // Boot: pure lockstep stall
