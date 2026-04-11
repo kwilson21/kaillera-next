@@ -408,6 +408,11 @@
   // rb-delay DC broadcast never arrives, the guest falls back to a
   // locally-computed delay instead of freezing forever.
   const RB_INIT_TIMEOUT_MS = 3000;
+  // I1 (MF5): late-join state transfer + decompression deadline.
+  // Host pauses tick loop for up to LATE_JOIN_TIMEOUT_MS waiting for
+  // joiner's ready signal; joiner wraps decompression in a
+  // Promise.race to prevent unbounded worker hangs.
+  const LATE_JOIN_TIMEOUT_MS = 15000;
   // Frames to wait for peers' first input before giving up on boot sync.
   // During this window, connected peers are treated as input peers even
   // before their first packet arrives — prevents host from advancing
@@ -1218,6 +1223,7 @@
   let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
+  let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
   // Must match hashes in server/config/known_roms.json.
@@ -4395,6 +4401,7 @@
       // NOTE: roster broadcast moved to late-join-ready handler — adding
       // the slot before the joiner can send input causes 5s stalls per frame.
       _lateJoinPaused = true;
+      _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       for (const p of Object.values(_peers)) {
         if (p.dc?.readyState === 'open') {
@@ -4403,12 +4410,23 @@
           } catch (_) {}
         }
       }
+      // I1 (MF5): late-join pause must have a wall-clock deadline.
+      // If the joiner's ready signal never arrives (their DC dies
+      // mid-transfer, worker hangs on decompression, etc.) we need
+      // to resume the game AND hard-disconnect the joiner so they
+      // retry from a clean slate rather than living in a half-loaded
+      // limbo. See spec §MF5, audit §D3.
       setTimeout(() => {
         if (_lateJoinPaused) {
+          const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
+          _syncLog(
+            `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
+              `resuming without joiner, hard-disconnecting so they can retry`,
+          );
           _lateJoinPaused = false;
+          _lateJoinPausedAt = 0;
           _resetPacingAfterLateJoin();
           _broadcastRoster();
-          _syncLog('late-join pause timeout — resuming');
           // Send resume to peers that are still paused
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
@@ -4417,8 +4435,14 @@
               } catch (_) {}
             }
           }
+          // Force the joiner out so they retry fresh. If the peer
+          // object still exists we hard-disconnect; if not (already
+          // gone), we just log.
+          if (_peers[remoteSid]) {
+            hardDisconnectPeer(remoteSid);
+          }
         }
-      }, 15000);
+      }, LATE_JOIN_TIMEOUT_MS);
 
       _syncLog(
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
@@ -4447,7 +4471,27 @@
     setStatus('Loading late-join state...');
 
     try {
-      const bytes = await decodeAndDecompress(msg.data);
+      // I1 (MF5): wrap the worker round-trip in a Promise.race with
+      // LATE_JOIN_TIMEOUT_MS deadline. If the compression worker
+      // hangs (stuck pthread, corrupted buffer, etc) we abort the
+      // late-join and let the host's LATE-JOIN-TIMEOUT handler
+      // hard-disconnect us for a fresh retry instead of freezing
+      // indefinitely. See spec §MF5, audit §C5.
+      let bytes;
+      try {
+        bytes = await Promise.race([
+          decodeAndDecompress(msg.data),
+          new Promise((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error('WORKER-STALL: late-join decompress')),
+              LATE_JOIN_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+      } catch (_workerErr) {
+        _syncLog(`WORKER-STALL late-join decompress failed: ${_workerErr.message}`);
+        return;
+      }
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         _syncLog('gameManager not ready');
