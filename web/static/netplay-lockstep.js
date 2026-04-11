@@ -2762,11 +2762,15 @@
           _consecutiveResyncs = 0;
           _resyncRequestInFlight = false;
           _syncMismatchStreak = 0;
-          // Clear stale remote inputs from before the disconnect. Any inputs
-          // in flight when the DC died are gone; keeping them can cause the
-          // rollback engine to read stale values after state resync.
-          if (_remoteInputs[peer.slot]) {
-            _remoteInputs[peer.slot] = {};
+          // I2: Full per-peer reset on DC reconnect. Any inputs in
+          // flight when the DC died are gone; keeping them lets the
+          // rollback engine read stale values after state resync. The
+          // original commit 788add0 cleared only _remoteInputs here —
+          // this expands to every per-peer field (phantom, ack state,
+          // audit log, fabrication counter, etc.) so the new DC starts
+          // from a guaranteed-clean slate.
+          if (peer.slot !== null && peer.slot !== undefined) {
+            resetPeerState(peer.slot, 'reconnect', { peer, sid: remoteSid });
           }
           // Send sync-request-full to the HOST's lockstep DC (only host handles
           // sync requests). `ch` is the DC to the reconnected peer — which may
