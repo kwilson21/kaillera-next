@@ -345,6 +345,9 @@
         });
     </script>
 
+    <!-- Version-mismatch force-reload guard (must load first so stale
+         tabs are caught before app code initializes) -->
+    <script src="/static/version-guard.js"></script>
     <!-- Native API reference management (must load before everything) -->
     <script src="/static/api-sandbox.js"></script>
 

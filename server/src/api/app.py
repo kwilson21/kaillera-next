@@ -385,6 +385,16 @@ class CacheBustMiddleware:
                             lambda m: m.group(1) + m.group(2) + b"?v=" + version_bytes + m.group(3),
                             body,
                         )
+                        # Inject current asset version as a window global
+                        # into the <head>. The client-side version-mismatch
+                        # guard reads this on page load and polls /api/version
+                        # to detect stale JS sessions across deploys / hot
+                        # edits, force-reloading if they diverge.
+                        version_script = (
+                            b"<script>window.__KN_ASSET_VERSION=" + b'"' + version_bytes + b'"' + b";</script>"
+                        )
+                        if b"</head>" in body:
+                            body = body.replace(b"</head>", version_script + b"</head>", 1)
                         new_headers = [
                             (k, str(len(body)).encode()) if k == b"content-length" else (k, v)
                             for k, v in start_message.get("headers", [])
@@ -536,6 +546,17 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/api/core-info")
     async def core_info() -> dict:
         return _get_core_info()
+
+    # Asset version endpoint — used by the client-side stale-JS guard.
+    # Every page load records `window.__KN_ASSET_VERSION` from a script
+    # tag the middleware injects. The client polls this endpoint and
+    # force-reloads if the server's current version differs from the
+    # version the page was loaded with. Solves the edge case where a
+    # browser session holds a stale tab open across deploys or local
+    # edits and silently runs pre-fix JS.
+    @app.get("/api/version")
+    async def asset_version() -> dict:
+        return {"version": _asset_version()}
 
     @app.get("/ice-servers")
     def ice_servers(request: Request) -> list:
