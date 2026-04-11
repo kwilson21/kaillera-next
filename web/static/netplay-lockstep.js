@@ -5016,7 +5016,13 @@
         }
         // Always 4 (KN_MAX_PLAYERS) — avoids contiguous slot assumption.
         const numPlayers = 4;
-        const rollbackMax = Math.min(20, Math.max(12, effectiveDelay + 8));
+        // Ring buffer size = rollbackMax + 1 slots × ~16MB each.
+        // Balance between memory pressure and pacing headroom.
+        // Too small (delay+2=4) causes safety-freeze to strangle FPS.
+        // Too large (20) wastes 320MB on mobile.
+        // 8 gives enough pacing headroom (safety freeze at fAdv>=6)
+        // while keeping ring buffer at 9 slots × 16MB = 144MB.
+        const rollbackMax = Math.max(12, effectiveDelay + 4);
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         // Late join: C engine starts at frame 0 (memset), but we need it at
         // the host's frame. Without this, kn_get_frame() returns 0 and the
@@ -5039,8 +5045,9 @@
         _rbConvergedLogged = false;
         // T3: explicit mode marker so the server-side log analyzer knows
         // which netplay mode captured the input audit payload.
+        const heapMB = detMod.HEAP8 ? (detMod.HEAP8.byteLength / 1024 / 1024).toFixed(0) : '?';
         _syncLog(
-          `C-ROLLBACK init: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers}`,
+          `C-ROLLBACK init: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers} heapMB=${heapMB}`,
         );
         _syncLog(`audit: recording enabled mode=rollback transport=${_rbTransport}`);
         // P4: reset the failed_rollbacks baseline at init so any increase

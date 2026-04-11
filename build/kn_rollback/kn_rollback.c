@@ -173,6 +173,16 @@ static struct {
     kn_input_t inputs[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
     kn_input_t last_known[KN_MAX_PLAYERS]; /* for prediction (most recent real input) */
     kn_input_t prev_known[KN_MAX_PLAYERS]; /* for dead-reckoning (input before last_known) */
+    int slot_active[KN_MAX_PLAYERS]; /* 1 once kn_feed_input called for this slot */
+    int confirmed_frame[KN_MAX_PLAYERS]; /* highest frame confirmed by kn_feed_input */
+
+    /* Previous-frame applied input for dirty-input serialize gate.
+     * RetroArch runahead approach: only save state when the input
+     * applied to the emulator CHANGES from the previous frame.
+     * If input is identical, the state can be derived by replaying
+     * from the last saved state with the same input. */
+    kn_input_t prev_applied[KN_MAX_PLAYERS]; /* input applied on previous frame */
+    int prev_applied_valid; /* 0 until first frame applies input */
 
     /* Prediction tracking: predicted values stored separately for comparison */
     int predicted[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
@@ -692,6 +702,9 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     rb.inputs[slot][idx] = real_input;
     rb.prev_known[slot] = rb.last_known[slot];
     rb.last_known[slot] = real_input;
+    rb.slot_active[slot] = 1;
+    if (frame > rb.confirmed_frame[slot])
+        rb.confirmed_frame[slot] = frame;
     return misprediction;
 }
 
@@ -809,11 +822,28 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
     if (apply_frame >= 0) {
         for (s = 0; s < rb.num_players; s++) {
             if (s == rb.local_slot) continue;
+            /* Skip empty slots — num_players is always 4 (KN_MAX_PLAYERS)
+             * for slot mapping, but only occupied slots send input. Without
+             * this check, empty slots are "predicted" every frame, setting
+             * has_active_predictions=1 and defeating the serialize skip.
+             * A slot is considered empty if kn_feed_input has NEVER been
+             * called for it (last_known stays zeroed from calloc). We
+             * detect this by checking if last_known has ever been written
+             * via a flag set by kn_feed_input. */
+            if (!rb.slot_active[s]) continue;
             idx = apply_frame % KN_INPUT_RING_SIZE;
             /* Guard against stale ring entries: the present flag from a
              * previous cycle (256 frames ago) can still be set. Verify
              * the stored frame number matches apply_frame. */
-            if (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame) {
+            /* Check if this slot's input needs prediction. A slot needs
+             * prediction if the input is missing OR if a prior tick already
+             * predicted it (present=1 but predicted[]=1). In both cases,
+             * kn_feed_input may later arrive with a different value,
+             * triggering a misprediction — so we need state in the ring. */
+            int needs_prediction = !rb.inputs[s][idx].present
+                                || rb.inputs[s][idx].frame != apply_frame
+                                || rb.predicted[s][idx];
+            if (needs_prediction && (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame)) {
                 /* Predict: dead-reckoning for stick, repeat-last for buttons.
                  * Extrapolate stick position based on velocity between the
                  * two most recent real inputs. Buttons are binary so
@@ -837,6 +867,10 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                 rb.predicted_values[s][idx].frame = apply_frame;
                 rb.prediction_count++;
                 rb.has_active_predictions = 1;
+            } else if (needs_prediction) {
+                /* Input is present but was predicted on a prior tick.
+                 * Still counts as active prediction for serialize gate. */
+                rb.has_active_predictions = 1;
             }
         }
     }
@@ -851,17 +885,53 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
      * misprediction could roll back to this frame. We also save
      * unconditionally if a rollback is pending (need the most recent
      * state for the replay target). */
-    {
-        int need_save = rb.has_active_predictions || rb.pending_rollback >= 0;
-        if (need_save) {
-            int save_idx = rb.frame % rb.ring_size;
-            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-            rb.ring_sf_state[save_idx] = sf_pack();
-            rb.ring_frames[save_idx] = rb.frame;
-        } else {
-            rb.serialize_skip_count++;
+        /* Dirty-input serialize gate (RetroArch runahead approach).
+         * Save state only when the input applied to the emulator CHANGES
+         * from the previous frame. If all players hold the same input for
+         * N consecutive frames, only the first needs a state save — a
+         * rollback to any of the others can replay from that save using
+         * the identical input and produce the same state.
+         *
+         * This avoids the prediction/confirmation timing problem: we don't
+         * care whether input is predicted or real — only whether the bytes
+         * written to the N64 controller ports changed. */
+        {
+            int need_save = rb.pending_rollback >= 0
+                         || kn_rdram_offset_in_state == 0
+                         || !rb.prev_applied_valid;
+            if (!need_save && apply_frame >= 0) {
+                /* Check if any slot's applied input changed from previous frame */
+                int ss;
+                for (ss = 0; ss < rb.num_players; ss++) {
+                    idx = apply_frame % KN_INPUT_RING_SIZE;
+                    kn_input_t *cur = &rb.inputs[ss][idx];
+                    kn_input_t *prev = &rb.prev_applied[ss];
+                    if (cur->buttons != prev->buttons
+                        || cur->lx != prev->lx || cur->ly != prev->ly
+                        || cur->cx != prev->cx || cur->cy != prev->cy) {
+                        need_save = 1;
+                        break;
+                    }
+                }
+            }
+            /* Update prev_applied for next frame's comparison */
+            if (apply_frame >= 0) {
+                int ss;
+                for (ss = 0; ss < rb.num_players; ss++) {
+                    idx = apply_frame % KN_INPUT_RING_SIZE;
+                    rb.prev_applied[ss] = rb.inputs[ss][idx];
+                }
+                rb.prev_applied_valid = 1;
+            }
+            if (need_save) {
+                int save_idx = rb.frame % rb.ring_size;
+                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+                rb.ring_sf_state[save_idx] = sf_pack();
+                rb.ring_frames[save_idx] = rb.frame;
+            } else {
+                rb.serialize_skip_count++;
+            }
         }
-    }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
     return 0; /* 0 = normal tick, JS should do stepOneFrame */
