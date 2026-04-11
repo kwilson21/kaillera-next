@@ -1842,6 +1842,8 @@
   let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
+  let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
+  const SYNC_COORD_TIMEOUT_MS = 3000;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
 
   // Proactive state push: host sends delta state every N frames so guests have a
@@ -2651,6 +2653,7 @@
           _consecutiveResyncs = 0;
           const _recoveryTarget = _frameNum + SYNC_COORD_DELTA;
           _syncTargetFrame = _recoveryTarget;
+          _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
           _resyncRequestInFlight = true;
           try {
             const peerDc = _peers[remoteSid]?.dc;
@@ -2662,6 +2665,7 @@
             _syncLog(`peer-recovery resync send failed: ${e}`);
             _resyncRequestInFlight = false;
             _syncTargetFrame = -1;
+            _syncTargetDeadlineAt = 0;
           }
         }
       }
@@ -2790,6 +2794,7 @@
           const hostDc = hostPeer?.dc;
           if (hostDc?.readyState === 'open') {
             _syncTargetFrame = -1;
+            _syncTargetDeadlineAt = 0;
             _resyncRequestInFlight = true;
             try {
               hostDc.send('sync-request-full');
@@ -3121,6 +3126,7 @@
             _resyncRequestInFlight = true;
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
             _syncTargetFrame = _coordTarget;
+            _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
             _syncLog(
               `sending sync-request-full-at:${_coordTarget} (RDRAM desync, cooldown=${Math.round(cooldownElapsed)}ms)`,
             );
@@ -3130,6 +3136,7 @@
               _syncLog(`sync-request send failed: ${e2}`);
               _resyncRequestInFlight = false;
               _syncTargetFrame = -1;
+              _syncTargetDeadlineAt = 0;
             }
           } else {
             _syncLog(
@@ -3164,7 +3171,16 @@
           if (!isNaN(targetFrame) && targetFrame > _frameNum) {
             // Replace any existing request from this guest so requests don't stack
             _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-            _scheduledSyncRequests.push({ targetFrame, targetSid: remoteSid, forceFull: isFull });
+            // I1 (MF3): record wall-clock deadline so the drain
+            // loop below can process the request immediately at
+            // current frame if frame pacing can't reach targetFrame
+            // in time.
+            _scheduledSyncRequests.push({
+              targetFrame,
+              targetSid: remoteSid,
+              forceFull: isFull,
+              deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+            });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
             pushSyncState(remoteSid);
@@ -5470,6 +5486,7 @@
         } else {
           _resyncRequestInFlight = false; // override — tab-focus resync always wins
           _syncTargetFrame = -1; // cancel any pending coord target — tab was paused, immediate sync needed
+          _syncTargetDeadlineAt = 0;
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
             try {
@@ -5506,6 +5523,7 @@
         _lastResyncTime = 0; // clear cooldown
         _resyncRequestInFlight = false; // override — network change resync always wins
         _syncTargetFrame = -1; // cancel any pending coord target — network path changed, immediate sync needed
+        _syncTargetDeadlineAt = 0;
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
           try {
@@ -5703,6 +5721,30 @@
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
     // both reach that frame before the state is applied — snap = 0.
+    //
+    // I1 (MF3): every coord-sync target has a wall-clock deadline
+    // (_syncTargetDeadlineAt). If frame pacing prevents reaching
+    // _syncTargetFrame before the deadline, drop the target — the
+    // block below will then apply any _pendingResyncState
+    // immediately at current frame (non-coordinated branch). This
+    // closes the frame-target-unreachable deadlock class from room
+    // 1Q6ZF7N6. See docs/netplay-invariants.md §I1 and spec §MF3.
+    if (
+      _syncTargetFrame > 0 &&
+      _syncTargetDeadlineAt > 0 &&
+      performance.now() > _syncTargetDeadlineAt
+    ) {
+      const _coordElapsed = Math.round(performance.now() - (_syncTargetDeadlineAt - SYNC_COORD_TIMEOUT_MS));
+      _syncLog(
+        `COORD-SYNC-TIMEOUT target=${_syncTargetFrame} f=${_frameNum} ` +
+          `elapsed=${_coordElapsed}ms pendingState=${!!_pendingResyncState} — ` +
+          `dropping target, applying at current frame`,
+      );
+      _syncTargetFrame = -1;
+      _syncTargetDeadlineAt = 0;
+      _awaitingResync = false;
+    }
+
     if (_syncTargetFrame > 0) {
       if (_frameNum >= _syncTargetFrame) {
         if (_pendingResyncState) {
@@ -5711,6 +5753,7 @@
           _pendingResyncState = null;
           _awaitingResync = false;
           _syncTargetFrame = -1;
+          _syncTargetDeadlineAt = 0;
           _audioFadeOut();
           applySyncState(pending.bytes, pending.frame, pending.fromProactive);
           _audioFadeIn();
@@ -7272,6 +7315,7 @@
         console.warn('[lockstep] resync timeout — log dump:\n' + exportSyncLog());
         _awaitingResync = false;
         _syncTargetFrame = -1;
+        _syncTargetDeadlineAt = 0;
         _resyncRequestInFlight = false; // unblock future resync requests
         _lastResyncTime = 0; // clear cooldown so next desync triggers immediately
       } else {
@@ -7301,10 +7345,30 @@
 
     // Coordinated sync dispatch: when host reaches a scheduled target frame, capture
     // and send state. Coalesces multiple guests (4P) into a single broadcast push.
+    //
+    // I1 (MF3): each request has a wall-clock deadline. If frame
+    // pacing prevents reaching targetFrame before the deadline, the
+    // request is dispatched NOW at current frame instead. This closes
+    // the coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
     if (_playerSlot === 0 && _scheduledSyncRequests.length > 0 && !_pushingSyncState) {
-      const due = _scheduledSyncRequests.filter((r) => r.targetFrame <= _frameNum);
+      const _coordNow = performance.now();
+      const due = _scheduledSyncRequests.filter(
+        (r) => r.targetFrame <= _frameNum || (r.deadlineAt && _coordNow > r.deadlineAt),
+      );
       if (due.length > 0) {
-        _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetFrame > _frameNum);
+        const timedOut = due.filter((r) => r.targetFrame > _frameNum);
+        if (timedOut.length > 0) {
+          for (const r of timedOut) {
+            _syncLog(
+              `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} ` +
+                `elapsed=${Math.round(_coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
+                `dispatching at current frame instead`,
+            );
+          }
+        }
+        _scheduledSyncRequests = _scheduledSyncRequests.filter(
+          (r) => r.targetFrame > _frameNum && (!r.deadlineAt || _coordNow <= r.deadlineAt),
+        );
         const forceFull = due.some((r) => r.forceFull);
         if (forceFull) _setLastSyncState(null, 'coord-full');
         // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
@@ -7885,6 +7949,7 @@
           _resyncRequestInFlight = false; // allow fresh request
           _awaitingResync = false; // release any active coord stall
           _syncTargetFrame = -1;
+          _syncTargetDeadlineAt = 0;
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           const hostSyncDc = hostPeer?.syncDc?.readyState === 'open' ? hostPeer.syncDc : hostPeer?.dc;
           if (hostSyncDc?.readyState === 'open') {
@@ -8237,6 +8302,7 @@
     _awaitingResync = false;
     _awaitingResyncAt = 0;
     _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _lastResyncTime = 0;
     _heldKeys.clear();
