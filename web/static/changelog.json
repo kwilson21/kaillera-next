@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.42.0",
+    "date": "2026-04-11",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "WASM core preload + client-side boot state cache (IndexedDB)"
+      },
+      {
+        "type": "fix",
+        "message": "increase RTT samples from 8 to 20 for stable IQR delay calculation"
+      },
+      {
+        "type": "fix",
+        "message": "sync _frameNum with rb.frame before replay step"
+      },
+      {
+        "type": "fix",
+        "message": "full RDRAM preservation + taint expansion for mobile determinism"
+      },
+      {
+        "type": "fix",
+        "message": "retry AudioContext resume on user gesture instead of silently swallowing"
+      },
+      {
+        "type": "fix",
+        "message": "remove orphan changelog entries from reset branch"
+      }
+    ]
+  },
+  {
     "version": "0.41.2",
     "date": "2026-04-10",
     "changes": [
