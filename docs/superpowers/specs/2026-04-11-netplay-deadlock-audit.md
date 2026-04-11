@@ -43,9 +43,15 @@ re-introduce the same bugs.
 
 ## Invariants
 
-Three invariants are codified in code and documentation. A new file
+Two invariants are codified in code and documentation. A new file
 `docs/netplay-invariants.md` explains them; `CLAUDE.md` gets a pointer;
 inline comments at each stall site name the invariant they satisfy.
+
+A third element — a tick watchdog — exists solely as a **detection
+and logging aid**, not a recovery mechanism. It emits rich diagnostic
+state when a freeze persists beyond a deadline, but takes no action.
+Its job is to make residual deadlocks loud enough to diagnose, not to
+hide them. See MF6 below.
 
 ### I1 — No stall without a timeout
 
@@ -86,27 +92,24 @@ The function's header docstring enumerates every cleared field and
 the invariant it upholds. Adding new per-peer state that is NOT
 cleared in `resetPeerState` is a code-review-level violation.
 
-### I3 — Tick watchdog is the last line of defense
+### Rejected alternative — auto-recovery watchdog
 
-A single wall-clock watchdog at the top of `tick()` fires when
-`_frameNum` has not incremented in `TICK_WATCHDOG_MS` (5000ms) while
-`_running && !_lateJoinPaused`. On fire:
+An earlier draft proposed a top-level watchdog that would force
+recovery (guest-side immediate resync, host-side force-advance) if
+`_frameNum` had not incremented in 5s. This was rejected:
 
-1. Log `TICK-WATCHDOG` with the stuck frame, elapsed ms, and a
-   snapshot of every candidate stall state (`_rbPendingInit`,
-   `_syncTargetFrame`, `_awaitingResync`, `_bootStallFrame`,
-   in-flight `_scheduledSyncRequests`).
-2. If guest: request immediate `sync-request-full` to host.
-3. If host: force-fall-through — unblock pacing throttles, clear
-   `_bootStallFrame`, let the main loop advance a frame so scheduled
-   captures can fire.
-4. Reset the watchdog timer so it won't fire again for at least
-   `TICK_WATCHDOG_MS`.
+- It masks root causes. A deadlock that recovers "silently" via
+  watchdog looks normal in aggregate; we lose the signal that tells
+  us a specific stall site is misbehaving.
+- It creates a temptation to stop diagnosing. If the safety net
+  catches everything, there is no pressure to find the actual bug.
+- It is at odds with `feedback_no_js_cascade_fix.md`: symptom-level
+  recovery is a dead end; fix forward from root cause.
 
-This invariant exists because I1 requires enumerating every stall
-site — and enumeration is inductive reasoning. The watchdog is a
-deductive backstop: even if we miss a stall, the game cannot be
-frozen for more than 5 seconds.
+A **detection-only** watchdog is different — it logs rich diagnostic
+state and takes no action. The game still freezes for the user, the
+bug is still visible, but we get enough telemetry to find and fix it.
+That version is included as MF6.
 
 ## Audit findings
 
@@ -199,40 +202,11 @@ I3 (if we cannot).
 
 ## Must-fix plan
 
-Ordered by dependency: watchdog first (backstop), reset consolidation
-next (enables clean reconnect semantics), then specific stalls.
+Ordered by dependency. `resetPeerState` first because every
+subsequent fix depends on clean reconnect semantics. Then each
+specific stall site is eliminated at its root.
 
-### MF1 — Tick watchdog (I3)
-
-Add `_tickWatchdogLastFrame`, `_tickWatchdogLastAdvanceAt`, constant
-`TICK_WATCHDOG_MS = 5000`, and a check at the top of `tick()`:
-
-```javascript
-// I3: Tick watchdog. If the frame counter has not advanced in
-// TICK_WATCHDOG_MS while running, the tick loop is stuck. Log a
-// diagnostic snapshot and trigger recovery.
-const _tickNow = performance.now();
-if (_running && !_lateJoinPaused) {
-  if (_frameNum !== _tickWatchdogLastFrame) {
-    _tickWatchdogLastFrame = _frameNum;
-    _tickWatchdogLastAdvanceAt = _tickNow;
-  } else if (_tickNow - _tickWatchdogLastAdvanceAt > TICK_WATCHDOG_MS) {
-    _tickWatchdogFire(_tickNow);
-    _tickWatchdogLastAdvanceAt = _tickNow; // cooldown
-  }
-}
-```
-
-`_tickWatchdogFire()` emits `TICK-WATCHDOG` with a snapshot, then
-routes to guest-side immediate resync or host-side force-advance.
-Test: with MF1 alone, all pre-existing deadlock classes must recover
-within 5s. `analyze_match.py` gets a TICK-WATCHDOG counter.
-
-**Verification:** Playwright two-tab test — start a rollback match,
-kill host DC during boot, assert both tabs log TICK-WATCHDOG and
-recover within 10s.
-
-### MF2 — `resetPeerState(slot, reason)` consolidation (I2)
+### MF1 — `resetPeerState(slot, reason)` consolidation (I2)
 
 Create the function. Audit every `delete _remoteInputs[`,
 `_peerPhantom[`, `_lastRemoteFramePerSlot[`, `_consecutiveFabrications[`,
@@ -251,7 +225,7 @@ comment linking back to invariant I2.
 real session, no PEER-PHANTOM events fire for the recovered peer
 because `_peerLastAdvanceTime` is fresh.
 
-### MF3 — `_rbPendingInit` timeout (A2, D1)
+### MF2 — `_rbPendingInit` timeout (A2, D1)
 
 Add a deadline inside `window._rbDoInit` registration. If
 `_rbPendingInit` is still true after `RB_INIT_TIMEOUT_MS` (3000ms)
@@ -263,13 +237,15 @@ math) or trigger a resync once asymmetry is detected.
 
 This is not ideal (symmetric delay was a load-bearing fix —
 `project_c_rollback_working.md` item 9) but is strictly better than
-infinite freeze, and the watchdog I3 backs it up.
+infinite freeze. If the fallback delay differs from what the host
+would have broadcast, the next hash mismatch triggers a resync that
+converges both peers.
 
 **Verification:** Playwright two-tab — start rollback, kill host DC
 before its `rb-delay:` sends, assert guest logs RB-INIT-TIMEOUT and
 resumes within 3s.
 
-### MF4 — Coord-sync target deadline (A3, B1, D2)
+### MF3 — Coord-sync target deadline (A3, B1, D2)
 
 `_syncTargetFrame` needs a wall-clock deadline independent of frame
 progress. Add `_syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS`
@@ -285,7 +261,7 @@ expires without reaching target:
 sync should have fired within 3s instead of deadlocking. Analyzer
 must surface COORD-SYNC-TIMEOUT events.
 
-### MF5 — INPUT-STALL drop → resync (A7)
+### MF4 — INPUT-STALL drop → resync (A7)
 
 Current behavior: after 5s INPUT-STALL, fabricate ZERO_INPUT and
 continue. Late arrivals are dropped. Result: host and guest have
@@ -299,7 +275,7 @@ resync corrects the divergence.
 via `knDiag.blockInputs(2000ms)`, assert game recovers to matching
 hash after resync, no permanent desync.
 
-### MF6 — Late-join pause timeout (D3)
+### MF5 — Late-join pause timeout (D3)
 
 200ms is too short — state decompression on mobile can take 500ms+.
 Raise host's `_lateJoinPaused` timeout at
@@ -315,6 +291,85 @@ Joiner-side: wrap worker decompression in `Promise.race` against a
 **Verification:** Playwright two-tab — force mobile-path state on
 late join (large compressed state), assert both host and joiner make
 progress within 10s or both recover cleanly on failure.
+
+### MF6 — Detection-only tick watchdog (diagnostic aid, ships last)
+
+**Purpose: find the deadlocks we missed.** Not recovery, not masking.
+If a stall gets past MF1-MF5, this watchdog makes it loud enough
+that we can diagnose it from logs alone. It ships **last**, after
+every root-cause fix has landed, so any time it fires the answer is
+"we have a new bug to find" not "the watchdog is doing its job."
+
+Add wall-clock tracking at the top of `tick()`:
+
+```javascript
+// MF6: Detection-only watchdog. Logs diagnostic state when the tick
+// loop has been stuck for TICK_STUCK_WARN_MS / TICK_STUCK_ERROR_MS.
+// Takes NO recovery action — its only job is to surface residual
+// deadlocks we haven't found yet. If this fires in production, we
+// have a real bug to diagnose; the fix belongs in the relevant
+// MF category (or a new one), not here.
+const _tickNow = performance.now();
+if (_running && !_lateJoinPaused && !document.hidden) {
+  if (_frameNum !== _tickStuckLastFrame) {
+    _tickStuckLastFrame = _frameNum;
+    _tickStuckLastAdvanceAt = _tickNow;
+    _tickStuckWarnFired = false;
+    _tickStuckErrorFired = false;
+  } else {
+    const stuckMs = _tickNow - _tickStuckLastAdvanceAt;
+    if (stuckMs > TICK_STUCK_ERROR_MS && !_tickStuckErrorFired) {
+      _tickStuckErrorFired = true;
+      _emitTickStuckSnapshot('error', stuckMs);
+    } else if (stuckMs > TICK_STUCK_WARN_MS && !_tickStuckWarnFired) {
+      _tickStuckWarnFired = true;
+      _emitTickStuckSnapshot('warn', stuckMs);
+    }
+  }
+}
+```
+
+`_emitTickStuckSnapshot()` logs a `TICK-STUCK` event (deliberately
+not named `TICK-WATCHDOG` to make its passive role explicit)
+containing:
+
+- Current `_frameNum`, stuck ms, severity (warn/error)
+- Every candidate stall state: `_rbPendingInit`, `_syncTargetFrame`,
+  `_awaitingResync`, `_awaitingResyncAt`, `_bootStallFrame`,
+  `_bootStallStartTime`, `_lateJoinPaused`, `_skipFrameAdvance`
+- Peer snapshot: for each slot, `_lastRemoteFramePerSlot`,
+  `_peerPhantom`, `_peerLastAdvanceTime`, ack state,
+  `dc.readyState`, `dc.bufferedAmount`
+- In-flight `_scheduledSyncRequests` entries
+- Inferred cause (the handler decides which of the above flags is
+  most likely the culprit and includes it in the log message)
+
+Thresholds: `TICK_STUCK_WARN_MS = 2000` (early warning),
+`TICK_STUCK_ERROR_MS = 5000` (something is genuinely wrong).
+
+Gates:
+
+- Skip while `_lateJoinPaused` (legitimate pause covered by MF5)
+- Skip while `document.hidden` (tab backgrounded — legitimate stall)
+- Skip during the first 2 seconds after `tick()` starts (warmup)
+- One warn per stuck-frame-continuity (resets when frame advances)
+- One error per stuck-frame-continuity
+
+**No recovery action.** The user still sees the freeze, still reports
+it, still feels the bug. We just get the telemetry we need to diagnose
+it. If `TICK-STUCK` fires in production, the fix belongs in one of the
+MF categories (or a new one), not in the watchdog itself.
+
+`analyze_match.py` gains `TICK-STUCK` detection — count, severity,
+inferred cause breakdown — in the freeze-detection section. Alerting
+on `TICK-STUCK error` in production is the monitoring-level signal
+that "something we thought we fixed isn't fixed."
+
+**Verification:** Playwright two-tab — manually introduce a freeze
+(revert one of the other fixes temporarily), assert `TICK-STUCK` log
+appears with correct diagnostic fields. In CI after MF1-MF5 land,
+verify `TICK-STUCK` count is **zero** across all scenarios — non-zero
+count means we shipped a bug.
 
 ## Should-fix plan (bundled after must-fixes)
 
@@ -362,13 +417,16 @@ peer than livelock.
 
 Three complementary layers, none of which requires new infra.
 
-### V1 — TICK-WATCHDOG telemetry (continuous)
+### V1 — Analyzer coverage
 
-The watchdog itself is ground truth. Every test scenario below must
-end with `analyze_match.py` showing `TICK-WATCHDOG` count = 0 (or
-only fires matching the intended fault injection). `analyze_match.py`
-gains a TICK-WATCHDOG detection in section 6 (network health) and
-section 8 (freeze detection).
+Every MUST FIX introduces a specific recovery event:
+`RB-INIT-TIMEOUT`, `COORD-SYNC-TIMEOUT`, `INPUT-STALL-RESYNC`,
+`LATE-JOIN-TIMEOUT`, `PEER-RESET` (from `resetPeerState`).
+`tools/analyze_match.py` gains detection for each. A passing
+verification run is one where the analyzer surfaces the recovery
+event exactly when fault injection triggers it and zero otherwise.
+No "silent recoveries" — every recovery path is named, logged, and
+counted.
 
 ### V2 — Session-log replay fixture
 
@@ -389,12 +447,12 @@ One scenario per MUST FIX:
 
 | Scenario | Fault injection | Assertion |
 |----------|-----------------|-----------|
-| MF1 | Kill DC during boot (`knDiag.killDc(0)` at frame 10) | Both tabs resume within 10s, TICK-WATCHDOG logged once |
-| MF2 | Reconnect after mid-game drop | No PEER-PHANTOM on recovered peer after state reset |
-| MF3 | Block host's rb-delay send (`knDiag.blockMessages('rb-delay:')`) | Guest logs RB-INIT-TIMEOUT and enters rollback within 3s |
-| MF4 | Stall guest at frame < targetFrame | Host fires COORD-SYNC-TIMEOUT, state applied immediately |
-| MF5 | Block inputs for 6s (`knDiag.blockInputs(6000)`) | Game recovers to matching hash within 10s |
-| MF6 | Large state on late join | Either both progress within 10s or both cleanly recover |
+| MF1 | Reconnect after mid-game drop | No PEER-PHANTOM on recovered peer; PEER-RESET logged with full field list |
+| MF2 | Block host's rb-delay send (`knDiag.blockMessages('rb-delay:')`) | Guest logs RB-INIT-TIMEOUT and enters rollback within 3s |
+| MF3 | Stall guest at frame < targetFrame | Host fires COORD-SYNC-TIMEOUT, state applied immediately at current frame |
+| MF4 | Block inputs for 6s (`knDiag.blockInputs(6000)`) | INPUT-STALL-RESYNC fires, game converges to matching hash within 10s |
+| MF5 | Large state on late join | Either both progress within 10s or LATE-JOIN-TIMEOUT fires and both cleanly recover |
+| MF6 | Artificial freeze (revert one MF temporarily) | `TICK-STUCK` log fires with full snapshot. In all MF1-MF5 scenarios above, `TICK-STUCK` count must be zero. |
 
 Implementation: extend `tests/design-mode.html` or create
 `tests/deadlock-harness.html` exposing `knDiag` hooks:
@@ -413,7 +471,8 @@ deploy that touches netplay code.
 ## Documentation
 
 1. **`docs/netplay-invariants.md`** — new top-level doc describing
-   I1/I2/I3 in prose with cross-references to code.
+   I1/I2 in prose with cross-references to code, plus a section
+   explaining why a global watchdog was rejected.
 2. **`CLAUDE.md`** — add "Netplay invariants" subsection pointing to
    the doc.
 3. **Inline comments** — every stall site gets a block comment naming
@@ -430,9 +489,10 @@ deploy that touches netplay code.
 4. **`resetPeerState` docstring** — enumerates every cleared field;
    adding new per-peer state without updating `resetPeerState` is a
    code-review violation.
-5. **`tools/analyze_match.py`** — new detection sections for
-   TICK-WATCHDOG, RB-INIT-TIMEOUT, COORD-SYNC-TIMEOUT,
-   LATE-JOIN-TIMEOUT, WORKER-STALL, RESYNC-LIVELOCK.
+5. **`tools/analyze_match.py`** — new detection for PEER-RESET,
+   RB-INIT-TIMEOUT, COORD-SYNC-TIMEOUT, INPUT-STALL-RESYNC,
+   LATE-JOIN-TIMEOUT, TICK-STUCK (warn/error), WORKER-STALL,
+   RESYNC-LIVELOCK.
 6. **Changelog entry** — `CHANGELOG.md` records MF1-MF6 as
    `fix(netplay): eliminate deadlock class ...` per conventional
    commits.
@@ -443,14 +503,15 @@ Each MF is its own commit. Each commit is verified against a fresh
 test session with `analyze_match.py` showing no regressions before
 moving on. Playwright two-tab test passes before any deploy.
 
-1. **MF1 — Tick watchdog** (backstop first; everything after is
-   safer because the watchdog is live)
-2. **MF2 — `resetPeerState` consolidation** (enables clean
-   reconnects for subsequent fixes)
-3. **MF3 — `_rbPendingInit` timeout**
-4. **MF4 — Coord-sync target deadline**
-5. **MF5 — INPUT-STALL → resync**
-6. **MF6 — Late-join timeout tuning + worker timeout**
+1. **MF1 — `resetPeerState` consolidation** (enables clean
+   reconnects for every fix that follows)
+2. **MF2 — `_rbPendingInit` timeout**
+3. **MF3 — Coord-sync target deadline**
+4. **MF4 — INPUT-STALL → resync**
+5. **MF5 — Late-join timeout tuning + worker timeout**
+6. **MF6 — Detection-only watchdog** (last — ships after every
+   root-cause fix so `TICK-STUCK` becomes a trustworthy signal that
+   we have a *new* bug, not a known one)
 7. **Documentation commits** — `netplay-invariants.md`, CLAUDE.md,
    inline stall-site comments, analyze_match.py updates
 8. **SF1-SF5** — bundled in one followup commit each
@@ -458,22 +519,32 @@ moving on. Playwright two-tab test passes before any deploy.
 
 ## Risks and mitigations
 
-- **Watchdog false positives.** Legitimate long stalls (paused tab,
-  user alt-tabbed, late-join in progress) must not trip it. Mitigation:
-  gate on `!_lateJoinPaused` and skip when `document.hidden`. If false
-  positives still occur, raise `TICK_WATCHDOG_MS` rather than weaken
-  detection.
 - **`resetPeerState` missing a field.** Any per-peer state not listed
-  is a silent bug. Mitigation: grep audit of all `[slot]`-indexed
-  variables before merge; add a unit test that enumerates expected
-  reset fields.
+  is a silent bug. Mitigation: grep audit of every `[slot]`-indexed
+  variable in `netplay-lockstep.js` before merge; enumerate expected
+  reset fields in a comment and verify against the function body in
+  code review. Adding new per-peer state in future work without
+  updating `resetPeerState` must be treated as a review blocker.
 - **RB-INIT-TIMEOUT asymmetric delay.** Falls back to local delay
   estimate instead of host's authoritative value. May cause rollback
-  asymmetry. Mitigation: the subsequent resync fixes divergence; the
-  watchdog catches it if not.
+  asymmetry. Mitigation: the subsequent hash-mismatch → resync path
+  converges both peers; we instrument `RB-INIT-TIMEOUT` so we can
+  measure how often the fallback fires and whether it produces
+  follow-on resyncs.
 - **Coord-sync deadline premature firing.** 3s may be too short on
   poor networks where capture legitimately takes 2-3s. Mitigation:
   start with 3s, instrument via analyzer, tune based on real sessions.
+  Start generous and tighten, not the other way around.
+- **MF4 fires too often under marginal WiFi.** INPUT-STALL-RESYNC
+  will churn if real input loss is common. Mitigation: exponential
+  cooldown on consecutive resync requests from the same peer; log
+  `INPUT-STALL-COOLDOWN` so we can see it in the analyzer.
+- **Watchdog becomes a crutch.** The MF6 watchdog is detection-only
+  by design — if we ever feel tempted to "just make it auto-recover,"
+  we must first re-read the rejected-alternatives section. Recovery
+  inside the watchdog is the exact failure mode this spec rejects.
+  Monitoring for `TICK-STUCK` in production is fine; silencing it via
+  auto-recovery is not.
 
 ## Out of scope for this spec
 
