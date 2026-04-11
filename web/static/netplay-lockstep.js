@@ -5363,6 +5363,18 @@
     };
     document.addEventListener('visibilitychange', _visChangeHandler);
 
+    // Focus/blur tracking: document.hasFocus() gates gamepad reads, so
+    // losing focus silently zeroes input. Log transitions so session logs
+    // show exactly when input capture stopped/resumed.
+    const _focusHandler = () => {
+      if (_running) _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
+    };
+    const _blurHandler = () => {
+      if (_running) _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
+    };
+    window.addEventListener('focus', _focusHandler);
+    window.addEventListener('blur', _blurHandler);
+
     // Network change detection: mobile WiFi↔cellular switches cause desync.
     // Request a FULL (non-delta) resync when the network path changes.
     _networkChangeHandler = () => {

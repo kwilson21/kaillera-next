@@ -634,7 +634,7 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
     found_any = False
 
     # Explicit freeze signals
-    for event_name in ["RENDER-STALL", "INPUT-DEAD", "AUDIO-STALL", "AUDIO-RESUME"]:
+    for event_name in ["RENDER-STALL", "INPUT-DEAD", "AUDIO-STALL", "AUDIO-RESUME", "TAB-FOCUS"]:
         events = df.filter(pl.col("msg").str.contains(event_name))
         if events.height > 0:
             found_any = True
