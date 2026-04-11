@@ -495,6 +495,12 @@
   let _inputEverNonZero = false; // true once local input has been non-zero
   let _inputDeadLogged = false; // one-shot for INPUT-DEAD
   let _audioLastState = ''; // last audioContext.state we logged
+  // BOOT-LOCKSTEP timeout tracking: if we're stalled at the same apply frame
+  // for too long during boot convergence, something has gone wrong (DC died
+  // with inputs in flight) and we must recover instead of deadlocking.
+  let _bootStallFrame = -1;
+  let _bootStallStartTime = 0;
+  let _bootStallRecoveryFired = false;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -2756,22 +2762,33 @@
           _consecutiveResyncs = 0;
           _resyncRequestInFlight = false;
           _syncMismatchStreak = 0;
+          // Clear stale remote inputs from before the disconnect. Any inputs
+          // in flight when the DC died are gone; keeping them can cause the
+          // rollback engine to read stale values after state resync.
+          if (_remoteInputs[peer.slot]) {
+            _remoteInputs[peer.slot] = {};
+          }
           // Send sync-request-full to the HOST's lockstep DC (only host handles
           // sync requests). `ch` is the DC to the reconnected peer — which may
           // not be the host (e.g. P1 reconnecting to P2).
+          //
+          // IMMEDIATE sync (no -at: suffix): avoids the coord-sync deadlock
+          // where `_frameNum + 15` is unreachable if the local frame counter
+          // is stuck (e.g. BOOT-LOCKSTEP stall). Host pushes state at its
+          // current frame, guest loads at host's frame. Both resume from a
+          // known common point. This is the reconnect path — there is no
+          // "in-progress gameplay" to preserve via coordination.
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           const hostDc = hostPeer?.dc;
           if (hostDc?.readyState === 'open') {
-            const _reconnectTarget = _frameNum + SYNC_COORD_DELTA;
-            _syncTargetFrame = _reconnectTarget;
+            _syncTargetFrame = -1;
             _resyncRequestInFlight = true;
             try {
-              hostDc.send(`sync-request-full-at:${_reconnectTarget}`);
-              _syncLog(`reconnect resync: sent sync-request-full-at:${_reconnectTarget} to host DC`);
+              hostDc.send('sync-request-full');
+              _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
             } catch (e) {
               _syncLog(`reconnect resync send failed: ${e}`);
               _resyncRequestInFlight = false;
-              _syncTargetFrame = -1;
             }
           } else {
             _syncLog(`reconnect resync: host DC not open, skipping resync request`);
@@ -5911,17 +5928,66 @@
       const _rbBootConverged = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > 300;
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
       if (!_rbBootConverged) {
-        // Boot: pure lockstep stall
+        // Boot: pure lockstep stall, with timeout-based deadlock recovery
         if (rbApplyFrame >= 0) {
           const bootInputPeers = getInputPeers();
+          let stalled = false;
+          let missingSlot = -1;
           for (const p of bootInputPeers) {
             if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
-              return;
+              stalled = true;
+              missingSlot = p.slot;
+              break;
             }
           }
-        }
-        if (_frameNum % 60 === 0) {
-          _syncLog(`BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} — stalling for remote input`);
+          if (stalled) {
+            // Track wall-clock time at this exact apply frame
+            const nowWall = performance.now();
+            if (_bootStallFrame !== rbApplyFrame) {
+              _bootStallFrame = rbApplyFrame;
+              _bootStallStartTime = nowWall;
+              _bootStallRecoveryFired = false;
+            }
+            const stallDuration = nowWall - _bootStallStartTime;
+            // BOOT-DEADLOCK-RECOVERY: after 3s stuck at same apply frame,
+            // assume the missing inputs will never arrive (DC died with
+            // in-flight packets). Request an immediate resync so both peers
+            // reset to a common state. Guests trigger resync; the host
+            // cannot (it already has the authoritative state) so the host
+            // just falls through and keeps running — guests will catch up
+            // via resync.
+            if (stallDuration >= 3000 && !_bootStallRecoveryFired) {
+              _bootStallRecoveryFired = true;
+              _syncLog(
+                `BOOT-DEADLOCK-RECOVERY f=${_frameNum} applyF=${rbApplyFrame} ` +
+                `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)} — ` +
+                `requesting immediate resync`,
+              );
+              if (_playerSlot !== 0) {
+                const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+                const hostDc = hostPeer?.dc;
+                if (hostDc?.readyState === 'open') {
+                  try {
+                    hostDc.send('sync-request-full');
+                    _syncLog('BOOT-DEADLOCK-RECOVERY: sent immediate sync-request-full');
+                  } catch (e) {
+                    _syncLog(`BOOT-DEADLOCK-RECOVERY send failed: ${e}`);
+                  }
+                }
+              }
+            }
+            if (_frameNum % 60 === 0) {
+              _syncLog(
+                `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+              );
+            }
+            return;
+          }
+          // Not stalled — clear tracking
+          _bootStallFrame = -1;
+          _bootStallStartTime = 0;
+          _bootStallRecoveryFired = false;
         }
       } else if (rbApplyFrame >= 0) {
         // Gameplay: stall only when too far ahead for rollback to help

@@ -660,6 +660,14 @@ def query_boot_deadlock(df: pl.DataFrame) -> None:
         print("(missing msg/f columns)")
         return
 
+    # Recovery events (new mechanism — if these fire, deadlock was caught)
+    recovery_events = df.filter(pl.col("msg").str.contains("BOOT-DEADLOCK-RECOVERY"))
+    if recovery_events.height > 0:
+        print(f"  BOOT-DEADLOCK-RECOVERY fired: {recovery_events.height} events")
+        for row in recovery_events.iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+        print()
+
     found_deadlock = False
     slots = sorted(df.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list())
 
