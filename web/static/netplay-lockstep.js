@@ -3398,11 +3398,16 @@
       try {
         writeInputToMemory(peer.slot, 0);
       } catch (_) {}
-      delete _remoteInputs[peer.slot];
-      // Only host modifies the input roster — non-hosts wait for
-      // the host's roster broadcast to remove the slot
+      // I2: route all per-peer cleanup through resetPeerState so
+      // every field gets cleared consistently. Non-hosts must
+      // preserve _peerInputStarted until the host's roster broadcast
+      // removes the slot, so we save/restore that one field.
       if (_playerSlot === 0 || !_activeRoster) {
-        delete _peerInputStarted[peer.slot];
+        resetPeerState(peer.slot, 'hard-disconnect', { peer, sid: remoteSid });
+      } else {
+        const startedBefore = _peerInputStarted[peer.slot];
+        resetPeerState(peer.slot, 'hard-disconnect-non-host', { peer, sid: remoteSid });
+        if (startedBefore) _peerInputStarted[peer.slot] = startedBefore;
       }
     }
 
