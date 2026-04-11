@@ -5,47 +5,10 @@
 import { chromium, devices } from 'playwright';
 import fs from 'fs';
 import path from 'path';
+import { TEST_DEVICES } from './vgp-devices.js';
 
 const SCREENSHOT_DIR = path.join(process.cwd(), 'tests', 'vgp-screenshots');
-const URL = 'http://127.0.0.1:18888/vgp-test.html';
-
-// Browser chrome height reductions
-const SAFARI_PHONE = 80;
-const CHROME_PHONE = 56;
-const SAFARI_TABLET = 50;
-const CHROME_TABLET = 40;
-
-const TEST_DEVICES = [
-  // [name, chrome_reduction, category]
-  // iPhones
-  ['iPhone SE', SAFARI_PHONE, 'phone'],
-  ['iPhone 8', SAFARI_PHONE, 'phone'],
-  ['iPhone X', SAFARI_PHONE, 'phone'],
-  ['iPhone 12 Mini', SAFARI_PHONE, 'phone'],
-  ['iPhone 12', SAFARI_PHONE, 'phone'],
-  ['iPhone 12 Pro Max', SAFARI_PHONE, 'phone'],
-  ['iPhone 14', SAFARI_PHONE, 'phone'],
-  ['iPhone 14 Plus', SAFARI_PHONE, 'phone'],
-  ['iPhone 14 Pro Max', SAFARI_PHONE, 'phone'],
-  ['iPhone 15', SAFARI_PHONE, 'phone'],
-  ['iPhone 15 Plus', SAFARI_PHONE, 'phone'],
-  ['iPhone 15 Pro Max', SAFARI_PHONE, 'phone'],
-  // Android phones
-  ['Pixel 5', CHROME_PHONE, 'phone'],
-  ['Pixel 7', CHROME_PHONE, 'phone'],
-  ['Galaxy S8', CHROME_PHONE, 'phone'],
-  ['Galaxy S9+', CHROME_PHONE, 'phone'],
-  ['Galaxy S24', CHROME_PHONE, 'phone'],
-  ['Galaxy A55', CHROME_PHONE, 'phone'],
-  ['Moto G4', CHROME_PHONE, 'phone'],
-  // Tablets
-  ['iPad Mini', SAFARI_TABLET, 'tablet'],
-  ['iPad (gen 7)', SAFARI_TABLET, 'tablet'],
-  ['iPad Pro 11', SAFARI_TABLET, 'tablet'],
-  ['Galaxy Tab S4', CHROME_TABLET, 'tablet'],
-  ['Galaxy Tab S9', CHROME_TABLET, 'tablet'],
-  ['Nexus 10', CHROME_TABLET, 'tablet'],
-];
+const URL = 'http://127.0.0.1:18888/tests/vgp-test.html';
 
 async function run() {
   // Clean output
@@ -60,9 +23,10 @@ async function run() {
   let count = 0;
   const total = TEST_DEVICES.length * 4; // landscape+portrait × with/without chrome
 
-  for (const [name, chrome, cat] of TEST_DEVICES) {
+  for (const [name, chrome, cat, customViewport] of TEST_DEVICES) {
     const desc = devices[name];
-    if (!desc) {
+    const viewport = customViewport || desc?.viewport;
+    if (!viewport) {
       console.warn(`Skip: ${name}`);
       continue;
     }
@@ -72,11 +36,11 @@ async function run() {
         count++;
         let w, h;
         if (orient === 'portrait') {
-          w = desc.viewport.width;
-          h = desc.viewport.height - (withChrome ? chrome : 0);
+          w = viewport.width;
+          h = viewport.height - (withChrome ? chrome : 0);
         } else {
-          w = desc.viewport.height;
-          h = desc.viewport.width - (withChrome ? chrome : 0);
+          w = viewport.height;
+          h = viewport.width - (withChrome ? chrome : 0);
         }
         if (h < 200) h = 200;
         if (w < 300) w = 300;

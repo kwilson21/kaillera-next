@@ -49,20 +49,19 @@
       <span id="toolbar-room">TEST1234</span>
       <span id="toolbar-status"></span>
       <div class="toolbar-spacer"></div>
-      <div id="share-wrapper">
-        <button id="toolbar-share" class="toolbar-toggle" title="Share invite link">Share</button>
-        <div id="share-dropdown" class="share-dropdown hidden">
-          <button id="share-play" class="share-option">Share Play Link</button>
-          <button id="share-watch" class="share-option">Share Watch Link</button>
-        </div>
-      </div>
       <button id="toolbar-leave">Leave</button>
       <div id="more-wrapper">
         <button id="toolbar-more" class="toolbar-toggle" title="More options">&#x22EF;</button>
         <div id="more-dropdown" class="more-dropdown hidden">
+          <div id="invite-submenu" class="more-submenu">
+            <div class="more-submenu-label">Invite</div>
+            <button id="share-play" class="more-option">Play Link</button>
+            <button id="share-watch" class="more-option">Watch Link</button>
+          </div>
           <button id="toolbar-info" class="more-option">Info</button>
           <button id="toolbar-remap" class="more-option">Remap</button>
-          <button id="toolbar-end" class="more-option more-end">End Game</button>
+          <button id="toolbar-settings" class="more-option">Controller Settings</button>
+          <button id="toolbar-end" class="more-option more-end" style="display: none">End Game</button>
         </div>
       </div>
     </div>

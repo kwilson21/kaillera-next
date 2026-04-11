@@ -56,3 +56,4 @@ logs/sync/
 certs/
 build/softfloat/obj/
 build/softfloat/libsoftfloat.a
+static

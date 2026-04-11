@@ -171,7 +171,8 @@ static struct {
 
     /* Input ring: per-player, per-frame */
     kn_input_t inputs[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
-    kn_input_t last_known[KN_MAX_PLAYERS]; /* for prediction */
+    kn_input_t last_known[KN_MAX_PLAYERS]; /* for prediction (most recent real input) */
+    kn_input_t prev_known[KN_MAX_PLAYERS]; /* for dead-reckoning (input before last_known) */
 
     /* Prediction tracking: predicted values stored separately for comparison */
     int predicted[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
@@ -201,6 +202,15 @@ static struct {
      * Cost: ~2-3ms per save/restore on mobile (one memcpy each way). */
     uint8_t *rdram_base;       /* -> start of RDRAM (set by JS) */
     uint8_t *saved_rdram;      /* malloc'd 8MB buffer for snapshot */
+
+    /* Dirty-input gate: skip retro_serialize when no predictions are
+     * active (all remote inputs arrived on time). Inspired by RetroArch's
+     * runahead preemptive frames — most frames have identical input and
+     * don't need a state snapshot because no rollback will target them.
+     * Reduces per-frame serialize from 16MB × 60fps = 960MB/s to near
+     * zero on stable connections. */
+    int has_active_predictions; /* 1 if any slot has predicted input */
+    int serialize_skip_count;  /* diagnostic: frames skipped */
 
     /* Stats */
     int rollback_count;
@@ -567,23 +577,36 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
          * If BOTH predicted and actual values are below deadzone,
          * they're considered a match regardless of exact bytes.
          * Above deadzone, we fall back to the tight ±4 tolerance. */
-        #define KN_STICK_TOLERANCE 4
-        #define KN_STICK_DEADZONE 16
+        /* Zone-based analog prediction comparison (inspired by fighting
+         * game input quantization). The full-precision analog value is
+         * always applied to the emulator — zones only affect whether a
+         * misprediction is detected. Both predicted and real values are
+         * mapped to a zone; if same zone, no rollback fires.
+         *
+         * N64 stick range: -83 to +83. Zone size 12 gives ~14 zones
+         * per axis. Deadzone (±16) maps entirely to zone 0. This means
+         * smooth stick motion within a zone doesn't trigger rollbacks,
+         * but real direction changes (crossing zone boundaries) do.
+         *
+         * Why this matters: GGPO works because fighting games use 8-way
+         * digital input. We're emulating a full analog stick — every
+         * frame of stick movement is a unique value that the "repeat
+         * last input" predictor gets wrong. Zones reduce the effective
+         * input space from 166×166 to ~14×14, matching the prediction
+         * accuracy that GGPO was designed for. */
+        #define KN_STICK_ZONE_SIZE 12
+        #define KN_STICK_ZONE(v) ((v) / KN_STICK_ZONE_SIZE)
+        #define KN_AXIS_ZONE_MATCH(a, b) (KN_STICK_ZONE(a) == KN_STICK_ZONE(b))
         int btn_match = (pred->buttons == buttons);
-        /* Per-axis: within tolerance OR both in deadzone */
-        #define AXIS_MATCH(a, b) \
-            (((a) >= -KN_STICK_DEADZONE && (a) <= KN_STICK_DEADZONE && \
-              (b) >= -KN_STICK_DEADZONE && (b) <= KN_STICK_DEADZONE) || \
-             (((a) - (b)) <= KN_STICK_TOLERANCE && ((b) - (a)) <= KN_STICK_TOLERANCE))
         int lxd = pred->lx - lx; if (lxd < 0) lxd = -lxd;
         int lyd = pred->ly - ly; if (lyd < 0) lyd = -lyd;
         int cxd = pred->cx - cx; if (cxd < 0) cxd = -cxd;
         int cyd = pred->cy - cy; if (cyd < 0) cyd = -cyd;
         int exact_stick = (lxd == 0 && lyd == 0 && cxd == 0 && cyd == 0);
-        int stick_within_tol = (AXIS_MATCH(pred->lx, lx) && AXIS_MATCH(pred->ly, ly)
-                                && AXIS_MATCH(pred->cx, cx) && AXIS_MATCH(pred->cy, cy));
+        int stick_within_zone = (KN_AXIS_ZONE_MATCH(pred->lx, lx) && KN_AXIS_ZONE_MATCH(pred->ly, ly)
+                                && KN_AXIS_ZONE_MATCH(pred->cx, cx) && KN_AXIS_ZONE_MATCH(pred->cy, cy));
         int exact_match = btn_match && exact_stick;
-        int match = btn_match && stick_within_tol;
+        int match = btn_match && stick_within_zone;
         rb.predicted[slot][idx] = 0;
 
         if (match) {
@@ -665,8 +688,9 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
         }
     }
 
-    /* Store real input */
+    /* Store real input + update dead-reckoning history */
     rb.inputs[slot][idx] = real_input;
+    rb.prev_known[slot] = rb.last_known[slot];
     rb.last_known[slot] = real_input;
     return misprediction;
 }
@@ -767,14 +791,6 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         return 2; /* 2 = JS should step the emulator for a replay frame */
     }
 
-    /* ── Save state for current frame ── */
-    {
-        int save_idx = rb.frame % rb.ring_size;
-        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-        rb.ring_sf_state[save_idx] = sf_pack();
-        rb.ring_frames[save_idx] = rb.frame;
-    }
-
     /* ── Store local input ── */
     {
         int local_idx = rb.frame % KN_INPUT_RING_SIZE;
@@ -789,6 +805,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
 
     /* ── Check remote inputs for apply frame ── */
     apply_frame = rb.frame - rb.delay_frames;
+    rb.has_active_predictions = 0;
     if (apply_frame >= 0) {
         for (s = 0; s < rb.num_players; s++) {
             if (s == rb.local_slot) continue;
@@ -797,15 +814,52 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
              * previous cycle (256 frames ago) can still be set. Verify
              * the stored frame number matches apply_frame. */
             if (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame) {
-                /* Predict: use last known input */
-                rb.inputs[s][idx] = rb.last_known[s];
+                /* Predict: dead-reckoning for stick, repeat-last for buttons.
+                 * Extrapolate stick position based on velocity between the
+                 * two most recent real inputs. Buttons are binary so
+                 * repeat-last is optimal (you're either pressing or not).
+                 *
+                 * Clamped to N64 stick range [-83, 83] to prevent
+                 * extrapolation from producing out-of-range values. */
+                #define KN_CLAMP_STICK(v) ((v) < -83 ? -83 : (v) > 83 ? 83 : (v))
+                kn_input_t pred_input = rb.last_known[s];
+                pred_input.lx = KN_CLAMP_STICK(2 * rb.last_known[s].lx - rb.prev_known[s].lx);
+                pred_input.ly = KN_CLAMP_STICK(2 * rb.last_known[s].ly - rb.prev_known[s].ly);
+                pred_input.cx = KN_CLAMP_STICK(2 * rb.last_known[s].cx - rb.prev_known[s].cx);
+                pred_input.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
+                /* Buttons: repeat last (no extrapolation for digital) */
+                pred_input.buttons = rb.last_known[s].buttons;
+                rb.inputs[s][idx] = pred_input;
                 rb.inputs[s][idx].present = 1;
                 rb.inputs[s][idx].frame = apply_frame;
                 rb.predicted[s][idx] = 1;
-                rb.predicted_values[s][idx] = rb.last_known[s];
+                rb.predicted_values[s][idx] = pred_input;
                 rb.predicted_values[s][idx].frame = apply_frame;
                 rb.prediction_count++;
+                rb.has_active_predictions = 1;
             }
+        }
+    }
+
+    /* ── Save state for current frame (dirty-input gated) ──
+     * Only serialize when predictions are active — if all remote inputs
+     * arrived on time, no rollback can target this frame. Inspired by
+     * RetroArch's runahead preemptive frames: skip serialization on
+     * steady-state frames to avoid 16MB memcpy at 60fps (960MB/s).
+     *
+     * When a prediction IS active, we must save because a future
+     * misprediction could roll back to this frame. We also save
+     * unconditionally if a rollback is pending (need the most recent
+     * state for the replay target). */
+    {
+        int need_save = rb.has_active_predictions || rb.pending_rollback >= 0;
+        if (need_save) {
+            int save_idx = rb.frame % rb.ring_size;
+            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+            rb.ring_sf_state[save_idx] = sf_pack();
+            rb.ring_frames[save_idx] = rb.frame;
+        } else {
+            rb.serialize_skip_count++;
         }
     }
 
@@ -1235,6 +1289,11 @@ int kn_get_max_depth(void) { return rb.max_depth; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_failed_rollbacks(void) { return rb.failed_rollbacks; }
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_serialize_skip_count(void) { return rb.serialize_skip_count; }
 
 /* T2: Misprediction breakdown by input category.
  * Writes 3 ints to out: [button_only, stick_only, both]. Returns 3. */

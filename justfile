@@ -99,6 +99,16 @@ certs:
     echo "Server will auto-detect HTTPS on next start"
     echo "Access at: https://$LEGO_DOMAIN:27888/"
 
+# Open VGP design mode (multi-device visual layout editor)
+design:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -L static ] || ln -sf web/static static
+    echo "Serving on http://localhost:18888/tests/design-mode.html"
+    echo "Press Ctrl+C to stop"
+    open "http://localhost:18888/tests/design-mode.html"
+    python3 -m http.server 18888
+
 # Deploy: bump version (one chore commit summarising all unpushed feat/fix
 # commits since origin/main), then push main with the new tag. Idempotent
 # — running it twice in a row is a no-op the second time. Refuses to run

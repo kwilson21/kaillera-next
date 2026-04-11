@@ -122,6 +122,7 @@ void kn_set_num_players(int num_players);
 /* Configure RNG sync for C-level replay. Pass RDRAM pointers for RNG seed addresses. */
 void kn_set_rng_sync(uint32_t base_seed, uint32_t *rng_ptr, uint32_t *rng_alt_ptr);
 void kn_set_rdram_preserve(uint8_t *rdram_base);
+int kn_get_serialize_skip_count(void);
 void kn_set_rng_netplay_ptr(uint32_t *ptr);
 
 /* Cleanup */
