@@ -3965,12 +3965,73 @@
 
   let _cacheAttempted = false;
 
+  // ── Client-side boot state cache (IndexedDB) ──────────────────────
+  // Caches the ~16MB boot savestate locally per ROM hash so repeat games
+  // skip the 20s server transfer entirely. Both host and guest check IDB
+  // first; on hit, no network transfer is needed.
+  const _STATE_DB = 'kaillera-state-cache';
+  const _STATE_STORE = 'states';
+
+  const _openStateDB = () =>
+    new Promise((resolve) => {
+      if (typeof indexedDB === 'undefined') return resolve(null);
+      const req = indexedDB.open(_STATE_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(_STATE_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    });
+
+  const _getStateFromIDB = async (romHash) => {
+    const db = await _openStateDB();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction(_STATE_STORE, 'readonly');
+      const req = tx.objectStore(_STATE_STORE).get(romHash);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = () => resolve(null);
+    });
+  };
+
+  const _putStateToIDB = async (romHash, bytes) => {
+    const db = await _openStateDB();
+    if (!db) return;
+    const tx = db.transaction(_STATE_STORE, 'readwrite');
+    tx.objectStore(_STATE_STORE).put(bytes, romHash);
+  };
+
   const fetchCachedState = async (romHash) => {
-    const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
+
+    // 1. Check local IndexedDB first — instant, no network
     try {
-      // Timeout after 30s — 16MB state download takes 10-15s even on
-      // fast connections; 10s was aborting before completion.
+      const idbBytes = await _getStateFromIDB(romHash);
+      if (idbBytes && idbBytes.length > 1000) {
+        _syncLog(`cached state loaded from IndexedDB (${idbBytes.length} bytes)`);
+        _guestStateBytes = idbBytes instanceof Uint8Array ? idbBytes : new Uint8Array(idbBytes);
+
+        if (_playerSlot === 0) {
+          compressAndEncode(new Uint8Array(_guestStateBytes))
+            .then((encoded) => {
+              _syncLog(
+                `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
+              );
+              socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
+            })
+            .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
+        }
+
+        _selfLockstepReady = true;
+        if (_rttComplete) broadcastLockstepReady();
+        checkAllLockstepReady();
+        return;
+      }
+    } catch (e) {
+      _syncLog(`IndexedDB state cache check failed: ${e.message || e}`);
+    }
+
+    // 2. Fall back to server cache
+    const url = `/api/cached-state/${encodeURIComponent(romHash)}`;
+    try {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 30000);
       const resp = await fetch(url, { signal: ac.signal });
@@ -3979,13 +4040,13 @@
       const raw = await resp.arrayBuffer();
       const bytes = new Uint8Array(raw);
       if (bytes.length < 1000) throw new Error(`cached state too small: ${bytes.length}`);
-      _syncLog(`cached state loaded (${bytes.length} bytes)`);
+      _syncLog(`cached state loaded from server (${bytes.length} bytes)`);
       _guestStateBytes = bytes;
 
-      // Host: also send cached bytes to guests via Socket.IO as fallback.
-      // Guest cache fetch may hang/timeout on slow mobile connections.
+      // Persist to local IDB for next time
+      _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
+
       if (_playerSlot === 0) {
-        // NOTE: intentionally fire-and-forget .then() — non-blocking Socket.IO relay
         compressAndEncode(new Uint8Array(bytes))
           .then((encoded) => {
             _syncLog(
@@ -4000,7 +4061,6 @@
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
     } catch (e) {
-      // No cached state or fetch timed out — fall back to host capture / guest wait
       const reason = e?.name === 'AbortError' ? 'fetch timed out' : e?.message || 'unknown';
       _syncLog(`no cached state — ${reason}, using live capture`);
       if (_playerSlot === 0 && !_cacheAttempted) {
@@ -4038,9 +4098,12 @@
       }
       checkAllLockstepReady();
 
-      // Background: upload to cache for future guests (fire-and-forget)
+      // Background: cache for future games (fire-and-forget)
       const romHash = _config?.romHash;
       if (romHash) {
+        // Local IDB cache — persists across deploys, no server needed
+        _putStateToIDB(romHash, new Uint8Array(cacheBytes)).catch(() => {});
+        // Server cache — helps other players who haven't played this ROM
         const cacheParams = new URLSearchParams({ room: _config.sessionId, token: _config.uploadToken || '' });
         fetch(`/api/cache-state/${encodeURIComponent(romHash)}?${cacheParams}`, {
           method: 'POST',
@@ -4064,6 +4127,10 @@
       const bytes = await decodeAndDecompress(msg.data);
       _guestStateBytes = bytes;
       _syncLog(`initial state decompressed (${bytes.length} bytes)`);
+
+      // Cache locally for next time
+      const romHash = _config?.romHash;
+      if (romHash) _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
 
       _selfLockstepReady = true;
       if (_rttComplete) {

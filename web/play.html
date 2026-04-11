@@ -14,6 +14,27 @@
       }
     </script>
     <link rel="stylesheet" href="/static/play.css" />
+    <script>
+      // Preload WASM core: fetch the content-addressed URL from /api/core-info
+      // and inject a preload link so the browser starts downloading immediately.
+      // core-redirector.js does the same fetch later, but this runs earlier in
+      // the page lifecycle, giving the browser a head start on the ~1.4MB download.
+      if (new URLSearchParams(location.search).get('mode') !== 'streaming') {
+        fetch('/api/core-info', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((info) => {
+            if (info?.url) {
+              const link = document.createElement('link');
+              link.rel = 'preload';
+              link.href = info.url;
+              link.as = 'fetch';
+              link.crossOrigin = '';
+              document.head.appendChild(link);
+            }
+          })
+          .catch(() => {});
+      }
+    </script>
   </head>
   <body>
     <!-- Pre-game overlay -->
