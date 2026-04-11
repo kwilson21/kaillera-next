@@ -190,6 +190,17 @@ static struct {
     uint32_t rng_base_seed; /* hash of match ID */
     uint32_t *rng_ptr;      /* pointer to primary RNG RDRAM address */
     uint32_t *rng_alt_ptr;  /* pointer to alternate RNG RDRAM address */
+    uint32_t *rng_netplay_ptr; /* pointer to Smash Remix netplay seed (0x3CB3C) */
+
+    /* Full RDRAM preservation during replay.
+     * Replay runs extra retro_run() calls that mutate RDRAM everywhere —
+     * game globals, heap, audio, interrupt state. Instead of chasing
+     * individual divergent blocks, we save/restore the ENTIRE 8MB RDRAM
+     * before/after replay. This guarantees replay has zero lasting side
+     * effects on ANY RDRAM, regardless of which blocks are tainted.
+     * Cost: ~2-3ms per save/restore on mobile (one memcpy each way). */
+    uint8_t *rdram_base;       /* -> start of RDRAM (set by JS) */
+    uint8_t *saved_rdram;      /* malloc'd 8MB buffer for snapshot */
 
     /* Stats */
     int rollback_count;
@@ -271,6 +282,7 @@ static void setup_frame(int frame) {
         h = h ^ (h >> 13);
         *rb.rng_ptr = h;
         if (rb.rng_alt_ptr) *rb.rng_alt_ptr = h;
+        if (rb.rng_netplay_ptr) *rb.rng_netplay_ptr = h;
     }
 }
 
@@ -442,6 +454,31 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
      * fix at source. Needs byte-level diff to confirm. */
     kn_taint_rdram(0x130000, 0x20000);
     rb_log("kn_rollback_init: tainted match runtime 0x130000 size=0x20000 (provisional)");
+
+    /* Taint blocks that diverge during rollback replay due to interrupt
+     * timing differences. Identified via C-REGIONS diff across multiple
+     * mobile-to-mobile sessions (6f865c3d, 9de54b0c, db6cd248, 1f5ee6cf,
+     * 2823557c). Divergent heap blocks shift depending on game state —
+     * individual block taints are whack-a-mole. Taint the full range. */
+
+    /* Block 2 (0x20000-0x2FFFF): N64 OS exception vectors + thread stacks. */
+    kn_taint_rdram(0x20000, 0x10000);
+    rb_log("kn_rollback_init: tainted OS thread stacks 0x20000 size=0x10000");
+
+    /* Blocks 11-13 (0xB0000-0xDFFFF): Audio DMA spillover + render data
+     * + transitions table + file manager. Block 13 intermittently diverges
+     * during screen transitions. */
+    kn_taint_rdram(0xB0000, 0x30000);
+    rb_log("kn_rollback_init: tainted audio/render/file data 0xB0000 size=0x30000");
+
+    /* Blocks 21-112 (0x150000-0x70FFFF): Full N64 dynamic heap.
+     * Heap allocation ordering depends on interrupt timing — objects have
+     * identical data but at different RDRAM addresses on each peer.
+     * No gameplay hash addresses exist in this range (all are in blocks
+     * 0-19 which are handled separately). Subsumes the previous individual
+     * heap block taints and the 0x390000 fill-pattern taint. */
+    kn_taint_rdram(0x150000, 0x5C0000);
+    rb_log("kn_rollback_init: tainted full heap 0x150000-0x70FFFF");
 
     /* Option X-2: Mark the post-RDRAM section of the savestate hash as
      * "ignore divergence". The post-RDRAM section contains CPU general
@@ -659,6 +696,11 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         int depth = rb.frame - rb_frame;
         int ring_idx = rb_frame % rb.ring_size;
         if (rb.replay_remaining > 0) {
+            /* Preempting an active replay — restore full RDRAM to pre-replay
+             * values FIRST, so the partial replay's mutations don't
+             * contaminate the next save. */
+            if (rb.rdram_base && rb.saved_rdram)
+                memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
             rb_log("C-REPLAY-PREEMPT old_start=%d old_remaining=%d new_start=%d",
                 rb.replay_start, rb.replay_remaining, rb_frame);
             rb.replay_remaining = 0;
@@ -666,6 +708,12 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         rb.pending_rollback = -1;
 
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
+            /* Save full RDRAM BEFORE state restore. These are the "real"
+             * values that both peers agree on. Replay will mutate them,
+             * but we restore the entire 8MB after replay ends. */
+            if (rb.rdram_base && rb.saved_rdram)
+                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);
+
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
             sf_restore(rb.ring_sf_state[ring_idx]);
             rb.rollback_count++;
@@ -775,6 +823,25 @@ int kn_post_tick(void) {
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
+            /* Restore frame counters to pre-replay values.
+             * Replay incremented these N times, but they should reflect
+             * only real (non-replay) frames to stay consistent across
+             * peers who replay different numbers of frames. */
+            /* Restore full RDRAM to pre-replay values. */
+            if (rb.rdram_base && rb.saved_rdram)
+                memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
+            /* Patch the RDRAM section of the current ring buffer entry with
+             * restored values. The ring entry was saved during replay and
+             * contains mutated RDRAM. Rather than re-serializing the full
+             * ~16MB state (retro_serialize), we memcpy just the 8MB RDRAM
+             * section into the existing entry — CPU/plugin state is fine. */
+            if (kn_rdram_offset_in_state > 0) {
+                int patch_idx = rb.frame % rb.ring_size;
+                if (rb.ring_frames[patch_idx] == rb.frame) {
+                    memcpy(rb.ring_bufs[patch_idx] + kn_rdram_offset_in_state,
+                           rb.saved_rdram, 0x800000);
+                }
+            }
             rb_log("C-REPLAY-DONE f=%d", rb.frame);
         }
     }
@@ -790,6 +857,26 @@ void kn_set_rng_sync(uint32_t base_seed, uint32_t *rng_ptr, uint32_t *rng_alt_pt
     rb.rng_ptr = rng_ptr;
     rb.rng_alt_ptr = rng_alt_ptr;
     rb_log("RNG sync configured: seed=0x%08x ptr=%p alt=%p", base_seed, rng_ptr, rng_alt_ptr);
+}
+
+/* ── Configure Smash Remix netplay seed pointer ────────────────────── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_rng_netplay_ptr(uint32_t *ptr) {
+    rb.rng_netplay_ptr = ptr;
+    rb_log("RNG netplay ptr configured: %p", ptr);
+}
+
+/* ── Configure RDRAM preservation for replay (SSB64 / Smash Remix) ── */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_rdram_preserve(uint8_t *rdram_base) {
+    rb.rdram_base = rdram_base;
+    if (rb.saved_rdram) free(rb.saved_rdram);
+    rb.saved_rdram = (uint8_t *)malloc(0x800000); /* 8MB */
+    rb_log("rdram preserve: base=%p buf=%p (8MB)", rdram_base, rb.saved_rdram);
 }
 
 /* ── Query: pending rollback frame (legacy — use kn_get_replay_depth) */
@@ -957,7 +1044,10 @@ uint32_t kn_game_state_hash(int frame) {
  * Hashes ONLY specific gameplay-relevant RDRAM addresses from a saved
  * state in the ring buffer: damage %, stocks, timer, RNG seeds, screen
  * state, character IDs. Immune to non-deterministic audio/video/heap
- * noise. This is the authoritative desync detection hash for rollback. */
+ * noise. This is the authoritative desync detection hash for rollback.
+ *
+ * ROM-SPECIFIC: These addresses are for SSB64 US v1.0 / Smash Remix.
+ * Other ROMs would need their own address tables. */
 
 typedef struct {
     uint32_t rdram_offset;

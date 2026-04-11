@@ -3828,7 +3828,7 @@
       const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
       const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
       const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67; // +1 frame safety
-      ownDelay = Math.min(15, Math.max(2, Math.ceil(effectiveMs / 16.67)));
+      ownDelay = Math.min(7, Math.max(2, Math.ceil(effectiveMs / 16.67)));
       _syncLog(
         `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +
           `IQR=[${q1.toFixed(1)},${q3.toFixed(1)}] samples=${sorted.length} ` +
@@ -3854,7 +3854,7 @@
           const fMax = pFiltered[pFiltered.length - 1] || pSorted[pSorted.length - 1];
           const pJitter = Math.max(fMax - fMedian, 0);
           const peerMs = fMedian / 2 + pJitter + 16.67;
-          const peerDelay = Math.min(15, Math.max(2, Math.ceil(peerMs / 16.67)));
+          const peerDelay = Math.min(7, Math.max(2, Math.ceil(peerMs / 16.67)));
           if (peerDelay > maxDelay) maxDelay = peerDelay;
         }
       }
@@ -3918,27 +3918,25 @@
       }
     }
 
-    // Soft-reset the core before loading state — clears internal state
-    // (JIT caches, hardware registers, plugin state) that loadState()
-    // alone doesn't overwrite. Without this, the host retains residual
-    // state from its boot frames, causing host-only desync.
+    // Enter manual mode FIRST — stop free frames before any state load.
+    // Previously, free frames could run between getState/loadState/enterManualMode,
+    // advancing emulator state and causing intermittent boot desync.
+    enterManualMode();
+
+    // Soft-reset the core — clears internal state (JIT caches, hardware
+    // registers, plugin state) that loadState() alone doesn't overwrite.
     const readyMod = gm.Module;
     if (readyMod?._retro_reset) {
       readyMod._retro_reset();
       _syncLog('core soft-reset before state load');
     }
 
-    // First loadState: fully restores CPU + RAM (needs main loop active)
+    // Load state twice — first load restores CPU + RAM, second load
+    // catches any residual drift from the reset/load sequence.
     gm.loadState(_guestStateBytes);
-
-    // Enter manual mode — captures rAF, stops free frames
-    enterManualMode();
-
-    // Second loadState: fixes any free-frame drift between first load
-    // and enterManualMode. Both sides now have identical state.
     gm.loadState(_guestStateBytes);
     _guestStateBytes = null;
-    _syncLog('double-loaded state (CPU + free-frame fix)');
+    _syncLog('state loaded (manual mode, post-reset, double-load)');
 
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
@@ -5012,9 +5010,6 @@
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
       const doRollbackInit = (effectiveDelay) => {
-        // Mobile peers: keep rollback but with longer stall tolerance.
-        // The unreliable DC occasionally drops packets on iOS — rollback
-        // should predict through them, not freeze.
         if (!detMod?._kn_rollback_init) {
           _useCRollback = false;
           return;
@@ -5061,6 +5056,25 @@
         _rbPendingPostRollbackHash = false;
         _rollbackStallActive = false;
         _rollbackStallStart = 0;
+
+        // C-level RNG sync + frame counter preservation.
+        // Must be inside doRollbackInit (not after) so deferred guest init
+        // also runs this — the outer code checks _useCRollback which is
+        // false until doRollbackInit sets it.
+        const rngMod = window.EJS_emulator?.gameManager?.Module;
+        if (rngMod) _initRNGSync(rngMod);
+        if (_rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
+          const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
+          const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
+          rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
+          _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
+        }
+        // Configure non-tainted RDRAM preservation — must be AFTER
+        // kn_rollback_init which sets up the taint bitmap.
+        if (_rdramBase && rngMod?._kn_set_rdram_preserve) {
+          rngMod._kn_set_rdram_preserve(_rdramBase);
+          _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
+        }
       };
       window._rbDoInit = doRollbackInit;
 
@@ -5148,17 +5162,11 @@
 
     initAudioPlayback();
 
-    // Enable per-frame RNG seed sync for Smash Remix netplay.
-    {
+    // JS-level RNG sync for non-rollback mode (lockstep).
+    // For rollback mode, RNG sync is configured inside doRollbackInit above.
+    if (!_useCRollback) {
       const rngMod = window.EJS_emulator?.gameManager?.Module;
       if (rngMod) _initRNGSync(rngMod);
-      // Configure C-level replay to do RNG sync too (same seed + RDRAM pointers)
-      if (_useCRollback && _rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
-        const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
-        const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
-        rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
-        _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
-      }
     }
 
     // Only install diagnostic hooks when explicitly enabled — they add
@@ -5177,7 +5185,7 @@
           : 'unknown';
     const isMobile = /Mobile|Android|iPhone|iPad/.test(ua);
     _syncLog(
-      `DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} romHash=${_config?.romHash?.substring(0, 16) || 'none'} ua=${ua.substring(0, 120)}`,
+      `DIAG-START slot=${_playerSlot} engine=${engine} mobile=${isMobile} forkedCore=${_hasForkedCore} romHash=${_config?.romHash?.substring(0, 16) || 'none'} coreHash=${window._knCoreHash || 'unknown'} ua=${ua.substring(0, 120)}`,
     );
 
     const activePeers = getActivePeers();
