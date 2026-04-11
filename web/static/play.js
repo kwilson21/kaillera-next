@@ -2088,12 +2088,14 @@
       // Restore OpenAL AudioContexts — undo lockstep's resume() monkey-patch
       // and unsuspend them so streaming's captureEmulatorAudio() finds live contexts.
       const proto = AudioContext.prototype || webkitAudioContext.prototype;
+      const suspendedCtxs = [];
       if (mod.AL?.contexts) {
         for (const ctx of Object.values(mod.AL.contexts)) {
           if (ctx?.audioCtx && ctx.audioCtx.state !== 'closed') {
             try {
               if (proto.resume) ctx.audioCtx.resume = proto.resume;
-              ctx.audioCtx.resume();
+              ctx.audioCtx.resume().catch(() => {});
+              if (ctx.audioCtx.state !== 'running') suspendedCtxs.push(ctx.audioCtx);
             } catch (_) {}
           }
         }
@@ -2102,8 +2104,26 @@
       // Resume SDL2 AudioContext if present
       if (mod.SDL2?.audioContext && mod.SDL2.audioContext.state !== 'closed') {
         try {
-          mod.SDL2.audioContext.resume();
+          mod.SDL2.audioContext.resume().catch(() => {});
+          if (mod.SDL2.audioContext.state !== 'running') suspendedCtxs.push(mod.SDL2.audioContext);
         } catch (_) {}
+      }
+
+      // Retry suspended contexts on next user gesture (autoplay policy)
+      if (suspendedCtxs.length) {
+        const retryResume = () => {
+          const still = suspendedCtxs.filter((c) => c.state !== 'running' && c.state !== 'closed');
+          if (!still.length) {
+            document.removeEventListener('click', retryResume, true);
+            document.removeEventListener('keydown', retryResume, true);
+            document.removeEventListener('touchstart', retryResume, true);
+            return;
+          }
+          for (const c of still) c.resume().catch(() => {});
+        };
+        document.addEventListener('click', retryResume, true);
+        document.addEventListener('keydown', retryResume, true);
+        document.addEventListener('touchstart', retryResume, true);
       }
     }
 
