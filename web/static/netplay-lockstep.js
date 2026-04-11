@@ -87,17 +87,20 @@
  *
  *   ROLLBACK — each tick at frame N:
  *     1-3. Same as Classic (pacing, read input, send to peers)
- *     4. kn_pre_tick(): C engine saves state to ring buffer, stores local
+ *     4. Drain _pendingCInputs queue: WebRTC callbacks push remote inputs
+ *        to a JS array; they are fed to the C engine (kn_feed_input) here
+ *        at the tick boundary, guaranteeing a consistent input snapshot.
+ *     5. kn_pre_tick(): C engine saves state to ring buffer, stores local
  *        input, predicts missing remote input (last-known). If a pending
- *        misprediction was detected by kn_feed_input(), restores state and
+ *        misprediction was detected by the drain above, restores state and
  *        replays 1 frame via C retro_run (amortized — catches up over
  *        multiple ticks instead of burst-replaying all at once).
  *        Returns 2 if catching up (JS steps emulator), 0 for normal.
- *     5. Read inputs from C ring buffer via kn_get_input(), write to WASM
+ *     6. Read inputs from C ring buffer via kn_get_input(), write to WASM
  *        via writeInputToMemory (same path as Classic)
- *     6. Step one frame via EJS runner, feed audio
- *     7. kn_post_tick(): advance C frame counter
- *     8. After replay catch-up completes, hash RDRAM and broadcast to
+ *     7. Step one frame via EJS runner, feed audio
+ *     8. kn_post_tick(): advance C frame counter
+ *     9. After replay catch-up completes, hash RDRAM and broadcast to
  *        peer for determinism verification (rb-check).
  *
  * ── Frame Pacing (Proportional Throttle) ────────────────────────────────
@@ -476,6 +479,22 @@
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
   const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
   const DC_ACK_STALE_MS = 500; // ms without ack advance before fallback
+  // JS-side input queue: WebRTC callbacks push here instead of calling
+  // kn_feed_input directly. The queue is drained at the start of each
+  // tick (before kn_pre_tick) so the C engine sees a consistent input
+  // snapshot per frame — no race between async DC delivery and sync tick.
+  const _pendingCInputs = []; // {slot, frame, buttons, lx, ly, cx, cy}
+  // ── Freeze detection state ─────────────────────────────────────────
+  // Lightweight per-frame sampling to detect when display, input, or
+  // audio stop working — the "emulator froze" scenario where the tick
+  // loop keeps running but the player sees/hears nothing.
+  let _renderLastHash = 0; // last canvas pixel hash (from _captureCanvasHash)
+  let _renderLastChangeFrame = 0; // frame at which canvas hash last changed
+  let _renderStallLogged = false; // one-shot: don't spam RENDER-STALL
+  let _inputLastNonZeroFrame = -1; // frame at which local input was last non-zero
+  let _inputEverNonZero = false; // true once local input has been non-zero
+  let _inputDeadLogged = false; // one-shot for INPUT-DEAD
+  let _audioLastState = ''; // last audioContext.state we logged
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -2559,10 +2578,10 @@
     _lastKnownInput[peer.slot] = recvInput;
     _auditRecordRemote(peer.slot, recvFrame, recvInput);
 
-    // P2 redundancy: feed piggy-backed prior frames ONLY if we don't already
-    // have a real input for that frame. Without this guard, every packet
-    // carrying 8 frames of history re-runs kn_feed_input 8 times — and for
-    // frames we already have, each call potentially re-triggers the
+    // P2 redundancy: queue piggy-backed prior frames ONLY if we don't
+    // already have a real input for that frame. Without this guard, every
+    // packet carrying 8 frames of history queues 8 kn_feed_input calls —
+    // and for frames we already have, each call re-triggers the
     // misprediction comparison against a stale ring entry, causing the
     // cascading rollbacks we observed in the 2026-04-07 field test.
     //
@@ -2571,7 +2590,6 @@
     // Otherwise it's redundant in the wasted-work sense, not the
     // error-correction sense.
     if (decoded.redundant && decoded.redundant.length > 0) {
-      const cMod = window.EJS_emulator?.gameManager?.Module;
       for (const r of decoded.redundant) {
         if (r.frame < 0) continue;
         // Already have real input for this frame? Skip — just a dup.
@@ -2586,26 +2604,22 @@
           cx: r.cx,
           cy: r.cy,
         };
-        if (_useCRollback && cMod?._kn_feed_input) {
-          cMod._kn_feed_input(peer.slot, r.frame, r.buttons, r.lx, r.ly, r.cx, r.cy);
+        if (_useCRollback) {
+          _pendingCInputs.push({
+            slot: peer.slot, frame: r.frame,
+            buttons: r.buttons, lx: r.lx, ly: r.ly, cx: r.cx, cy: r.cy,
+          });
         }
       }
     }
 
-    // Feed to C-level rollback engine for prediction correction
+    // Queue for C-level rollback engine — drained at tick boundary
     if (_useCRollback) {
-      const cMod = window.EJS_emulator?.gameManager?.Module;
-      if (cMod?._kn_feed_input) {
-        cMod._kn_feed_input(
-          peer.slot,
-          recvFrame,
-          recvInput.buttons,
-          recvInput.lx,
-          recvInput.ly,
-          recvInput.cx,
-          recvInput.cy,
-        );
-      }
+      _pendingCInputs.push({
+        slot: peer.slot, frame: recvFrame,
+        buttons: recvInput.buttons, lx: recvInput.lx, ly: recvInput.ly,
+        cx: recvInput.cx, cy: recvInput.cy,
+      });
     }
     if (!_peerInputStarted[peer.slot]) {
       _peerInputStarted[peer.slot] = true;
@@ -5921,6 +5935,19 @@
         }
       }
 
+      // ── Drain queued remote inputs into C engine ──────────────────────
+      // WebRTC callbacks push to _pendingCInputs instead of calling
+      // kn_feed_input directly. Draining here — at the tick boundary,
+      // before kn_pre_tick — guarantees the C engine sees a consistent
+      // input snapshot per frame. No race between async DC delivery and
+      // the sync prediction/serialize logic inside kn_pre_tick.
+      if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
+        for (const qi of _pendingCInputs) {
+          tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
+        }
+        _pendingCInputs.length = 0;
+      }
+
       // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
@@ -6065,8 +6092,9 @@
       const _tTotal = performance.now();
 
       // ── P4: silent-desync detection (LOG-ONLY) ──
-      // kn_feed_input increments failed_rollbacks when a misprediction targets
-      // a frame outside the rollback ring (too old OR state overwritten). This
+      // kn_feed_input (drained at tick boundary above) increments
+      // failed_rollbacks when a misprediction targets a frame outside the
+      // rollback ring (too old OR state overwritten). This
       // is a silent desync: the correction can't be applied. We log so the
       // session record captures it, but we deliberately do NOT trigger a
       // mid-game resync — snaps feel worse than gradual divergence and break
@@ -6097,6 +6125,61 @@
         const lag = _frameNum - confirmed;
         if (peerInfo.length > 0) {
           _syncLog(`INPUT-ACK f=${_frameNum} confirmed=${confirmed} lag=${lag} ${peerInfo.join(' ')}`);
+        }
+      }
+
+      // ── Freeze detection (every 60 frames) ───────────────────────────
+      // Three lightweight checks that fire in the existing periodic block.
+      // Together they detect the "emulator froze" scenario: tick loop runs
+      // but the player sees a frozen screen, hears nothing, and input stops.
+      if (_frameNum % 60 === 0 && _frameNum > 300) {
+        // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames
+        const renderHash = _captureCanvasHash();
+        if (renderHash !== 0) {
+          if (renderHash !== _renderLastHash) {
+            _renderLastHash = renderHash;
+            _renderLastChangeFrame = _frameNum;
+            _renderStallLogged = false;
+          } else if (_frameNum - _renderLastChangeFrame >= 180 && !_renderStallLogged) {
+            _syncLog(
+              `RENDER-STALL start=${_renderLastChangeFrame} cur=${_frameNum} ` +
+              `unchanged=${_frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
+            );
+            _renderStallLogged = true;
+          }
+        }
+
+        // 2. INPUT-DEAD: local input all-zero for 300+ frames after being non-zero
+        const isNonZero = localInput.buttons !== 0 || localInput.lx !== 0 ||
+          localInput.ly !== 0 || localInput.cx !== 0 || localInput.cy !== 0;
+        if (isNonZero) {
+          _inputLastNonZeroFrame = _frameNum;
+          _inputEverNonZero = true;
+          _inputDeadLogged = false;
+        }
+        if (_inputEverNonZero && !isNonZero &&
+            _inputLastNonZeroFrame >= 0 &&
+            _frameNum - _inputLastNonZeroFrame >= 300 && !_inputDeadLogged) {
+          const hasFocus = document.hasFocus();
+          const gpCount = navigator.getGamepads?.()?.filter(Boolean)?.length ?? 0;
+          _syncLog(
+            `INPUT-DEAD slot=${_playerSlot} zeroSince=${_inputLastNonZeroFrame} ` +
+            `cur=${_frameNum} gap=${_frameNum - _inputLastNonZeroFrame}f ` +
+            `focus=${hasFocus} gamepads=${gpCount}`,
+          );
+          _inputDeadLogged = true;
+        }
+
+        // 3. AUDIO-STALL: audioContext not running during active gameplay
+        const actx = _audioCtx;
+        const aState = actx?.state ?? 'none';
+        if (aState !== _audioLastState) {
+          if (aState !== 'running' && _audioLastState === 'running') {
+            _syncLog(`AUDIO-STALL state=${aState} prev=${_audioLastState} f=${_frameNum}`);
+          } else if (aState === 'running' && _audioLastState !== '' && _audioLastState !== 'running') {
+            _syncLog(`AUDIO-RESUME state=${aState} prev=${_audioLastState} f=${_frameNum}`);
+          }
+          _audioLastState = aState;
         }
       }
 
