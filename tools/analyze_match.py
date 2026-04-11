@@ -760,6 +760,7 @@ def query_deadlock_audit_events(df: pl.DataFrame) -> None:
         ("LATE-JOIN-TIMEOUT", "MF5 late-join deadline", "§MF5"),
         ("WORKER-STALL", "MF5 worker timeout", "§MF5"),
         ("TICK-STUCK", "MF6 tick watchdog", "§MF6"),
+        ("VERSION-MISMATCH", "cache-bust version guard", "version-guard.js"),
     ]
 
     any_fired = False
@@ -805,6 +806,38 @@ def query_deadlock_audit_events(df: pl.DataFrame) -> None:
             # First few events inline
             for row in matches.head(3).iter_rows(named=True):
                 print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+            continue
+
+        # VERSION-MISMATCH: serious signal — client was running stale JS.
+        # Always surface every event and mark the session as suspect because
+        # any analysis assumptions may be wrong if code was old.
+        if event_name == "VERSION-MISMATCH":
+            print("    !! STALE CLIENT CODE DETECTED — slot(s) below were running")
+            print("    !! an older netplay-lockstep.js than the server was shipping.")
+            print("    !! Any desync/freeze analysis for this match is suspect;")
+            print("    !! cross-reference page/server tags before drawing conclusions.")
+            pages: dict[str, int] = defaultdict(int)
+            servers: dict[str, int] = defaultdict(int)
+            actions: dict[str, int] = defaultdict(int)
+            for row in matches.iter_rows(named=True):
+                msg = row.get("msg", "") or ""
+                pm = re.search(r"page=(\S+)", msg)
+                sm = re.search(r"server=(\S+)", msg)
+                am = re.search(r"action=(\S+)", msg)
+                if pm:
+                    pages[pm.group(1)] += 1
+                if sm:
+                    servers[sm.group(1)] += 1
+                if am:
+                    actions[am.group(1)] += 1
+            if pages:
+                print(f"    page versions seen: {dict(pages)}")
+            if servers:
+                print(f"    server versions seen: {dict(servers)}")
+            if actions:
+                print(f"    actions: {dict(actions)}")
+            for row in matches.head(5).iter_rows(named=True):
+                print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
             continue
 
         # Default: show the first 3 events with full msg
