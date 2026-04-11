@@ -404,6 +404,10 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
+  // I1: _rbPendingInit fallback deadline (MF2). If the host's
+  // rb-delay DC broadcast never arrives, the guest falls back to a
+  // locally-computed delay instead of freezing forever.
+  const RB_INIT_TIMEOUT_MS = 3000;
   // Frames to wait for peers' first input before giving up on boot sync.
   // During this window, connected peers are treated as input peers even
   // before their first packet arrives — prevents host from advancing
@@ -2983,6 +2987,7 @@
             if (window._rbPendingInit && window._rbDoInit) {
               // Deferred init was waiting for this. Run it now.
               window._rbPendingInit = false;
+              window._rbPendingInitAt = 0;
               DELAY_FRAMES = hostDelay;
               _syncLog(`rb-delay: deferred init triggered with host delay=${hostDelay}`);
               window._rbDoInit(hostDelay);
@@ -5221,7 +5226,12 @@
             DELAY_FRAMES = window._rbHostDelay;
             doRollbackInit(window._rbHostDelay);
           } else {
+            // I1 (MF2): record the wall-clock start of the pending
+            // state so tick() can fire RB-INIT-TIMEOUT if the host's
+            // rb-delay broadcast never arrives (DC died mid-send,
+            // host crashed, etc).
             window._rbPendingInit = true;
+            window._rbPendingInitAt = performance.now();
             _syncLog(`C-ROLLBACK deferred: waiting for host rb-delay broadcast (own delay=${DELAY_FRAMES})`);
           }
         }
@@ -5660,7 +5670,35 @@
     // 0..N in pure-lockstep mode, then the C engine would init at frame 0
     // (its internal counter), and JS would jump backwards from frame N to
     // frame 0 — corrupting input ring frame tags and the rollback ring.
-    if (window._rbPendingInit) return;
+    //
+    // I1 (MF2): the stall is bounded by RB_INIT_TIMEOUT_MS. If the
+    // host's rb-delay DC broadcast never arrives (DC died before
+    // send, host crashed, message lost), fall back to a locally
+    // computed delay so the guest does not freeze forever. The next
+    // hash mismatch → resync converges both peers if the fallback
+    // delay differs from what the host would have broadcast.
+    // See docs/netplay-invariants.md §I1 and spec §MF2.
+    if (window._rbPendingInit) {
+      const _rbPendingStart = window._rbPendingInitAt || 0;
+      if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
+        const _rbFallbackDelay = DELAY_FRAMES > 0 ? DELAY_FRAMES : 3;
+        _syncLog(
+          `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
+            `host rb-delay never arrived, falling back to local delay=${_rbFallbackDelay}`,
+        );
+        window._rbPendingInit = false;
+        window._rbPendingInitAt = 0;
+        if (window._rbDoInit) {
+          try {
+            window._rbDoInit(_rbFallbackDelay);
+          } catch (e) {
+            _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
+          }
+        }
+      } else {
+        return;
+      }
+    }
 
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
