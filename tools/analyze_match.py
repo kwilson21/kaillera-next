@@ -138,6 +138,26 @@ def _list_sessions_for_match(base: str, key: str, match_id: str) -> list[dict]:
     return sessions
 
 
+def _list_sessions_for_room(base: str, key: str, room: str) -> list[dict]:
+    """Find all sessions for a given room code. Returns the most recent match
+    in that room (a single room may have multiple matches over time)."""
+    r = requests.get(
+        f"{base}/admin/api/session-logs?days=7&limit=200",
+        headers={"X-Admin-Key": key},
+        verify=False,
+        timeout=10,
+    )
+    r.raise_for_status()
+    data = r.json()
+    room_sessions = [e for e in data.get("entries", []) if e.get("room") == room]
+    if not room_sessions:
+        return []
+    # Pick the most recent match_id from this room
+    room_sessions.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
+    latest_match = room_sessions[0].get("match_id")
+    return [e for e in room_sessions if e.get("match_id") == latest_match]
+
+
 def _download_jsonl(base: str, key: str, session_id: int, dest: Path) -> int:
     """Stream the JSONL export to a local file. Returns line count."""
     r = requests.get(
@@ -625,6 +645,92 @@ def query_pacing(df: pl.DataFrame) -> None:
 # ── 8. Freeze detection ─────────────────────────────────────────────────────
 
 
+def query_boot_deadlock(df: pl.DataFrame) -> None:
+    """Detect BOOT-LOCKSTEP deadlock: frame counter stuck in boot phase
+    (frame < 300) after a WebRTC peer disconnect, with emulation never
+    resuming. Signature of this pattern:
+      - Last BOOT-LOCKSTEP log is < 300
+      - Followed by peer disconnect events
+      - Frame counter has a long stuck period (many log entries, same f)
+      - Session still has many log entries after the stuck point (wall
+        time continues) but no frame advancement
+    """
+    _print_section("8a. BOOT-LOCKSTEP DEADLOCK DETECTION")
+    if "msg" not in df.columns or "f" not in df.columns:
+        print("(missing msg/f columns)")
+        return
+
+    found_deadlock = False
+    slots = sorted(df.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list())
+
+    for slot_val in slots:
+        slot_df = df.filter(pl.col("slot") == slot_val).sort("t", nulls_last=True)
+        if slot_df.height == 0:
+            continue
+
+        # Find last BOOT-LOCKSTEP entry for this slot
+        boot_entries = slot_df.filter(pl.col("msg").str.contains("BOOT-LOCKSTEP"))
+        if boot_entries.height == 0:
+            continue
+        last_boot_f = boot_entries.get_column("f").max()
+        if last_boot_f is None or last_boot_f >= 300:
+            continue  # Not in boot phase or converged past it
+
+        # Check if there are peer disconnects after boot phase
+        disconnects = slot_df.filter(
+            pl.col("msg").str.contains("connection-state: disconnected")
+            | pl.col("msg").str.contains("DC died")
+            | pl.col("msg").str.contains("disconnect grace expired")
+        )
+        if disconnects.height == 0:
+            continue
+
+        # Find the maximum frame this slot ever reached
+        frames = slot_df.filter(pl.col("f").is_not_null()).get_column("f")
+        if frames.len() == 0:
+            continue
+        max_frame = frames.max()
+        if max_frame >= 300:
+            continue  # Advanced past boot phase — not a boot deadlock
+
+        # Count log entries at max_frame (stuck-frame run length)
+        stuck_entries = slot_df.filter(pl.col("f") == max_frame)
+        stuck_count = stuck_entries.height
+
+        # Wall-time span of the stuck period (from first entry at max_frame to last)
+        times = stuck_entries.get_column("t").drop_nulls()
+        if times.len() >= 2:
+            wall_span = times.max() - times.min()
+        else:
+            wall_span = 0
+
+        # Deadlock criteria: stuck at boot frame with >10 subsequent log entries
+        # and >5 seconds of wall time at that frame
+        if stuck_count >= 10 and wall_span >= 5000:
+            found_deadlock = True
+            print(
+                f"  DEADLOCK slot={slot_val}: stuck at f={max_frame} (boot phase, <300) "
+                f"for {wall_span:.0f}ms across {stuck_count} log entries"
+            )
+            print(f"    Last BOOT-LOCKSTEP: f={boot_entries.get_column('f').max()}")
+            print(f"    Disconnect events: {disconnects.height}")
+            first_disc = disconnects.head(1)
+            if first_disc.height > 0:
+                row = first_disc.row(0, named=True)
+                print(f"    First disconnect: f={row.get('f')} {row['msg'][:150]}")
+            # Show what kept the slot busy while stuck
+            stuck_event_types: dict[str, int] = defaultdict(int)
+            for m in stuck_entries.get_column("msg").to_list():
+                match = re.match(r"^(\[?[A-Z\-a-z]+\]?(?:\s+[A-Za-z\-]+)?)", m)
+                if match:
+                    stuck_event_types[match.group(1)] += 1
+            top_activity = sorted(stuck_event_types.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            print(f"    Activity while stuck: {', '.join(f'{k}={v}' for k, v in top_activity)}")
+
+    if not found_deadlock:
+        print("  No BOOT-LOCKSTEP deadlock detected.")
+
+
 def query_freeze_detection(df: pl.DataFrame) -> None:
     _print_section("8. FREEZE DETECTION")
     if "msg" not in df.columns:
@@ -890,7 +996,8 @@ def query_c_debug_highlights(df: pl.DataFrame) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("match_id", help="Match ID prefix (8+ chars) or full UUID")
+    p.add_argument("target", nargs="?", help="Match ID prefix (8+ chars), full UUID, or room code (use --room)")
+    p.add_argument("--room", action="store_true", help="Target is a room code instead of a match_id")
     p.add_argument("--base", default="https://localhost:27888", help="Server base URL")
     p.add_argument("--key", default=os.environ.get("KN_ADMIN_KEY", "1234"), help="Admin key")
     p.add_argument(
@@ -900,11 +1007,25 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    print(f"[analyze] looking up sessions for match {args.match_id} on {args.base}")
-    sessions = _list_sessions_for_match(args.base, args.key, args.match_id)
-    if not sessions:
-        print(f"No session_logs found for match {args.match_id}", file=sys.stderr)
+    if not args.target:
+        print("Error: provide a match_id prefix or --room <code>", file=sys.stderr)
         sys.exit(2)
+
+    if args.room:
+        print(f"[analyze] looking up sessions for room {args.target} on {args.base}")
+        sessions = _list_sessions_for_room(args.base, args.key, args.target)
+        if not sessions:
+            print(f"No session_logs found for room {args.target}", file=sys.stderr)
+            sys.exit(2)
+        args.match_id = sessions[0].get("match_id", "")
+        print(f"[analyze] resolved to match {args.match_id[:8]}")
+    else:
+        args.match_id = args.target
+        print(f"[analyze] looking up sessions for match {args.match_id} on {args.base}")
+        sessions = _list_sessions_for_match(args.base, args.key, args.match_id)
+        if not sessions:
+            print(f"No session_logs found for match {args.match_id}", file=sys.stderr)
+            sys.exit(2)
     print(f"[analyze] found {len(sessions)} session(s):")
     for s in sessions:
         print(f"  id={s['id']} slot={s['slot']} room={s.get('room')} updated={s.get('updated_at')}")
@@ -946,6 +1067,7 @@ def main() -> None:
     query_performance(df)
     query_network_health(df)
     query_pacing(df)
+    query_boot_deadlock(df)
     query_freeze_detection(df)
     query_session_lifecycle(client_events)
     query_input_analysis(df)
