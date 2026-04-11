@@ -739,6 +739,82 @@ def query_boot_deadlock(df: pl.DataFrame) -> None:
         print("  No BOOT-LOCKSTEP deadlock detected.")
 
 
+def query_deadlock_audit_events(df: pl.DataFrame) -> None:
+    """Detect the new recovery events introduced by the netplay
+    deadlock audit (MF1-MF6). Every event here is a signal that
+    a specific fix caught a real stall.
+
+    See docs/superpowers/specs/2026-04-11-netplay-deadlock-audit.md.
+    """
+    _print_section("8d. DEADLOCK AUDIT RECOVERY EVENTS")
+    if "msg" not in df.columns:
+        print("(missing msg column)")
+        return
+
+    # (event_name, human_label, spec_section) — order matters for readability
+    events = [
+        ("PEER-RESET", "MF1 resetPeerState", "§MF1"),
+        ("RB-INIT-TIMEOUT", "MF2 _rbPendingInit fallback", "§MF2"),
+        ("COORD-SYNC-TIMEOUT", "MF3 coord-sync deadline", "§MF3"),
+        ("INPUT-STALL-RESYNC", "MF4 input-stall resync", "§MF4"),
+        ("LATE-JOIN-TIMEOUT", "MF5 late-join deadline", "§MF5"),
+        ("WORKER-STALL", "MF5 worker timeout", "§MF5"),
+        ("TICK-STUCK", "MF6 tick watchdog", "§MF6"),
+    ]
+
+    any_fired = False
+    for event_name, label, section in events:
+        matches = df.filter(pl.col("msg").str.contains(event_name))
+        if matches.height == 0:
+            continue
+        any_fired = True
+        # TICK-STUCK has warn/error severity — break out separately
+        if event_name == "TICK-STUCK":
+            warn = matches.filter(pl.col("msg").str.contains("severity=warn"))
+            err = matches.filter(pl.col("msg").str.contains("severity=error"))
+            print(f"  {event_name} ({label} {section}): warn={warn.height} error={err.height}")
+            # For error-level events, extract inferred cause to surface root-cause clustering
+            if err.height > 0:
+                causes: dict[str, int] = defaultdict(int)
+                for row in err.iter_rows(named=True):
+                    m = re.search(r"cause=([a-z0-9\-_]+)", row.get("msg", "") or "")
+                    if m:
+                        causes[m.group(1)] += 1
+                if causes:
+                    top = sorted(causes.items(), key=lambda kv: kv[1], reverse=True)
+                    print(f"    cause breakdown: {', '.join(f'{k}={v}' for k, v in top)}")
+            # Show first 3 of each severity
+            for row in err.head(3).iter_rows(named=True):
+                print(f"    ERROR slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+            for row in warn.head(3).iter_rows(named=True):
+                print(f"    warn  slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+            continue
+
+        print(f"  {event_name} ({label} {section}): {matches.height} events")
+
+        # For PEER-RESET, group by reason so we can see disconnect-path attribution
+        if event_name == "PEER-RESET":
+            reasons: dict[str, int] = defaultdict(int)
+            for row in matches.iter_rows(named=True):
+                m = re.search(r"reason=(\S+)", row.get("msg", "") or "")
+                if m:
+                    reasons[m.group(1)] += 1
+            if reasons:
+                top = sorted(reasons.items(), key=lambda kv: kv[1], reverse=True)
+                print(f"    reason breakdown: {', '.join(f'{k}={v}' for k, v in top)}")
+            # First few events inline
+            for row in matches.head(3).iter_rows(named=True):
+                print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+            continue
+
+        # Default: show the first 3 events with full msg
+        for row in matches.head(3).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+
+    if not any_fired:
+        print("  No deadlock audit recovery events — either clean session or fixes not triggered.")
+
+
 def query_freeze_detection(df: pl.DataFrame) -> None:
     _print_section("8. FREEZE DETECTION")
     if "msg" not in df.columns:
@@ -1127,6 +1203,7 @@ def main() -> None:
     query_network_health(df)
     query_pacing(df)
     query_boot_deadlock(df)
+    query_deadlock_audit_events(df)
     query_freeze_detection(df)
     query_session_lifecycle(client_events)
     query_input_analysis(df)
