@@ -157,6 +157,24 @@ All events go through the default Socket.IO namespace (`/`).
   (kn_set_deterministic, kn_set_frame_time) for lockstep sync. Falls back to stock
   CDN core with JS-level timing shim.
 
+## Netplay invariants
+
+Two codified invariants govern the netplay tick loop. See
+[docs/netplay-invariants.md](docs/netplay-invariants.md):
+
+- **I1 — No stall without a timeout:** every tick-loop early-return that
+  waits on external events has a wall-clock deadline and a recovery
+  action. Every deadline site is listed in the invariants doc.
+- **I2 — Reconnect starts clean:** all per-peer cleanup routes through
+  `resetPeerState(slot, reason)`. Adding per-peer state without updating
+  `resetPeerState` is a review-level violation.
+
+A detection-only tick watchdog (MF6) logs `TICK-STUCK` for any residual
+stall past I1/I2. **It takes no recovery action by design** — its only
+job is to surface bugs we haven't found yet. Auto-recovery was
+considered and rejected; see the rejected-alternatives section in the
+invariants doc before proposing any watchdog that *acts* on stalls.
+
 ## Versioning
 
 - **Auto-versioning** via post-commit hook (`scripts/bump-version.sh`)
