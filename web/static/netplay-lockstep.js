@@ -5898,6 +5898,17 @@
         // Pre-frame setup (reset audio, RNG sync) must match the normal path
         // exactly — setup_frame() was removed from C to avoid double-calling
         // normalize/reset which caused progressive state divergence.
+        //
+        // CRITICAL: sync _frameNum with C's rb.frame BEFORE stepOneFrame().
+        // On the first replay frame of a rollback, _frameNum is still the
+        // pre-rollback value while C has already rewound rb.frame to the
+        // rollback target. stepOneFrame() uses _frameNum for frame time
+        // and event queue normalization. If _frameNum is wrong, each peer
+        // applies a DIFFERENT wrong frame time to the same logical frame
+        // (because each detects the misprediction at a different absolute
+        // frame), causing event queue divergence that never recovers.
+        _frameNum = tickMod._kn_get_frame();
+        KNState.frameNum = _frameNum;
         if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
         _syncRNGSeed(tickMod, _frameNum);
         _inDeterministicStep = true;
