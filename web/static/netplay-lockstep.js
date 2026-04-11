@@ -515,6 +515,12 @@
   let _tickStuckLastAdvanceAt = 0;
   let _tickStuckWarnFired = false;
   let _tickStuckErrorFired = false;
+  // Module-scope flag toggled around stepOneFrame() so the watchdog
+  // can distinguish "JS-level stall with no known flag set" from
+  // "WASM call itself is frozen". If TICK-STUCK fires while this is
+  // true, the emulator thread is blocked inside the WASM step and
+  // we have a WASM-internal problem rather than a JS deadlock.
+  let _wasmStepActive = false;
   const TICK_STUCK_WARN_MS = 2000;
   const TICK_STUCK_ERROR_MS = 5000;
   // BOOT-LOCKSTEP timeout tracking: if we're stalled at the same apply frame
@@ -1389,19 +1395,25 @@
 
     // Inferred cause: pick the most likely culprit flag so the log
     // line is immediately actionable without needing to parse the
-    // full peer snapshot.
+    // full peer snapshot. Order matters — we check the most specific
+    // causes first.
     let cause = 'unknown';
-    if (window._rbPendingInit) cause = 'rb-pending-init';
+    if (_wasmStepActive) cause = 'wasm-step-frozen';
+    else if (window._rbPendingInit) cause = 'rb-pending-init';
     else if (_awaitingResync) cause = 'awaiting-resync';
     else if (_syncTargetFrame > 0) cause = `coord-sync-waiting-for-f${_syncTargetFrame}`;
     else if (_bootStallFrame >= 0) cause = `boot-lockstep-f${_bootStallFrame}`;
     else if (_stallStart > 0) cause = 'input-stall';
+    else if (_rollbackStallActive) cause = 'rollback-stall';
+    else if (_framePacingActive) cause = 'pacing-throttle';
 
     _syncLog(
       `TICK-STUCK severity=${severity} f=${_frameNum} stuckMs=${Math.round(stuckMs)} ` +
         `cause=${cause} rbPending=${!!window._rbPendingInit} ` +
         `awaitingResync=${_awaitingResync} syncTargetFrame=${_syncTargetFrame} ` +
         `bootStallFrame=${_bootStallFrame} scheduledSyncs=${_scheduledSyncRequests.length} ` +
+        `pacing=${_framePacingActive} rbStall=${_rollbackStallActive} ` +
+        `wasmStep=${_wasmStepActive} stallStart=${_stallStart} ` +
         `peers=${JSON.stringify(peerSnap)}`,
     );
   };
@@ -4976,6 +4988,13 @@
 
   const stepOneFrame = () => {
     if (!_pendingRunner) return false;
+    // MF6: mark WASM step active so TICK-STUCK watchdog can
+    // attribute a stall to the WASM side if the frame counter is
+    // stuck while this flag is true. Cleared in the return path
+    // below (no try/finally — the runner is synchronous; if it
+    // throws, the exception propagates and the tick interval keeps
+    // firing new ticks which will clear the flag on re-entry).
+    _wasmStepActive = true;
     const runner = _pendingRunner;
     _pendingRunner = null;
 
@@ -5119,6 +5138,7 @@
 
     // Force GL composite via real rAF no-op
     APISandbox.nativeRAF(() => {});
+    _wasmStepActive = false;
     return true;
   };
 
