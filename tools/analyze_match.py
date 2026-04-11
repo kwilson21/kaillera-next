@@ -746,6 +746,58 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
         return
 
     found_any = False
+    slots = sorted(df.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list())
+
+    # Audio death — extended audio-empty or audio-silent runs
+    audio_empty = df.filter(pl.col("msg").str.contains("audio-empty f="))
+    audio_silent = df.filter(pl.col("msg").str.contains("audio-silent:"))
+    if audio_empty.height >= 10 or audio_silent.height > 0:
+        found_any = True
+        print(f"  AUDIO-DEATH: {audio_empty.height} audio-empty + {audio_silent.height} audio-silent events")
+        if audio_silent.height > 0:
+            for row in audio_silent.head(3).iter_rows(named=True):
+                print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+        if audio_empty.height >= 10:
+            first_empty = audio_empty.head(1).row(0, named=True)
+            last_empty = audio_empty.tail(1).row(0, named=True)
+            print(f"    audio-empty range: f={first_empty.get('f')} -> f={last_empty.get('f')} on slot={first_empty.get('slot')}")
+
+    # Rollback restore corruption — RB-POST-RB gp hash differs from C-REPLAY done gp
+    replay_done = df.filter(pl.col("msg").str.contains("C-REPLAY done:"))
+    post_rb = df.filter(pl.col("msg").str.contains("RB-POST-RB"))
+    if replay_done.height > 0 and post_rb.height > 0:
+        # Extract gp= hash from both, pair them by adjacency in time per slot
+        replay_done_parsed = replay_done.with_columns(
+            replay_gp=pl.col("msg").str.extract(r"gp=(0x[-0-9a-f]+)", 1),
+            replay_f=pl.col("msg").str.extract(r"caught up at f=(\d+)", 1).cast(pl.Int64),
+        )
+        post_rb_parsed = post_rb.with_columns(
+            post_gp=pl.col("msg").str.extract(r"gp=(0x[-0-9a-f]+)", 1),
+            post_f=pl.col("msg").str.extract(r"RB-POST-RB f=(\d+)", 1).cast(pl.Int64),
+        )
+        # For each slot, pair replay_done[N] with post_rb[N] and compare
+        corruptions = []
+        for slot_val in slots:
+            rd = replay_done_parsed.filter(pl.col("slot") == slot_val).sort("t")
+            pr = post_rb_parsed.filter(pl.col("slot") == slot_val).sort("t")
+            rd_rows = list(rd.iter_rows(named=True))
+            pr_rows = list(pr.iter_rows(named=True))
+            n = min(len(rd_rows), len(pr_rows))
+            for i in range(n):
+                if rd_rows[i].get("replay_gp") and pr_rows[i].get("post_gp"):
+                    if rd_rows[i]["replay_gp"] != pr_rows[i]["post_gp"]:
+                        corruptions.append({
+                            "slot": slot_val,
+                            "replay_f": rd_rows[i].get("replay_f"),
+                            "post_f": pr_rows[i].get("post_f"),
+                            "replay_gp": rd_rows[i]["replay_gp"],
+                            "post_gp": pr_rows[i]["post_gp"],
+                        })
+        if corruptions:
+            found_any = True
+            print(f"  ROLLBACK-RESTORE-CORRUPTION: {len(corruptions)} events (replay gp != post-restore gp)")
+            for c in corruptions[:10]:
+                print(f"    slot={c['slot']} f={c['replay_f']} replay_gp={c['replay_gp']} post_gp={c['post_gp']}")
 
     # Explicit freeze signals
     for event_name in ["RENDER-STALL", "INPUT-DEAD", "AUDIO-STALL", "AUDIO-RESUME", "TAB-FOCUS"]:
@@ -759,7 +811,6 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
     # Heuristic: extended zero-input periods from NORMAL-INPUT logs
     normal_inputs = df.filter(pl.col("msg").str.contains("NORMAL-INPUT"))
     if normal_inputs.height > 0:
-        slots = sorted(df.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list())
         for slot_val in slots:
             slot_inputs = normal_inputs.filter(pl.col("slot") == slot_val)
             if slot_inputs.height == 0:
