@@ -3254,6 +3254,91 @@
     };
   };
 
+  // -- Per-peer state cleanup (Invariant I2) --------------------------------
+
+  /**
+   * Resets ALL per-peer state for a given slot. This is the single
+   * authoritative cleanup path for peer disconnects, reconnects,
+   * phantom clears, tab-visibility resets, and game stop.
+   *
+   * Invariant I2 ("Reconnect starts clean"): every disconnect,
+   * reconnect, or cleanup path must route through this function.
+   * Adding new per-peer state without updating this function is a
+   * code-review-level violation.
+   *
+   * See docs/netplay-invariants.md §I2.
+   *
+   * Fields reset for slot-indexed globals:
+   *   - _remoteInputs[slot]            (input buffer)
+   *   - _peerInputStarted[slot]        (first-input-received flag)
+   *   - _lastRemoteFramePerSlot[slot]  (highest received frame)
+   *   - _peerLastAdvanceTime[slot]     (wall-clock of last new frame)
+   *   - _peerPhantom[slot]             (dead-peer flag)
+   *   - _consecutiveFabrications[slot] (fabrication counter)
+   *   - _inputLateLogTime[slot]        (rate-limit timestamp)
+   *   - _auditRemoteInputs[slot]       (audit log buffer)
+   *
+   * Fields reset for per-peer-object state (if peer provided):
+   *   - peer.lastAckFromPeer
+   *   - peer.lastFrameFromPeer
+   *   - peer.lastAckAdvanceTime
+   *
+   * Shared queues filtered to remove entries for this slot:
+   *   - _pendingCInputs (by slot)
+   *   - _scheduledSyncRequests (by targetSid if sid provided)
+   *
+   * Boot-stall tracking cleared if currently stalled:
+   *   - _bootStallFrame / _bootStallStartTime / _bootStallRecoveryFired
+   *
+   * @param {number} slot - player slot to clear (0-3)
+   * @param {string} reason - short human-readable reason for the reset;
+   *   used in PEER-RESET log and analyze_match.py attribution
+   * @param {Object} [opts] - optional extras
+   * @param {Object} [opts.peer] - peer object to clear ack state on
+   * @param {string} [opts.sid] - socket.io sid to filter scheduled syncs
+   */
+  const resetPeerState = (slot, reason, opts = {}) => {
+    if (slot === null || slot === undefined) return;
+
+    // Slot-indexed globals
+    delete _remoteInputs[slot];
+    delete _peerInputStarted[slot];
+    delete _lastRemoteFramePerSlot[slot];
+    delete _peerLastAdvanceTime[slot];
+    delete _peerPhantom[slot];
+    delete _consecutiveFabrications[slot];
+    delete _inputLateLogTime[slot];
+    delete _auditRemoteInputs[slot];
+
+    // Per-peer-object ack state
+    if (opts.peer) {
+      opts.peer.lastAckFromPeer = -1;
+      opts.peer.lastFrameFromPeer = -1;
+      opts.peer.lastAckAdvanceTime = 0;
+    }
+
+    // Shared queues — filter out entries for this slot/sid
+    for (let i = _pendingCInputs.length - 1; i >= 0; i--) {
+      if (_pendingCInputs[i].slot === slot) _pendingCInputs.splice(i, 1);
+    }
+    if (opts.sid) {
+      _scheduledSyncRequests = _scheduledSyncRequests.filter(
+        (r) => r.targetSid !== opts.sid,
+      );
+    }
+
+    // Boot-stall tracking — if we were stalled waiting on this slot's
+    // apply frame, clear the tracking so the stall clock restarts
+    // cleanly once a new peer fills the slot.
+    if (_bootStallFrame >= 0) {
+      _bootStallFrame = -1;
+      _bootStallStartTime = 0;
+      _bootStallRecoveryFired = false;
+    }
+
+    _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
+  };
+
   // -- Peer disconnect (drop handling) ---------------------------------------
 
   const handlePeerDisconnect = (remoteSid) => {

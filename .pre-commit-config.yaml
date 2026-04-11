@@ -9,13 +9,17 @@ repos:
         args: [--config, server/pyproject.toml]
         files: ^server/
 
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
+  # Using rbubley/mirrors-prettier (community fork) because the official
+  # mirrors-prettier repo is archived and its last tag v4.0.0-alpha.8 is
+  # broken: prettier exits with "No files matching the given patterns were
+  # found" on every JS file even with absolute paths. rbubley tracks
+  # stable prettier 3.x releases.
+  - repo: https://github.com/rbubley/mirrors-prettier
+    rev: v3.3.3
     hooks:
       - id: prettier
         types_or: [javascript, css, json, yaml, html]
         exclude: ^(build/src/|web/static/ejs/|node_modules/)
-
 # Note: version bumping moved out of the post-commit hook. Run `just deploy`
 # to bump version + tag + push as a single explicit operation. See
 # scripts/bump-version.sh for the bump logic.
