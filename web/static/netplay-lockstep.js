@@ -504,6 +504,19 @@
   let _inputEverNonZero = false; // true once local input has been non-zero
   let _inputDeadLogged = false; // one-shot for INPUT-DEAD
   let _audioLastState = ''; // last audioContext.state we logged
+  // MF6: Detection-only tick watchdog state. Logs TICK-STUCK with a
+  // rich diagnostic snapshot when the frame counter has not advanced
+  // for longer than the warn / error thresholds. Takes NO recovery
+  // action — its sole purpose is to surface residual deadlocks we
+  // have not yet found. If this fires in production, we have a new
+  // bug to diagnose; the fix belongs in one of the MF categories,
+  // not in the watchdog itself. See docs/netplay-invariants.md.
+  let _tickStuckLastFrame = -1;
+  let _tickStuckLastAdvanceAt = 0;
+  let _tickStuckWarnFired = false;
+  let _tickStuckErrorFired = false;
+  const TICK_STUCK_WARN_MS = 2000;
+  const TICK_STUCK_ERROR_MS = 5000;
   // BOOT-LOCKSTEP timeout tracking: if we're stalled at the same apply frame
   // for too long during boot convergence, something has gone wrong (DC died
   // with inputs in flight) and we must recover instead of deadlocking.
@@ -1349,6 +1362,48 @@
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     console.log(`[lockstep] ${msg}`);
+  };
+
+  // MF6: Detection-only tick watchdog snapshot emitter. Gathers a
+  // rich view of every candidate stall state so the analyzer can
+  // attribute a stuck frame to a specific root cause. Does NOT take
+  // recovery action — see docs/netplay-invariants.md for the
+  // philosophy behind this being passive.
+  const _emitTickStuckSnapshot = (severity, stuckMs) => {
+    const peerSnap = {};
+    for (const [sid, p] of Object.entries(_peers)) {
+      peerSnap[sid] = {
+        slot: p.slot,
+        dc: p.dc?.readyState ?? 'null',
+        buffered: p.dc?.bufferedAmount ?? 0,
+        lastFrameFromPeer: p.lastFrameFromPeer ?? -1,
+        lastAckAdvanceMs:
+          p.lastAckAdvanceTime > 0
+            ? Math.round(performance.now() - p.lastAckAdvanceTime)
+            : -1,
+        phantom: !!_peerPhantom?.[p.slot],
+        lastRemoteFrame: _lastRemoteFramePerSlot?.[p.slot] ?? -1,
+        bufSize: Object.keys(_remoteInputs?.[p.slot] || {}).length,
+      };
+    }
+
+    // Inferred cause: pick the most likely culprit flag so the log
+    // line is immediately actionable without needing to parse the
+    // full peer snapshot.
+    let cause = 'unknown';
+    if (window._rbPendingInit) cause = 'rb-pending-init';
+    else if (_awaitingResync) cause = 'awaiting-resync';
+    else if (_syncTargetFrame > 0) cause = `coord-sync-waiting-for-f${_syncTargetFrame}`;
+    else if (_bootStallFrame >= 0) cause = `boot-lockstep-f${_bootStallFrame}`;
+    else if (_stallStart > 0) cause = 'input-stall';
+
+    _syncLog(
+      `TICK-STUCK severity=${severity} f=${_frameNum} stuckMs=${Math.round(stuckMs)} ` +
+        `cause=${cause} rbPending=${!!window._rbPendingInit} ` +
+        `awaitingResync=${_awaitingResync} syncTargetFrame=${_syncTargetFrame} ` +
+        `bootStallFrame=${_bootStallFrame} scheduledSyncs=${_scheduledSyncRequests.length} ` +
+        `peers=${JSON.stringify(peerSnap)}`,
+    );
   };
 
   const exportSyncLog = () => _syncLogRing.export();
@@ -5732,6 +5787,33 @@
 
   const tick = () => {
     if (!_running) return;
+
+    // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
+    // diagnostic snapshot when the frame counter has not advanced
+    // for longer than the warn / error thresholds. Takes NO recovery
+    // action — the user still sees the freeze, and the fix belongs
+    // in whichever MF category covers the root cause. Skipped while
+    // _lateJoinPaused or document.hidden (both are legitimate
+    // pauses). See docs/netplay-invariants.md.
+    const _tickNow = performance.now();
+    if (!_lateJoinPaused && !(typeof document !== 'undefined' && document.hidden)) {
+      if (_frameNum !== _tickStuckLastFrame) {
+        _tickStuckLastFrame = _frameNum;
+        _tickStuckLastAdvanceAt = _tickNow;
+        _tickStuckWarnFired = false;
+        _tickStuckErrorFired = false;
+      } else if (_tickStuckLastAdvanceAt > 0) {
+        const _stuckMs = _tickNow - _tickStuckLastAdvanceAt;
+        if (_stuckMs > TICK_STUCK_ERROR_MS && !_tickStuckErrorFired) {
+          _tickStuckErrorFired = true;
+          _emitTickStuckSnapshot('error', _stuckMs);
+        } else if (_stuckMs > TICK_STUCK_WARN_MS && !_tickStuckWarnFired) {
+          _tickStuckWarnFired = true;
+          _emitTickStuckSnapshot('warn', _stuckMs);
+        }
+      }
+    }
+
     if (_lateJoinPaused) return; // frozen while late-joiner loads state
     // Guests defer the entire tick loop until the host's authoritative
     // rb-delay broadcast arrives and the C rollback engine is initialized
