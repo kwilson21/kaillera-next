@@ -1289,6 +1289,13 @@
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
   let _resendSent = false; // true once resend request sent for current stall
+  // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
+  // the game moving, but any real inputs that arrive later are dropped
+  // — creating permanent hash divergence. When hard-timeout fires, we
+  // also request a full resync so the divergence converges. Rate-limited
+  // so we don't resync-storm under sustained marginal WiFi.
+  let _lastInputStallResyncAt = 0;
+  const INPUT_STALL_RESYNC_COOLDOWN_MS = 10000;
   let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _tickInterval = null; // setInterval handle for tick loop
@@ -7168,6 +7175,31 @@
               missing: [..._missingSlots],
             });
             KNState.sessionStats.stalls++;
+            // MF4: fabrication keeps the game moving but creates
+            // permanent hash divergence from peers that had the real
+            // input. Request a full resync so the divergence
+            // converges. Rate-limited via
+            // INPUT_STALL_RESYNC_COOLDOWN_MS to avoid storms under
+            // sustained marginal WiFi. See spec §MF4, audit §A7.
+            const _nowStallResync = performance.now();
+            if (_nowStallResync - _lastInputStallResyncAt > INPUT_STALL_RESYNC_COOLDOWN_MS) {
+              _lastInputStallResyncAt = _nowStallResync;
+              _syncLog(
+                `INPUT-STALL-RESYNC f=${_frameNum} apply=${applyFrame} ` +
+                  `missing=[${_missingSlots.join(',')}] — requesting full resync`,
+              );
+              if (_playerSlot !== 0) {
+                const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
+                const _hostDcForResync = _hostForResync?.dc;
+                if (_hostDcForResync?.readyState === 'open') {
+                  try {
+                    _hostDcForResync.send('sync-request-full');
+                  } catch (_e) {
+                    _syncLog(`INPUT-STALL-RESYNC send failed: ${_e}`);
+                  }
+                }
+              }
+            }
             _stallStart = 0;
           } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
             // Stage 2 — request resend from missing peers (once per stall)
