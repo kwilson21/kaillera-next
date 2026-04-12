@@ -6397,6 +6397,26 @@
         localInput.cx,
         localInput.cy,
       );
+      // ── R1: runner continuity across rollback restore ─────────────────
+      // kn_pre_tick's rollback branch calls retro_unserialize directly,
+      // which invalidates the Emscripten rAF runner captured by JS's
+      // overrideRAF interceptor. Without re-capture, stepOneFrame in the
+      // catchingUp==2 branch is a silent no-op and the replay never runs.
+      // The loadState path at line ~8221 already does this; we mirror
+      // here for the C-level rollback path.
+      // See docs/netplay-invariants.md §R1.
+      if (tickMod._kn_rollback_did_restore?.()) {
+        const gm = window.EJS_emulator?.gameManager;
+        if (gm?.Module) {
+          gm.Module.pauseMainLoop();
+          gm.Module.resumeMainLoop();
+          if (gm.Module.updateMemoryViews) {
+            gm.Module.updateMemoryViews();
+          } else if (gm.Module._emscripten_notify_memory_growth) {
+            gm.Module._emscripten_notify_memory_growth(0);
+          }
+        }
+      }
       const _tPreTick = performance.now();
 
       // Sync JS frame counter with C

@@ -237,6 +237,13 @@ static struct {
      * the tolerance window is absorbing what would have been rollbacks. */
     int tolerance_hits;
 
+    /* RF1 (R1): did_restore flag — set by the rollback branch immediately
+     * after retro_unserialize. JS polls via kn_rollback_did_restore() and
+     * re-captures the Emscripten rAF runner via pauseMainLoop/resumeMainLoop.
+     * Flag is read-and-clear, same pattern as replay_depth.
+     * See docs/netplay-invariants.md §R1. */
+    int did_restore;
+
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
@@ -753,6 +760,12 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
 
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
             sf_restore(rb.ring_sf_state[ring_idx]);
+            /* R1: retro_unserialize invalidates the Emscripten rAF runner
+             * captured by JS's overrideRAF interceptor. JS must re-capture
+             * it via pauseMainLoop/resumeMainLoop before the next
+             * stepOneFrame call, or the replay runs as silent no-ops.
+             * See docs/netplay-invariants.md §R1. */
+            rb.did_restore = 1;
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -1022,6 +1035,20 @@ int kn_get_replay_depth(void) {
     int d = rb.replay_depth;
     rb.replay_depth = 0;
     return d;
+}
+
+/* ── Query: did the rollback branch just restore state? ───────────────
+ * Returns 1 (and clears flag) if a rollback restore happened since the
+ * last call. JS uses this to trigger pauseMainLoop/resumeMainLoop so the
+ * rAF runner is re-captured before the next stepOneFrame. Per R1:
+ * retro_unserialize invalidates _pendingRunner in JS. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_rollback_did_restore(void) {
+    int v = rb.did_restore;
+    rb.did_restore = 0;
+    return v;
 }
 
 /* ── Query: replay start frame ─────────────────────────────────────── */

@@ -46,6 +46,10 @@ int kn_restore_frame(int frame);
 /* Get replay depth after kn_pre_tick. Returns frames to replay (0=none). Clears flag. */
 int kn_get_replay_depth(void);
 
+/* R1: Returns 1 (and clears flag) if the rollback branch just called
+ * retro_unserialize. JS re-captures the rAF runner on hit. */
+int kn_rollback_did_restore(void);
+
 /* Get replay start frame (valid when kn_get_replay_depth > 0). */
 int kn_get_replay_start(void);
 
