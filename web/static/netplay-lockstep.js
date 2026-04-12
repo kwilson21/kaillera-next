@@ -6478,6 +6478,24 @@
         }
       }
       const _rbBootConverged = _bootDone && !inMenu;
+      // Boot sync: guest requests host state when boot convergence completes.
+      // Different Safari/JIT versions produce different boot RDRAM (CP0_COUNT,
+      // interrupt timing, RSP work area). A one-time state push from host
+      // forces identical starting state regardless of JIT differences.
+      if (_rbBootConverged && !window._knBootSyncDone) {
+        window._knBootSyncDone = true;
+        if (_playerSlot !== 0) {
+          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+          if (hostPeer?.dc?.readyState === 'open') {
+            try {
+              hostPeer.dc.send('sync-request-full');
+              _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
+            } catch (e) {
+              _syncLog(`BOOT-SYNC send failed: ${e}`);
+            }
+          }
+        }
+      }
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
       // Tick timing: measure wall-clock between ticks for FPS diagnosis
       const _tickWallNow = performance.now();
@@ -7132,7 +7150,7 @@
       // ── Periodic logging with timing + per-region hash exchange ──
       // Tighter interval during menus (30 frames) to catch CSS/stage-select
       // divergence before it compounds. 300 frames during gameplay.
-      const _hashInterval = _inGameplay ? 300 : 30;
+      const _hashInterval = _inGameplay ? 300 : 1;
       if (_frameNum % _hashInterval === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
