@@ -5002,7 +5002,28 @@
   ];
 
   const stepOneFrame = () => {
-    if (!_pendingRunner) return false;
+    if (!_pendingRunner) {
+      // ── R2: no silent no-ops during rollback replay ──────────────
+      // If a replay tick lands here with a null runner, retro_unserialize
+      // (or another path) invalidated it and we have no way to actually
+      // step the emulator. kn_post_tick would still advance rb.frame,
+      // producing a Frankenstein state with frozen emulation. Per §Core
+      // principle: log-loud-and-continue. No resync recovery.
+      // See docs/netplay-invariants.md §R2.
+      if (_useCRollback && _rbReplayLogged) {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        const rbFrame = mod?._kn_get_frame?.() ?? -1;
+        const replayRemaining = mod?._kn_get_replay_depth?.() ?? -1;
+        _syncLog(
+          `REPLAY-NORUN f=${_frameNum} rbFrame=${rbFrame} ` +
+            `replayRemaining=${replayRemaining} tick=${performance.now().toFixed(1)}`,
+        );
+        if (window.KN_DEV_BUILD) {
+          throw new Error('REPLAY-NORUN: stepOneFrame called with null runner during replay');
+        }
+      }
+      return false;
+    }
     // MF6: mark WASM step active so TICK-STUCK watchdog can
     // attribute a stall to the WASM side if the frame counter is
     // stuck while this flag is true. Cleared in the return path
