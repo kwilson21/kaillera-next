@@ -77,18 +77,18 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    RetroArch patch already applied or failed"
     fi
 
-    # ASYNCIFY_REMOVE: make retro_run/retro_serialize/retro_unserialize synchronous
-    # for deterministic C-level replay. co_switch uses emscripten_fiber_swap which
-    # needs asyncify — but works because retro_run's fiber context is pre-initialized.
-    # Intermittent freeze reported once; monitoring — do NOT revert without repro.
-    if ! grep -q "ASYNCIFY_REMOVE" Makefile.emulatorjs; then
-        sed -i 's|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192$|-s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=8192 -s ASYNCIFY_REMOVE='\''["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop"]'\''|' Makefile.emulatorjs
-        echo "    Added ASYNCIFY_REMOVE for synchronous retro_run"
-    fi
+    # ASYNCIFY_REMOVE: strip Asyncify instrumentation from functions that must
+    # run synchronously. Without this, Asyncify save/restore bookkeeping in
+    # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
+    # video callback to silently fail (canvas freeze).
+    # Override the Makefile variable directly instead of sed-patching the flags.
+    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash"]'
+    sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
+    echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
 
@@ -346,7 +346,7 @@ cd "${SRC_DIR}/mupen64plus-libretro-nx"
 emmake make -f Makefile platform=emscripten clean 2>/dev/null || true
 
 # Build
-emmake make -j$(nproc) -f Makefile platform=emscripten LTO=1
+emmake make -j4 -f Makefile platform=emscripten LTO=1
 
 BC_FILE="${SRC_DIR}/mupen64plus-libretro-nx/mupen64plus_next_libretro_emscripten.bc"
 if [ ! -f "${BC_FILE}" ]; then
@@ -396,7 +396,7 @@ emmake make -f Makefile.emulatorjs \
     TARGET=mupen64plus_next_libretro.js \
     LTO=1 \
     additional_libs="${SF_ADDITIONAL}" \
-    -j$(nproc)
+    -j4
 
 JS_FILE="${SRC_DIR}/RetroArch/mupen64plus_next_libretro.js"
 WASM_FILE="${SRC_DIR}/RetroArch/mupen64plus_next_libretro.wasm"

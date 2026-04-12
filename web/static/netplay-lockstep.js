@@ -1283,6 +1283,12 @@
   // differ briefly (e.g., roster change), the next frame resets the seed.
   const KN_RNG_SEED_RDRAM = 0x0005b940; // primary LCG seed
   const KN_RNG_ALT_SEED_RDRAM = 0x000a0578; // alternate seed
+  // SSB64/Smash Remix game_status byte — same offset used by C rollback
+  // engine (kn_gameplay_addrs). Values: 0=wait, 1=ongoing, 2=paused, 5=end.
+  // Used to gate rollback prediction: during menus (status != 1), rollback's
+  // stash-and-restore only preserves ~73 bytes of in-match state, corrupting
+  // menu navigation state and causing screen-skip desyncs.
+  const KN_GAME_STATUS_RDRAM = 0x000a4d19;
   let _rngPatched = false;
   let _rngSeed = 0;
   let _rdramBase = 0; // WASM heap byte offset of RDRAM
@@ -1311,6 +1317,19 @@
 
   const _rdram32 = (mod, rdramOffset) => {
     return (_rdramBase >> 2) + (rdramOffset >> 2);
+  };
+
+  // Read SSB64 game_status from RDRAM. Returns 1 when the match is
+  // actively running (gameplay), 0 during menus/CSS/stage-select, or
+  // -1 if RDRAM isn't available yet. Reads the same byte offset the C
+  // rollback engine uses in kn_gameplay_addrs (0xA4D19).
+  let _inGameplay = false;
+  let _inGameplayLoggedAt = -1; // frame where we last logged a transition
+  const _readGameStatus = () => {
+    if (!_rdramBase || !_isSmashRemix()) return -1;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?.HEAPU8) return -1;
+    return mod.HEAPU8[_rdramBase + KN_GAME_STATUS_RDRAM];
   };
 
   const _initRNGSync = (mod) => {
@@ -5666,7 +5685,7 @@
         _backgroundAt = Date.now();
         _syncLog(`tab hidden at frame ${_frameNum}`);
         // BF2: warn user if tab goes hidden during boot convergence
-        const inBoot = _rbInitFrame >= 0 && _frameNum - _rbInitFrame <= BOOT_GRACE_FRAMES;
+        const inBoot = (_rbInitFrame >= 0 && _frameNum - _rbInitFrame <= BOOT_GRACE_FRAMES) || !_inGameplay;
         if (inBoot) {
           window.knShowToast?.('Game is paused \u2014 switch to this tab to continue', 'warn');
         }
@@ -5816,6 +5835,7 @@
         _rbRegionsBufPtr = 0;
       }
       _useCRollback = false;
+      _inGameplay = false;
     }
 
     // Disable FPU trace
@@ -6152,7 +6172,7 @@
           // even though the input pipeline hasn't converged yet.
           // BF4: reduced from 300 to 120 — N64 boot sequence stabilizes by ~120 frames.
           // Matches BOOT_GRACE_FRAMES and MIN_BOOT_FRAMES constants.
-          const _rbConverged = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
+          const _rbConverged = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES && _inGameplay;
           if (_rbConverged && !_rbConvergedLogged) {
             _rbConvergedLogged = true;
             _syncLog(
@@ -6392,25 +6412,55 @@
       }
 
       // ── Hybrid input stall ───────────────────────────────────────────
-      // Two modes, one goal: never let the local peer run so far ahead
+      // Three modes, one goal: never let the local peer run so far ahead
       // that rollback can't correct a misprediction.
       //
       // BOOT (first BOOT_GRACE_FRAMES): pure lockstep stall — wait for
       // remote input before every frame. Prevents the boot race where
       // both emulators predict through boot frames and desync.
       //
-      // GAMEPLAY (after BOOT_GRACE_FRAMES): let rollback predict through the
-      // first few frames of missing input (hides jitter). But if frame
-      // advantage exceeds DELAY_FRAMES + 4, stall to wait — prevents
-      // runaway prediction → phantom → disconnect. Rollback handles
-      // small gaps, lockstep stall handles big ones.
+      // MENU (game_status != 1): pure lockstep stall — rollback's
+      // stash-and-restore only preserves ~73 bytes of in-match gameplay
+      // state (damage, stocks, RNG, screen). Menu navigation state
+      // (CSS cursors, stage selection, transition timers) lives outside
+      // those bytes. A misprediction during menus corrupts the game
+      // state: current_screen says "in match" but internal menu
+      // structures are from the prediction pass → host skips stage
+      // select entirely. Pure lockstep during menus prevents this.
+      //
+      // GAMEPLAY (game_status == 1, after BOOT_GRACE_FRAMES): let
+      // rollback predict through the first few frames of missing input
+      // (hides jitter). But if frame advantage exceeds DELAY_FRAMES + 4,
+      // stall to wait — prevents runaway prediction → phantom →
+      // disconnect. Rollback handles small gaps, lockstep stall handles
+      // big ones.
+      //
       // Late joiners skip boot convergence — they loaded the host's state
       // directly, no 120-frame boot race to protect against. Without this,
       // late joiners stall in pure-lockstep waiting for ALL peers' input
       // every frame, which is fatal on mobile with 3+ peers.
       const _isLateJoinStart = _rbInitFrame > 0;
-      // BF4: reduced from 300 to BOOT_GRACE_FRAMES (120) — boot stabilizes by ~120 frames
-      const _rbBootConverged = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
+      const _bootDone = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
+      // Gate rollback on SSB64 game_status: only allow prediction during
+      // active gameplay. During menus/CSS, game_status is 0 (wait) — use
+      // pure lockstep. For non-SSB64 ROMs, _readGameStatus returns -1 and
+      // we fall back to the boot-grace-only gate.
+      const gameStatus = _readGameStatus();
+      // game_status: 0=wait (CSS/menus), 1=ongoing, 2=paused, 5=end.
+      // Only status 0 is dangerous for rollback (menu state corruption).
+      // Status -1 means RDRAM not available (non-SSB64) — safe fallback.
+      const inMenu = gameStatus === 0;
+      if (!_inGameplay && !inMenu && _bootDone) {
+        _inGameplay = true;
+        _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus}`);
+      } else if (_inGameplay && inMenu) {
+        _inGameplay = false;
+        if (_frameNum - _inGameplayLoggedAt > 60) {
+          _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus}`);
+          _inGameplayLoggedAt = _frameNum;
+        }
+      }
+      const _rbBootConverged = _bootDone && !inMenu;
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
       if (!_rbBootConverged) {
         // Boot: pure lockstep stall, with timeout-based deadlock recovery
@@ -6515,7 +6565,7 @@
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
       const _t0 = performance.now();
-      const _frameAdvForC = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES ? _frameAdvRaw : -1;
+      const _frameAdvForC = _rbBootConverged ? _frameAdvRaw : -1;
       const catchingUp = tickMod._kn_pre_tick(
         localInput.buttons,
         localInput.lx,

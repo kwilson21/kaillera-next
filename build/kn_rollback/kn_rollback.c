@@ -837,7 +837,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             rb.frame = rb_frame;
             rb.replay_depth = depth;
             rb.replay_start = rb_frame;
-            rb_log("C-REPLAY-START f=%d depth=%d target=%d", rb_frame, depth, rb.replay_target);
+            rb_log("C-REPLAY-START f=%d depth=%d target=%d replay_remaining=%d replay_depth=%d",
+                rb_frame, depth, rb.replay_target, rb.replay_remaining, rb.replay_depth);
         } else {
             /* Restore impossible — treat as silent desync so P4 resync path triggers */
             rb.failed_rollbacks++;
@@ -871,7 +872,10 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         int replay_apply = rb.frame - rb.delay_frames;
         int save_idx = rb.frame % rb.ring_size;
 
-        /* Save state for this frame BEFORE stepping */
+        /* Save state for this frame BEFORE stepping.
+         * R5 diagnostic: log the replay frame details. */
+        rb_log("C-REPLAY-FRAME f=%d remaining=%d apply=%d save_idx=%d",
+            rb.frame, rb.replay_remaining, replay_apply, save_idx);
         retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
         rb.ring_sf_state[save_idx] = sf_pack();
         rb.ring_frames[save_idx] = rb.frame;
@@ -1056,8 +1060,57 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
+    /* R5 diagnostic: log if replay_depth is nonzero at normal-tick return.
+     * This should never happen — if replay_depth was set, replay_remaining
+     * should also be > 0 and we'd return 2 above. If this fires, something
+     * corrupted replay_remaining without clearing replay_depth. */
+    if (rb.replay_depth > 0) {
+        rb_log("R5-DIAG return=0 but replay_depth=%d replay_remaining=%d "
+               "pending_rb=%d did_restore=%d frame=%d target=%d",
+               rb.replay_depth, rb.replay_remaining,
+               rb.pending_rollback, rb.did_restore,
+               rb.frame, rb.replay_target);
+    }
     return 0; /* 0 = normal tick, JS should do stepOneFrame */
 }
+
+/* ── Gameplay address table (used by kn_post_tick stash + kn_gameplay_hash) ── */
+
+typedef struct {
+    uint32_t rdram_offset;
+    uint32_t size;
+} kn_gameplay_addr_t;
+
+static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
+    /* Screen + game status */
+    { 0xA4AD0, 1 },   /* current_screen */
+    { 0xA4D19, 1 },   /* game_status (0=wait,1=ongoing,2=paused,5=end) */
+    /* VS settings block */
+    { 0xA4D08, 28 },  /* stage, mode, teams, time, stocks, handicap, ... timer, elapsed */
+    /* VS player stocks (offset 0x2B within each 0x74-byte player entry) */
+    { 0xA4D53, 1 },   /* P1 stock count */
+    { 0xA4DC7, 1 },   /* P2 stock count */
+    { 0xA4E3B, 1 },   /* P3 stock count */
+    { 0xA4EAF, 1 },   /* P4 stock count */
+    /* In-game player struct: character ID (offset 0x08, 4 bytes) */
+    { 0x130D8C, 4 },  /* P1 char_id */
+    { 0x1318DC, 4 },  /* P2 char_id */
+    { 0x13242C, 4 },  /* P3 char_id */
+    { 0x132F7C, 4 },  /* P4 char_id */
+    /* In-game player struct: damage % (offset 0x2C, 4 bytes) */
+    { 0x130DB0, 4 },  /* P1 damage */
+    { 0x131900, 4 },  /* P2 damage */
+    { 0x132450, 4 },  /* P3 damage */
+    { 0x132FA0, 4 },  /* P4 damage */
+    /* RNG seeds */
+    { 0x05B940, 4 },  /* primary LCG seed */
+    { 0x0A0578, 4 },  /* alternate seed */
+};
+#define KN_GAMEPLAY_ADDR_COUNT (sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]))
+/* Total bytes across all gameplay addresses (73 bytes as of writing).
+ * Used for the stack-allocated stash buffer in kn_post_tick. Padded
+ * to 128 for alignment and headroom if addresses are added. */
+#define KN_GAMEPLAY_STASH_SIZE 128
 
 /* ── Post-tick: advance frame counter, decrement replay if catching up ── */
 #ifdef __EMSCRIPTEN__
@@ -1069,30 +1122,60 @@ int kn_post_tick(void) {
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
-            /* Restore frame counters to pre-replay values.
-             * Replay incremented these N times, but they should reflect
-             * only real (non-replay) frames to stay consistent across
-             * peers who replay different numbers of frames. */
-            /* Restore full RDRAM to pre-replay values. */
-            if (rb.rdram_base && rb.saved_rdram)
-                memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
-            /* Patch the RDRAM section of the current ring buffer entry with
-             * restored values. The ring entry was saved during replay and
-             * contains mutated RDRAM. Rather than re-serializing the full
-             * ~16MB state (retro_serialize), we memcpy just the 8MB RDRAM
-             * section into the existing entry — CPU/plugin state is fine. */
-            if (kn_rdram_offset_in_state > 0) {
-                int patch_idx = rb.frame % rb.ring_size;
-                if (rb.ring_frames[patch_idx] == rb.frame) {
-                    memcpy(rb.ring_bufs[patch_idx] + kn_rdram_offset_in_state,
-                           rb.saved_rdram, 0x800000);
+            /* Stash gameplay addresses from live RDRAM (replayed with correct
+             * inputs), restore full RDRAM to pre-replay forward-pass values,
+             * then patch gameplay bytes back. This prevents non-deterministic
+             * replay side-effects (interrupt timing jitter, audio DMA, heap
+             * allocs) from persisting — proven necessary by Apr 2026 testing
+             * where same-platform iPhone↔iPhone replay diverged 2-8 RDRAM
+             * blocks. Full serialize was considered but replay non-determinism
+             * from V8/JSC interrupt scheduling makes it unsafe.
+             *
+             * IMPORTANT: This mechanism only preserves ~73 bytes of in-match
+             * gameplay state. During CSS/stage-select, menu navigation state
+             * lives outside these addresses. Rollback during menus would
+             * create a Frankenstein state (screen says "in match" but menu
+             * structures are from prediction pass → host skips stages).
+             * The JS tick loop gates rollback on game_status==1 to prevent
+             * this — see the MENU lockstep comment in netplay-lockstep.js. */
+            {
+                uint8_t gameplay_stash[KN_GAMEPLAY_STASH_SIZE];
+                int stash_valid = 0;
+                if (rb.rdram_base) {
+                    int a;
+                    size_t pos = 0;
+                    stash_valid = 1;
+                    for (a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
+                        size_t rdram_off = kn_gameplay_addrs[a].rdram_offset;
+                        uint32_t sz = kn_gameplay_addrs[a].size;
+                        if (rdram_off + sz > 0x800000) { stash_valid = 0; break; }
+                        memcpy(gameplay_stash + pos, rb.rdram_base + rdram_off, sz);
+                        pos += sz;
+                    }
+                }
+
+                /* Restore full RDRAM to pre-replay values. Prevents
+                 * non-deterministic replay side-effects (audio DMA, heap
+                 * allocs, interrupt state) from persisting. */
+                if (rb.rdram_base && rb.saved_rdram)
+                    memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
+
+                /* Write back the stashed gameplay addresses. */
+                if (stash_valid && rb.rdram_base) {
+                    int a;
+                    size_t pos = 0;
+                    for (a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
+                        size_t rdram_off = kn_gameplay_addrs[a].rdram_offset;
+                        uint32_t sz = kn_gameplay_addrs[a].size;
+                        memcpy(rb.rdram_base + rdram_off, gameplay_stash + pos, sz);
+                        pos += sz;
+                    }
                 }
             }
             /* R4: Post-replay live-state verification. Hash the live
              * emulator state and compare to what the ring claims for
              * the just-completed frame. If they differ, the replay
-             * introduced drift and the run is corrupted. Log loudly;
-             * no recovery. Per §Core principle.
+             * introduced gameplay-level drift. Log loudly; no recovery.
              * See docs/netplay-invariants.md §R4. */
             {
                 int target = rb.frame - 1;
@@ -1358,39 +1441,10 @@ uint32_t kn_game_state_hash(int frame) {
  * noise. This is the authoritative desync detection hash for rollback.
  *
  * ROM-SPECIFIC: These addresses are for SSB64 US v1.0 / Smash Remix.
- * Other ROMs would need their own address tables. */
-
-typedef struct {
-    uint32_t rdram_offset;
-    uint32_t size;
-} kn_gameplay_addr_t;
-
-static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
-    /* Screen + game status */
-    { 0xA4AD0, 1 },   /* current_screen */
-    { 0xA4D19, 1 },   /* game_status (0=wait,1=ongoing,2=paused,5=end) */
-    /* VS settings block */
-    { 0xA4D08, 28 },  /* stage, mode, teams, time, stocks, handicap, ... timer, elapsed */
-    /* VS player stocks (offset 0x2B within each 0x74-byte player entry) */
-    { 0xA4D53, 1 },   /* P1 stock count */
-    { 0xA4DC7, 1 },   /* P2 stock count */
-    { 0xA4E3B, 1 },   /* P3 stock count */
-    { 0xA4EAF, 1 },   /* P4 stock count */
-    /* In-game player struct: character ID (offset 0x08, 4 bytes) */
-    { 0x130D8C, 4 },  /* P1 char_id */
-    { 0x1318DC, 4 },  /* P2 char_id */
-    { 0x13242C, 4 },  /* P3 char_id */
-    { 0x132F7C, 4 },  /* P4 char_id */
-    /* In-game player struct: damage % (offset 0x2C, 4 bytes) */
-    { 0x130DB0, 4 },  /* P1 damage */
-    { 0x131900, 4 },  /* P2 damage */
-    { 0x132450, 4 },  /* P3 damage */
-    { 0x132FA0, 4 },  /* P4 damage */
-    /* RNG seeds */
-    { 0x05B940, 4 },  /* primary LCG seed */
-    { 0x0A0578, 4 },  /* alternate seed */
-};
-#define KN_GAMEPLAY_ADDR_COUNT (sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]))
+ * Other ROMs would need their own address tables.
+ *
+ * NOTE: kn_gameplay_addrs[] and KN_GAMEPLAY_ADDR_COUNT are defined
+ * earlier (before kn_post_tick) so the gameplay stash logic can use them. */
 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

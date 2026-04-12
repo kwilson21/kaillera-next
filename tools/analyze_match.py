@@ -946,7 +946,7 @@ def query_deadlock_audit_events(df: pl.DataFrame) -> None:
         print("  No deadlock audit recovery events — either clean session or fixes not triggered.")
 
 
-def query_freeze_detection(df: pl.DataFrame) -> None:
+def query_freeze_detection(df: pl.DataFrame, jsonl_dir: str = "") -> None:
     _print_section("8. FREEZE DETECTION")
     if "msg" not in df.columns:
         print("(missing msg column)")
@@ -1175,6 +1175,108 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
 
     if not found_any:
         print("  No freeze signals detected.")
+
+    # ── Log truncation + viewport freeze detection ─────────────────────────
+    # Compare max frame in the log vs summary-reported frames. A large gap
+    # means the sync log buffer filled (usually with diagnostic dumps) and
+    # the host kept ticking without logging. Combined with RENDER-STALL,
+    # this is the signature of the "viewport freeze" bug: game runs internally
+    # but canvas stops updating, diagnostics flood the log, and the user sees
+    # a frozen screen.
+    _print_section("8g. VIEWPORT FREEZE ANALYSIS")
+    vf_found = False
+    # Parse summary frames from JSONL meta lines directly (DuckDB flattens nested dicts unpredictably)
+    import glob as _glob
+    slot_summaries = {}
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as _mf:
+                first_line = json.loads(_mf.readline())
+                if first_line.get("_kind") == "meta":
+                    s = first_line.get("slot")
+                    summary_frames = first_line.get("summary", {}).get("frames")
+                    summary_dur = first_line.get("summary", {}).get("duration_sec")
+                    if s is not None and summary_frames is not None:
+                        slot_summaries[s] = (summary_frames, summary_dur)
+        except Exception:
+            continue
+
+    for slot_val, (summary_frames, summary_dur) in slot_summaries.items():
+
+            # Max frame in actual log entries for this slot
+            # _kind is null for regular entries (only "meta" for session metadata)
+            slot_entries = df.filter(
+                (pl.col("slot") == slot_val) & (pl.col("_kind").is_null()) & pl.col("f").is_not_null()
+            )
+            if slot_entries.height == 0:
+                continue
+            max_logged_frame = slot_entries.get_column("f").max()
+            missing = summary_frames - max_logged_frame
+
+            if missing > 60:  # more than 1 second of unlogged frames
+                vf_found = True
+                # Calculate logged duration
+                wall_times = slot_entries.filter(pl.col("t") > 10000).get_column("t")
+                logged_dur = (wall_times.max() - wall_times.min()) / 1000 if wall_times.len() > 1 else 0
+                print(
+                    f"  !! LOG TRUNCATION slot={slot_val}: log ends at f={max_logged_frame} "
+                    f"but summary reports {summary_frames} frames ({missing} unlogged frames)"
+                )
+                print(
+                    f"     Logged duration: {logged_dur:.1f}s, "
+                    f"summary duration: {summary_dur}s"
+                )
+                # Check if diagnostic dumps caused the truncation
+                diag_dumps = slot_entries.filter(
+                    pl.col("msg").str.contains("RB-REGION-BYTES|RB-SUBHASH-DIFF|RB-REGION-DIFF")
+                )
+                if diag_dumps.height > 50:
+                    print(
+                        f"     Cause: {diag_dumps.height} diagnostic dump entries "
+                        f"filled the sync log buffer"
+                    )
+
+                # Check for RENDER-STALL preceding the truncation
+                render_stalls = slot_entries.filter(
+                    pl.col("msg").str.contains("RENDER-STALL")
+                )
+                if render_stalls.height > 0:
+                    first_stall = render_stalls.head(1).row(0, named=True)
+                    stall_f = first_stall.get("f", 0)
+                    # Check for hash mismatches near the render stall
+                    mismatches = slot_entries.filter(
+                        pl.col("msg").str.contains("MISMATCH")
+                    )
+                    first_mm_f = None
+                    if mismatches.height > 0:
+                        first_mm_f = mismatches.get_column("f").min()
+
+                    print(
+                        f"\n  ** VIEWPORT FREEZE DETECTED (slot={slot_val}):"
+                    )
+                    print(
+                        f"     RENDER-STALL at f={stall_f} (canvas stopped updating)"
+                    )
+                    if first_mm_f is not None:
+                        print(
+                            f"     First hash MISMATCH at f={first_mm_f} "
+                            f"({'after' if first_mm_f > stall_f else 'before'} render stall)"
+                        )
+                    # Audio death
+                    audio_dead = slot_entries.filter(pl.col("msg").str.contains("audio-empty"))
+                    if audio_dead.height > 5:
+                        first_audio = audio_dead.get_column("f").min()
+                        print(
+                            f"     Audio dead from f={first_audio} "
+                            f"({audio_dead.height} audio-empty events)"
+                        )
+                    print(
+                        f"     Game ticked to f={summary_frames} internally but "
+                        f"UI was frozen from ~f={stall_f}"
+                    )
+
+    if not vf_found:
+        print("  No viewport freeze detected.")
 
 
 # ── 8b-pre. Boot funnel analysis ─────────────────────────────────────────────
@@ -1687,7 +1789,7 @@ def main() -> None:
     query_pacing(df)
     query_boot_deadlock(df)
     query_deadlock_audit_events(df)
-    query_freeze_detection(df)
+    query_freeze_detection(df, str(out_dir))
     query_boot_funnel(df, client_events)
     query_session_lifecycle(client_events)
     query_input_analysis(df)
