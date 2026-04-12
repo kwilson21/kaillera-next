@@ -1283,12 +1283,11 @@
   // differ briefly (e.g., roster change), the next frame resets the seed.
   const KN_RNG_SEED_RDRAM = 0x0005b940; // primary LCG seed
   const KN_RNG_ALT_SEED_RDRAM = 0x000a0578; // alternate seed
-  // SSB64/Smash Remix game_status byte — same offset used by C rollback
-  // engine (kn_gameplay_addrs). Values: 0=wait, 1=ongoing, 2=paused, 5=end.
-  // Used to gate rollback prediction: during menus (status != 1), rollback's
+  // SSB64/Smash Remix game_status — VS settings word at N64 0x800A4D18.
+  // game_status is byte 1 (bits 23-16): 0=wait, 1=ongoing, 2=paused, 5=end.
+  // Used to gate rollback prediction: during menus (status == 0), rollback's
   // stash-and-restore only preserves ~73 bytes of in-match state, corrupting
   // menu navigation state and causing screen-skip desyncs.
-  const KN_GAME_STATUS_RDRAM = 0x000a4d19;
   let _rngPatched = false;
   let _rngSeed = 0;
   let _rdramBase = 0; // WASM heap byte offset of RDRAM
@@ -1321,15 +1320,22 @@
 
   // Read SSB64 game_status from RDRAM. Returns 1 when the match is
   // actively running (gameplay), 0 during menus/CSS/stage-select, or
-  // -1 if RDRAM isn't available yet. Reads the same byte offset the C
-  // rollback engine uses in kn_gameplay_addrs (0xA4D19).
+  // -1 if RDRAM isn't available yet.
+  //
+  // BYTE ORDER: mupen64plus stores RDRAM in host (little-endian) byte
+  // order. N64 byte 1 of a BE word is at LE offset (byte_offset ^ 3).
+  // Using HEAPU32 + shift avoids XOR-3 confusion: read the 32-bit word
+  // at the word-aligned address, then extract the correct byte position.
+  // game_status is byte 1 (bits 23-16) of the N64 word at 0x800A4D18.
+  const KN_GAME_STATUS_WORD_RDRAM = 0x000a4d18; // word-aligned address
   let _inGameplay = false;
   let _inGameplayLoggedAt = -1; // frame where we last logged a transition
   const _readGameStatus = () => {
     if (!_rdramBase || !_isSmashRemix()) return -1;
     const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?.HEAPU8) return -1;
-    return mod.HEAPU8[_rdramBase + KN_GAME_STATUS_RDRAM];
+    if (!mod?.HEAPU32) return -1;
+    const word = mod.HEAPU32[(_rdramBase + KN_GAME_STATUS_WORD_RDRAM) >> 2];
+    return (word >> 16) & 0xff;
   };
 
   const _initRNGSync = (mod) => {
