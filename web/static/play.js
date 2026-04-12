@@ -136,7 +136,9 @@
     } catch (_) {
       window._kn_preloadedAudioCtx = new AC();
     }
-    window._kn_preloadedAudioCtx.resume().catch(() => {});
+    window._kn_preloadedAudioCtx.resume().catch((e) => {
+      console.warn(`[kn] preload AudioContext resume: ${e.name}: ${e.message}`);
+    });
     const dest = window._kn_preloadedAudioCtx.createMediaStreamDestination();
     const el = document.createElement('audio');
     el.srcObject = dest.stream;
@@ -256,7 +258,17 @@
         _reconnectDowngradeTimer = null;
       }
     };
+    // BF7: warn user if initial connection takes >10s
+    let _initialConnectTimer = setTimeout(() => {
+      if (!socket.connected) {
+        showToast('Unable to reach server \u2014 retrying\u2026', 'error');
+      }
+    }, 10000);
     socket.on('connect', () => {
+      if (_initialConnectTimer) {
+        clearTimeout(_initialConnectTimer);
+        _initialConnectTimer = null;
+      }
       _hideReconnecting();
       onConnect();
     });
@@ -2190,12 +2202,22 @@
       };
       script.onerror = () => {
         console.log('[play] loader.js FAILED to load');
+        // BF5: surface EJS loader failure to the user
+        window.knShowError?.('Failed to load emulator \u2014 please refresh the page.');
+        KNEvent?.('wasm-fail', 'ejs-loader script error');
       };
       document.body.appendChild(script);
     };
     if (window._knCoreReady) {
-      // NOTE: intentionally .then() — dual resolve/reject handler, cleaner than try/finally
-      window._knCoreReady.then(injectLoader, injectLoader);
+      // BF5: race _knCoreReady against a 15s timeout so boot doesn't hang
+      // forever if /api/core-info fetch never resolves.
+      const coreTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Core load timeout (15s)')), 15000),
+      );
+      Promise.race([window._knCoreReady, coreTimeout]).then(injectLoader, (err) => {
+        console.warn(`[play] core-ready: ${err.message} — proceeding without cache clear`);
+        injectLoader();
+      });
     } else {
       injectLoader();
     }

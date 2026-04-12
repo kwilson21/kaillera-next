@@ -2163,7 +2163,8 @@
             document.removeEventListener('keydown', resumeAudio, true);
             document.removeEventListener('touchstart', resumeAudio, true);
           } catch (e) {
-            _syncLog(`audio resume failed: ${e.message}`);
+            _syncLog(`audio resume failed: ${e.name}: ${e.message}`);
+            KNEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name });
           }
         };
         document.addEventListener('click', resumeAudio, true);
@@ -2182,9 +2183,15 @@
   let _audioFeedCount = 0;
   let _audioEmptyCount = 0;
   let _audioErrorLogged = false;
+  let _audioSuspendedToastShown = false;
   const feedAudio = () => {
     try {
       if (!_audioReady || !_audioCtx) return;
+      // BF1/BF8: don't feed audio into a suspended context — attempt resume instead
+      if (_audioCtx.state === 'suspended') {
+        _audioCtx.resume().catch(() => {});
+        return;
+      }
       const mod = window.EJS_emulator?.gameManager?.Module;
       if (!mod) return;
 
@@ -2224,6 +2231,11 @@
               `ctxState=${ctxState} ` +
               `workletPort=${workletPort}`,
           );
+          // BF1: surface persistent audio failure to the user
+          if (_audioCtx.state === 'suspended' && !_audioSuspendedToastShown) {
+            _audioSuspendedToastShown = true;
+            window.knShowToast?.('Audio blocked \u2014 click anywhere to enable sound', 'warn');
+          }
         }
         return;
       }
@@ -3748,10 +3760,19 @@
           // → Asyncify stalls at frame 6. We fix both problems here:
           //   1. Monkey-patch AudioContext so EJS gets a running context
           //   2. Pre-create _audioCtx for lockstep audio (stays running)
+          //
+          // BF3: if document is hidden when gesture fires, AudioContext.resume()
+          // will throw NotAllowedError. We still create the contexts (they'll
+          // be resumed by the BF6 visibilitychange handler when tab returns).
           const AC = window.AudioContext || window.webkitAudioContext;
           if (AC) {
             const _ejsCtx = new AC();
-            _ejsCtx.resume().catch(() => {});
+            _ejsCtx.resume().catch((e) => {
+              _syncLog(`EJS AudioContext resume: ${e.name}: ${e.message}`);
+              if (e.name === 'NotAllowedError') {
+                _syncLog('BF3: gesture fired while hidden — audio will resume on tab return');
+              }
+            });
             // Pre-create the lockstep AudioContext at 44100Hz (N64 core rate).
             // iOS WKWebView may silently fail when AudioBufferSourceNode
             // buffers don't match the context's sample rate.
@@ -3761,7 +3782,9 @@
               } catch (_) {
                 _audioCtx = new AC(); // fallback to native rate
               }
-              _audioCtx.resume().catch(() => {});
+              _audioCtx.resume().catch((e) => {
+                _syncLog(`lockstep AudioContext resume: ${e.name}: ${e.message}`);
+              });
               // iOS FxiOS (WKWebView): ScriptProcessorNode → destination produces
               // no audible output even though samples flow and ctx reports running.
               // Route through <audio> element instead — iOS grants privileged audio
@@ -5633,12 +5656,31 @@
       if (document.hidden) {
         _backgroundAt = Date.now();
         _syncLog(`tab hidden at frame ${_frameNum}`);
+        // BF2: warn user if tab goes hidden during boot convergence
+        const inBoot = _rbInitFrame >= 0 && _frameNum - _rbInitFrame <= BOOT_GRACE_FRAMES;
+        if (inBoot) {
+          window.knShowToast?.('Game is paused \u2014 switch to this tab to continue', 'warn');
+        }
       } else {
         const bgDuration = _backgroundAt ? Date.now() - _backgroundAt : 0;
         _backgroundAt = 0;
         _syncLog(`tab visible (was background ${bgDuration} ms)`);
 
-        // Short background (<500ms): no action needed
+        // BF6: resume AudioContext on visibility return — browsers suspend
+        // AudioContext when tab is hidden, and it won't auto-resume.
+        if (_audioCtx?.state === 'suspended') {
+          _audioCtx.resume().catch((e) => {
+            _syncLog(`audio re-resume on visibility failed: ${e.name}: ${e.message}`);
+          });
+          _syncLog(`audio context resumed on tab return (was suspended)`);
+        }
+        // Also resume EJS AudioContext if accessible
+        const ejsAudioCtx = window.EJS_emulator?.audioContext;
+        if (ejsAudioCtx?.state === 'suspended') {
+          ejsAudioCtx.resume().catch(() => {});
+        }
+
+        // Short background (<500ms): no action needed (audio resume above still fires)
         if (bgDuration < 500) return;
 
         // Force full resync after background return (delta base is stale).
@@ -5658,8 +5700,11 @@
 
         // Fast-forward _frameNum to catch up with peers. Background throttling
         // means we fell behind — peers have moved far ahead.
+        // BF2: during boot convergence, this skips the 300-frame pure-lockstep
+        // window that would take 5+ minutes at background-throttled 1fps.
         if (_lastRemoteFrame > _frameNum) {
-          _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);
+          const wasBoot = _rbInitFrame >= 0 && _frameNum - _rbInitFrame <= 300;
+          _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}${wasBoot ? ' (boot-skip)' : ''}`);
           _frameNum = _lastRemoteFrame;
           KNState.frameNum = _frameNum;
           _localInputs = {};
@@ -6094,7 +6139,9 @@
           // frames independently before input exchange begins — the host can
           // race 100+ frames ahead, which would permanently trigger the freeze
           // even though the input pipeline hasn't converged yet.
-          const _rbConverged = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > 300;
+          // BF4: reduced from 300 to 120 — N64 boot sequence stabilizes by ~120 frames.
+          // Matches BOOT_GRACE_FRAMES and MIN_BOOT_FRAMES constants.
+          const _rbConverged = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
           if (_rbConverged && !_rbConvergedLogged) {
             _rbConvergedLogged = true;
             _syncLog(
@@ -6299,11 +6346,11 @@
       // Two modes, one goal: never let the local peer run so far ahead
       // that rollback can't correct a misprediction.
       //
-      // BOOT (first 300 frames): pure lockstep stall — wait for remote
-      // input before every frame. Prevents the boot race where both
-      // emulators predict through ~120 boot frames and desync.
+      // BOOT (first BOOT_GRACE_FRAMES): pure lockstep stall — wait for
+      // remote input before every frame. Prevents the boot race where
+      // both emulators predict through boot frames and desync.
       //
-      // GAMEPLAY (after 300 frames): let rollback predict through the
+      // GAMEPLAY (after BOOT_GRACE_FRAMES): let rollback predict through the
       // first few frames of missing input (hides jitter). But if frame
       // advantage exceeds DELAY_FRAMES + 4, stall to wait — prevents
       // runaway prediction → phantom → disconnect. Rollback handles
@@ -6313,7 +6360,8 @@
       // late joiners stall in pure-lockstep waiting for ALL peers' input
       // every frame, which is fatal on mobile with 3+ peers.
       const _isLateJoinStart = _rbInitFrame > 0;
-      const _rbBootConverged = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > 300;
+      // BF4: reduced from 300 to BOOT_GRACE_FRAMES (120) — boot stabilizes by ~120 frames
+      const _rbBootConverged = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
       if (!_rbBootConverged) {
         // Boot: pure lockstep stall, with timeout-based deadlock recovery

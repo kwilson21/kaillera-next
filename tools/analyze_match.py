@@ -14,6 +14,7 @@ Sections:
   6. Network health (ack lag trends, input lateness, DC events)
   7. Pacing analysis (throttle frequency, frame advantage distribution)
   8. Freeze detection (render stall, input dead, audio stall, zero-input runs)
+  8f. Boot funnel analysis (pre-gameplay failure classification)
   9. Rollback detail (failed rollbacks, misprediction breakdown, tolerance)
   10. C debug log highlights
 
@@ -1144,6 +1145,240 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
         print("  No freeze signals detected.")
 
 
+# ── 8b-pre. Boot funnel analysis ─────────────────────────────────────────────
+
+
+def query_boot_funnel(df: pl.DataFrame, client_events: list[dict]) -> None:
+    """Analyze the boot funnel: lobby → room → ROM → WebRTC → game → boot → input.
+
+    Classifies sessions into boot-phase failure categories:
+      PRE-GAMEPLAY-FAILURE  — emulator_booted event missing
+      AUDIO-CONTEXT-BLOCKED — NotAllowedError or audio resume failed in first 120 frames
+      INPUT-STARVED-AT-BOOT — 0% non-zero input + TAB-FOCUS lost in first 60 frames
+      BOOT-TIMEOUT          — boot duration > 30s
+      BOOT-SLOW             — boot duration > 10s
+      PRE-MATCH-DISCONNECT  — ended_by=disconnect with frames < 200
+      BOOT-OK               — none of the above
+    """
+    _print_section("8f. BOOT FUNNEL ANALYSIS")
+
+    # ── 1. Boot timeline from client_events ─────────────────────────────
+    FUNNEL_STAGES = [
+        "room_created", "peer_joined", "rom_loaded",
+        "webrtc_connected", "server_game_started",
+        "first_frame_rendered", "emulator_booted",
+    ]
+
+    if not client_events:
+        print("  (no client events — cannot build boot timeline)")
+        print("\n  Boot classification: PRE-GAMEPLAY-FAILURE (no events)")
+        return
+
+    # Build timeline: first occurrence of each stage type
+    stage_times: dict[str, str] = {}
+    stage_slots: dict[str, list] = {}
+    for ev in client_events:
+        etype = ev.get("type", "")
+        created = ev.get("created_at", "")
+        slot = ev.get("slot", ev.get("_session_slot", "?"))
+        if etype in FUNNEL_STAGES:
+            if etype not in stage_times:
+                stage_times[etype] = created
+            stage_slots.setdefault(etype, []).append(slot)
+
+    # Parse timestamps for delta calculation
+    from datetime import datetime
+
+    def _parse_ts(ts_str: str) -> datetime | None:
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(ts_str.replace("Z", "").replace("+00:00", ""), fmt)
+            except ValueError:
+                continue
+        return None
+
+    base_ts = None
+    print("  Boot timeline:")
+    for stage in FUNNEL_STAGES:
+        ts_str = stage_times.get(stage)
+        if not ts_str:
+            print(f"    {stage:25s} — MISSING")
+            continue
+        ts = _parse_ts(ts_str)
+        if ts and base_ts is None:
+            base_ts = ts
+        delta = f"+{(ts - base_ts).total_seconds():.1f}s" if ts and base_ts else "?"
+        slots_str = ",".join(str(s) for s in stage_slots.get(stage, []))
+        print(f"    {stage:25s} → {delta:>8s}  (slot(s): {slots_str})")
+
+    # ── 2. Boot duration ────────────────────────────────────────────────
+    game_started_ts = _parse_ts(stage_times.get("server_game_started", ""))
+    emu_booted_ts = _parse_ts(stage_times.get("emulator_booted", ""))
+
+    boot_duration = None
+    if game_started_ts and emu_booted_ts:
+        boot_duration = (emu_booted_ts - game_started_ts).total_seconds()
+        flag = ""
+        if boot_duration > 30:
+            flag = " [BOOT-TIMEOUT]"
+        elif boot_duration > 10:
+            flag = " [BOOT-SLOW]"
+        print(f"\n  Boot duration: {boot_duration:.1f}s (game_started → emulator_booted){flag}")
+    elif game_started_ts and not emu_booted_ts:
+        print("\n  Boot duration: FAILED (emulator_booted event never fired)")
+    else:
+        print("\n  Boot duration: unknown (missing server_game_started)")
+
+    # ── 3. Check inter-stage delays ─────────────────────────────────────
+    prev_ts = None
+    prev_stage = None
+    for stage in FUNNEL_STAGES:
+        ts_str = stage_times.get(stage)
+        if not ts_str:
+            continue
+        ts = _parse_ts(ts_str)
+        if ts and prev_ts:
+            delta = (ts - prev_ts).total_seconds()
+            if delta > 5:
+                print(f"  SLOW-BOOT-STAGE: {prev_stage} → {stage} took {delta:.1f}s (> 5s)")
+        prev_ts = ts
+        prev_stage = stage
+
+    # ── 4. AudioContext failures ────────────────────────────────────────
+    classifications = []
+
+    if "msg" in df.columns:
+        boot_df = df
+        if "f" in df.columns:
+            boot_df = df.filter(pl.col("f") <= 120)
+
+        audio_failures = boot_df.filter(
+            pl.col("msg").str.contains("(?i)NotAllowedError|audio resume failed|audio-silent|AUDIO-DEATH")
+        )
+        if audio_failures.height > 0:
+            classifications.append("AUDIO-CONTEXT-BLOCKED")
+            print(f"\n  Audio issues during boot ({audio_failures.height} events):")
+            for row in audio_failures.head(5).iter_rows(named=True):
+                f_val = row.get("f", "?")
+                slot = row.get("slot", "?")
+                msg = str(row.get("msg", ""))[:120]
+                print(f"    slot={slot} f={f_val} {msg}")
+
+        # ── 5. Input starvation at boot ─────────────────────────────────
+        tab_focus_lost = boot_df.filter(
+            pl.col("msg").str.contains("TAB-FOCUS lost")
+        )
+        if "f" in df.columns:
+            early_focus_lost = tab_focus_lost.filter(pl.col("f") <= 60)
+        else:
+            early_focus_lost = tab_focus_lost
+
+        # Check for NORMAL-INPUT in first 200 frames
+        if "f" in df.columns:
+            early_inputs = df.filter(
+                (pl.col("f") <= 200) & pl.col("msg").str.contains("NORMAL-INPUT")
+            )
+        else:
+            early_inputs = df.filter(pl.col("msg").str.contains("NORMAL-INPUT")).head(10)
+
+        # Parse for zero-only input
+        has_nonzero_input = False
+        slots_with_data = set()
+        for row in early_inputs.iter_rows(named=True):
+            msg = str(row.get("msg", ""))
+            slot = row.get("slot", 0)
+            slots_with_data.add(slot)
+            # Check each slot's input: s0[buttons,lx,ly] — nonzero = active
+            for m in re.finditer(r"s\d+\[(\d+),(-?\d+),(-?\d+)", msg):
+                buttons, lx, ly = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if buttons != 0 or lx != 0 or ly != 0:
+                    has_nonzero_input = True
+                    break
+            if has_nonzero_input:
+                break
+
+        if not has_nonzero_input and early_focus_lost.height > 0:
+            classifications.append("INPUT-STARVED-AT-BOOT")
+            focus_frames = [str(r.get("f", "?")) for r in early_focus_lost.iter_rows(named=True)]
+            print(f"\n  INPUT-STARVED-AT-BOOT: no non-zero input in first 200 frames")
+            print(f"    TAB-FOCUS lost at frames: {', '.join(focus_frames[:5])}")
+
+        # ── 6. Boot convergence stalls ──────────────────────────────────
+        boot_lockstep_events = df.filter(
+            pl.col("msg").str.contains("BOOT-LOCKSTEP|BOOT-DEADLOCK-RECOVERY")
+        )
+        if boot_lockstep_events.height > 0:
+            print(f"\n  Boot convergence: {boot_lockstep_events.height} BOOT-LOCKSTEP events")
+            recovery = boot_lockstep_events.filter(
+                pl.col("msg").str.contains("BOOT-DEADLOCK-RECOVERY")
+            )
+            if recovery.height > 0:
+                print(f"    BOOT-DEADLOCK-RECOVERY fired {recovery.height} time(s)")
+
+    # ── 7. Pre-match disconnect classification ──────────────────────────
+    # Check total frame count from the data
+    max_frame = 0
+    if "f" in df.columns:
+        f_max = df.get_column("f").max()
+        if f_max is not None:
+            max_frame = int(f_max)
+
+    ended_by_disconnect = any(
+        ev.get("type") == "session-end" and "disconnect" in str(ev.get("message", "")).lower()
+        for ev in client_events
+    )
+    # Also check from session meta
+    if not ended_by_disconnect:
+        ended_by_disconnect = any(
+            ev.get("type") == "disconnect" for ev in client_events
+        )
+
+    if max_frame < 200 and ended_by_disconnect:
+        classifications.append("PRE-MATCH-DISCONNECT")
+
+    if boot_duration is not None:
+        if boot_duration > 30:
+            classifications.append("BOOT-TIMEOUT")
+        elif boot_duration > 10:
+            classifications.append("BOOT-SLOW")
+
+    if not emu_booted_ts and game_started_ts:
+        classifications.append("PRE-GAMEPLAY-FAILURE")
+
+    if not classifications:
+        classifications.append("BOOT-OK")
+
+    # ── 8. Summary ──────────────────────────────────────────────────────
+    print(f"\n  Boot classification: {', '.join(classifications)}")
+    print(f"  Total frames: {max_frame}")
+
+    # Root cause inference
+    if len(classifications) > 1 or classifications[0] != "BOOT-OK":
+        print("\n  Root cause inference:")
+        if "INPUT-STARVED-AT-BOOT" in classifications and "AUDIO-CONTEXT-BLOCKED" in classifications:
+            print("    Tab lost focus during boot → AudioContext blocked →")
+            print("    gamepad input zeroed → boot convergence stalled →")
+            if "PRE-MATCH-DISCONNECT" in classifications:
+                print(f"    disconnected after {max_frame} frames with no gameplay.")
+            else:
+                print(f"    degraded boot ({max_frame} frames).")
+        elif "PRE-GAMEPLAY-FAILURE" in classifications:
+            missing = [s for s in FUNNEL_STAGES if s not in stage_times]
+            if missing:
+                print(f"    Boot funnel broke at: {missing[0]}")
+                print(f"    Missing stages: {', '.join(missing)}")
+            else:
+                print("    Emulator failed to boot despite all funnel stages completing.")
+        elif "BOOT-TIMEOUT" in classifications:
+            print(f"    Boot took {boot_duration:.1f}s (expected <5s).")
+            if "AUDIO-CONTEXT-BLOCKED" in classifications:
+                print("    Likely cause: AudioContext suspension stalled emulator boot.")
+        elif "BOOT-SLOW" in classifications:
+            print(f"    Boot took {boot_duration:.1f}s (expected <5s).")
+        elif "PRE-MATCH-DISCONNECT" in classifications:
+            print(f"    Session ended at {max_frame} frames — never reached gameplay.")
+
+
 # ── 8b. Session lifecycle (server + client events) ──────────────────────────
 
 
@@ -1421,6 +1656,7 @@ def main() -> None:
     query_boot_deadlock(df)
     query_deadlock_audit_events(df)
     query_freeze_detection(df)
+    query_boot_funnel(df, client_events)
     query_session_lifecycle(client_events)
     query_input_analysis(df)
     query_rollback_detail(df)
