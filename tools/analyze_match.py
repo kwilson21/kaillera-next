@@ -1089,8 +1089,40 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
         if corruptions:
             found_any = True
             print(f"  ROLLBACK-RESTORE-CORRUPTION: {len(corruptions)} events (replay gp != post-restore gp)")
+            zero_gp = sum(1 for c in corruptions if c["replay_gp"] == "0x0")
+            if zero_gp:
+                print(f"    ({zero_gp} with replay_gp=0x0 — ring lookup failed, hash not computed)")
             for c in corruptions[:10]:
                 print(f"    slot={c['slot']} f={c['replay_f']} replay_gp={c['replay_gp']} post_gp={c['post_gp']}")
+
+    # C-REPLAY done detail: parse per-replay hash values
+    c_replay_done = df.filter(pl.col("msg").str.contains("C-REPLAY done"))
+    if c_replay_done.height > 0:
+        found_any = True
+        parsed = c_replay_done.with_columns(
+            rp_f=pl.col("msg").str.extract(r"caught up at f=(\d+)", 1).cast(pl.Int64, strict=False),
+            rp_gp=pl.col("msg").str.extract(r"gp=(0x[-0-9a-f]+)", 1),
+            rp_game=pl.col("msg").str.extract(r"game=(0x[-0-9a-f]+)", 1),
+            rp_full=pl.col("msg").str.extract(r"full=(0x[-0-9a-f]+)", 1),
+            rp_taint=pl.col("msg").str.extract(r"taint=(\d+)", 1).cast(pl.Int64, strict=False),
+        )
+        total = parsed.height
+        zero_gp = parsed.filter(pl.col("rp_gp") == "0x0").height
+        zero_all = parsed.filter(
+            (pl.col("rp_gp") == "0x0") & (pl.col("rp_game") == "0x0") & (pl.col("rp_full") == "0x0")
+        ).height
+        print(f"  C-REPLAY done detail: {total} replays, {zero_gp} with gp=0x0, {zero_all} with all-zero hashes")
+        for row in parsed.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('rp_f')} gp={row.get('rp_gp')} "
+                  f"game={row.get('rp_game')} full={row.get('rp_full')} taint={row.get('rp_taint')}")
+
+    # REPLAY-REMAINING-FIXUP: defensive fixup events (should not fire if rollback is healthy)
+    fixup_events = df.filter(pl.col("msg").str.contains("REPLAY-REMAINING-FIXUP"))
+    if fixup_events.height > 0:
+        found_any = True
+        print(f"  REPLAY-REMAINING-FIXUP: {fixup_events.height} events (replay_remaining was corrupted after restore)")
+        for row in fixup_events.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
 
     # Explicit freeze signals
     for event_name in ["RENDER-STALL", "INPUT-DEAD", "AUDIO-STALL", "AUDIO-RESUME", "TAB-FOCUS"]:

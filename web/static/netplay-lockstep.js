@@ -6569,7 +6569,7 @@
           throw new Error(`RB-INVARIANT-VIOLATION: replayDepth=${replayDepth} catchingUp=${catchingUp}`);
         }
       }
-      if (replayDepth > 0 && !_rbReplayLogged) {
+      if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _rbReplayLogged = true;
       }

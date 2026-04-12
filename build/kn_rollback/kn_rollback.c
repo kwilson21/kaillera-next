@@ -225,6 +225,11 @@ static struct {
     int has_active_predictions; /* 1 if any slot has predicted input */
     int serialize_skip_count;  /* diagnostic: frames skipped */
 
+    /* Ring staleness ceiling: last frame where a state was saved.
+     * Forces a periodic save even during long zero-input runs so
+     * every ring slot stays fresh within one ring_size window. */
+    int last_save_frame;
+
     /* Stats */
     int rollback_count;
     int prediction_count;
@@ -392,6 +397,7 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.local_slot = local_slot;
     rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
     rb.pending_rollback = -1;
+    rb.last_save_frame = -1;
     /* retro_serialize is now safe (static scratch buffer patch eliminates the
      * 16MB malloc per call). Same code path used by gm.getState() and resync. */
     rb.state_size = retro_serialize_size();
@@ -812,6 +818,22 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
         }
     }
 
+    /* Defensive: if rollback just restored state (did_restore=1) but
+     * replay_remaining is unexpectedly 0, something corrupted it between
+     * the assignment at line ~801 and the check below. Re-derive from
+     * frame position so the replay executes instead of being silently
+     * skipped (which causes the first replay frame to run as a normal
+     * tick with wrong inputs → permanent desync).
+     * If this fires, log loudly for root cause investigation. */
+    if (rb.did_restore && rb.replay_remaining <= 0 &&
+        rb.replay_target > rb.frame) {
+        int expected = rb.replay_target - rb.frame;
+        rb_log("REPLAY-REMAINING-FIXUP was=%d expected=%d frame=%d target=%d",
+            rb.replay_remaining, expected, rb.frame, rb.replay_target);
+        rb.replay_remaining = expected;
+        rb.replay_depth = expected; /* re-expose to JS */
+    }
+
     /* ── Amortized catch-up: prepare 1 replay frame, JS will step it ──
      * During catch-up, C writes inputs + saves state, then returns 2.
      * JS handles the actual emulator step via stepOneFrame() — same code
@@ -957,6 +979,19 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                     need_save = 1;
                 }
             }
+            /* Ring staleness ceiling: force a save at least once per
+             * ring_size frames. The oldest-frame check above scans one
+             * slot per tick, but a misprediction can target ANY frame
+             * within the window. During long zero-input runs (e.g., boot
+             * intro), the scan can't fill all slots before the first
+             * input-change misprediction arrives. Ceiling guarantees
+             * every ring slot is populated within one full rotation.
+             * Cost: at most 1 extra serialize per ring_size frames (~0.8/s
+             * at ring_size=13, 60fps). */
+            if (!need_save && rb.last_save_frame >= 0 &&
+                (rb.frame - rb.last_save_frame) >= rb.ring_size - 1) {
+                need_save = 1;
+            }
             if (!need_save && apply_frame >= 0) {
                 /* Check if any slot's applied input changed from previous frame */
                 int ss;
@@ -986,6 +1021,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
                 retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
                 rb.ring_sf_state[save_idx] = sf_pack();
                 rb.ring_frames[save_idx] = rb.frame;
+                rb.last_save_frame = rb.frame;
             } else {
                 rb.serialize_skip_count++;
             }
