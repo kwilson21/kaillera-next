@@ -5607,11 +5607,16 @@
     // Skip RSP audio processing on guest — eliminates audio DMA RDRAM writes
     // that diverge cross-platform due to mid-frame interrupt timing differences.
     // Host produces audio; guest gets it via the lockstep audio bypass.
-    if (_playerSlot !== 0) {
+    // Skip RSP HLE audio processing on ALL peers during netplay.
+    // RSP HLE uses hardware floats (not SoftFloat) for audio mixing,
+    // producing different RDRAM writes on V8 vs JSC. These writes are
+    // tainted but cascade to gameplay state through interrupt timing.
+    // Audio playback uses the lockstep audio bypass buffer instead.
+    {
       const skipMod = window.EJS_emulator?.gameManager?.Module;
       if (skipMod?._kn_set_skip_rsp_audio) {
-        skipMod._kn_set_skip_rsp_audio(1);
-        _syncLog('RSP audio DRAM writes disabled (guest — cross-platform determinism)');
+        skipMod._kn_set_skip_rsp_audio(2);
+        _syncLog('RSP audio mode 2: process for capture, restore DRAM after');
       }
     }
 
@@ -7246,6 +7251,25 @@
               _syncLog(
                 `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame}`,
               );
+              // Dump actual gameplay address values on first mismatch so we
+              // can see exactly which byte diverges. Read live RDRAM directly.
+              if (_rdramBase) {
+                const m = window.EJS_emulator?.gameManager?.Module;
+                if (m?.HEAPU32) {
+                  const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
+                  const r8 = (off) => m.HEAPU8[_rdramBase + off];
+                  const vals = [
+                    `scr=${r32(0xa4ad0).toString(16)}`,
+                    `gs=${r32(0xa4d18).toString(16)}`,
+                    `vs=${r32(0xa4d08).toString(16)},${r32(0xa4d0c).toString(16)},${r32(0xa4d10).toString(16)},${r32(0xa4d14).toString(16)},${r32(0xa4d18).toString(16)},${r32(0xa4d1c).toString(16)},${r32(0xa4d20).toString(16)}`,
+                    `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
+                    `chr=${r32(0x130d8c).toString(16)},${r32(0x1318dc).toString(16)},${r32(0x13242c).toString(16)},${r32(0x132f7c).toString(16)}`,
+                    `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)},${r32(0x132450).toString(16)},${r32(0x132fa0).toString(16)}`,
+                    `rng=${r32(0x5b940).toString(16)},${r32(0xa0578).toString(16)}`,
+                  ];
+                  _syncLog(`GP-DUMP f=${f} ${vals.join(' ')}`);
+                }
+              }
               // Arm bisect mode: per-frame hash broadcasts for the next 30
               // frames. The next divergence will be flagged at frame-exact
               // precision instead of 300-frame coarse granularity.

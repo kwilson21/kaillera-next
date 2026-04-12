@@ -522,6 +522,13 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     kn_taint_rdram(0x20000, 0x10000);
     rb_log("kn_rollback_init: tainted OS thread stacks 0x20000 size=0x10000");
 
+    /* Blocks 6-7 (0x60000-0x7FFFF): RSP HLE work area + audio processing.
+     * Sub-chunks 97,98,102,103,107,108 in block 6 diverge during replay
+     * due to RSP audio task timing differences between V8/JSC WASM JITs.
+     * No gameplay hash addresses in this range. */
+    kn_taint_rdram(0x60000, 0x20000);
+    rb_log("kn_rollback_init: tainted RSP/audio work area 0x60000 size=0x20000");
+
     /* Blocks 11-13 (0xB0000-0xDFFFF): Audio DMA spillover + render data
      * + transitions table + file manager. Block 13 intermittently diverges
      * during screen transitions. */
@@ -1122,56 +1129,21 @@ int kn_post_tick(void) {
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
-            /* Stash gameplay addresses from live RDRAM (replayed with correct
-             * inputs), restore full RDRAM to pre-replay forward-pass values,
-             * then patch gameplay bytes back. This prevents non-deterministic
-             * replay side-effects (interrupt timing jitter, audio DMA, heap
-             * allocs) from persisting — proven necessary by Apr 2026 testing
-             * where same-platform iPhone↔iPhone replay diverged 2-8 RDRAM
-             * blocks. Full serialize was considered but replay non-determinism
-             * from V8/JSC interrupt scheduling makes it unsafe.
+            /* GGPO-style full serialize: keep the replay's RDRAM as-is.
              *
-             * IMPORTANT: This mechanism only preserves ~73 bytes of in-match
-             * gameplay state. During CSS/stage-select, menu navigation state
-             * lives outside these addresses. Rollback during menus would
-             * create a Frankenstein state (screen says "in match" but menu
-             * structures are from prediction pass → host skips stages).
-             * The JS tick loop gates rollback on game_status==1 to prevent
-             * this — see the MENU lockstep comment in netplay-lockstep.js. */
-            {
-                uint8_t gameplay_stash[KN_GAMEPLAY_STASH_SIZE];
-                int stash_valid = 0;
-                if (rb.rdram_base) {
-                    int a;
-                    size_t pos = 0;
-                    stash_valid = 1;
-                    for (a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-                        size_t rdram_off = kn_gameplay_addrs[a].rdram_offset;
-                        uint32_t sz = kn_gameplay_addrs[a].size;
-                        if (rdram_off + sz > 0x800000) { stash_valid = 0; break; }
-                        memcpy(gameplay_stash + pos, rb.rdram_base + rdram_off, sz);
-                        pos += sz;
-                    }
-                }
-
-                /* Restore full RDRAM to pre-replay values. Prevents
-                 * non-deterministic replay side-effects (audio DMA, heap
-                 * allocs, interrupt state) from persisting. */
-                if (rb.rdram_base && rb.saved_rdram)
-                    memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
-
-                /* Write back the stashed gameplay addresses. */
-                if (stash_valid && rb.rdram_base) {
-                    int a;
-                    size_t pos = 0;
-                    for (a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-                        size_t rdram_off = kn_gameplay_addrs[a].rdram_offset;
-                        uint32_t sz = kn_gameplay_addrs[a].size;
-                        memcpy(rb.rdram_base + rdram_off, gameplay_stash + pos, sz);
-                        pos += sz;
-                    }
-                }
-            }
+             * The previous stash-and-restore approach saved 73 gameplay bytes
+             * from replay, restored full 8MB RDRAM to forward-pass values,
+             * then patched the 73 bytes back. GP-DUMP analysis (Apr 2026)
+             * proved this CORRUPTED game state: VS_settings were zeroed after
+             * rollback, causing camera changes and damage immunity on host.
+             *
+             * Full serialize is safe because:
+             * - Gameplay-critical values (stocks, damage, char_id) are
+             *   identical between replay and normal execution (GP-DUMP confirmed)
+             * - Non-deterministic RSP audio DRAM writes are handled by mode 2
+             *   save/restore in send_alist_to_audio_plugin (384KB, not 8MB)
+             * - Timer/RNG within-frame noise is excluded from the hash
+             * - The taint system excludes audio/heap from desync detection */
             /* R4: Post-replay live-state verification. Hash the live
              * emulator state and compare to what the ring claims for
              * the just-completed frame. If they differ, the replay

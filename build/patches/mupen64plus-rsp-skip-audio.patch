@@ -1,28 +1,44 @@
 diff --git a/mupen64plus-rsp-hle/src/hle.c b/mupen64plus-rsp-hle/src/hle.c
-index 4e65113..7c2f71f 100644
 --- a/mupen64plus-rsp-hle/src/hle.c
 +++ b/mupen64plus-rsp-hle/src/hle.c
-@@ -179,8 +179,26 @@ void rsp_break(struct hle_t* hle, unsigned int setbits)
+@@ -179,6 +179,59 @@ void rsp_break(struct hle_t* hle, unsigned int setbits)
      }
  }
- 
-+/* kaillera-next: When set, skip RSP audio processing (DRAM writes) but still
-+ * fire the task completion interrupt. The guest in lockstep netplay enables this
-+ * so the RSP audio output doesn't diverge between platforms — the guest receives
-+ * audio via the lockstep audio bypass, not from DRAM. */
+
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
++#include <string.h>
++#include <stdlib.h>
++/* kaillera-next: RSP audio determinism for netplay.
++ * mode 0: normal (RSP writes to DRAM)
++ * mode 1: skip entirely (silent, fastest, DRAM untouched)
++ * mode 2: process for audio capture, then restore DRAM (audio works, DRAM deterministic) */
 +int kn_skip_rsp_audio = 0;
 +EMSCRIPTEN_KEEPALIVE void kn_set_skip_rsp_audio(int skip) { kn_skip_rsp_audio = skip; }
++static uint8_t *kn_rsp_audio_snapshot = NULL;
++#define KN_RSP_AUDIO_DRAM_START 0x80000u
++#define KN_RSP_AUDIO_DRAM_SIZE  0x60000u
 +#endif
 +
  static void send_alist_to_audio_plugin(struct hle_t* hle)
  {
 +#ifdef __EMSCRIPTEN__
-+    if (kn_skip_rsp_audio) {
-+        /* Skip audio processing — DRAM stays untouched.
-+         * Still signal task completion so the game's interrupt handler runs. */
++    if (kn_skip_rsp_audio == 1) {
 +        rsp_break(hle, SP_STATUS_TASKDONE);
++        return;
++    }
++    if (kn_skip_rsp_audio >= 2) {
++        if (!kn_rsp_audio_snapshot) {
++            kn_rsp_audio_snapshot = (uint8_t *)malloc(KN_RSP_AUDIO_DRAM_SIZE);
++        }
++        if (kn_rsp_audio_snapshot && hle->dram) {
++            memcpy(kn_rsp_audio_snapshot, hle->dram + KN_RSP_AUDIO_DRAM_START, KN_RSP_AUDIO_DRAM_SIZE);
++            HleProcessAlistList(hle->user_defined);
++            memcpy(hle->dram + KN_RSP_AUDIO_DRAM_START, kn_rsp_audio_snapshot, KN_RSP_AUDIO_DRAM_SIZE);
++            rsp_break(hle, SP_STATUS_TASKDONE);
++        } else {
++            rsp_break(hle, SP_STATUS_TASKDONE);
++        }
 +        return;
 +    }
 +#endif

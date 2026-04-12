@@ -131,12 +131,44 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    WARN: AI DMA determinism patch failed"
     fi
 
-    # RSP HLE audio skip: allows guest to skip RSP audio DRAM writes that
-    # produce non-deterministic intermediate values across WASM JIT engines.
-    if [ -f "${PATCHES_DIR}/mupen64plus-rsp-skip-audio.patch" ]; then
-        git apply "${PATCHES_DIR}/mupen64plus-rsp-skip-audio.patch" && \
-            echo "    Applied mupen64plus RSP skip-audio patch" || \
-            echo "    WARN: RSP skip-audio patch failed"
+    # RSP HLE audio determinism: mode 1=silent skip, mode 2=process+restore DRAM.
+    # Applied via sed injection (patch format was fragile).
+    if ! grep -q "kn_skip_rsp_audio" mupen64plus-rsp-hle/src/hle.c; then
+        python3 -c "
+import re
+src = open('mupen64plus-rsp-hle/src/hle.c').read()
+globals_block = '''
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <string.h>
+#include <stdlib.h>
+int kn_skip_rsp_audio = 0;
+EMSCRIPTEN_KEEPALIVE void kn_set_skip_rsp_audio(int skip) { kn_skip_rsp_audio = skip; }
+static uint8_t *kn_rsp_audio_snapshot = NULL;
+#define KN_RSP_AUDIO_DRAM_START 0x80000u
+#define KN_RSP_AUDIO_DRAM_SIZE  0x60000u
+#endif
+
+'''
+body_block = '''#ifdef __EMSCRIPTEN__
+    if (kn_skip_rsp_audio == 1) { rsp_break(hle, SP_STATUS_TASKDONE); return; }
+    if (kn_skip_rsp_audio >= 2) {
+        if (!kn_rsp_audio_snapshot) kn_rsp_audio_snapshot = (uint8_t *)malloc(KN_RSP_AUDIO_DRAM_SIZE);
+        if (kn_rsp_audio_snapshot && hle->dram) {
+            memcpy(kn_rsp_audio_snapshot, hle->dram + KN_RSP_AUDIO_DRAM_START, KN_RSP_AUDIO_DRAM_SIZE);
+            HleProcessAlistList(hle->user_defined);
+            memcpy(hle->dram + KN_RSP_AUDIO_DRAM_START, kn_rsp_audio_snapshot, KN_RSP_AUDIO_DRAM_SIZE);
+            rsp_break(hle, SP_STATUS_TASKDONE);
+        } else { rsp_break(hle, SP_STATUS_TASKDONE); }
+        return;
+    }
+#endif
+'''
+src = src.replace('static void send_alist_to_audio_plugin', globals_block + 'static void send_alist_to_audio_plugin')
+src = src.replace('    HleProcessAlistList(hle->user_defined);\n    rsp_break(hle, SP_STATUS_TASKDONE);\n}', body_block + '    HleProcessAlistList(hle->user_defined);\n    rsp_break(hle, SP_STATUS_TASKDONE);\n}')
+open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
+"
+        echo "    Injected RSP audio skip (modes 1+2)"
     fi
 
     # FPU trace: ring buffer instrumentation in fpu.h for cross-platform

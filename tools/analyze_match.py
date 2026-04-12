@@ -1711,6 +1711,213 @@ def query_c_debug_highlights(df: pl.DataFrame) -> None:
         print(f"  {t}: {n}")
 
 
+def query_byte_level_diff(jsonl_dir: str) -> None:
+    """Byte-level diff of REGION-BYTES from both peers at the same frame+region+sub-chunk."""
+    _print_section("11. BYTE-LEVEL STATE DIFF")
+    import glob as _glob
+
+    # Collect all RB-REGION-BYTES entries keyed by (frame, region, sub-chunk)
+    # slot -> { (frame, region, sub) -> hex_bytes }
+    per_slot: dict[int, dict[tuple[int, int, int], str]] = defaultdict(dict)
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", -1)
+                f.seek(0)
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    if "RB-REGION-BYTES" not in msg:
+                        continue
+                    # Parse: RB-REGION-BYTES f=N rR:RDRAM sub=S/T off=0xX len=L: HEXDATA
+                    m = re.match(
+                        r"RB-REGION-BYTES f=(\d+) r(\d+):\w+ sub=(\d+)/\d+ off=0x[0-9a-f]+ len=\d+: ([0-9a-f]+)",
+                        msg,
+                    )
+                    if m:
+                        frame, region, sub = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                        per_slot[slot][(frame, region, sub)] = m.group(4)
+        except Exception:
+            continue
+
+    if len(per_slot) < 2:
+        print("  Need REGION-BYTES from both peers for diffing.")
+        return
+
+    slots = sorted(per_slot.keys())
+    s0, s1 = slots[0], slots[1]
+    # Find overlapping keys
+    common = set(per_slot[s0].keys()) & set(per_slot[s1].keys())
+    if not common:
+        print(f"  No overlapping frame+region+sub between slot {s0} and slot {s1}.")
+        print(f"  Slot {s0}: {len(per_slot[s0])} entries, Slot {s1}: {len(per_slot[s1])} entries")
+        # Fall back: show per-slot byte dumps at first divergence
+        for s in slots:
+            entries = sorted(per_slot[s].keys())
+            if entries:
+                frame, region, sub = entries[0]
+                print(f"\n  First REGION-BYTES from slot {s}: f={frame} r{region} sub={sub}")
+                hex_data = per_slot[s][(frame, region, sub)]
+                # Show first 128 bytes as formatted hex
+                for off in range(0, min(len(hex_data), 256), 64):
+                    chunk = hex_data[off : off + 64]
+                    byte_off = off // 2
+                    rdram_base = region * 0x10000 + sub * 256
+                    print(f"    0x{rdram_base + byte_off:06X}: {chunk}")
+        return
+
+    print(f"  Found {len(common)} overlapping frame+region+sub entries between slots {s0} and {s1}")
+    # Sort by frame, then region, then sub
+    common_sorted = sorted(common)
+    diffs_found = 0
+    for frame, region, sub in common_sorted:
+        h0 = per_slot[s0][(frame, region, sub)]
+        h1 = per_slot[s1][(frame, region, sub)]
+        if h0 == h1:
+            continue
+        min_len = min(len(h0), len(h1))
+        byte_diffs = []
+        for i in range(0, min_len, 2):
+            if h0[i : i + 2] != h1[i : i + 2]:
+                byte_off = i // 2
+                rdram_addr = region * 0x10000 + sub * 256 + byte_off
+                byte_diffs.append((byte_off, rdram_addr, h0[i : i + 2], h1[i : i + 2]))
+        if byte_diffs:
+            diffs_found += 1
+            rdram_base = region * 0x10000 + sub * 256
+            print(f"\n  f={frame} r{region} sub={sub} (RDRAM 0x{rdram_base:06X}): {len(byte_diffs)} bytes differ")
+            for byte_off, rdram_addr, b0, b1 in byte_diffs[:20]:
+                print(f"    offset {byte_off:>3} (0x{rdram_addr:06X}): slot{s0}=0x{b0} slot{s1}=0x{b1}")
+            if len(byte_diffs) > 20:
+                print(f"    ... +{len(byte_diffs) - 20} more")
+            if diffs_found >= 10:
+                print(f"\n  (showing first 10 diverging sub-chunks, {len(common_sorted) - diffs_found} more)")
+                break
+
+    if diffs_found == 0:
+        print("  All overlapping REGION-BYTES are identical between peers.")
+
+    # Also dump gameplay address values from live RDRAM if GP-DUMP entries exist
+    gp_dumps: dict[int, list[str]] = defaultdict(list)
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", -1)
+                f.seek(0)
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    if msg.startswith("GP-DUMP"):
+                        gp_dumps[slot].append(msg)
+        except Exception:
+            continue
+
+    if gp_dumps:
+        print(f"\n  === GAMEPLAY ADDRESS DUMPS (from JS) ===")
+        for s in sorted(gp_dumps.keys()):
+            print(f"\n  Slot {s}:")
+            for msg in gp_dumps[s][:5]:
+                print(f"    {msg}")
+
+    # Extract gameplay address values from REGION-BYTES data
+    gameplay_addrs = [
+        (0xA4AD0, 1, "current_screen"),
+        (0xA4D08, 4, "VS_settings[0]"),
+        (0xA4D0C, 4, "VS_settings[1]"),
+        (0xA4D10, 4, "VS_settings[2]"),
+        (0xA4D14, 4, "VS_settings[3]"),
+        (0xA4D18, 4, "VS_settings[4] (game_status)"),
+        (0xA4D1C, 4, "VS_settings[5]"),
+        (0xA4D20, 4, "VS_settings[6]"),
+        (0xA4D53, 1, "P1_stocks"),
+        (0xA4DC7, 1, "P2_stocks"),
+        (0xA4E3B, 1, "P3_stocks"),
+        (0xA4EAF, 1, "P4_stocks"),
+        (0x130D8C, 4, "P1_char_id"),
+        (0x130DB0, 4, "P1_damage"),
+        (0x1318DC, 4, "P2_char_id"),
+        (0x131900, 4, "P2_damage"),
+        (0x13242C, 4, "P3_char_id"),
+        (0x132450, 4, "P3_damage"),
+        (0x132F7C, 4, "P4_char_id"),
+        (0x132FA0, 4, "P4_damage"),
+        (0x05B940, 4, "RNG_primary"),
+        (0x0A0578, 4, "RNG_alt"),
+    ]
+
+    # Build lookup: (region, sub, byte_offset_in_sub) -> (slot, frame, hex_value)
+    # For each gameplay addr, find if we have REGION-BYTES covering it
+    print(f"\n  === GAMEPLAY ADDRESS VALUES (from REGION-BYTES) ===")
+    # Find first MISMATCH frame
+    first_mismatch_frame = None
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    if "RB-CHECK" in msg and "MISMATCH" in msg:
+                        m = re.search(r"RB-CHECK f=(\d+)", msg)
+                        if m:
+                            mf = int(m.group(1))
+                            if first_mismatch_frame is None or mf < first_mismatch_frame:
+                                first_mismatch_frame = mf
+        except Exception:
+            continue
+
+    if first_mismatch_frame is None:
+        print("  No MISMATCH detected — gameplay addresses not compared.")
+        return
+
+    print(f"  First MISMATCH at f={first_mismatch_frame}")
+    print()
+
+    # For each gameplay address, check if we have bytes in any nearby frame
+    search_range = range(first_mismatch_frame - 5, first_mismatch_frame + 10)
+    for addr, size, name in gameplay_addrs:
+        region = addr >> 16
+        sub = (addr & 0xFFFF) >> 8
+        byte_off = addr & 0xFF
+        # Check both slots for this region+sub in the search range
+        values: dict[int, dict[int, str]] = {}  # slot -> frame -> hex_value
+        for s in slots:
+            for frame in search_range:
+                key = (frame, region, sub)
+                if key in per_slot[s]:
+                    hex_data = per_slot[s][key]
+                    # Extract bytes at byte_off
+                    hex_start = byte_off * 2
+                    hex_end = hex_start + size * 2
+                    if hex_end <= len(hex_data):
+                        val = hex_data[hex_start:hex_end]
+                        if s not in values:
+                            values[s] = {}
+                        values[s][frame] = val
+
+        if values:
+            slot_strs = []
+            for s in sorted(values.keys()):
+                frames = sorted(values[s].keys())
+                for frame in frames[:2]:
+                    slot_strs.append(f"slot{s}@f{frame}=0x{values[s][frame]}")
+            match_str = ""
+            # Check if values match across slots at same frame
+            for frame in search_range:
+                vals_at_frame = {}
+                for s in sorted(values.keys()):
+                    if frame in values.get(s, {}):
+                        vals_at_frame[s] = values[s][frame]
+                if len(vals_at_frame) == 2:
+                    v = list(vals_at_frame.values())
+                    match_str = " MATCH" if v[0] == v[1] else f" DIFFER"
+                    break
+            print(f"  0x{addr:06X} {name:30s} r{region}:sub{sub}:off{byte_off} {' | '.join(slot_strs)}{match_str}")
+        else:
+            print(f"  0x{addr:06X} {name:30s} r{region}:sub{sub}:off{byte_off} (no REGION-BYTES data)")
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
@@ -1795,6 +2002,7 @@ def main() -> None:
     query_input_analysis(df)
     query_rollback_detail(df)
     query_c_debug_highlights(df)
+    query_byte_level_diff(str(out_dir))
 
     if not cleanup:
         print(f"\n[analyze] JSONL files kept at: {out_dir}")

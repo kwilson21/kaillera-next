@@ -38,7 +38,7 @@ index bc46a5f..e2c5bc8 100644
 --- a/mupen64plus-core/src/device/rcp/ai/ai_controller.c
 +++ b/mupen64plus-core/src/device/rcp/ai/ai_controller.c
 @@ -100,7 +100,7 @@ static void do_dma(struct ai_controller* ai, struct ai_dma* dma)
- 
+
  static void fifo_push(struct ai_controller* ai)
  {
 -    unsigned int duration = get_dma_duration(ai) * ai->dma_modifier;
