@@ -4,6 +4,38 @@
 > `/static/changelog.json` (click the version badge in the page footer).
 > This file is a historical record of the pre-automation era (v0.1.0–v0.7.0).
 
+## [Unreleased]
+
+### Fixed
+- **Rollback state integrity (RF1-RF7)**: eliminated silent state
+  corruption in the C rollback engine. Seven fixes enforcing six
+  new invariants (R1-R6):
+  - RF1 — re-capture Emscripten rAF runner after `retro_unserialize`
+    so replay frames actually step the emulator (root-cause fix for
+    room B190OHFY silent state corruption)
+  - RF2 — `stepOneFrame` emits `REPLAY-NORUN` if called with a null
+    runner during replay; dev builds throw
+  - RF3 — `kn_pre_tick` return-value invariant: `replay_depth > 0`
+    requires `catchingUp === 2` (`RB-INVARIANT-VIOLATION`)
+  - RF4 — dirty-input serialize gate enforces ring coverage across
+    the rollback window
+  - RF5 — post-replay live-state hash verified against ring
+    (`RB-LIVE-MISMATCH` on drift)
+  - RF6 Part A — strengthened `AUDIO-DEATH` diagnostics with
+    rollback-correlation metadata and AudioWorklet state
+  - RF7 — `FAILED-ROLLBACK (stale)` promoted to loud
+    `FATAL-RING-STALE` event; dev builds throw
+
+### Changed
+- `tools/analyze_match.py` detects all new event types
+  (`REPLAY-NORUN`, `RB-INVARIANT-VIOLATION`, `FATAL-RING-STALE`,
+  `RB-LIVE-MISMATCH`) and enriches `AUDIO-DEATH` with rollback-
+  correlation inference.
+
+### Documentation
+- `docs/netplay-invariants.md` §Rollback Integrity (R1-R6)
+- `CLAUDE.md` rollback invariant bullet under Netplay invariants
+
 ## [0.7.0] - 2026-03-27
 
 ### Added

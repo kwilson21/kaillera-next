@@ -1009,6 +1009,51 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
                 print("    rollback correlation: no prior C-REPLAY done (independent)")
             print(f"    ctxState={ctx_state} workletPort={worklet_port}")
 
+    # RF2/RF3: JS-side invariant violations
+    # REPLAY-NORUN = stepOneFrame called with null runner during replay
+    # RB-INVARIANT-VIOLATION = kn_pre_tick returned !=2 with replay_depth>0
+    replay_norun = df.filter(pl.col("msg").str.contains("REPLAY-NORUN"))
+    if replay_norun.height > 0:
+        found_any = True
+        print(
+            f"  REPLAY-NORUN: {replay_norun.height} events "
+            f"(R2 violation — stepOneFrame no-op during replay)"
+        )
+        for row in replay_norun.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
+
+    rb_invariant = df.filter(pl.col("msg").str.contains("RB-INVARIANT-VIOLATION"))
+    if rb_invariant.height > 0:
+        found_any = True
+        print(
+            f"  RB-INVARIANT-VIOLATION: {rb_invariant.height} events "
+            f"(R5 violation — kn_pre_tick return-value inconsistent with replay_depth)"
+        )
+        for row in rb_invariant.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
+
+    # RF7: fatal stale-ring
+    fatal_stale = df.filter(pl.col("msg").str.contains("FATAL-RING-STALE"))
+    if fatal_stale.height > 0:
+        found_any = True
+        print(
+            f"  FATAL-RING-STALE: {fatal_stale.height} events "
+            f"(R3 violation — rollback targeted a frame no longer in the ring)"
+        )
+        for row in fatal_stale.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
+
+    # RF5: post-replay live-state drift
+    live_mismatch = df.filter(pl.col("msg").str.contains("RB-LIVE-MISMATCH"))
+    if live_mismatch.height > 0:
+        found_any = True
+        print(
+            f"  RB-LIVE-MISMATCH: {live_mismatch.height} events "
+            f"(R4 violation — live state after replay differs from ring)"
+        )
+        for row in live_mismatch.head(5).iter_rows(named=True):
+            print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
+
     # Rollback restore corruption — RB-POST-RB gp hash differs from C-REPLAY done gp
     replay_done = df.filter(pl.col("msg").str.contains("C-REPLAY done:"))
     post_rb = df.filter(pl.col("msg").str.contains("RB-POST-RB"))

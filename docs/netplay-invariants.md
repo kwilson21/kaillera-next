@@ -131,3 +131,84 @@ section before writing the PR.
 - **Plan:** [superpowers/plans/2026-04-11-netplay-deadlock-audit.md](superpowers/plans/2026-04-11-netplay-deadlock-audit.md)
 - **Trigger:** commit `788add0` "fix(rollback): eliminate BOOT-LOCKSTEP + coord-sync deadlock"
 - **Diagnostic tool:** `tools/analyze_match.py` (see `reference_analyze_match.md`) — section 8d surfaces all I1/I2/MF6 recovery events
+
+## Rollback Integrity (R1-R6)
+
+The C-level rollback engine ([build/kn_rollback/kn_rollback.c](../build/kn_rollback/kn_rollback.c))
+enforces six additional invariants that together eliminate the class
+of silent state-corruption bugs uncovered by the 2026-04-11 audit of
+room B190OHFY. These complement the deadlock-audit invariants above —
+while I1/I2 prevent the tick loop from freezing forever, R1-R6
+prevent the rollback itself from silently producing wrong state when
+the tick loop IS running normally.
+
+**Core principle: no band-aid recovery.** Mid-match auto-resync
+triggered from an invariant violation is forbidden. Dev builds throw
+so regressions are caught in CI; production builds log loudly and
+continue so the player sees the broken game, the analyzer catches
+the event, and the root-cause fix goes back in the queue. Silent
+auto-recovery is the exact failure mode the audit rejected.
+
+### R1 — Runner continuity across rollback restore
+
+Any code path that calls `retro_unserialize` must re-capture the
+Emscripten rAF runner before the next `stepOneFrame()`. The C
+rollback branch uses `kn_rollback_did_restore()` polled from JS to
+trigger `pauseMainLoop`/`resumeMainLoop`. The pre-existing loadState
+resync path already does this; RF1 mirrors it for the rollback path.
+
+### R2 — No silent stepOneFrame no-ops during replay
+
+`stepOneFrame()` returning false while `_rbReplayLogged === true` is
+an invariant violation. Logs `REPLAY-NORUN` with full diagnostic
+fields (current frame, replay depth, runner state). Dev builds throw.
+
+### R3 — Ring coverage within the rollback window
+
+For any frame F where `rb.frame - F <= rb.max_frames`, the ring
+buffer must hold valid state for F. The dirty-input serialize gate
+may only skip a save if doing so cannot leave any in-window frame
+stale (RF4). Violations during a misprediction-triggered restore
+log `FATAL-RING-STALE` and throw in dev (RF7).
+
+### R4 — Post-replay live state equals ring state
+
+After a replay completes at frame N, the emulator's live state
+(fresh `retro_serialize` + `kn_gameplay_hash`) must match the ring's
+stored hash for frame N. Mismatches log `RB-LIVE-MISMATCH` with both
+hashes and throw in dev (RF5).
+
+### R5 — Pre-tick return value consistency
+
+If `rb.replay_depth > 0` after `kn_pre_tick` returns, the return
+value must equal 2 (replay frame). A return value of 0 with
+`replay_depth > 0` logs `RB-INVARIANT-VIOLATION` and throws in dev
+(RF3). This is the smallest defense-in-depth check and ships first
+as an insurance policy that would have caught the B190OHFY bug on
+the first run regardless of root cause.
+
+### R6 — Audio/video state survives restore
+
+Any subsystem driven by RDRAM contents (AudioWorklet, OpenAL, GL
+framebuffer) must either survive `retro_unserialize` intact or be
+explicitly re-initialized in the restore sequence. RF6 Part A adds
+`lastRb`/`rbDelta`/`resetAudioCalls`/`ctxState`/`workletPort` fields
+to the `audio-empty`/`audio-silent` log so the analyzer can infer
+whether a cluster of audio-death events correlates with a recent
+rollback. RF6 Part B (explicit `kn_reset_audio` in the rollback
+restore path) is contingent: ships only if real-session playtesting
+shows residual AUDIO-DEATH after RF1-RF5 are in the field.
+
+### Detection events
+
+Every violation of R1-R6 produces a loud analyzer event. Zero of
+any of these events across a real session log means the integrity
+invariants held.
+
+| Event | Invariant | Spec RF |
+|-------|-----------|---------|
+| `REPLAY-NORUN` | R2 | RF2 |
+| `RB-INVARIANT-VIOLATION` | R5 | RF3 |
+| `FATAL-RING-STALE` | R3 | RF7 |
+| `RB-LIVE-MISMATCH` | R4 | RF5 |
+| `AUDIO-DEATH` (enriched) | R6 diagnostic | RF6 Part A |

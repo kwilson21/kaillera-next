@@ -168,6 +168,12 @@ Two codified invariants govern the netplay tick loop. See
 - **I2 — Reconnect starts clean:** all per-peer cleanup routes through
   `resetPeerState(slot, reason)`. Adding per-peer state without updating
   `resetPeerState` is a review-level violation.
+- **Rollback integrity** (R1-R6): the C rollback engine must produce
+  bit-correct state or fail loudly. Dev builds throw on violation;
+  production logs `REPLAY-NORUN`, `RB-INVARIANT-VIOLATION`,
+  `FATAL-RING-STALE`, or `RB-LIVE-MISMATCH`. No mid-match auto-resync
+  from these events — fix the root cause instead. See
+  [docs/netplay-invariants.md §Rollback Integrity](docs/netplay-invariants.md).
 
 A detection-only tick watchdog (MF6) logs `TICK-STUCK` for any residual
 stall past I1/I2. **It takes no recovery action by design** — its only
