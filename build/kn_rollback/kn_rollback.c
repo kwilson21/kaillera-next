@@ -728,9 +728,8 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
                     }
                     misprediction = 1;
                 } else {
-                    /* R3 VIOLATION: state for this frame was overwritten in the ring.
-                     * Set the fatal flag for JS to surface; no recovery action in C.
-                     * Per §Core principle: log-loud-and-continue. */
+                    /* R3 VIOLATION: state for this frame was overwritten.
+                     * With every-frame saves this should never happen. */
                     rb.failed_rollbacks++;
                     rb.fatal_stale_f = frame;
                     rb.fatal_stale_ring_idx = ring_idx;
@@ -989,81 +988,22 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
      * misprediction could roll back to this frame. We also save
      * unconditionally if a rollback is pending (need the most recent
      * state for the replay target). */
-        /* Dirty-input serialize gate (RetroArch runahead approach).
-         * Save state only when the input applied to the emulator CHANGES
-         * from the previous frame. If all players hold the same input for
-         * N consecutive frames, only the first needs a state save — a
-         * rollback to any of the others can replay from that save using
-         * the identical input and produce the same state.
+        /* Save state every frame — no serialize skip gate.
          *
-         * This avoids the prediction/confirmation timing problem: we don't
-         * care whether input is predicted or real — only whether the bytes
-         * written to the N64 controller ports changed. */
+         * The previous dirty-input gate skipped saves when inputs didn't
+         * change, creating ring coverage gaps. FATAL-RING-STALE at f=23410
+         * proved this causes permanent desync: 4 mispredictions couldn't
+         * be rolled back, wrong inputs ran uncorrected, characters diverged.
+         *
+         * Cost: ~3-5ms per serialize (16MB). At 60fps with the gate, we
+         * already saved ~59% of frames. Going to 100% adds ~1.5-2ms/frame
+         * average — well within the 16.6ms budget. Eliminates ring gaps. */
         {
-            int need_save = rb.pending_rollback >= 0
-                         || kn_rdram_offset_in_state == 0
-                         || !rb.prev_applied_valid;
-            /* R3: Ring coverage invariant. The dirty-input gate may only
-             * skip a save if doing so cannot leave any frame inside the
-             * rollback window [rb.frame - max_frames, rb.frame] without
-             * a valid ring entry. If the oldest frame still in-window no
-             * longer matches its ring slot, force a save to guarantee
-             * coverage. Fixed ring_size-bounded (ring_size ≈ 13 in prod),
-             * O(1) per tick — no measurable perf regression.
-             * See docs/netplay-invariants.md §R3. */
-            if (!need_save && rb.frame > rb.max_frames) {
-                int oldest_window_frame = rb.frame - rb.max_frames;
-                int oldest_idx = oldest_window_frame % rb.ring_size;
-                if (rb.ring_frames[oldest_idx] != oldest_window_frame) {
-                    need_save = 1;
-                }
-            }
-            /* Ring staleness ceiling: force a save at least once per
-             * ring_size frames. The oldest-frame check above scans one
-             * slot per tick, but a misprediction can target ANY frame
-             * within the window. During long zero-input runs (e.g., boot
-             * intro), the scan can't fill all slots before the first
-             * input-change misprediction arrives. Ceiling guarantees
-             * every ring slot is populated within one full rotation.
-             * Cost: at most 1 extra serialize per ring_size frames (~0.8/s
-             * at ring_size=13, 60fps). */
-            if (!need_save && rb.last_save_frame >= 0 &&
-                (rb.frame - rb.last_save_frame) >= rb.ring_size - 1) {
-                need_save = 1;
-            }
-            if (!need_save && apply_frame >= 0) {
-                /* Check if any slot's applied input changed from previous frame */
-                int ss;
-                for (ss = 0; ss < rb.num_players; ss++) {
-                    idx = apply_frame % KN_INPUT_RING_SIZE;
-                    kn_input_t *cur = &rb.inputs[ss][idx];
-                    kn_input_t *prev = &rb.prev_applied[ss];
-                    if (cur->buttons != prev->buttons
-                        || cur->lx != prev->lx || cur->ly != prev->ly
-                        || cur->cx != prev->cx || cur->cy != prev->cy) {
-                        need_save = 1;
-                        break;
-                    }
-                }
-            }
-            /* Update prev_applied for next frame's comparison */
-            if (apply_frame >= 0) {
-                int ss;
-                for (ss = 0; ss < rb.num_players; ss++) {
-                    idx = apply_frame % KN_INPUT_RING_SIZE;
-                    rb.prev_applied[ss] = rb.inputs[ss][idx];
-                }
-                rb.prev_applied_valid = 1;
-            }
-            if (need_save) {
-                int save_idx = rb.frame % rb.ring_size;
-                retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-                rb.ring_sf_state[save_idx] = sf_pack();
-                rb.ring_frames[save_idx] = rb.frame;
-                rb.last_save_frame = rb.frame;
-            } else {
-                rb.serialize_skip_count++;
-            }
+            int save_idx = rb.frame % rb.ring_size;
+            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+            rb.ring_sf_state[save_idx] = sf_pack();
+            rb.ring_frames[save_idx] = rb.frame;
+            rb.last_save_frame = rb.frame;
         }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
