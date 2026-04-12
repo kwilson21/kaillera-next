@@ -1017,6 +1017,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                rb.replay_depth, rb.replay_remaining,
                rb.pending_rollback, rb.did_restore,
                rb.frame, rb.replay_target);
+        rb.replay_depth = 0; /* Clear stale value so JS doesn't false-positive */
     }
     return 0; /* 0 = normal tick, JS should do stepOneFrame */
 }
@@ -1069,6 +1070,7 @@ int kn_post_tick(void) {
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
+            rb.replay_depth = 0; /* Clear so JS R5 check doesn't false-positive */
             /* GGPO-style full serialize: keep the replay's RDRAM as-is.
              *
              * The previous stash-and-restore approach saved 73 gameplay bytes
@@ -1155,9 +1157,7 @@ int kn_get_pending_rollback(void) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_replay_depth(void) {
-    int d = rb.replay_depth;
-    rb.replay_depth = 0;
-    return d;
+    return rb.replay_depth;
 }
 
 /* ── Query: did the rollback branch just restore state? ───────────────

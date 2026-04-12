@@ -3101,11 +3101,17 @@
         // Rollback state checksum verification
         if (e.data.startsWith('rb-check:')) {
           // Store peer's hash — compare when we reach the same frame
+          // Format: rb-check:frame:gpHash:gameHash (gameHash added for full state detection)
           const parts = e.data.split(':');
           const checkFrame = parseInt(parts[1], 10);
           const peerHash = parseInt(parts[2], 10);
+          const peerGameHash = parts.length > 3 ? parseInt(parts[3], 10) : null;
           if (!window._rbPendingChecks) window._rbPendingChecks = {};
           window._rbPendingChecks[checkFrame] = peerHash;
+          if (peerGameHash !== null) {
+            if (!window._rbPendingGameChecks) window._rbPendingGameChecks = {};
+            window._rbPendingGameChecks[checkFrame] = peerGameHash;
+          }
           return;
         }
         if (e.data.startsWith('rb-blocks:')) {
@@ -6703,7 +6709,7 @@
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
             } catch (_) {}
           }
         }
@@ -6958,7 +6964,7 @@
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
-                p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
+                p.dc.send(`rb-check:${hashFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
               } catch (_) {}
             }
           }
@@ -7028,7 +7034,7 @@
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
-                p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
+                p.dc.send(`rb-check:${hashFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
               } catch (_) {}
             }
           }
@@ -7178,7 +7184,7 @@
         for (const p of Object.values(_peers)) {
           if (p.dc?.readyState === 'open') {
             try {
-              p.dc.send(`rb-check:${hashFrame}:${gpHash}`);
+              p.dc.send(`rb-check:${hashFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
             } catch (_) {}
           }
         }
@@ -7241,7 +7247,38 @@
             if (localHash === 0) {
               _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
             } else if (localHash === peerHash) {
-              _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
+              // Gameplay hash matches — also check game_state_hash for
+              // broader divergence (player positions, animation, objects).
+              const peerGameHash = window._rbPendingGameChecks?.[fStr];
+              if (peerGameHash != null) {
+                delete window._rbPendingGameChecks[fStr];
+                const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
+                if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
+                  _syncLog(
+                    `RB-STATE-DRIFT f=${f} gp=MATCH game=DIFFER peer=0x${peerGameHash.toString(16)} local=0x${localGameHash.toString(16)} — non-gameplay RDRAM diverged`,
+                  );
+                  // Fire GP-DUMP for context
+                  if (_rdramBase) {
+                    const m = window.EJS_emulator?.gameManager?.Module;
+                    if (m?.HEAPU32) {
+                      const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
+                      const r8 = (off) => m.HEAPU8[_rdramBase + off];
+                      const vals = [
+                        `scr=${r32(0xa4ad0).toString(16)}`,
+                        `gs=${r32(0xa4d18).toString(16)}`,
+                        `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
+                        `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)}`,
+                        `rng=${r32(0x5b940).toString(16)}`,
+                      ];
+                      _syncLog(`GP-DRIFT f=${f} ${vals.join(' ')}`);
+                    }
+                  }
+                } else {
+                  _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
+                }
+              } else {
+                _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
+              }
               // Track last-known-good frame so post-mortem analysis can
               // bound the divergence window without scanning the whole log.
               if (f > _rbLastGoodFrame) _rbLastGoodFrame = f;
