@@ -561,8 +561,22 @@
   //   knDiag.tainted()                 // current taint bitmap summary
   //   knDiag.blockHashes()             // 128 RDRAM block hashes
   //   knDiag.dumpBlock(7)              // hex-dump a 64KB block
+  // Dev-build flag: set via ?debug=1 URL param or KN_DEV_BUILD=1 in
+  // localStorage. Dev builds throw on invariant violations so the test
+  // suite catches regressions. Production builds log and continue.
+  // (Rollback integrity spec §Core principle.)
+  const KN_DEV_BUILD = (() => {
+    try {
+      if (new URLSearchParams(window.location.search).get('debug') === '1') return true;
+      if (window.localStorage?.getItem('KN_DEV_BUILD') === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
+  window.KN_DEV_BUILD = KN_DEV_BUILD;
+
   const _knDiagEnabled = (() => {
     try {
+      if (window.KN_DEV_BUILD) return true;
       if (new URLSearchParams(window.location.search).has('knDiag')) return true;
       if (localStorage.getItem('kn-debug') === '1') return true;
     } catch (_) {}
@@ -1383,10 +1397,7 @@
         dc: p.dc?.readyState ?? 'null',
         buffered: p.dc?.bufferedAmount ?? 0,
         lastFrameFromPeer: p.lastFrameFromPeer ?? -1,
-        lastAckAdvanceMs:
-          p.lastAckAdvanceTime > 0
-            ? Math.round(performance.now() - p.lastAckAdvanceTime)
-            : -1,
+        lastAckAdvanceMs: p.lastAckAdvanceTime > 0 ? Math.round(performance.now() - p.lastAckAdvanceTime) : -1,
         phantom: !!_peerPhantom?.[p.slot],
         lastRemoteFrame: _lastRemoteFramePerSlot?.[p.slot] ?? -1,
         bufSize: Object.keys(_remoteInputs?.[p.slot] || {}).length,
@@ -2698,8 +2709,13 @@
         };
         if (_useCRollback) {
           _pendingCInputs.push({
-            slot: peer.slot, frame: r.frame,
-            buttons: r.buttons, lx: r.lx, ly: r.ly, cx: r.cx, cy: r.cy,
+            slot: peer.slot,
+            frame: r.frame,
+            buttons: r.buttons,
+            lx: r.lx,
+            ly: r.ly,
+            cx: r.cx,
+            cy: r.cy,
           });
         }
       }
@@ -2708,9 +2724,13 @@
     // Queue for C-level rollback engine — drained at tick boundary
     if (_useCRollback) {
       _pendingCInputs.push({
-        slot: peer.slot, frame: recvFrame,
-        buttons: recvInput.buttons, lx: recvInput.lx, ly: recvInput.ly,
-        cx: recvInput.cx, cy: recvInput.cy,
+        slot: peer.slot,
+        frame: recvFrame,
+        buttons: recvInput.buttons,
+        lx: recvInput.lx,
+        ly: recvInput.ly,
+        cx: recvInput.cx,
+        cy: recvInput.cy,
       });
     }
     if (!_peerInputStarted[peer.slot]) {
@@ -3427,9 +3447,7 @@
       if (_pendingCInputs[i].slot === slot) _pendingCInputs.splice(i, 1);
     }
     if (opts.sid) {
-      _scheduledSyncRequests = _scheduledSyncRequests.filter(
-        (r) => r.targetSid !== opts.sid,
-      );
+      _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
     }
 
     // Boot-stall tracking — if we were stalled waiting on this slot's
@@ -4549,10 +4567,7 @@
         bytes = await Promise.race([
           decodeAndDecompress(msg.data),
           new Promise((_resolve, reject) =>
-            setTimeout(
-              () => reject(new Error('WORKER-STALL: late-join decompress')),
-              LATE_JOIN_TIMEOUT_MS,
-            ),
+            setTimeout(() => reject(new Error('WORKER-STALL: late-join decompress')), LATE_JOIN_TIMEOUT_MS),
           ),
         ]);
       } catch (_workerErr) {
@@ -5882,11 +5897,7 @@
     // immediately at current frame (non-coordinated branch). This
     // closes the frame-target-unreachable deadlock class from room
     // 1Q6ZF7N6. See docs/netplay-invariants.md §I1 and spec §MF3.
-    if (
-      _syncTargetFrame > 0 &&
-      _syncTargetDeadlineAt > 0 &&
-      performance.now() > _syncTargetDeadlineAt
-    ) {
+    if (_syncTargetFrame > 0 && _syncTargetDeadlineAt > 0 && performance.now() > _syncTargetDeadlineAt) {
       const _coordElapsed = Math.round(performance.now() - (_syncTargetDeadlineAt - SYNC_COORD_TIMEOUT_MS));
       _syncLog(
         `COORD-SYNC-TIMEOUT target=${_syncTargetFrame} f=${_frameNum} ` +
@@ -6288,8 +6299,8 @@
               _bootStallRecoveryFired = true;
               _syncLog(
                 `BOOT-DEADLOCK-RECOVERY f=${_frameNum} applyF=${rbApplyFrame} ` +
-                `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)} — ` +
-                `requesting immediate resync`,
+                  `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)} — ` +
+                  `requesting immediate resync`,
               );
               if (_playerSlot !== 0) {
                 const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
@@ -6307,7 +6318,7 @@
             if (_frameNum % 60 === 0) {
               _syncLog(
                 `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                  `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
               );
             }
             return;
@@ -6373,6 +6384,23 @@
 
       // Log replay start/done
       const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
+      // ── R5: pre-tick return-value invariant ─────────────────────────────
+      // If C just set replay_depth > 0, kn_pre_tick MUST return 2 (replay
+      // frame). Any other return value means the rollback branch ran but
+      // the replay branch didn't — the emulator state is about to freeze
+      // at the rollback target while the frame counter keeps advancing.
+      // Per §Core principle: log-loud-and-continue. No resync recovery.
+      // See docs/netplay-invariants.md §R5.
+      if (replayDepth > 0 && catchingUp !== 2) {
+        const rbFrame = tickMod._kn_get_frame?.() ?? -1;
+        _syncLog(
+          `RB-INVARIANT-VIOLATION f=${_frameNum} replayDepth=${replayDepth} ` +
+            `catchingUp=${catchingUp} rbFrame=${rbFrame} tick=${performance.now().toFixed(1)}`,
+        );
+        if (window.KN_DEV_BUILD) {
+          throw new Error(`RB-INVARIANT-VIOLATION: replayDepth=${replayDepth} catchingUp=${catchingUp}`);
+        }
+      }
       if (replayDepth > 0 && !_rbReplayLogged) {
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _rbReplayLogged = true;
@@ -6549,29 +6577,37 @@
           } else if (_frameNum - _renderLastChangeFrame >= 180 && !_renderStallLogged) {
             _syncLog(
               `RENDER-STALL start=${_renderLastChangeFrame} cur=${_frameNum} ` +
-              `unchanged=${_frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
+                `unchanged=${_frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
             );
             _renderStallLogged = true;
           }
         }
 
         // 2. INPUT-DEAD: local input all-zero for 300+ frames after being non-zero
-        const isNonZero = localInput.buttons !== 0 || localInput.lx !== 0 ||
-          localInput.ly !== 0 || localInput.cx !== 0 || localInput.cy !== 0;
+        const isNonZero =
+          localInput.buttons !== 0 ||
+          localInput.lx !== 0 ||
+          localInput.ly !== 0 ||
+          localInput.cx !== 0 ||
+          localInput.cy !== 0;
         if (isNonZero) {
           _inputLastNonZeroFrame = _frameNum;
           _inputEverNonZero = true;
           _inputDeadLogged = false;
         }
-        if (_inputEverNonZero && !isNonZero &&
-            _inputLastNonZeroFrame >= 0 &&
-            _frameNum - _inputLastNonZeroFrame >= 300 && !_inputDeadLogged) {
+        if (
+          _inputEverNonZero &&
+          !isNonZero &&
+          _inputLastNonZeroFrame >= 0 &&
+          _frameNum - _inputLastNonZeroFrame >= 300 &&
+          !_inputDeadLogged
+        ) {
           const hasFocus = document.hasFocus();
           const gpCount = navigator.getGamepads?.()?.filter(Boolean)?.length ?? 0;
           _syncLog(
             `INPUT-DEAD slot=${_playerSlot} zeroSince=${_inputLastNonZeroFrame} ` +
-            `cur=${_frameNum} gap=${_frameNum - _inputLastNonZeroFrame}f ` +
-            `focus=${hasFocus} gamepads=${gpCount}`,
+              `cur=${_frameNum} gap=${_frameNum - _inputLastNonZeroFrame}f ` +
+              `focus=${hasFocus} gamepads=${gpCount}`,
           );
           _inputDeadLogged = true;
         }
