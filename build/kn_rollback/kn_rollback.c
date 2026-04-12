@@ -544,6 +544,7 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     kn_taint_rdram(0x150000, 0x5C0000);
     rb_log("kn_rollback_init: tainted full heap 0x150000-0x70FFFF");
 
+
     /* Option X-2: Mark the post-RDRAM section of the savestate hash as
      * "ignore divergence". The post-RDRAM section contains CPU general
      * registers, cp0 (system control: status, cause, count), cp1 (FPU),

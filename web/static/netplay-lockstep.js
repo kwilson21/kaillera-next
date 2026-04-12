@@ -6791,6 +6791,7 @@
         _inDeterministicStep = true;
         stepOneFrame();
         _inDeterministicStep = false;
+        _syncRNGSeed(tickMod, _frameNum);
         feedAudio();
         // Advance C frame counter
         const newFrame = tickMod._kn_post_tick();
@@ -6854,6 +6855,13 @@
       stepOneFrame();
       _inDeterministicStep = false;
       const _tStep = performance.now();
+      // Post-step RNG reseed: the game advances RNG during the frame a
+      // different number of times on each peer (from interrupt timing
+      // differences). Re-seeding AFTER the step ensures the stored RNG
+      // value is identical for the next frame, regardless of within-frame
+      // divergence. Without this, random character/stage selection picks
+      // different results on iPhone↔iPhone.
+      _syncRNGSeed(tickMod, _frameNum);
       feedAudio();
 
       // ── Post-tick: advance C frame counter ──
