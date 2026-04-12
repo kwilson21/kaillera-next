@@ -912,6 +912,21 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
             int need_save = rb.pending_rollback >= 0
                          || kn_rdram_offset_in_state == 0
                          || !rb.prev_applied_valid;
+            /* R3: Ring coverage invariant. The dirty-input gate may only
+             * skip a save if doing so cannot leave any frame inside the
+             * rollback window [rb.frame - max_frames, rb.frame] without
+             * a valid ring entry. If the oldest frame still in-window no
+             * longer matches its ring slot, force a save to guarantee
+             * coverage. Fixed ring_size-bounded (ring_size ≈ 13 in prod),
+             * O(1) per tick — no measurable perf regression.
+             * See docs/netplay-invariants.md §R3. */
+            if (!need_save && rb.frame > rb.max_frames) {
+                int oldest_window_frame = rb.frame - rb.max_frames;
+                int oldest_idx = oldest_window_frame % rb.ring_size;
+                if (rb.ring_frames[oldest_idx] != oldest_window_frame) {
+                    need_save = 1;
+                }
+            }
             if (!need_save && apply_frame >= 0) {
                 /* Check if any slot's applied input changed from previous frame */
                 int ss;
