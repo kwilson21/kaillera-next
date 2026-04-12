@@ -549,6 +549,14 @@
   // Per-frame hash broadcast pending — populated after rollback to verify
   // the rollback restoration produced bit-identical state across peers.
   let _rbPendingPostRollbackHash = false;
+  // RF6 Part A: AUDIO-DEATH diagnostics enrichment. Track the most recent
+  // `C-REPLAY done` frame and how many kn_reset_audio() calls have fired
+  // since then, so audio-empty / audio-silent log lines can report
+  // rollback-correlation (Δ frames since rollback completed) and whether
+  // the rollback path missed resetting audio. Pure diagnostics — no
+  // behavior change.
+  let _lastRollbackDoneFrame = null;
+  let _resetAudioCallsSinceRb = 0;
 
   // ── window.knDiag — interactive diagnostics for devtools console ──
   //
@@ -2187,16 +2195,34 @@
         if (_audioEmptyCount <= 30) {
           const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
           const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'none';
+          // RF6 Part A: rollback-correlation + subsystem state enrichment
+          const rbDelta = _lastRollbackDoneFrame != null ? _frameNum - _lastRollbackDoneFrame : -1;
+          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
+          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
           _syncLog(
-            `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState}`,
+            `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState} ` +
+              `lastRb=${_lastRollbackDoneFrame ?? -1} ` +
+              `rbDelta=${rbDelta} ` +
+              `resetAudioCalls=${_resetAudioCallsSinceRb} ` +
+              `ctxState=${ctxState} ` +
+              `workletPort=${workletPort}`,
           );
         }
         // Log once after 300 consecutive empty frames (~5s) to detect silent audio
         if (_audioEmptyCount === 300) {
           const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
           const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
+          // RF6 Part A: rollback-correlation + subsystem state enrichment
+          const rbDelta = _lastRollbackDoneFrame != null ? _frameNum - _lastRollbackDoneFrame : -1;
+          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
+          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
           _syncLog(
-            `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState})`,
+            `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState}) ` +
+              `lastRb=${_lastRollbackDoneFrame ?? -1} ` +
+              `rbDelta=${rbDelta} ` +
+              `resetAudioCalls=${_resetAudioCallsSinceRb} ` +
+              `ctxState=${ctxState} ` +
+              `workletPort=${workletPort}`,
           );
         }
         return;
@@ -6527,6 +6553,8 @@
         // bugs because it's the first divergence point.
         _rbPendingPostRollbackHash = true;
         _rbReplayLogged = false;
+        _lastRollbackDoneFrame = _frameNum;
+        _resetAudioCallsSinceRb = 0;
       }
 
       if (catchingUp === 2) {
@@ -6546,7 +6574,10 @@
         // frame), causing event queue divergence that never recovers.
         _frameNum = tickMod._kn_get_frame();
         KNState.frameNum = _frameNum;
-        if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+        if (tickMod._kn_reset_audio) {
+          tickMod._kn_reset_audio();
+          _resetAudioCallsSinceRb++;
+        }
         _syncRNGSeed(tickMod, _frameNum);
         _inDeterministicStep = true;
         stepOneFrame();
@@ -6604,7 +6635,10 @@
         }
       }
 
-      if (tickMod._kn_reset_audio) tickMod._kn_reset_audio();
+      if (tickMod._kn_reset_audio) {
+        tickMod._kn_reset_audio();
+        _resetAudioCallsSinceRb++;
+      }
       _syncRNGSeed(tickMod, _frameNum);
       const _tStep0 = performance.now();
       _inDeterministicStep = true;
@@ -7633,7 +7667,10 @@
 
     // Step one frame with audio capture
     const tickMod = window.EJS_emulator?.gameManager?.Module;
-    if (tickMod?._kn_reset_audio) tickMod._kn_reset_audio();
+    if (tickMod?._kn_reset_audio) {
+      tickMod._kn_reset_audio();
+      _resetAudioCallsSinceRb++;
+    }
     _syncRNGSeed(tickMod, _frameNum);
     _inDeterministicStep = true;
     stepOneFrame();

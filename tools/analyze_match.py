@@ -954,19 +954,60 @@ def query_freeze_detection(df: pl.DataFrame) -> None:
     found_any = False
     slots = sorted(df.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list())
 
-    # Audio death — extended audio-empty or audio-silent runs
+    # Audio death — extended audio-empty or audio-silent runs.
+    # RF6 Part A: enriched with rollback-correlation fields (lastRb,
+    # rbDelta, resetAudioCalls) and AudioContext/AudioWorklet state
+    # (ctxState, workletPort) so the analyzer can infer whether a
+    # cluster of audio-death events correlates with a recent rollback.
     audio_empty = df.filter(pl.col("msg").str.contains("audio-empty f="))
     audio_silent = df.filter(pl.col("msg").str.contains("audio-silent:"))
     if audio_empty.height >= 10 or audio_silent.height > 0:
         found_any = True
-        print(f"  AUDIO-DEATH: {audio_empty.height} audio-empty + {audio_silent.height} audio-silent events")
+        print(
+            f"  AUDIO-DEATH: {audio_empty.height} audio-empty + "
+            f"{audio_silent.height} audio-silent events"
+        )
         if audio_silent.height > 0:
             for row in audio_silent.head(3).iter_rows(named=True):
-                print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+                print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
         if audio_empty.height >= 10:
-            first_empty = audio_empty.head(1).row(0, named=True)
-            last_empty = audio_empty.tail(1).row(0, named=True)
-            print(f"    audio-empty range: f={first_empty.get('f')} -> f={last_empty.get('f')} on slot={first_empty.get('slot')}")
+            audio_empty_parsed = audio_empty.with_columns(
+                rb_delta=pl.col("msg").str.extract(r"rbDelta=(-?\d+)", 1).cast(pl.Int64),
+                last_rb=pl.col("msg").str.extract(r"lastRb=(-?\d+)", 1).cast(pl.Int64),
+                reset_calls=pl.col("msg").str.extract(r"resetAudioCalls=(\d+)", 1).cast(pl.Int64),
+                ctx_state=pl.col("msg").str.extract(r"ctxState=(\w+)", 1),
+                worklet_port=pl.col("msg").str.extract(r"workletPort=(\w+)", 1),
+            )
+            first_empty = audio_empty_parsed.head(1).row(0, named=True)
+            last_empty = audio_empty_parsed.tail(1).row(0, named=True)
+            print(
+                f"    audio-empty range: f={first_empty.get('f')} -> "
+                f"f={last_empty.get('f')} on slot={first_empty.get('slot')}"
+            )
+            rb_delta = first_empty.get("rb_delta")
+            last_rb = first_empty.get("last_rb")
+            reset_calls = first_empty.get("reset_calls")
+            ctx_state = first_empty.get("ctx_state") or "unknown"
+            worklet_port = first_empty.get("worklet_port") or "unknown"
+            if last_rb is not None and last_rb >= 0 and rb_delta is not None and rb_delta >= 0:
+                if rb_delta < 10:
+                    correlation = "strong"
+                elif rb_delta < 100:
+                    correlation = "moderate"
+                else:
+                    correlation = "independent"
+                print(
+                    f"    rollback correlation: C-REPLAY done at f={last_rb} "
+                    f"(Δ={rb_delta}f, {correlation})"
+                )
+                if correlation == "strong" and reset_calls is not None and reset_calls == 0:
+                    print(
+                        "    likely cause: rollback path missed audio reset "
+                        "(resetAudioCalls=0)"
+                    )
+            else:
+                print("    rollback correlation: no prior C-REPLAY done (independent)")
+            print(f"    ctxState={ctx_state} workletPort={worklet_port}")
 
     # Rollback restore corruption — RB-POST-RB gp hash differs from C-REPLAY done gp
     replay_done = df.filter(pl.col("msg").str.contains("C-REPLAY done:"))
