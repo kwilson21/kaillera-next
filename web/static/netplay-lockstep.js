@@ -1992,6 +1992,8 @@
   let _frameAdvantage = 0; // smoothed frame advantage (EMA)
   let _frameAdvRaw = 0; // instantaneous frame advantage (for logging)
   let _framePacingActive = false; // true when cap is throttling
+  let _pacingThrottleStartAt = 0; // wall-clock when continuous throttle began (I1 deadline)
+  const PACING_THROTTLE_TIMEOUT_MS = 5000; // I1: max continuous pacing stall before forced release
   // Pacing summary stats (reset every 300 frames)
   let _pacingCapsCount = 0;
   let _pacingCapsFrames = 0;
@@ -2817,7 +2819,7 @@
   // _rbTransport === 'unreliable' (host-negotiated).
   const setupRollbackInputDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
-    ch.onopen = () => {
+    const onOpen = () => {
       // T4: log the ACTUAL negotiated DC properties, not what we asked for.
       // Some browsers ignore init options and silently give us ordered/reliable.
       // If the mismatch matters (we're in unreliable mode but got reliable),
@@ -2831,6 +2833,8 @@
         );
       }
     };
+    ch.onopen = onOpen;
+    if (ch.readyState === 'open') onOpen();
     ch.onclose = () => {
       _syncLog(`rb-input DC closed sid=${remoteSid}`);
     };
@@ -2852,7 +2856,7 @@
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
-    ch.onopen = () => {
+    const onOpen = () => {
       const peer = _peers[remoteSid];
       if (!peer) return;
       const known = _knownPlayers[remoteSid];
@@ -2970,6 +2974,11 @@
 
       if (!_gameStarted) startGameSequence();
     };
+    ch.onopen = onOpen;
+    // If the DataChannel is already open (race: ondatachannel delivered it
+    // in the 'open' state), fire the handler immediately. Without this,
+    // startGameSequence() never runs and the gesture prompt never appears.
+    if (ch.readyState === 'open') onOpen();
 
     ch.onclose = () => {
       // Guard: ignore stale close events from replaced peers after restart
@@ -5882,6 +5891,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
     _pacingMaxAdv = 0;
@@ -6117,6 +6127,7 @@
         // If no active pacing peers remain, release any active cap
         if (activePacingPeers === 0 && _framePacingActive) {
           _framePacingActive = false;
+          _pacingThrottleStartAt = 0;
           _syncLog('PACING-THROTTLE released — all peers phantom');
         }
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
@@ -6148,56 +6159,94 @@
               `PACING-CONVERGED f=${_frameNum} initF=${_rbInitFrame} fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax}`,
             );
           }
-          if (_useCRollback && _rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
-            if (!_framePacingActive) {
-              _framePacingActive = true;
-              _pacingCapsCount++;
-              _syncLog(
-                `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — skipping frame advance (inputs still sent)`,
-              );
+          if (!_useCRollback) {
+            if (_rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
+              if (!_framePacingActive) {
+                _framePacingActive = true;
+                _pacingThrottleStartAt = nowPacing;
+                _pacingCapsCount++;
+                _syncLog(
+                  `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — skipping frame advance (inputs still sent)`,
+                );
+              }
+              _pacingCapsFrames++;
+              _skipFrameAdvance = true;
             }
-            _pacingCapsFrames++;
-            _skipFrameAdvance = true;
           }
 
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
 
-          // Track stats for periodic summary
           _pacingAdvSum += _frameAdvantage;
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
 
-          // Proportional throttle: soft pacing for normal jitter.
-          // The faster peer naturally sits at fAdv ≈ delay+1 in steady
-          // state — that's normal GGPO operation, not something to throttle.
-          // Only start skipping when excess reaches +2 above delay (the peer
-          // is actually pulling away), and hard-skip at +3.
-          // During boot convergence, disable throttle (excess=-1) so the
-          // host isn't starved while the input pipeline stabilizes.
-          const excess = _rbConverged ? _frameAdvRaw - DELAY_FRAMES : -1;
-          let shouldSkip = false;
-          if (excess >= 3) {
-            shouldSkip = true;
-          } else if (excess >= 2) {
-            _pacingSkipCounter++;
-            shouldSkip = (_pacingSkipCounter & 1) === 0;
-          }
-          if (shouldSkip) {
-            _pacingCapsFrames++;
-            if (!_framePacingActive) {
-              _framePacingActive = true;
-              _pacingCapsCount++;
-              const ratio = excess >= 2 ? '100%' : '50%';
-              _syncLog(
-                `PACING-THROTTLE start fAdv=${_frameAdvRaw} ratio=${ratio} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
-              );
+          if (!_useCRollback) {
+            const excess = _rbConverged ? _frameAdvRaw - DELAY_FRAMES : -1;
+            let shouldSkip = false;
+            if (excess >= 3) {
+              shouldSkip = true;
+            } else if (excess >= 2) {
+              _pacingSkipCounter++;
+              shouldSkip = (_pacingSkipCounter & 1) === 0;
             }
-            _skipFrameAdvance = true;
+            if (shouldSkip) {
+              _pacingCapsFrames++;
+              if (!_framePacingActive) {
+                _framePacingActive = true;
+                _pacingThrottleStartAt = nowPacing;
+                _pacingCapsCount++;
+                const ratio = excess >= 2 ? '100%' : '50%';
+                _syncLog(
+                  `PACING-THROTTLE start fAdv=${_frameAdvRaw} ratio=${ratio} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
+                );
+              }
+              _skipFrameAdvance = true;
+            }
+            if (_framePacingActive && !_skipFrameAdvance) {
+              _framePacingActive = false;
+              _pacingThrottleStartAt = 0;
+              _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
+            }
           }
-          if (_framePacingActive && !_skipFrameAdvance) {
-            _framePacingActive = false;
-            _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
+
+          // ── I1: Pacing throttle wall-clock deadline ────────────────────
+          // If the throttle has been continuously active for longer than
+          // PACING_THROTTLE_TIMEOUT_MS, the slowest peer's inputs have
+          // stopped arriving (DC died, peer crashed, Safari suspended JS).
+          // Force-mark the slowest peer as phantom to release pacing.
+          // Without this, a dead DC + broken phantom detection = permanent
+          // freeze (match f0566d95: host stuck at f=187 for 41s until
+          // Socket.IO heartbeat timeout disconnected it).
+          if (_framePacingActive && _pacingThrottleStartAt > 0) {
+            const _pacingStallMs = nowPacing - _pacingThrottleStartAt;
+            if (_pacingStallMs >= PACING_THROTTLE_TIMEOUT_MS) {
+              // Find the peer holding minRemoteFrame and force-phantom it
+              let slowestSlot = -1;
+              for (const p of inputPeersForPacing) {
+                if (_peerPhantom[p.slot]) continue;
+                const rf = _lastRemoteFramePerSlot[p.slot] ?? -1;
+                if (rf === minRemoteFrame) {
+                  slowestSlot = p.slot;
+                  break;
+                }
+              }
+              _syncLog(
+                `PACING-THROTTLE-TIMEOUT f=${_frameNum} stalledMs=${Math.round(_pacingStallMs)} ` +
+                  `slowestSlot=${slowestSlot} minRemote=${minRemoteFrame} fAdv=${_frameAdvRaw} — ` +
+                  `force-releasing pacing (I1 deadline)`,
+              );
+              if (slowestSlot >= 0) {
+                _peerPhantom[slowestSlot] = true;
+                _syncLog(
+                  `PEER-PHANTOM slot=${slowestSlot} reason=pacing-timeout stalledMs=${Math.round(_pacingStallMs)} — excluded from pacing`,
+                );
+                window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: slowestSlot } }));
+              }
+              _framePacingActive = false;
+              _pacingThrottleStartAt = 0;
+              _skipFrameAdvance = false;
+            }
           }
         }
       }
@@ -6466,12 +6515,14 @@
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
       const _t0 = performance.now();
+      const _frameAdvForC = _rbInitFrame >= 0 && _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES ? _frameAdvRaw : -1;
       const catchingUp = tickMod._kn_pre_tick(
         localInput.buttons,
         localInput.lx,
         localInput.ly,
         localInput.cx,
         localInput.cy,
+        _frameAdvForC,
       );
       // ── R1: runner continuity across rollback restore ─────────────────
       // kn_pre_tick's rollback branch calls retro_unserialize directly,
@@ -6603,6 +6654,24 @@
         _rbReplayLogged = false;
         _lastRollbackDoneFrame = _frameNum;
         _resetAudioCallsSinceRb = 0;
+      }
+
+      if (catchingUp === 3) {
+        _pacingCapsFrames++;
+        if (!_framePacingActive) {
+          _framePacingActive = true;
+          _pacingThrottleStartAt = performance.now();
+          _pacingCapsCount++;
+          _syncLog(
+            `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
+          );
+        }
+        return;
+      }
+      if (_framePacingActive) {
+        _framePacingActive = false;
+        _pacingThrottleStartAt = 0;
+        _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} source=C`);
       }
 
       if (catchingUp === 2) {
@@ -8471,6 +8540,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
     _pacingMaxAdv = 0;
@@ -8677,6 +8747,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
     _pacingMaxAdv = 0;
