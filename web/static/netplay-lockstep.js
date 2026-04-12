@@ -462,6 +462,7 @@
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
   let _rbFatalBuf = 0; // RF7 (R3): WASM heap pointer for kn_get_fatal_stale out params (3 × int32)
+  let _rbLiveMismatchBuf = 0; // 3 × uint32: frame, ring hash, live hash
   // P2/T4: host-negotiated transport mode for rollback input packets.
   //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
   //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
@@ -6425,6 +6426,7 @@
       // and continues. No resync recovery.
       // See docs/netplay-invariants.md §R3.
       if (!_rbFatalBuf && tickMod._malloc) _rbFatalBuf = tickMod._malloc(12);
+      if (!_rbLiveMismatchBuf && tickMod._malloc) _rbLiveMismatchBuf = tickMod._malloc(12);
       if (tickMod._kn_get_fatal_stale && _rbFatalBuf) {
         const hit = tickMod._kn_get_fatal_stale(_rbFatalBuf, _rbFatalBuf + 4, _rbFatalBuf + 8);
         if (hit) {
@@ -6439,6 +6441,32 @@
           );
           if (window.KN_DEV_BUILD) {
             throw new Error(`FATAL-RING-STALE: ring[${staleIdx}]=${staleActual} but needed frame ${staleF}`);
+          }
+        }
+      }
+      // ── R4: Post-replay live-state mismatch poll ─────────────────────
+      // kn_post_tick compares the live emulator state hash to what the
+      // ring claims for the just-completed replay frame. If they differ,
+      // the replay introduced drift and the run is corrupted. Per §Core
+      // principle: dev throws, prod logs and continues. No resync.
+      // See docs/netplay-invariants.md §R4.
+      if (tickMod._kn_get_live_mismatch && _rbLiveMismatchBuf) {
+        const hit = tickMod._kn_get_live_mismatch(_rbLiveMismatchBuf, _rbLiveMismatchBuf + 4, _rbLiveMismatchBuf + 8);
+        if (hit) {
+          const heap32 = tickMod.HEAP32;
+          const heapU32 = tickMod.HEAPU32;
+          const base = _rbLiveMismatchBuf >> 2;
+          const mf = heap32[base];
+          const ringHash = heapU32[base + 1];
+          const liveHash = heapU32[base + 2];
+          _syncLog(
+            `RB-LIVE-MISMATCH f=${mf} ring=0x${ringHash.toString(16)} ` +
+              `live=0x${liveHash.toString(16)} curF=${_frameNum}`,
+          );
+          if (window.KN_DEV_BUILD) {
+            throw new Error(
+              `RB-LIVE-MISMATCH: ring=0x${ringHash.toString(16)} live=0x${liveHash.toString(16)} at f=${mf}`,
+            );
           }
         }
       }

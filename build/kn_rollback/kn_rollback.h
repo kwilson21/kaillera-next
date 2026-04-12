@@ -55,6 +55,17 @@ int kn_rollback_did_restore(void);
  * to out params. JS surfaces via FATAL-RING-STALE log. No resync. */
 int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual);
 
+/* RF5 (R4): Fresh retro_serialize + gameplay hash of the live
+ * emulator state, bypassing the ring. Used by kn_post_tick to
+ * verify replay produced bit-correct state. Also exported for
+ * V1 integrity test harness (Chunk 8). */
+uint32_t kn_live_gameplay_hash(void);
+
+/* RF5 (R4): Returns 1 (and clears flag) if post-replay live vs
+ * ring hash mismatch was signaled. Writes frame, ring hash, live
+ * hash to out params. No resync recovery. */
+int kn_get_live_mismatch(int *out_f, uint32_t *out_ring, uint32_t *out_live);
+
 /* Get replay start frame (valid when kn_get_replay_depth > 0). */
 int kn_get_replay_start(void);
 

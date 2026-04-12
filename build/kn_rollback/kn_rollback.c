@@ -65,6 +65,9 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
+/* Forward declaration: RF5 live gameplay hash (defined later). */
+uint32_t kn_live_gameplay_hash(void);
+
 /* Forward declaration: SoftFloat globals (not in retro_serialize — saved
  * alongside ring buffer snapshots by sf_pack/sf_restore below).
  * Type must match softfloat.h: uint_fast8_t (1 byte on WASM). */
@@ -253,6 +256,17 @@ static struct {
     int fatal_stale_ring_idx;
     int fatal_stale_actual;
     int fatal_stale_pending;
+
+    /* RF5 (R4): Live-vs-ring hash mismatch signal. Set by kn_post_tick
+     * when a replay completes and the live state hash differs from
+     * what the ring claims for the just-completed frame. JS polls via
+     * kn_get_live_mismatch() and logs RB-LIVE-MISMATCH. No resync
+     * recovery per §Core principle.
+     * See docs/netplay-invariants.md §R4. */
+    int live_mismatch_pending;
+    int live_mismatch_f;
+    uint32_t live_mismatch_replay;
+    uint32_t live_mismatch_live;
 
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
@@ -1010,6 +1024,25 @@ int kn_post_tick(void) {
                            rb.saved_rdram, 0x800000);
                 }
             }
+            /* R4: Post-replay live-state verification. Hash the live
+             * emulator state and compare to what the ring claims for
+             * the just-completed frame. If they differ, the replay
+             * introduced drift and the run is corrupted. Log loudly;
+             * no recovery. Per §Core principle.
+             * See docs/netplay-invariants.md §R4. */
+            {
+                int target = rb.frame - 1;
+                uint32_t ring_gp = kn_gameplay_hash(target);
+                uint32_t live_gp = kn_live_gameplay_hash();
+                if (ring_gp != 0 && live_gp != 0 && ring_gp != live_gp) {
+                    rb.live_mismatch_pending = 1;
+                    rb.live_mismatch_f = target;
+                    rb.live_mismatch_replay = ring_gp;
+                    rb.live_mismatch_live = live_gp;
+                    rb_log("RB-LIVE-MISMATCH f=%d ring=0x%x live=0x%x",
+                        target, ring_gp, live_gp);
+                }
+            }
             rb_log("C-REPLAY-DONE f=%d", rb.frame);
         }
     }
@@ -1095,6 +1128,22 @@ int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual) {
     if (out_idx) *out_idx = rb.fatal_stale_ring_idx;
     if (out_actual) *out_actual = rb.fatal_stale_actual;
     rb.fatal_stale_pending = 0;
+    return 1;
+}
+
+/* ── RF5 (R4): Returns 1 (and clears flag) if post-replay live-state
+ * hash mismatch was detected. Writes frame, ring hash, live hash to
+ * out params. Per §Core principle: JS logs and continues; no resync
+ * recovery. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_live_mismatch(int *out_f, uint32_t *out_ring, uint32_t *out_live) {
+    if (!rb.live_mismatch_pending) return 0;
+    if (out_f) *out_f = rb.live_mismatch_f;
+    if (out_ring) *out_ring = rb.live_mismatch_replay;
+    if (out_live) *out_live = rb.live_mismatch_live;
+    rb.live_mismatch_pending = 0;
     return 1;
 }
 
@@ -1298,6 +1347,55 @@ uint32_t kn_gameplay_hash(int frame) {
         if (off + sz > rb.state_size) continue; /* bounds check */
         for (uint32_t b = 0; b < sz; b++) {
             hash ^= state[off + b];
+            hash *= 16777619u;
+        }
+    }
+    return hash;
+}
+
+/* ── Live gameplay hash (RF5, R4) ──────────────────────────────────
+ * Fresh retro_serialize + gameplay hash of the CURRENT live emulator
+ * state, bypassing the ring buffer. Used by kn_post_tick to verify
+ * that after a replay completes, the live state matches what the ring
+ * claims. If they differ, the replay introduced drift and we log
+ * RB-LIVE-MISMATCH.
+ *
+ * Uses a static scratch buffer reused across calls to avoid malloc
+ * pressure. Expected cost: one retro_serialize (~1-2ms) per call.
+ * Called at most once per rollback completion (rollbacks are rare),
+ * so total overhead is negligible. Also exported for V1 integrity
+ * harness use. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_live_gameplay_hash(void) {
+    static uint8_t *scratch = NULL;
+    static size_t scratch_capacity = 0;
+
+    if (!rb.initialized) return 0;
+    if (kn_rdram_offset_in_state == 0) return 0;
+
+    size_t state_size = rb.state_size;
+    if (scratch_capacity < state_size) {
+        free(scratch);
+        scratch = (uint8_t *)malloc(state_size);
+        if (!scratch) {
+            scratch_capacity = 0;
+            return 0;
+        }
+        scratch_capacity = state_size;
+    }
+
+    if (!retro_serialize(scratch, state_size)) return 0;
+
+    /* Same address-list loop as kn_gameplay_hash but over scratch. */
+    uint32_t hash = 2166136261u;
+    for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
+        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        uint32_t sz = kn_gameplay_addrs[a].size;
+        if (off + sz > state_size) continue;
+        for (uint32_t b = 0; b < sz; b++) {
+            hash ^= scratch[off + b];
             hash *= 16777619u;
         }
     }
