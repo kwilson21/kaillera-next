@@ -7130,7 +7130,10 @@
       }
 
       // ── Periodic logging with timing + per-region hash exchange ──
-      if (_frameNum % 300 === 0) {
+      // Tighter interval during menus (30 frames) to catch CSS/stage-select
+      // divergence before it compounds. 300 frames during gameplay.
+      const _hashInterval = _inGameplay ? 300 : 30;
+      if (_frameNum % _hashInterval === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
         const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
@@ -7305,6 +7308,16 @@
                       ];
                       _syncLog(`GP-DRIFT f=${f} ${vals.join(' ')}`);
                     }
+                  }
+                  // Arm bisect mode on STATE-DRIFT so the byte-level
+                  // pipeline (REGION-DIFF, SUBHASH-DIFF, REGION-BYTES)
+                  // fires for the next 30 frames. Same pipeline as
+                  // gameplay_hash MISMATCH but triggered by game_state_hash.
+                  if (!_rbBisectActive && _rbBisectCount < RB_BISECT_MAX_PER_MATCH) {
+                    _rbBisectActive = true;
+                    _rbBisectFramesRemaining = 30;
+                    _rbBisectCount++;
+                    _syncLog(`RB-BISECT armed for ${_rbBisectFramesRemaining} frames after STATE-DRIFT at f=${f}`);
                   }
                 } else {
                   _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
