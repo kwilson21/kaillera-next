@@ -1711,9 +1711,237 @@ def query_c_debug_highlights(df: pl.DataFrame) -> None:
         print(f"  {t}: {n}")
 
 
+def query_full_state_comparison(jsonl_dir: str) -> None:
+    """Compare ALL hash levels between peers: gameplay, game_state, full_state, per-region."""
+    _print_section("11. FULL STATE COMPARISON")
+    import glob as _glob
+
+    # Extract C-PERF hashes per slot per frame
+    perf_by_slot: dict[int, dict[int, dict]] = defaultdict(dict)
+    regions_by_slot: dict[int, dict[int, list]] = defaultdict(dict)
+
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", -1)
+                f.seek(0)
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    if "C-PERF" in msg:
+                        m = re.search(
+                            r"hashF=(\d+).*gp=0x([0-9a-f-]+).*game=0x([0-9a-f-]+).*full=0x([0-9a-f-]+)",
+                            msg,
+                        )
+                        if m:
+                            frame = int(m.group(1))
+                            perf_by_slot[slot][frame] = {
+                                "gp": m.group(2),
+                                "game": m.group(3),
+                                "full": m.group(4),
+                            }
+                    elif "C-REGIONS" in msg:
+                        m = re.match(r"C-REGIONS f=(\d+) (.+)", msg)
+                        if m:
+                            frame = int(m.group(1))
+                            regions_by_slot[slot][frame] = m.group(2).split(",")
+        except Exception:
+            continue
+
+    if len(perf_by_slot) < 2:
+        # Show what we have from one peer
+        if len(perf_by_slot) == 1:
+            s = list(perf_by_slot.keys())[0]
+            print(f"  Only slot {s} has C-PERF data (other peer's log may have truncated).")
+            print(f"  Slot {s} hashes:")
+            for frame in sorted(perf_by_slot[s].keys()):
+                p = perf_by_slot[s][frame]
+                print(f"    f={frame:>6} gp={p['gp']} game={p['game']} full={p['full']}")
+        else:
+            print("  No C-PERF data from either peer.")
+
+    # Region-level comparison (works even without C-PERF from both peers)
+    if len(regions_by_slot) >= 2:
+        r_slots = sorted(regions_by_slot.keys())
+        rs0, rs1 = r_slots[0], r_slots[1]
+        common_rf = sorted(set(regions_by_slot[rs0].keys()) & set(regions_by_slot[rs1].keys()))
+        if common_rf:
+            print(f"\n  Per-region comparison across {len(common_rf)} frames (slot {rs0} vs slot {rs1}):")
+            first_div_frame = None
+            for rf in common_rf:
+                r0 = regions_by_slot[rs0][rf]
+                r1 = regions_by_slot[rs1][rf]
+                diffs = [i for i in range(min(len(r0), len(r1))) if r0[i] != r1[i]]
+                status = f"{len(diffs)} regions differ" if diffs else "ALL MATCH"
+                print(f"    f={rf:>6}: {status}" + (f" — {diffs[:20]}" if diffs else ""))
+                if diffs and first_div_frame is None:
+                    first_div_frame = rf
+                    # Show detail for first divergence
+                    print(f"    First divergence detail:")
+                    for ri in diffs[:15]:
+                        base = ri * 0x10000 if ri < 128 else 0
+                        labels = []
+                        if ri in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 19, 20} or (21 <= ri <= 112) or ri in {113, 121}:
+                            labels.append("TAINTED")
+                        if ri == 5: labels.append("RNG_primary")
+                        elif ri == 10: labels.append("VS_settings/screen/RNG_alt")
+                        elif ri == 19: labels.append("player_structs/char_id/damage")
+                        elif 21 <= ri <= 112: labels.append("heap")
+                        label = " ".join(labels) if labels else "NOT TAINTED"
+                        print(f"      r{ri:>3} (0x{base:06X}): {label}")
+
+            if first_div_frame:
+                # Find rollbacks in window before first divergence
+                prev_clean = None
+                for rf in common_rf:
+                    if rf < first_div_frame:
+                        r0 = regions_by_slot[rs0][rf]
+                        r1 = regions_by_slot[rs1][rf]
+                        if all(r0[i] == r1[i] for i in range(min(len(r0), len(r1)))):
+                            prev_clean = rf
+                if prev_clean:
+                    print(f"\n    Divergence window: f={prev_clean} (clean) → f={first_div_frame} (diverged)")
+                    rb_count = 0
+                    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+                        try:
+                            with open(path) as fp:
+                                first_line = json.loads(fp.readline())
+                                sl = first_line.get("slot", -1)
+                                fp.seek(0)
+                                for line in fp:
+                                    d = json.loads(line)
+                                    msg = d.get("msg", "")
+                                    fr = d.get("f", -1)
+                                    if prev_clean <= fr <= first_div_frame and any(
+                                        k in msg for k in ["INVARIANT", "MISPREDICTION", "C-REPLAY"]
+                                    ):
+                                        if rb_count < 15:
+                                            print(f"      slot={sl} f={fr} {msg[:120]}")
+                                        rb_count += 1
+                        except Exception:
+                            continue
+                    if rb_count == 0:
+                        print(f"      (none — divergence from normal execution)")
+                    elif rb_count > 15:
+                        print(f"      ... +{rb_count - 15} more")
+
+    if len(perf_by_slot) < 2:
+        return
+    slots = sorted(perf_by_slot.keys())
+    s0, s1 = slots[0], slots[1]
+    common_frames = sorted(set(perf_by_slot[s0].keys()) & set(perf_by_slot[s1].keys()))
+
+    if not common_frames:
+        print("  No common C-PERF frames between peers.")
+        return
+
+    print(f"  Hash comparison across {len(common_frames)} common frames (slot {s0} vs slot {s1}):")
+    print()
+    print(f"  {'frame':>8} | {'gp_hash':^10} | {'game_hash':^10} | {'full_hash':^10}")
+    print(f"  {'-'*8}-+-{'-'*10}-+-{'-'*10}-+-{'-'*10}")
+
+    first_game_div = None
+    first_full_div = None
+    for frame in common_frames:
+        p0 = perf_by_slot[s0][frame]
+        p1 = perf_by_slot[s1][frame]
+        gp_match = p0["gp"] == p1["gp"]
+        game_match = p0["game"] == p1["game"]
+        full_match = p0["full"] == p1["full"]
+        gp_str = "MATCH" if gp_match else "DIFFER"
+        game_str = "MATCH" if game_match else "!! DIFFER"
+        full_str = "MATCH" if full_match else "!! DIFFER"
+        print(f"  {frame:>8} | {gp_str:^10} | {game_str:^10} | {full_str:^10}")
+        if not game_match and first_game_div is None:
+            first_game_div = frame
+        if not full_match and first_full_div is None:
+            first_full_div = frame
+
+    if first_game_div:
+        print(f"\n  ** GAME STATE diverges at f={first_game_div} (taint-filtered RDRAM hash)")
+        print(f"     gameplay_hash still matches — divergence is in non-gameplay addresses")
+        print(f"     that are NOT tainted (player positions, velocities, animation, objects)")
+    elif first_full_div:
+        print(f"\n  ** FULL STATE diverges at f={first_full_div} (raw hash including tainted)")
+        print(f"     game_state_hash matches — divergence is only in tainted regions (audio/heap)")
+    else:
+        print(f"\n  All hashes match across all frames — perfect sync.")
+
+    # Region-level diff at first divergence (C-PERF based — see also region comparison below)
+    if False and (first_game_div or first_full_div):
+        div_frame = first_game_div or first_full_div
+        # Find closest region frame
+        common_region_frames = sorted(
+            set(regions_by_slot.get(s0, {}).keys()) & set(regions_by_slot.get(s1, {}).keys())
+        )
+        closest = None
+        for rf in common_region_frames:
+            if rf >= div_frame - 300:
+                closest = rf
+                break
+
+        if closest and closest in regions_by_slot.get(s0, {}) and closest in regions_by_slot.get(s1, {}):
+            r0 = regions_by_slot[s0][closest]
+            r1 = regions_by_slot[s1][closest]
+            diffs = []
+            for i in range(min(len(r0), len(r1))):
+                if r0[i] != r1[i]:
+                    diffs.append(i)
+            if diffs:
+                print(f"\n  Region diff at f={closest}: {len(diffs)} regions diverge")
+                for ri in diffs[:20]:
+                    base = ri * 0x10000 if ri < 128 else 0
+                    tainted = "TAINTED" if ri in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 19, 20} or (21 <= ri <= 112) or ri in {113, 121} else ""
+                    has_gameplay = ""
+                    if ri == 5:
+                        has_gameplay = " [RNG_primary]"
+                    elif ri == 10:
+                        has_gameplay = " [VS_settings, current_screen, RNG_alt]"
+                    elif ri == 19:
+                        has_gameplay = " [char_id, damage, player structs]"
+                    print(f"    r{ri:>3} (0x{base:06X}): {tainted}{has_gameplay}")
+            else:
+                print(f"\n  Region diff at f={closest}: ALL MATCH (divergence in post-RDRAM section?)")
+
+    # Check for rollbacks in the divergence window
+    if first_game_div or first_full_div:
+        div_frame = first_game_div or first_full_div
+        prev_clean = None
+        for frame in common_frames:
+            if frame < div_frame:
+                p0 = perf_by_slot[s0][frame]
+                p1 = perf_by_slot[s1][frame]
+                if p0["game"] == p1["game"]:
+                    prev_clean = frame
+        if prev_clean:
+            print(f"\n  Divergence window: f={prev_clean} (clean) → f={div_frame} (diverged)")
+            print(f"  Rollbacks in this window:")
+            rb_count = 0
+            for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+                try:
+                    with open(path) as f:
+                        first = json.loads(f.readline())
+                        slot = first.get("slot", -1)
+                        f.seek(0)
+                        for line in f:
+                            d = json.loads(line)
+                            msg = d.get("msg", "")
+                            fr = d.get("f", -1)
+                            if prev_clean <= fr <= div_frame and any(
+                                k in msg for k in ["INVARIANT", "MISPREDICTION", "C-REPLAY"]
+                            ):
+                                print(f"    slot={slot} f={fr} {msg[:140]}")
+                                rb_count += 1
+                except Exception:
+                    continue
+            if rb_count == 0:
+                print(f"    (none — divergence is from normal execution, not rollback)")
+
+
 def query_byte_level_diff(jsonl_dir: str) -> None:
     """Byte-level diff of REGION-BYTES from both peers at the same frame+region+sub-chunk."""
-    _print_section("11. BYTE-LEVEL STATE DIFF")
+    _print_section("12. BYTE-LEVEL STATE DIFF")
     import glob as _glob
 
     # Collect all RB-REGION-BYTES entries keyed by (frame, region, sub-chunk)
@@ -2002,6 +2230,7 @@ def main() -> None:
     query_input_analysis(df)
     query_rollback_detail(df)
     query_c_debug_highlights(df)
+    query_full_state_comparison(str(out_dir))
     query_byte_level_diff(str(out_dir))
 
     if not cleanup:
