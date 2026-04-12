@@ -2819,7 +2819,7 @@
   // _rbTransport === 'unreliable' (host-negotiated).
   const setupRollbackInputDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
-    const onOpen = () => {
+    ch.onopen = () => {
       // T4: log the ACTUAL negotiated DC properties, not what we asked for.
       // Some browsers ignore init options and silently give us ordered/reliable.
       // If the mismatch matters (we're in unreliable mode but got reliable),
@@ -2833,8 +2833,6 @@
         );
       }
     };
-    ch.onopen = onOpen;
-    if (ch.readyState === 'open') onOpen();
     ch.onclose = () => {
       _syncLog(`rb-input DC closed sid=${remoteSid}`);
     };
@@ -2856,7 +2854,7 @@
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
-    const onOpen = () => {
+    ch.onopen = () => {
       const peer = _peers[remoteSid];
       if (!peer) return;
       const known = _knownPlayers[remoteSid];
@@ -2974,11 +2972,6 @@
 
       if (!_gameStarted) startGameSequence();
     };
-    ch.onopen = onOpen;
-    // If the DataChannel is already open (race: ondatachannel delivered it
-    // in the 'open' state), fire the handler immediately. Without this,
-    // startGameSequence() never runs and the gesture prompt never appears.
-    if (ch.readyState === 'open') onOpen();
 
     ch.onclose = () => {
       // Guard: ignore stale close events from replaced peers after restart
