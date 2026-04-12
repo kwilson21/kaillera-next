@@ -758,9 +758,37 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy) {
+int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
+
+    /* ── Pacing gate: if JS says we're too far ahead, maintain ring and skip ──
+     * frame_adv >= 0 means JS computed a valid frame advantage.
+     * If frame_adv >= delay_frames + 2, we're ahead enough to skip — but
+     * first check if the ring needs a save to prevent FATAL-RING-STALE. */
+    if (frame_adv >= 0 && frame_adv >= rb.delay_frames + 2 &&
+        rb.pending_rollback < 0 && rb.replay_remaining == 0) {
+        int ring_needs_save = 0;
+        if (rb.last_save_frame < 0 ||
+            (rb.frame - rb.last_save_frame) >= rb.ring_size / 2) {
+            ring_needs_save = 1;
+        }
+        if (!ring_needs_save && rb.frame > rb.max_frames) {
+            int oldest_window_frame = rb.frame - rb.max_frames;
+            int oldest_idx = oldest_window_frame % rb.ring_size;
+            if (rb.ring_frames[oldest_idx] != oldest_window_frame) {
+                ring_needs_save = 1;
+            }
+        }
+        if (ring_needs_save) {
+            int save_idx = rb.frame % rb.ring_size;
+            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
+            rb.ring_sf_state[save_idx] = sf_pack();
+            rb.ring_frames[save_idx] = rb.frame;
+            rb.last_save_frame = rb.frame;
+        }
+        return 3; /* ring maintained, skip frame advance */
+    }
 
     /* ── Handle pending rollback: restore state, start amortized catch-up ──
      *

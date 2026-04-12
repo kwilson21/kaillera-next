@@ -20,7 +20,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
  * missing remote inputs. Does NOT step the emulator.
  * Returns current frame number.
  */
-int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy);
+int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv);
 
 /* Post-tick: advance frame counter.
  * Returns the new frame number.
