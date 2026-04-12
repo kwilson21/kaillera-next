@@ -366,6 +366,7 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
 
     # 4a. SSIM progression (from screenshots API)
     ssim_data = _fetch_ssim(base, key, match_id)
+    first_visual_desync_frame: int | None = None
     if ssim_data:
         print("  SSIM progression (visual similarity, 1.0 = identical):")
         desync_start = None
@@ -376,6 +377,10 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
             marker = " << DESYNC" if is_desync else ""
             if is_desync and desync_start is None:
                 desync_start = frame
+                try:
+                    first_visual_desync_frame = int(frame)
+                except (ValueError, TypeError):
+                    pass
             # Only show transitions and boundaries, not every entry
             print(f"    f={frame:>6}  ssim={ssim:.4f}{marker}")
         total_desync = sum(1 for s in ssim_data if s.get("is_desync"))
@@ -392,6 +397,32 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
     mismatches = df.filter(pl.col("msg").str.contains("MISMATCH"))
     if mismatches.height == 0:
         print("  Hash comparison: no MISMATCH events — hashes agreed across all peers.")
+        # 4b-bis. Visual-only desync detection. SSIM drops while gameplay/
+        # RDRAM hashes agree indicates a RENDERING divergence (GPU/GL
+        # path, screenshot capture timing, cursor offset, etc.) rather
+        # than a logical desync. These are a distinct bug class from the
+        # network-state deadlocks MF1-MF6 target. Per
+        # `feedback_visual_over_rdram.md` the visual output is still
+        # ground truth — a visual-only desync still needs fixing, but
+        # the root cause is in rendering, not state sync.
+        if first_visual_desync_frame is not None:
+            phase = (
+                "intro/splash"
+                if first_visual_desync_frame < 200
+                else "character-select"
+                if first_visual_desync_frame < 900
+                else "mid-match"
+                if first_visual_desync_frame < 3000
+                else "late-match"
+            )
+            print(
+                f"  !! VISUAL-ONLY DESYNC detected: SSIM divergence at f={first_visual_desync_frame} "
+                f"({phase} phase) while gameplay hashes agree."
+            )
+            print("     This is a RENDERING divergence, not a state-sync bug.")
+            print("     Likely causes: GL framebuffer readback, GPU driver differences,")
+            print("     screenshot capture timing skew, CSS cursor offset. Fix belongs")
+            print("     in the rendering pipeline, not the netplay layer.")
     else:
         by_slot = (
             mismatches.group_by("slot")
@@ -641,6 +672,30 @@ def query_pacing(df: pl.DataFrame) -> None:
             print(f"    slot={slot_val}: fAdv min={fadv.min()} median={fadv.median():.0f} max={fadv.max()} "
                   f"smooth min={smooth.min():.1f} max={smooth.max():.1f}")
 
+    # PACING-SAFETY-FREEZE is a harder escalation than PACING-THROTTLE —
+    # it fires when fAdv exceeds rbMax (rollback budget exhausted), at
+    # which point the engine skips frame advance entirely. A cluster of
+    # these preceding a TICK-STUCK is the signature of a pacing cascade
+    # triggered by tab-focus loss, CPU starvation, or a peer running
+    # slow. We call it out distinctly because it's both a symptom
+    # worth knowing about and a common trigger for downstream problems.
+    safety_freeze = df.filter(pl.col("msg").str.contains("PACING-SAFETY-FREEZE"))
+    if safety_freeze.height > 0:
+        print(f"\n  PACING-SAFETY-FREEZE events: {safety_freeze.height} (rollback budget exhausted)")
+        for slot_val in sorted(
+            safety_freeze.filter(pl.col("slot").is_not_null()).get_column("slot").unique().to_list()
+        ):
+            ss = safety_freeze.filter(pl.col("slot") == slot_val)
+            first = ss.head(1).row(0, named=True)
+            last = ss.tail(1).row(0, named=True)
+            print(
+                f"    slot={slot_val}: {ss.height} events, first f={first.get('f')} "
+                f"last f={last.get('f')}"
+            )
+        # Show the first event inline so the reader sees the fAdv/rbMax context
+        first_row = safety_freeze.head(1).row(0, named=True)
+        print(f"    example: slot={first_row.get('slot')} f={first_row.get('f')} {first_row['msg'][:220]}")
+
 
 # ── 8. Freeze detection ─────────────────────────────────────────────────────
 
@@ -774,21 +829,63 @@ def query_deadlock_audit_events(df: pl.DataFrame) -> None:
             warn = matches.filter(pl.col("msg").str.contains("severity=warn"))
             err = matches.filter(pl.col("msg").str.contains("severity=error"))
             print(f"  {event_name} ({label} {section}): warn={warn.height} error={err.height}")
-            # For error-level events, extract inferred cause to surface root-cause clustering
-            if err.height > 0:
-                causes: dict[str, int] = defaultdict(int)
-                for row in err.iter_rows(named=True):
-                    m = re.search(r"cause=([a-z0-9\-_]+)", row.get("msg", "") or "")
-                    if m:
-                        causes[m.group(1)] += 1
-                if causes:
-                    top = sorted(causes.items(), key=lambda kv: kv[1], reverse=True)
-                    print(f"    cause breakdown: {', '.join(f'{k}={v}' for k, v in top)}")
+            # Cause breakdown across BOTH severities (warn is enough to
+            # diagnose — no need to wait for error).
+            causes: dict[str, int] = defaultdict(int)
+            for row in matches.iter_rows(named=True):
+                m = re.search(r"cause=([a-z0-9\-_]+)", row.get("msg", "") or "")
+                if m:
+                    causes[m.group(1)] += 1
+            if causes:
+                top = sorted(causes.items(), key=lambda kv: kv[1], reverse=True)
+                print(f"    cause breakdown: {', '.join(f'{k}={v}' for k, v in top)}")
+
+            # TAB-FOCUS correlation: if a TAB-FOCUS event (lost/gained)
+            # occurred within ±2 seconds of any TICK-STUCK, surface
+            # that explicitly. Browser tab-switching is a common
+            # pacing-throttle trigger (emulator ticks freeze when the
+            # tab is hidden, then try to catch up when focused).
+            tab_focus = df.filter(pl.col("msg").str.contains("TAB-FOCUS"))
+            if tab_focus.height > 0 and "t" in matches.columns:
+                correlated = 0
+                for row in matches.iter_rows(named=True):
+                    t = row.get("t")
+                    slot = row.get("slot")
+                    if t is None:
+                        continue
+                    nearby = tab_focus.filter(
+                        (pl.col("slot") == slot)
+                        & (pl.col("t") >= t - 2000)
+                        & (pl.col("t") <= t + 2000)
+                    )
+                    if nearby.height > 0:
+                        correlated += 1
+                if correlated > 0:
+                    print(
+                        f"    !! TAB-FOCUS correlation: {correlated}/{matches.height} TICK-STUCK events "
+                        f"had a TAB-FOCUS event within ±2s on the same slot."
+                    )
+                    print(
+                        "       Tab-switching freezes the browser rAF and Emscripten"
+                    )
+                    print(
+                        "       timers, which causes the pacing-throttle cascade. The"
+                    )
+                    print(
+                        "       stall is legitimate (not a bug) but the watchdog will"
+                    )
+                    print(
+                        "       still fire. Consider excluding tab-hidden periods"
+                    )
+                    print(
+                        "       from TICK-STUCK thresholds if this is noisy in prod."
+                    )
+
             # Show first 3 of each severity
             for row in err.head(3).iter_rows(named=True):
-                print(f"    ERROR slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+                print(f"    ERROR slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
             for row in warn.head(3).iter_rows(named=True):
-                print(f"    warn  slot={row.get('slot')} f={row.get('f')} {row['msg'][:200]}")
+                print(f"    warn  slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
             continue
 
         print(f"  {event_name} ({label} {section}): {matches.height} events")
