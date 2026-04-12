@@ -6479,6 +6479,31 @@
       }
       const _rbBootConverged = _bootDone && !inMenu;
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
+      // Tick timing: measure wall-clock between ticks for FPS diagnosis
+      const _tickWallNow = performance.now();
+      if (!window._knLastTickWall) window._knLastTickWall = _tickWallNow;
+      if (!window._knTickDeltas) window._knTickDeltas = [];
+      const _tickDelta = _tickWallNow - window._knLastTickWall;
+      window._knLastTickWall = _tickWallNow;
+      if (_tickDelta > 0 && _tickDelta < 200) window._knTickDeltas.push(_tickDelta);
+      if (window._knTickDeltas.length > 120) window._knTickDeltas.splice(0, window._knTickDeltas.length - 120);
+      if (_frameNum > 0 && _frameNum % 300 === 0 && window._knTickDeltas.length > 10) {
+        const sorted = [...window._knTickDeltas].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const p95 = sorted[Math.floor(sorted.length * 0.95)];
+        const avgFps = 1000 / (sorted.reduce((a, b) => a + b) / sorted.length);
+        // Check input availability for peers
+        const inputPeers = getInputPeers();
+        let inputAvail = 'none';
+        if (rbApplyFrame >= 0 && inputPeers.length > 0) {
+          const avail = inputPeers.filter((p) => _remoteInputs[p.slot]?.[rbApplyFrame]).length;
+          inputAvail = `${avail}/${inputPeers.length}`;
+        }
+        _syncLog(
+          `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
+            `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
+        );
+      }
       if (!_rbBootConverged) {
         // Boot: pure lockstep stall, with timeout-based deadlock recovery
         if (rbApplyFrame >= 0) {
