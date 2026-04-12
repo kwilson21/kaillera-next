@@ -409,7 +409,7 @@
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
 
-    ch.onopen = () => {
+    const onOpen = () => {
       const peer = _peers[remoteSid];
       _syncLog(
         `DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
@@ -445,6 +445,10 @@
         _syncLog('DC open: spectator, no input loop');
       }
     };
+    ch.onopen = onOpen;
+    // If the DataChannel is already open (race: ondatachannel delivered it
+    // in the 'open' state), fire the handler immediately.
+    if (ch.readyState === 'open') onOpen();
 
     ch.onclose = () => {
       const current = _peers[remoteSid];

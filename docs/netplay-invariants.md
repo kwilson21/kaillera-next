@@ -34,6 +34,7 @@ local-state branches (`if (!_running) return;`) are not stalls.
 | Late-join worker round-trip (joiner decompresses initial state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Abort late-join; host's timeout cleans up the joiner | `WORKER-STALL` | §MF5 |
 | BOOT-LOCKSTEP stall (pure-lockstep boot convergence) | 3000ms (in tick loop) | Guest requests immediate `sync-request-full` | `BOOT-DEADLOCK-RECOVERY` | commit 788add0 |
 | `_awaitingResync` (guest waiting for state after coord stall) | 3000ms | Resume without corrected state (known livelock, see SF5) | (timeout log only) | spec SF5 |
+| `_framePacingActive` (pacing throttle skipping frame advance) | `PACING_THROTTLE_TIMEOUT_MS = 5000` | Force-phantom slowest peer, release pacing | `PACING-THROTTLE-TIMEOUT` | match f0566d95 |
 
 ## I2 — Reconnect starts clean
 
