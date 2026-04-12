@@ -244,6 +244,16 @@ static struct {
      * See docs/netplay-invariants.md §R1. */
     int did_restore;
 
+    /* RF7 (R3): Fatal stale-ring signal. Set by kn_feed_input when a
+     * misprediction targets a ring slot that no longer holds the
+     * expected frame. JS polls via kn_get_fatal_stale() and logs
+     * FATAL-RING-STALE loudly. No resync recovery per §Core principle.
+     * See docs/netplay-invariants.md §R3. */
+    int fatal_stale_f;
+    int fatal_stale_ring_idx;
+    int fatal_stale_actual;
+    int fatal_stale_pending;
+
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
@@ -691,9 +701,15 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
                     }
                     misprediction = 1;
                 } else {
-                    /* SILENT DESYNC: state for this frame was overwritten in the ring */
+                    /* R3 VIOLATION: state for this frame was overwritten in the ring.
+                     * Set the fatal flag for JS to surface; no recovery action in C.
+                     * Per §Core principle: log-loud-and-continue. */
                     rb.failed_rollbacks++;
-                    rb_log("FAILED-ROLLBACK slot=%d f=%d myF=%d depth=%d ring[%d]=%d (stale) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    rb.fatal_stale_f = frame;
+                    rb.fatal_stale_ring_idx = ring_idx;
+                    rb.fatal_stale_actual = rb.ring_frames[ring_idx];
+                    rb.fatal_stale_pending = 1;
+                    rb_log("FATAL-RING-STALE slot=%d f=%d myF=%d depth=%d ring[%d]=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
                         slot, frame, rb.frame, depth, ring_idx, rb.ring_frames[ring_idx], btn_xor, lx_d, ly_d, cx_d, cy_d);
                 }
             } else {
@@ -1064,6 +1080,22 @@ int kn_rollback_did_restore(void) {
     int v = rb.did_restore;
     rb.did_restore = 0;
     return v;
+}
+
+/* ── RF7 (R3): Returns 1 (and clears flag) if kn_feed_input just
+ * detected a stale ring slot. Writes frame, ring_idx, actual-frame-
+ * in-slot to out params for the JS FATAL-RING-STALE log. Per §Core
+ * principle: JS logs and continues; no resync recovery. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual) {
+    if (!rb.fatal_stale_pending) return 0;
+    if (out_f) *out_f = rb.fatal_stale_f;
+    if (out_idx) *out_idx = rb.fatal_stale_ring_idx;
+    if (out_actual) *out_actual = rb.fatal_stale_actual;
+    rb.fatal_stale_pending = 0;
+    return 1;
 }
 
 /* ── Query: replay start frame ─────────────────────────────────────── */

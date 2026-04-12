@@ -50,6 +50,11 @@ int kn_get_replay_depth(void);
  * retro_unserialize. JS re-captures the rAF runner on hit. */
 int kn_rollback_did_restore(void);
 
+/* RF7 (R3): Returns 1 (and clears flag) if kn_feed_input detected a
+ * stale ring slot. Writes frame, ring_idx, and actual-frame-in-slot
+ * to out params. JS surfaces via FATAL-RING-STALE log. No resync. */
+int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual);
+
 /* Get replay start frame (valid when kn_get_replay_depth > 0). */
 int kn_get_replay_start(void);
 

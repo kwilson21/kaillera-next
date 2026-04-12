@@ -461,6 +461,7 @@
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
+  let _rbFatalBuf = 0; // RF7 (R3): WASM heap pointer for kn_get_fatal_stale out params (3 × int32)
   // P2/T4: host-negotiated transport mode for rollback input packets.
   //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
   //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
@@ -6414,6 +6415,30 @@
             gm.Module.updateMemoryViews();
           } else if (gm.Module._emscripten_notify_memory_growth) {
             gm.Module._emscripten_notify_memory_growth(0);
+          }
+        }
+      }
+      // ── R3: Fatal stale-ring poll ────────────────────────────────────
+      // If kn_feed_input just detected a misprediction for a frame
+      // whose ring slot was overwritten, log FATAL-RING-STALE with full
+      // diagnostic fields. Per §Core principle: dev throws, prod logs
+      // and continues. No resync recovery.
+      // See docs/netplay-invariants.md §R3.
+      if (!_rbFatalBuf && tickMod._malloc) _rbFatalBuf = tickMod._malloc(12);
+      if (tickMod._kn_get_fatal_stale && _rbFatalBuf) {
+        const hit = tickMod._kn_get_fatal_stale(_rbFatalBuf, _rbFatalBuf + 4, _rbFatalBuf + 8);
+        if (hit) {
+          const heap = tickMod.HEAP32;
+          const base = _rbFatalBuf >> 2;
+          const staleF = heap[base];
+          const staleIdx = heap[base + 1];
+          const staleActual = heap[base + 2];
+          _syncLog(
+            `FATAL-RING-STALE f=${staleF} ring[${staleIdx}]=${staleActual} ` +
+              `curF=${_frameNum} tick=${performance.now().toFixed(1)}`,
+          );
+          if (window.KN_DEV_BUILD) {
+            throw new Error(`FATAL-RING-STALE: ring[${staleIdx}]=${staleActual} but needed frame ${staleF}`);
           }
         }
       }
