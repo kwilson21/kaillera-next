@@ -4584,11 +4584,28 @@
     }
 
     try {
+      // Pause lockstep FIRST — freeze all players before capturing state
+      // so no frames advance during the async compression below. Without
+      // this, the tick loop can run N frames between getState() and the
+      // moment we read _frameNum, causing the late joiner to load state
+      // from frame X but think they're at frame X+N (cursor desync).
+      _lateJoinPaused = true;
+      _lateJoinPausedAt = performance.now();
+      _syncLog(`pausing for late-join at frame ${_frameNum}`);
+      for (const p of Object.values(_peers)) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send('late-join-pause');
+          } catch (_) {}
+        }
+      }
+
+      // Capture state + frame number + RNG atomically while paused
+      const capturedFrame = _frameNum;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-      const encoded = await compressAndEncode(bytes);
 
-      // Read game-specific RNG/settings values from RDRAM
+      // Read game-specific RNG/settings values from RDRAM (while paused)
       let rngValues = null;
       let saveData = null;
       const hMod = gm.Module;
@@ -4627,20 +4644,8 @@
         } catch (_) {}
       }
 
-      // Pause lockstep — freeze all players at this exact frame until
-      // the late-joiner confirms ready. Zero frame gap = zero RNG drift.
-      // NOTE: roster broadcast moved to late-join-ready handler — adding
-      // the slot before the joiner can send input causes 5s stalls per frame.
-      _lateJoinPaused = true;
-      _lateJoinPausedAt = performance.now();
-      _syncLog(`pausing for late-join at frame ${_frameNum}`);
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send('late-join-pause');
-          } catch (_) {}
-        }
-      }
+      // Async compression is safe now — tick loop is frozen
+      const encoded = await compressAndEncode(bytes);
       // I1 (MF5): late-join pause must have a wall-clock deadline.
       // If the joiner's ready signal never arrives (their DC dies
       // mid-transfer, worker hangs on decompression, etc.) we need
@@ -4676,12 +4681,12 @@
       }, LATE_JOIN_TIMEOUT_MS);
 
       _syncLog(
-        `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${_frameNum}`,
+        `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
       );
 
       socket.emit('data-message', {
         type: 'late-join-state',
-        frame: _frameNum,
+        frame: capturedFrame,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
         rbTransport: _rbTransport,
