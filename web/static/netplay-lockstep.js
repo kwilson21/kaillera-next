@@ -378,7 +378,7 @@
       peer._rttSamples.push(rtt);
     }
     sendNextPing(peer);
-    if (_rttComplete && _selfLockstepReady) {
+    if (_rttComplete && _phase >= PHASE_LOCKSTEP_READY) {
       broadcastLockstepReady();
       checkAllLockstepReady();
     }
@@ -1167,10 +1167,8 @@
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
-  let _gameStarted = false;
   let _sessionId = 0; // incremented on each init() to invalidate stale timers
   let _romWaitInterval = null; // setInterval ID for guest ROM-wait polling
-  let _selfEmuReady = false;
   let _p1KeyMap = null;
   const _heldKeys = new Set();
 
@@ -1179,7 +1177,6 @@
 
   // Lockstep state
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
-  let _selfLockstepReady = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _frameNum = 0; // current logical frame number
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
@@ -1358,7 +1355,6 @@
   // so we don't resync-storm under sustained marginal WiFi.
   let _lastInputStallResyncAt = 0;
   const INPUT_STALL_RESYNC_COOLDOWN_MS = 10000;
-  let _syncStarted = false; // true once initial state sync begins (prevents re-entry)
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _tickInterval = null; // setInterval handle for tick loop
   // Saved originals of WASM speed-control functions — neutralized during lockstep
@@ -2386,7 +2382,7 @@
       }
       ch.send('ready');
 
-      if (_selfEmuReady) ch.send('emu-ready');
+      if (_phase >= PHASE_EMU_READY) ch.send('emu-ready');
 
       // Both sides measure RTT for auto delay
       startRttMeasurement(peer);
@@ -2486,7 +2482,7 @@
         } catch (_) {}
       }
 
-      if (!_gameStarted) startGameSequence();
+      if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
     ch.onopen = onOpen;
     // If the DataChannel is already open (race: ondatachannel delivered it
@@ -3272,8 +3268,7 @@
   const MIN_BOOT_FRAMES = 120; // ~2 seconds at 60fps
 
   const startGameSequence = () => {
-    if (_gameStarted) return;
-    _gameStarted = true;
+    if (_phase >= PHASE_GAME_STARTED) return;
     _phase = PHASE_GAME_STARTED;
     _checkStateTransition();
 
@@ -3505,7 +3500,6 @@
       _p1KeyMap = null; // force re-read from EJS controls
       setupKeyTracking();
 
-      _selfEmuReady = true;
       _phase = PHASE_EMU_READY;
       _checkStateTransition();
       hookVirtualGamepad();
@@ -3567,7 +3561,7 @@
   };
 
   const checkAllEmuReady = () => {
-    if (!_selfEmuReady) return;
+    if (_phase < PHASE_EMU_READY) return;
     if (_isSpectator) return;
     if (_running) return;
     if (_awaitingLateJoinState) return; // late-join path active — don't use normal sync
@@ -3588,8 +3582,7 @@
       return;
     }
 
-    if (_syncStarted) return; // guard against re-entrant calls
-    _syncStarted = true;
+    if (_phase >= PHASE_SYNCING) return; // guard against re-entrant calls
     _phase = PHASE_SYNCING;
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
@@ -3612,17 +3605,17 @@
     const sid = _sessionId;
     setTimeout(() => {
       if (sid !== _sessionId) return; // stale timer from previous session
-      if (!_running && _selfEmuReady && _gameStarted) {
+      if (!_running && _phase >= PHASE_EMU_READY) {
         setStatus('Sync timed out — waiting for reconnect...');
         _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
-        _syncStarted = false;
+        _phase = PHASE_EMU_READY; // allow sync retry
         _lockstepReadyPeers = {};
       }
     }, 30000);
   };
 
   const checkAllLockstepReady = () => {
-    if (!_selfLockstepReady) return;
+    if (_phase < PHASE_LOCKSTEP_READY) return;
     if (_running) return;
 
     // Check that at least 1 player peer is lockstep-ready
@@ -3870,7 +3863,6 @@
             .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
         }
 
-        _selfLockstepReady = true;
         _phase = PHASE_LOCKSTEP_READY;
         _phase = PHASE_LOCKSTEP_READY;
         if (_rttComplete) broadcastLockstepReady();
@@ -3909,7 +3901,6 @@
           .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
       }
 
-      _selfLockstepReady = true;
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
@@ -3945,7 +3936,6 @@
       // cache round-trip. The blocking await fetch(POST 16MB) was causing
       // the host to stall for 10-30s while the guest started normally.
       _guestStateBytes = cacheBytes;
-      _selfLockstepReady = true;
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -3973,7 +3963,7 @@
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
-    if (_selfLockstepReady) return; // already loaded (e.g. from cache)
+    if (_phase >= PHASE_LOCKSTEP_READY) return; // already loaded (e.g. from cache)
     _syncLog('received initial state');
     setStatus('Loading initial state...');
 
@@ -3986,7 +3976,6 @@
       const romHash = _config?.romHash;
       if (romHash) _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
 
-      _selfLockstepReady = true;
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -8423,7 +8412,7 @@
     const initSid = _sessionId;
     setTimeout(() => {
       if (initSid !== _sessionId) return;
-      if (!_gameStarted && _config) {
+      if (_phase < PHASE_GAME_STARTED && _config) {
         const peerCount = Object.keys(_peers).length;
         if (peerCount === 0 && _playerSlot !== 0) {
           setStatus('No peer connection — check network');
@@ -8512,10 +8501,6 @@
     KNState.frameNum = 0;
     _running = false;
     _lateJoin = false;
-    _gameStarted = false;
-    _selfEmuReady = false;
-    _selfLockstepReady = false;
-    _syncStarted = false;
     _phase = PHASE_IDLE;
     _awaitingLateJoinState = false;
     _cacheAttempted = false;
