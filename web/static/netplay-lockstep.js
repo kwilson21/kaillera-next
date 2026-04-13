@@ -531,6 +531,7 @@
   let _bootStallFrame = -1;
   let _bootStallStartTime = 0;
   let _bootStallRecoveryFired = false;
+  let _bootStallRecoveryResetTime = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -6587,6 +6588,25 @@
             `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
         );
       }
+      // Reset deadlock recovery flag periodically — without this, a single
+      // 3s stall permanently disables lockstep enforcement. Re-stall every
+      // 5 seconds to give the connection time to recover. Also reset
+      // immediately when peer input catches up.
+      if (_bootStallRecoveryFired && rbApplyFrame >= 0) {
+        const recoveryPeers = getInputPeers();
+        const allHaveInput =
+          recoveryPeers.length > 0 && recoveryPeers.every((p) => _remoteInputs[p.slot]?.[rbApplyFrame]);
+        if (allHaveInput) {
+          _bootStallRecoveryFired = false;
+          _syncLog(`BOOT-STALL-RECOVERY reset: peer input available at applyF=${rbApplyFrame}`);
+        } else if (!_bootStallRecoveryResetTime) {
+          _bootStallRecoveryResetTime = performance.now();
+        } else if (performance.now() - _bootStallRecoveryResetTime >= 5000) {
+          _bootStallRecoveryFired = false;
+          _bootStallRecoveryResetTime = 0;
+          _syncLog(`BOOT-STALL-RECOVERY periodic reset: re-stalling to wait for peer input`);
+        }
+      }
       if (!_rbBootConverged && !_resyncRequestInFlight && !_bootStallRecoveryFired) {
         // Boot: pure lockstep stall, with timeout-based deadlock recovery.
         // Skipped when resync is in flight or deadlock recovery fired —
@@ -8461,6 +8481,44 @@
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
       _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+
+      // Dump event queue on host for cross-peer comparison
+      if (mod._kn_eventqueue_dump) {
+        const eqBuf = mod._malloc(256);
+        if (eqBuf) {
+          const n = mod._kn_eventqueue_dump(eqBuf >> 2, 64);
+          const u32 = mod.HEAPU32;
+          const base = eqBuf >> 2;
+          const count = u32[base];
+          const compare = u32[base + 1];
+          const cycle = u32[base + 2];
+          const nextInt = u32[base + 3];
+          const numEvents = u32[base + 4];
+          const intNames = {
+            1: 'VI',
+            2: 'CMP',
+            4: 'CHK',
+            8: 'SI',
+            16: 'PI',
+            32: 'SPC',
+            64: 'AI',
+            128: 'SP',
+            256: 'DP',
+          };
+          const events = [];
+          for (let i = 0; i < numEvents && 5 + i * 3 + 2 < n; i++) {
+            const idx = base + 5 + i * 3;
+            const type = u32[idx];
+            const abs = u32[idx + 1];
+            const rel = u32[idx + 2];
+            events.push(`${intNames[type] || type}@${rel}`);
+          }
+          _syncLog(
+            `EQ-HOST-SYNC f=${_frameNum} COUNT=${count} COMPARE=${compare} cycle=${cycle} next=${nextInt} events=[${events.join(',')}]`,
+          );
+          mod._free(eqBuf);
+        }
+      }
     } else {
       // Fallback: existing getState path
       const ps0 = performance.now();
@@ -8764,6 +8822,44 @@
       _resyncCount++;
       _consecutiveResyncs++;
       _syncLog(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+
+      // Dump event queue state after sync for cross-peer comparison
+      if (mod._kn_eventqueue_dump) {
+        const eqBuf = mod._malloc(256);
+        if (eqBuf) {
+          const n = mod._kn_eventqueue_dump(eqBuf >> 2, 64);
+          const u32 = mod.HEAPU32;
+          const base = eqBuf >> 2;
+          const count = u32[base];
+          const compare = u32[base + 1];
+          const cycle = u32[base + 2];
+          const nextInt = u32[base + 3];
+          const numEvents = u32[base + 4];
+          const intNames = {
+            1: 'VI',
+            2: 'CMP',
+            4: 'CHK',
+            8: 'SI',
+            16: 'PI',
+            32: 'SPC',
+            64: 'AI',
+            128: 'SP',
+            256: 'DP',
+          };
+          const events = [];
+          for (let i = 0; i < numEvents && 5 + i * 3 + 2 < n; i++) {
+            const idx = base + 5 + i * 3;
+            const type = u32[idx];
+            const abs = u32[idx + 1];
+            const rel = u32[idx + 2];
+            events.push(`${intNames[type] || type}@${rel}`);
+          }
+          _syncLog(
+            `EQ-POST-SYNC f=${_frameNum} COUNT=${count} COMPARE=${compare} cycle=${cycle} next=${nextInt} events=[${events.join(',')}]`,
+          );
+          mod._free(eqBuf);
+        }
+      }
 
       // For boot sync (first alignment from divergent boot state), reset
       // frame counter to the host's frame. Without this, the guest keeps
