@@ -202,6 +202,10 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
     if ! grep -q "kn_get_hidden_state_fingerprint_impl" mupen64plus-core/src/main/main.c; then
         cat >> mupen64plus-core/src/main/main.c <<'KNFP_EOF'
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include "softfloat.h"
+#include "device/r4300/cp0.h"
 EMSCRIPTEN_KEEPALIVE uint32_t kn_get_hidden_state_fingerprint_impl(void) {
     uint32_t h = 2166136261u;
     h ^= (uint32_t)softfloat_roundingMode; h *= 16777619u;
@@ -215,6 +219,7 @@ EMSCRIPTEN_KEEPALIVE uint32_t kn_get_hidden_state_fingerprint_impl(void) {
     h ^= *r4300_cp0_last_addr(&g_dev.r4300.cp0); h *= 16777619u;
     return h;
 }
+#endif
 KNFP_EOF
         echo "    Injected kn_get_hidden_state_fingerprint_impl"
     fi
