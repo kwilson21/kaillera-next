@@ -1239,7 +1239,6 @@
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
-  let _running = false; // tick loop active
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
@@ -1867,7 +1866,7 @@
 
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
-    if (_playerSlot !== 0 || !_running) return;
+    if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
     const requesterSid = msg.requesterSid;
     if (!requesterSid) return;
     _syncLog(`received late-join request from ${requesterSid}`);
@@ -1901,7 +1900,7 @@
     const existingPeerSids = Object.keys(_peers);
     _syncLog(
       `onUsersUpdated: ${Object.keys(players).length} players, ${otherPlayers.length} others, ` +
-        `mySlot=${_playerSlot}, lateJoin=${_lateJoin}, running=${_running}, spectator=${_isSpectator}, ` +
+        `mySlot=${_playerSlot}, lateJoin=${_lateJoin}, running=${_phase === PHASE_RUNNING}, spectator=${_isSpectator}, ` +
         `existingPeers=[${existingPeerSids.join(',')}]`,
     );
 
@@ -1939,7 +1938,7 @@
       if (_lateJoin && !_isSpectator) {
         shouldInitiate = true;
         reason = 'late-joiner always initiates';
-      } else if (_running) {
+      } else if (_phase === PHASE_RUNNING) {
         shouldInitiate = false;
         reason = 'running — wait for late-joiner offer';
       } else if (_isSpectator) {
@@ -2220,7 +2219,7 @@
     }
     if (!_remoteInputs[peer.slot]) _remoteInputs[peer.slot] = {};
     const currentApply = _frameNum - DELAY_FRAMES;
-    if (_running && recvFrame < currentApply) {
+    if (_phase === PHASE_RUNNING && recvFrame < currentApply) {
       const now = performance.now();
       if (!_inputLateLogTime[peer.slot] || now - _inputLateLogTime[peer.slot] >= 1000) {
         _inputLateLogTime[peer.slot] = now;
@@ -2388,7 +2387,7 @@
       startRttMeasurement(peer);
 
       // Late join: if game is running, host starts spectator stream for new spectator
-      if (_running && _playerSlot === 0 && peer.slot === null) {
+      if (_phase === PHASE_RUNNING && _playerSlot === 0 && peer.slot === null) {
         startSpectatorStreamForPeer(remoteSid);
       }
 
@@ -3038,7 +3037,7 @@
     }
 
     // If game is running and not an intentional leave, attempt reconnect
-    if (_running && !peer._intentionalLeave) {
+    if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -3104,7 +3103,7 @@
     delete _lockstepReadyPeers[remoteSid];
     KNState.peers = _peers;
     _syncLog(`peer hard-disconnected: ${remoteSid} slot: ${peer.slot}`);
-    if (_playerSlot === 0 && _running) {
+    if (_playerSlot === 0 && _phase === PHASE_RUNNING) {
       _broadcastRoster();
     }
     // P0-1 funnel: emit peer_left only from the host so the per-session timeline
@@ -3118,9 +3117,9 @@
     const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
 
     const remaining = getActivePeers();
-    if (remaining.length === 0 && _running) {
+    if (remaining.length === 0 && _phase === PHASE_RUNNING) {
       setStatus('All peers disconnected -- running solo');
-    } else if (_running) {
+    } else if (_phase === PHASE_RUNNING) {
       const count = remaining.length + 1;
       setStatus(`${name} dropped -- ${count} player${count > 1 ? 's' : ''} remaining`);
     }
@@ -3563,7 +3562,7 @@
   const checkAllEmuReady = () => {
     if (_phase < PHASE_EMU_READY) return;
     if (_isSpectator) return;
-    if (_running) return;
+    if (_phase === PHASE_RUNNING) return;
     if (_awaitingLateJoinState) return; // late-join path active — don't use normal sync
 
     // Wait for ALL player peers to be emu-ready (not just 1)
@@ -3605,7 +3604,7 @@
     const sid = _sessionId;
     setTimeout(() => {
       if (sid !== _sessionId) return; // stale timer from previous session
-      if (!_running && _phase >= PHASE_EMU_READY) {
+      if (_phase !== PHASE_RUNNING && _phase >= PHASE_EMU_READY) {
         setStatus('Sync timed out — waiting for reconnect...');
         _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
         _phase = PHASE_EMU_READY; // allow sync retry
@@ -3616,7 +3615,7 @@
 
   const checkAllLockstepReady = () => {
     if (_phase < PHASE_LOCKSTEP_READY) return;
-    if (_running) return;
+    if (_phase === PHASE_RUNNING) return;
 
     // Check that at least 1 player peer is lockstep-ready
     const playerPeerSids = Object.keys(_peers).filter((sid) => {
@@ -4156,7 +4155,7 @@
 
   const handleLateJoinState = async (msg) => {
     if (_isSpectator) return;
-    if (_running) return; // already running, ignore duplicate
+    if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
@@ -4390,7 +4389,7 @@
     let _lastSrcW = canvas.width;
     let _lastSrcH = canvas.height;
     const blitFrame = () => {
-      if (!_running) return; // stopped
+      if (_phase !== PHASE_RUNNING) return; // stopped
       APISandbox.nativeRAF(blitFrame);
       if (canvas.width !== _lastSrcW || canvas.height !== _lastSrcH) {
         _lastSrcW = canvas.width;
@@ -4821,8 +4820,7 @@
   let _inputLateLogTime = {}; // slot -> last time INPUT-LATE was logged (rate-limiting)
 
   const startLockstep = () => {
-    if (_running) return;
-    _running = true;
+    if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
     _checkStateTransition();
 
@@ -5227,7 +5225,7 @@
     // peers, then resync emulator state from host.
     let _backgroundAt = 0;
     _visChangeHandler = () => {
-      if (!_running) return;
+      if (_phase !== PHASE_RUNNING) return;
       if (document.hidden) {
         _backgroundAt = Date.now();
         _syncLog(`tab hidden at frame ${_frameNum}`);
@@ -5315,10 +5313,10 @@
     // losing focus silently zeroes input. Log transitions so session logs
     // show exactly when input capture stopped/resumed.
     const _focusHandler = () => {
-      if (_running) _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
+      if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
     };
     const _blurHandler = () => {
-      if (_running) _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
+      if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
     };
     window.addEventListener('focus', _focusHandler);
     window.addEventListener('blur', _blurHandler);
@@ -5326,7 +5324,7 @@
     // Network change detection: mobile WiFi↔cellular switches cause desync.
     // Request a FULL (non-delta) resync when the network path changes.
     _networkChangeHandler = () => {
-      if (!_running) return;
+      if (_phase !== PHASE_RUNNING) return;
       _syncLog('network change detected — requesting full resync');
       if (_playerSlot !== 0) {
         _setLastSyncState(null, 'network-change');
@@ -5361,7 +5359,6 @@
   };
 
   const stopSync = () => {
-    _running = false;
     _phase = PHASE_STOPPED;
     _checkStateTransition();
     window._lockstepActive = false;
@@ -5471,7 +5468,7 @@
   };
 
   const tick = () => {
-    if (!_running) return;
+    if (_phase !== PHASE_RUNNING) return;
     _checkStateTransition();
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
@@ -8499,7 +8496,6 @@
     _frameNum = 0;
     _funnelMilestoneSent = false;
     KNState.frameNum = 0;
-    _running = false;
     _lateJoin = false;
     _phase = PHASE_IDLE;
     _awaitingLateJoinState = false;
@@ -8673,7 +8669,7 @@
         ping: rtt,
         playerCount: peers.length + 1,
         frame: _frameNum,
-        running: _running,
+        running: _phase === PHASE_RUNNING,
         state: _computeState(),
         mode: 'lockstep',
         syncEnabled: _syncEnabled,
@@ -8686,7 +8682,7 @@
       state: _computeState(),
       activeRoster: _activeRoster ? [..._activeRoster] : null,
       inputPeerSlots: getInputPeers().map((p) => p.slot),
-      running: _running,
+      running: _phase === PHASE_RUNNING,
       frameNum: _frameNum,
       playerSlot: _playerSlot,
       peerCount: Object.keys(_peers).length,
@@ -8698,7 +8694,7 @@
         const info = {
           slot: _playerSlot,
           frame: _frameNum,
-          running: _running,
+          running: _phase === PHASE_RUNNING,
           syncEnabled: _syncEnabled,
           resyncCount: _resyncCount,
           peerCount: Object.keys(_peers).length,
