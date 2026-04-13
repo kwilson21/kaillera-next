@@ -8700,6 +8700,22 @@
       _resyncCount++;
       _consecutiveResyncs++;
       _syncLog(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+
+      // For boot sync (first alignment from divergent boot state), reset
+      // frame counter to the host's frame. Without this, the guest keeps
+      // its old _frameNum while the emulator state is from the host's frame,
+      // causing input mapping mismatch. Only done when the frame gap is
+      // large (boot sync) — not for normal resyncs where frames are close.
+      if (frame != null && mod._kn_set_frame && Math.abs(_frameNum - frame) > 30) {
+        const oldFrame = _frameNum;
+        _frameNum = frame;
+        KNState.frameNum = frame;
+        mod._kn_set_frame(frame);
+        _bootStallFrame = -1;
+        _bootStallStartTime = 0;
+        _bootStallRecoveryFired = false;
+        _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
+      }
     } else {
       // Fallback: existing loadState path
       const lt0 = performance.now();
