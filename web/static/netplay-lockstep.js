@@ -1152,6 +1152,21 @@
   // cause false-positive canvas mismatches that trigger unnecessary resyncs.
   let _peers = {}; // remoteSid -> PeerState
   let _knownPlayers = {}; // socketId -> {slot, playerName}
+
+  // ── Boot phase enum ──────────────────────────────────────────────────
+  // Linear progression replacing individual boolean flags. Integer ordering
+  // lets guards use >= comparisons: "at least this far along".
+  const PHASE_IDLE = 0;
+  const PHASE_GAME_STARTED = 1; // startGameSequence() called
+  const PHASE_EMU_READY = 2; // WASM core + Module available
+  const PHASE_SYNCING = 3; // initial state sync in progress
+  const PHASE_LOCKSTEP_READY = 4; // state loaded, ready for tick loop
+  const PHASE_RUNNING = 5; // tick loop active
+  const PHASE_STOPPED = 6; // tick loop stopped (game ended)
+  let _phase = PHASE_IDLE;
+
+  // Legacy booleans — still the source of truth until fully migrated.
+  // Each is set alongside _phase during the transition period.
   let _gameStarted = false;
   let _sessionId = 0; // incremented on each init() to invalidate stale timers
   let _romWaitInterval = null; // setInterval ID for guest ROM-wait polling
@@ -1678,16 +1693,21 @@
   let _lastComputedState = 'idle';
 
   const _computeState = () => {
-    if (!_gameStarted) return 'idle';
-    if (_gameStarted && !_selfEmuReady) return 'booting';
-    if (_selfEmuReady && !_selfLockstepReady && !_awaitingLateJoinState) return 'syncing';
-    if (_awaitingLateJoinState) return 'late-join-wait';
+    // Boot lifecycle — derived from _phase enum
+    if (_phase === PHASE_IDLE) return 'idle';
+    if (_phase === PHASE_GAME_STARTED) return 'booting';
+    if (_phase === PHASE_EMU_READY || _phase === PHASE_SYNCING) {
+      if (_awaitingLateJoinState) return 'late-join-wait';
+      return 'syncing';
+    }
+    if (_phase === PHASE_LOCKSTEP_READY) return 'stopped'; // ready but tick loop not started yet
+    if (_phase === PHASE_STOPPED) return 'stopped';
+    // Runtime sub-states (only when PHASE_RUNNING)
     if (_lateJoinPaused) return 'late-join-paused';
-    if (!_running) return 'stopped';
     if (_awaitingResync) return 'awaiting-resync';
     if (_rollbackStallActive) return 'rollback-stall';
     if (_framePacingActive) return 'pacing-throttle';
-    if (_running && !_inGameplay) return 'running:menu';
+    if (!_inGameplay) return 'running:menu';
     return 'running';
   };
 
@@ -3254,6 +3274,7 @@
   const startGameSequence = () => {
     if (_gameStarted) return;
     _gameStarted = true;
+    _phase = PHASE_GAME_STARTED;
     _checkStateTransition();
 
     // P0-1 funnel: lockstep handshake complete, input exchange beginning.
@@ -3485,6 +3506,7 @@
       setupKeyTracking();
 
       _selfEmuReady = true;
+      _phase = PHASE_EMU_READY;
       _checkStateTransition();
       hookVirtualGamepad();
 
@@ -3568,6 +3590,7 @@
 
     if (_syncStarted) return; // guard against re-entrant calls
     _syncStarted = true;
+    _phase = PHASE_SYNCING;
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
@@ -3848,6 +3871,8 @@
         }
 
         _selfLockstepReady = true;
+        _phase = PHASE_LOCKSTEP_READY;
+        _phase = PHASE_LOCKSTEP_READY;
         if (_rttComplete) broadcastLockstepReady();
         checkAllLockstepReady();
         return;
@@ -3885,6 +3910,7 @@
       }
 
       _selfLockstepReady = true;
+      _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
     } catch (e) {
@@ -3920,6 +3946,7 @@
       // the host to stall for 10-30s while the guest started normally.
       _guestStateBytes = cacheBytes;
       _selfLockstepReady = true;
+      _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
       }
@@ -3960,6 +3987,7 @@
       if (romHash) _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
 
       _selfLockstepReady = true;
+      _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
       }
@@ -4806,6 +4834,7 @@
   const startLockstep = () => {
     if (_running) return;
     _running = true;
+    _phase = PHASE_RUNNING;
     _checkStateTransition();
 
     // Ensure session log flushing is active. startGameSequence() sets this
@@ -5344,6 +5373,7 @@
 
   const stopSync = () => {
     _running = false;
+    _phase = PHASE_STOPPED;
     _checkStateTransition();
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
@@ -8486,6 +8516,7 @@
     _selfEmuReady = false;
     _selfLockstepReady = false;
     _syncStarted = false;
+    _phase = PHASE_IDLE;
     _awaitingLateJoinState = false;
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
