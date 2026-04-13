@@ -1970,7 +1970,7 @@
     if (_syncBufPtr) return;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._malloc) return;
-    _syncBufSize = 8 * 1024 * 1024 + 16384;
+    _syncBufSize = 8 * 1024 * 1024 + 64 * 1024;
     _syncBufPtr = mod._malloc(_syncBufSize);
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
