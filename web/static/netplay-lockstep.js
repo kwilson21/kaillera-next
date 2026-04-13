@@ -7173,7 +7173,7 @@
       // ── Periodic logging with timing + per-region hash exchange ──
       // Tighter interval during menus (30 frames) to catch CSS/stage-select
       // divergence before it compounds. 300 frames during gameplay.
-      const _hashInterval = _inGameplay ? 300 : 30;
+      const _hashInterval = _inGameplay ? 300 : _isLocalDev ? 30 : 60;
       if (_frameNum % _hashInterval === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
@@ -7331,11 +7331,17 @@
                 delete window._rbPendingGameChecks[fStr];
                 const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
                 if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
-                  _syncLog(
-                    `RB-STATE-DRIFT f=${f} gp=MATCH game=DIFFER peer=0x${peerGameHash.toString(16)} local=0x${localGameHash.toString(16)} — non-gameplay RDRAM diverged`,
-                  );
-                  // Fire GP-DUMP for context
-                  if (_rdramBase) {
+                  // Throttle STATE-DRIFT logging: first + every 300 frames on prod
+                  if (!window._stateDriftCount) window._stateDriftCount = 0;
+                  window._stateDriftCount++;
+                  const shouldLog = _isLocalDev || window._stateDriftCount <= 3 || window._stateDriftCount % 10 === 0;
+                  if (shouldLog) {
+                    _syncLog(
+                      `RB-STATE-DRIFT f=${f} gp=MATCH game=DIFFER peer=0x${peerGameHash.toString(16)} local=0x${localGameHash.toString(16)} — non-gameplay RDRAM diverged (#${window._stateDriftCount})`,
+                    );
+                  }
+                  // Fire GP-DUMP for context (first 3 + every 10th)
+                  if (shouldLog && _rdramBase) {
                     const m = window.EJS_emulator?.gameManager?.Module;
                     if (m?.HEAPU32) {
                       const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
