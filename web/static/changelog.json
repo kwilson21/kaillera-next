@@ -1,5 +1,235 @@
 [
   {
+    "version": "0.43.0",
+    "date": "2026-04-13",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "dirty-input serialize skip + zone prediction + dead-reckoning"
+      },
+      {
+        "type": "fix",
+        "message": "input-change serialize gate + rollbackMax tuning"
+      },
+      {
+        "type": "feat",
+        "message": "input queue drain + freeze detection + comprehensive match analyzer"
+      },
+      {
+        "type": "fix",
+        "message": "log TAB-FOCUS gained/lost for input capture diagnosis"
+      },
+      {
+        "type": "feat",
+        "message": "BOOT-LOCKSTEP deadlock detection + --room flag"
+      },
+      {
+        "type": "fix",
+        "message": "eliminate BOOT-LOCKSTEP + coord-sync deadlock"
+      },
+      {
+        "type": "feat",
+        "message": "detect AUDIO-DEATH and ROLLBACK-RESTORE-CORRUPTION"
+      },
+      {
+        "type": "feat",
+        "message": "route hardDisconnectPeer through resetPeerState (MF1)"
+      },
+      {
+        "type": "feat",
+        "message": "route reconnect cleanup through resetPeerState (MF1)"
+      },
+      {
+        "type": "fix",
+        "message": "add RB_INIT_TIMEOUT_MS deadline on _rbPendingInit (MF2)"
+      },
+      {
+        "type": "fix",
+        "message": "add SYNC_COORD_TIMEOUT_MS deadline on coord sync (MF3)"
+      },
+      {
+        "type": "fix",
+        "message": "trigger resync on INPUT-STALL hard-timeout (MF4)"
+      },
+      {
+        "type": "fix",
+        "message": "late-join timeout tuning and worker stall guard (MF5)"
+      },
+      {
+        "type": "feat",
+        "message": "detection-only tick watchdog for residual deadlocks (MF6)"
+      },
+      {
+        "type": "feat",
+        "message": "detect new netplay recovery events from deadlock audit"
+      },
+      {
+        "type": "fix",
+        "message": "improve MF6 cause inference for pacing/wasm stalls"
+      },
+      {
+        "type": "feat",
+        "message": "client-side version-mismatch guard with force reload"
+      },
+      {
+        "type": "feat",
+        "message": "detect VERSION-MISMATCH from cache-bust guard"
+      },
+      {
+        "type": "feat",
+        "message": "visual-only desync, TAB-FOCUS correlation, pacing-safety-freeze"
+      },
+      {
+        "type": "feat",
+        "message": "R5 pre_tick return-value invariant assertion (RF3)"
+      },
+      {
+        "type": "feat",
+        "message": "R2 stepOneFrame invariant assertion (RF2)"
+      },
+      {
+        "type": "fix",
+        "message": "R1 re-capture rAF runner after retro_unserialize (RF1)"
+      },
+      {
+        "type": "feat",
+        "message": "R3 ring coverage invariant in dirty-input gate (RF4)"
+      },
+      {
+        "type": "feat",
+        "message": "R3 loud FATAL-RING-STALE on stale ring slot (RF7)"
+      },
+      {
+        "type": "feat",
+        "message": "R4 post-replay live-state hash verification (RF5)"
+      },
+      {
+        "type": "feat",
+        "message": "R6 Part A — strengthen AUDIO-DEATH diagnostics"
+      },
+      {
+        "type": "feat",
+        "message": "BF1-BF8 pre-gameplay boot reliability fixes"
+      },
+      {
+        "type": "fix",
+        "message": "defensive replay_remaining fixup + ring staleness ceiling"
+      },
+      {
+        "type": "feat",
+        "message": "C-level pacing gate in kn_pre_tick to prevent ring starvation"
+      },
+      {
+        "type": "feat",
+        "message": "defer pacing to C engine + handle return 3 in JS"
+      },
+      {
+        "type": "fix",
+        "message": "revert out-of-scope DataChannel onOpen changes"
+      },
+      {
+        "type": "feat",
+        "message": "C-level pacing gate + I1 throttle timeout + boot reliability DC fix"
+      },
+      {
+        "type": "fix",
+        "message": "eliminate DataChannel onopen race that blocked gesture prompt"
+      },
+      {
+        "type": "fix",
+        "message": "gate rollback on game_status to prevent menu state corruption"
+      },
+      {
+        "type": "fix",
+        "message": "correct RDRAM byte order for game_status read (HEAPU32 + shift)"
+      },
+      {
+        "type": "feat",
+        "message": "full serialize + mode 2 RSP audio for desync-free rollback"
+      },
+      {
+        "type": "feat",
+        "message": "save state every frame — eliminate ring coverage gaps"
+      },
+      {
+        "type": "feat",
+        "message": "add full state comparison section (game/full hash + region diff)"
+      },
+      {
+        "type": "fix",
+        "message": "clear replay_depth + broadcast game_state_hash for full desync detection"
+      },
+      {
+        "type": "feat",
+        "message": "add TICK-PERF logging for FPS diagnosis + input availability"
+      },
+      {
+        "type": "fix",
+        "message": "post-step RNG reseed to prevent random selection desync"
+      },
+      {
+        "type": "feat",
+        "message": "STATE-DRIFT triggers byte-level bisect + faster menu hash checks"
+      },
+      {
+        "type": "fix",
+        "message": "boot sync — guest requests host state after boot convergence"
+      },
+      {
+        "type": "fix",
+        "message": "reduce menu hash interval to 30 frames (was 1, flooded log buffer)"
+      },
+      {
+        "type": "fix",
+        "message": "keep latest entries on overflow + cap REGION-BYTES dumps"
+      },
+      {
+        "type": "fix",
+        "message": "skip boot lockstep stall during reconnect resync"
+      },
+      {
+        "type": "fix",
+        "message": "break boot lockstep stall after deadlock recovery fires"
+      },
+      {
+        "type": "fix",
+        "message": "set reconnecting flag when receiving reconnect offer"
+      },
+      {
+        "type": "fix",
+        "message": "don't enter boot stall when resync/recovery is active"
+      },
+      {
+        "type": "fix",
+        "message": "trigger boot sync at boot grace end, not gameplay transition"
+      },
+      {
+        "type": "fix",
+        "message": "flush sync logs every 5s instead of 30s"
+      },
+      {
+        "type": "feat",
+        "message": "real-time log flush for local dev, 5s for prod"
+      },
+      {
+        "type": "feat",
+        "message": "add tick performance + GP-DUMP comparison sections"
+      },
+      {
+        "type": "fix",
+        "message": "sync buffer too small — boot sync silently failed"
+      },
+      {
+        "type": "fix",
+        "message": "reset frame counter on boot sync (large frame gap)"
+      },
+      {
+        "type": "fix",
+        "message": "throttle logging for prod deployment"
+      }
+    ]
+  },
+  {
     "version": "0.42.0",
     "date": "2026-04-11",
     "changes": [
