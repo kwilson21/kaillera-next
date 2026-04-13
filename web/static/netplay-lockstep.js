@@ -6688,7 +6688,7 @@
               }
               return;
             }
-            // Stall exceeded 500ms — fabricate zero input and continue
+            // Fabricate zero input and continue
             if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
             if (!_remoteInputs[missingSlot][rbApplyFrame]) {
               _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
@@ -6874,6 +6874,11 @@
         if (tickMod._kn_hle_save && tickMod._kn_set_skip_rsp_audio) {
           tickMod._kn_hle_save();
           tickMod._kn_set_skip_rsp_audio(1); // skip entirely during replay
+          _syncLog(`REPLAY-AUDIO-SKIP: hle saved, rsp mode=1 for replay depth=${replayDepth}`);
+        } else {
+          _syncLog(
+            `REPLAY-AUDIO-SKIP: NOT AVAILABLE (hle_save=${!!tickMod._kn_hle_save} skip_rsp=${!!tickMod._kn_set_skip_rsp_audio})`,
+          );
         }
       }
       if (_rbReplayLogged && !catchingUp) {
@@ -7516,7 +7521,10 @@
                         `fc=${r32(0x3cb30).toString(16)}`,
                         `sfc=${r32(0x3b6e4).toString(16)}`,
                       ];
-                      _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
+                      if (!window._knLastGpCssFrame || f - window._knLastGpCssFrame >= 60) {
+                        window._knLastGpCssFrame = f;
+                        _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
+                      }
                     }
                   }
                   // Arm bisect mode on STATE-DRIFT so the byte-level
