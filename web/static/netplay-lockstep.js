@@ -5321,7 +5321,7 @@
       _cachedRoom = _cachedRoom || KNState.room;
       _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
       _socketFlushFails = 0;
-      _flushInterval = setInterval(_flushSyncLog, 30000);
+      _flushInterval = setInterval(_flushSyncLog, 5000);
       // Early flush at 5s so short matches (that freeze, crash, or are
       // aborted before the 30s interval fires) still leave a DB row. This
       // caught a real bug where room 4A2NMSLS was completely invisible
@@ -5636,7 +5636,7 @@
     _cachedRoom = KNState.room;
     _cachedUploadToken = KNState.uploadToken;
     _socketFlushFails = 0;
-    _flushInterval = setInterval(_flushSyncLog, 30000);
+    _flushInterval = setInterval(_flushSyncLog, 5000);
     // Early flush at 5s so short matches (freeze/crash/abort before 30s)
     // still leave a DB row. See also the lockstep-ready path above.
     setTimeout(() => _flushSyncLog(), 5000);
