@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>VGP Design Mode</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: #0a0a0f;
+        color: #ccc;
+        font-family: -apple-system, system-ui, sans-serif;
+        overflow-x: hidden;
+      }
+
+      /* ── Toolbar ── */
+      .toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 16px;
+        background: #14141f;
+        border-bottom: 1px solid #2a2a3a;
+      }
+      .toolbar h1 {
+        font-size: 14px;
+        color: #6af;
+        white-space: nowrap;
+      }
+      .toolbar label {
+        font-size: 12px;
+        color: #888;
+      }
+      .toolbar input[type='range'] {
+        width: 120px;
+      }
+      .toolbar .zoom-val {
+        font-size: 12px;
+        color: #6af;
+        min-width: 35px;
+      }
+      .toolbar button {
+        padding: 5px 12px;
+        border: 1px solid #3a3a5a;
+        border-radius: 4px;
+        background: #1a1a2e;
+        color: #ccc;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .toolbar button:hover {
+        background: #2a2a4e;
+      }
+      .toolbar button.active {
+        background: #2a4a6a;
+        border-color: #6af;
+      }
+      .toolbar .spacer {
+        flex: 1;
+      }
+      .toolbar .status {
+        font-size: 11px;
+        color: #666;
+      }
+
+      /* ── Section headers ── */
+      .section-header {
+        padding: 12px 16px 6px;
+        font-size: 13px;
+        color: #888;
+        border-bottom: 1px solid #1a1a2a;
+        cursor: pointer;
+        user-select: none;
+      }
+      .section-header:hover {
+        color: #aaa;
+      }
+      .section-header .arrow {
+        display: inline-block;
+        transition: transform 0.2s;
+        margin-right: 6px;
+      }
+      .section-header.collapsed .arrow {
+        transform: rotate(-90deg);
+      }
+
+      /* ── Viewport grid ── */
+      .viewport-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(var(--card-w, 200px), 1fr));
+        gap: 12px;
+        padding: 12px 16px;
+      }
+      .viewport-grid.collapsed {
+        display: none;
+      }
+
+      /* ── Viewport card ── */
+      .viewport-card {
+        border: 2px solid #2a2a3a;
+        border-radius: 6px;
+        background: #111;
+        overflow: hidden;
+        cursor: pointer;
+        transition: border-color 0.15s;
+        display: flex;
+        flex-direction: column;
+      }
+      .viewport-card:hover {
+        border-color: #4a4a6a;
+      }
+      .viewport-card.reference {
+        border-color: #6af;
+        box-shadow: 0 0 12px rgba(102, 170, 255, 0.2);
+      }
+      .viewport-label {
+        padding: 4px 8px;
+        font-size: 10px;
+        color: #888;
+        background: #0d0d15;
+        font-family: monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .viewport-card.reference .viewport-label {
+        color: #6af;
+      }
+      .viewport-frame-wrap {
+        position: relative;
+        overflow: hidden;
+        margin: 0 auto;
+      }
+      .viewport-frame-wrap iframe {
+        border: none;
+        display: block;
+        transform-origin: top left;
+        pointer-events: none;
+      }
+      .viewport-card.reference .viewport-frame-wrap iframe {
+        pointer-events: auto;
+      }
+
+      /* ── Drag overlay (on top of reference iframe) ── */
+      .drag-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 10;
+        cursor: crosshair;
+      }
+      .drag-overlay.dragging {
+        cursor: grabbing;
+      }
+
+      /* ── Element highlight ── */
+      .el-highlight {
+        position: absolute;
+        border: 2px solid #ff6b6b;
+        border-radius: 3px;
+        pointer-events: none;
+        z-index: 11;
+        background: rgba(255, 107, 107, 0.08);
+      }
+      .el-highlight.selected {
+        border-color: #6af;
+        background: rgba(102, 170, 255, 0.1);
+      }
+
+      /* ── Delta tooltip ── */
+      .drag-tooltip {
+        position: fixed;
+        padding: 3px 8px;
+        background: rgba(0, 0, 0, 0.85);
+        color: #6af;
+        font-size: 11px;
+        font-family: monospace;
+        border-radius: 4px;
+        pointer-events: none;
+        z-index: 200;
+        white-space: nowrap;
+        display: none;
+      }
+
+      /* ── Inspector panel ── */
+      .inspector {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        z-index: 100;
+        background: #14141f;
+        border-top: 1px solid #2a2a3a;
+        padding: 8px 16px;
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+        max-height: 180px;
+        overflow-y: auto;
+        font-size: 12px;
+      }
+      .inspector-section {
+        min-width: 0;
+      }
+      .inspector-section h3 {
+        font-size: 11px;
+        color: #6af;
+        margin-bottom: 4px;
+        text-transform: uppercase;
+      }
+      .inspector .el-name {
+        font-family: monospace;
+        color: #ff6b6b;
+        font-size: 13px;
+      }
+      .inspector .css-props {
+        font-family: monospace;
+        color: #888;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      .inspector .css-props span {
+        color: #aaa;
+      }
+
+      /* ── Change log ── */
+      .change-log {
+        flex: 1;
+        min-width: 200px;
+      }
+      .change-entry {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 0;
+        font-family: monospace;
+        font-size: 11px;
+        color: #aaa;
+      }
+      .change-entry .undo-btn {
+        background: none;
+        border: none;
+        color: #f66;
+        cursor: pointer;
+        font-size: 11px;
+        padding: 0 4px;
+      }
+      .change-entry .undo-btn:hover {
+        color: #f99;
+      }
+
+      /* ── Resize +/- buttons ── */
+      .resize-controls {
+        position: absolute;
+        z-index: 100;
+        display: none;
+        pointer-events: auto;
+      }
+      .resize-controls.visible {
+        display: flex;
+      }
+      .resize-btn {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: rgba(102, 170, 255, 0.9);
+        color: #fff;
+        border: none;
+        font-size: 16px;
+        font-weight: bold;
+        line-height: 1;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: auto;
+      }
+      .resize-btn:hover {
+        background: rgba(102, 170, 255, 1);
+      }
+      .resize-btn:active {
+        background: rgba(80, 140, 220, 1);
+      }
+
+      /* ── Export area ── */
+      .export-btns {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      .export-btns button {
+        font-size: 11px;
+        padding: 4px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <h1>VGP Design Mode</h1>
+      <label>Zoom</label>
+      <input type="range" id="zoom" min="10" max="100" value="25" />
+      <span class="zoom-val" id="zoom-val">25%</span>
+      <button id="filter-all" class="active">All</button>
+      <button id="filter-phones">Phones</button>
+      <button id="filter-tablets">Tablets</button>
+      <span class="spacer"></span>
+      <span class="status" id="status">Click a viewport to set as reference</span>
+    </div>
+
+    <div id="sections"></div>
+
+    <div class="drag-tooltip" id="tooltip"></div>
+
+    <div class="inspector" id="inspector" style="display: none">
+      <div class="inspector-section">
+        <h3>Selected</h3>
+        <div class="el-name" id="sel-name">—</div>
+        <div id="size-controls" style="display: none; align-items: center; gap: 8px; margin: 4px 0">
+          <button class="resize-btn" id="size-minus">&minus;</button>
+          <span
+            id="size-val"
+            style="font-family: monospace; font-size: 12px; color: #6af; min-width: 40px; text-align: center"
+            >—</span
+          >
+          <button class="resize-btn" id="size-plus">+</button>
+        </div>
+        <div class="css-props" id="sel-css"></div>
+      </div>
+      <div class="inspector-section change-log">
+        <h3>Changes</h3>
+        <div id="change-list"></div>
+      </div>
+      <div class="inspector-section export-btns">
+        <button id="btn-save">Save</button>
+        <button id="btn-copy">Copy</button>
+        <button id="btn-reset">Reset All</button>
+      </div>
+    </div>
+
+    <script type="module">
+      import { TEST_DEVICES } from './vgp-devices.js';
+
+      // ── Playwright device viewports (fallback for custom entries) ──
+      // We fetch the viewport from the iframe's actual rendering, but need
+      // dimensions upfront to size iframes. Use known Playwright viewports.
+      const PLAYWRIGHT_VIEWPORTS = {};
+      // We'll populate these dynamically — first load a temp iframe to read
+      // Playwright data. For custom devices, the viewport is in the 4th element.
+
+      // Hardcoded viewport map (from Playwright source) for devices we use.
+      // This avoids needing to import playwright in the browser.
+      const VIEWPORTS = {
+        'iPhone SE': { width: 320, height: 568 },
+        'iPhone SE (3rd gen)': { width: 375, height: 667 },
+        'iPhone 8': { width: 375, height: 667 },
+        'iPhone X': { width: 375, height: 812 },
+        'iPhone 12 Mini': { width: 375, height: 629 },
+        'iPhone 12': { width: 390, height: 664 },
+        'iPhone 12 Pro Max': { width: 428, height: 746 },
+        'iPhone 13 Mini': { width: 375, height: 629 },
+        'iPhone 13': { width: 390, height: 664 },
+        'iPhone 13 Pro Max': { width: 428, height: 746 },
+        'iPhone 14': { width: 390, height: 664 },
+        'iPhone 14 Plus': { width: 428, height: 746 },
+        'iPhone 14 Pro Max': { width: 430, height: 740 },
+        'iPhone 15': { width: 393, height: 659 },
+        'iPhone 15 Plus': { width: 430, height: 739 },
+        'iPhone 15 Pro Max': { width: 430, height: 739 },
+        'iPhone 16+': { width: 430, height: 932 },
+        'Pixel 5': { width: 393, height: 727 },
+        'Pixel 7': { width: 412, height: 839 },
+        'Galaxy S8': { width: 360, height: 740 },
+        'Galaxy S9+': { width: 320, height: 658 },
+        'Galaxy S24': { width: 360, height: 780 },
+        'Galaxy A55': { width: 480, height: 1040 },
+        'Moto G4': { width: 360, height: 640 },
+        'iPad Mini': { width: 768, height: 1024 },
+        'iPad (gen 7)': { width: 810, height: 1080 },
+        'iPad Pro 11': { width: 834, height: 1194 },
+        'Galaxy Tab S4': { width: 712, height: 1138 },
+        'Galaxy Tab S9': { width: 640, height: 1024 },
+        'Nexus 10': { width: 800, height: 1280 },
+      };
+
+      const VGP_URL = '/tests/vgp-test.html';
+
+      // ── State ──
+      let zoomLevel = 25;
+      let referenceCard = null;
+      let selectedEl = null;
+      let selectedClass = null;
+      let changes = [];
+      let isDragging = false;
+      let dragStart = null;
+
+      // Draggable element classes
+      const DRAGGABLE = [
+        'vgp-dpad',
+        'vgp-stick-zone',
+        'vgp-cbuttons',
+        'vgp-ab',
+        'vgp-shoulders',
+        'vgp-l',
+        'vgp-r',
+        'vgp-z',
+        'vgp-z-portrait',
+        'vgp-start-portrait',
+        'vgp-start-landscape',
+        'vgp-start',
+      ];
+
+      // Map draggable elements to their CSS custom property strategy.
+      // 'fixed-lr' = positioned via --X-top/--X-left/--X-right (L, R when dissolved from shoulders)
+      // 'nudge-xy' = uses transform translate via --X-nudge-x/--X-nudge-y
+      // 'nudge-y'  = uses transform translateY via --X-nudge-y
+      // 'translate' = fallback, uses inline style.transform (no custom property yet)
+      const VAR_MAP = {
+        'vgp-l': { type: 'fixed-lr', vars: { top: '--l-top', left: '--l-left', position: '--l-position' } },
+        'vgp-r': { type: 'fixed-lr', vars: { top: '--r-top', right: '--r-right', position: '--r-position' } },
+        'vgp-dpad': { type: 'nudge-xy', vars: { x: '--dpad-nudge-x', y: '--dpad-nudge-y' } },
+        'vgp-ab': { type: 'nudge-xy', vars: { x: '--ab-nudge-x', y: '--ab-nudge-y' } },
+        'vgp-start-landscape': { type: 'nudge-xy', vars: { x: '--start-nudge-x', y: '--start-nudge-y' } },
+        'vgp-start': { type: 'nudge-xy', vars: { x: '--start-nudge-x', y: '--start-nudge-y' } },
+        'vgp-cbuttons': { type: 'nudge-xy', vars: { x: '--cbuttons-nudge-x', y: '--cbuttons-nudge-y' } },
+        'vgp-z-landscape': { type: 'nudge-xy', vars: { x: '--z-nudge-x', y: '--z-nudge-y' } },
+        'vgp-z': { type: 'nudge-xy', vars: { x: '--z-nudge-x', y: '--z-nudge-y' } },
+      };
+
+      // Map elements to their size CSS var. Scroll wheel on selected element resizes.
+      const SIZE_MAP = {
+        'vgp-dpad': '--btn-dpad', // dpad-size = btn-dpad * 3
+        'vgp-cbuttons': '--btn-c', // c-group = btn-c * 3
+        'vgp-ab': '--btn-ab', // ab-group-w/h derived from btn-ab
+        'vgp-stick-zone': '--stick-size', // direct size
+        'vgp-a': '--btn-ab',
+        'vgp-b': '--btn-ab',
+        'vgp-l': '--btn-l-size',
+        'vgp-r': '--btn-r-size',
+        'vgp-z': '--btn-z-size',
+        'vgp-start': '--btn-start-size',
+        'vgp-start-landscape': '--btn-start-size',
+      };
+
+      // Read a CSS custom property value from an iframe's :root
+      const getCSSVar = (doc, name) =>
+        doc.defaultView.getComputedStyle(doc.documentElement).getPropertyValue(name).trim();
+
+      // Set a CSS custom property on an iframe's :root
+      const setCSSVar = (doc, name, value) => doc.documentElement.style.setProperty(name, value);
+
+      // ── Build sections ──
+      const sectionsEl = document.getElementById('sections');
+      const groups = [
+        { title: 'Phones — Landscape', filter: (d) => d[2] === 'phone', orient: 'landscape' },
+        { title: 'Phones — Portrait', filter: (d) => d[2] === 'phone', orient: 'portrait' },
+        { title: 'Tablets — Landscape', filter: (d) => d[2] === 'tablet', orient: 'landscape' },
+        { title: 'Tablets — Portrait', filter: (d) => d[2] === 'tablet', orient: 'portrait' },
+      ];
+
+      const allCards = [];
+
+      for (const group of groups) {
+        const header = document.createElement('div');
+        header.className = 'section-header';
+        header.innerHTML = `<span class="arrow">▼</span> ${group.title}`;
+        const grid = document.createElement('div');
+        grid.className = 'viewport-grid';
+        grid.dataset.cat = group.filter(TEST_DEVICES[0]) ? 'phone' : 'tablet';
+
+        header.addEventListener('click', () => {
+          header.classList.toggle('collapsed');
+          grid.classList.toggle('collapsed');
+        });
+
+        for (const device of TEST_DEVICES) {
+          if (!group.filter(device)) continue;
+          const [name, chrome, cat, customVP] = device;
+          const vp = customVP || VIEWPORTS[name];
+          if (!vp) continue;
+
+          let w, h;
+          if (group.orient === 'portrait') {
+            w = vp.width;
+            h = vp.height - chrome;
+          } else {
+            w = vp.height;
+            h = vp.width - chrome;
+          }
+          if (h < 200) h = 200;
+          if (w < 300) w = 300;
+
+          const card = document.createElement('div');
+          card.className = 'viewport-card';
+          card.dataset.name = name;
+          card.dataset.orient = group.orient;
+          card.dataset.cat = cat;
+          card.dataset.iframeW = w;
+          card.dataset.iframeH = h;
+
+          const label = document.createElement('div');
+          label.className = 'viewport-label';
+          label.textContent = `${name} ${group.orient} ${w}×${h}`;
+
+          const frameWrap = document.createElement('div');
+          frameWrap.className = 'viewport-frame-wrap';
+
+          card.appendChild(label);
+          card.appendChild(frameWrap);
+          grid.appendChild(card);
+          allCards.push(card);
+
+          // Click to set reference
+          card.addEventListener('click', (e) => {
+            if (e.target.closest('.drag-overlay')) return;
+            setReference(card);
+          });
+        }
+
+        sectionsEl.appendChild(header);
+        sectionsEl.appendChild(grid);
+      }
+
+      // ── Lazy-load iframes with IntersectionObserver ──
+      const observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              const card = entry.target;
+              if (card._iframeLoaded) continue;
+              card._iframeLoaded = true;
+              loadIframe(card);
+              observer.unobserve(card);
+            }
+          }
+        },
+        { rootMargin: '400px' },
+      );
+
+      for (const card of allCards) observer.observe(card);
+
+      // Set initial grid column width
+      updateAllScales();
+
+      function loadIframe(card) {
+        const w = parseInt(card.dataset.iframeW);
+        const h = parseInt(card.dataset.iframeH);
+        const frameWrap = card.querySelector('.viewport-frame-wrap');
+        const scale = zoomLevel / 100;
+
+        frameWrap.style.width = w * scale + 'px';
+        frameWrap.style.height = h * scale + 'px';
+
+        const iframe = document.createElement('iframe');
+        iframe.width = w;
+        iframe.height = h;
+        iframe.style.width = w + 'px';
+        iframe.style.height = h + 'px';
+        iframe.style.transform = `scale(${scale})`;
+        iframe.style.transformOrigin = 'top left';
+        iframe.src = VGP_URL + '?t=' + Date.now();
+        iframe.loading = 'lazy';
+        frameWrap.appendChild(iframe);
+
+        // Inject device label after load
+        iframe.addEventListener('load', () => {
+          try {
+            const doc = iframe.contentDocument;
+            const lbl = doc?.getElementById('device-label');
+            if (lbl) lbl.textContent = `${card.dataset.name} ${card.dataset.orient} ${w}×${h}`;
+          } catch (e) {
+            /* cross-origin fallback */
+          }
+        });
+      }
+
+      // ── Zoom ──
+      const zoomSlider = document.getElementById('zoom');
+      const zoomVal = document.getElementById('zoom-val');
+      zoomSlider.addEventListener('input', () => {
+        zoomLevel = parseInt(zoomSlider.value);
+        zoomVal.textContent = zoomLevel + '%';
+        updateAllScales();
+      });
+
+      function updateAllScales() {
+        const scale = zoomLevel / 100;
+        // Update grid column sizing based on the widest device scaled
+        const maxW = Math.max(...allCards.map((c) => parseInt(c.dataset.iframeW) * scale));
+        document.documentElement.style.setProperty('--card-w', Math.round(maxW + 20) + 'px');
+        for (const card of allCards) {
+          const w = parseInt(card.dataset.iframeW);
+          const h = parseInt(card.dataset.iframeH);
+          const frameWrap = card.querySelector('.viewport-frame-wrap');
+          frameWrap.style.width = w * scale + 'px';
+          frameWrap.style.height = h * scale + 'px';
+          const iframe = frameWrap?.querySelector('iframe');
+          if (iframe) iframe.style.transform = `scale(${scale})`;
+        }
+      }
+
+      // ── Filter buttons ──
+      document.getElementById('filter-all').addEventListener('click', () => setFilter('all'));
+      document.getElementById('filter-phones').addEventListener('click', () => setFilter('phone'));
+      document.getElementById('filter-tablets').addEventListener('click', () => setFilter('tablet'));
+
+      function setFilter(cat) {
+        document.querySelectorAll('.toolbar button').forEach((b) => b.classList.remove('active'));
+        document
+          .getElementById(cat === 'all' ? 'filter-all' : cat === 'phone' ? 'filter-phones' : 'filter-tablets')
+          .classList.add('active');
+        for (const card of allCards) {
+          card.style.display = cat === 'all' || card.dataset.cat === cat ? '' : 'none';
+        }
+      }
+
+      // ── Reference device ──
+      function setReference(card) {
+        if (referenceCard) {
+          referenceCard.classList.remove('reference');
+          const oldOverlay = referenceCard.querySelector('.drag-overlay');
+          if (oldOverlay) oldOverlay.remove();
+        }
+        referenceCard = card;
+        card.classList.add('reference');
+        selectedEl = null;
+        selectedClass = null;
+
+        // Ensure iframe is loaded
+        if (!card._iframeLoaded) {
+          card._iframeLoaded = true;
+          loadIframe(card);
+          observer.unobserve(card);
+        }
+
+        // Add drag overlay
+        const frameWrap = card.querySelector('.viewport-frame-wrap');
+        const overlay = document.createElement('div');
+        overlay.className = 'drag-overlay';
+        frameWrap.appendChild(overlay);
+
+        setupDragOverlay(overlay, card);
+
+        document.getElementById('status').textContent = `Reference: ${card.dataset.name} ${card.dataset.orient}`;
+        document.getElementById('inspector').style.display = 'flex';
+      }
+
+      // ── Drag overlay interaction ──
+      function setupDragOverlay(overlay, card) {
+        const iframe = card.querySelector('iframe');
+        const scale = () => zoomLevel / 100;
+
+        overlay.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const rect = overlay.getBoundingClientRect();
+          const x = (e.clientX - rect.left) / scale();
+          const y = (e.clientY - rect.top) / scale();
+
+          // Find element at point in iframe
+          try {
+            const doc = iframe.contentDocument;
+            const el = doc.elementFromPoint(x, y);
+            if (!el) return;
+
+            // Walk up to find draggable ancestor
+            let target = el;
+            let targetClass = null;
+            while (target && target !== doc.body) {
+              for (const cls of DRAGGABLE) {
+                if (target.classList.contains(cls)) {
+                  targetClass = cls;
+                  break;
+                }
+              }
+              if (targetClass) break;
+              target = target.parentElement;
+            }
+
+            if (!targetClass) {
+              clearSelection();
+              return;
+            }
+
+            selectElement(target, targetClass, card);
+
+            // Start drag
+            isDragging = true;
+            dragStart = { x: e.clientX, y: e.clientY, el: target, cls: targetClass };
+            overlay.classList.add('dragging');
+
+            const origRect = target.getBoundingClientRect();
+            const mapping = VAR_MAP[targetClass];
+            const tooltip = document.getElementById('tooltip');
+
+            // Capture starting CSS var values for mapped elements
+            let startVars = {};
+            if (mapping && doc) {
+              if (mapping.type === 'fixed-lr') {
+                // Read current computed top/left/right
+                const cs = doc.defaultView.getComputedStyle(target);
+                startVars.top = parseFloat(cs.top) || 0;
+                startVars.left = parseFloat(cs.left) || 0;
+                startVars.right = parseFloat(cs.right) || 0;
+                // Ensure position is fixed
+                setCSSVar(doc, mapping.vars.position, 'fixed');
+              } else if (mapping.type === 'nudge-xy') {
+                startVars.x = parseFloat(getCSSVar(doc, mapping.vars.x)) || 0;
+                startVars.y = parseFloat(getCSSVar(doc, mapping.vars.y)) || 0;
+              } else if (mapping.type === 'nudge-y') {
+                startVars.y = parseFloat(getCSSVar(doc, mapping.vars.y)) || 0;
+              }
+            }
+
+            // Fallback: existing inline transform
+            const existingTransform = target.style.transform || '';
+            const existingMatch = existingTransform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+            const baseX = existingMatch ? parseFloat(existingMatch[1]) : 0;
+            const baseY = existingMatch ? parseFloat(existingMatch[2]) : 0;
+
+            const onMove = (me) => {
+              const dx = (me.clientX - dragStart.x) / scale();
+              const dy = (me.clientY - dragStart.y) / scale();
+
+              if (mapping) {
+                if (mapping.type === 'fixed-lr') {
+                  setCSSVar(doc, mapping.vars.top, Math.round(startVars.top + dy) + 'px');
+                  if (mapping.vars.left) setCSSVar(doc, mapping.vars.left, Math.round(startVars.left + dx) + 'px');
+                  if (mapping.vars.right) setCSSVar(doc, mapping.vars.right, Math.round(startVars.right - dx) + 'px');
+                } else if (mapping.type === 'nudge-xy') {
+                  setCSSVar(doc, mapping.vars.x, Math.round(startVars.x + dx) + 'px');
+                  setCSSVar(doc, mapping.vars.y, Math.round(startVars.y + dy) + 'px');
+                } else if (mapping.type === 'nudge-y') {
+                  setCSSVar(doc, mapping.vars.y, Math.round(startVars.y + dy) + 'px');
+                }
+              } else {
+                // Fallback: inline transform
+                target.style.transform = `translate(${baseX + dx}px, ${baseY + dy}px)`;
+              }
+
+              tooltip.style.display = 'block';
+              tooltip.style.left = me.clientX + 12 + 'px';
+              tooltip.style.top = me.clientY - 20 + 'px';
+              tooltip.textContent = `dx: ${Math.round(dx)} dy: ${Math.round(dy)}`;
+              updateHighlight(target, card);
+            };
+
+            const onUp = (ue) => {
+              document.removeEventListener('mousemove', onMove);
+              document.removeEventListener('mouseup', onUp);
+              overlay.classList.remove('dragging');
+              tooltip.style.display = 'none';
+              isDragging = false;
+
+              const dx = Math.round((ue.clientX - dragStart.x) / scale());
+              const dy = Math.round((ue.clientY - dragStart.y) / scale());
+
+              if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+                const change = {
+                  element: '.' + targetClass,
+                  action: 'move',
+                  dx,
+                  dy,
+                  mapping: mapping ? mapping.type : 'translate',
+                  originalRect: {
+                    x: Math.round(origRect.x),
+                    y: Math.round(origRect.y),
+                    width: Math.round(origRect.width),
+                    height: Math.round(origRect.height),
+                  },
+                };
+
+                // Record CSS var values for export
+                if (mapping) {
+                  change.cssVars = {};
+                  if (mapping.type === 'fixed-lr') {
+                    change.cssVars[mapping.vars.top] = Math.round(startVars.top + dy) + 'px';
+                    if (mapping.vars.left) change.cssVars[mapping.vars.left] = Math.round(startVars.left + dx) + 'px';
+                    if (mapping.vars.right)
+                      change.cssVars[mapping.vars.right] = Math.round(startVars.right - dx) + 'px';
+                    change.cssVars[mapping.vars.position] = 'fixed';
+                  } else if (mapping.type === 'nudge-xy') {
+                    change.cssVars[mapping.vars.x] = Math.round(startVars.x + dx) + 'px';
+                    change.cssVars[mapping.vars.y] = Math.round(startVars.y + dy) + 'px';
+                  } else if (mapping.type === 'nudge-y') {
+                    change.cssVars[mapping.vars.y] = Math.round(startVars.y + dy) + 'px';
+                  }
+                }
+
+                changes.push(change);
+                renderChanges();
+              }
+
+              dragStart = null;
+            };
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+          } catch (err) {
+            console.warn('iframe access error:', err);
+          }
+        });
+      }
+
+      // ── Element selection ──
+      function selectElement(el, cls, card) {
+        clearHighlights();
+        selectedEl = el;
+        selectedClass = cls;
+
+        // Show highlight
+        const highlight = document.createElement('div');
+        highlight.className = 'el-highlight selected';
+        const frameWrap = card.querySelector('.viewport-frame-wrap');
+        frameWrap.appendChild(highlight);
+
+        // Show +/- resize buttons in inspector if element has a size var
+        const sizeControls = document.getElementById('size-controls');
+        const sizeVar = SIZE_MAP[cls];
+        if (sizeVar && sizeControls) {
+          sizeControls.style.display = 'flex';
+          sizeControls.dataset.sizeVar = sizeVar;
+          const iframe = card.querySelector('iframe');
+          const doc = iframe?.contentDocument;
+          let current = doc ? parseFloat(getCSSVar(doc, sizeVar)) : NaN;
+          if (isNaN(current) && doc) {
+            const cs = doc.defaultView.getComputedStyle(el);
+            current = parseFloat(cs.fontSize) || parseFloat(cs.width) || 14;
+          }
+          document.getElementById('size-val').textContent = Math.round(current) + 'px';
+        } else if (sizeControls) {
+          sizeControls.style.display = 'none';
+        }
+
+        updateHighlight(el, card);
+
+        // Update inspector
+        document.getElementById('sel-name').textContent = '.' + cls;
+        updateCSSProps(el);
+      }
+
+      function updateHighlight(el, card) {
+        const highlight = card.querySelector('.el-highlight');
+        if (!highlight || !el) return;
+        const scale = zoomLevel / 100;
+        // Position resize controls next to the highlight
+        const controls = card.querySelector('.resize-controls');
+        const iframeRect = card.querySelector('iframe').getBoundingClientRect();
+        const elRect = el.getBoundingClientRect();
+        highlight.style.left = ((elRect.left - iframeRect.left) / scale) * scale + 'px';
+        highlight.style.top = ((elRect.top - iframeRect.top) / scale) * scale + 'px';
+        highlight.style.width = (elRect.width / scale) * scale + 'px';
+        highlight.style.height = (elRect.height / scale) * scale + 'px';
+      }
+
+      function clearHighlights() {
+        document.querySelectorAll('.el-highlight, .resize-controls').forEach((h) => h.remove());
+      }
+
+      function clearSelection() {
+        clearHighlights();
+        selectedEl = null;
+        selectedClass = null;
+        document.getElementById('sel-name').textContent = '—';
+        document.getElementById('sel-css').textContent = '';
+      }
+
+      function updateCSSProps(el) {
+        const cssEl = document.getElementById('sel-css');
+        try {
+          const doc = el.ownerDocument;
+          const cs = doc.defaultView.getComputedStyle(el);
+          const props = [
+            'position',
+            'display',
+            'width',
+            'height',
+            'margin',
+            'padding',
+            'flex',
+            'transform',
+            'top',
+            'bottom',
+            'left',
+            'right',
+          ];
+          cssEl.innerHTML = props.map((p) => `${p}: <span>${cs.getPropertyValue(p)}</span>`).join('<br>');
+        } catch (e) {
+          cssEl.textContent = '(unable to read)';
+        }
+      }
+
+      // ── Propagate changes to all iframes ──
+      function propagateToAll(cls, totalDx, totalDy) {
+        // Reference-only: other viewports stay untouched so you see the
+        // real baseline. Switch reference devices to adjust per-breakpoint.
+      }
+
+      // ── Change log ──
+      function renderChanges() {
+        const list = document.getElementById('change-list');
+        list.innerHTML = '';
+        changes.forEach((c, i) => {
+          const entry = document.createElement('div');
+          entry.className = 'change-entry';
+          entry.innerHTML = `
+      <span>${c.element} ${
+        c.action === 'resize'
+          ? Object.entries(c.cssVars)
+              .map(([k, v]) => k + ':' + v)
+              .join(' ')
+          : 'dx:' + c.dx + ' dy:' + c.dy
+      }</span>
+      <button class="undo-btn" title="Undo">✕</button>
+    `;
+          entry.querySelector('.undo-btn').addEventListener('click', () => undoChange(i));
+          list.appendChild(entry);
+        });
+      }
+
+      function undoChange(index) {
+        changes.splice(index, 1);
+
+        // Reload the reference iframe to reset all CSS vars, then replay remaining changes
+        if (referenceCard) {
+          const iframe = referenceCard.querySelector('iframe');
+          if (iframe) {
+            iframe.addEventListener(
+              'load',
+              () => {
+                // Replay remaining changes by re-setting their CSS vars
+                const doc = iframe.contentDocument;
+                if (!doc) return;
+                for (const c of changes) {
+                  if (c.cssVars) {
+                    for (const [varName, value] of Object.entries(c.cssVars)) {
+                      setCSSVar(doc, varName, value);
+                    }
+                  } else {
+                    // Fallback: inline transform
+                    const cls = c.element.slice(1);
+                    const el = doc.querySelector('.' + cls);
+                    if (el) el.style.transform = `translate(${c.dx}px, ${c.dy}px)`;
+                  }
+                }
+              },
+              { once: true },
+            );
+            iframe.src = iframe.src;
+          }
+        }
+
+        renderChanges();
+      }
+
+      // ── Keyboard shortcuts ──
+      document.addEventListener('keydown', (e) => {
+        // Undo
+        if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+          e.preventDefault();
+          if (changes.length > 0) undoChange(changes.length - 1);
+          return;
+        }
+
+        // Arrow nudge
+        if (!selectedEl || !selectedClass || !referenceCard) return;
+        const nudgeMap = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+        const nudge = nudgeMap[e.key];
+        if (!nudge) {
+          if (e.key === 'Escape') {
+            clearSelection();
+            return;
+          }
+          return;
+        }
+        e.preventDefault();
+        const mult = e.shiftKey ? 10 : 1;
+        const dx = nudge[0] * mult;
+        const dy = nudge[1] * mult;
+
+        // Get current transform
+        const existing = selectedEl.style.transform || '';
+        const match = existing.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+        const bx = match ? parseFloat(match[1]) : 0;
+        const by = match ? parseFloat(match[2]) : 0;
+        const nx = bx + dx;
+        const ny = by + dy;
+
+        selectedEl.style.transform = `translate(${nx}px, ${ny}px)`;
+
+        const origRect = selectedEl.getBoundingClientRect();
+        changes.push({
+          element: '.' + selectedClass,
+          action: 'move',
+          dx,
+          dy,
+          originalRect: {
+            x: Math.round(origRect.x),
+            y: Math.round(origRect.y),
+            width: Math.round(origRect.width),
+            height: Math.round(origRect.height),
+          },
+        });
+
+        propagateToAll(selectedClass, nx, ny);
+        renderChanges();
+        updateHighlight(selectedEl, referenceCard);
+      });
+
+      // ── Export ──
+      function buildExport() {
+        return {
+          timestamp: new Date().toISOString(),
+          referenceDevice: referenceCard?.dataset.name || null,
+          referenceOrientation: referenceCard?.dataset.orient || null,
+          referenceViewport: referenceCard
+            ? {
+                width: parseInt(referenceCard.dataset.iframeW),
+                height: parseInt(referenceCard.dataset.iframeH),
+              }
+            : null,
+          changes,
+        };
+      }
+
+      document.getElementById('btn-save').addEventListener('click', () => {
+        if (!referenceCard || !changes.length) return;
+
+        // Accumulate total dx/dy per element
+        const totals = {};
+        for (const c of changes) {
+          if (!totals[c.element]) totals[c.element] = { dx: 0, dy: 0 };
+          totals[c.element].dx += c.dx;
+          totals[c.element].dy += c.dy;
+        }
+
+        const exportData = {
+          timestamp: new Date().toISOString(),
+          referenceDevice: referenceCard.dataset.name,
+          referenceOrientation: referenceCard.dataset.orient,
+          referenceViewport: {
+            width: parseInt(referenceCard.dataset.iframeW),
+            height: parseInt(referenceCard.dataset.iframeH),
+          },
+          transforms: totals,
+        };
+
+        const json = JSON.stringify(exportData, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'vgp-design-changes.json';
+        a.click();
+
+        document.getElementById('status').textContent = 'Saved vgp-design-changes.json';
+      });
+
+      document.getElementById('btn-copy').addEventListener('click', () => {
+        if (!referenceCard || !changes.length) return;
+
+        // Collect final CSS var values (last write wins per var)
+        const cssVars = {};
+        for (const c of changes) {
+          if (c.cssVars) Object.assign(cssVars, c.cssVars);
+        }
+
+        const json = JSON.stringify(
+          {
+            referenceDevice: referenceCard.dataset.name,
+            referenceOrientation: referenceCard.dataset.orient,
+            referenceViewport: {
+              width: parseInt(referenceCard.dataset.iframeW),
+              height: parseInt(referenceCard.dataset.iframeH),
+            },
+            cssVars,
+          },
+          null,
+          2,
+        );
+        navigator.clipboard.writeText(json).then(() => {
+          document.getElementById('status').textContent = 'Copied to clipboard!';
+          setTimeout(() => {
+            document.getElementById('status').textContent = `Reference: ${referenceCard?.dataset.name || '—'}`;
+          }, 2000);
+        });
+      });
+
+      // ── Size +/- buttons in inspector ──
+      const doResize = (delta) => {
+        if (!referenceCard || !selectedClass || !selectedEl) return;
+        const sizeVar = document.getElementById('size-controls').dataset.sizeVar;
+        if (!sizeVar) return;
+        const iframe = referenceCard.querySelector('iframe');
+        const doc = iframe?.contentDocument;
+        if (!doc) return;
+        // Read the computed pixel value, not the raw CSS var (which may be clamp())
+        const rawVar = getCSSVar(doc, sizeVar);
+        let current = parseFloat(rawVar);
+        if (isNaN(current)) {
+          // clamp() expression — read the actual computed value from the element
+          const cs = doc.defaultView.getComputedStyle(selectedEl);
+          current = parseFloat(cs.fontSize) || parseFloat(cs.width) || 14;
+        }
+        const newVal = Math.max(6, Math.round(current + delta));
+        setCSSVar(doc, sizeVar, newVal + 'px');
+        document.getElementById('size-val').textContent = newVal + 'px';
+        changes.push({ element: '.' + selectedClass, action: 'resize', cssVars: { [sizeVar]: newVal + 'px' } });
+        renderChanges();
+        updateCSSProps(selectedEl);
+      };
+      document.getElementById('size-minus').addEventListener('click', () => doResize(-2));
+      document.getElementById('size-plus').addEventListener('click', () => doResize(2));
+
+      document.getElementById('btn-reset').addEventListener('click', () => {
+        changes = [];
+        // Reload reference iframe to reset all CSS vars and inline styles
+        if (referenceCard) {
+          const iframe = referenceCard.querySelector('iframe');
+          if (iframe) iframe.src = iframe.src;
+        }
+        clearSelection();
+        renderChanges();
+        document.getElementById('status').textContent = 'All changes reset';
+      });
+    </script>
+  </body>
+</html>

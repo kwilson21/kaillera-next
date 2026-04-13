@@ -152,8 +152,9 @@
       '  grid-area: start; display: flex; align-items: center; justify-content: center;',
       '  padding: 2px 0;',
       '}',
-      // Landscape: Start+Z wrapper hidden in portrait
+      // Landscape wrappers: hidden in portrait
       '.vgp-start-landscape { display: none; }',
+      '.vgp-z-landscape { display: none; }',
 
       // Portrait responsive: scale sizes with min(vw, svh) on small phones.
       // Centered transforms handle positioning — only sizes need scaling.
@@ -207,6 +208,7 @@
 
       // ── Design tokens on :root so both #game and #virtual-gamepad can use them ──
       '  :root {',
+      // ── Size tokens ──
       '    --btn-ab: clamp(32px, 17svh, 66px);',
       '    --btn-c: clamp(20px, 10svh, 38px);',
       '    --btn-dpad: clamp(18px, 9svh, 34px);',
@@ -220,11 +222,37 @@
       '    --shoulder-h: calc(clamp(11px, 3.5svh, 14px) + clamp(4px, 1.5svh, 6px) * 2 + 8px);',
       '    --spacer-pref: calc(var(--shoulder-h) + 4px);',
       '    --pad-l: clamp(16px, 5vw, 32px);',
-      // Panel widths derived from content
+      // ── Layout tokens ──
       '    --panel-l: calc(var(--stick-size) + var(--pad-l) + 20px);',
       '    --panel-r: calc(max(var(--ab-group-w), var(--c-group)) + 30px);',
       '    --offset-l: max(clamp(24px, 4vw, 48px), env(safe-area-inset-left, 0px));',
       '    --offset-r: max(clamp(24px, 4vw, 48px), env(safe-area-inset-right, 0px));',
+      // ── Position tokens (design-mode editable) ──
+      '    --shoulders-top: clamp(4px, 1svh, 10px);',
+      '    --shoulders-display: flex;',
+      '    --l-position: static;',
+      '    --l-top: auto;',
+      '    --l-left: auto;',
+      '    --l-right: auto;',
+      '    --r-position: static;',
+      '    --r-top: auto;',
+      '    --r-right: auto;',
+      '    --dpad-nudge-x: 0px;',
+      '    --dpad-nudge-y: 0px;',
+      '    --ab-nudge-x: 0px;',
+      '    --ab-nudge-y: 0px;',
+      '    --start-landscape-order: 0;',
+      '    --z-landscape-order: 0;',
+      '    --start-nudge-x: 0px;',
+      '    --start-nudge-y: 0px;',
+      '    --cbuttons-nudge-x: 0px;',
+      '    --cbuttons-nudge-y: 0px;',
+      '    --z-nudge-x: 0px;',
+      '    --z-nudge-y: 0px;',
+      '    --btn-l-size: clamp(11px, 3.5svh, 14px);',
+      '    --btn-r-size: clamp(11px, 3.5svh, 14px);',
+      '    --btn-z-size: clamp(11px, 3.5svh, 14px);',
+      '    --btn-start-size: clamp(10px, 3svh, 13px);',
       '  }',
 
       // Container
@@ -250,27 +278,34 @@
       '  .vgp-left { left: var(--offset-l); width: var(--panel-l); align-items: flex-start; padding: 0 0 0 var(--pad-l); }',
       '  .vgp-right { right: var(--offset-r); width: var(--panel-r); align-items: flex-end; padding: 0 14px 0 0; }',
 
-      // Shoulders — top of screen
-      '  .vgp-shoulders { position: fixed; top: clamp(4px, 1svh, 10px); left: 0; right: 0;',
+      // Shoulders — positioned via tokens (design-mode can dissolve or reposition)
+      '  .vgp-shoulders { position: fixed; top: var(--shoulders-top); left: 0; right: 0;',
+      '    display: var(--shoulders-display); justify-content: space-between;',
       '    padding: 0 calc(var(--offset-r) + 4px) 0 calc(var(--offset-l) + 4px);',
       '    z-index: 56; }',
-      '  .vgp-l, .vgp-r, .vgp-z { padding: clamp(4px, 1.5svh, 6px) clamp(10px, 3svh, 16px); font-size: clamp(11px, 3.5svh, 14px); }',
+      '  .vgp-l { font-size: var(--btn-l-size); padding: 0.4em 1em; }',
+      '  .vgp-r { font-size: var(--btn-r-size); padding: 0.4em 1em; }',
+      '  .vgp-z { font-size: var(--btn-z-size); padding: 0.4em 1em; }',
+      '  .vgp-l { position: var(--l-position) !important; top: var(--l-top); left: var(--l-left); right: var(--l-right); z-index: 56; }',
+      '  .vgp-r { position: var(--r-position) !important; top: var(--r-top); right: var(--r-right); z-index: 56; }',
 
       // Start — flex child between C-buttons and A/B
       '  .vgp-start-portrait { display: none; }',
       '  .vgp-z-portrait { display: none; }',
-      '  .vgp-start-landscape { display: flex; justify-content: center; gap: 8px; flex-shrink: 5; }',
-      '  .vgp-start { padding: clamp(4px, 1.5svh, 6px) clamp(14px, 4svh, 20px); font-size: clamp(10px, 3svh, 13px); }',
+      '  .vgp-start-landscape { display: flex; justify-content: center; flex-shrink: 5; order: var(--start-landscape-order); transform: translate(var(--start-nudge-x), var(--start-nudge-y)); }',
+      '  .vgp-z-landscape { display: flex; justify-content: flex-end; flex-shrink: 0; order: var(--z-landscape-order); transform: translate(var(--z-nudge-x), var(--z-nudge-y)); }',
+      '  .vgp-start { font-size: var(--btn-start-size); padding: 0.4em 1.4em; }',
 
       // Spacer: preferred height clears shoulders, collapses on tight viewports.
       // flex-shrink:10 means spacer absorbs compression first before groups shrink.
       '  .vgp-spacer { display: block; flex: 1 10 var(--spacer-pref); min-height: 0; }',
 
-      // D-pad — flex-shrink:1 so it can compress slightly on very short screens
+      // D-pad — flex child, nudgeable via tokens
       '  .vgp-dpad {',
       '    position: relative; top: auto; left: auto; bottom: auto; flex-shrink: 0;',
       '    width: var(--dpad-size); height: var(--dpad-size);',
       '    margin-bottom: var(--gap);',
+      '    transform: translate(var(--dpad-nudge-x), var(--dpad-nudge-y));',
       '  }',
       '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr {',
       '    width: var(--btn-dpad); height: var(--btn-dpad);',
@@ -292,6 +327,7 @@
       '    display: block; position: relative; flex-shrink: 0;',
       '    width: var(--c-group); height: var(--c-group);',
       '    margin-bottom: var(--gap);',
+      '    transform: translate(var(--cbuttons-nudge-x), var(--cbuttons-nudge-y));',
       '  }',
       '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr {',
       '    width: var(--btn-c); height: var(--btn-c);',
@@ -302,10 +338,11 @@
       '  .vgp-cl { top: 50%; transform: translateY(-50%); left: 0; right: auto; }',
       '  .vgp-cr { top: 50%; transform: translateY(-50%); right: 0; left: auto; }',
 
-      // A/B — flex-shrink:1 so group compresses on very short screens
+      // A/B — flex child, nudgeable via token
       '  .vgp-ab {',
       '    display: block; position: relative; flex-shrink: 0; margin-top: 0;',
       '    width: var(--ab-group-w); height: var(--ab-group-h);',
+      '    transform: translate(var(--ab-nudge-x), var(--ab-nudge-y));',
       '  }',
       '  .vgp-a {',
       '    width: var(--btn-ab); height: var(--btn-ab);',
@@ -317,15 +354,195 @@
       '  }',
       '}',
 
-      // Very short landscape viewports: dissolve the shoulder bar and position
-      // L/R/Z individually at the top of each panel area. Saves vertical space
-      // because the spacer only needs to clear the small buttons, not a full bar.
+      // Short landscape (≤300px): shared rules for dissolving shoulder bar
       '@media (orientation: landscape) and (max-height: 300px) {',
-      '  .vgp-shoulders { display: contents; }',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '  }',
       '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
-      // L on the left, R on the right (Z is next to Start, not in shoulders)
-      '  .vgp-l { position: fixed !important; top: 2px; left: var(--offset-l); z-index: 56; padding: 3px 8px !important; font-size: 10px !important; }',
-      '  .vgp-r { position: fixed !important; top: 2px; right: var(--offset-r); z-index: 56; padding: 3px 8px !important; font-size: 10px !important; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPhone SE (≤260px): design-mode values
+      '@media (orientation: landscape) and (max-height: 260px) {',
+      '  :root {',
+      '    --btn-l-size: 11px;',
+      '    --l-position: fixed; --l-top: 57px; --l-left: 121px;',
+      '    --r-position: fixed; --r-top: 91px; --r-right: 97px;',
+      '    --dpad-nudge-x: 13px; --dpad-nudge-y: -2px;',
+      '    --ab-nudge-y: -10px;',
+      '    --start-nudge-x: -56px; --start-nudge-y: 2px;',
+      '    --cbuttons-nudge-x: 1px; --cbuttons-nudge-y: -5px;',
+      '    --z-nudge-x: -4px; --z-nudge-y: -1px;',
+      '  }',
+      '}',
+
+      // Galaxy S9+ (261–280px, ≤750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 261px) and (max-height: 280px) and (max-width: 750px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 60px; --l-left: 142px;',
+      '    --r-position: fixed; --r-top: 99px; --r-right: 106px;',
+      '    --dpad-nudge-x: 17px; --dpad-nudge-y: -6px;',
+      '    --ab-nudge-x: -1px; --ab-nudge-y: -6px;',
+      '    --z-nudge-x: -7px; --z-nudge-y: 3px;',
+      '    --cbuttons-nudge-x: -5px; --cbuttons-nudge-y: -4px;',
+      '    --start-nudge-x: -87px; --start-nudge-y: 18px;',
+      '  }',
+      '}',
+
+      // 12 Mini / SE 3rd gen / iPhone 8 (281–300px, ≤750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 281px) and (max-height: 300px) and (max-width: 750px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 96px; --l-left: 142px;',
+      '    --r-position: fixed; --r-top: 122px; --r-right: 118px;',
+      '    --dpad-nudge-x: 10px; --dpad-nudge-y: -2px;',
+      '    --ab-nudge-y: -10px;',
+      '    --cbuttons-nudge-x: -4px; --cbuttons-nudge-y: -2px;',
+      '    --z-nudge-x: -11px; --z-nudge-y: 2px;',
+      '    --start-nudge-x: -76px; --start-nudge-y: 2px;',
+      '  }',
+      '}',
+
+      // iPhone X and similar (261–300px, wide >750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 261px) and (max-height: 300px) and (min-width: 751px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 72px; --l-left: 183px;',
+      '    --r-position: fixed; --r-top: 125px; --r-right: 124px;',
+      '    --dpad-nudge-x: 30px; --dpad-nudge-y: -1px;',
+      '    --ab-nudge-y: -5px;',
+      '    --start-nudge-x: -114px; --start-nudge-y: 3px;',
+      '    --cbuttons-nudge-x: -10px; --cbuttons-nudge-y: -14px;',
+      '    --z-nudge-x: -9px; --z-nudge-y: 5px;',
+      '  }',
+      '}',
+
+      // iPhone 12 / 13 / 14 (301–320px, ≤700px): design-mode values
+      '@media (orientation: landscape) and (min-height: 301px) and (max-height: 320px) and (max-width: 700px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --l-position: fixed; --l-top: 104px; --l-left: 145px;',
+      '    --r-position: fixed; --r-top: 138px; --r-right: 122px;',
+      '    --dpad-nudge-x: 14px; --dpad-nudge-y: -10px;',
+      '    --ab-nudge-x: -2px; --ab-nudge-y: -5px;',
+      '    --start-nudge-x: -84px; --start-nudge-y: 2px;',
+      '    --cbuttons-nudge-x: -4px; --cbuttons-nudge-y: -2px;',
+      '    --z-nudge-x: -12px; --z-nudge-y: 10px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Galaxy S8 / similar (301–320px, 701–750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 301px) and (max-height: 320px) and (min-width: 701px) and (max-width: 750px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --l-position: fixed; --l-top: 91px; --l-left: 151px;',
+      '    --r-position: fixed; --r-top: 132px; --r-right: 122px;',
+      '    --start-nudge-x: -97px; --start-nudge-y: 27px;',
+      '    --ab-nudge-x: 0px; --ab-nudge-y: -6px;',
+      '    --cbuttons-nudge-x: -7px; --cbuttons-nudge-y: -7px;',
+      '    --z-nudge-x: -11px; --z-nudge-y: 5px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Galaxy S24 / similar (301–320px, >750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 301px) and (max-height: 320px) and (min-width: 751px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --l-position: fixed; --l-top: 77px; --l-left: 165px;',
+      '    --r-position: fixed; --r-top: 132px; --r-right: 123px;',
+      '    --dpad-nudge-x: 24px; --dpad-nudge-y: -3px;',
+      '    --ab-nudge-x: 2px; --ab-nudge-y: -11px;',
+      '    --start-nudge-x: -94px; --start-nudge-y: 2px;',
+      '    --cbuttons-nudge-x: -3px; --cbuttons-nudge-y: 3px;',
+      '    --z-nudge-x: -8px; --z-nudge-y: 5px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Pixel 5 / similar (321–340px, ≤750px): design-mode values
+      '@media (orientation: landscape) and (min-height: 321px) and (max-height: 340px) and (max-width: 750px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --btn-l-size: 11px;',
+      '    --l-position: fixed; --l-top: 112px; --l-left: 154px;',
+      '    --r-position: fixed; --r-top: 152px; --r-right: 134px;',
+      '    --ab-nudge-x: -4px; --ab-nudge-y: -11px;',
+      '    --cbuttons-nudge-x: -6px; --cbuttons-nudge-y: -8px;',
+      '    --start-nudge-x: -94px; --start-nudge-y: 6px;',
+      '    --z-nudge-x: -14px; --z-nudge-y: 3px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPhone 12 Pro Max / 14 Plus range (341–380px, ≤800px): design-mode values
+      '@media (orientation: landscape) and (min-height: 341px) and (max-height: 380px) and (max-width: 800px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --l-position: fixed; --l-top: 123px; --l-left: 160px;',
+      '    --r-position: fixed; --r-top: 163px; --r-right: 131px;',
+      '    --dpad-nudge-x: 12px; --dpad-nudge-y: -8px;',
+      '    --ab-nudge-x: 7px; --ab-nudge-y: -7px;',
+      '    --start-nudge-x: -93px; --start-nudge-y: 2px;',
+      '    --cbuttons-nudge-x: -5px; --cbuttons-nudge-y: -8px;',
+      '    --z-nudge-x: -9px; --z-nudge-y: 12px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Pixel 7 / similar (341–380px, 801–900px): design-mode values
+      '@media (orientation: landscape) and (min-height: 341px) and (max-height: 380px) and (min-width: 801px) and (max-width: 900px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --btn-l-size: 11px;',
+      '    --l-position: fixed; --l-top: 119px; --l-left: 176px;',
+      '    --r-position: fixed; --r-top: 161px; --r-right: 140px;',
+      '    --start-nudge-x: -101px; --start-nudge-y: 27px;',
+      '    --ab-nudge-x: 0px; --ab-nudge-y: -11px;',
+      '    --cbuttons-nudge-x: -7px; --cbuttons-nudge-y: -7px;',
+      '    --z-nudge-x: -15px; --z-nudge-y: 6px;',
+      '    --dpad-nudge-x: 27px; --dpad-nudge-y: -4px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPhone 16+ and similar (341–380px, wide >900px): design-mode values
+      '@media (orientation: landscape) and (min-height: 341px) and (max-height: 380px) and (min-width: 901px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --btn-l-size: 11px;',
+      '    --l-position: fixed; --l-top: 109px; --l-left: 196px;',
+      '    --r-position: fixed; --r-top: 162px; --r-right: 137px;',
+      '    --dpad-nudge-x: 13px; --dpad-nudge-y: -6px;',
+      '    --ab-nudge-x: 5px; --ab-nudge-y: -10px;',
+      '    --start-nudge-x: -129px; --start-nudge-y: 9px;',
+      '    --cbuttons-nudge-x: -6px; --cbuttons-nudge-y: -8px;',
+      '    --z-nudge-x: -9px; --z-nudge-y: 6px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
       '}',
 
       // Short landscape phones (iPhone SE, Galaxy S9+, etc.): analog too small when
@@ -338,6 +555,23 @@
       '    --btn-ab: clamp(40px, 17svh, 66px);',
       '    --btn-dpad: clamp(20px, 9svh, 34px);',
       '  }',
+      '}',
+
+      // Galaxy A55 / large phones (381–450px): design-mode values
+      '@media (orientation: landscape) and (min-height: 381px) and (max-height: 450px) {',
+      '  :root {',
+      '    --shoulders-display: contents;',
+      '    --start-landscape-order: -1;',
+      '    --spacer-pref: 0px;',
+      '    --l-position: fixed; --l-top: 224px; --l-left: 176px;',
+      '    --r-position: fixed; --r-top: 211px; --r-right: 159px;',
+      '    --ab-nudge-x: -4px; --ab-nudge-y: -14px;',
+      '    --start-nudge-x: -127px; --start-nudge-y: 103px;',
+      '    --z-nudge-x: -21px; --z-nudge-y: 1px;',
+      '    --cbuttons-nudge-x: -4px; --cbuttons-nudge-y: -7px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
       '}',
 
       '</style>',
@@ -353,6 +587,7 @@
       '  <div class="vgp-spacer"></div>',
       '  <div class="vgp-cbuttons"></div>',
       '  <div class="vgp-start-landscape"></div>',
+      '  <div class="vgp-z-landscape"></div>',
       '  <div class="vgp-ab"></div>',
       '  <div class="vgp-z-portrait"></div>',
       '</div>',
@@ -364,6 +599,7 @@
     const startPortraitEl = _overlay.querySelector('.vgp-start-portrait');
     const startLandscapeEl = _overlay.querySelector('.vgp-start-landscape');
     const zPortraitEl = _overlay.querySelector('.vgp-z-portrait');
+    const zLandscapeEl = _overlay.querySelector('.vgp-z-landscape');
     const dpadEl = _overlay.querySelector('.vgp-dpad');
     const cbuttonsEl = _overlay.querySelector('.vgp-cbuttons');
     const abEl = _overlay.querySelector('.vgp-ab');
@@ -377,10 +613,10 @@
       if (cls === 'vgp-l' || cls === 'vgp-r') {
         shouldersEl.appendChild(btn);
       } else if (cls === 'vgp-z') {
-        // Portrait: Z in right column below AB (near B). Landscape: Z left of Start (prepend).
+        // Portrait: Z in right column below AB. Landscape: own container between cbuttons and AB.
         zPortraitEl.appendChild(btn);
         const zClone = btn.cloneNode(true);
-        startLandscapeEl.prepend(zClone);
+        zLandscapeEl.appendChild(zClone);
       } else if (cls === 'vgp-start') {
         // Start in portrait row (Z appended after), and landscape container
         startPortraitEl.appendChild(btn);
