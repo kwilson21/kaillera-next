@@ -433,8 +433,9 @@
 
   let INPUT_BASE = 715364; // auto-discovered at startup
 
-  // -- Diagnostics state (DIAG logger) ----------------------------------------
-  // -- Diagnostics (delegated to kn-diagnostics.js / window.KNDiag) --
+  // -- External modules (grabbed once, used by local refs) ---------------------
+  const _audio = window.KNAudio;
+  const _diag = window.KNDiag;
 
   // -- State -----------------------------------------------------------------
 
@@ -1652,8 +1653,8 @@
   // Cost: ~2-5ms per call (GPU→CPU sync). Runs every 10 frames (~167ms).
 
   // -- Diagnostic functions (delegated to kn-diagnostics.js) --
-  const _diagInput = (frameNum, applyFrame, force) => window.KNDiag.diagInput(frameNum, applyFrame, force);
-  const _diagInstallHooks = () => window.KNDiag.installHooks();
+  const _diagInput = (frameNum, applyFrame, force) => _diag.diagInput(frameNum, applyFrame, force);
+  const _diagInstallHooks = () => _diag.installHooks();
 
   let _syncChunks = []; // incoming chunks from host DC
   let _syncExpected = 0; // expected chunk count
@@ -1742,7 +1743,7 @@
 
   // -- Audio pipeline (delegated to kn-audio.js) --
   async function initAudioPlayback() {
-    await window.KNAudio.init({
+    await _audio.init({
       log: _syncLog,
       getFrame: () => _frameNum,
       getSlot: () => _playerSlot,
@@ -1751,7 +1752,7 @@
       knEvent: KNEvent,
     });
   }
-  const feedAudio = () => window.KNAudio.feed();
+  const feedAudio = () => _audio.feed();
 
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
@@ -3419,13 +3420,13 @@
             mod._simulate_input(pi, 0, 1);
             for (let psi = 0; psi < scanLen; psi++) {
               if (mod.HEAPU8[psi] !== pSnap[psi]) {
-                window.KNDiag.playerAddrs[pi] = psi;
+                _diag.playerAddrs[pi] = psi;
                 break;
               }
             }
             mod._simulate_input(pi, 0, 0);
           }
-          _syncLog(`per-player input addrs: ${JSON.stringify(window.KNDiag.playerAddrs)}`);
+          _syncLog(`per-player input addrs: ${JSON.stringify(_diag.playerAddrs)}`);
         } catch (e) {
           _syncLog(`INPUT_BASE auto-discovery failed, using default: ${INPUT_BASE}`);
         }
@@ -4312,8 +4313,8 @@
     _hostStream = captureCanvas.captureStream(0); // manual frame control
 
     // Add audio track from bypass playback (if available)
-    if (window.KNAudio?.destNode?.stream) {
-      const audioTracks = window.KNAudio.destNode.stream.getAudioTracks();
+    if (_audio?.destNode?.stream) {
+      const audioTracks = _audio.destNode.stream.getAudioTracks();
       for (let at = 0; at < audioTracks.length; at++) {
         _hostStream.addTrack(audioTracks[at]);
       }
@@ -4616,8 +4617,8 @@
     runner(frameTimeMs);
 
     // Periodic gameplay screenshot for desync debugging
-    if (_frameNum > 0 && _frameNum % window.KNDiag.SCREENSHOT_INTERVAL === 0) {
-      window.KNDiag.captureAndSendScreenshot();
+    if (_frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+      _diag.captureAndSendScreenshot();
       // Log event queue hash + interrupt trace for cross-peer comparison
       const eqMod = window.EJS_emulator?.gameManager?.Module;
       if (eqMod?._kn_eventqueue_hash) {
@@ -4681,7 +4682,7 @@
       // Input hash: FNV-1a over all inputs (local + remote) for last 300 frames.
       // Compare across peers to definitively prove whether inputs match.
       {
-        const startF = _frameNum - window.KNDiag.SCREENSHOT_INTERVAL;
+        const startF = _frameNum - _diag.SCREENSHOT_INTERVAL;
         let ih = 2166136261 >>> 0;
         const slots = [
           _playerSlot,
@@ -5036,7 +5037,7 @@
     // Only install diagnostic hooks when explicitly enabled — they add
     // MutationObserver on document.body, touch listeners, and write to
     // window.KNDiag.eventLog which grows unboundedly (17MB+ on mobile in 30 min).
-    window.KNDiag.init({
+    _diag.init({
       log: _syncLog,
       getFrame: () => _frameNum,
       getSlot: () => _playerSlot,
@@ -5178,8 +5179,8 @@
 
         // BF6: resume AudioContext on visibility return — browsers suspend
         // AudioContext when tab is hidden, and it won't auto-resume.
-        if (window.KNAudio?.ctx?.state === 'suspended') {
-          window.KNAudio.ctx.resume().catch((e) => {
+        if (_audio?.ctx?.state === 'suspended') {
+          _audio.ctx.resume().catch((e) => {
             _syncLog(`audio re-resume on visibility failed: ${e.name}: ${e.message}`);
           });
           _syncLog(`audio context resumed on tab return (was suspended)`);
@@ -5400,7 +5401,7 @@
     _pacingAdvCount = 0;
     _pacingSkipCounter = 0;
     // Remove diagnostic hooks (delegated to kn-diagnostics.js)
-    window.KNDiag?.cleanup();
+    _diag?.cleanup();
   };
 
   const tick = () => {
@@ -6488,7 +6489,7 @@
       }
 
       // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
-      window.KNDiag.checkFreeze(localInput);
+      _diag.checkFreeze(localInput);
 
       // ── Bisect-on-mismatch: when a divergence is detected, switch to
       // per-frame hash broadcasts for the next N frames so we can pinpoint
@@ -7212,8 +7213,7 @@
           dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
         }
       }
-      if (_frameNum > 0 && _frameNum % window.KNDiag.SCREENSHOT_INTERVAL === 0)
-        window.KNDiag.captureAndSendScreenshot();
+      if (_frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) _diag.captureAndSendScreenshot();
       return;
     }
 
@@ -8492,7 +8492,7 @@
     _syncLogRing.clear();
 
     // Clean up audio (delegated to kn-audio.js)
-    window.KNAudio?.cleanup();
+    _audio?.cleanup();
 
     // Clean up spectator stream
     if (_hostStream) {
