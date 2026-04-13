@@ -6521,9 +6521,12 @@
       // waiting for the host's rb-delay broadcast. In case (b), we must NOT
       // skip boot grace — the boot sync depends on it. Use _frameNum as the
       // fallback reference when _rbInitFrame hasn't been set yet.
-      const _rbNoRollback = _rbInitFrame < 0 && !window._rbPendingInit && !_useCRollback;
+      // _bootDoneForSync: gates boot sync trigger (needs 120 frames for emulator to stabilize)
+      // _bootDone: gates lockstep stall (always true — no stall during boot/intro,
+      //   boot sync at f=120 and CSS sync at menu entry handle alignment instead)
       const _bootRef = _rbInitFrame >= 0 ? _rbInitFrame : 0;
-      const _bootDone = _isLateJoinStart || _rbNoRollback || _frameNum - _bootRef > BOOT_GRACE_FRAMES;
+      const _bootDoneForSync = _frameNum - _bootRef > BOOT_GRACE_FRAMES;
+      const _bootDone = true;
       // Gate rollback on SSB64 game_status: only allow prediction during
       // active gameplay. During menus/CSS, game_status is 0 (wait) — use
       // pure lockstep. For non-SSB64 ROMs, _readGameStatus returns -1 and
@@ -6532,7 +6535,11 @@
       // game_status: 0=wait (CSS/menus), 1=ongoing, 2=paused, 5=end.
       // Only status 0 is dangerous for rollback (menu state corruption).
       // Status -1 means RDRAM not available (non-SSB64) — safe fallback.
-      const inMenu = gameStatus === 0;
+      // Only treat game_status==0 as "menu" after CSS sync has fired.
+      // During N64 boot, VS settings are uninitialized (byte is 0),
+      // which falsely triggers menu lockstep during the intro sequence.
+      // After CSS sync fires, game_status==0 is a real menu state.
+      const inMenu = gameStatus === 0 && !!window._knCssSyncDone;
       if (!_inGameplay && !inMenu && _bootDone) {
         _inGameplay = true;
         _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus}`);
@@ -6543,7 +6550,31 @@
           _inGameplayLoggedAt = _frameNum;
         }
       }
-      const _rbBootConverged = _bootDone && !inMenu;
+      // Second boot sync: when game_status first becomes 0 (CSS/menus),
+      // request a fresh state push from host. The first boot sync at f=120
+      // happens during the intro sequence where tainted-region divergence
+      // causes peers to reach screen transitions at different frames.
+      // This second sync at CSS entry forces both peers to identical state
+      // right before player input matters.
+      if (gameStatus === 0 && !window._knCssSyncDone && _bootDoneForSync && _frameNum > BOOT_GRACE_FRAMES + 30) {
+        window._knCssSyncDone = true;
+        if (_playerSlot !== 0) {
+          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+          if (hostPeer?.dc?.readyState === 'open') {
+            try {
+              hostPeer.dc.send('sync-request-full');
+              _syncLog(`CSS-SYNC: guest requesting host state at f=${_frameNum} (menu entry sync)`);
+            } catch (e) {
+              _syncLog(`CSS-SYNC send failed: ${e}`);
+            }
+          }
+        }
+      }
+      // Lockstep stall only during actual CSS menus (after CSS sync).
+      // During boot grace and intro, run freely — boot sync at f=120
+      // and CSS sync at menu entry handle alignment.
+      const _menuLockstepActive = inMenu && !!window._knCssSyncDone;
+      const _rbBootConverged = _bootDone && !_menuLockstepActive;
       // Boot sync: guest requests host state when boot grace period ends.
       // Different Safari/JIT versions produce different boot RDRAM (CP0_COUNT,
       // interrupt timing, RSP work area). A one-time state push from host
@@ -6551,7 +6582,7 @@
       // Triggers on _bootDone (not _rbBootConverged) so it fires during
       // menus — waiting for GAMEPLAY transition is too late (1500+ frames
       // of divergent menu execution).
-      if (_bootDone && !window._knBootSyncDone) {
+      if (_bootDoneForSync && !window._knBootSyncDone) {
         window._knBootSyncDone = true;
         if (_playerSlot !== 0) {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
@@ -6641,12 +6672,12 @@
               _bootStallRecoveryFired = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
-            // During menus/boot, stall briefly (500ms) then fabricate zero
-            // input and continue. This prevents multi-second freezes during
-            // intro screens while maintaining lockstep. Zero input during
-            // intros is harmless (no player actions needed). If real input
-            // arrives later, rollback or resync will correct.
-            if (stallDuration < 500) {
+            // During menus/boot, stall briefly then fabricate zero input
+            // and continue. Timeout = 2x RTT, clamped 33-250ms.
+            // 33ms = two frame times (invisible). 250ms = perceptible but
+            // not sluggish. Most inputs arrive within 2 RTTs.
+            const _bootStallTimeout = Math.max(33, Math.min(250, (_rttMedian || 50) * 2));
+            if (stallDuration < _bootStallTimeout) {
               // Brief stall — wait for input to arrive
               if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
                 window._knLastBootStallLogFrame = _frameNum;
