@@ -7050,6 +7050,20 @@
       KNState.frameNum = _frameNum;
       const _tTotal = performance.now();
 
+      // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
+      if (window._knPostSyncDiagFrames > 0) {
+        window._knPostSyncDiagFrames--;
+        const gpH = (tickMod._kn_gameplay_hash?.(_frameNum - 1) ?? 0) >>> 0;
+        const gameH = (tickMod._kn_game_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
+        const fullH = (tickMod._kn_full_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
+        const eqH = (tickMod._kn_eventqueue_hash?.() ?? 0) >>> 0;
+        const hidH = (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) >>> 0;
+        _syncLog(
+          `POST-SYNC-DIAG f=${_frameNum} gp=0x${gpH.toString(16)} game=0x${gameH.toString(16)} ` +
+            `full=0x${fullH.toString(16)} eq=0x${eqH.toString(16)} hid=0x${hidH.toString(16)}`,
+        );
+      }
+
       // ── P4: silent-desync detection (LOG-ONLY) ──
       // kn_feed_input (drained at tick boundary above) increments
       // failed_rollbacks when a misprediction targets a frame outside the
@@ -7346,7 +7360,7 @@
             .join(',');
         }
         _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
+          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} eq=0x${(tickMod._kn_eventqueue_hash?.() >>> 0).toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
         );
         if (regionsHex) {
           _syncLog(`C-REGIONS f=${hashFrame} ${regionsHex}`);
@@ -8563,6 +8577,8 @@
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
       _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+      // Arm post-sync diagnostic burst on host too
+      window._knPostSyncDiagFrames = 10;
 
       // Dump event queue on host for cross-peer comparison
       if (mod._kn_eventqueue_dump) {
@@ -8904,6 +8920,8 @@
       _resyncCount++;
       _consecutiveResyncs++;
       _syncLog(`kn_sync_write: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
+      // Arm post-sync diagnostic burst on every sync application
+      window._knPostSyncDiagFrames = 10;
 
       // Dump event queue state after sync for cross-peer comparison
       if (mod._kn_eventqueue_dump) {
@@ -8948,7 +8966,7 @@
       // its old _frameNum while the emulator state is from the host's frame,
       // causing input mapping mismatch. Only done when the frame gap is
       // large (boot sync) — not for normal resyncs where frames are close.
-      if (frame != null && mod._kn_set_frame && Math.abs(_frameNum - frame) > 30) {
+      if (frame != null && mod._kn_set_frame && Math.abs(_frameNum - frame) > 2) {
         const oldFrame = _frameNum;
         _frameNum = frame;
         KNState.frameNum = frame;
@@ -8957,6 +8975,8 @@
         _bootStallStartTime = 0;
         _bootStallRecoveryFired = false;
         _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
+        // Arm post-sync diagnostic burst: log full state hash for 10 frames
+        window._knPostSyncDiagFrames = 10;
       }
     } else {
       // Fallback: existing loadState path
@@ -9339,6 +9359,12 @@
 
     // Clear debug log between sessions
     _debugLog.length = 0;
+
+    // Clear boot/CSS sync flags so they re-trigger on next match.
+    // Without this, subsequent matches skip the state-push that
+    // aligns frame_counter (used by get_random_int_safe_ for RNG).
+    window._knBootSyncDone = undefined;
+    window._knCssSyncDone = undefined;
 
     _config = null;
   };
