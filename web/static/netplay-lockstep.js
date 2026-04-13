@@ -1165,6 +1165,16 @@
   const PHASE_STOPPED = 6; // tick loop stopped (game ended)
   let _phase = PHASE_IDLE;
 
+  // ── Runtime sub-state enum ───────────────────────────────────────────
+  // Mutually exclusive conditions during PHASE_RUNNING. Only one can be
+  // active — if two booleans are ever set simultaneously, that's a bug.
+  const RUN_NORMAL = 'normal';
+  const RUN_PACING = 'pacing'; // frame advantage cap throttling
+  const RUN_RB_STALL = 'rollback-stall'; // rollback engine waiting for peer
+  const RUN_LATE_JOIN_PAUSE = 'late-join-pause'; // host paused for joiner
+  const RUN_AWAITING_RESYNC = 'awaiting-resync'; // guest waiting for state
+  let _runSubstate = RUN_NORMAL;
+
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
   let _sessionId = 0; // incremented on each init() to invalidate stale timers
@@ -1698,10 +1708,7 @@
     if (_phase === PHASE_LOCKSTEP_READY) return 'stopped'; // ready but tick loop not started yet
     if (_phase === PHASE_STOPPED) return 'stopped';
     // Runtime sub-states (only when PHASE_RUNNING)
-    if (_lateJoinPaused) return 'late-join-paused';
-    if (_awaitingResync) return 'awaiting-resync';
-    if (_rollbackStallActive) return 'rollback-stall';
-    if (_framePacingActive) return 'pacing-throttle';
+    if (_runSubstate !== RUN_NORMAL) return _runSubstate;
     if (!_inGameplay) return 'running:menu';
     return 'running';
   };
@@ -1843,6 +1850,7 @@
     if (msg.type === 'late-join-ready') {
       if (_lateJoinPaused) {
         _lateJoinPaused = false;
+        if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
         _resetPacingAfterLateJoin();
         _broadcastRoster();
         _syncLog('late-join resume: joiner ready (via Socket.IO)');
@@ -2516,16 +2524,19 @@
         }
         if (e.data === 'late-join-pause') {
           _lateJoinPaused = true;
+          _runSubstate = RUN_LATE_JOIN_PAUSE;
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-resume') {
           _lateJoinPaused = false;
+          if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
           _resetPacingAfterLateJoin();
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-ready') {
           if (_lateJoinPaused) {
             _lateJoinPaused = false;
+            if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
             _resetPacingAfterLateJoin();
             // Broadcast roster NOW — the joiner is ready to send input.
             // Broadcasting earlier causes 5s stalls per frame while the
@@ -4045,6 +4056,7 @@
       // moment we read _frameNum, causing the late joiner to load state
       // from frame X but think they're at frame X+N (cursor desync).
       _lateJoinPaused = true;
+      _runSubstate = RUN_LATE_JOIN_PAUSE;
       _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       for (const p of Object.values(_peers)) {
@@ -4115,6 +4127,7 @@
               `resuming without joiner, hard-disconnecting so they can retry`,
           );
           _lateJoinPaused = false;
+          if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
           _lateJoinPausedAt = 0;
           _resetPacingAfterLateJoin();
           _broadcastRoster();
@@ -4977,6 +4990,7 @@
         _rbBisectCount = 0;
         _rbPendingPostRollbackHash = false;
         _rollbackStallActive = false;
+        if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
 
         // C-level RNG sync + frame counter preservation.
@@ -5360,6 +5374,7 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    _runSubstate = RUN_NORMAL;
     _checkStateTransition();
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
@@ -5456,6 +5471,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
@@ -5555,6 +5571,7 @@
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _awaitingResync = false;
+      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     }
 
     if (_syncTargetFrame > 0) {
@@ -5564,12 +5581,14 @@
           const pending = _pendingResyncState;
           _pendingResyncState = null;
           _awaitingResync = false;
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
           applySyncState(pending.bytes, pending.frame, pending.fromProactive);
         } else if (!_awaitingResync) {
           // Reached target frame but state not here yet — stall until it arrives
           _awaitingResync = true;
+          _runSubstate = RUN_AWAITING_RESYNC;
           _awaitingResyncAt = performance.now();
           _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
         }
@@ -5582,6 +5601,7 @@
       const pending = _pendingResyncState;
       _pendingResyncState = null;
       _awaitingResync = false;
+      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
       applySyncState(pending.bytes, pending.frame, pending.fromProactive);
     }
 
@@ -5614,6 +5634,7 @@
         if (stale >= ROLLBACK_STALL_MS) {
           if (!_rollbackStallActive) {
             _rollbackStallActive = true;
+            _runSubstate = RUN_RB_STALL;
             _rollbackStallStart = nowStall;
             _syncLog(
               `ROLLBACK-STALL start slot=${p.slot} staleMs=${stale.toFixed(0)} — freezing sim until input returns`,
@@ -5629,6 +5650,7 @@
       if (_rollbackStallActive && !_skipFrameAdvance) {
         const stallDuration = nowStall - _rollbackStallStart;
         _rollbackStallActive = false;
+        if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
         _syncLog(`ROLLBACK-STALL end durationMs=${stallDuration.toFixed(0)}`);
       }
@@ -5666,6 +5688,7 @@
         // If no active pacing peers remain, release any active cap
         if (activePacingPeers === 0 && _framePacingActive) {
           _framePacingActive = false;
+          if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
           _pacingThrottleStartAt = 0;
           if (window._knLastPhantomReleaseFrame !== _frameNum) {
             window._knLastPhantomReleaseFrame = _frameNum;
@@ -5705,6 +5728,7 @@
             if (_rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
               if (!_framePacingActive) {
                 _framePacingActive = true;
+                _runSubstate = RUN_PACING;
                 _pacingThrottleStartAt = nowPacing;
                 _pacingCapsCount++;
                 _syncLog(
@@ -5736,6 +5760,7 @@
               _pacingCapsFrames++;
               if (!_framePacingActive) {
                 _framePacingActive = true;
+                _runSubstate = RUN_PACING;
                 _pacingThrottleStartAt = nowPacing;
                 _pacingCapsCount++;
                 const ratio = excess >= 2 ? '100%' : '50%';
@@ -5747,6 +5772,7 @@
             }
             if (_framePacingActive && !_skipFrameAdvance) {
               _framePacingActive = false;
+              if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
               _pacingThrottleStartAt = 0;
               _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
             }
@@ -5786,6 +5812,7 @@
                 window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: slowestSlot } }));
               }
               _framePacingActive = false;
+              if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
               _pacingThrottleStartAt = 0;
               _skipFrameAdvance = false;
             }
@@ -6371,6 +6398,7 @@
         if (allPhantom) {
           if (_framePacingActive) {
             _framePacingActive = false;
+            if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
             _pacingThrottleStartAt = 0;
             if (window._knLastCPhantomReleaseFrame !== _frameNum) {
               window._knLastCPhantomReleaseFrame = _frameNum;
@@ -6382,6 +6410,7 @@
           _pacingCapsFrames++;
           if (!_framePacingActive) {
             _framePacingActive = true;
+            _runSubstate = RUN_PACING;
             _pacingThrottleStartAt = performance.now();
             _pacingCapsCount++;
             _syncLog(
@@ -6393,6 +6422,7 @@
       }
       if (_framePacingActive) {
         _framePacingActive = false;
+        if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
         _pacingThrottleStartAt = 0;
         _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} source=C`);
       }
@@ -7551,6 +7581,7 @@
         _syncLog('resync wait timeout — resuming');
         console.warn('[lockstep] resync timeout — log dump:\n' + exportSyncLog());
         _awaitingResync = false;
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
         _syncTargetFrame = -1;
         _syncTargetDeadlineAt = 0;
         _resyncRequestInFlight = false; // unblock future resync requests
@@ -8350,6 +8381,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
@@ -8498,6 +8530,7 @@
     KNState.frameNum = 0;
     _lateJoin = false;
     _phase = PHASE_IDLE;
+    _runSubstate = RUN_NORMAL;
     _awaitingLateJoinState = false;
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
@@ -8512,6 +8545,7 @@
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     _framePacingActive = false;
+    if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
     _pacingCapsFrames = 0;
@@ -8528,6 +8562,7 @@
     _proactivePushInFlight = false;
     _pendingResyncState = null;
     _awaitingResync = false;
+    if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     _awaitingResyncAt = 0;
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
