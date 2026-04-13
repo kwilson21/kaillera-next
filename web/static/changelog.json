@@ -1,5 +1,51 @@
 [
   {
+    "version": "0.44.0",
+    "date": "2026-04-13",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "CSS/menu hash expansion, WiFi resilience, peripheral state sync, desync diagnostics"
+      },
+      {
+        "type": "fix",
+        "message": "add #ifdef __EMSCRIPTEN__ guard to fingerprint function, restore clean kn-all patch"
+      },
+      {
+        "type": "fix",
+        "message": "boot grace when rollback init deferred + fc low-6-bit RNG sync"
+      },
+      {
+        "type": "fix",
+        "message": "periodic reset of boot stall recovery to prevent host runaway"
+      },
+      {
+        "type": "fix",
+        "message": "HLE state restore for RSP audio determinism + pacing phantom override + boot stall fabrication"
+      },
+      {
+        "type": "fix",
+        "message": "prevent log flooding from stalled-frame tick iterations"
+      },
+      {
+        "type": "fix",
+        "message": "eliminate boot/intro lockstep stall + CSS sync trigger fix"
+      },
+      {
+        "type": "feat",
+        "message": "skip RSP audio during rollback replay + hle save/restore exports"
+      },
+      {
+        "type": "fix",
+        "message": "lower sync frame reset threshold from 30 to 2 frames"
+      },
+      {
+        "type": "fix",
+        "message": "GP-CSS rate limit + replay audio skip logging"
+      }
+    ]
+  },
+  {
     "version": "0.43.0",
     "date": "2026-04-13",
     "changes": [
