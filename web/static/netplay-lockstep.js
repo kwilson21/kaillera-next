@@ -272,7 +272,7 @@
  *   _debugLog: timestamped log of [lockstep] and [play] console output
  *   _syncLogRing: 10,000-entry circular buffer for sync events (hash
  *     mismatches, resync triggers, frame caps), exportable as CSV
- *   _diagEventLog: frame-level diagnostic events (cleared each tick,
+ *   window.KNDiag.eventLog: frame-level diagnostic events (cleared each tick,
  *     only active when window._KN_DIAG is set)
  *   debug-sync / debug-logs: Socket.IO events for remote log upload to server
  *   Sync hash/resync operations run in a Web Worker to avoid blocking
@@ -434,16 +434,7 @@
   let INPUT_BASE = 715364; // auto-discovered at startup
 
   // -- Diagnostics state (DIAG logger) ----------------------------------------
-  let _diagPlayerAddrs = [null, null, null, null]; // per-player input base addresses
-  const _diagEventLog = []; // buffered async events [{t, type, detail}]
-  let _diagHookInstalled = false; // true once async event hooks are set up
-  let _diagVisHandler = null;
-  let _diagFocusHandler = null;
-  let _diagBlurHandler = null;
-  let _diagTouchHandlers = []; // [{el, evName, handler}]
-  let _diagObserver = null;
-  const DIAG_INPUT_INTERVAL = 300; // frames between input read logs
-  const DIAG_EARLY_FRAMES = 30; // log everything for first N frames
+  // -- Diagnostics (delegated to kn-diagnostics.js / window.KNDiag) --
 
   // -- State -----------------------------------------------------------------
 
@@ -498,13 +489,6 @@
   // Lightweight per-frame sampling to detect when display, input, or
   // audio stop working — the "emulator froze" scenario where the tick
   // loop keeps running but the player sees/hears nothing.
-  let _renderLastHash = 0; // last canvas pixel hash (from _captureCanvasHash)
-  let _renderLastChangeFrame = 0; // frame at which canvas hash last changed
-  let _renderStallLogged = false; // one-shot: don't spam RENDER-STALL
-  let _inputLastNonZeroFrame = -1; // frame at which local input was last non-zero
-  let _inputEverNonZero = false; // true once local input has been non-zero
-  let _inputDeadLogged = false; // one-shot for INPUT-DEAD
-  let _audioLastState = ''; // last audioContext.state we logged
   // MF6: Detection-only tick watchdog state. Logs TICK-STUCK with a
   // rich diagnostic snapshot when the frame counter has not advanced
   // for longer than the warn / error thresholds. Takes NO recovery
@@ -1809,121 +1793,9 @@
     }
   };
 
-  // Read block 25 (0x190000) hash from kn_rdram_block_hashes.
-  // -- Diagnostic logger functions -------------------------------------------
-
-  const _diagShouldLog = (frameNum, interval) => frameNum < DIAG_EARLY_FRAMES || frameNum % interval === 0;
-
-  // DIAG-INPUT: read back per-player inputs from WASM memory using discovered addresses
-  const _diagInput = (frameNum, applyFrame, force = false) => {
-    if (!force && !_diagShouldLog(frameNum, DIAG_INPUT_INTERVAL)) return;
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?.HEAPU8) return;
-    const mem = mod.HEAPU8;
-    const vals = [];
-    for (let p = 0; p < 4; p++) {
-      const addr = _diagPlayerAddrs[p];
-      if (addr === null) {
-        vals.push('?');
-        continue;
-      }
-      // Read 4 bytes (32-bit LE) at the player's button 0 address
-      if (addr + 3 < mem.length) {
-        const v = mem[addr] | (mem[addr + 1] << 8) | (mem[addr + 2] << 16) | (mem[addr + 3] << 24);
-        vals.push(v);
-      } else {
-        vals.push('OOB');
-      }
-    }
-    _syncLog(`DIAG-INPUT f=${frameNum} apply=${applyFrame} p0=${vals[0]} p1=${vals[1]} p2=${vals[2]} p3=${vals[3]}`);
-  };
-
-  // Install async event hooks (called once at lockstep start)
-  const _diagInstallHooks = () => {
-    if (_diagHookInstalled) return;
-    _diagHookInstalled = true;
-
-    // Visibility change (tab hidden/shown)
-    _diagVisHandler = () => {
-      _diagEventLog.push({
-        t: performance.now(),
-        type: 'visibility',
-        detail: document.visibilityState,
-      });
-    };
-    document.addEventListener('visibilitychange', _diagVisHandler);
-
-    // Window focus/blur
-    _diagFocusHandler = () => {
-      _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'gained' });
-    };
-    _diagBlurHandler = () => {
-      _diagEventLog.push({ t: performance.now(), type: 'focus', detail: 'lost' });
-    };
-    window.addEventListener('focus', _diagFocusHandler);
-    window.addEventListener('blur', _diagBlurHandler);
-
-    // Touch events on emulator canvas
-    const canvas = document.querySelector('#game canvas, canvas');
-    if (canvas) {
-      for (const evName of ['touchstart', 'touchend', 'touchmove']) {
-        const handler = (e) => {
-          _diagEventLog.push({
-            t: performance.now(),
-            type: 'touch',
-            detail: `${evName}:${e.touches.length}`,
-          });
-        };
-        canvas.addEventListener(evName, handler, { passive: true });
-        _diagTouchHandlers.push({ el: canvas, evName, handler });
-      }
-    }
-
-    // EJS settings menu open/close (MutationObserver on body for settings panel)
-    _diagObserver = new MutationObserver((mutations) => {
-      for (const mut of mutations) {
-        for (const node of mut.addedNodes) {
-          if (
-            node.nodeType === 1 &&
-            (node.classList.contains('ejs--settings') || (node.querySelector && node.querySelector('.ejs--settings')))
-          ) {
-            _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'opened' });
-          }
-        }
-        for (const rnode of mut.removedNodes) {
-          if (
-            rnode.nodeType === 1 &&
-            (rnode.classList.contains('ejs--settings') ||
-              (rnode.querySelector && rnode.querySelector('.ejs--settings')))
-          ) {
-            _diagEventLog.push({ t: performance.now(), type: 'ejs-menu', detail: 'closed' });
-          }
-        }
-      }
-    });
-    _diagObserver.observe(document.body, { childList: true, subtree: true });
-
-    // Monkey-patch pauseMainLoop/resumeMainLoop to detect unexpected pauses
-    const diagMod = window.EJS_emulator?.gameManager?.Module;
-    if (diagMod) {
-      const origPause = diagMod.pauseMainLoop;
-      const origResume = diagMod.resumeMainLoop;
-      if (origPause) {
-        diagMod.pauseMainLoop = function () {
-          _diagEventLog.push({ t: performance.now(), type: 'mainloop', detail: 'paused' });
-          return origPause.apply(this, arguments);
-        };
-      }
-      if (origResume) {
-        diagMod.resumeMainLoop = function () {
-          _diagEventLog.push({ t: performance.now(), type: 'mainloop', detail: 'resumed' });
-          return origResume.apply(this, arguments);
-        };
-      }
-    }
-
-    _syncLog('DIAG hooks installed');
-  };
+  // -- Diagnostic functions (delegated to kn-diagnostics.js) --
+  const _diagInput = (frameNum, applyFrame, force) => window.KNDiag.diagInput(frameNum, applyFrame, force);
+  const _diagInstallHooks = () => window.KNDiag.installHooks();
 
   let _syncChunks = []; // incoming chunks from host DC
   let _syncExpected = 0; // expected chunk count
@@ -3702,13 +3574,13 @@
             mod._simulate_input(pi, 0, 1);
             for (let psi = 0; psi < scanLen; psi++) {
               if (mod.HEAPU8[psi] !== pSnap[psi]) {
-                _diagPlayerAddrs[pi] = psi;
+                window.KNDiag.playerAddrs[pi] = psi;
                 break;
               }
             }
             mod._simulate_input(pi, 0, 0);
           }
-          _syncLog(`per-player input addrs: ${JSON.stringify(_diagPlayerAddrs)}`);
+          _syncLog(`per-player input addrs: ${JSON.stringify(window.KNDiag.playerAddrs)}`);
         } catch (e) {
           _syncLog(`INPUT_BASE auto-discovery failed, using default: ${INPUT_BASE}`);
         }
@@ -5318,7 +5190,12 @@
 
     // Only install diagnostic hooks when explicitly enabled — they add
     // MutationObserver on document.body, touch listeners, and write to
-    // _diagEventLog which grows unboundedly (17MB+ on mobile in 30 min).
+    // window.KNDiag.eventLog which grows unboundedly (17MB+ on mobile in 30 min).
+    window.KNDiag.init({
+      log: _syncLog,
+      getFrame: () => _frameNum,
+      getSlot: () => _playerSlot,
+    });
     if (window._KN_DIAG) _diagInstallHooks();
 
     // DIAG: one-time startup banner for log self-description
@@ -5670,30 +5547,8 @@
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
     _pacingSkipCounter = 0;
-    // Remove diagnostic hooks
-    if (_diagHookInstalled) {
-      if (_diagVisHandler) {
-        document.removeEventListener('visibilitychange', _diagVisHandler);
-        _diagVisHandler = null;
-      }
-      if (_diagFocusHandler) {
-        window.removeEventListener('focus', _diagFocusHandler);
-        _diagFocusHandler = null;
-      }
-      if (_diagBlurHandler) {
-        window.removeEventListener('blur', _diagBlurHandler);
-        _diagBlurHandler = null;
-      }
-      for (const { el, evName, handler } of _diagTouchHandlers) {
-        el.removeEventListener(evName, handler);
-      }
-      _diagTouchHandlers = [];
-      if (_diagObserver) {
-        _diagObserver.disconnect();
-        _diagObserver = null;
-      }
-      _diagHookInstalled = false;
-    }
+    // Remove diagnostic hooks (delegated to kn-diagnostics.js)
+    window.KNDiag?.cleanup();
   };
 
   const tick = () => {
@@ -6781,68 +6636,8 @@
         }
       }
 
-      // ── Freeze detection (every 60 frames) ───────────────────────────
-      // Three lightweight checks that fire in the existing periodic block.
-      // Together they detect the "emulator froze" scenario: tick loop runs
-      // but the player sees a frozen screen, hears nothing, and input stops.
-      if (_frameNum % 60 === 0 && _frameNum > 300) {
-        // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames
-        const renderHash = _captureCanvasHash();
-        if (renderHash !== 0) {
-          if (renderHash !== _renderLastHash) {
-            _renderLastHash = renderHash;
-            _renderLastChangeFrame = _frameNum;
-            _renderStallLogged = false;
-          } else if (_frameNum - _renderLastChangeFrame >= 180 && !_renderStallLogged) {
-            _syncLog(
-              `RENDER-STALL start=${_renderLastChangeFrame} cur=${_frameNum} ` +
-                `unchanged=${_frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
-            );
-            _renderStallLogged = true;
-          }
-        }
-
-        // 2. INPUT-DEAD: local input all-zero for 300+ frames after being non-zero
-        const isNonZero =
-          localInput.buttons !== 0 ||
-          localInput.lx !== 0 ||
-          localInput.ly !== 0 ||
-          localInput.cx !== 0 ||
-          localInput.cy !== 0;
-        if (isNonZero) {
-          _inputLastNonZeroFrame = _frameNum;
-          _inputEverNonZero = true;
-          _inputDeadLogged = false;
-        }
-        if (
-          _inputEverNonZero &&
-          !isNonZero &&
-          _inputLastNonZeroFrame >= 0 &&
-          _frameNum - _inputLastNonZeroFrame >= 300 &&
-          !_inputDeadLogged
-        ) {
-          const hasFocus = document.hasFocus();
-          const gpCount = navigator.getGamepads?.()?.filter(Boolean)?.length ?? 0;
-          _syncLog(
-            `INPUT-DEAD slot=${_playerSlot} zeroSince=${_inputLastNonZeroFrame} ` +
-              `cur=${_frameNum} gap=${_frameNum - _inputLastNonZeroFrame}f ` +
-              `focus=${hasFocus} gamepads=${gpCount}`,
-          );
-          _inputDeadLogged = true;
-        }
-
-        // 3. AUDIO-STALL: audioContext not running during active gameplay
-        const actx = window.KNAudio?.ctx;
-        const aState = actx?.state ?? 'none';
-        if (aState !== _audioLastState) {
-          if (aState !== 'running' && _audioLastState === 'running') {
-            _syncLog(`AUDIO-STALL state=${aState} prev=${_audioLastState} f=${_frameNum}`);
-          } else if (aState === 'running' && _audioLastState !== '' && _audioLastState !== 'running') {
-            _syncLog(`AUDIO-RESUME state=${aState} prev=${_audioLastState} f=${_frameNum}`);
-          }
-          _audioLastState = aState;
-        }
-      }
+      // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
+      window.KNDiag.checkFreeze(_captureCanvasHash, localInput);
 
       // ── Bisect-on-mismatch: when a divergence is detected, switch to
       // per-frame hash broadcasts for the next N frames so we can pinpoint
