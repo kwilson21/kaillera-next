@@ -6482,11 +6482,14 @@
         }
       }
       const _rbBootConverged = _bootDone && !inMenu;
-      // Boot sync: guest requests host state when boot convergence completes.
+      // Boot sync: guest requests host state when boot grace period ends.
       // Different Safari/JIT versions produce different boot RDRAM (CP0_COUNT,
       // interrupt timing, RSP work area). A one-time state push from host
       // forces identical starting state regardless of JIT differences.
-      if (_rbBootConverged && !window._knBootSyncDone) {
+      // Triggers on _bootDone (not _rbBootConverged) so it fires during
+      // menus — waiting for GAMEPLAY transition is too late (1500+ frames
+      // of divergent menu execution).
+      if (_bootDone && !window._knBootSyncDone) {
         window._knBootSyncDone = true;
         if (_playerSlot !== 0) {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
