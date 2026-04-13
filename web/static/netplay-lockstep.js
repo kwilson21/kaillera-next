@@ -6523,11 +6523,10 @@
         );
       }
       if (!_rbBootConverged) {
-        // Skip boot lockstep stall if a resync is in flight (reconnect).
-        // After reconnect, the old apply frame's inputs will never arrive
-        // from the new peer. The resync will load host state and reset
-        // the frame counter. Stalling here just causes TICK-STUCK.
-        if (_resyncRequestInFlight) {
+        // Skip boot lockstep stall if resync is in flight or if the
+        // deadlock recovery already fired. After reconnect, old apply
+        // frame inputs will never arrive — stalling is a deadlock.
+        if (_resyncRequestInFlight || _bootStallRecoveryFired) {
           return;
         }
         // Boot: pure lockstep stall, with timeout-based deadlock recovery
