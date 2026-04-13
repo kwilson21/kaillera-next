@@ -167,10 +167,12 @@ fields (current frame, replay depth, runner state). Dev builds throw.
 ### R3 — Ring coverage within the rollback window
 
 For any frame F where `rb.frame - F <= rb.max_frames`, the ring
-buffer must hold valid state for F. The dirty-input serialize gate
-may only skip a save if doing so cannot leave any in-window frame
-stale (RF4). Violations during a misprediction-triggered restore
-log `FATAL-RING-STALE` and throw in dev (RF7).
+buffer must hold valid state for F. As of v0.43.0, state is saved
+every frame unconditionally (the previous dirty-input serialize gate
+was removed after FATAL-RING-STALE at f=23410 proved that skipping
+saves created ring coverage gaps). Violations during a
+misprediction-triggered restore log `FATAL-RING-STALE` and throw
+in dev (RF7).
 
 ### R4 — Post-replay live state equals ring state
 

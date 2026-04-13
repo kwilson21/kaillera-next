@@ -37,8 +37,9 @@ V1 — Browser-based
               HTTP/WS :27888
 
   Lockstep mode: all players run the emulator in sync via WebRTC DataChannels.
+  Rollback mode: GGPO-style input prediction + C-level replay via WebRTC DataChannels.
   Streaming mode: host runs the emulator and streams video via WebRTC MediaStream.
-  Server is idle after signaling completes (lockstep) or relays save states (initial sync).
+  Server is idle after signaling completes (lockstep/rollback) or relays save states (initial sync).
 ```
 
 ## Repo structure
@@ -153,9 +154,14 @@ All events go through the default Socket.IO namespace (`/`).
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
 - **Rooms are ephemeral:** No persistent database. Rooms live in memory (with optional
   Redis persistence for zero-downtime deploys and reconnect survival).
+- **Rollback netcode:** C-level GGPO-style rollback engine (`kn_rollback.c`) with
+  input prediction, save state ring buffer (full serialize every frame), and amortized
+  replay. Cross-platform determinism via SoftFloat FPU. Menu lockstep gate reads
+  `game_status` from RDRAM. Host-authoritative resync remains as fallback for
+  reconnection and late join.
 - **Patched WASM core:** mupen64plus-next compiled with deterministic timing patches
-  (kn_set_deterministic, kn_set_frame_time) for lockstep sync. Falls back to stock
-  CDN core with JS-level timing shim.
+  (kn_set_deterministic, kn_set_frame_time), SoftFloat FPU, and rollback exports
+  for lockstep sync. Falls back to stock CDN core with JS-level timing shim.
 
 ## Netplay invariants
 
