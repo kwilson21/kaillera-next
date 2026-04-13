@@ -1711,6 +1711,117 @@ def query_c_debug_highlights(df: pl.DataFrame) -> None:
         print(f"  {t}: {n}")
 
 
+def query_tick_performance(jsonl_dir: str) -> None:
+    """Per-peer FPS and tick timing from TICK-PERF entries."""
+    _print_section("11a. TICK PERFORMANCE (per peer)")
+    import glob as _glob
+
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", "?")
+                ua = (first.get("context") or {}).get("ua", "")
+                mobile = (first.get("context") or {}).get("mobile", False)
+                f.seek(0)
+                fps_vals = []
+                median_vals = []
+                p95_vals = []
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    if "TICK-PERF" not in msg:
+                        continue
+                    m = re.search(r"fps=([0-9.]+).*median=([0-9.]+).*p95=([0-9.]+)", msg)
+                    if m:
+                        fps_vals.append(float(m.group(1)))
+                        median_vals.append(float(m.group(2)))
+                        p95_vals.append(float(m.group(3)))
+                if fps_vals:
+                    avg_fps = sum(fps_vals) / len(fps_vals)
+                    avg_med = sum(median_vals) / len(median_vals)
+                    avg_p95 = sum(p95_vals) / len(p95_vals)
+                    device = "mobile" if mobile else "desktop"
+                    print(f"  Slot {slot} ({device}): fps={avg_fps:.1f} tickMs median={avg_med:.1f} p95={avg_p95:.1f} ({len(fps_vals)} samples)")
+                    if avg_fps < 55:
+                        budget = 1000 / avg_fps
+                        # Check C-PERF total to see how much is code vs browser
+                        f.seek(0)
+                        totals = []
+                        for line2 in f:
+                            d2 = json.loads(line2)
+                            msg2 = d2.get("msg", "")
+                            if "C-PERF" in msg2:
+                                m2 = re.search(r"total=([0-9.]+)ms", msg2)
+                                if m2:
+                                    totals.append(float(m2.group(1)))
+                        if totals:
+                            avg_total = sum(totals) / len(totals)
+                            gap = avg_med - avg_total
+                            print(f"    !! BELOW 60fps: tick={avg_med:.1f}ms but code={avg_total:.1f}ms → {gap:.1f}ms idle gap")
+                            if gap > 5:
+                                print(f"    Browser scheduling at {avg_fps:.0f}Hz — not a code performance issue")
+                            else:
+                                print(f"    Code is near budget — optimization may help")
+        except Exception:
+            continue
+
+
+def query_gp_dump_comparison(jsonl_dir: str) -> None:
+    """Compare GP-DUMP and GP-DRIFT values between peers."""
+    _print_section("11b. GAMEPLAY ADDRESS COMPARISON")
+    import glob as _glob
+
+    dumps_by_slot: dict[int, list] = defaultdict(list)
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", -1)
+                f.seek(0)
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    fr = d.get("f", -1)
+                    if msg.startswith("GP-DUMP") or msg.startswith("GP-DRIFT"):
+                        dumps_by_slot[slot].append((fr, msg))
+        except Exception:
+            continue
+
+    if not dumps_by_slot:
+        print("  No GP-DUMP or GP-DRIFT entries.")
+        return
+
+    for s in sorted(dumps_by_slot.keys()):
+        entries = dumps_by_slot[s]
+        print(f"  Slot {s}: {len(entries)} dumps")
+        for fr, msg in entries[:5]:
+            print(f"    f={fr:>6} {msg[:160]}")
+        if len(entries) > 5:
+            print(f"    ... +{len(entries) - 5} more")
+    print()
+
+    # Cross-peer comparison at same frame
+    if len(dumps_by_slot) >= 2:
+        slots = sorted(dumps_by_slot.keys())
+        s0_by_frame = {fr: msg for fr, msg in dumps_by_slot[slots[0]]}
+        s1_by_frame = {fr: msg for fr, msg in dumps_by_slot[slots[1]]}
+        common_frames = sorted(set(s0_by_frame.keys()) & set(s1_by_frame.keys()))
+        if common_frames:
+            print(f"  Cross-peer comparison at {len(common_frames)} common frames:")
+            for fr in common_frames[:5]:
+                m0 = s0_by_frame[fr]
+                m1 = s1_by_frame[fr]
+                if m0 == m1:
+                    print(f"    f={fr}: IDENTICAL")
+                else:
+                    # Find which fields differ
+                    parts0 = {p.split("=")[0]: p.split("=", 1)[1] for p in m0.split() if "=" in p}
+                    parts1 = {p.split("=")[0]: p.split("=", 1)[1] for p in m1.split() if "=" in p}
+                    diffs = [k for k in parts0 if k in parts1 and parts0[k] != parts1[k]]
+                    print(f"    f={fr}: {len(diffs)} fields differ: {', '.join(diffs[:8])}")
+
+
 def query_full_state_comparison(jsonl_dir: str) -> None:
     """Compare ALL hash levels between peers: gameplay, game_state, full_state, per-region."""
     _print_section("11. FULL STATE COMPARISON")
@@ -2230,6 +2341,8 @@ def main() -> None:
     query_input_analysis(df)
     query_rollback_detail(df)
     query_c_debug_highlights(df)
+    query_tick_performance(str(out_dir))
+    query_gp_dump_comparison(str(out_dir))
     query_full_state_comparison(str(out_dir))
     query_byte_level_diff(str(out_dir))
 
