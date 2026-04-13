@@ -6220,7 +6220,10 @@
         if (activePacingPeers === 0 && _framePacingActive) {
           _framePacingActive = false;
           _pacingThrottleStartAt = 0;
-          _syncLog('PACING-THROTTLE released — all peers phantom');
+          if (window._knLastPhantomReleaseFrame !== _frameNum) {
+            window._knLastPhantomReleaseFrame = _frameNum;
+            _syncLog('PACING-THROTTLE released — all peers phantom');
+          }
         }
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
@@ -6571,7 +6574,13 @@
       window._knLastTickWall = _tickWallNow;
       if (_tickDelta > 0 && _tickDelta < 200) window._knTickDeltas.push(_tickDelta);
       if (window._knTickDeltas.length > 120) window._knTickDeltas.splice(0, window._knTickDeltas.length - 120);
-      if (_frameNum > 0 && _frameNum % 300 === 0 && window._knTickDeltas.length > 10) {
+      if (
+        _frameNum > 0 &&
+        _frameNum % 300 === 0 &&
+        window._knTickDeltas.length > 10 &&
+        window._knLastTickPerfFrame !== _frameNum
+      ) {
+        window._knLastTickPerfFrame = _frameNum;
         const sorted = [...window._knTickDeltas].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
         const p95 = sorted[Math.floor(sorted.length * 0.95)];
@@ -6639,7 +6648,8 @@
             // arrives later, rollback or resync will correct.
             if (stallDuration < 500) {
               // Brief stall — wait for input to arrive
-              if (_frameNum % 60 === 0) {
+              if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                window._knLastBootStallLogFrame = _frameNum;
                 _syncLog(
                   `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
                     `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
@@ -6866,7 +6876,10 @@
           if (_framePacingActive) {
             _framePacingActive = false;
             _pacingThrottleStartAt = 0;
-            _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
+            if (window._knLastCPhantomReleaseFrame !== _frameNum) {
+              window._knLastCPhantomReleaseFrame = _frameNum;
+              _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
+            }
           }
           // Fall through to normal tick instead of returning
         } else {
