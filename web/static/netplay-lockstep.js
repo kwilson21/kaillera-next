@@ -6526,14 +6526,12 @@
             `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
         );
       }
-      if (!_rbBootConverged) {
-        // Skip boot lockstep stall if resync is in flight or if the
-        // deadlock recovery already fired. After reconnect, old apply
-        // frame inputs will never arrive — stalling is a deadlock.
-        if (_resyncRequestInFlight || _bootStallRecoveryFired) {
-          return;
-        }
-        // Boot: pure lockstep stall, with timeout-based deadlock recovery
+      if (!_rbBootConverged && !_resyncRequestInFlight && !_bootStallRecoveryFired) {
+        // Boot: pure lockstep stall, with timeout-based deadlock recovery.
+        // Skipped when resync is in flight or deadlock recovery fired —
+        // the tick must continue so the resync handler can process the
+        // host's state push. Without this, the tick returns early and
+        // the resync response is never handled.
         if (rbApplyFrame >= 0) {
           const bootInputPeers = getInputPeers();
           let stalled = false;
@@ -6546,7 +6544,6 @@
             }
           }
           if (stalled) {
-            // Track wall-clock time at this exact apply frame
             const nowWall = performance.now();
             if (_bootStallFrame !== rbApplyFrame) {
               _bootStallFrame = rbApplyFrame;
@@ -6554,13 +6551,6 @@
               _bootStallRecoveryFired = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
-            // BOOT-DEADLOCK-RECOVERY: after 3s stuck at same apply frame,
-            // assume the missing inputs will never arrive (DC died with
-            // in-flight packets). Request an immediate resync so both peers
-            // reset to a common state. Guests trigger resync; the host
-            // cannot (it already has the authoritative state) so the host
-            // just falls through and keeps running — guests will catch up
-            // via resync.
             if (stallDuration >= 3000 && !_bootStallRecoveryFired) {
               _bootStallRecoveryFired = true;
               _syncLog(
@@ -6589,12 +6579,11 @@
             }
             return;
           }
-          // Not stalled — clear tracking
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
           _bootStallRecoveryFired = false;
         }
-      } else if (rbApplyFrame >= 0) {
+      } else if (_rbBootConverged && rbApplyFrame >= 0) {
         // Gameplay: stall only when too far ahead for rollback to help
         const rbInputPeers = getInputPeers();
         for (const p of rbInputPeers) {
