@@ -1054,12 +1054,60 @@ static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
     /* RNG seeds */
     { 0x05B940, 4 },  /* primary LCG seed */
     { 0x0A0578, 4 },  /* alternate seed */
+
+    /* ── CSS (Character Select Screen) state ──────────────────────────
+     * VS CSS_PLAYER_STRUCT at N64 0x8013BA88, 0xBC bytes per player.
+     * These fields determine which character each player picks. If any
+     * diverge between peers, the match will desync on stage/char. */
+
+    /* P1 CSS state (base 0x8013BA88 → RDRAM 0x13BA88) */
+    { 0x13BAD0, 4 },  /* P1 css char_id (+0x48) */
+    { 0x13BADC, 4 },  /* P1 css cursor_state (+0x54) */
+    { 0x13BAE0, 4 },  /* P1 css selected_flag (+0x58) */
+    { 0x13BAE4, 4 },  /* P1 css is_recalling (+0x5C) */
+    { 0x13BB04, 4 },  /* P1 css state_0x7C (+0x7C) */
+    { 0x13BB08, 4 },  /* P1 css held_token (+0x80) */
+    { 0x13BB0C, 4 },  /* P1 css panel_state (+0x84, 0=HMN) */
+    { 0x13BB10, 4 },  /* P1 css selected_flag_2 (+0x88) */
+    /* P2 CSS state (base 0x8013BB44 → RDRAM 0x13BB44) */
+    { 0x13BB8C, 4 },  /* P2 css char_id (+0x48) */
+    { 0x13BB98, 4 },  /* P2 css cursor_state (+0x54) */
+    { 0x13BB9C, 4 },  /* P2 css selected_flag (+0x58) */
+    { 0x13BBA0, 4 },  /* P2 css is_recalling (+0x5C) */
+    { 0x13BBC0, 4 },  /* P2 css state_0x7C (+0x7C) */
+    { 0x13BBC4, 4 },  /* P2 css held_token (+0x80) */
+    { 0x13BBC8, 4 },  /* P2 css panel_state (+0x84, 0=HMN) */
+    { 0x13BBCC, 4 },  /* P2 css selected_flag_2 (+0x88) */
+    /* P3 CSS state (base 0x8013BC00 → RDRAM 0x13BC00) */
+    { 0x13BC48, 4 },  /* P3 css char_id (+0x48) */
+    { 0x13BC54, 4 },  /* P3 css cursor_state (+0x54) */
+    { 0x13BC58, 4 },  /* P3 css selected_flag (+0x58) */
+    { 0x13BC5C, 4 },  /* P3 css is_recalling (+0x5C) */
+    { 0x13BC7C, 4 },  /* P3 css state_0x7C (+0x7C) */
+    { 0x13BC80, 4 },  /* P3 css held_token (+0x80) */
+    { 0x13BC84, 4 },  /* P3 css panel_state (+0x84, 0=HMN) */
+    { 0x13BC88, 4 },  /* P3 css selected_flag_2 (+0x88) */
+    /* P4 CSS state (base 0x8013BCBC → RDRAM 0x13BCBC) */
+    { 0x13BD04, 4 },  /* P4 css char_id (+0x48) */
+    { 0x13BD10, 4 },  /* P4 css cursor_state (+0x54) */
+    { 0x13BD14, 4 },  /* P4 css selected_flag (+0x58) */
+    { 0x13BD18, 4 },  /* P4 css is_recalling (+0x5C) */
+    { 0x13BD38, 4 },  /* P4 css state_0x7C (+0x7C) */
+    { 0x13BD3C, 4 },  /* P4 css held_token (+0x80) */
+    { 0x13BD40, 4 },  /* P4 css panel_state (+0x84, 0=HMN) */
+    { 0x13BD44, 4 },  /* P4 css selected_flag_2 (+0x88) */
+
+    /* ── RNG-related frame counters ──────────────────────────────────
+     * These affect RNG advancement (get_random_int_safe_ uses fc%64)
+     * and CSS→SSS transition seeding (random_fix_). */
+    { 0x03CB30, 4 },  /* Global.frame_counter */
+    { 0x03B6E4, 4 },  /* current_screen_frame_count */
 };
 #define KN_GAMEPLAY_ADDR_COUNT (sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]))
-/* Total bytes across all gameplay addresses (73 bytes as of writing).
+/* Total bytes across all gameplay addresses (209 bytes as of writing).
  * Used for the stack-allocated stash buffer in kn_post_tick. Padded
- * to 128 for alignment and headroom if addresses are added. */
-#define KN_GAMEPLAY_STASH_SIZE 128
+ * to 256 for alignment and headroom if addresses are added. */
+#define KN_GAMEPLAY_STASH_SIZE 256
 
 /* ── Post-tick: advance frame counter, decrement replay if catching up ── */
 #ifdef __EMSCRIPTEN__

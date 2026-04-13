@@ -1283,6 +1283,7 @@
   // differ briefly (e.g., roster change), the next frame resets the seed.
   const KN_RNG_SEED_RDRAM = 0x0005b940; // primary LCG seed
   const KN_RNG_ALT_SEED_RDRAM = 0x000a0578; // alternate seed
+  const KN_FRAME_COUNTER_RDRAM = 0x0003cb30; // Global.frame_counter (get_random_int_safe_ uses fc%64)
   // SSB64/Smash Remix game_status — VS settings word at N64 0x800A4D18.
   // game_status is byte 1 (bits 23-16): 0=wait, 1=ongoing, 2=paused, 5=end.
   // Used to gate rollback prediction: during menus (status == 0), rollback's
@@ -2568,7 +2569,7 @@
               // and show the appropriate "reconnecting..." status
               handlePeerDisconnect(remoteSid);
             }
-          }, 1500); // 1.5s grace — fast reconnect on mobile network switch
+          }, 3000); // 3s grace — allow ICE recovery on WiFi blips
         }
       }
     };
@@ -3601,12 +3602,12 @@
         attemptReconnect(remoteSid);
       }
 
-      // 15-second timeout — give up and hard disconnect
+      // 45-second timeout — give up and hard disconnect (allows up to 3 retry attempts)
       peer._reconnectTimeout = setTimeout(() => {
         if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-        _syncLog(`reconnect timeout for ${remoteSid}`);
+        _syncLog(`reconnect timeout for ${remoteSid} after ${peer._reconnectAttempts || 1} attempts`);
         hardDisconnectPeer(remoteSid);
-      }, 15000);
+      }, 45000);
 
       return;
     }
@@ -3668,34 +3669,54 @@
     _config?.onReconnecting?.(remoteSid, false);
   };
 
-  const attemptReconnect = async (remoteSid) => {
+  const _MAX_RECONNECT_ATTEMPTS = 3;
+  const _RECONNECT_ATTEMPT_TIMEOUT = 10000; // 10s per attempt
+  const _RECONNECT_RETRY_DELAY = 3000; // 3s between retries
+
+  const attemptReconnect = async (remoteSid, attempt = 1) => {
     const peer = _peers[remoteSid];
     if (!peer || !peer.reconnecting) return;
+    peer._reconnectAttempts = attempt;
 
-    _syncLog(`initiating reconnect to ${remoteSid}`);
+    _syncLog(`initiating reconnect to ${remoteSid} (attempt ${attempt}/${_MAX_RECONNECT_ATTEMPTS})`);
+    const known = _knownPlayers[remoteSid];
+    const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
+    setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
     KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
     peer.ready = false;
 
-    // Timeout: if reconnect doesn't reach 'connected' within 10s, hard disconnect
+    const retryOrGiveUp = () => {
+      if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      if (attempt < _MAX_RECONNECT_ATTEMPTS) {
+        _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
+        setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
+        setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);
+      } else {
+        _syncLog(`reconnect failed after ${_MAX_RECONNECT_ATTEMPTS} attempts — hard disconnect ${remoteSid}`);
+        hardDisconnectPeer(remoteSid);
+      }
+    };
+
+    // Timeout: if this attempt doesn't reach 'connected' in time, retry
     let _reconnectTimer2 = setTimeout(() => {
       const state = peer.pc.connectionState;
       if (state !== 'connected') {
-        _syncLog(`reconnect timeout (state=${state}) — hard disconnect ${remoteSid}`);
-        hardDisconnectPeer(remoteSid);
+        _syncLog(`reconnect attempt ${attempt} timeout (state=${state}) for ${remoteSid}`);
+        retryOrGiveUp();
       }
-    }, 10000);
+    }, _RECONNECT_ATTEMPT_TIMEOUT);
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
-      _syncLog(`reconnect peer ${remoteSid} connection-state: ${s}`);
+      _syncLog(`reconnect peer ${remoteSid} connection-state: ${s} (attempt ${attempt})`);
       if (s === 'connected' || s === 'closed') {
         clearTimeout(_reconnectTimer2);
       }
       if (s === 'failed') {
         clearTimeout(_reconnectTimer2);
-        _syncLog(`reconnect PC failed for ${remoteSid}`);
-        hardDisconnectPeer(remoteSid);
+        _syncLog(`reconnect PC failed for ${remoteSid} (attempt ${attempt})`);
+        retryOrGiveUp();
       }
     };
 
@@ -3735,8 +3756,8 @@
         reconnect: true,
       });
     } catch (err) {
-      _syncLog(`reconnect offer failed: ${err}`);
-      hardDisconnectPeer(remoteSid);
+      _syncLog(`reconnect offer failed (attempt ${attempt}): ${err}`);
+      retryOrGiveUp();
     }
   };
 
@@ -7354,6 +7375,16 @@
                         `rng=${r32(0x5b940).toString(16)}`,
                       ];
                       _syncLog(`GP-DRIFT f=${f} ${vals.join(' ')}`);
+                      // CSS player struct state for menu desync diagnosis
+                      const cssVals = [
+                        `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
+                        `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
+                        `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
+                        `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
+                        `fc=${r32(0x3cb30).toString(16)}`,
+                        `sfc=${r32(0x3b6e4).toString(16)}`,
+                      ];
+                      _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
                     }
                   }
                   // Arm bisect mode on STATE-DRIFT so the byte-level
@@ -7398,6 +7429,17 @@
                     `rng=${r32(0x5b940).toString(16)},${r32(0xa0578).toString(16)}`,
                   ];
                   _syncLog(`GP-DUMP f=${f} ${vals.join(' ')}`);
+                  // CSS player struct state (VS mode, 0x8013BA88 base, 0xBC stride)
+                  // char_id(+0x48) cursor_state(+0x54) selected(+0x58) held_token(+0x80)
+                  const cssVals = [
+                    `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
+                    `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
+                    `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
+                    `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
+                    `fc=${r32(0x3cb30).toString(16)}`,
+                    `sfc=${r32(0x3b6e4).toString(16)}`,
+                  ];
+                  _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
                 }
               }
               // Arm bisect mode: per-frame hash broadcasts for the next 30

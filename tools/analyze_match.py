@@ -71,21 +71,36 @@ def _fetch_match_metrics(base: str, key: str, match_id: str) -> dict | None:
         return None
 
 
+_ssim_cache: dict[str, list[dict]] = {}
+
 def _fetch_ssim(base: str, key: str, match_id: str) -> list[dict]:
-    """Fetch SSIM comparison data from the screenshots endpoint."""
-    try:
-        r = requests.get(
-            f"{base}/admin/api/screenshots/{match_id}/comparisons",
-            headers={"X-Admin-Key": key},
-            verify=False,
-            timeout=10,
-        )
-        if r.status_code != 200:
+    """Fetch SSIM comparison data from the screenshots endpoint. Cached."""
+    if match_id in _ssim_cache:
+        return _ssim_cache[match_id]
+    import time
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                f"{base}/admin/api/screenshots/{match_id}/comparisons",
+                headers={"X-Admin-Key": key},
+                verify=False,
+                timeout=10,
+            )
+            if r.status_code == 429:
+                time.sleep(1)
+                continue
+            if r.status_code != 200:
+                _ssim_cache[match_id] = []
+                return []
+            data = r.json()
+            result = data.get("comparisons", []) if isinstance(data, dict) else data
+            _ssim_cache[match_id] = result
+            return result
+        except (requests.RequestException, ValueError):
+            _ssim_cache[match_id] = []
             return []
-        data = r.json()
-        return data.get("comparisons", []) if isinstance(data, dict) else data
-    except (requests.RequestException, ValueError):
-        return []
+    _ssim_cache[match_id] = []
+    return []
 
 
 def _fetch_client_events(base: str, key: str, sessions: list[dict]) -> list[dict]:
@@ -1783,7 +1798,7 @@ def query_gp_dump_comparison(jsonl_dir: str) -> None:
                     d = json.loads(line)
                     msg = d.get("msg", "")
                     fr = d.get("f", -1)
-                    if msg.startswith("GP-DUMP") or msg.startswith("GP-DRIFT"):
+                    if msg.startswith("GP-DUMP") or msg.startswith("GP-DRIFT") or msg.startswith("GP-CSS"):
                         dumps_by_slot[slot].append((fr, msg))
         except Exception:
             continue
@@ -1820,6 +1835,241 @@ def query_gp_dump_comparison(jsonl_dir: str) -> None:
                     parts1 = {p.split("=")[0]: p.split("=", 1)[1] for p in m1.split() if "=" in p}
                     diffs = [k for k in parts0 if k in parts1 and parts0[k] != parts1[k]]
                     print(f"    f={fr}: {len(diffs)} fields differ: {', '.join(diffs[:8])}")
+
+
+def query_desync_summary(jsonl_dir: str, base: str = "", key: str = "", match_id: str = "") -> None:
+    """Quick-glance desync diagnosis: screen, stage, character, CSS state, SSIM per slot."""
+    _print_section("11c. DESYNC SUMMARY (screen, stage, character, CSS, SSIM)")
+    import glob as _glob
+
+    # Extract key state per slot over time
+    slot_data: dict[int, dict] = {}  # slot -> {gp_dumps, css_dumps}
+    for path in sorted(_glob.glob(f"{jsonl_dir}/session-*.jsonl")):
+        try:
+            with open(path) as f:
+                first = json.loads(f.readline())
+                slot = first.get("slot", -1)
+                f.seek(0)
+                gp = []
+                css = []
+                ssim_entries = []
+                for line in f:
+                    d = json.loads(line)
+                    msg = d.get("msg", "")
+                    fr = d.get("f", -1)
+                    if msg.startswith("GP-DUMP"):
+                        gp.append((fr, msg))
+                    elif msg.startswith("GP-CSS"):
+                        css.append((fr, msg))
+                    elif "SSIM" in msg or "visual_desync" in msg.lower():
+                        ssim_entries.append((fr, msg))
+                slot_data[slot] = {"gp": gp, "css": css, "ssim": ssim_entries}
+        except Exception:
+            continue
+
+    if not slot_data:
+        print("  No GP-DUMP data found.")
+        return
+
+    # Parse GP-DUMP fields
+    def parse_gp(msg):
+        fields = {}
+        for part in msg.split():
+            if "=" in part:
+                k, v = part.split("=", 1)
+                fields[k] = v
+        return fields
+
+    # Per-slot timeline
+    for s in sorted(slot_data.keys()):
+        gp = slot_data[s]["gp"]
+        css = slot_data[s]["css"]
+        print(f"\n  ── Slot {s} ──")
+
+        # Screen + game_status transitions
+        print(f"  Screen/game_status progression:")
+        last_scr = None
+        last_gs = None
+        for fr, msg in gp:
+            fields = parse_gp(msg)
+            scr = fields.get("scr", "?")
+            gs = fields.get("gs", "?")
+            if scr != last_scr or gs != last_gs:
+                print(f"    f={fr:>6}  scr={scr}  gs={gs}")
+                last_scr = scr
+                last_gs = gs
+
+        # Stage ID from vs= field (byte 0 of first word)
+        print(f"  Stage ID progression:")
+        last_vs0 = None
+        for fr, msg in gp:
+            fields = parse_gp(msg)
+            vs = fields.get("vs", "")
+            vs0 = vs.split(",")[0] if vs else "?"
+            if vs0 != last_vs0:
+                # Stage byte is at offset +1 in VS settings — extract from first word
+                try:
+                    w = int(vs0, 16)
+                    # VS settings at 0x0A4D08: stage_id is N64 byte +1 = LE bits 23-16
+                    stage = (w >> 16) & 0xff
+                    print(f"    f={fr:>6}  vs[0]=0x{vs0}  stage_id=0x{stage:02X} ({stage})")
+                except ValueError:
+                    print(f"    f={fr:>6}  vs[0]={vs0}")
+                last_vs0 = vs0
+
+        # Character ID from chr= field
+        print(f"  Character IDs (in-game struct):")
+        last_chr = None
+        for fr, msg in gp:
+            fields = parse_gp(msg)
+            chr_val = fields.get("chr", "?")
+            if chr_val != last_chr:
+                print(f"    f={fr:>6}  chr={chr_val}")
+                last_chr = chr_val
+
+        # CSS state transitions (non-zero cid)
+        css_transitions = []
+        last_css_state = None
+        for fr, msg in css:
+            # Extract p1 and p2 cid values
+            p1_cid = p2_cid = "?"
+            for part in msg.split():
+                if part.startswith("p1_css:"):
+                    for kv in part[7:].split(","):
+                        if kv.startswith("cid="):
+                            p1_cid = kv[4:]
+                elif part.startswith("p2_css:"):
+                    for kv in part[7:].split(","):
+                        if kv.startswith("cid="):
+                            p2_cid = kv[4:]
+            state_key = f"p1={p1_cid},p2={p2_cid}"
+            if state_key != last_css_state:
+                css_transitions.append((fr, state_key, msg))
+                last_css_state = state_key
+        if css_transitions:
+            print(f"  CSS character selection timeline:")
+            for fr, state_key, msg in css_transitions[:15]:
+                # Extract p1/p2 full state
+                parts = {}
+                for token in msg.split():
+                    if token.startswith("p1_css:") or token.startswith("p2_css:"):
+                        label = token[:6]
+                        kvs = token[7:]
+                        parts[label] = kvs
+                p1 = parts.get("p1_css", "?")
+                p2 = parts.get("p2_css", "?")
+                print(f"    f={fr:>6}  P1[{p1}]  P2[{p2}]")
+            if len(css_transitions) > 15:
+                print(f"    ... +{len(css_transitions) - 15} more transitions")
+
+    # Cross-peer comparison at key moments
+    if len(slot_data) >= 2:
+        slots = sorted(slot_data.keys())
+        print(f"\n  ── Cross-Peer Comparison ──")
+
+        # Compare stage IDs
+        for label, key in [("gp", "GP-DUMP")]:
+            s0_gp = {fr: parse_gp(msg) for fr, msg in slot_data[slots[0]][label]}
+            s1_gp = {fr: parse_gp(msg) for fr, msg in slot_data[slots[1]][label]}
+            common = sorted(set(s0_gp.keys()) & set(s1_gp.keys()))
+            if not common:
+                continue
+
+            # Find first frame where stage or chr differs
+            stage_diff = None
+            chr_diff = None
+            scr_diff = None
+            rng_diff = None
+            for fr in common:
+                f0, f1 = s0_gp[fr], s1_gp[fr]
+                if f0.get("vs") != f1.get("vs") and stage_diff is None:
+                    stage_diff = (fr, f0.get("vs", "?"), f1.get("vs", "?"))
+                if f0.get("chr") != f1.get("chr") and chr_diff is None:
+                    chr_diff = (fr, f0.get("chr", "?"), f1.get("chr", "?"))
+                if f0.get("scr") != f1.get("scr") and scr_diff is None:
+                    scr_diff = (fr, f0.get("scr", "?"), f1.get("scr", "?"))
+                if f0.get("rng") != f1.get("rng") and rng_diff is None:
+                    rng_diff = (fr, f0.get("rng", "?"), f1.get("rng", "?"))
+
+            if scr_diff:
+                fr, v0, v1 = scr_diff
+                print(f"  SCREEN DIVERGE at f={fr}: slot{slots[0]}={v0} slot{slots[1]}={v1}")
+            else:
+                print(f"  Screen: IDENTICAL across {len(common)} common frames")
+
+            if stage_diff:
+                fr, v0, v1 = stage_diff
+                # Parse stage byte from vs[0]
+                try:
+                    s0_stage = (int(v0.split(",")[0], 16) >> 16) & 0xff
+                    s1_stage = (int(v1.split(",")[0], 16) >> 16) & 0xff
+                    print(f"  STAGE DIVERGE at f={fr}: slot{slots[0]}=0x{s0_stage:02X} slot{slots[1]}=0x{s1_stage:02X}")
+                except (ValueError, IndexError):
+                    print(f"  STAGE DIVERGE at f={fr}: slot{slots[0]}={v0.split(',')[0]} slot{slots[1]}={v1.split(',')[0]}")
+            else:
+                print(f"  Stage: IDENTICAL across {len(common)} common frames")
+
+            if chr_diff:
+                fr, v0, v1 = chr_diff
+                print(f"  CHARACTER DIVERGE at f={fr}: slot{slots[0]}={v0} slot{slots[1]}={v1}")
+            else:
+                print(f"  Character: IDENTICAL across {len(common)} common frames")
+
+            if rng_diff:
+                fr, v0, v1 = rng_diff
+                print(f"  RNG DIVERGE at f={fr}: slot{slots[0]}={v0} slot{slots[1]}={v1}")
+            else:
+                print(f"  RNG: IDENTICAL across {len(common)} common frames")
+
+        # CSS cross-comparison
+        s0_css = {fr: msg for fr, msg in slot_data[slots[0]]["css"]}
+        s1_css = {fr: msg for fr, msg in slot_data[slots[1]]["css"]}
+        css_common = sorted(set(s0_css.keys()) & set(s1_css.keys()))
+        if css_common:
+            css_diffs = [(fr, s0_css[fr], s1_css[fr]) for fr in css_common if s0_css[fr] != s1_css[fr]]
+            if css_diffs:
+                print(f"\n  CSS state differs at {len(css_diffs)}/{len(css_common)} common frames:")
+                for fr, m0, m1 in css_diffs[:5]:
+                    # Show the p1/p2 cid differences
+                    def extract_cids(msg):
+                        cids = {}
+                        for token in msg.split():
+                            for px in ["p1_css:", "p2_css:", "p3_css:", "p4_css:"]:
+                                if token.startswith(px):
+                                    for kv in token[len(px):].split(","):
+                                        if kv.startswith("cid="):
+                                            cids[px[:6]] = kv[4:]
+                        return cids
+                    c0 = extract_cids(m0)
+                    c1 = extract_cids(m1)
+                    diffs = [f"{k}:{c0.get(k,'?')}→{c1.get(k,'?')}" for k in sorted(set(c0) | set(c1)) if c0.get(k) != c1.get(k)]
+                    print(f"    f={fr:>6} char_id diffs: {', '.join(diffs)}")
+            else:
+                print(f"\n  CSS state: IDENTICAL across {len(css_common)} common frames")
+
+        # SSIM visual comparison
+        if base and key and match_id:
+            ssim_data = _fetch_ssim(base, key, match_id)
+            if ssim_data:
+                print(f"\n  ── SSIM Visual Comparison ({len(ssim_data)} frames) ──")
+                desynced = [s for s in ssim_data if s.get("is_desync")]
+                synced = [s for s in ssim_data if not s.get("is_desync")]
+                print(f"  Synced: {len(synced)}/{len(ssim_data)}  Desynced: {len(desynced)}/{len(ssim_data)}")
+                if desynced:
+                    first = desynced[0]
+                    worst = min(desynced, key=lambda s: s.get("ssim", 1))
+                    print(f"  First visual desync: f={first.get('frame')} ssim={first.get('ssim', 0):.4f}")
+                    print(f"  Worst visual desync: f={worst.get('frame')} ssim={worst.get('ssim', 0):.4f}")
+                    print(f"  SSIM timeline (desynced frames):")
+                    for s in desynced[:20]:
+                        print(f"    f={s.get('frame', '?'):>6}  ssim={s.get('ssim', 0):.4f}")
+                    if len(desynced) > 20:
+                        print(f"    ... +{len(desynced) - 20} more")
+                if synced:
+                    avg_ssim = sum(s.get("ssim", 0) for s in synced) / len(synced)
+                    print(f"  Average SSIM (synced frames): {avg_ssim:.4f}")
+            else:
+                print(f"\n  (no SSIM data available)")
 
 
 def query_full_state_comparison(jsonl_dir: str) -> None:
@@ -2148,7 +2398,7 @@ def query_byte_level_diff(jsonl_dir: str) -> None:
                 for line in f:
                     d = json.loads(line)
                     msg = d.get("msg", "")
-                    if msg.startswith("GP-DUMP"):
+                    if msg.startswith("GP-DUMP") or msg.startswith("GP-CSS"):
                         gp_dumps[slot].append(msg)
         except Exception:
             continue
@@ -2184,6 +2434,42 @@ def query_byte_level_diff(jsonl_dir: str) -> None:
         (0x132FA0, 4, "P4_damage"),
         (0x05B940, 4, "RNG_primary"),
         (0x0A0578, 4, "RNG_alt"),
+        # CSS player struct state (VS mode, base 0x8013BA88, stride 0xBC)
+        (0x13BAD0, 4, "P1_css_char_id"),
+        (0x13BADC, 4, "P1_css_cursor_state"),
+        (0x13BAE0, 4, "P1_css_selected"),
+        (0x13BAE4, 4, "P1_css_recalling"),
+        (0x13BB04, 4, "P1_css_state_7C"),
+        (0x13BB08, 4, "P1_css_held_token"),
+        (0x13BB0C, 4, "P1_css_panel_state"),
+        (0x13BB10, 4, "P1_css_selected2"),
+        (0x13BB8C, 4, "P2_css_char_id"),
+        (0x13BB98, 4, "P2_css_cursor_state"),
+        (0x13BB9C, 4, "P2_css_selected"),
+        (0x13BBA0, 4, "P2_css_recalling"),
+        (0x13BBC0, 4, "P2_css_state_7C"),
+        (0x13BBC4, 4, "P2_css_held_token"),
+        (0x13BBC8, 4, "P2_css_panel_state"),
+        (0x13BBCC, 4, "P2_css_selected2"),
+        (0x13BC48, 4, "P3_css_char_id"),
+        (0x13BC54, 4, "P3_css_cursor_state"),
+        (0x13BC58, 4, "P3_css_selected"),
+        (0x13BC5C, 4, "P3_css_recalling"),
+        (0x13BC7C, 4, "P3_css_state_7C"),
+        (0x13BC80, 4, "P3_css_held_token"),
+        (0x13BC84, 4, "P3_css_panel_state"),
+        (0x13BC88, 4, "P3_css_selected2"),
+        (0x13BD04, 4, "P4_css_char_id"),
+        (0x13BD10, 4, "P4_css_cursor_state"),
+        (0x13BD14, 4, "P4_css_selected"),
+        (0x13BD18, 4, "P4_css_recalling"),
+        (0x13BD38, 4, "P4_css_state_7C"),
+        (0x13BD3C, 4, "P4_css_held_token"),
+        (0x13BD40, 4, "P4_css_panel_state"),
+        (0x13BD44, 4, "P4_css_selected2"),
+        # RNG frame counters
+        (0x03CB30, 4, "frame_counter"),
+        (0x03B6E4, 4, "screen_frame_count"),
     ]
 
     # Build lookup: (region, sub, byte_offset_in_sub) -> (slot, frame, hex_value)
@@ -2343,6 +2629,7 @@ def main() -> None:
     query_c_debug_highlights(df)
     query_tick_performance(str(out_dir))
     query_gp_dump_comparison(str(out_dir))
+    query_desync_summary(str(out_dir), args.base, args.key, full_match_id)
     query_full_state_comparison(str(out_dir))
     query_byte_level_diff(str(out_dir))
 
