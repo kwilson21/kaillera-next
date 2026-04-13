@@ -269,13 +269,17 @@
   // Shared by lockstep and streaming WebRTC signal handlers.
   async function drainCandidates(peer) {
     peer.remoteDescSet = true;
-    if (peer.pendingCandidates) {
-      for (const c of peer.pendingCandidates) {
+    if (peer.pendingCandidates && peer.pendingCandidates.length) {
+      // Swap to a temp array before iterating — candidates arriving during
+      // the async addIceCandidate calls go into the fresh empty array
+      // instead of being lost when we clear pendingCandidates.
+      const batch = peer.pendingCandidates;
+      peer.pendingCandidates = [];
+      for (const c of batch) {
         try {
           await peer.pc.addIceCandidate(c);
         } catch (_) {}
       }
-      peer.pendingCandidates = [];
     }
   }
 

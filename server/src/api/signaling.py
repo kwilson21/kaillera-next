@@ -193,6 +193,12 @@ rooms: dict[str, Room] = {}
 # sid -> (sessionId, playerId, is_spectator)
 _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 
+# Serialize all room-mutating operations. Python's GIL does NOT protect
+# against interleaving across await points — two concurrent Socket.IO
+# handlers can read stale room state and then both write, corrupting it.
+# Every handler that reads then mutates rooms/_sid_to_room must hold this.
+_room_lock = asyncio.Lock()
+
 _shutting_down = False
 
 
@@ -283,12 +289,13 @@ async def _disconnect_grace_expiry(sid: str, session_id: str, player_id: str, re
         await asyncio.sleep(_DISCONNECT_GRACE_SECONDS)
     except asyncio.CancelledError:
         return  # Reconnected in time
-    _disconnect_grace_tasks.pop(player_id, None)
-    log.info("Disconnect grace expired for %s in room %s — removing", player_id, session_id)
-    # Re-insert the entry so _leave can find it. The SID is dead but
-    # _leave needs the mapping to locate the room/player.
-    _sid_to_room[sid] = (session_id, player_id, False)
-    await _leave(sid, reason)
+    async with _room_lock:
+        _disconnect_grace_tasks.pop(player_id, None)
+        log.info("Disconnect grace expired for %s in room %s — removing", player_id, session_id)
+        # Re-insert the entry so _leave can find it. The SID is dead but
+        # _leave needs the mapping to locate the room/player.
+        _sid_to_room[sid] = (session_id, player_id, False)
+        await _leave(sid, reason)
 
 
 async def _leave(sid: str, reason: str = "disconnect") -> None:
@@ -419,11 +426,12 @@ async def _cleanup_empty_rooms() -> None:
                     to_delete.append(session_id)
             else:
                 _zombie_ages.pop(session_id, None)
-        for session_id in to_delete:
-            del rooms[session_id]
-            _zombie_ages.pop(session_id, None)
-            await state.delete_room(session_id)
-            log.info("Cleanup: deleted room %s", session_id)
+        async with _room_lock:
+            for session_id in to_delete:
+                del rooms[session_id]
+                _zombie_ages.pop(session_id, None)
+                await state.delete_room(session_id)
+                log.info("Cleanup: deleted room %s", session_id)
         cleanup()
 
 
@@ -435,7 +443,11 @@ async def _cleanup_empty_rooms() -> None:
 async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
     if not check(sid, "open-room"):
         return "Rate limited"
+    async with _room_lock:
+        return await _open_room_locked(sid, payload)
 
+
+async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     session_id = payload.extra.sessionid
     persistent_id = payload.extra.persistentId or sid
     player_name = payload.extra.player_name
@@ -507,7 +519,11 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
 async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dict | None]:
     if not check(sid, "join-room"):
         return ("Rate limited", None)
+    async with _room_lock:
+        return await _join_room_locked(sid, payload)
 
+
+async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dict | None]:
     session_id = payload.extra.sessionid
     persistent_id = payload.extra.persistentId or sid
     player_name = _sanitize_str(payload.extra.player_name, 32)
@@ -588,22 +604,28 @@ async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dic
 async def leave_room(sid: str, data: dict | None = None) -> None:
     if not check(sid, "leave-room"):
         return
-    # Intentional leave — cancel any pending grace timer
-    entry = _sid_to_room.get(sid)
-    if entry:
-        _cancel_disconnect_grace(entry[1])  # entry[1] = player_id
-    await _leave(sid, reason="leave")
+    async with _room_lock:
+        # Intentional leave — cancel any pending grace timer
+        entry = _sid_to_room.get(sid)
+        if entry:
+            _cancel_disconnect_grace(entry[1])  # entry[1] = player_id
+        await _leave(sid, reason="leave")
 
 
 @sio.on("claim-slot")
 @validated(ClaimSlotPayload)
 async def claim_slot(sid: str, payload: ClaimSlotPayload) -> str | None:
     """Spectator claims a vacated player slot."""
+    if not check(sid, "claim-slot"):
+        return "Rate limited"
+    async with _room_lock:
+        return await _claim_slot_locked(sid, payload)
+
+
+async def _claim_slot_locked(sid: str, payload: ClaimSlotPayload) -> str | None:
     entry = _sid_to_room.get(sid)
     if entry is None:
         return "Not in a room"
-    if not check(sid, "claim-slot"):
-        return "Rate limited"
     session_id, player_id, is_spectator = entry
     if not is_spectator:
         return "Not a spectator"
@@ -643,29 +665,35 @@ async def set_name(sid: str, payload: SetNamePayload) -> str | None:
     name = _sanitize_str(payload.name, 24).strip()
     if not name:
         return "Empty name"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
-    # Update name in players or spectators (SID is in one collection only)
-    found = False
-    for info in room.players.values():
-        if info["socketId"] == sid:
-            info["playerName"] = name
-            found = True
-            break
-    if not found:
-        for info in room.spectators.values():
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        # Update name in players or spectators (SID is in one collection only)
+        found = False
+        for info in room.players.values():
             if info["socketId"] == sid:
                 info["playerName"] = name
+                found = True
                 break
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+        if not found:
+            for info in room.spectators.values():
+                if info["socketId"] == sid:
+                    info["playerName"] = name
+                    break
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
 @sio.on("start-game")
 @validated(StartGamePayload)
 async def start_game(sid: str, payload: StartGamePayload) -> str | None:
+    async with _room_lock:
+        return await _start_game_locked(sid, payload)
+
+
+async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -722,6 +750,11 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
 @sio.on("end-game")
 @validated(EndGamePayload)
 async def end_game(sid: str, payload: EndGamePayload) -> str | None:
+    async with _room_lock:
+        return await _end_game_locked(sid, payload)
+
+
+async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
         return "Not in a room"
@@ -762,20 +795,21 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
     """Host sets the game mode pre-game so guests can update their UI."""
     if not check(sid, "set-mode"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
-    if room.owner != sid:
-        return "Only the host can set the mode"
-    if room.status != "lobby":
-        return "Cannot change mode during game"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can set the mode"
+        if room.status != "lobby":
+            return "Cannot change mode during game"
 
-    mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
-    room.mode = mode
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
-    await state.save_room(session_id, room)
-    log.info("Mode set to %s in room %s", mode, session_id)
+        mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
+        room.mode = mode
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+        log.info("Mode set to %s in room %s", mode, session_id)
     return None
 
 
@@ -784,17 +818,18 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
 async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str | None:
     if not check(sid, "rom-sharing-toggle"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
-    if room.owner != sid:
-        return "Only the host can toggle ROM sharing"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can toggle ROM sharing"
 
-    room.rom_sharing = payload.enabled
-    await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
-    await state.save_room(session_id, room)
-    log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
+        room.rom_sharing = payload.enabled
+        await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
+        await state.save_room(session_id, room)
+        log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
     return None
 
 
@@ -803,20 +838,21 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
 async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
     if not check(sid, "rom-ready"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
 
-    if payload.ready:
-        room.rom_ready.add(sid)
-    else:
-        room.rom_ready.discard(sid)
-    # Store host's ROM hash so guests can verify their cached ROM
-    if sid == room.owner and payload.hash and len(payload.hash) >= 16:
-        room.rom_hash = payload.hash
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
-    await state.save_room(session_id, room)
+        if payload.ready:
+            room.rom_ready.add(sid)
+        else:
+            room.rom_ready.discard(sid)
+        # Store host's ROM hash so guests can verify their cached ROM
+        if sid == room.owner and payload.hash and len(payload.hash) >= 16:
+            room.rom_hash = payload.hash
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
     return None
 
 
@@ -826,17 +862,18 @@ async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
     """Player declares they own a legal copy of the ROM (streaming mode)."""
     if not check(sid, "rom-declare"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
 
-    if payload.declared:
-        room.rom_declared.add(sid)
-    else:
-        room.rom_declared.discard(sid)
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
-    await state.save_room(session_id, room)
+        if payload.declared:
+            room.rom_declared.add(sid)
+        else:
+            room.rom_declared.discard(sid)
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
     return None
 
 
@@ -845,14 +882,15 @@ async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
 async def input_type(sid: str, payload: InputTypePayload) -> str | None:
     if not check(sid, "input-type"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
 
-    itype = payload.type if payload.type in ("keyboard", "gamepad") else "keyboard"
-    room.input_types[sid] = itype
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+        itype = payload.type if payload.type in ("keyboard", "gamepad") else "keyboard"
+        room.input_types[sid] = itype
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
@@ -861,14 +899,15 @@ async def input_type(sid: str, payload: InputTypePayload) -> str | None:
 async def device_type(sid: str, payload: DeviceTypePayload) -> str | None:
     if not check(sid, "device-type"):
         return "Rate limited"
-    result = _get_room(sid)
-    if result is None:
-        return "Not in a room"
-    session_id, room = result
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
 
-    dtype = payload.type if payload.type in ("desktop", "mobile") else "desktop"
-    room.device_types[sid] = dtype
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+        dtype = payload.type if payload.type in ("desktop", "mobile") else "desktop"
+        room.device_types[sid] = dtype
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
@@ -1202,22 +1241,27 @@ async def disconnect(sid: str) -> None:
     if _shutting_down:
         return
 
-    # Mid-game disconnect grace: defer _leave so the player can reconnect
-    # and reclaim their slot within _DISCONNECT_GRACE_SECONDS.
-    entry = _sid_to_room.get(sid)
-    if entry:
-        session_id, player_id, is_spectator = entry
-        room = rooms.get(session_id)
-        if room and room.status == "playing" and not is_spectator and player_id not in _disconnect_grace_tasks:
-            log.info(
-                "SIO %s disconnect mid-game — %ds grace for %s in room %s",
-                sid,
-                _DISCONNECT_GRACE_SECONDS,
-                player_id,
-                session_id,
-            )
-            task = asyncio.create_task(_disconnect_grace_expiry(sid, session_id, player_id, "disconnect"))
-            _disconnect_grace_tasks[player_id] = task
-            return  # Don't call _leave yet
+    async with _room_lock:
+        # Mid-game disconnect grace: defer _leave so the player can reconnect
+        # and reclaim their slot within _DISCONNECT_GRACE_SECONDS.
+        entry = _sid_to_room.get(sid)
+        if entry:
+            session_id, player_id, is_spectator = entry
+            room = rooms.get(session_id)
+            if room and room.status == "playing" and not is_spectator:
+                # Cancel any existing grace task before starting a new one —
+                # a rapid reconnect→disconnect cycle could otherwise orphan
+                # the old task while overwriting the dict entry.
+                _cancel_disconnect_grace(player_id)
+                log.info(
+                    "SIO %s disconnect mid-game — %ds grace for %s in room %s",
+                    sid,
+                    _DISCONNECT_GRACE_SECONDS,
+                    player_id,
+                    session_id,
+                )
+                task = asyncio.create_task(_disconnect_grace_expiry(sid, session_id, player_id, "disconnect"))
+                _disconnect_grace_tasks[player_id] = task
+                return  # Don't call _leave yet
 
-    await _leave(sid)
+        await _leave(sid)
