@@ -2654,6 +2654,10 @@
         if (data.reconnect && _peers[senderSid]) {
           const existingPeer = _peers[senderSid];
           _syncLog(`received reconnect offer from ${senderSid}`);
+          // Mark as reconnecting so the DC open handler triggers resync.
+          // Without this, only the initiator's side sends sync-request-full
+          // and the receiver silently continues with stale state.
+          existingPeer.reconnecting = true;
 
           const peerGuard = (p) => _peers[senderSid] === p;
           KNShared.resetPeerConnection(existingPeer, _getIceServers(), senderSid, socket, peerGuard);
