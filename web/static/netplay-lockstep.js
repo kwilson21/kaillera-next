@@ -1656,6 +1656,49 @@
   const _diagInput = (frameNum, applyFrame, force) => _diag.diagInput(frameNum, applyFrame, force);
   const _diagInstallHooks = () => _diag.installHooks();
 
+  // -- State machine observer (read-only) ------------------------------------
+  // Computes a human-readable state name from the boolean flags. Does NOT
+  // control anything — the booleans remain the source of truth. This exists
+  // to make the implicit state machine visible: log transitions, detect
+  // illegal combinations, and prepare for eventual flag→enum migration.
+  //
+  // States (in priority order — first match wins):
+  //   'idle'                — not started
+  //   'gesture-wait'        — waiting for user gesture to unlock audio
+  //   'booting'             — emulator loading
+  //   'syncing'             — initial state sync in progress
+  //   'late-join-wait'      — waiting for late-join state from host
+  //   'late-join-paused'    — host paused for late-joiner
+  //   'awaiting-resync'     — guest paused waiting for resync data
+  //   'pacing-throttle'     — frame pacing cap active
+  //   'rollback-stall'      — rollback engine stalled
+  //   'running'             — tick loop active, normal gameplay
+  //   'running:menu'        — running but in menu (pre-gameplay)
+  //   'stopped'             — tick loop stopped (game ended or cleanup)
+  let _lastComputedState = 'idle';
+
+  const _computeState = () => {
+    if (!_gameStarted) return 'idle';
+    if (_gameStarted && !_selfEmuReady) return 'booting';
+    if (_selfEmuReady && !_selfLockstepReady && !_awaitingLateJoinState) return 'syncing';
+    if (_awaitingLateJoinState) return 'late-join-wait';
+    if (_lateJoinPaused) return 'late-join-paused';
+    if (!_running) return 'stopped';
+    if (_awaitingResync) return 'awaiting-resync';
+    if (_rollbackStallActive) return 'rollback-stall';
+    if (_framePacingActive) return 'pacing-throttle';
+    if (_running && !_inGameplay) return 'running:menu';
+    return 'running';
+  };
+
+  const _checkStateTransition = () => {
+    const cur = _computeState();
+    if (cur !== _lastComputedState) {
+      _syncLog(`STATE ${_lastComputedState} → ${cur} f=${_frameNum}`);
+      _lastComputedState = cur;
+    }
+  };
+
   let _syncChunks = []; // incoming chunks from host DC
   let _syncExpected = 0; // expected chunk count
   let _syncFrame = 0; // frame number of incoming sync
@@ -3211,6 +3254,7 @@
   const startGameSequence = () => {
     if (_gameStarted) return;
     _gameStarted = true;
+    _checkStateTransition();
 
     // P0-1 funnel: lockstep handshake complete, input exchange beginning.
     // This is the meaningful "the player can play now" signal.
@@ -3441,6 +3485,7 @@
       setupKeyTracking();
 
       _selfEmuReady = true;
+      _checkStateTransition();
       hookVirtualGamepad();
 
       // On mobile: hide EJS's built-in virtual gamepad and use our custom one.
@@ -4761,6 +4806,7 @@
   const startLockstep = () => {
     if (_running) return;
     _running = true;
+    _checkStateTransition();
 
     // Ensure session log flushing is active. startGameSequence() sets this
     // up for normal joins, but late-joiners return early from that function
@@ -5298,6 +5344,7 @@
 
   const stopSync = () => {
     _running = false;
+    _checkStateTransition();
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
     _lastAppliedSyncHostFrame = -1;
@@ -5406,6 +5453,7 @@
 
   const tick = () => {
     if (!_running) return;
+    _checkStateTransition();
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
     // diagnostic snapshot when the frame counter has not advanced
@@ -8610,6 +8658,7 @@
         playerCount: peers.length + 1,
         frame: _frameNum,
         running: _running,
+        state: _computeState(),
         mode: 'lockstep',
         syncEnabled: _syncEnabled,
         resyncCount: _resyncCount,
@@ -8618,6 +8667,7 @@
       };
     },
     getDebugState: () => ({
+      state: _computeState(),
       activeRoster: _activeRoster ? [..._activeRoster] : null,
       inputPeerSlots: getInputPeers().map((p) => p.slot),
       running: _running,
