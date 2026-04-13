@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.44.1",
+    "date": "2026-04-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "pause tick loop before capturing late-join state"
+      }
+    ]
+  },
+  {
     "version": "0.44.0",
     "date": "2026-04-13",
     "changes": [
