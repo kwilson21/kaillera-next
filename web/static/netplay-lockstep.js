@@ -7150,7 +7150,7 @@
       // ── Periodic logging with timing + per-region hash exchange ──
       // Tighter interval during menus (30 frames) to catch CSS/stage-select
       // divergence before it compounds. 300 frames during gameplay.
-      const _hashInterval = _inGameplay ? 300 : 1;
+      const _hashInterval = _inGameplay ? 300 : 30;
       if (_frameNum % _hashInterval === 0) {
         const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
         const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
