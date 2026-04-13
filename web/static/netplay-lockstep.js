@@ -1651,91 +1651,6 @@
   // to 2D canvas drawImage if WebGL context isn't available.
   // Cost: ~2-5ms per call (GPU→CPU sync). Runs every 10 frames (~167ms).
 
-  // -- Gameplay screenshot capture (for desync debugging) --------------------
-  // Periodically capture the WebGL canvas via readPixels → scale → JPEG →
-  // send to server. Cost: ~3-5ms GPU sync every SCREENSHOT_INTERVAL frames.
-  // The frame number is snapshotted at capture entry (NOT read in the async
-  // FileReader callback) so peers stamp the actual captured frame instead of
-  // whatever _frameNum has advanced to by the time the JPEG encode finishes.
-  // `_lastScreenshotFrame` guards against the same frame being captured twice
-  // when two tick code paths both hit the SCREENSHOT_INTERVAL modulo check.
-  const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
-  const SCREENSHOT_WIDTH = 160;
-  const SCREENSHOT_HEIGHT = 120;
-  let _screenshotCanvas = null;
-  let _screenshotCtx = null;
-  let _lastScreenshotFrame = -1;
-
-  let _screenshotDebugLogged = false;
-  const _captureAndSendScreenshot = () => {
-    // Snapshot the frame at capture entry so async encoding can't race.
-    const capturedFrame = _frameNum;
-    if (capturedFrame === _lastScreenshotFrame) return; // guard double-capture
-    _lastScreenshotFrame = capturedFrame;
-    const canvas = document.querySelector('#game canvas');
-    if (!canvas || !canvas.width || !canvas.height) {
-      if (!_screenshotDebugLogged) {
-        _screenshotDebugLogged = true;
-        _syncLog(`screenshot: no canvas (sel=${!!canvas} w=${canvas?.width} h=${canvas?.height})`);
-      }
-      return;
-    }
-
-    // Scale down to thumbnail, then toDataURL. The full-res canvas
-    // produces ~175KB JPEG which exceeds the server's 50KB limit.
-    // drawImage from a WebGL canvas works in the same JS task as the
-    // render (before browser composites). No EJS hijacking needed.
-    try {
-      if (!_screenshotCanvas) {
-        _screenshotCanvas = document.createElement('canvas');
-        _screenshotCanvas.width = SCREENSHOT_WIDTH;
-        _screenshotCanvas.height = SCREENSHOT_HEIGHT;
-        _screenshotCtx = _screenshotCanvas.getContext('2d');
-      }
-      const w = canvas.width;
-      const h = canvas.height;
-      const targetRatio = 4 / 3;
-      const srcRatio = w / h;
-      let sx = 0,
-        sy = 0,
-        sw = w,
-        sh = h;
-      if (srcRatio > targetRatio) {
-        sw = Math.round(h * targetRatio);
-        sx = Math.round((w - sw) / 2);
-      } else if (srcRatio < targetRatio) {
-        sh = Math.round(w / targetRatio);
-        sy = Math.round((h - sh) / 2);
-      }
-      _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
-      const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
-      if (!dataUrl || dataUrl.length < 100) {
-        if (!_screenshotDebugLogged) {
-          _screenshotDebugLogged = true;
-          _syncLog(`screenshot: toDataURL too small (${dataUrl?.length || 0})`);
-        }
-        return;
-      }
-      if (!_screenshotDebugLogged) {
-        _screenshotDebugLogged = true;
-        _syncLog(`screenshot: ok ${SCREENSHOT_WIDTH}x${SCREENSHOT_HEIGHT} size=${dataUrl.length}`);
-      }
-      const base64 = dataUrl.split(',')[1];
-      if (!socket?.connected) return;
-      socket.emit('game-screenshot', {
-        matchId: _cachedMatchId || KNState.matchId,
-        slot: _playerSlot,
-        frame: capturedFrame,
-        data: base64,
-      });
-    } catch (e) {
-      if (!_screenshotDebugLogged) {
-        _screenshotDebugLogged = true;
-        _syncLog(`screenshot: error: ${e.message}`);
-      }
-    }
-  };
-
   // -- Diagnostic functions (delegated to kn-diagnostics.js) --
   const _diagInput = (frameNum, applyFrame, force) => window.KNDiag.diagInput(frameNum, applyFrame, force);
   const _diagInstallHooks = () => window.KNDiag.installHooks();
@@ -4701,8 +4616,8 @@
     runner(frameTimeMs);
 
     // Periodic gameplay screenshot for desync debugging
-    if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) {
-      _captureAndSendScreenshot();
+    if (_frameNum > 0 && _frameNum % window.KNDiag.SCREENSHOT_INTERVAL === 0) {
+      window.KNDiag.captureAndSendScreenshot();
       // Log event queue hash + interrupt trace for cross-peer comparison
       const eqMod = window.EJS_emulator?.gameManager?.Module;
       if (eqMod?._kn_eventqueue_hash) {
@@ -4766,7 +4681,7 @@
       // Input hash: FNV-1a over all inputs (local + remote) for last 300 frames.
       // Compare across peers to definitively prove whether inputs match.
       {
-        const startF = _frameNum - SCREENSHOT_INTERVAL;
+        const startF = _frameNum - window.KNDiag.SCREENSHOT_INTERVAL;
         let ih = 2166136261 >>> 0;
         const slots = [
           _playerSlot,
@@ -5125,6 +5040,13 @@
       log: _syncLog,
       getFrame: () => _frameNum,
       getSlot: () => _playerSlot,
+      sendScreenshot: (data) => {
+        if (!socket?.connected) return;
+        socket.emit('game-screenshot', {
+          matchId: _cachedMatchId || KNState.matchId,
+          ...data,
+        });
+      },
     });
     if (window._KN_DIAG) _diagInstallHooks();
 
@@ -7290,7 +7212,8 @@
           dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
         }
       }
-      if (_frameNum > 0 && _frameNum % SCREENSHOT_INTERVAL === 0) _captureAndSendScreenshot();
+      if (_frameNum > 0 && _frameNum % window.KNDiag.SCREENSHOT_INTERVAL === 0)
+        window.KNDiag.captureAndSendScreenshot();
       return;
     }
 
@@ -8508,7 +8431,6 @@
     _localInputs = {};
     _frameNum = 0;
     _funnelMilestoneSent = false;
-    _lastScreenshotFrame = -1;
     KNState.frameNum = 0;
     _running = false;
     _lateJoin = false;

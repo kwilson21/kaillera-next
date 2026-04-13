@@ -14,6 +14,8 @@
  *   window.KNDiag.cleanup()             — remove all listeners, reset state
  *   window.KNDiag.checkFreeze(localInput) — per-frame freeze detection (call from tick)
  *   window.KNDiag.captureCanvasHash()   — FNV-1a hash of game canvas pixels
+ *   window.KNDiag.captureAndSendScreenshot() — capture + send gameplay screenshot
+ *   window.KNDiag.SCREENSHOT_INTERVAL   — frame interval for periodic screenshots
  *   window.KNDiag.diagInput(f, af, force) — DIAG-INPUT logger
  *   window.KNDiag.eventLog              — readonly ref to event log array
  *   window.KNDiag.playerAddrs           — per-player input base addresses
@@ -101,15 +103,17 @@
   let _inputDeadLogged = false;
   let _audioLastState = '';
 
-  // Context callbacks
+  // Context callbacks — set by init()
   let _log = () => {};
   let _getFrame = () => 0;
   let _getSlot = () => -1;
+  let _sendScreenshot = null; // (data: {matchId, slot, frame, data}) => void
 
   function init(ctx) {
     _log = ctx.log || _log;
     _getFrame = ctx.getFrame || _getFrame;
     _getSlot = ctx.getSlot || _getSlot;
+    _sendScreenshot = ctx.sendScreenshot || null;
   }
 
   // -- Diag helpers --
@@ -285,6 +289,78 @@
     }
   }
 
+  // -- Gameplay screenshot capture --
+  const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
+  const SCREENSHOT_WIDTH = 160;
+  const SCREENSHOT_HEIGHT = 120;
+  let _screenshotCanvas = null;
+  let _screenshotCtx = null;
+  let _lastScreenshotFrame = -1;
+  let _screenshotDebugLogged = false;
+
+  function captureAndSendScreenshot() {
+    if (!_sendScreenshot) return;
+    const capturedFrame = _getFrame();
+    if (capturedFrame === _lastScreenshotFrame) return;
+    _lastScreenshotFrame = capturedFrame;
+    const canvas = document.querySelector('#game canvas');
+    if (!canvas || !canvas.width || !canvas.height) {
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _log(`screenshot: no canvas (sel=${!!canvas} w=${canvas?.width} h=${canvas?.height})`);
+      }
+      return;
+    }
+
+    try {
+      if (!_screenshotCanvas) {
+        _screenshotCanvas = document.createElement('canvas');
+        _screenshotCanvas.width = SCREENSHOT_WIDTH;
+        _screenshotCanvas.height = SCREENSHOT_HEIGHT;
+        _screenshotCtx = _screenshotCanvas.getContext('2d');
+      }
+      const w = canvas.width;
+      const h = canvas.height;
+      const targetRatio = 4 / 3;
+      const srcRatio = w / h;
+      let sx = 0,
+        sy = 0,
+        sw = w,
+        sh = h;
+      if (srcRatio > targetRatio) {
+        sw = Math.round(h * targetRatio);
+        sx = Math.round((w - sw) / 2);
+      } else if (srcRatio < targetRatio) {
+        sh = Math.round(w / targetRatio);
+        sy = Math.round((h - sh) / 2);
+      }
+      _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+      const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
+      if (!dataUrl || dataUrl.length < 100) {
+        if (!_screenshotDebugLogged) {
+          _screenshotDebugLogged = true;
+          _log(`screenshot: toDataURL too small (${dataUrl?.length || 0})`);
+        }
+        return;
+      }
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _log(`screenshot: ok ${SCREENSHOT_WIDTH}x${SCREENSHOT_HEIGHT} size=${dataUrl.length}`);
+      }
+      const base64 = dataUrl.split(',')[1];
+      _sendScreenshot({
+        slot: _getSlot(),
+        frame: capturedFrame,
+        data: base64,
+      });
+    } catch (e) {
+      if (!_screenshotDebugLogged) {
+        _screenshotDebugLogged = true;
+        _log(`screenshot: error: ${e.message}`);
+      }
+    }
+  }
+
   // -- Cleanup --
 
   function cleanup() {
@@ -324,6 +400,10 @@
     _glPixelBuf = null;
     _offscreenCanvas = null;
     _offscreenCtx = null;
+    _screenshotCanvas = null;
+    _screenshotCtx = null;
+    _lastScreenshotFrame = -1;
+    _screenshotDebugLogged = false;
   }
 
   window.KNDiag = {
@@ -332,6 +412,8 @@
     cleanup,
     checkFreeze,
     captureCanvasHash,
+    captureAndSendScreenshot,
+    SCREENSHOT_INTERVAL,
     diagInput,
     get eventLog() {
       return _eventLog;
