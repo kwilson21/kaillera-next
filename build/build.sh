@@ -88,7 +88,7 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
 
@@ -222,6 +222,29 @@ EMSCRIPTEN_KEEPALIVE uint32_t kn_get_hidden_state_fingerprint_impl(void) {
 #endif
 KNFP_EOF
         echo "    Injected kn_get_hidden_state_fingerprint_impl"
+    fi
+
+    # Inject kn_hle_save/restore into RSP HLE plugin for rollback
+    if ! grep -q "kn_hle_save" mupen64plus-rsp-hle/src/plugin.c; then
+        cat >> mupen64plus-rsp-hle/src/plugin.c <<'KNHLE_EOF'
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <string.h>
+#include <stddef.h>
+#define KN_HLE_RB_OFFSET offsetof(struct hle_t, alist_buffer)
+#define KN_HLE_RB_SIZE   (offsetof(struct hle_t, cached_ucodes) - offsetof(struct hle_t, alist_buffer))
+static uint8_t *kn_hle_rb_snapshot = NULL;
+EMSCRIPTEN_KEEPALIVE void kn_hle_save(void) {
+    if (!kn_hle_rb_snapshot) kn_hle_rb_snapshot = (uint8_t *)malloc(KN_HLE_RB_SIZE);
+    if (kn_hle_rb_snapshot) memcpy(kn_hle_rb_snapshot, ((uint8_t *)&g_hle) + KN_HLE_RB_OFFSET, KN_HLE_RB_SIZE);
+}
+EMSCRIPTEN_KEEPALIVE void kn_hle_restore(void) {
+    if (kn_hle_rb_snapshot) memcpy(((uint8_t *)&g_hle) + KN_HLE_RB_OFFSET, kn_hle_rb_snapshot, KN_HLE_RB_SIZE);
+}
+#endif
+KNHLE_EOF
+        echo "    Injected kn_hle_save/kn_hle_restore"
     fi
 
     # v3 kn_sync_read/write: complete state capture matching retro_serialize.

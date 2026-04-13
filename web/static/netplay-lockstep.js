@@ -6556,17 +6556,17 @@
       // causes peers to reach screen transitions at different frames.
       // This second sync at CSS entry forces both peers to identical state
       // right before player input matters.
-      if (gameStatus === 0 && !window._knCssSyncDone && _bootDoneForSync && _frameNum > BOOT_GRACE_FRAMES + 30) {
+      // CSS sync: one-time state push when game_status first becomes 0.
+      if (gameStatus === 0 && !window._knCssSyncDone && _bootDoneForSync) {
         window._knCssSyncDone = true;
+        _syncLog(`CSS-SYNC: menu detected at f=${_frameNum}, lockstep active`);
         if (_playerSlot !== 0) {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
             try {
               hostPeer.dc.send('sync-request-full');
-              _syncLog(`CSS-SYNC: guest requesting host state at f=${_frameNum} (menu entry sync)`);
-            } catch (e) {
-              _syncLog(`CSS-SYNC send failed: ${e}`);
-            }
+              _syncLog(`CSS-SYNC: guest requesting host state at f=${_frameNum}`);
+            } catch (_) {}
           }
         }
       }
@@ -6866,6 +6866,15 @@
       if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _rbReplayLogged = true;
+        // Skip RSP audio during replay: save hle_t state, switch to mode 1.
+        // Mode 2's DRAM restore means original execution has net-zero audio
+        // DRAM writes. Skipping audio entirely during replay produces the
+        // same net-zero result, but faster and without the hle_t state
+        // divergence that causes LIVE-MISMATCH.
+        if (tickMod._kn_hle_save && tickMod._kn_set_skip_rsp_audio) {
+          tickMod._kn_hle_save();
+          tickMod._kn_set_skip_rsp_audio(1); // skip entirely during replay
+        }
       }
       if (_rbReplayLogged && !catchingUp) {
         // Replay finished — broadcast the gameplay hash so the peer can
@@ -6897,6 +6906,11 @@
         _rbReplayLogged = false;
         _lastRollbackDoneFrame = _frameNum;
         _resetAudioCallsSinceRb = 0;
+        // Restore hle_t state and re-enable mode 2 audio after replay
+        if (tickMod._kn_hle_restore && tickMod._kn_set_skip_rsp_audio) {
+          tickMod._kn_hle_restore();
+          tickMod._kn_set_skip_rsp_audio(2); // back to mode 2
+        }
       }
 
       if (catchingUp === 3) {
