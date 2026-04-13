@@ -6632,12 +6632,33 @@
               _bootStallRecoveryFired = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
+            // During menus/boot, stall briefly (500ms) then fabricate zero
+            // input and continue. This prevents multi-second freezes during
+            // intro screens while maintaining lockstep. Zero input during
+            // intros is harmless (no player actions needed). If real input
+            // arrives later, rollback or resync will correct.
+            if (stallDuration < 500) {
+              // Brief stall — wait for input to arrive
+              if (_frameNum % 60 === 0) {
+                _syncLog(
+                  `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                    `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                );
+              }
+              return;
+            }
+            // Stall exceeded 500ms — fabricate zero input and continue
+            if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
+            if (!_remoteInputs[missingSlot][rbApplyFrame]) {
+              _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
+            }
+            // Request resync after fabrication to converge divergence (MF4 pattern)
             if (stallDuration >= 3000 && !_bootStallRecoveryFired) {
               _bootStallRecoveryFired = true;
               _syncLog(
                 `BOOT-DEADLOCK-RECOVERY f=${_frameNum} applyF=${rbApplyFrame} ` +
                   `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)} — ` +
-                  `requesting immediate resync`,
+                  `fabricated zero + requesting resync`,
               );
               if (_playerSlot !== 0) {
                 const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
@@ -6645,20 +6666,11 @@
                 if (hostDc?.readyState === 'open') {
                   try {
                     hostDc.send('sync-request-full');
-                    _syncLog('BOOT-DEADLOCK-RECOVERY: sent immediate sync-request-full');
-                  } catch (e) {
-                    _syncLog(`BOOT-DEADLOCK-RECOVERY send failed: ${e}`);
-                  }
+                  } catch (_) {}
                 }
               }
             }
-            if (_frameNum % 60 === 0) {
-              _syncLog(
-                `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                  `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
-              );
-            }
-            return;
+            // Fall through to normal tick with fabricated zero input
           }
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
@@ -6847,16 +6859,28 @@
       }
 
       if (catchingUp === 3) {
-        _pacingCapsFrames++;
-        if (!_framePacingActive) {
-          _framePacingActive = true;
-          _pacingThrottleStartAt = performance.now();
-          _pacingCapsCount++;
-          _syncLog(
-            `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
-          );
+        // Check if all peers are phantom — if so, ignore C-level throttle
+        // to prevent permanent freeze when the only peer has disconnected.
+        const allPhantom = getInputPeers().every((p) => _peerPhantom[p.slot]);
+        if (allPhantom) {
+          if (_framePacingActive) {
+            _framePacingActive = false;
+            _pacingThrottleStartAt = 0;
+            _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
+          }
+          // Fall through to normal tick instead of returning
+        } else {
+          _pacingCapsFrames++;
+          if (!_framePacingActive) {
+            _framePacingActive = true;
+            _pacingThrottleStartAt = performance.now();
+            _pacingCapsCount++;
+            _syncLog(
+              `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
+            );
+          }
+          return;
         }
-        return;
       }
       if (_framePacingActive) {
         _framePacingActive = false;
