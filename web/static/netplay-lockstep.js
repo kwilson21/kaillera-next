@@ -7582,8 +7582,8 @@
                             //  - Otherwise dump SUB_DUMPS_PER_REGION samples
                             //    spread across the region (broad coverage)
                             const dumpIdxs = divergingSubs.length
-                              ? divergingSubs.slice(0, 8)
-                              : Array.from({ length: SUB_DUMPS_PER_REGION }, (_, k) =>
+                              ? divergingSubs.slice(0, 3)
+                              : Array.from({ length: Math.min(SUB_DUMPS_PER_REGION, 3) }, (_, k) =>
                                   Math.floor((k * subCount) / SUB_DUMPS_PER_REGION),
                                 );
                             for (const si of dumpIdxs) {

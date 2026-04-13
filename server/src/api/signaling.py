@@ -1132,7 +1132,8 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
     entries = payload.entries if isinstance(payload.entries, list) else []
     log_data_str = json.dumps(entries)
     while len(log_data_str) > _SESSION_LOG_MAX and entries:
-        entries = entries[: len(entries) // 2]
+        # Keep LATEST entries (drop oldest) so reconnect/desync events survive
+        entries = entries[len(entries) // 2 :]
         log_data_str = json.dumps(entries)
 
     await db.upsert_session_log(
