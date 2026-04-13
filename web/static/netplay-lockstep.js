@@ -451,7 +451,6 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
-  let _anyMobilePeer = false; // true if any player in the room is on mobile
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
@@ -1143,19 +1142,6 @@
   // Full RDRAM hash — hashes all 128 × 64KB blocks (8MB total) via kn_rdram_block_hashes.
   // Returns a single uint32 combining all block hashes. ~1-2ms on mobile.
   let _rbHashBufPtr = 0;
-  const _rbFullHash = (mod) => {
-    if (!mod._kn_rdram_block_hashes) return 0;
-    if (!_rbHashBufPtr && mod._malloc) _rbHashBufPtr = mod._malloc(128 * 4);
-    if (!_rbHashBufPtr) return 0;
-    const count = mod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
-    const hashes = new Uint32Array(mod.HEAPU8.buffer, _rbHashBufPtr, count);
-    let h = 2166136261;
-    for (let i = 0; i < count; i++) {
-      h ^= hashes[i];
-      h = Math.imul(h, 16777619);
-    }
-    return h >>> 0;
-  };
 
   // Read input from C ring buffer for a given slot/frame.
   // Returns input object compatible with writeInputToMemory.
@@ -1175,18 +1161,11 @@
     return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
   };
 
-  // -- Audio bypass state --
-  let _audioCtx = null;
-  let _audioWorklet = null;
-  let _audioDestNode = null;
-  let _resyncGainNode = null; // GainNode for fade-out/fade-in around resyncs
+  // -- Audio (delegated to kn-audio.js / window.KNAudio) --
   // Canvas hash checks only run after reconnect events — during steady-state
   // gameplay, trust AI DMA determinism. GPU rendering differences between platforms
   // cause false-positive canvas mismatches that trigger unnecessary resyncs.
   let _canvasCheckUntil = 0; // frame number until which canvas checks are active
-  let _audioPtr = 0;
-  let _audioRate = 0;
-  let _audioReady = false;
   let _peers = {}; // remoteSid -> PeerState
   let _knownPlayers = {}; // socketId -> {slot, playerName}
   let _gameStarted = false;
@@ -1402,13 +1381,9 @@
   let _syncMismatchStreak = 0; // consecutive anchor-hash mismatches without a successful sync-OK
   // Escalate to full resync after this many consecutive mismatches (delta syncs stopped converging).
   // At 10-frame interval: 5 mismatches ≈ 50 frames ≈ 0.8s — fast enough to catch stuck delta loops.
-  const MISMATCH_FULL_RESYNC_THRESHOLD = 5;
-  let _prevBlockHashes = null; // diagnostic: previous kn_rdram_block_hashes snapshot
   let _offscreenCanvas = null; // reused 64×48 canvas for pixel hash capture
   let _offscreenCtx = null;
-  let _lastResyncFrame = 0; // frame when last applySyncState ran (pixel verify window)
   let _lastResyncToastTime = 0; // wall-clock ms of last 'Desync corrected' toast (throttle)
-  let _lastDesyncEventTime = 0; // wall-clock ms of last KNEvent('desync') — throttle to avoid 429
   // Resync cooldown: minimum time between applying a state and sending the next explicit request.
   // Exponential backoff on _consecutiveResyncs: if corrections keep re-diverging immediately,
   // back off to avoid a snap every second. Resets to 400ms baseline on sync OK.
@@ -1957,7 +1932,6 @@
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
-  let _pendingSyncCheck = null; // deferred sync check {frame, hash, peerSid}
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
   let _hasKnSync = false;
@@ -2005,41 +1979,12 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  const _PROACTIVE_SYNC_INTERVAL = 300; // frames (~5s at 60fps). Reduced from 30f to avoid FPS drops — each push reads 8MB + compresses + sends 2.5MB
-  // (proactive flood caused input FRAME-CAPs). Now that sync uses a separate low-priority DC,
-  // 30f is safe. Faster interval = fresher buffered state = smaller correction snap (~30f snap vs ~60f).
   let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
   let _syncIsRegions = false; // true when current incoming sync-regions-start is a regions patch
 
   // Apply buffered proactive state immediately on desync, skipping the round-trip.
   // Returns true if a preloaded state was promoted (caller should NOT send sync-request).
-  const _tryApplyPreloaded = () => {
-    if (!_preloadedResyncState) return false;
-    // Note: _consecutiveResyncs check removed. The fast-path can't loop because it
-    // consumes _preloadedResyncState, which isn't refilled until the next proactive
-    // push (~30 frames later). After the fast-path fires once, subsequent desync
-    // checks find _preloadedResyncState=null and fall through to the explicit path.
-    const age = _frameNum - _preloadedResyncState.receivedFrame;
-    if (age >= 120) {
-      _preloadedResyncState = null;
-      return false;
-    }
-    // Don't apply proactive state older than the most recently applied coord state —
-    // that would move the emulator backwards in time and cause immediate re-divergence.
-    if (_preloadedResyncState.frame <= _lastAppliedSyncHostFrame) {
-      _syncLog(
-        `proactive discarded: stale frame=${_preloadedResyncState.frame} <= lastApplied=${_lastAppliedSyncHostFrame}`,
-      );
-      _preloadedResyncState = null;
-      return false;
-    }
-    _pendingResyncState = { ..._preloadedResyncState, fromProactive: true };
-    _preloadedResyncState = null;
-    _lastResyncTime = performance.now();
-    _syncLog(`instant resync from preloaded state (age=${age}f frame=${_pendingResyncState.frame})`);
-    return true;
-  };
 
   // Frame pacing (GGPO-style frame advantage cap)
   const FRAME_ADV_ALPHA_UP = 0.1; // EMA when advantage is rising (slow to trigger)
@@ -2077,289 +2022,18 @@
   KNState.peers = _peers;
   KNState.frameNum = 0;
 
+  // -- Audio pipeline (delegated to kn-audio.js) --
   async function initAudioPlayback() {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod) return;
-
-    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples || !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
-      _syncLog('audio capture exports not found — audio disabled');
-      return;
-    }
-
-    _audioPtr = mod._kn_get_audio_ptr();
-    _audioRate = mod._kn_get_audio_rate();
-    const initSamples = mod._kn_get_audio_samples();
-    const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
-    _syncLog(
-      `audio init: ptr=${_audioPtr} rate=${_audioRate} initSamples=${initSamples} alCtx=${alCtxCount} f=${_frameNum}`,
-    );
-    if (!_audioRate || _audioRate <= 0) {
-      _syncLog('audio rate not set yet, defaulting to 33600');
-      _audioRate = 33600;
-    }
-
-    try {
-      // Reuse gesture-created context if available (already running on mobile).
-      // For mobile hosts, play.js pre-creates one in the startGame() click handler
-      // (window._kn_preloadedAudioCtx) since the engine starts audio 30+ seconds
-      // after the gesture — past iOS's trust window.
-      if (!_audioCtx || _audioCtx.state === 'closed') {
-        const preloaded = window._kn_preloadedAudioCtx;
-        if (preloaded && preloaded.state === 'running' && preloaded.currentTime < 5) {
-          _audioCtx = preloaded;
-          delete window._kn_preloadedAudioCtx;
-          _syncLog(
-            `reusing host gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`,
-          );
-        } else {
-          _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
-        }
-      } else {
-        _syncLog(`reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
-        // Keep the gesture oscillator alive until a real audio node is connected.
-        // Stopping it now would leave _audioCtx with no active sources during the
-        // async AudioWorklet probe, causing iOS to deactivate the audio session.
-      }
-
-      // Try AudioWorklet first (requires secure context), fall back to
-      // AudioBufferSourceNode scheduling (works everywhere including mobile HTTP).
-      let workletOk = false;
-      if (_audioCtx.audioWorklet) {
-        try {
-          await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
-          _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
-            numberOfInputs: 0,
-            numberOfOutputs: 1,
-            outputChannelCount: [2],
-            processorOptions: { sampleRate: _audioRate },
-          });
-
-          if (_playerSlot === 0) {
-            _audioDestNode = _audioCtx.createMediaStreamDestination();
-            _audioWorklet.connect(_audioDestNode);
-          }
-
-          _audioWorklet.connect(_audioCtx.destination);
-          workletOk = true;
-          _syncLog('audio using AudioWorklet');
-        } catch (wErr) {
-          _syncLog(`AudioWorklet failed, using fallback: ${wErr.message}`);
-          KNEvent('audio-fail', `AudioWorklet failed: ${wErr.message}`, { error: wErr.message });
-        }
-      }
-
-      if (!workletOk) {
-        // Fallback: ScriptProcessorNode with ring buffer.
-        // AudioBufferSourceNode per-frame scheduling doesn't produce sound
-        // on iOS WKWebView (FxiOS). ScriptProcessorNode continuously pulls
-        // audio, keeping the iOS audio session active.
-        _audioWorklet = null;
-        const ringSize = Math.ceil(_audioRate * 0.1) * 2; // ~100ms stereo
-        window._kn_audioRing = new Float32Array(ringSize);
-        window._kn_audioRingWrite = 0;
-        window._kn_audioRingRead = 0;
-        window._kn_audioRingCount = 0;
-        const spNode = _audioCtx.createScriptProcessor(2048, 0, 2);
-        spNode.onaudioprocess = (e) => {
-          const outL = e.outputBuffer.getChannelData(0);
-          const outR = e.outputBuffer.getChannelData(1);
-          const ring = window._kn_audioRing;
-          const rSize = ring.length;
-          for (let si = 0; si < outL.length; si++) {
-            if (window._kn_audioRingCount >= 2) {
-              outL[si] = ring[window._kn_audioRingRead];
-              outR[si] = ring[(window._kn_audioRingRead + 1) % rSize];
-              window._kn_audioRingRead = (window._kn_audioRingRead + 2) % rSize;
-              window._kn_audioRingCount -= 2;
-            } else {
-              outL[si] = 0;
-              outR[si] = 0;
-            }
-          }
-        };
-        if (_playerSlot === 0) {
-          _audioDestNode = _audioCtx.createMediaStreamDestination();
-          spNode.connect(_audioDestNode);
-        }
-        const gestureDest = window._kn_gestureAudioDest;
-        if (gestureDest) {
-          spNode.connect(gestureDest);
-          _syncLog(`audio using ScriptProcessorNode fallback via <audio> element (ring=${ringSize})`);
-        } else {
-          spNode.connect(_audioCtx.destination);
-          _syncLog(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
-        }
-        window._kn_scriptProcessor = spNode;
-      }
-
-      // NOW stop the keep-alive oscillator — a real audio node is connected,
-      // so the iOS audio session stays alive across the handoff.
-      if (window._kn_keepAliveOsc) {
-        try {
-          window._kn_keepAliveOsc.stop();
-        } catch (_) {}
-        window._kn_keepAliveOsc = null;
-      }
-
-      _audioReady = true;
-
-      // Resume AudioContext on user interaction (autoplay policy).
-      // Use capture phase so EmulatorJS virtual controls can't block via
-      // stopPropagation. Retry on every interaction until actually running.
-      if (_audioCtx.state !== 'running') {
-        const resumeAudio = async () => {
-          if (!_audioCtx || _audioCtx.state === 'running') {
-            document.removeEventListener('click', resumeAudio, true);
-            document.removeEventListener('keydown', resumeAudio, true);
-            document.removeEventListener('touchstart', resumeAudio, true);
-            return;
-          }
-          try {
-            await _audioCtx.resume();
-            _syncLog(`audio resumed via gesture (state: ${_audioCtx.state})`);
-            document.removeEventListener('click', resumeAudio, true);
-            document.removeEventListener('keydown', resumeAudio, true);
-            document.removeEventListener('touchstart', resumeAudio, true);
-          } catch (e) {
-            _syncLog(`audio resume failed: ${e.name}: ${e.message}`);
-            KNEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name });
-          }
-        };
-        document.addEventListener('click', resumeAudio, true);
-        document.addEventListener('keydown', resumeAudio, true);
-        document.addEventListener('touchstart', resumeAudio, true);
-        _syncLog(`audio context state: ${_audioCtx.state} — waiting for gesture to resume`);
-      }
-
-      _syncLog(`audio playback initialized (rate: ${_audioRate})`);
-    } catch (err) {
-      _syncLog(`audio init failed: ${err}`);
-      _audioReady = false;
-    }
+    await window.KNAudio.init({
+      log: _syncLog,
+      getFrame: () => _frameNum,
+      getSlot: () => _playerSlot,
+      getLastRbFrame: () => _lastRollbackDoneFrame,
+      getResetAudioCalls: () => _resetAudioCallsSinceRb,
+      knEvent: KNEvent,
+    });
   }
-
-  let _audioFeedCount = 0;
-  let _audioEmptyCount = 0;
-  let _audioErrorLogged = false;
-  let _audioSuspendedToastShown = false;
-  const feedAudio = () => {
-    try {
-      if (!_audioReady || !_audioCtx) return;
-      // BF1/BF8: don't feed audio into a suspended context — attempt resume instead
-      if (_audioCtx.state === 'suspended') {
-        _audioCtx.resume().catch(() => {});
-        return;
-      }
-      const mod = window.EJS_emulator?.gameManager?.Module;
-      if (!mod) return;
-
-      const n = mod._kn_get_audio_samples();
-      if (n <= 0) {
-        _audioEmptyCount++;
-        // Log first 30 empty frames for diagnostics on fresh boot
-        if (_audioEmptyCount <= 30) {
-          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
-          const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'none';
-          // RF6 Part A: rollback-correlation + subsystem state enrichment
-          const rbDelta = _lastRollbackDoneFrame != null ? _frameNum - _lastRollbackDoneFrame : -1;
-          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
-          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
-          _syncLog(
-            `audio-empty f=${_frameNum} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState} ` +
-              `lastRb=${_lastRollbackDoneFrame ?? -1} ` +
-              `rbDelta=${rbDelta} ` +
-              `resetAudioCalls=${_resetAudioCallsSinceRb} ` +
-              `ctxState=${ctxState} ` +
-              `workletPort=${workletPort}`,
-          );
-        }
-        // Log once after 300 consecutive empty frames (~5s) to detect silent audio
-        if (_audioEmptyCount === 300) {
-          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
-          const sdlState = mod.SDL2?.audioContext?.state ?? 'none';
-          // RF6 Part A: rollback-correlation + subsystem state enrichment
-          const rbDelta = _lastRollbackDoneFrame != null ? _frameNum - _lastRollbackDoneFrame : -1;
-          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
-          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
-          _syncLog(
-            `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState}) ` +
-              `lastRb=${_lastRollbackDoneFrame ?? -1} ` +
-              `rbDelta=${rbDelta} ` +
-              `resetAudioCalls=${_resetAudioCallsSinceRb} ` +
-              `ctxState=${ctxState} ` +
-              `workletPort=${workletPort}`,
-          );
-          // BF1: surface persistent audio failure to the user
-          if (_audioCtx.state === 'suspended' && !_audioSuspendedToastShown) {
-            _audioSuspendedToastShown = true;
-            window.knShowToast?.('Audio blocked \u2014 click anywhere to enable sound', 'warn');
-          }
-        }
-        return;
-      }
-      _audioEmptyCount = 0;
-
-      // Log audio state periodically (every 600 frames ≈ 10s)
-      _audioFeedCount++;
-      if (_audioFeedCount === 1 || _audioFeedCount % 600 === 0) {
-        // Check PCM level (RMS of first 100 samples)
-        const pcmCheck = new Int16Array(mod.HEAPU8.buffer, _audioPtr, Math.min(n * 2, 200));
-        let rms = 0;
-        for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
-        rms = Math.sqrt(rms / pcmCheck.length);
-        _syncLog(
-          `audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`,
-        );
-      }
-
-      const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
-
-      if (_audioWorklet) {
-        // AudioWorklet path
-        const copy = new Int16Array(pcm);
-        _audioWorklet.port.postMessage(copy, [copy.buffer]);
-      } else {
-        // ScriptProcessorNode fallback — push PCM to ring buffer.
-        // The ScriptProcessorNode's onaudioprocess callback pulls from it.
-        const ring = window._kn_audioRing;
-        if (ring) {
-          const rSize = ring.length;
-          for (let i = 0; i < n; i++) {
-            ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
-            ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
-            window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
-          }
-          window._kn_audioRingCount += n * 2;
-          if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
-        }
-      }
-    } catch (audioErr) {
-      if (!_audioErrorLogged) {
-        _syncLog(`AUDIO-ERROR: ${audioErr.message}`);
-        _audioErrorLogged = true;
-      }
-    }
-  };
-
-  // -- Resync audio fade helpers --
-  const FADE_OUT_MS = 30;
-  const FADE_IN_MS = 50;
-
-  const _audioFadeOut = () => {
-    if (!_resyncGainNode || !_audioCtx || _audioCtx.state !== 'running') return;
-    const now = _audioCtx.currentTime;
-    _resyncGainNode.gain.cancelScheduledValues(now);
-    _resyncGainNode.gain.setValueAtTime(_resyncGainNode.gain.value, now);
-    _resyncGainNode.gain.linearRampToValueAtTime(0, now + FADE_OUT_MS / 1000);
-  };
-
-  const _audioFadeIn = () => {
-    if (!_resyncGainNode || !_audioCtx || _audioCtx.state !== 'running') return;
-    const now = _audioCtx.currentTime;
-    _resyncGainNode.gain.cancelScheduledValues(now);
-    _resyncGainNode.gain.setValueAtTime(0, now + FADE_OUT_MS / 1000);
-    _resyncGainNode.gain.linearRampToValueAtTime(1, now + (FADE_OUT_MS + FADE_IN_MS) / 1000);
-  };
+  const feedAudio = () => window.KNAudio.feed();
 
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
@@ -2446,7 +2120,6 @@
     }
 
     const otherPlayers = Object.values(players).filter((p) => p.socketId !== socket.id);
-    _anyMobilePeer = Object.values(players).some((p) => p.deviceType === 'mobile');
     const existingPeerSids = Object.keys(_peers);
     _syncLog(
       `onUsersUpdated: ${Object.keys(players).length} players, ${otherPlayers.length} others, ` +
@@ -3871,13 +3544,15 @@
             // Pre-create the lockstep AudioContext at 44100Hz (N64 core rate).
             // iOS WKWebView may silently fail when AudioBufferSourceNode
             // buffers don't match the context's sample rate.
-            if (!_audioCtx) {
+            // Stored as _kn_preloadedAudioCtx — KNAudio.init() picks it up.
+            if (!window._kn_preloadedAudioCtx) {
+              let _preCtx;
               try {
-                _audioCtx = new AC({ sampleRate: 44100 });
+                _preCtx = new AC({ sampleRate: 44100 });
               } catch (_) {
-                _audioCtx = new AC(); // fallback to native rate
+                _preCtx = new AC(); // fallback to native rate
               }
-              _audioCtx.resume().catch((e) => {
+              _preCtx.resume().catch((e) => {
                 _syncLog(`lockstep AudioContext resume: ${e.name}: ${e.message}`);
               });
               // iOS FxiOS (WKWebView): ScriptProcessorNode → destination produces
@@ -3885,7 +3560,7 @@
               // Route through <audio> element instead — iOS grants privileged audio
               // output to <audio>.play() called within a gesture. We set it up HERE
               // (in the gesture handler) so the .play() authorization persists.
-              const gestDest = _audioCtx.createMediaStreamDestination();
+              const gestDest = _preCtx.createMediaStreamDestination();
               const gestAudio = document.createElement('audio');
               gestAudio.srcObject = gestDest.stream;
               gestAudio.play().catch(() => {});
@@ -3893,14 +3568,15 @@
               window._kn_gestureAudioDest = gestDest;
               // Keep-alive: silent oscillator through the <audio> element so the
               // iOS audio session stays active until real audio takes over.
-              const _keepAliveGain = _audioCtx.createGain();
+              const _keepAliveGain = _preCtx.createGain();
               _keepAliveGain.gain.value = 0;
-              const _keepAliveOsc = _audioCtx.createOscillator();
+              const _keepAliveOsc = _preCtx.createOscillator();
               _keepAliveOsc.connect(_keepAliveGain);
               _keepAliveGain.connect(gestDest);
               _keepAliveOsc.start();
               window._kn_keepAliveOsc = _keepAliveOsc;
-              _syncLog(`lockstep AudioContext pre-created in gesture (rate: ${_audioCtx.sampleRate})`);
+              window._kn_preloadedAudioCtx = _preCtx;
+              _syncLog(`lockstep AudioContext pre-created in gesture (rate: ${_preCtx.sampleRate})`);
             }
             const _RealAC = AC;
             let _hijacked = false;
@@ -4919,8 +4595,8 @@
     _hostStream = captureCanvas.captureStream(0); // manual frame control
 
     // Add audio track from bypass playback (if available)
-    if (_audioDestNode?.stream) {
-      const audioTracks = _audioDestNode.stream.getAudioTracks();
+    if (window.KNAudio?.destNode?.stream) {
+      const audioTracks = window.KNAudio.destNode.stream.getAudioTracks();
       for (let at = 0; at < audioTracks.length; at++) {
         _hostStream.addTrack(audioTracks[at]);
       }
@@ -5773,8 +5449,8 @@
 
         // BF6: resume AudioContext on visibility return — browsers suspend
         // AudioContext when tab is hidden, and it won't auto-resume.
-        if (_audioCtx?.state === 'suspended') {
-          _audioCtx.resume().catch((e) => {
+        if (window.KNAudio?.ctx?.state === 'suspended') {
+          window.KNAudio.ctx.resume().catch((e) => {
             _syncLog(`audio re-resume on visibility failed: ${e.name}: ${e.message}`);
           });
           _syncLog(`audio context resumed on tab return (was suspended)`);
@@ -5969,7 +5645,6 @@
     }
     _manualMode = false;
     _pendingRunner = null;
-    _pendingSyncCheck = null;
     _setLastSyncState(null, 'stopSync');
     // Free C-level sync buffers
     if (_syncBufPtr && _hasKnSync) {
@@ -6119,14 +5794,11 @@
           _awaitingResync = false;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          _audioFadeOut();
           applySyncState(pending.bytes, pending.frame, pending.fromProactive);
-          _audioFadeIn();
         } else if (!_awaitingResync) {
           // Reached target frame but state not here yet — stall until it arrives
           _awaitingResync = true;
           _awaitingResyncAt = performance.now();
-          _audioFadeOut();
           _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
         }
         // _awaitingResync already true: stall check below keeps loop paused;
@@ -6138,9 +5810,7 @@
       const pending = _pendingResyncState;
       _pendingResyncState = null;
       _awaitingResync = false;
-      _audioFadeOut();
       applySyncState(pending.bytes, pending.frame, pending.fromProactive);
-      _audioFadeIn();
     }
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
@@ -7162,7 +6832,7 @@
         }
 
         // 3. AUDIO-STALL: audioContext not running during active gameplay
-        const actx = _audioCtx;
+        const actx = window.KNAudio?.ctx;
         const aState = actx?.state ?? 'none';
         if (aState !== _audioLastState) {
           if (aState !== 'running' && _audioLastState === 'running') {
@@ -8742,43 +8412,6 @@
     );
   };
 
-  const pushRegionsSyncState = async (targetSid) => {
-    // Host: read only the 4 diverged 64KB RDRAM blocks, compress, send as sync-regions-start packet.
-    // ~256KB vs 8MB — guest applies with kn_sync_write_regions, no full state snap.
-    if (_playerSlot !== 0 || !_syncEnabled) return;
-    if (_pushingSyncState) return;
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
-    const mod = gm.Module;
-    ensureRegionsBuffer();
-    if (!_regionsBufPtr || !_hasKnSyncRegions) {
-      return pushSyncState(targetSid);
-    }
-    _pushingSyncState = true;
-    const frame = _frameNum;
-    try {
-      const bytesRead = mod._kn_sync_read_regions(
-        _regionsOffsetPtr,
-        _SYNC_REGION_OFFSETS.length,
-        _regionsBufPtr,
-        _SYNC_REGIONS_TOTAL,
-      );
-      if (!bytesRead) {
-        _syncLog('kn_sync_read_regions returned 0 — falling back to full sync');
-        _pushingSyncState = false;
-        return pushSyncState(targetSid);
-      }
-      const regionData = new Uint8Array(mod.HEAPU8.buffer, _regionsBufPtr, bytesRead).slice();
-      _syncLog(`host kn_sync_read_regions: ${Math.round(regionData.length / 1024)}KB frame=${frame}`);
-      const compressed = await compressState(regionData);
-      await sendRegionsSyncChunks(compressed, frame, targetSid);
-    } catch (err) {
-      _syncLog(`regions sync error: ${err}`);
-    } finally {
-      _pushingSyncState = false;
-    }
-  };
-
   const sendRegionsSyncChunks = async (compressed, frame, targetSid) => {
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
@@ -9026,7 +8659,6 @@
     }
 
     _syncMismatchStreak = 0;
-    _lastResyncFrame = _frameNum;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
@@ -9044,46 +8676,6 @@
     _pacingSkipCounter = 0;
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
-    const now = performance.now();
-    if (now - _lastResyncToastTime > 5000) {
-      _lastResyncToastTime = now;
-      _config?.onSyncStatus?.('Desync corrected');
-    }
-  };
-
-  const applyRegionsSyncState = (bytes, frame) => {
-    // Guest: patch only the diverged RDRAM blocks via kn_sync_write_regions.
-    // No full state snap — CPU state is untouched, game continues forward.
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm || !_hasKnSyncRegions) return;
-    const mod = gm.Module;
-    ensureRegionsBuffer();
-    if (!_regionsBufPtr) {
-      _syncLog('regions buffer not ready — skipping regions apply');
-      return;
-    }
-    mod.HEAPU8.set(bytes, _regionsBufPtr);
-    const lt0 = performance.now();
-    const result = mod._kn_sync_write_regions(
-      _regionsOffsetPtr,
-      _SYNC_REGION_OFFSETS.length,
-      _regionsBufPtr,
-      bytes.length,
-    );
-    const lt1 = performance.now();
-    if (result !== 0) {
-      _syncLog(`kn_sync_write_regions failed: result=${result}`);
-      return;
-    }
-    _syncLog(`kn_sync_write_regions: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
-    // Do NOT update _lastSyncState — regions don't participate in the full-state delta chain.
-    _resyncCount++;
-    _consecutiveResyncs++;
-    _syncMismatchStreak = 0;
-    _lastResyncFrame = _frameNum;
-    _lastAppliedSyncHostFrame = frame;
-    _lastResyncTime = performance.now();
-    _syncLog(`regions sync #${_resyncCount} applied (frame ${frame}, next in ${_syncCheckInterval}f)`);
     const now = performance.now();
     if (now - _lastResyncToastTime > 5000) {
       _lastResyncToastTime = now;
@@ -9282,43 +8874,8 @@
     _syncWorkerCallbacks = {};
     _syncLogRing.clear();
 
-    // Clean up audio bypass
-    if (_audioWorklet) {
-      _audioWorklet.disconnect();
-      _audioWorklet = null;
-    }
-    if (_resyncGainNode) {
-      _resyncGainNode.disconnect();
-      _resyncGainNode = null;
-    }
-    if (window._kn_scriptProcessor) {
-      window._kn_scriptProcessor.disconnect();
-      window._kn_scriptProcessor = null;
-    }
-    if (window._kn_audioEl) {
-      window._kn_audioEl.pause();
-      window._kn_audioEl.srcObject = null;
-      window._kn_audioEl = null;
-    }
-    if (window._kn_keepAliveOsc) {
-      try {
-        window._kn_keepAliveOsc.stop();
-      } catch (_) {}
-      window._kn_keepAliveOsc = null;
-    }
-    window._kn_audioRing = null;
-    window._kn_audioRingCount = 0;
-    if (_audioDestNode) {
-      _audioDestNode.disconnect();
-      _audioDestNode = null;
-    }
-    if (_audioCtx) {
-      _audioCtx.close();
-      _audioCtx = null;
-    }
-    _audioReady = false;
-    _audioPtr = 0;
-    _audioRate = 0;
+    // Clean up audio (delegated to kn-audio.js)
+    window.KNAudio?.cleanup();
 
     // Clean up spectator stream
     if (_hostStream) {
