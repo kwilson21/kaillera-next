@@ -1149,7 +1149,6 @@
   // Canvas hash checks only run after reconnect events — during steady-state
   // gameplay, trust AI DMA determinism. GPU rendering differences between platforms
   // cause false-positive canvas mismatches that trigger unnecessary resyncs.
-  let _canvasCheckUntil = 0; // frame number until which canvas checks are active
   let _peers = {}; // remoteSid -> PeerState
   let _knownPlayers = {}; // socketId -> {slot, playerName}
   let _gameStarted = false;
@@ -1831,17 +1830,6 @@
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
 
-  const ensureRegionsBuffer = () => {
-    if (_regionsBufPtr) return;
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?._malloc) return;
-    _regionsBufPtr = mod._malloc(_SYNC_REGIONS_TOTAL);
-    _regionsOffsetPtr = mod._malloc(_SYNC_REGION_OFFSETS.length * 4);
-    for (let i = 0; i < _SYNC_REGION_OFFSETS.length; i++) {
-      mod.HEAPU32[(_regionsOffsetPtr >> 2) + i] = _SYNC_REGION_OFFSETS[i];
-    }
-    _syncLog(`regions buffer allocated: data=${_regionsBufPtr} offsets=${_regionsOffsetPtr}`);
-  };
   let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
@@ -1851,7 +1839,6 @@
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
-  let _preloadedResyncState = null; // {bytes, frame, receivedFrame} — most recent proactive push
   let _syncIsProactive = false; // true when current incoming sync-start is a proactive push
   let _syncIsRegions = false; // true when current incoming sync-regions-start is a regions patch
 
@@ -2092,7 +2079,6 @@
           _syncCheckInterval = _syncBaseInterval;
           // Discard any proactive state buffered before the reconnect — it was
           // captured on the old network path and may be inconsistent post-ICE-restart.
-          _preloadedResyncState = null;
         }
       }
       if (s === 'failed') {
@@ -6044,7 +6030,6 @@
       // directly, no 120-frame boot race to protect against. Without this,
       // late joiners stall in pure-lockstep waiting for ALL peers' input
       // every frame, which is fatal on mobile with 3+ peers.
-      const _isLateJoinStart = _rbInitFrame > 0;
       // Boot grace: stall in pure lockstep for the first BOOT_GRACE_FRAMES.
       // _rbInitFrame === -1 means C-rollback hasn't initialized yet. This can
       // be because (a) the WASM core doesn't support it, or (b) the guest is
@@ -8015,11 +8000,9 @@
   let _proactivePushInFlight = false; // separate flag so proactive pushes never block explicit sync-requests
 
   let _lastSyncState = null; // host/guest: previous state for delta computation
-  let _lastSyncStateInfo = null; // { frame, setBy, ts } for debugging
 
   const _setLastSyncState = (state, reason) => {
     _lastSyncState = state;
-    _lastSyncStateInfo = state ? { frame: _frameNum, setBy: reason, ts: performance.now() } : null;
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
@@ -8207,31 +8190,6 @@
     );
   };
 
-  const sendRegionsSyncChunks = async (compressed, frame, targetSid) => {
-    const CHUNK_SIZE = 64000;
-    const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
-    const target = _peers[targetSid];
-    if (!target) return;
-    const dc = target.syncDc?.readyState === 'open' ? target.syncDc : target.dc;
-    if (!dc || dc.readyState !== 'open') {
-      _syncLog(`regions sync: target slot=${target.slot} dc not open`);
-      return;
-    }
-    try {
-      dc.send(`sync-regions-start:${frame}:${numChunks}`);
-      for (let i = 0; i < numChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        dc.send(compressed.slice(start, Math.min(start + CHUNK_SIZE, compressed.length)));
-        if ((i + 1) % 3 === 0 && i < numChunks - 1) await new Promise((r) => setTimeout(r, 0));
-      }
-      _syncLog(
-        `regions sync sent to slot=${target.slot}: frame=${frame} ${Math.round(compressed.length / 1024)}KB ${numChunks} chunks`,
-      );
-    } catch (err) {
-      _syncLog(`regions sync send failed to slot=${target.slot}: ${err}`);
-    }
-  };
-
   const handleSyncChunksComplete = async () => {
     // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     const total = _syncChunks.reduce((a, c) => a + c.length, 0);
@@ -8301,7 +8259,6 @@
         // Do NOT advance _lastSyncState — proactive states are independent of the
         // requested-sync delta chain. Advancing it here would desync delta bases
         // if any proactive packet is lost (e.g. during a network switch).
-        _preloadedResyncState = { bytes: fullBytes, frame, receivedFrame: _frameNum };
         _syncLog(`proactive state buffered: ${Math.round(assembled.length / 1024)}KB wire, frame=${frame}`);
       } else {
         // Request satisfied — clear in-flight flag so next desync can send a new request.
@@ -8644,7 +8601,6 @@
     _pushingSyncState = false;
     _proactivePushInFlight = false;
     _pendingResyncState = null;
-    _preloadedResyncState = null;
     _awaitingResync = false;
     _awaitingResyncAt = 0;
     _syncTargetFrame = -1;
