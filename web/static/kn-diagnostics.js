@@ -12,7 +12,8 @@
  *   window.KNDiag.init(ctx)             — set context callbacks
  *   window.KNDiag.installHooks()        — attach event listeners
  *   window.KNDiag.cleanup()             — remove all listeners, reset state
- *   window.KNDiag.checkFreeze(ctx)      — per-frame freeze detection (call from tick)
+ *   window.KNDiag.checkFreeze(localInput) — per-frame freeze detection (call from tick)
+ *   window.KNDiag.captureCanvasHash()   — FNV-1a hash of game canvas pixels
  *   window.KNDiag.diagInput(f, af, force) — DIAG-INPUT logger
  *   window.KNDiag.eventLog              — readonly ref to event log array
  *   window.KNDiag.playerAddrs           — per-player input base addresses
@@ -33,6 +34,63 @@
   const playerAddrs = [null, null, null, null]; // per-player input base addresses
   const DIAG_INPUT_INTERVAL = 300;
   const DIAG_EARLY_FRAMES = 30;
+
+  // -- Canvas hash capture state --
+  let _glCtxCache = null;
+  let _glPixelBuf = null;
+  let _offscreenCanvas = null;
+  let _offscreenCtx = null;
+
+  function captureCanvasHash() {
+    const canvas = document.querySelector('#game canvas');
+    if (!canvas || !canvas.width || !canvas.height) return 0;
+    try {
+      // Try WebGL direct readback (no intermediate canvas copy)
+      if (!_glCtxCache || _glCtxCache.canvas !== canvas) {
+        _glCtxCache =
+          canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+          canvas.getContext('webgl', { preserveDrawingBuffer: true });
+      }
+      const gl = _glCtxCache;
+      if (gl) {
+        const w = gl.drawingBufferWidth;
+        const h = gl.drawingBufferHeight;
+        const totalBytes = w * h * 4;
+        if (!_glPixelBuf || _glPixelBuf.length !== totalBytes) {
+          _glPixelBuf = new Uint8Array(totalBytes);
+        }
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
+        // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
+        let hash = 2166136261;
+        const stride = 16 * 4;
+        for (let i = 0; i < totalBytes; i += stride) {
+          hash = Math.imul(hash ^ (_glPixelBuf[i] >> 4), 16777619) >>> 0;
+          hash = Math.imul(hash ^ (_glPixelBuf[i + 1] >> 4), 16777619) >>> 0;
+          hash = Math.imul(hash ^ (_glPixelBuf[i + 2] >> 4), 16777619) >>> 0;
+        }
+        return hash;
+      }
+      // Fallback: 2D canvas full resolution
+      if (!_offscreenCanvas || _offscreenCanvas.width !== canvas.width || _offscreenCanvas.height !== canvas.height) {
+        _offscreenCanvas = document.createElement('canvas');
+        _offscreenCanvas.width = canvas.width;
+        _offscreenCanvas.height = canvas.height;
+        _offscreenCtx = _offscreenCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      _offscreenCtx.drawImage(canvas, 0, 0);
+      const data = _offscreenCtx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let h2 = 2166136261;
+      const stride2 = 16 * 4;
+      for (let i = 0; i < data.length; i += stride2) {
+        h2 = Math.imul(h2 ^ (data[i] >> 4), 16777619) >>> 0;
+        h2 = Math.imul(h2 ^ (data[i + 1] >> 4), 16777619) >>> 0;
+        h2 = Math.imul(h2 ^ (data[i + 2] >> 4), 16777619) >>> 0;
+      }
+      return h2;
+    } catch (_) {
+      return 0;
+    }
+  }
 
   // -- Freeze detection state --
   let _renderLastHash = 0;
@@ -165,7 +223,7 @@
 
   // -- Freeze detection (called from tick loop) --
 
-  function checkFreeze(captureCanvasHash, localInput) {
+  function checkFreeze(localInput) {
     const frameNum = _getFrame();
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
 
@@ -262,6 +320,10 @@
     _inputDeadLogged = false;
     _audioLastState = '';
     for (let i = 0; i < playerAddrs.length; i++) playerAddrs[i] = null;
+    _glCtxCache = null;
+    _glPixelBuf = null;
+    _offscreenCanvas = null;
+    _offscreenCtx = null;
   }
 
   window.KNDiag = {
@@ -269,6 +331,7 @@
     installHooks,
     cleanup,
     checkFreeze,
+    captureCanvasHash,
     diagInput,
     get eventLog() {
       return _eventLog;

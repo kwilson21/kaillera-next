@@ -1364,8 +1364,6 @@
   let _syncMismatchStreak = 0; // consecutive anchor-hash mismatches without a successful sync-OK
   // Escalate to full resync after this many consecutive mismatches (delta syncs stopped converging).
   // At 10-frame interval: 5 mismatches ≈ 50 frames ≈ 0.8s — fast enough to catch stuck delta loops.
-  let _offscreenCanvas = null; // reused 64×48 canvas for pixel hash capture
-  let _offscreenCtx = null;
   let _lastResyncToastTime = 0; // wall-clock ms of last 'Desync corrected' toast (throttle)
   // Resync cooldown: minimum time between applying a state and sending the next explicit request.
   // Exponential backoff on _consecutiveResyncs: if corrections keep re-diverging immediately,
@@ -1652,60 +1650,6 @@
   // Uses WebGL readPixels for direct GPU framebuffer access, falls back
   // to 2D canvas drawImage if WebGL context isn't available.
   // Cost: ~2-5ms per call (GPU→CPU sync). Runs every 10 frames (~167ms).
-  let _glCtxCache = null;
-  let _glPixelBuf = null;
-  const _captureCanvasHash = () => {
-    const canvas = document.querySelector('#game canvas');
-    if (!canvas || !canvas.width || !canvas.height) return 0;
-    try {
-      // Try WebGL direct readback (no intermediate canvas copy)
-      if (!_glCtxCache || _glCtxCache.canvas !== canvas) {
-        _glCtxCache =
-          canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
-          canvas.getContext('webgl', { preserveDrawingBuffer: true });
-      }
-      const gl = _glCtxCache;
-      if (gl) {
-        const w = gl.drawingBufferWidth;
-        const h = gl.drawingBufferHeight;
-        const totalBytes = w * h * 4;
-        if (!_glPixelBuf || _glPixelBuf.length !== totalBytes) {
-          _glPixelBuf = new Uint8Array(totalBytes);
-        }
-        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
-        // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
-        // Quantization ignores minor GPU rendering differences (anti-aliasing,
-        // shader float precision) while catching game-state differences.
-        let hash = 2166136261;
-        const stride = 16 * 4;
-        for (let i = 0; i < totalBytes; i += stride) {
-          hash = Math.imul(hash ^ (_glPixelBuf[i] >> 4), 16777619) >>> 0;
-          hash = Math.imul(hash ^ (_glPixelBuf[i + 1] >> 4), 16777619) >>> 0;
-          hash = Math.imul(hash ^ (_glPixelBuf[i + 2] >> 4), 16777619) >>> 0;
-        }
-        return hash;
-      }
-      // Fallback: 2D canvas full resolution
-      if (!_offscreenCanvas || _offscreenCanvas.width !== canvas.width || _offscreenCanvas.height !== canvas.height) {
-        _offscreenCanvas = document.createElement('canvas');
-        _offscreenCanvas.width = canvas.width;
-        _offscreenCanvas.height = canvas.height;
-        _offscreenCtx = _offscreenCanvas.getContext('2d', { willReadFrequently: true });
-      }
-      _offscreenCtx.drawImage(canvas, 0, 0);
-      const data = _offscreenCtx.getImageData(0, 0, canvas.width, canvas.height).data;
-      let h2 = 2166136261;
-      const stride2 = 16 * 4;
-      for (let i = 0; i < data.length; i += stride2) {
-        h2 = Math.imul(h2 ^ (data[i] >> 4), 16777619) >>> 0;
-        h2 = Math.imul(h2 ^ (data[i + 1] >> 4), 16777619) >>> 0;
-        h2 = Math.imul(h2 ^ (data[i + 2] >> 4), 16777619) >>> 0;
-      }
-      return h2;
-    } catch (_) {
-      return 0;
-    }
-  };
 
   // -- Gameplay screenshot capture (for desync debugging) --------------------
   // Periodically capture the WebGL canvas via readPixels → scale → JPEG →
@@ -6622,7 +6566,7 @@
       }
 
       // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
-      window.KNDiag.checkFreeze(_captureCanvasHash, localInput);
+      window.KNDiag.checkFreeze(localInput);
 
       // ── Bisect-on-mismatch: when a divergence is detected, switch to
       // per-frame hash broadcasts for the next N frames so we can pinpoint
