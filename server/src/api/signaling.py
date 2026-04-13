@@ -34,6 +34,13 @@ Server → Room broadcasts:
 
 Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 (see api/app.py — it imports `rooms` from here)
+
+Disconnect grace period:
+  Mid-game Socket.IO disconnects defer player removal for 30 seconds
+  (_DISCONNECT_GRACE_SECONDS), allowing auto-reconnect to reclaim the
+  slot. Cancelled on explicit leave-room or successful reconnect.
+  Periodic 5-second re-stall prevents the host from running free
+  indefinitely if the peer never reconnects.
 """
 
 import asyncio

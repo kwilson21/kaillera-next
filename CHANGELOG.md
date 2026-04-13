@@ -6,7 +6,60 @@
 
 ## [Unreleased]
 
+### Added
+- **CSS/menu gameplay hash expansion**: 34 new RDRAM addresses tracked
+  (CSS player struct state, frame counters) for menu desync detection
+- **GP-CSS diagnostic log lines**: emitted on MISMATCH and STATE-DRIFT
+  with full per-player CSS state for cross-peer comparison
+- **analyze_match.py section 11c**: DESYNC SUMMARY with screen/stage/
+  character/CSS progression, cross-peer divergence, and SSIM timeline
+- **RSP HLE state save/restore**: `kn_hle_save`/`kn_hle_restore`
+  exports for rollback-safe audio state management
+- **Replay audio skip**: RSP audio skipped during rollback replay
+  (mode 1) with hle_t state preserved — eliminates RB-LIVE-MISMATCH
+- **CSS sync**: one-time host→guest state push at CSS menu entry
+- **POST-SYNC-DIAG**: per-component hash burst after every boot sync
+  for precise divergence identification
+- **Event queue hash** (`eq=`) added to C-PERF periodic logging
+
 ### Fixed
+- **Boot grace enforcement**: `_rbInitFrame=-1` when rollback init was
+  deferred caused `_bootDone=true` immediately, skipping 120-frame
+  lockstep window. Both emulators ran free during boot causing 65+
+  frame drift in Global.frame_counter
+- **Sync frame reset threshold**: lowered from 30 to 2 frames — guest
+  stayed at divergent `_frameNum` after boot sync, causing fc low-6-bit
+  RNG write to produce different values on each peer
+- **RSP HLE determinism**: mode 2 now saves/restores hle_t persistent
+  audio state (ADPCM tables, envelopes, alist_buffer) alongside DRAM.
+  Prevents non-deterministic audio state cascading across tasks
+- **Boot stall recovery runaway**: `_bootStallRecoveryFired` flag now
+  resets periodically (5s) and when peer input arrives, preventing
+  host from running free forever after a single 3s stall timeout
+- **C-level pacing phantom override**: when `kn_pre_tick` returns 3
+  (throttle) but all peers are phantom, ignore throttle to prevent
+  permanent freeze on peer disconnect
+- **Boot/intro lockstep stall eliminated**: runs free like prod during
+  intro (no stall), boot sync at f=120 + CSS sync handle alignment
+- **Menu detection**: `inMenu` only true after CSS sync fires, prevents
+  false menu lockstep during N64 boot (VS settings byte uninitialized)
+- **Log flooding**: TICK-PERF, BOOT-LOCKSTEP, PACING-THROTTLE phantom
+  release rate-limited to once per frame (was every stalled tick)
+- **GP-CSS rate limited**: once per 60 frames (was every tick during
+  menu lockstep, flooding entire log buffer)
+- **Build**: `#ifdef __EMSCRIPTEN__` guard for fingerprint function
+
+### Changed
+- **WiFi resilience**: server-side 30s disconnect grace period during
+  gameplay; WebRTC reconnect retries (3 attempts with 3s backoff);
+  ICE grace 1.5s→3s; overall reconnect timeout 15s→45s
+- **Boot stall timeout**: RTT-adaptive (2×RTT, clamped 33-250ms)
+  instead of fixed 500ms
+- **frame_counter low-6-bit sync**: forces `fc & 0x3F` to match
+  `_frameNum & 0x3F` so `get_random_int_safe_` extra advances are
+  identical between peers regardless of boot-phase fc drift
+
+### Fixed (prior — RF1-RF7)
 - **Rollback state integrity (RF1-RF7)**: eliminated silent state
   corruption in the C rollback engine. Seven fixes enforcing six
   new invariants (R1-R6):

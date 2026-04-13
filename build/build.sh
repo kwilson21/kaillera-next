@@ -7,6 +7,12 @@
 # Stages:
 #   1. Clone source repos (if not present)
 #   2. Apply kaillera-next patches for deterministic timing
+#      - kn-all.patch: sync read/write, event queue normalization, FPU trace
+#      - RSP audio skip patch: mode 0/1/2 + hle_t state save/restore
+#      - SoftFloat patch: bit-exact FPU cross-platform
+#      - patch-sync-v3.py: upgrades sync to capture full peripheral state
+#      - Inject kn_hle_save/kn_hle_restore into RSP HLE plugin (rollback)
+#      - Inject kn_get_hidden_state_fingerprint (determinism diagnostics)
 #   3. Compile core to LLVM bitcode (.bc)
 #   4. Link through RetroArch → .js + .wasm
 #   5. Package into 7z .data archive
