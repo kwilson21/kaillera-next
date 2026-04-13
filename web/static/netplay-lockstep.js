@@ -1414,9 +1414,30 @@
   const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
   let _startTime = 0;
 
+  const _isLocalDev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     console.log(`[lockstep] ${msg}`);
+    // Local dev: flush on every log entry (real-time diagnostics)
+    // Prod: flush on critical events only (bandwidth-conscious)
+    if (_isLocalDev) {
+      try {
+        _flushSyncLog();
+      } catch (_) {}
+    } else if (
+      msg.includes('MISMATCH') ||
+      msg.includes('STATE-DRIFT') ||
+      msg.includes('GP-D') ||
+      msg.includes('REGION-DIFF') ||
+      msg.includes('BOOT-SYNC') ||
+      msg.includes('reconnect') ||
+      msg.includes('RECOVERY') ||
+      msg.includes('STUCK')
+    ) {
+      try {
+        _flushSyncLog();
+      } catch (_) {}
+    }
   };
 
   // MF6: Detection-only tick watchdog snapshot emitter. Gathers a
@@ -5321,7 +5342,7 @@
       _cachedRoom = _cachedRoom || KNState.room;
       _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
       _socketFlushFails = 0;
-      _flushInterval = setInterval(_flushSyncLog, 5000);
+      _flushInterval = setInterval(_flushSyncLog, _isLocalDev ? 1000 : 5000);
       // Early flush at 5s so short matches (that freeze, crash, or are
       // aborted before the 30s interval fires) still leave a DB row. This
       // caught a real bug where room 4A2NMSLS was completely invisible
@@ -5636,7 +5657,7 @@
     _cachedRoom = KNState.room;
     _cachedUploadToken = KNState.uploadToken;
     _socketFlushFails = 0;
-    _flushInterval = setInterval(_flushSyncLog, 5000);
+    _flushInterval = setInterval(_flushSyncLog, _isLocalDev ? 1000 : 5000);
     // Early flush at 5s so short matches (freeze/crash/abort before 30s)
     // still leave a DB row. See also the lockstep-ready path above.
     setTimeout(() => _flushSyncLog(), 5000);
