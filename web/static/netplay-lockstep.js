@@ -1357,6 +1357,14 @@
     h = (h ^ (h >>> 13)) >>> 0;
     mod.HEAPU32[_rdram32(mod, KN_RNG_SEED_RDRAM)] = h;
     mod.HEAPU32[_rdram32(mod, KN_RNG_ALT_SEED_RDRAM)] = h;
+    // Sync frame_counter low 6 bits: get_random_int_safe_ uses (fc & 0x3F)
+    // for extra LCG advances. If fc drifts between peers (boot timing),
+    // identical seeds produce different random outcomes. Force the low 6 bits
+    // to match _frameNum so both peers do the same number of extra advances.
+    // Upper bits preserved so the game's increment logic isn't disrupted.
+    const fcIdx = _rdram32(mod, KN_FRAME_COUNTER_RDRAM);
+    const fc = mod.HEAPU32[fcIdx];
+    mod.HEAPU32[fcIdx] = (fc & 0xffffffc0) | (frameNum & 0x3f);
   };
 
   // Manual mode / rAF interception state (native refs managed by APISandbox)
@@ -6503,7 +6511,15 @@
       // late joiners stall in pure-lockstep waiting for ALL peers' input
       // every frame, which is fatal on mobile with 3+ peers.
       const _isLateJoinStart = _rbInitFrame > 0;
-      const _bootDone = _isLateJoinStart || _rbInitFrame < 0 || _frameNum - _rbInitFrame > BOOT_GRACE_FRAMES;
+      // Boot grace: stall in pure lockstep for the first BOOT_GRACE_FRAMES.
+      // _rbInitFrame === -1 means C-rollback hasn't initialized yet. This can
+      // be because (a) the WASM core doesn't support it, or (b) the guest is
+      // waiting for the host's rb-delay broadcast. In case (b), we must NOT
+      // skip boot grace — the boot sync depends on it. Use _frameNum as the
+      // fallback reference when _rbInitFrame hasn't been set yet.
+      const _rbNoRollback = _rbInitFrame < 0 && !window._rbPendingInit && !_useCRollback;
+      const _bootRef = _rbInitFrame >= 0 ? _rbInitFrame : 0;
+      const _bootDone = _isLateJoinStart || _rbNoRollback || _frameNum - _bootRef > BOOT_GRACE_FRAMES;
       // Gate rollback on SSB64 game_status: only allow prediction during
       // active gameplay. During menus/CSS, game_status is 0 (wait) — use
       // pure lockstep. For non-SSB64 ROMs, _readGameStatus returns -1 and
