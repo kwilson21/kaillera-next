@@ -1250,7 +1250,6 @@
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
   let _lateJoin = false; // true when joining a game already in progress
-  let _lateJoinPaused = false; // host pauses tick loop while late-joiner loads state
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
@@ -1454,19 +1453,19 @@
     let cause = 'unknown';
     if (_wasmStepActive) cause = 'wasm-step-frozen';
     else if (window._rbPendingInit) cause = 'rb-pending-init';
-    else if (_awaitingResync) cause = 'awaiting-resync';
+    else if (_runSubstate === RUN_AWAITING_RESYNC) cause = 'awaiting-resync';
     else if (_syncTargetFrame > 0) cause = `coord-sync-waiting-for-f${_syncTargetFrame}`;
     else if (_bootStallFrame >= 0) cause = `boot-lockstep-f${_bootStallFrame}`;
     else if (_stallStart > 0) cause = 'input-stall';
-    else if (_rollbackStallActive) cause = 'rollback-stall';
-    else if (_framePacingActive) cause = 'pacing-throttle';
+    else if (_runSubstate === RUN_RB_STALL) cause = 'rollback-stall';
+    else if (_runSubstate === RUN_PACING) cause = 'pacing-throttle';
 
     _syncLog(
       `TICK-STUCK severity=${severity} f=${_frameNum} stuckMs=${Math.round(stuckMs)} ` +
         `cause=${cause} rbPending=${!!window._rbPendingInit} ` +
-        `awaitingResync=${_awaitingResync} syncTargetFrame=${_syncTargetFrame} ` +
+        `awaitingResync=${_runSubstate === RUN_AWAITING_RESYNC} syncTargetFrame=${_syncTargetFrame} ` +
         `bootStallFrame=${_bootStallFrame} scheduledSyncs=${_scheduledSyncRequests.length} ` +
-        `pacing=${_framePacingActive} rbStall=${_rollbackStallActive} ` +
+        `pacing=${_runSubstate === RUN_PACING} rbStall=${_runSubstate === RUN_RB_STALL} ` +
         `wasmStep=${_wasmStepActive} stallStart=${_stallStart} ` +
         `peers=${JSON.stringify(peerSnap)}`,
     );
@@ -1755,7 +1754,6 @@
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
 
-  let _awaitingResync = false; // guest: pause emulator while waiting for resync data
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
@@ -1776,7 +1774,6 @@
   const FRAME_PACING_WARMUP = 120; // skip pacing during first 120 frames (~2s boot)
   let _frameAdvantage = 0; // smoothed frame advantage (EMA)
   let _frameAdvRaw = 0; // instantaneous frame advantage (for logging)
-  let _framePacingActive = false; // true when cap is throttling
   let _pacingThrottleStartAt = 0; // wall-clock when continuous throttle began (I1 deadline)
   const PACING_THROTTLE_TIMEOUT_MS = 5000; // I1: max continuous pacing stall before forced release
   // Pacing summary stats (reset every 300 frames)
@@ -1848,8 +1845,7 @@
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
     if (msg.type === 'late-join-ready') {
-      if (_lateJoinPaused) {
-        _lateJoinPaused = false;
+      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
         if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
         _resetPacingAfterLateJoin();
         _broadcastRoster();
@@ -2523,19 +2519,16 @@
           checkAllEmuReady();
         }
         if (e.data === 'late-join-pause') {
-          _lateJoinPaused = true;
           _runSubstate = RUN_LATE_JOIN_PAUSE;
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-resume') {
-          _lateJoinPaused = false;
           if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
           _resetPacingAfterLateJoin();
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-ready') {
-          if (_lateJoinPaused) {
-            _lateJoinPaused = false;
+          if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
             if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
             _resetPacingAfterLateJoin();
             // Broadcast roster NOW — the joiner is ready to send input.
@@ -4055,7 +4048,6 @@
       // this, the tick loop can run N frames between getState() and the
       // moment we read _frameNum, causing the late joiner to load state
       // from frame X but think they're at frame X+N (cursor desync).
-      _lateJoinPaused = true;
       _runSubstate = RUN_LATE_JOIN_PAUSE;
       _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
@@ -4120,13 +4112,12 @@
       // retry from a clean slate rather than living in a half-loaded
       // limbo. See spec §MF5, audit §D3.
       setTimeout(() => {
-        if (_lateJoinPaused) {
+        if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
           const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
           _syncLog(
             `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
               `resuming without joiner, hard-disconnecting so they can retry`,
           );
-          _lateJoinPaused = false;
           if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
           _lateJoinPausedAt = 0;
           _resetPacingAfterLateJoin();
@@ -4826,7 +4817,6 @@
   // cascading prediction-replay work is eating the frame budget, so we
   // freeze the local sim until inputs return. See ROLLBACK-STALL logic.
   const ROLLBACK_STALL_MS = 3000; // was 500 — keep predicting through drops
-  let _rollbackStallActive = false;
   let _rollbackStallStart = 0;
   let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
   const RAPID_FABRICATION_THRESHOLD = 2; // after N consecutive fabrications, skip stall wait
@@ -4989,7 +4979,6 @@
         _rbBisectFramesRemaining = 0;
         _rbBisectCount = 0;
         _rbPendingPostRollbackHash = false;
-        _rollbackStallActive = false;
         if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
 
@@ -5470,7 +5459,6 @@
     _hasKnSyncRegions = false;
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
-    _framePacingActive = false;
     if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
@@ -5495,7 +5483,7 @@
     // _lateJoinPaused or document.hidden (both are legitimate
     // pauses). See docs/netplay-invariants.md.
     const _tickNow = performance.now();
-    if (!_lateJoinPaused && !(typeof document !== 'undefined' && document.hidden)) {
+    if (_runSubstate !== RUN_LATE_JOIN_PAUSE && !(typeof document !== 'undefined' && document.hidden)) {
       if (_frameNum !== _tickStuckLastFrame) {
         _tickStuckLastFrame = _frameNum;
         _tickStuckLastAdvanceAt = _tickNow;
@@ -5513,7 +5501,7 @@
       }
     }
 
-    if (_lateJoinPaused) return; // frozen while late-joiner loads state
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE) return; // frozen while late-joiner loads state
     // Guests defer the entire tick loop until the host's authoritative
     // rb-delay broadcast arrives and the C rollback engine is initialized
     // with the agreed delay. Without this, the guest would advance frames
@@ -5570,7 +5558,6 @@
       );
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
-      _awaitingResync = false;
       if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     }
 
@@ -5580,14 +5567,12 @@
           // State arrived on time — apply at the agreed frame
           const pending = _pendingResyncState;
           _pendingResyncState = null;
-          _awaitingResync = false;
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
           applySyncState(pending.bytes, pending.frame, pending.fromProactive);
-        } else if (!_awaitingResync) {
+        } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
-          _awaitingResync = true;
           _runSubstate = RUN_AWAITING_RESYNC;
           _awaitingResyncAt = performance.now();
           _syncLog(`coord stall at frame ${_frameNum} (target=${_syncTargetFrame}) — waiting for state`);
@@ -5600,7 +5585,6 @@
       // Non-coordinated (proactive push, reconnect, visibility/network-change): apply now
       const pending = _pendingResyncState;
       _pendingResyncState = null;
-      _awaitingResync = false;
       if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
       applySyncState(pending.bytes, pending.frame, pending.fromProactive);
     }
@@ -5632,8 +5616,7 @@
         if (last === undefined) continue;
         const stale = nowStall - last;
         if (stale >= ROLLBACK_STALL_MS) {
-          if (!_rollbackStallActive) {
-            _rollbackStallActive = true;
+          if (_runSubstate !== RUN_RB_STALL) {
             _runSubstate = RUN_RB_STALL;
             _rollbackStallStart = nowStall;
             _syncLog(
@@ -5647,9 +5630,8 @@
       // Release stall only if no peer triggered it this frame.
       // (If the for-loop broke out after setting _skipFrameAdvance, a peer
       // IS stalled and we must NOT release.)
-      if (_rollbackStallActive && !_skipFrameAdvance) {
+      if (_runSubstate === RUN_RB_STALL && !_skipFrameAdvance) {
         const stallDuration = nowStall - _rollbackStallStart;
-        _rollbackStallActive = false;
         if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
         _syncLog(`ROLLBACK-STALL end durationMs=${stallDuration.toFixed(0)}`);
@@ -5686,8 +5668,7 @@
           activePacingPeers++;
         }
         // If no active pacing peers remain, release any active cap
-        if (activePacingPeers === 0 && _framePacingActive) {
-          _framePacingActive = false;
+        if (activePacingPeers === 0 && _runSubstate === RUN_PACING) {
           if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
           _pacingThrottleStartAt = 0;
           if (window._knLastPhantomReleaseFrame !== _frameNum) {
@@ -5726,8 +5707,7 @@
           }
           if (!_useCRollback) {
             if (_rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
-              if (!_framePacingActive) {
-                _framePacingActive = true;
+              if (_runSubstate !== RUN_PACING) {
                 _runSubstate = RUN_PACING;
                 _pacingThrottleStartAt = nowPacing;
                 _pacingCapsCount++;
@@ -5758,8 +5738,7 @@
             }
             if (shouldSkip) {
               _pacingCapsFrames++;
-              if (!_framePacingActive) {
-                _framePacingActive = true;
+              if (_runSubstate !== RUN_PACING) {
                 _runSubstate = RUN_PACING;
                 _pacingThrottleStartAt = nowPacing;
                 _pacingCapsCount++;
@@ -5770,8 +5749,7 @@
               }
               _skipFrameAdvance = true;
             }
-            if (_framePacingActive && !_skipFrameAdvance) {
-              _framePacingActive = false;
+            if (_runSubstate === RUN_PACING && !_skipFrameAdvance) {
               if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
               _pacingThrottleStartAt = 0;
               _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
@@ -5786,7 +5764,7 @@
           // Without this, a dead DC + broken phantom detection = permanent
           // freeze (match f0566d95: host stuck at f=187 for 41s until
           // Socket.IO heartbeat timeout disconnected it).
-          if (_framePacingActive && _pacingThrottleStartAt > 0) {
+          if (_runSubstate === RUN_PACING && _pacingThrottleStartAt > 0) {
             const _pacingStallMs = nowPacing - _pacingThrottleStartAt;
             if (_pacingStallMs >= PACING_THROTTLE_TIMEOUT_MS) {
               // Find the peer holding minRemoteFrame and force-phantom it
@@ -5811,7 +5789,6 @@
                 );
                 window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot: slowestSlot } }));
               }
-              _framePacingActive = false;
               if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
               _pacingThrottleStartAt = 0;
               _skipFrameAdvance = false;
@@ -6396,8 +6373,7 @@
         // to prevent permanent freeze when the only peer has disconnected.
         const allPhantom = getInputPeers().every((p) => _peerPhantom[p.slot]);
         if (allPhantom) {
-          if (_framePacingActive) {
-            _framePacingActive = false;
+          if (_runSubstate === RUN_PACING) {
             if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
             _pacingThrottleStartAt = 0;
             if (window._knLastCPhantomReleaseFrame !== _frameNum) {
@@ -6408,8 +6384,7 @@
           // Fall through to normal tick instead of returning
         } else {
           _pacingCapsFrames++;
-          if (!_framePacingActive) {
-            _framePacingActive = true;
+          if (_runSubstate !== RUN_PACING) {
             _runSubstate = RUN_PACING;
             _pacingThrottleStartAt = performance.now();
             _pacingCapsCount++;
@@ -6420,8 +6395,7 @@
           return;
         }
       }
-      if (_framePacingActive) {
-        _framePacingActive = false;
+      if (_runSubstate === RUN_PACING) {
         if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
         _pacingThrottleStartAt = 0;
         _syncLog(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} source=C`);
@@ -7576,11 +7550,10 @@
     // Input sending above continues so the host doesn't INPUT-STALL,
     // but the emulator doesn't advance (no divergent frames).
     // Safety: resume after 3s if resync data never arrives.
-    if (_awaitingResync) {
+    if (_runSubstate === RUN_AWAITING_RESYNC) {
       if (performance.now() - _awaitingResyncAt > 3000) {
         _syncLog('resync wait timeout — resuming');
         console.warn('[lockstep] resync timeout — log dump:\n' + exportSyncLog());
-        _awaitingResync = false;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
         _syncTargetFrame = -1;
         _syncTargetDeadlineAt = 0;
@@ -8194,7 +8167,7 @@
             `delta base missing or size mismatch: last=${_lastSyncState?.length} delta=${decompressed.length} — requesting full`,
           );
           _resyncRequestInFlight = false; // allow fresh request
-          _awaitingResync = false; // release any active coord stall
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
@@ -8380,7 +8353,6 @@
     // so pacing starts fresh from the new synchronized state.
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
-    _framePacingActive = false;
     if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
@@ -8544,7 +8516,6 @@
     _inputLateLogTime = {};
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
-    _framePacingActive = false;
     if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
     _pacingThrottleStartAt = 0;
     _pacingCapsCount = 0;
@@ -8561,7 +8532,6 @@
     _pushingSyncState = false;
     _proactivePushInFlight = false;
     _pendingResyncState = null;
-    _awaitingResync = false;
     if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     _awaitingResyncAt = 0;
     _syncTargetFrame = -1;
