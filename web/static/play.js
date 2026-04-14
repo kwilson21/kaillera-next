@@ -2393,6 +2393,20 @@
         KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
         showToast('ROM hash failed — game may not work');
       }
+      // Guest ROM mismatch check: if the host's ROM hash is known and
+      // this ROM doesn't match, reject it and prompt re-upload.
+      if (!isHost && _hostRomHash && _romHash && romHashMismatch(_hostRomHash, _romHash)) {
+        console.log(
+          '[play] ROM mismatch — guest hash:',
+          _romHash?.substring(0, 16),
+          'host hash:',
+          _hostRomHash?.substring(0, 16),
+        );
+        clearLoadedRom();
+        if (socket?.connected) socket.emit('rom-ready', { ready: false });
+        showToast('ROM version mismatch — please load the same ROM as the host');
+        return;
+      }
       notifyRomReady();
       // Always proceed with late-join, even if hash computation failed
       if (_pendingLateJoin) {
