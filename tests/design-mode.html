@@ -422,7 +422,7 @@
       // 'nudge-xy' = uses transform translate via --X-nudge-x/--X-nudge-y
       // 'nudge-y'  = uses transform translateY via --X-nudge-y
       // 'translate' = fallback, uses inline style.transform (no custom property yet)
-      const VAR_MAP = {
+      const VAR_MAP_LANDSCAPE = {
         'vgp-l': { type: 'fixed-lr', vars: { top: '--l-top', left: '--l-left', position: '--l-position' } },
         'vgp-r': { type: 'fixed-lr', vars: { top: '--r-top', right: '--r-right', position: '--r-position' } },
         'vgp-dpad': { type: 'nudge-xy', vars: { x: '--dpad-nudge-x', y: '--dpad-nudge-y' } },
@@ -433,13 +433,24 @@
         'vgp-z-landscape': { type: 'nudge-xy', vars: { x: '--z-nudge-x', y: '--z-nudge-y' } },
         'vgp-z': { type: 'nudge-xy', vars: { x: '--z-nudge-x', y: '--z-nudge-y' } },
       };
+      const VAR_MAP_PORTRAIT = {
+        'vgp-dpad': { type: 'nudge-xy', vars: { x: '--p-dpad-nudge-x', y: '--p-dpad-nudge-y' } },
+        'vgp-cbuttons': { type: 'nudge-xy', vars: { x: '--p-cbuttons-nudge-x', y: '--p-cbuttons-nudge-y' } },
+        'vgp-ab': { type: 'nudge-xy', vars: { x: '--p-ab-nudge-x', y: '--p-ab-nudge-y' } },
+        'vgp-stick-zone': { type: 'nudge-xy', vars: { x: '--p-stick-nudge-x', y: '--p-stick-nudge-y' } },
+        'vgp-z-portrait': { type: 'nudge-xy', vars: { x: '--p-z-nudge-x', y: '--p-z-nudge-y' } },
+        'vgp-z': { type: 'nudge-xy', vars: { x: '--p-z-nudge-x', y: '--p-z-nudge-y' } },
+        'vgp-l': { type: 'nudge-xy', vars: { x: '--p-l-nudge-x', y: '--p-l-nudge-y' } },
+        'vgp-r': { type: 'nudge-xy', vars: { x: '--p-r-nudge-x', y: '--p-r-nudge-y' } },
+      };
+      const getVarMap = () => (referenceCard?.dataset.orient === 'portrait' ? VAR_MAP_PORTRAIT : VAR_MAP_LANDSCAPE);
 
-      // Map elements to their size CSS var. Scroll wheel on selected element resizes.
-      const SIZE_MAP = {
-        'vgp-dpad': '--btn-dpad', // dpad-size = btn-dpad * 3
-        'vgp-cbuttons': '--btn-c', // c-group = btn-c * 3
-        'vgp-ab': '--btn-ab', // ab-group-w/h derived from btn-ab
-        'vgp-stick-zone': '--stick-size', // direct size
+      // Map elements to their size CSS var.
+      const SIZE_MAP_LANDSCAPE = {
+        'vgp-dpad': '--btn-dpad',
+        'vgp-cbuttons': '--btn-c',
+        'vgp-ab': '--btn-ab',
+        'vgp-stick-zone': '--stick-size',
         'vgp-a': '--btn-ab',
         'vgp-b': '--btn-ab',
         'vgp-l': '--btn-l-size',
@@ -448,6 +459,19 @@
         'vgp-start': '--btn-start-size',
         'vgp-start-landscape': '--btn-start-size',
       };
+      const SIZE_MAP_PORTRAIT = {
+        'vgp-dpad': '--p-btn-dpad',
+        'vgp-cbuttons': '--p-btn-c',
+        'vgp-ab': '--p-btn-a',
+        'vgp-stick-zone': '--p-stick-size',
+        'vgp-a': '--p-btn-a',
+        'vgp-b': '--p-btn-b',
+        'vgp-l': '--p-l-size',
+        'vgp-r': '--p-r-size',
+        'vgp-z': '--p-z-size',
+        'vgp-start': '--p-start-size',
+      };
+      const getSizeMap = () => (referenceCard?.dataset.orient === 'portrait' ? SIZE_MAP_PORTRAIT : SIZE_MAP_LANDSCAPE);
 
       // Read a CSS custom property value from an iframe's :root
       const getCSSVar = (doc, name) =>
@@ -696,7 +720,7 @@
             overlay.classList.add('dragging');
 
             const origRect = target.getBoundingClientRect();
-            const mapping = VAR_MAP[targetClass];
+            const mapping = getVarMap()[targetClass];
             const tooltip = document.getElementById('tooltip');
 
             // Capture starting CSS var values for mapped elements
@@ -822,7 +846,7 @@
 
         // Show +/- resize buttons in inspector if element has a size var
         const sizeControls = document.getElementById('size-controls');
-        const sizeVar = SIZE_MAP[cls];
+        const sizeVar = getSizeMap()[cls];
         if (sizeVar && sizeControls) {
           sizeControls.style.display = 'flex';
           sizeControls.dataset.sizeVar = sizeVar;
@@ -830,8 +854,18 @@
           const doc = iframe?.contentDocument;
           let current = doc ? parseFloat(getCSSVar(doc, sizeVar)) : NaN;
           if (isNaN(current) && doc) {
-            const cs = doc.defaultView.getComputedStyle(el);
-            current = parseFloat(cs.fontSize) || parseFloat(cs.width) || 14;
+            const isFontVar =
+              sizeVar.includes('-l-size') ||
+              sizeVar.includes('-r-size') ||
+              sizeVar.includes('-z-size') ||
+              sizeVar.includes('-start-size');
+            let measureEl = el;
+            if (cls === 'vgp-ab') measureEl = doc.querySelector('.vgp-a') || el;
+            else if (cls === 'vgp-dpad') measureEl = doc.querySelector('.vgp-du') || el;
+            else if (cls === 'vgp-cbuttons') measureEl = doc.querySelector('.vgp-cu') || el;
+            const cs = doc.defaultView.getComputedStyle(measureEl);
+            current = isFontVar ? parseFloat(cs.fontSize) : parseFloat(cs.width);
+            if (isNaN(current)) current = 14;
           }
           document.getElementById('size-val').textContent = Math.round(current) + 'px';
         } else if (sizeControls) {
@@ -1103,14 +1137,34 @@
         const rawVar = getCSSVar(doc, sizeVar);
         let current = parseFloat(rawVar);
         if (isNaN(current)) {
-          // clamp() expression — read the actual computed value from the element
-          const cs = doc.defaultView.getComputedStyle(selectedEl);
-          current = parseFloat(cs.fontSize) || parseFloat(cs.width) || 14;
+          // clamp() expression — read the actual computed value from the right element
+          const isFontVar =
+            sizeVar.includes('-l-size') ||
+            sizeVar.includes('-r-size') ||
+            sizeVar.includes('-z-size') ||
+            sizeVar.includes('-start-size');
+          // For container targets (vgp-ab, vgp-dpad, vgp-cbuttons), read from a child button
+          let measureEl = selectedEl;
+          if (selectedClass === 'vgp-ab') measureEl = doc.querySelector('.vgp-a') || selectedEl;
+          else if (selectedClass === 'vgp-dpad') measureEl = doc.querySelector('.vgp-du') || selectedEl;
+          else if (selectedClass === 'vgp-cbuttons') measureEl = doc.querySelector('.vgp-cu') || selectedEl;
+          const cs = doc.defaultView.getComputedStyle(measureEl);
+          current = isFontVar ? parseFloat(cs.fontSize) : parseFloat(cs.width);
+          if (isNaN(current)) current = 14;
         }
         const newVal = Math.max(6, Math.round(current + delta));
         setCSSVar(doc, sizeVar, newVal + 'px');
+        // Keep A and B in sync when resizing via the AB container
+        if (sizeVar === '--p-btn-a') setCSSVar(doc, '--p-btn-b', newVal + 'px');
+        if (sizeVar === '--p-btn-b') setCSSVar(doc, '--p-btn-a', newVal + 'px');
+        if (sizeVar === '--btn-ab') {
+          /* landscape: btn-ab already controls both */
+        }
         document.getElementById('size-val').textContent = newVal + 'px';
-        changes.push({ element: '.' + selectedClass, action: 'resize', cssVars: { [sizeVar]: newVal + 'px' } });
+        const cssVars = { [sizeVar]: newVal + 'px' };
+        if (sizeVar === '--p-btn-a') cssVars['--p-btn-b'] = newVal + 'px';
+        if (sizeVar === '--p-btn-b') cssVars['--p-btn-a'] = newVal + 'px';
+        changes.push({ element: '.' + selectedClass, action: 'resize', cssVars });
         renderChanges();
         updateCSSProps(selectedEl);
       };

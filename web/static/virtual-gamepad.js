@@ -65,6 +65,27 @@
       '}',
       '#virtual-gamepad * { pointer-events: auto; }',
 
+      // ── Portrait position tokens (design-mode editable) ──
+      ':root {',
+      '  --p-dpad-nudge-x: 21px; --p-dpad-nudge-y: 11px;',
+      '  --p-cbuttons-nudge-x: -13px; --p-cbuttons-nudge-y: 9px;',
+      '  --p-ab-nudge-x: -15px; --p-ab-nudge-y: 42px;',
+      '  --p-stick-nudge-x: 12px; --p-stick-nudge-y: 22px;',
+      '  --p-z-nudge-x: 94px; --p-z-nudge-y: -33px;',
+      '  --p-l-nudge-x: 72px; --p-l-nudge-y: 88px;',
+      '  --p-r-nudge-x: -59px; --p-r-nudge-y: 105px;',
+      '  --p-l-size: 10px; --p-r-size: 10px; --p-z-size: 10px;',
+      '  --p-start-size: 13px;',
+      '  --p-btn-dpad: 24px;',
+      '  --p-dpad-size: calc(var(--p-btn-dpad) * 3);',
+      '  --p-btn-c: 28px;',
+      '  --p-cbuttons-w: calc(var(--p-btn-c) * 3); --p-cbuttons-h: calc(var(--p-btn-c) * 3);',
+      '  --p-btn-a: 39px; --p-btn-b: 39px;',
+      '  --p-ab-w: calc(var(--p-btn-a) * 2.4); --p-ab-h: calc(var(--p-btn-a) * 1.5);',
+      '  --p-stick-size: 86px;',
+      '  --p-knob-size: calc(var(--p-stick-size) * 0.42);',
+      '}',
+
       // ── Portrait: controls below video ──
       // 3-row grid: shoulders on top, left+right content, start at bottom
       '#virtual-gamepad {',
@@ -102,52 +123,68 @@
       '}',
       '.vgp-btn.active { background: rgba(255,255,255,0.4); }',
 
-      // Shoulder buttons (in .vgp-shoulders flow, not absolute)
-      '.vgp-l, .vgp-r, .vgp-z { position: static; border-radius: 8px; padding: 6px 16px; font-size: 14px; }',
+      // Shoulder buttons (base styles, orientation-agnostic)
+      '.vgp-l { position: static; border-radius: 8px; padding: 0.4em 1em; }',
+      '.vgp-r { position: static; border-radius: 8px; padding: 0.4em 1em; }',
+      '.vgp-z { position: static; border-radius: 8px; padding: 0.4em 1em; }',
 
-      // D-pad — flex child, scales with viewport height
-      '.vgp-dpad { position: relative; width: clamp(68px, 15svh, 96px); height: clamp(68px, 15svh, 96px); flex-shrink: 1; }',
-      // D-pad arrows: centered transforms so they scale with any container size
-      '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 13px; width: 34px; height: 34px; }',
+      // D-pad (base)
+      '.vgp-dpad { position: relative; flex-shrink: 1; }',
+      '.vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { border-radius: 6px; font-size: 13px; }',
       '.vgp-du { left: 50%; transform: translateX(-50%); top: 0; }',
       '.vgp-dd { left: 50%; transform: translateX(-50%); bottom: 0; top: auto; }',
       '.vgp-dl { left: 0; top: 50%; transform: translateY(-50%); }',
       '.vgp-dr { right: 0; top: 50%; transform: translateY(-50%); }',
 
-      // Stick zone — flex child, scales with viewport height
+      // Stick zone (base)
       '.vgp-stick-zone {',
       '  position: relative; flex-shrink: 1; margin-top: 6px;',
-      '  width: clamp(128px, 20svh, 164px); height: clamp(128px, 20svh, 164px); border-radius: 50%;',
+      '  border-radius: 50%;',
       '  background: rgba(255,255,255,0.08); border: 2px solid rgba(255,255,255,0.15);',
       '}',
       '.vgp-stick-knob {',
-      '  position: absolute; width: clamp(54px, 8svh, 68px); height: clamp(54px, 8svh, 68px); border-radius: 50%;',
+      '  position: absolute; border-radius: 50%;',
       '  background: rgba(255,255,255,0.25); border: 2px solid rgba(255,255,255,0.4);',
       '  left: 50%; top: 50%; transform: translate(-50%,-50%);',
       '  transition: none; will-change: transform;',
       '}',
 
-      // C-buttons diamond — inside .vgp-right, TOP area, pushed right
-      // C-buttons: centered transforms for proper diamond at any container size
-      '.vgp-cu { width: 38px; height: 38px; left: 50%; transform: translateX(-50%); top: 0; font-size: 11px; }',
-      '.vgp-cd { width: 38px; height: 38px; left: 50%; transform: translateX(-50%); bottom: 0; top: auto; font-size: 11px; }',
-      '.vgp-cl { width: 38px; height: 38px; left: 0; top: 50%; transform: translateY(-50%); font-size: 11px; }',
-      '.vgp-cr { width: 38px; height: 38px; right: 0; left: auto; top: 50%; transform: translateY(-50%); font-size: 11px; }',
+      // C-buttons (base)
+      '.vgp-cu { left: 50%; transform: translateX(-50%); top: 0; font-size: 11px; }',
+      '.vgp-cd { left: 50%; transform: translateX(-50%); bottom: 0; top: auto; font-size: 11px; }',
+      '.vgp-cl { left: 0; top: 50%; transform: translateY(-50%); font-size: 11px; }',
+      '.vgp-cr { right: 0; left: auto; top: 50%; transform: translateY(-50%); font-size: 11px; }',
 
-      // A + B — diagonal layout (Gameboy style: A lower-right, B upper-left)
-      // Percentage positioning so the gap scales with the container at any size.
-      '.vgp-a { width: 66px; height: 66px; right: 9%; bottom: 2%; top: auto; font-size: 21px; }',
-      '.vgp-b { width: 66px; height: 66px; right: 54%; bottom: 38%; top: auto; font-size: 21px; }',
+      // A + B (base)
+      '.vgp-a { right: 9%; bottom: 2%; top: auto; font-size: 21px; }',
+      '.vgp-b { right: 54%; bottom: 38%; top: auto; font-size: 21px; }',
 
-      // Start button
-      '.vgp-start { position: static; border-radius: 14px; padding: 6px 20px; font-size: 13px; }',
+      // Start button (base)
+      '.vgp-start { position: static; border-radius: 14px; }',
 
-      // Sub-containers: flex children that scale with viewport height in portrait
-      '.vgp-cbuttons { position: relative; width: clamp(86px, 18svh, 120px); height: clamp(86px, 18svh, 112px); flex-shrink: 1; }',
-      '.vgp-ab { position: relative; width: clamp(110px, 24svh, 160px); height: clamp(84px, 18svh, 116px); flex-shrink: 1; margin-top: 4px; }',
+      // Sub-containers (base)
+      '.vgp-cbuttons { position: relative; flex-shrink: 1; }',
+      '.vgp-ab { position: relative; flex-shrink: 1; margin-top: 4px; }',
       '.vgp-spacer { display: none; pointer-events: none; }',
-      // Portrait: Z sits at bottom of right column (near B/A), floats above Start area
-      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; transform: translateY(-34px); pointer-events: none !important; }',
+      '.vgp-z-portrait { display: flex; justify-content: flex-start; width: 100%; padding-left: 4px; pointer-events: none !important; }',
+
+      // ── Portrait-only sizes, transforms, and nudges ──
+      '@media (orientation: portrait) {',
+      '  .vgp-l { font-size: var(--p-l-size); transform: translate(var(--p-l-nudge-x), var(--p-l-nudge-y)); }',
+      '  .vgp-r { font-size: var(--p-r-size); transform: translate(var(--p-r-nudge-x), var(--p-r-nudge-y)); }',
+      '  .vgp-z { font-size: var(--p-z-size); }',
+      '  .vgp-dpad { width: var(--p-dpad-size); height: var(--p-dpad-size); transform: translate(var(--p-dpad-nudge-x), var(--p-dpad-nudge-y)); }',
+      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: var(--p-btn-dpad); height: var(--p-btn-dpad); }',
+      '  .vgp-stick-zone { width: var(--p-stick-size); height: var(--p-stick-size); transform: translate(var(--p-stick-nudge-x), var(--p-stick-nudge-y)); }',
+      '  .vgp-stick-knob { width: var(--p-knob-size); height: var(--p-knob-size); }',
+      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: var(--p-btn-c); height: var(--p-btn-c); }',
+      '  .vgp-a { width: var(--p-btn-a); height: var(--p-btn-a); }',
+      '  .vgp-b { width: var(--p-btn-b); height: var(--p-btn-b); }',
+      '  .vgp-start { padding: 0.4em 1.4em; font-size: var(--p-start-size); }',
+      '  .vgp-cbuttons { width: var(--p-cbuttons-w); height: var(--p-cbuttons-h); transform: translate(var(--p-cbuttons-nudge-x), var(--p-cbuttons-nudge-y)); }',
+      '  .vgp-ab { width: var(--p-ab-w); height: var(--p-ab-h); transform: translate(var(--p-ab-nudge-x), var(--p-ab-nudge-y)); }',
+      '  .vgp-z-portrait { transform: translate(var(--p-z-nudge-x), var(--p-z-nudge-y)); }',
+      '}',
       '.vgp-start-portrait {',
       '  grid-area: start; display: flex; align-items: center; justify-content: center;',
       '  padding: 2px 0;',
@@ -156,44 +193,225 @@
       '.vgp-start-landscape { display: none; }',
       '.vgp-z-landscape { display: none; }',
 
-      // Portrait responsive: scale sizes with min(vw, svh) on small phones.
-      // Centered transforms handle positioning — only sizes need scaling.
+      // Portrait responsive: override --p- vars per breakpoint so sizes scale.
       '@media (orientation: portrait) and (max-width: 430px) {',
-      '  .vgp-dpad { width: clamp(68px, 15svh, 96px); height: clamp(68px, 15svh, 96px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(24px, 5svh, 34px); height: clamp(24px, 5svh, 34px); }',
-      '  .vgp-stick-zone { width: clamp(90px, 18svh, 128px); height: clamp(90px, 18svh, 128px); }',
-      '  .vgp-stick-knob { width: clamp(38px, 7.5svh, 54px); height: clamp(38px, 7.5svh, 54px); }',
-      '  .vgp-cbuttons { width: clamp(76px, 16svh, 120px); height: clamp(76px, 16svh, 112px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(24px, 5svh, 38px); height: clamp(24px, 5svh, 38px); }',
-      '  .vgp-ab { width: clamp(100px, 22svh, 160px); height: clamp(76px, 16svh, 116px); }',
-      '  .vgp-a, .vgp-b { width: clamp(40px, 9svh, 66px); height: clamp(40px, 9svh, 66px); font-size: clamp(14px, 3svh, 21px); }',
+      '  :root {',
+      '    --p-btn-dpad: clamp(24px, 5svh, 34px);',
+      '    --p-stick-size: clamp(90px, 18svh, 128px);',
+      '    --p-btn-c: clamp(24px, 5svh, 38px);',
+      '    --p-btn-a: clamp(40px, 9svh, 66px); --p-btn-b: clamp(40px, 9svh, 66px);',
+      '  }',
+      '}',
+
+      // iPhone X / standard phones portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 430px) and (min-height: 651px) {',
+      '  :root {',
+      '    --p-dpad-nudge-x: 22px; --p-dpad-nudge-y: 3px;',
+      '    --p-l-nudge-x: 105px; --p-l-nudge-y: 126px;',
+      '    --p-l-size: 12px;',
+      '    --p-z-nudge-x: 92px; --p-z-nudge-y: -72px;',
+      '    --p-z-size: 14px;',
+      '    --p-cbuttons-nudge-x: -16px; --p-cbuttons-nudge-y: 12px;',
+      '    --p-r-nudge-x: -106px; --p-r-nudge-y: 146px;',
+      '    --p-r-size: 14px;',
+      '  }',
+      '}',
+
+      // Galaxy S8 / narrow tall phones portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 375px) and (min-height: 651px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 109px; --p-z-nudge-y: -63px;',
+      '    --p-r-nudge-x: -80px; --p-r-nudge-y: 150px;',
+      '    --p-ab-nudge-x: 5px; --p-ab-nudge-y: 55px;',
+      '    --p-cbuttons-nudge-x: -9px; --p-cbuttons-nudge-y: 10px;',
+      '  }',
+      '}',
+
+      // Pixel 5 / mid-size tall phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 376px) and (max-width: 413px) and (min-height: 651px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 108px; --p-z-nudge-y: -68px;',
+      '    --p-r-nudge-x: -93px; --p-r-nudge-y: 137px;',
+      '    --p-l-nudge-x: 106px; --p-l-nudge-y: 126px;',
+      '  }',
+      '}',
+
+      // Pixel 7 / mid-size tall phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 376px) and (max-width: 413px) and (min-height: 750px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 111px; --p-z-nudge-y: -74px;',
+      '    --p-r-nudge-x: -106px; --p-r-nudge-y: 146px;',
+      '  }',
+      '}',
+
+      // iPhone 12 Pro Max / large phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 414px) and (min-height: 651px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 122px; --p-z-nudge-y: -67px;',
+      '    --p-r-nudge-x: -95px; --p-r-nudge-y: 139px;',
+      '  }',
+      '}',
+
+      // iPhone 16+ / largest phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 428px) and (min-height: 800px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 122px; --p-z-nudge-y: -72px;',
+      '    --p-r-nudge-x: -105px; --p-r-nudge-y: 149px;',
+      '  }',
       '}',
 
       // Small portrait phones: narrow AND short (Moto G4, iPhone SE, iPhone 12 Mini, etc.)
-      // Reduce element sizes further on tiny screens.
       '@media (orientation: portrait) and (max-width: 430px) and (max-height: 650px) {',
       '  .vgp-left, .vgp-right { padding-top: 2px; padding-bottom: 1px; gap: 1px; }',
-      '  .vgp-stick-zone { width: clamp(76px, 14svh, 108px); height: clamp(76px, 14svh, 108px); }',
-      '  .vgp-stick-knob { width: clamp(32px, 6svh, 45px); height: clamp(32px, 6svh, 45px); }',
-      '  .vgp-dpad { width: clamp(60px, 12svh, 84px); height: clamp(60px, 12svh, 84px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(20px, 4svh, 28px); height: clamp(20px, 4svh, 28px); }',
-      '  .vgp-ab { width: clamp(90px, 20svh, 140px); height: clamp(68px, 14svh, 100px); }',
-      '  .vgp-a, .vgp-b { width: clamp(35px, 7.5svh, 56px); height: clamp(35px, 7.5svh, 56px); font-size: clamp(12px, 2.5svh, 18px); }',
-      '  .vgp-cbuttons { width: clamp(68px, 13svh, 96px); height: clamp(68px, 13svh, 96px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(22px, 4.5svh, 32px); height: clamp(22px, 4.5svh, 32px); }',
+      '  :root {',
+      '    --p-btn-dpad: clamp(20px, 4svh, 28px);',
+      '    --p-stick-size: clamp(76px, 14svh, 108px);',
+      '    --p-btn-c: clamp(22px, 4.5svh, 32px);',
+      '    --p-btn-a: clamp(35px, 7.5svh, 56px); --p-btn-b: clamp(35px, 7.5svh, 56px);',
+      '  }',
       '}',
 
-      // Tablet portrait: more inward padding + larger stick + larger d-pad and face buttons
+      // iPhone SE (3rd gen) portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 375px) and (max-height: 600px) {',
+      '  :root {',
+      '    --p-stick-size: 94px;',
+      '    --p-z-nudge-x: 114px; --p-z-nudge-y: -37px;',
+      '    --p-l-nudge-x: 78px; --p-l-nudge-y: 96px;',
+      '    --p-r-nudge-x: -72px; --p-r-nudge-y: 113px;',
+      '  }',
+      '}',
+
+      // iPhone 13 Mini portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 375px) and (min-height: 501px) and (max-height: 600px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 116px; --p-z-nudge-y: -39px;',
+      '    --p-r-nudge-x: -68px; --p-r-nudge-y: 110px;',
+      '  }',
+      '}',
+
+      // Galaxy S9+ / narrow mid-height phones portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 320px) and (min-height: 501px) and (max-height: 650px) {',
+      '  :root {',
+      '    --p-r-nudge-x: -74px; --p-r-nudge-y: 116px;',
+      '    --p-z-nudge-x: 85px; --p-z-nudge-y: -44px;',
+      '    --p-l-nudge-x: 77px; --p-l-nudge-y: 100px;',
+      '  }',
+      '}',
+
+      // iPhone SE (1st/2nd gen) portrait: design-mode values
+      '@media (orientation: portrait) and (max-width: 320px) and (max-height: 500px) {',
+      '  :root {',
+      '    --p-btn-dpad: 22px;',
+      '    --p-l-nudge-x: 78px; --p-l-nudge-y: 91px;',
+      '    --p-r-nudge-x: -58px; --p-r-nudge-y: 104px;',
+      '    --p-z-nudge-x: 92px; --p-z-nudge-y: -32px;',
+      '  }',
+      '}',
+
+      // iPhone 12 / mid-size short phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 376px) and (max-width: 430px) and (max-height: 650px) {',
+      '  :root {',
+      '    --p-stick-size: 98px;',
+      '    --p-btn-dpad: 25px;',
+      '    --p-dpad-nudge-x: 22px; --p-dpad-nudge-y: 10px;',
+      '    --p-l-nudge-x: 83px; --p-l-nudge-y: 100px;',
+      '    --p-r-nudge-x: -68px; --p-r-nudge-y: 115px;',
+      '    --p-z-nudge-x: 123px; --p-z-nudge-y: -41px;',
+      '  }',
+      '}',
+
+      // Galaxy A55 / wide phones portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 431px) and (max-width: 599px) {',
+      '  :root {',
+      '    --p-stick-size: 100px;',
+      '    --p-stick-nudge-x: 18px; --p-stick-nudge-y: 24px;',
+      '    --p-btn-dpad: 26px;',
+      '    --p-dpad-nudge-x: 32px; --p-dpad-nudge-y: 9px;',
+      '    --p-btn-a: 41px; --p-btn-b: 41px;',
+      '    --p-ab-nudge-x: -14px; --p-ab-nudge-y: 51px;',
+      '    --p-cbuttons-nudge-x: -13px; --p-cbuttons-nudge-y: 13px;',
+      '    --p-l-nudge-x: 97px; --p-l-nudge-y: 103px;',
+      '    --p-r-nudge-x: -64px; --p-r-nudge-y: 130px;',
+      '    --p-z-nudge-x: 172px; --p-z-nudge-y: -30px;',
+      '  }',
+      '}',
+
+      // Tablet portrait: more inward padding + larger sizes
       '@media (orientation: portrait) and (min-width: 600px) {',
       '  #virtual-gamepad { padding: 8px 32px; }',
-      '  .vgp-stick-zone { width: clamp(150px, 18svh, 200px); height: clamp(150px, 18svh, 200px); }',
-      '  .vgp-stick-knob { width: clamp(62px, 7.5svh, 84px); height: clamp(62px, 7.5svh, 84px); }',
-      '  .vgp-dpad { width: clamp(100px, 13svh, 160px); height: clamp(100px, 13svh, 160px); }',
-      '  .vgp-du, .vgp-dd, .vgp-dl, .vgp-dr { width: clamp(35px, 4.5svh, 56px); height: clamp(35px, 4.5svh, 56px); }',
-      '  .vgp-ab { width: clamp(150px, 26svh, 220px); height: clamp(116px, 20svh, 170px); }',
-      '  .vgp-a, .vgp-b { width: clamp(64px, 11svh, 88px); height: clamp(64px, 11svh, 88px); font-size: clamp(22px, 4svh, 30px); }',
-      '  .vgp-cbuttons { width: clamp(116px, 18svh, 168px); height: clamp(116px, 18svh, 168px); }',
-      '  .vgp-cu, .vgp-cd, .vgp-cl, .vgp-cr { width: clamp(38px, 6svh, 56px); height: clamp(38px, 6svh, 56px); }',
+      '  :root {',
+      '    --p-btn-dpad: clamp(35px, 4.5svh, 56px);',
+      '    --p-stick-size: clamp(150px, 18svh, 200px);',
+      '    --p-btn-c: clamp(38px, 6svh, 56px);',
+      '    --p-btn-a: clamp(64px, 11svh, 88px); --p-btn-b: clamp(64px, 11svh, 88px);',
+      '  }',
+      '}',
+
+      // iPad Mini portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 600px) and (max-width: 850px) {',
+      '  :root {',
+      '    --p-btn-c: 48px;',
+      '    --p-cbuttons-nudge-x: -35px; --p-cbuttons-nudge-y: -21px;',
+      '    --p-r-nudge-x: -141px; --p-r-nudge-y: 171px;',
+      '    --p-r-size: 18px;',
+      '    --p-z-nudge-x: 243px; --p-z-nudge-y: -104px;',
+      '    --p-z-size: 18px;',
+      '    --p-dpad-nudge-x: 33px; --p-dpad-nudge-y: 2px;',
+      '    --p-l-nudge-x: 155px; --p-l-nudge-y: 164px;',
+      '    --p-l-size: 18px;',
+      '    --p-start-size: 17px;',
+      '  }',
+      '}',
+
+      // Galaxy Tab S9 / narrow mid-height tablets portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 600px) and (max-width: 710px) and (max-height: 999px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 195px; --p-z-nudge-y: -103px;',
+      '    --p-ab-nudge-x: -4px; --p-ab-nudge-y: 45px;',
+      '    --p-r-nudge-x: -127px; --p-r-nudge-y: 175px;',
+      '    --p-cbuttons-nudge-x: -22px; --p-cbuttons-nudge-y: -4px;',
+      '  }',
+      '}',
+
+      // Galaxy Tab S4 / narrow tall tablets portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 600px) and (max-width: 710px) and (min-height: 1000px) {',
+      '  :root {',
+      '    --p-ab-nudge-x: -15px; --p-ab-nudge-y: 55px;',
+      '    --p-z-nudge-x: 219px; --p-z-nudge-y: -106px;',
+      '    --p-r-nudge-x: -136px; --p-r-nudge-y: 179px;',
+      '    --p-cbuttons-nudge-x: -34px; --p-cbuttons-nudge-y: -7px;',
+      '  }',
+      '}',
+
+      // iPad (gen 7) portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 800px) and (max-width: 850px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 263px; --p-z-nudge-y: -110px;',
+      '    --p-start-size: 19px;',
+      '  }',
+      '}',
+
+      // Nexus 10 / 800px wide tall tablets portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 800px) and (max-width: 820px) and (min-height: 1100px) {',
+      '  :root {',
+      '    --p-ab-nudge-x: -25px; --p-ab-nudge-y: 101px;',
+      '    --p-z-nudge-x: 254px; --p-z-nudge-y: -51px;',
+      '    --p-cbuttons-nudge-x: -37px; --p-cbuttons-nudge-y: 51px;',
+      '    --p-r-nudge-x: -148px; --p-r-nudge-y: 228px;',
+      '    --p-dpad-nudge-x: 29px; --p-dpad-nudge-y: 4px;',
+      '    --p-l-nudge-x: 164px; --p-l-nudge-y: 187px;',
+      '  }',
+      '}',
+
+      // iPad Pro 11 portrait: design-mode values
+      '@media (orientation: portrait) and (min-width: 821px) and (min-height: 1100px) {',
+      '  :root {',
+      '    --p-z-nudge-x: 281px; --p-z-nudge-y: -59px;',
+      '    --p-ab-nudge-x: -12px; --p-ab-nudge-y: 91px;',
+      '    --p-r-nudge-x: -136px; --p-r-nudge-y: 220px;',
+      '    --p-cbuttons-nudge-x: -31px; --p-cbuttons-nudge-y: 19px;',
+      '    --p-l-nudge-x: 162px; --p-l-nudge-y: 177px;',
+      '  }',
       '}',
 
       // ── Landscape: coordinated responsive layout system ──
@@ -534,12 +752,12 @@
       '    --spacer-pref: 0px;',
       '    --btn-l-size: 11px;',
       '    --l-position: fixed; --l-top: 109px; --l-left: 196px;',
-      '    --r-position: fixed; --r-top: 162px; --r-right: 137px;',
+      '    --r-position: fixed; --r-top: 154px; --r-right: 137px;',
       '    --dpad-nudge-x: 13px; --dpad-nudge-y: -6px;',
       '    --ab-nudge-x: 5px; --ab-nudge-y: -10px;',
       '    --start-nudge-x: -129px; --start-nudge-y: 9px;',
-      '    --cbuttons-nudge-x: -6px; --cbuttons-nudge-y: -8px;',
-      '    --z-nudge-x: -9px; --z-nudge-y: 6px;',
+      '    --cbuttons-nudge-x: -6px; --cbuttons-nudge-y: -15px;',
+      '    --z-nudge-x: -10px; --z-nudge-y: 4px;',
       '  }',
       '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
       '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
@@ -569,6 +787,75 @@
       '    --start-nudge-x: -127px; --start-nudge-y: 103px;',
       '    --z-nudge-x: -21px; --z-nudge-y: 1px;',
       '    --cbuttons-nudge-x: -4px; --cbuttons-nudge-y: -7px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Galaxy Tab S9 / mid-height wide tablets landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 451px) and (max-height: 650px) and (min-width: 900px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 398px; --l-left: 161px;',
+      '    --r-position: fixed; --r-top: 398px; --r-right: 156px;',
+      '    --z-nudge-x: -16px; --z-nudge-y: 9px;',
+      '    --start-nudge-x: -82px; --start-nudge-y: -141px;',
+      '    --cbuttons-nudge-x: -1px; --cbuttons-nudge-y: 30px;',
+      '    --ab-nudge-x: -2px; --ab-nudge-y: -13px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPad Mini landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 651px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 520px; --l-left: 161px;',
+      '    --r-position: fixed; --r-top: 507px; --r-right: 152px;',
+      '    --z-nudge-x: -12px; --z-nudge-y: 1px;',
+      '    --start-nudge-x: -78px; --start-nudge-y: -154px;',
+      '    --cbuttons-nudge-x: -3px; --cbuttons-nudge-y: 22px;',
+      '    --ab-nudge-x: 2px; --ab-nudge-y: -16px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Galaxy Tab S4 / wide mid-height tablets landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 651px) and (max-height: 750px) and (min-width: 1100px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 475px; --l-left: 165px;',
+      '    --r-position: fixed; --r-top: 463px; --r-right: 157px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPad (gen 7) landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 751px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 561px; --l-left: 166px;',
+      '    --r-position: fixed; --r-top: 551px; --r-right: 157px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // iPad Pro 11 landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 751px) and (min-width: 1100px) and (max-width: 1250px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 582px; --l-left: 168px;',
+      '    --r-position: fixed; --r-top: 571px; --r-right: 158px;',
+      '  }',
+      '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
+      '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
+      '}',
+
+      // Nexus 10 / extra-wide tablets landscape: design-mode values
+      '@media (orientation: landscape) and (min-height: 751px) and (min-width: 1251px) {',
+      '  :root {',
+      '    --l-position: fixed; --l-top: 565px; --l-left: 170px;',
+      '    --r-position: fixed; --r-top: 556px; --r-right: 159px;',
+      '    --z-nudge-x: -11px; --z-nudge-y: 4px;',
       '  }',
       '  .vgp-shoulders > div:not(.vgp-btn) { display: none; }',
       '  .vgp-l { padding: 0.4em 1em; } .vgp-r { padding: 0.4em 1em; }',
