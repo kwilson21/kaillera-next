@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.46.0",
+    "date": "2026-04-14",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "add gzip compression + lazy Playwright lifecycle"
+      },
+      {
+        "type": "feat",
+        "message": "ROM-based game detection with Smash Remix support"
+      },
+      {
+        "type": "fix",
+        "message": "reject mismatched ROM uploads for guests with error notification"
+      }
+    ]
+  },
+  {
     "version": "0.45.0",
     "date": "2026-04-14",
     "changes": [
