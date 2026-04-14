@@ -1299,10 +1299,10 @@ git commit -m "feat: verified SSB64 US RDRAM addresses for game memory reader"
 
 ## Chunk 6: Integration & Polish
 
-### Task 14: Add session log and PostHog enrichment
+### Task 14: Add session log enrichment
 
 **Files:**
-- Modify: `server/src/api/signaling.py` (game-state handler — detect transitions, write to session log and PostHog)
+- Modify: `server/src/api/signaling.py` (game-state handler — detect transitions, write to session log)
 
 - [ ] **Step 1: Update game-state handler to detect transitions and write to session log**
 
@@ -1318,7 +1318,6 @@ In `signaling.py`, update the `on_game_state` handler to detect key transitions 
     if payload.matchState == "in-game" and (not prev_state or prev_state.get("matchState") != "in-game"):
         characters = [p.get("character") if isinstance(p, dict) else None for p in (new_state.get("players") or [])]
         log.info("Match started in room %s: stage=%s players=%s", session_id, payload.stage, characters)
-        # Enrich session log
         if room.match_id:
             try:
                 await db.upsert_session_log(
@@ -1343,35 +1342,11 @@ In `signaling.py`, update the `on_game_state` handler to detect key transitions 
                 pass  # best-effort
 ```
 
-- [ ] **Step 2: Enrich PostHog events in start-game and end-game handlers**
-
-Find the existing `start-game` handler where PostHog events are emitted. After the game starts, if `room.game_state` is available, include it in PostHog properties. Similarly in the `end-game` handler, capture final game state before clearing it.
-
-In `start-game` handler, where PostHog `game_started` event is emitted, add to properties:
-```python
-    if room.game_state:
-        props["stage"] = room.game_state.get("stage")
-        props["characters"] = [
-            p.get("character") if isinstance(p, dict) else None
-            for p in (room.game_state.get("players") or [])
-        ]
-```
-
-In `end-game` handler, before clearing game_state, capture final state for PostHog:
-```python
-    final_state = room.game_state or {}
-    # ... existing end-game logic ...
-    # In PostHog game_ended event properties:
-    if final_state:
-        props["stage"] = final_state.get("stage")
-        props["winner"] = final_state.get("winner")
-```
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
 git add server/src/api/signaling.py
-git commit -m "feat: enrich session logs and PostHog with game state transitions"
+git commit -m "feat: enrich session logs with game state transitions"
 ```
 
 ---

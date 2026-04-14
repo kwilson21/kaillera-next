@@ -12,7 +12,7 @@ Read live N64 game state from WASM RDRAM and surface it through a public game br
 1. Decode live game data from SSB64 and Smash Remix (stage, characters, stocks, damage %, timer, match state, winner)
 2. Provide a public game browser page with live thumbnails and game state
 3. Allow players and spectators to join public matches directly from the browser
-4. Enrich session logs and PostHog analytics with actual match data
+4. Enrich session logs with actual match data (characters, stage, winner)
 5. Lay groundwork for future Discord presence integration
 
 ## Non-Goals
@@ -222,8 +222,6 @@ These are shown to the host in the room lobby before and during a game. Password
 ### 6. Integration Points
 
 **Session logs:** The server enriches session log entries server-side when `game-state` events arrive. Key state transitions (game started with characters X on stage Y, match ended with winner Z) are appended to the existing session log via `db.upsert_session_log`. This keeps the merge logic server-side where the game state and session log data are co-located.
-
-**PostHog:** Enrich existing game-started / game-ended events with character picks, stage, winner, match duration.
 
 **Future Discord presence:** The `game_state` on the room object is exactly what a Discord bot would read to set Rich Presence ("Playing SSB64 — Dream Land — Fox vs Pikachu").
 
