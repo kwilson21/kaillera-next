@@ -151,9 +151,20 @@ The shim is the main original engineering work in this project.
 
 This avoids needing to recompile the boot sequence, which differs across N64 ROM regions and is generic/tiny anyway.
 
+**Mid-frame handoff:** Recompiled code may indirectly jump to non-recompiled addresses (unmapped overlay, library call into boot code, etc.). On such jumps the shim must flush recompiled register state back to mupen64plus's interpreter state and resume interpretation. On return, state flushes back. This register-sync cost is bounded because well-mapped overlays will almost never cross the boundary mid-frame; if it becomes hot, the fix is to map more overlays, not to optimize the sync path.
+
 ### 5. Rollback Integration
 
-`kn_rollback.c` is untouched. The rollback state ring continues to use `retro_serialize`/`retro_unserialize`. The only addition: ~300 bytes of recompiled runtime state (GP regs + FP regs + PC + small COP0 subset) appended to the serialize buffer.
+`kn_rollback.c` is untouched. The rollback state ring continues to use `retro_serialize`/`retro_unserialize`. The only addition: ~300 bytes of recompiled runtime state appended to the serialize buffer.
+
+**Exact recomp state contents** (enumerated during M3, frozen at M7):
+- 32 × u64 GP registers (256 bytes)
+- 32 × u64 FP registers + FPCR/FPSR (264 bytes)
+- PC + delay slot state (16 bytes)
+- Active overlay table id (4 bytes)
+- COP0 subset *not already in `g_cp0_regs[]`* — likely zero bytes; anything recompiled code reads from COP0 should go through the shim to the mupen64plus copy, not a private copy, to avoid divergence
+
+If any COP0 register ends up duplicated between the shim and `g_cp0_regs`, that is a determinism bug and must be collapsed to a single owner.
 
 ```c
 // In retro_serialize, after existing mupen64plus state:
@@ -165,10 +176,14 @@ Rollback engine doesn't know or care that the CPU is recompiled. One snapshot, o
 
 ### 6. Determinism Verification
 
-For the first few weeks of integration, run interpreter and recompiled paths **side-by-side** in a development mode:
+Run interpreter and recompiled paths **side-by-side** in a development mode from M3 onward:
 - Each frame, after execution, compute RDRAM hash
 - Compare hashes between interpreter-only and recompiled builds
 - Any divergence → bug in shim, fix before continuing
+
+**Exit criterion for side-by-side mode:** 10,000 consecutive frames of boot-to-match clean across 3 independent runs on each target browser. Before that bar is met, side-by-side stays on in dev builds. After, it becomes an opt-in debug flag.
+
+**ASYNCIFY validation (M4 gate):** Statically verify that no recompiled function calls a function marked with `EMTERPRETIFY_ASYNC` or equivalent ASYNCIFY annotation. If the recompiled hot path crosses an ASYNCIFY boundary, the freeze risk documented in `project_c_rollback_working.md` re-enters. Fix is either (a) unmark the target function, (b) route via a synchronous shim, or (c) exclude that code path from recompilation.
 
 This is the gatekeeper against subtle determinism bugs the shim layer might introduce.
 
@@ -217,6 +232,8 @@ Frame N:
 | M6 | Smash Remix overlay config, gameplay works | 1 week |
 | M7 | Rollback verified with recompiled path (retro_serialize includes recomp state) | 1 week |
 | M8 | Perf benchmarks, comparison with interpreter path | 1 day |
+
+**If M8 reveals perf targets are missed,** the design is reopened before scope is extended. We do not silently add "M9: perf tuning" — a missed target means an assumption was wrong and we should know which one before committing more time.
 
 **Total: 7-10 weeks to rollback-verified Smash Remix via N64Recomp.**
 
