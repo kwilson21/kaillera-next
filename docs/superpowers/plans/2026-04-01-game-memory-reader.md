@@ -17,7 +17,7 @@
 ### Task 1: Add Pydantic payload models for new events
 
 **Files:**
-- Modify: `server/src/api/payloads.py` (append after line 171)
+- Modify: `server/src/api/payloads.py` (append after line 169)
 
 - [ ] **Step 1: Add the three new payload models**
 
@@ -75,12 +75,12 @@ git commit -m "feat: add Pydantic payload models for game-state, match-thumbnail
 ### Task 2: Extend Room dataclass with new fields
 
 **Files:**
-- Modify: `server/src/api/signaling.py:141-162` (Room dataclass)
+- Modify: `server/src/api/signaling.py:159-187` (Room dataclass)
 - Modify: `server/src/state.py:41-73` (serialization)
 
 - [ ] **Step 1: Add new fields to Room dataclass**
 
-In `server/src/api/signaling.py`, add after `match_id` (line 162):
+In `server/src/api/signaling.py`, add after `match_id` (line 180):
 
 ```python
     game_state: dict | None = None  # latest decoded game state from host
@@ -133,7 +133,7 @@ git commit -m "feat: extend Room dataclass with game_state, thumbnail, visibilit
 
 - [ ] **Step 1: Add rate limit entries**
 
-In `server/src/ratelimit.py`, add to the `_LIMITS` dict (after the `"feedback"` entry at line 41):
+In `server/src/ratelimit.py`, add to the `_LIMITS` dict (after the `"feedback"` entry at line 43):
 
 ```python
     "game-state": (5, 1),  # 5/sec — buffer above 250ms poll (~4/sec)
@@ -203,31 +203,34 @@ async def on_match_thumbnail(sid: str, payload: MatchThumbnailPayload) -> str | 
 
 - [ ] **Step 4: Add `set-visibility` event handler**
 
+Note: This handler mutates room state and persists to Redis, so it must acquire `_room_lock` (added in commit a7c9d4a for concurrency safety).
+
 ```python
 @sio.on("set-visibility")
 @validated(SetVisibilityPayload)
 async def on_set_visibility(sid: str, payload: SetVisibilityPayload) -> str | None:
     if not check(sid, "set-visibility"):
         return "Rate limited"
-    info = _sid_to_room.get(sid)
-    if not info:
-        return "Not in a room"
-    session_id, _pid, _is_spec = info
-    room = rooms.get(session_id)
-    if not room or room.owner != sid:
-        return "Not room owner"
-    if payload.public is not None:
-        room.public = payload.public
-    if payload.allowJoin is not None:
-        room.allow_join = payload.allowJoin
-    if payload.allowSpectate is not None:
-        room.allow_spectate = payload.allowSpectate
-    await state.save_room(session_id, room)
-    await sio.emit("visibility-updated", {
-        "public": room.public,
-        "allowJoin": room.allow_join,
-        "allowSpectate": room.allow_spectate,
-    }, room=session_id)
+    async with _room_lock:
+        info = _sid_to_room.get(sid)
+        if not info:
+            return "Not in a room"
+        session_id, _pid, _is_spec = info
+        room = rooms.get(session_id)
+        if not room or room.owner != sid:
+            return "Not room owner"
+        if payload.public is not None:
+            room.public = payload.public
+        if payload.allowJoin is not None:
+            room.allow_join = payload.allowJoin
+        if payload.allowSpectate is not None:
+            room.allow_spectate = payload.allowSpectate
+        await state.save_room(session_id, room)
+        await sio.emit("visibility-updated", {
+            "public": room.public,
+            "allowJoin": room.allow_join,
+            "allowSpectate": room.allow_spectate,
+        }, room=session_id)
     return None
 ```
 
@@ -252,7 +255,7 @@ git commit -m "feat: add game-state, match-thumbnail, set-visibility Socket.IO h
 
 - [ ] **Step 1: Add the matches endpoint**
 
-In `server/src/api/app.py`, add a new endpoint inside `create_app()`, after the existing `/list` endpoint (around line 456):
+In `server/src/api/app.py`, add a new endpoint inside `create_app()`, after the existing `/list` endpoint (around line 653):
 
 ```python
     @app.get("/api/matches")
@@ -682,7 +685,7 @@ git commit -m "feat: add ThumbnailCapture class for match browser previews"
 
 **Files:**
 - Modify: `web/play.html` (add script tags)
-- Modify: `web/static/play.js:738-846` (game lifecycle hooks)
+- Modify: `web/static/play.js:910-1035` (game lifecycle hooks)
 
 - [ ] **Step 1: Add script tags to play.html**
 
@@ -695,7 +698,7 @@ In `web/play.html`, find the existing `<script>` tags that load JS files. Add be
 
 - [ ] **Step 2: Add reader/thumbnail state variables to play.js**
 
-In `web/static/play.js`, in the state section (around line 63-84), add:
+In `web/static/play.js`, in the state section (around line 63-100), add:
 
 ```js
   let _memoryReader = null;
@@ -704,7 +707,7 @@ In `web/static/play.js`, in the state section (around line 63-84), add:
 
 - [ ] **Step 3: Initialize reader and thumbnail on game start**
 
-In `web/static/play.js`, in `onGameStarted` (line 738), add initialization after the `initEngine()` call at line 802. Add just before the closing `};` of `onGameStarted`:
+In `web/static/play.js`, in `onGameStarted` (line 910), add initialization after the `initEngine()` call. Add just before the closing `};` of `onGameStarted`:
 
 ```js
     // Start live game memory reader (host only, supported ROMs)
@@ -730,7 +733,7 @@ In `web/static/play.js`, in `onGameStarted` (line 738), add initialization after
 
 - [ ] **Step 4: Clean up on game end**
 
-In `web/static/play.js`, in `onGameEnded` (line 805), add cleanup after `hibernateEmulator()` (line 822):
+In `web/static/play.js`, in `onGameEnded` (line 992), add cleanup after `hibernateEmulator()`:
 
 ```js
     // Stop memory reader and thumbnail capture
@@ -761,12 +764,12 @@ git commit -m "feat: integrate GameMemoryReader and ThumbnailCapture into play.j
 ### Task 9: Add visibility toggles to host controls UI
 
 **Files:**
-- Modify: `web/play.html:101-127` (host-controls section)
+- Modify: `web/play.html:131-157` (host-controls section)
 - Modify: `web/static/play.js` (visibility event emission)
 
 - [ ] **Step 1: Add visibility toggles to play.html**
 
-In `web/play.html`, inside the `host-controls` div (after the `rom-sharing-disclaimer` paragraph, before the start button at line 126), add:
+In `web/play.html`, inside the `host-controls` div (after the `rom-sharing-disclaimer` paragraph, before the start button at line 156), add:
 
 ```html
           <div class="host-options-row" id="visibility-options">
@@ -1187,7 +1190,7 @@ git commit -m "feat: add game browser page (matches.html) with live match cards"
 
 - [ ] **Step 1: Add "Browse Games" link to lobby**
 
-In `web/index.html`, after the `join-row` div (line 29), add:
+In `web/index.html`, after the `join-row` div (line 31), add:
 
 ```html
       <div class="divider">or browse public games</div>
@@ -1210,9 +1213,9 @@ git commit -m "feat: add game browser link to lobby page"
 
 - [ ] **Step 1: Pass password from URL to join-room payload**
 
-In `web/static/play.js`, around line 421-432, the guest emits `join-room` with a payload object containing `extra: { ... }`. The `JoinRoomPayload` already has a `password` field at the top level. Add the password from URL params.
+In `web/static/play.js`, around line 570, the guest emits `join-room` with a payload object containing `extra: { ... }`. The `JoinRoomPayload` already has a `password` field at the top level. Add the password from URL params.
 
-Find the `socket.emit('join-room', {` call at line 421 and add `password` to the payload object (sibling of `extra`):
+Find the `socket.emit('join-room', {` call at line 570 and add `password` to the payload object (sibling of `extra`):
 
 ```js
         socket.emit(
@@ -1230,7 +1233,7 @@ Find the `socket.emit('join-room', {` call at line 421 and add `password` to the
           },
 ```
 
-Also add the same `password` field to the retry emit at line 439 (the "Room is full" auto-spectate fallback) and to the reconnect payloads at lines 235 and 346.
+Also add the same `password` field to the retry emit at line 588 (the "Room is full" auto-spectate fallback) and to the reconnect payloads in `onConnect` and the `reconnect` handler.
 
 - [ ] **Step 2: Commit**
 
