@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.45.0",
+    "date": "2026-04-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "serialize room mutations with asyncio.Lock and fix concurrency hazards"
+      },
+      {
+        "type": "feat",
+        "message": "add read-only state machine observer"
+      },
+      {
+        "type": "feat",
+        "message": "design mode tool + CSS custom property layout system"
+      },
+      {
+        "type": "feat",
+        "message": "per-device portrait breakpoints + scoped portrait/landscape CSS isolation"
+      }
+    ]
+  },
+  {
     "version": "0.44.1",
     "date": "2026-04-13",
     "changes": [
