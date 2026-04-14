@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 GAME_INFO: dict[str, dict[str, str]] = {
     "ssb64": {"image": "ssb64.jpg", "name": "Super Smash Bros. 64"},
+    "smash-remix": {"image": "smash-remix.jpg", "name": "Smash Remix"},
 }
 
 # Raw env var values — evaluated per-request via feature_enabled_for_host().

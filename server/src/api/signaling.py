@@ -68,6 +68,7 @@ from src.api.payloads import (
     RomReadyPayload,
     RomSharingTogglePayload,
     SessionLogPayload,
+    SetGameIdPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
@@ -810,6 +811,28 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
         await sio.emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
         log.info("Mode set to %s in room %s", mode, session_id)
+    return None
+
+
+@sio.on("set-game-id")
+@validated(SetGameIdPayload)
+async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
+    """Host updates game_id after ROM identification."""
+    if not check(sid, "set-game-id"):
+        return "Rate limited"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can set the game"
+        game_id = payload.game_id
+        if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
+            game_id = "unknown"
+        room.game_id = game_id
+        await state.save_room(session_id, room)
+        log.info("Game ID set to %s in room %s", game_id, session_id)
     return None
 
 

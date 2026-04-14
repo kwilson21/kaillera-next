@@ -2,18 +2,21 @@
   {
     "sha256": "S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d",
     "game": "Super Smash Bros.",
+    "game_id": "ssb64",
     "region": "US",
     "format": "z64"
   },
   {
     "sha256": "S73855bdf5e8753c546a31e278dfe558c3eaa575b97752c1d95950d66b1161130",
     "game": "Smash Remix 2.0.0",
+    "game_id": "smash-remix",
     "region": "US",
     "format": "z64"
   },
   {
     "sha256": "S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403",
     "game": "Smash Remix 2.0.1",
+    "game_id": "smash-remix",
     "region": "US",
     "format": "z64"
   }

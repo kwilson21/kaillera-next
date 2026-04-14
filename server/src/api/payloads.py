@@ -111,6 +111,10 @@ class SetModePayload(BaseModel):
     mode: Literal["lockstep", "streaming"] = "lockstep"
 
 
+class SetGameIdPayload(BaseModel):
+    game_id: str = Field(default="ssb64", max_length=32)
+
+
 # ── rom-sharing-toggle ───────────────────────────────────────────────────────
 
 

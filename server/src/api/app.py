@@ -810,7 +810,12 @@ def create_app(lifespan=None) -> FastAPI:
     try:
         with open(_known_roms_path) as _f:
             _known_roms = {
-                entry["sha256"]: {"game": entry["game"], "region": entry.get("region"), "format": entry.get("format")}
+                entry["sha256"]: {
+                    "game": entry["game"],
+                    "game_id": entry.get("game_id"),
+                    "region": entry.get("region"),
+                    "format": entry.get("format"),
+                }
                 for entry in json.load(_f)
             }
         log.info("Loaded %d known ROM(s) from %s", len(_known_roms), _known_roms_path)

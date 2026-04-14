@@ -78,6 +78,7 @@
   let _romBlob = null; // raw ROM Blob for re-creating blob URLs
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
+  let _gameId = null; // derived from ROM hash via known_roms table
   let _hostRomHash = null; // host's ROM hash for late-join verification
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
@@ -87,6 +88,11 @@
 
   let _knownRoms = {}; // populated from /api/rom-hashes on load
   let renderRomLibrary = () => {}; // replaced with full impl after IDB functions
+
+  const _gameIdFromHash = (hash) => {
+    if (hash && _knownRoms[hash]?.game_id) return _knownRoms[hash].game_id;
+    return 'ssb64'; // default fallback
+  };
 
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
@@ -306,7 +312,7 @@
               sessionid: roomCode,
               player_name: playerName,
               room_name: `${playerName}'s room`,
-              game_id: 'ssb64',
+              game_id: _gameId || 'ssb64',
               persistentId: _persistentId,
               reconnectToken: _reconnectToken,
             },
@@ -488,7 +494,7 @@
               sessionid: roomCode,
               player_name: playerName,
               room_name: `${playerName}'s room`,
-              game_id: 'ssb64',
+              game_id: _gameId || 'ssb64',
               persistentId: _persistentId,
               reconnectToken: _reconnectToken,
             },
@@ -521,7 +527,7 @@
             playerId: socket.id,
             player_name: playerName,
             room_name: `${playerName}'s room`,
-            game_id: 'ssb64',
+            game_id: _gameId || 'ssb64',
             persistentId: _persistentId,
             reconnectToken: _reconnectToken,
           },
@@ -1900,6 +1906,7 @@
     // uses SHA-256 (HTTPS/localhost) while the guest uses FNV-1a (HTTP LAN IP).
     if (expectedHash) {
       _romHash = expectedHash;
+      _gameId = _gameIdFromHash(expectedHash);
       KNState.romHash = expectedHash;
       afterRomTransferComplete(displayName);
     } else {
@@ -1907,6 +1914,7 @@
       reader.onload = async () => {
         try {
           _romHash = await hashArrayBuffer(reader.result);
+          _gameId = _gameIdFromHash(_romHash);
           KNState.romHash = _romHash;
         } catch (_) {}
         afterRomTransferComplete(displayName);
@@ -2372,10 +2380,14 @@
       try {
         const hash = await hashArrayBuffer(reader.result);
         _romHash = hash;
+        _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026`);
+        console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
+        if (isHost && _gameId && _gameId !== 'ssb64') {
+          socket.emit('set-game-id', { game_id: _gameId });
+        }
       } catch (err) {
         console.log('[play] hash failed:', err);
         KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
@@ -2445,6 +2457,7 @@
     _romBlob = null;
     _romBlobUrl = null;
     _romHash = null;
+    _gameId = null;
     KNState.romHash = null;
     window.EJS_gameUrl = undefined;
     const romDrop = document.getElementById('rom-drop');
@@ -2609,9 +2622,13 @@
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
         _romHash = hash;
+        _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
         _safeSet('localStorage', 'kaillera-rom-name', val.name);
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
+        if (isHost && _gameId && _gameId !== 'ssb64') {
+          socket.emit('set-game-id', { game_id: _gameId });
+        }
         // Update lastUsed
         tx.objectStore(_ROM_STORE).put({ ...val, lastUsed: Date.now() }, hash);
         // Enable ROM sharing checkbox if host
@@ -3487,6 +3504,7 @@
   const _gameParam = () => {
     // Include game_id in shared URLs so OG cards show the right background
     // even if the room doesn't exist yet when the crawler fetches it
+    if (_gameId) return _gameId;
     const params = new URLSearchParams(window.location.search);
     return params.get('game') || 'ssb64';
   };
