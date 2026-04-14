@@ -5,10 +5,12 @@ Generates 1200x630 PNG preview cards by screenshotting HTML templates via Playwr
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -51,22 +53,44 @@ def feature_enabled_for_host(raw: str, host: str) -> bool:
 
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
 
-# ── Playwright browser singleton ──────────────────────────────────────────────
+# ── Playwright browser singleton (lazy-start, auto-close on idle) ────────────
 
 _browser = None
 _playwright = None
+_last_used: float = 0.0
+_idle_closer_task: asyncio.Task | None = None
+
+# Close the browser after 5 minutes of no OG image requests.
+_IDLE_TIMEOUT_S = 300
 
 
 async def _get_browser():
-    """Lazy-init a headless Chromium browser."""
-    global _browser, _playwright
+    """Lazy-init a headless Chromium browser, scheduling auto-close on idle."""
+    global _browser, _playwright, _last_used, _idle_closer_task
+    _last_used = time.monotonic()
     if _browser is None:
         from playwright.async_api import async_playwright
 
         _playwright = await async_playwright().start()
         _browser = await _playwright.chromium.launch(headless=True)
         log.info("OG image renderer: Playwright browser started")
+        # Start idle-close watcher if not already running
+        if _idle_closer_task is None or _idle_closer_task.done():
+            _idle_closer_task = asyncio.create_task(_idle_closer())
     return _browser
+
+
+async def _idle_closer() -> None:
+    """Background task that closes the browser after _IDLE_TIMEOUT_S of inactivity."""
+    while True:
+        await asyncio.sleep(60)  # check every minute
+        if _browser is None:
+            return  # nothing to close
+        idle = time.monotonic() - _last_used
+        if idle >= _IDLE_TIMEOUT_S:
+            log.info("OG image renderer: closing browser after %ds idle", int(idle))
+            await close_browser()
+            return
 
 
 async def close_browser() -> None:

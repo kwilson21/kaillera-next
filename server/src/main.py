@@ -42,13 +42,8 @@ async def lifespan(_app):
     task = asyncio.create_task(_cleanup_empty_rooms())
     log_task = asyncio.create_task(cleanup_old_data())
     rotation_task = match_rotation.start_sweeper()
-    # Warm up Playwright browser so the first OG image request isn't slow
-    try:
-        from src.api.og import _get_browser
-
-        await _get_browser()
-    except Exception as e:
-        log.warning("OG image warmup failed (non-fatal): %s", e)
+    # Playwright browser starts lazily on first OG image request
+    # and auto-closes after 5 minutes idle (see og.py _idle_closer).
     yield
     set_shutting_down()
     task.cancel()

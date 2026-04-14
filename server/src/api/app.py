@@ -42,6 +42,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from starlette.middleware.gzip import GZipMiddleware
 
 from src import db, state
 from src.api.og import (
@@ -487,6 +488,7 @@ def create_app(lifespan=None) -> FastAPI:
     version = _asset_version()
     # Pass the function (not the value) so the middleware re-evaluates
     # per-request — file edits propagate without a server restart.
+    app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(CacheBustMiddleware, version_fn=_asset_version)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
 
