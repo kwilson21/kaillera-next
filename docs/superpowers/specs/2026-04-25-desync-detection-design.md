@@ -107,6 +107,21 @@ Out of scope for v1: shield, hitstun/blockstun, item state, camera. Add later vi
 
 A small fixture set of known savestates with hand-labeled field values. Tests assert `kn_hash_damage(player, frame)` produces expected bytes. A wrong address regresses these tests immediately — long before a match ever runs.
 
+## Rollback diagnostics
+
+**Added 2026-04-25 after live finding that rollbacks/replays are the proximate cause of desyncs.** The registry captures three additional pieces of state per replay event, on each peer locally:
+
+- **`pre_replay_hashes[field]`** — every field's hash at the moment the rollback engine schedules a replay. The "what state did we have *before* restoring?" snapshot.
+- **`post_replay_hashes[field]`** — every field's hash when `replay_remaining` hits 0. The "what state did the replay produce?" snapshot.
+- **`replay_ring[field][replay_offset]`** — every replayed frame's field hashes, indexed by replay-relative offset. Cleared at each replay enter, capped at `KN_MAX_REPLAY_FRAMES` (~64).
+
+Cross-peer comparison through the same digest channel surfaces:
+
+- "rollback at frame 3127 corrupted `physics_motion` on guest but not on host" (pre/post delta diff)
+- "frame +12 of the replay is where the divergence appeared" (trajectory comparison)
+
+**Determinism note:** all three are recorded per-peer locally. Each peer records what *its own* replay produced; cross-peer divergence in those recordings is the diagnostic signal. No assumption that a replay re-run on another device would produce the same trajectory — that's the trap memory `feedback_replay_dead_end` warns against, and we don't go there.
+
 ## History rings — frame-precise root cause without replay
 
 Each peer keeps a 600-entry C-side ring buffer (~10s at 60fps) of all field hashes per frame.
