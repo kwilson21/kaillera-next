@@ -88,7 +88,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
     # video callback to silently fail (canvas freeze).
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash"]'
+    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
@@ -96,6 +96,46 @@ if [ -d "${PATCHES_DIR}" ]; then
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
         sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
+    fi
+
+    # Add kn_hash_registry field exports (Tasks 3-5 of desync detection v1).
+    # Keyed on _kn_hle_restore (terminal symbol of the rollback exports added
+    # above). Each sed replaces the anchor with "anchor + new symbols", so
+    # multiple sed lines are additive — order doesn't matter.
+    if ! grep -q "_kn_hash_registry_post_tick" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_fnv1a,_kn_hash_stocks,_kn_hash_history_stocks, \\\n                     _kn_hash_character_id,_kn_hash_history_character_id, \\\n                     _kn_hash_css_cursor,_kn_hash_history_css_cursor, \\\n                     _kn_hash_css_selected,_kn_hash_history_css_selected, \\\n                     _kn_hash_rng,_kn_hash_history_rng, \\\n                     _kn_hash_match_phase,_kn_hash_history_match_phase, \\\n                     _kn_hash_vs_battle_hdr,_kn_hash_history_vs_battle_hdr, \\\n                     _kn_hash_physics_motion,_kn_hash_history_physics_motion, \\\n                     _kn_hash_registry_post_tick|' Makefile.emulatorjs
+        echo "    Added kn_hash_registry field exports"
+    fi
+
+    # Smoke-test diagnostic helpers (Task 5). Separate group per the plan
+    # pattern; same anchor, additive replacement.
+    if ! grep -q "_kn_smoke_buf_ptr" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_smoke_buf_ptr,_kn_smoke_dump_stocks|' Makefile.emulatorjs
+        echo "    Added kn_hash_registry smoke-test helpers"
+    fi
+
+    # Rollback-event field snapshots (Task 8). Same anchor, additive.
+    if ! grep -q "_kn_hash_on_replay_enter" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_on_replay_enter,_kn_hash_on_replay_exit, \\\n                     _kn_get_pre_replay_hash,_kn_get_post_replay_hash, \\\n                     _kn_get_last_replay_target_frame,_kn_get_last_replay_final_frame|' Makefile.emulatorjs
+        echo "    Added kn_hash_registry rollback-event snapshot exports"
+    fi
+
+    # Per-frame replay trajectory ring (Task 9). Same anchor, additive.
+    if ! grep -q "_kn_get_replay_frame_hash" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_get_replay_frame_hash,_kn_get_last_replay_length|' Makefile.emulatorjs
+        echo "    Added kn_hash_registry replay trajectory exports"
+    fi
+
+    # Phase-gating scene_curr export (Task 14). Same anchor, additive.
+    if ! grep -q "_kn_get_scene_curr" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_get_scene_curr|' Makefile.emulatorjs
+        echo "    Added kn_get_scene_curr export"
+    fi
+
+    # ft_buffer hash export (per-fighter coverage). Same anchor, additive.
+    if ! grep -q "_kn_hash_ft_buffer" Makefile.emulatorjs; then
+        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_ft_buffer,_kn_hash_history_ft_buffer|' Makefile.emulatorjs
+        echo "    Added kn_hash_ft_buffer export"
     fi
 
     # mupen64plus: full reset + apply patches.
@@ -289,8 +329,11 @@ KNHLE_EOF
     echo "    Installing kn_rollback.c/h..."
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
-    # Add kn_rollback.c to SOURCES_C in Makefile.common
-    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
+    cp "${SCRIPT_DIR}/kn_rollback/kn_gameplay_addrs.h" mupen64plus-core/src/main/kn_gameplay_addrs.h
+    cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.c" mupen64plus-core/src/main/kn_hash_registry.c
+    cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.h" mupen64plus-core/src/main/kn_hash_registry.h
+    # Add kn_rollback.c and kn_hash_registry.c to SOURCES_C in Makefile.common
+    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\\n\t$(CORE_DIR)/src/main/kn_hash_registry.c \\|' Makefile.common
     echo "    Done."
 
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls

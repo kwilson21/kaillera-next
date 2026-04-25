@@ -20,6 +20,15 @@ repos:
       - id: prettier
         types_or: [javascript, css, json, yaml, html]
         exclude: ^(build/src/|web/static/ejs/|node_modules/)
+
+  - repo: local
+    hooks:
+      - id: check-hash-citations
+        name: Hash registry citation check
+        entry: bash scripts/check-hash-citations.sh
+        language: system
+        files: ^build/kn_rollback/kn_hash_registry\.h$
+        pass_filenames: false
 # Note: version bumping moved out of the post-commit hook. Run `just deploy`
 # to bump version + tag + push as a single explicit operation. See
 # scripts/bump-version.sh for the bump logic.

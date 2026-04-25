@@ -1368,6 +1368,40 @@
     }
   });
 
+  // -- Desync Events ---------------------------------------------------------
+
+  const loadDesyncEvents = async () => {
+    const matchId = ($('#desync-match-id')?.value || '').trim();
+    if (!matchId) return;
+    const res = await fetch(`/admin/api/desync-events?match_id=${encodeURIComponent(matchId)}`, { headers: headers() });
+    if (!res.ok) {
+      showToast(`Load failed: ${res.status}`);
+      return;
+    }
+    const body = await res.json();
+    const list = $('#desync-event-list');
+    const empty = $('#no-desync-events');
+    if (!body.events || body.events.length === 0) {
+      list.innerHTML = '';
+      empty?.classList.remove('hidden');
+      return;
+    }
+    empty?.classList.add('hidden');
+    list.innerHTML = body.events
+      .map((e) => {
+        const equal = e.vision_equal === null || e.vision_equal === undefined ? '?' : e.vision_equal ? 'eq' : 'NEQ';
+        const conf = e.vision_confidence ?? '?';
+        const slot = e.slot ?? '-';
+        return `<li style="padding:4px 8px; border-bottom:1px solid #222">f=${escapeHtml(String(e.frame))} ${escapeHtml(e.field)}[${escapeHtml(String(slot))}] ${escapeHtml(e.trigger)} vision=${escapeHtml(equal)}/${escapeHtml(conf)}</li>`;
+      })
+      .join('');
+  };
+
+  $('#desync-load-btn')?.addEventListener('click', loadDesyncEvents);
+  $('#desync-match-id')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') loadDesyncEvents();
+  });
+
   // -- Init ------------------------------------------------------------------
 
   const loadAll = async () => {

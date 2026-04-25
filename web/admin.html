@@ -27,6 +27,7 @@
         <button class="tab active" data-tab="logs">Session Logs</button>
         <button class="tab" data-tab="errors">Client Events</button>
         <button class="tab" data-tab="feedback">Feedback</button>
+        <button class="tab" data-tab="desync">Desync Events</button>
       </div>
 
       <div class="log-section" id="tab-logs">
@@ -88,6 +89,18 @@
         </div>
         <div id="feedback-list"></div>
         <p id="no-feedback" class="dim hidden">No feedback found.</p>
+      </div>
+
+      <div class="log-section hidden" id="tab-desync">
+        <div class="log-header">
+          <h2>Desync Events</h2>
+          <div class="log-actions">
+            <input id="desync-match-id" type="text" placeholder="match_id…" style="width: 360px; padding: 6px 10px" />
+            <button id="desync-load-btn">Load</button>
+          </div>
+        </div>
+        <ul id="desync-event-list" style="list-style: none; padding: 0; font-family: monospace; font-size: 13px"></ul>
+        <p id="no-desync-events" class="dim hidden">No desync events for this match.</p>
       </div>
 
       <div id="log-viewer" class="hidden">

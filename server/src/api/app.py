@@ -1452,6 +1452,27 @@ def create_app(lifespan=None) -> FastAPI:
             "totalComparisons": len(comparisons),
         }
 
+    @app.get("/admin/api/desync-events")
+    async def admin_desync_events(request: Request, _auth: None = Depends(_require_admin)) -> dict:
+        """List vision-validated desync events for a match."""
+        match_id = request.query_params.get("match_id", "")
+        if not match_id:
+            raise HTTPException(status_code=400, detail="match_id required")
+        rows = await db.query(
+            """SELECT id, match_id, frame, field, slot, trigger,
+                      vision_equal, vision_confidence, vision_verdict_json,
+                      replay_meta_json, created_at
+               FROM desync_events
+               WHERE match_id = ?
+               ORDER BY frame""",
+            (match_id,),
+        )
+        return {
+            "match_id": match_id,
+            "events": rows,
+            "count": len(rows),
+        }
+
     @app.get("/admin/api/screenshots/img/{screenshot_id}")
     async def admin_screenshot_image(request: Request, screenshot_id: int, key: str = "") -> Response:
         """Serve a single screenshot JPEG from the database.
@@ -1550,5 +1571,12 @@ def create_app(lifespan=None) -> FastAPI:
         tags = build_og_tags(host)
         html = inject_og_tags(_get_index_html(), tags)
         return Response(content=html, media_type="text/html")
+
+    # ── Vision desync verdict endpoint ────────────────────────────────────
+    # POST /api/desync-vision — Claude vision verdicts for desync suspects.
+    # Self-contained APIRouter (see desync_vision.py).
+    from .desync_vision import router as desync_vision_router
+
+    app.include_router(desync_vision_router, prefix="/api")
 
     return app

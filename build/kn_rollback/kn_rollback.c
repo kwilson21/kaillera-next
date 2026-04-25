@@ -16,6 +16,7 @@
  */
 
 #include "kn_rollback.h"
+#include "kn_hash_registry.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -841,6 +842,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
             rb.replay_target = rb.frame;
+            kn_hash_on_replay_enter(rb.replay_target);
             rb.frame = rb_frame;
             rb.replay_depth = depth;
             rb.replay_start = rb_frame;
@@ -1025,35 +1027,93 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
 /* ── Gameplay address table (used by kn_post_tick stash + kn_gameplay_hash) ── */
 
-typedef struct {
-    uint32_t rdram_offset;
-    uint32_t size;
-} kn_gameplay_addr_t;
+#include "kn_gameplay_addrs.h"
 
-static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
-    /* Screen + game status */
-    { 0xA4AD0, 1 },   /* current_screen */
-    { 0xA4D19, 1 },   /* game_status (0=wait,1=ongoing,2=paused,5=end) */
-    /* VS settings block */
-    { 0xA4D08, 28 },  /* stage, mode, teams, time, stocks, handicap, ... timer, elapsed */
-    /* VS player stocks (offset 0x2B within each 0x74-byte player entry) */
-    { 0xA4D53, 1 },   /* P1 stock count */
-    { 0xA4DC7, 1 },   /* P2 stock count */
-    { 0xA4E3B, 1 },   /* P3 stock count */
-    { 0xA4EAF, 1 },   /* P4 stock count */
-    /* In-game player struct: character ID (offset 0x08, 4 bytes) */
-    { 0x130D8C, 4 },  /* P1 char_id */
-    { 0x1318DC, 4 },  /* P2 char_id */
-    { 0x13242C, 4 },  /* P3 char_id */
-    { 0x132F7C, 4 },  /* P4 char_id */
-    /* In-game player struct: damage % (offset 0x2C, 4 bytes) */
-    { 0x130DB0, 4 },  /* P1 damage */
-    { 0x131900, 4 },  /* P2 damage */
-    { 0x132450, 4 },  /* P3 damage */
-    { 0x132FA0, 4 },  /* P4 damage */
-    /* RNG seeds */
-    { 0x05B940, 4 },  /* primary LCG seed */
-    { 0x0A0578, 4 },  /* alternate seed */
+/* Definition. Declaration is in the header (kn_gameplay_addrs.h).
+ *
+ * The array body below is the existing 41-entry table moved out of
+ * static-declaration form into extern-linkage form. Every entry, every
+ * comment, every cautionary block is preserved verbatim — the only
+ * substitutions are named-constant macros for the entries that have
+ * named constants in the header.
+ *
+ * Verbatim preservation rule:
+ *   - All cautionary comments (PRIOR STATE BROKE FOR 9 MONTHS, REMOVED
+ *     2026-04-24 audio-tic block, fighter-manager counters explanation,
+ *     CSS state header) are kept exactly as they were in kn_rollback.c.
+ *   - Only the numeric literals listed in the substitution map below are
+ *     replaced with named constants from kn_gameplay_addrs.h.
+ *   - The 32 CSS entries (0x13BAD0..0x13BD44) keep their raw hex literals
+ *     because they are individual struct offsets, not header constants.
+ *
+ * Substitution map (apply only to entries that match exactly):
+ *     0xA4AD0            → KN_ADDR_SCENE_CURR
+ *     { 0xA4EF8, 32 }    → { KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER }
+ *     0xA4F23            → KN_ADDR_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE
+ *     0xA4F97            → KN_ADDR_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE
+ *     0xA500B            → KN_ADDR_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE
+ *     0xA507F            → KN_ADDR_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE
+ *     0x03B940           → KN_ADDR_SY_UTILS_RANDOM_SEED
+ *     0x130D90           → KN_ADDR_FT_PLAYERS_NUM
+ *     0x130D94           → KN_ADDR_FT_MOTION_COUNT
+ */
+const kn_gameplay_addr_t kn_gameplay_addrs[] = {
+    /* ── Screen + VS match state ────────────────────────────────────
+     * Addresses cross-verified 2026-04-23 against smash64r decomp
+     * source (lib/ssb-decomp-re/src/sc/scmanager.c + sctypes.h).
+     *
+     * PRIOR STATE BROKE FOR 9 MONTHS: old table sampled
+     * gSCManagerTransferBattleState at 0x800A4D08 (a SCRATCH buffer
+     * used only during scene transitions) instead of
+     * gSCManagerVSBattleState at 0x800A4EF8 (the live VS state). The
+     * transfer buffer is non-deterministic cross-peer because it holds
+     * whatever fragment was copied during the last scene transition,
+     * which depends on unsynchronized audio-HLE/RDMA timing. Result:
+     * RB-CHECK mismatch fired f=149+ on every match, sending the
+     * rollback engine into thousands of spurious replays and masking
+     * actual determinism status with noise.
+     *
+     * The old "P1-P4 stock count" entries also used offset 0x2B within
+     * the player struct. In SCPlayerData, offset 0x2B is the LSB of
+     * the undocumented u32 `unk_pblock_0x28` field, NOT stock_count
+     * (which is at offset 0xB). So those entries hashed unknown
+     * undocumented data that may or may not even be initialized.
+     *
+     * The old "fighter struct" entries at 0x80130D8C etc pointed to
+     * sFTManagerPartsAllocBuf and sc1pstageclear symbols — there is
+     * no fixed-address per-player fighter struct in SSB64 (live
+     * fighters are pooled GObjs). Those entries are removed entirely;
+     * SCPlayerData.stock_count is our only cross-peer-deterministic
+     * per-player fixed-address signal. Fine-grained live damage
+     * tracking would require walking the GObj pool.
+     */
+    { KN_ADDR_SCENE_CURR, 1 },   /* gSCManagerSceneData.scene_curr */
+
+    /* gSCManagerVSBattleState: full header (32 bytes) covers
+     * game_type, gkind, is_team_battle, game_rules, pl_count,
+     * cp_count, time_limit, stocks, handicap, is_team_attack,
+     * is_stage_select, damage_ratio, item_toggles, is_reset_players,
+     * game_status, time_remain, time_passed, item_appearance_rate,
+     * and is_show_score/is_not_teamshadows bitfields. */
+    { KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
+
+    /* gSCManagerVSBattleState.players[N].stock_count
+     *   base 0xA4EF8 + players offset 0x20 + player index * 0x74
+     *   + stock_count offset 0xB within SCPlayerData. */
+    { KN_ADDR_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },   /* P1 stock_count */
+    { KN_ADDR_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
+    { KN_ADDR_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
+    { KN_ADDR_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
+    /* RNG seed — sample the REAL game RNG so cross-peer divergence at
+     * char-pick time surfaces via RB-CHECK. Prior table sampled 0x05B940
+     * which was thought to be the seed but is actually gSYAudioHeapBuffer
+     * (offset +0x14670). sSYUtilsRandomSeed is at 0x03B940 per decomp
+     * (lib/ssb-decomp-re/src/sys/utils.c:13). sRandomSeed1/2 at 0x03D320
+     * / 0x03D324 were briefly included but are audio-library LCG state
+     * (lib/ssb-decomp-re/src/libultra/n_audio/n_env.c:109-110) — NOT game
+     * RNG, cross-peer non-deterministic because audio HLE is non-deterministic.
+     * Removed so they don't make the gameplay hash permanently noisy. */
+    { KN_ADDR_SY_UTILS_RANDOM_SEED, 4 },  /* sSYUtilsRandomSeed (primary LCG) */
 
     /* ── CSS (Character Select Screen) state ──────────────────────────
      * VS CSS_PLAYER_STRUCT at N64 0x8013BA88, 0xBC bytes per player.
@@ -1100,10 +1160,38 @@ static const kn_gameplay_addr_t kn_gameplay_addrs[] = {
     /* ── RNG-related frame counters ──────────────────────────────────
      * These affect RNG advancement (get_random_int_safe_ uses fc%64)
      * and CSS→SSS transition seeding (random_fix_). */
-    { 0x03CB30, 4 },  /* Global.frame_counter */
-    { 0x03B6E4, 4 },  /* current_screen_frame_count */
+    /* REMOVED 2026-04-24: both of these were mislabeled.
+     *   0x03CB30 is actually dSYAudioCurrentTic (audio tic counter,
+     *     src/sys/audio.c:85) — wall-clock driven, cross-JIT non-
+     *     deterministic. Linker map confirms:
+     *       0x000000008003cb30 dSYAudioCurrentTic
+     *   0x03B6E4 is actually dSYTaskmanUpdateCount (scheduler counter,
+     *     src/sys/taskman.c) — same problem, drifts cross-JIT due to
+     *     V8 vs JSC VI-interrupt delivery cadence.
+     *       0x000000008003b6e4 dSYTaskmanUpdateCount
+     * These are SYSTEM-LEVEL counters, not game-logic state, and should
+     * never have been in gameplay_hash. They polluted every cross-peer
+     * comparison and produced phantom RB-CHECK mismatches that sent
+     * the root-cause hunt chasing emulator-timing ghosts for hours.
+     * See memory: project_c_rollback_working.md and the 2026-04-24
+     * desync-dump analysis (/tmp/rdram-*-desync-gf3127.bin diff). */
+
+    /* ── Fighter manager counters ────────────────────────────────────
+     * These increment on fighter motion/stat events. Prior cross-peer
+     * diagnostics (2026-04-23) proved these diverge first when cross-
+     * JIT state drift occurs: host hits 46 events while guest hits 44
+     * at the same game-frame, producing visible fighter-state desync
+     * (positions, animations) that wasn't caught by the existing
+     * gameplay hash because these live in block 19 which is tainted
+     * for audio-heap reasons. Including them here as explicit addresses
+     * means the gameplay hash directly reflects fighter-state parity. */
+    { KN_ADDR_FT_PLAYERS_NUM, 4 },  /* gFTManagerPlayersNum (u32) */
+    { KN_ADDR_FT_MOTION_COUNT, 4 },  /* gFTManagerMotionCount (u16) + gFTManagerStatUpdateCount (u16) packed */
 };
-#define KN_GAMEPLAY_ADDR_COUNT (sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]))
+const size_t kn_gameplay_addr_count = sizeof(kn_gameplay_addrs) / sizeof(kn_gameplay_addrs[0]);
+
+/* Backward-compat for callers that used the legacy macro form. */
+#define KN_GAMEPLAY_ADDR_COUNT kn_gameplay_addr_count
 /* Total bytes across all gameplay addresses (209 bytes as of writing).
  * Used for the stack-allocated stash buffer in kn_post_tick. Padded
  * to 256 for alignment and headroom if addresses are added. */
@@ -1116,6 +1204,9 @@ EMSCRIPTEN_KEEPALIVE
 int kn_post_tick(void) {
     if (!rb.initialized) return -1;
     rb.frame++;
+    /* Refresh field-granular hashes and append to history rings.
+     * No-op if RDRAM not yet bound. Cheap (~8 small FNV hashes per frame). */
+    kn_hash_registry_post_tick(rb.frame, rb.replay_remaining > 0);
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
@@ -1153,6 +1244,7 @@ int kn_post_tick(void) {
                         target, ring_gp, live_gp);
                 }
             }
+            kn_hash_on_replay_exit(rb.frame);
             rb_log("C-REPLAY-DONE f=%d", rb.frame);
         }
     }

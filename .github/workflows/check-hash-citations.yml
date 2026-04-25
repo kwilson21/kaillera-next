@@ -1,0 +1,14 @@
+name: Hash citations
+on:
+  pull_request:
+    paths:
+      - 'build/kn_rollback/kn_hash_registry.h'
+      - 'scripts/check-hash-citations.sh'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify all kn_hash_* exports have citation blocks
+        run: bash scripts/check-hash-citations.sh

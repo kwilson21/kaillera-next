@@ -2868,6 +2868,10 @@
               peer.delayValue = msg.delay || 2;
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
+            } else if (msg.type === 'digest') {
+              if (window.KNDesync) {
+                KNDesync.onPeerDigest(remoteSid, msg);
+              }
             } else if (_onUnhandledMessage) {
               _onUnhandledMessage(remoteSid, msg);
             }
@@ -4852,6 +4856,13 @@
       _syncLog('forked core detected — C-level deterministic timing');
     } else {
       _syncLog('stock core — JS-level timing patch (fallback)');
+    }
+
+    // Wire desync detector once the WASM Module is ready. Mode selected
+    // by ?desync=b URL flag (default C — production heartbeat-off).
+    if (lsMod && window.KNDesync) {
+      const desyncMode = new URLSearchParams(location.search).get('desync') === 'b' ? 'B' : 'C';
+      KNDesync.init(lsMod, desyncMode);
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
@@ -7578,6 +7589,7 @@
 
     _frameNum++;
     KNState.frameNum = _frameNum;
+    if (window.KNDesync) KNDesync.tick(_frameNum);
 
     // P0-1 funnel: fire milestone_reached once when the player reaches
     // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the

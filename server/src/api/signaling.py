@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 import socketio
 
 from src import db, state
+from src.api import desync_vision
 from src.api.payloads import (
     ClaimSlotPayload,
     DeviceTypePayload,
@@ -787,6 +788,10 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
             "user_agent": "server",
         }
     )
+    # Kick off vision post-mortem for unverified desync_events. Async —
+    # does not block the client end-game return.
+    if ended_match_id:
+        asyncio.create_task(desync_vision.run_postmortem(ended_match_id))
     return None
 
 

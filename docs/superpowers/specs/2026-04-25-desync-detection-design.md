@@ -82,19 +82,18 @@ A build-time check (`scripts/check-hash-citations.sh`) greps every `kn_hash_*` d
 
 **2. Field set, scoped to v1:**
 
-| Field             | Per-player | Source                    | Phase    |
-|-------------------|------------|---------------------------|----------|
-| `damage`          | yes        | `SCBattleState.damage`    | in-game  |
-| `stocks`          | yes        | `SCBattleState.stocks`    | in-game  |
-| `position`        | yes        | `SCBattleState.pos`       | in-game  |
-| `velocity`        | yes        | `SCBattleState.vel`       | in-game  |
-| `action_state`    | yes        | `SCBattleState.fsm_id`    | in-game  |
-| `character_id`    | yes        | `SCBattleState.char_id`   | CSS+     |
-| `rng`             | no         | RNG state addr            | all      |
-| `match_phase`     | no         | phase enum                | all      |
-| `css_state`       | no         | cursors + selections      | menu/CSS |
-| `stage_id`        | no         | selected stage            | CSS+     |
-| `frame_counter`   | no         | global frame counter      | all      |
+| Field             | Per-player | Source                              | Phase    |
+|-------------------|------------|-------------------------------------|----------|
+| `stocks`          | yes        | `SCPlayerData.stock_count`          | in-game  |
+| `character_id`    | yes        | CSS struct +0x48                    | CSS+     |
+| `css_cursor`      | yes        | CSS struct +0x54                    | menu/CSS |
+| `css_selected`    | yes        | CSS struct +0x58                    | menu/CSS |
+| `rng`             | no         | `sSYUtilsRandomSeed`                | all      |
+| `match_phase`     | no         | `gSCManagerSceneData.scene_curr`    | all      |
+| `vs_battle_hdr`   | no         | VS battle state header (32 bytes)   | in-game  |
+| `physics_motion`  | no         | `gFTManagerMotionCount` packed      | in-game  |
+
+*Per-player damage/position/velocity/action_state deferred to v2 — SSB64 fighters are pooled GObjs with no fixed RDRAM address (`build/kn_rollback/kn_rollback.c:1158-1163`). `physics_motion` is the v1 substitute (cross-JIT desyncs hit it first per `project_cross_jit_hunt_apr24`). Vision extracts per-player physics from screenshots when `physics_motion` flags.*
 
 Out of scope for v1: shield, hitstun/blockstun, item state, camera. Add later via the same registry rules — citation, single sampling hook, golden test.
 

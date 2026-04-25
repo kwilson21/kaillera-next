@@ -199,6 +199,7 @@
     roomCode = params.get('room');
     KNState.room = roomCode;
     isHost = params.get('host') === '1';
+    KNState.isLocalHost = isHost;
     playerName = params.get('name') || _safeGet('localStorage', 'kaillera-name') || 'Player';
     _safeSet('localStorage', 'kaillera-name', playerName);
     mode = params.get('mode') || 'lockstep';
@@ -845,6 +846,7 @@
     const wasHost = isHost;
     if (ownerSid) {
       isHost = ownerSid === socket.id;
+      KNState.isLocalHost = isHost;
     }
     if (!wasHost && isHost) {
       showToast('You are now the host');

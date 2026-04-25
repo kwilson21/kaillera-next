@@ -69,6 +69,12 @@ def run() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
     )
 
+    _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if _anthropic_key:
+        print(f"[startup] vision enabled (key {_anthropic_key[:8]}…)")
+    else:
+        print("[startup] vision DISABLED (no ANTHROPIC_API_KEY env var)")
+
     raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
     if not raw_origin:
         raw_origin = "*"
