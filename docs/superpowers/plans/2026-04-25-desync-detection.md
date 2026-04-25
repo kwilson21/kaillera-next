@@ -1916,10 +1916,14 @@ Inside the detector IIFE, before the `KNDesync` object literal:
 
 ```js
 /* Send local digest to every connected peer over their lockstep DC.
+ * Uses `type: 'digest'` (not `t: 'digest'`) to match the existing
+ * netplay-lockstep onmessage convention which dispatches on msg.type —
+ * see web/static/netplay-lockstep.js:3231 (JSON branch handling
+ * 'save-state', 'late-join-state', 'delay-ping', etc.).
  * Tolerates partially-connected mesh: skip peers whose dc isn't open. */
 function _broadcastDigest(digest) {
   const peers = window._peers || (window.KNState && KNState.peers) || {};
-  const packet = JSON.stringify({ t: 'digest', ...digest });
+  const packet = JSON.stringify({ type: 'digest', ...digest });
   for (const sid of Object.keys(peers)) {
     const peer = peers[sid];
     if (!peer || !peer.dc || peer.dc.readyState !== 'open') continue;
@@ -1964,19 +1968,30 @@ onPeerDigest(peerId, payload) {
 
 - [ ] **Step 3: Wire `'digest'` into the lockstep DC message handler**
 
-In `web/static/netplay-lockstep.js`, locate the existing `setupDataChannel` function. Within it, find the `dc.onmessage` handler that switches on parsed JSON `type`/`t`. Add a new case:
+`netplay-lockstep.js` has THREE separate `ch.onmessage` handlers (around lines 2594, 2747, 3274). Only one — the lockstep tick handler near line 3231 — handles JSON-typed messages like `save-state`, `late-join-state`, `delay-ping`, `delay-pong`, and `lockstep-ready`. That's the one we extend.
+
+The existing structure at lines 3225-3243 is an `if` chain dispatching on `msg.type`:
 
 ```js
-// Inside the dc.onmessage JSON-message branch:
-if (msg.t === 'digest') {
+if (msg.type === 'save-state') handleSaveStateMsg(msg);
+else if (msg.type === 'late-join-state') handleLateJoinState(msg);
+else if (msg.type === 'delay-ping') { ... }
+else if (msg.type === 'delay-pong') { ... }
+else if (msg.type === 'lockstep-ready') { ... }
+else if (_onUnhandledMessage) { _onUnhandledMessage(remoteSid, msg); }
+```
+
+Add a new branch before the `else if (_onUnhandledMessage)` line:
+
+```js
+else if (msg.type === 'digest') {
   if (window.KNDesync) {
     KNDesync.onPeerDigest(remoteSid, msg);
   }
-  return;
 }
 ```
 
-Make sure the case is placed alongside other JSON-typed messages (e.g. `delay-ping`/`delay-pong` near line 3232). Use `msg.t` rather than `msg.type` to match the digest packet's field name.
+Use `msg.type` to match the existing dispatcher convention and the broadcast packet shape from Step 1. (Earlier draft used `msg.t`; corrected for consistency.)
 
 - [ ] **Step 4: Replace the placeholder broadcast call in `tick()`**
 
@@ -2025,6 +2040,26 @@ window. New 'digest' case added to setupDataChannel onmessage."
 **Files:**
 
 - Modify: `web/static/kn-desync-detector.js`
+- Modify: `web/static/kn-state.js` — add `isLocalHost` property
+- Modify: `web/static/play.js` — set `KNState.isLocalHost` from the existing local `isHost` closure
+
+- [ ] **Step 1A: Plumb host status onto KNState**
+
+The existing host indicator lives in a `play.js`-local closure (`let isHost = false;` at line 67, set from `params.get('host') === '1'` at line 201). The detector needs cross-module access. One-line plumbing in two places:
+
+In `web/static/kn-state.js`, add to the `window.KNState` object literal:
+
+```js
+isLocalHost: false, // play.js → kn-desync-detector.js
+```
+
+In `web/static/play.js` at line 201 (where `isHost = params.get('host') === '1';` happens), append:
+
+```js
+KNState.isLocalHost = isHost;
+```
+
+If there are other call sites that mutate `isHost` (rejoin paths around lines 308, 490), mirror the assignment to `KNState.isLocalHost` at each one. `grep -n 'isHost = ' web/static/play.js` enumerates them.
 
 - [ ] **Step 1: Implement `_compareAtFrame`**
 
@@ -2060,28 +2095,25 @@ function _comparePairwise(local, peerHits) {
 }
 
 /* C-mode: host-auth — host's hashes are ground truth.
- * Each guest's delta vs host is the signal. */
+ * Each guest's delta vs host is the signal.
+ *
+ * Host identification: this project's existing convention is "host owns
+ * slot 0." `KNState.isLocalHost` is set by play.js at boot (see Step 1A
+ * below). Peer host status is derived from peer slot in KNState.peers. */
 function _compareHostAuth(local, peerHits) {
-  // Determine which side is host. KNState.peers[sid].isHost is set during
-  // signaling; falls back to lowest slot.
-  const localIsHost = _isLocalHost();
-  if (localIsHost) {
+  if (KNState.isLocalHost) {
     for (const guest of peerHits) {
       _diffDigests({ peerId: 'host', digest: local }, guest);
     }
   } else {
-    const host = peerHits.find((p) => _isPeerHost(p.peerId));
+    // Find the peer whose slot is 0 (the host). KNState.peers is keyed
+    // by sid, with each entry carrying { slot, name, ... } from the
+    // existing roster broadcast.
+    const host = peerHits.find((p) => KNState.peers?.[p.peerId]?.slot === 0);
     if (host) {
       _diffDigests(host, { peerId: 'local', digest: local });
     }
   }
-}
-
-function _isLocalHost() {
-  return KNState.peers && Object.values(KNState.peers).some((p) => p.isLocalHost);
-}
-function _isPeerHost(peerId) {
-  return KNState.peers?.[peerId]?.isHost === true;
 }
 
 /* Diff two digests at the field level. Emits one suspect event per
@@ -2180,6 +2212,31 @@ per mismatched (field, slot)."
 **Files:**
 
 - Modify: `web/static/kn-desync-detector.js`
+- Modify: `build/kn_rollback/kn_hash_registry.{c,h}` — add `kn_get_scene_curr` export
+- Modify: `build/build.sh` — export the new symbol
+
+- [ ] **Step 1B: Look up the actual scene IDs from the decomp source**
+
+The detector's eligibility logic refers to `SCENE.IN_GAME_VS`, `SCENE.CSS_VS`, etc. — placeholder integers that must be replaced with the actual `scene_curr` values from `lib/ssb-decomp-re/include/sc/sctypes.h` (or `scmanager.c`).
+
+Run from the project root:
+
+```bash
+grep -rn "SCENE_\|sce_curr\|scene_curr\s*=" \
+  build/recomp/vendor/smash64r/lib/ssb-decomp-re/include/sc/ \
+  build/recomp/vendor/smash64r/lib/ssb-decomp-re/src/sc/
+```
+
+Identify the enum (or set of `#define`s) that names scene IDs. The values we need:
+
+- The CSS scene ID (typically `SCENE_BATTLE_MENU` or `SCENE_CSS_VS`)
+- The stage-select scene ID
+- The in-game/match scene ID (typically `SCENE_BATTLE_FIELD` or `SCENE_VS_BATTLE`)
+- The results scene ID
+
+Replace the placeholder integers in the `SCENE` const block with the decomp values, and append a one-line `// decomp:` citation comment to each one (filename:line). Same discipline as `kn_hash_registry.h`.
+
+If the decomp source doesn't have a clean named enum, capture the values empirically: in a live session, log `Module._kn_get_scene_curr()` at known game phases (CSS, stage select, in-game, results) and use those concrete byte values, citing the empirical capture in a comment ("Captured 2026-04-25 via console: byte = 0xNN observed at <phase>"). Empirical citations are acceptable when the decomp source doesn't provide a named constant — but the citation must still be there.
 
 - [ ] **Step 1: Add phase-gating filter to `_diffDigests`**
 
@@ -2211,7 +2268,7 @@ function _diffDigests(a, b) {
     if (ha[fid] === hb[fid]) continue;
 
     // Per-field phase eligibility:
-    const phase = _phaseFromHash(ha[FIELD.MATCH_PHASE]); // common to both peers here
+    const phase = _readScenePhase(); // peers' MATCH_PHASE hashes are equal here
     if (!_fieldEligibleInPhase(fid, phase)) continue;
 
     // Dedup ...
@@ -2224,22 +2281,36 @@ function _diffDigests(a, b) {
   }
 }
 
-/* Helper: derive a coarse phase label from the match_phase hash. We
- * don't have a reverse mapping (hash is one-way), so the helper looks
- * up the most-recently-seen-locally raw scene byte from a small cache. */
-let _lastSceneByte = -1;
-function _phaseFromHash(_hash) {
-  // Simplest viable: in-game iff scene_curr indicates VS battle.
-  // The actual phase is read from the live RDRAM via a small C export.
-  // For v1, gate by what the local module reports.
+/* Read the live scene_curr byte from the C side. Both peers reach this
+ * code only after their MATCH_PHASE hashes matched, so the local read
+ * is authoritative for "what phase are we in." */
+function _readScenePhase() {
   return _module._kn_get_scene_curr ? _module._kn_get_scene_curr() : 0;
 }
 
-/* Per-field phase eligibility table. */
+/* Per-field phase eligibility table.
+ *
+ * The eligible scene IDs for IN_GAME and CSS phases come from the
+ * decomp source — see Step 1B below for the lookup procedure. The
+ * named constants below are placeholders that the executor REPLACES
+ * with the actual decomp values before running. Keeping eligibility
+ * driven by named, decomp-cited constants (not magic numbers) is
+ * the same discipline that gates kn_hash_registry. */
+const SCENE = {
+  // Replace these with the actual gSCManagerSceneData.scene_curr values
+  // from lib/ssb-decomp-re/include/sc/sctypes.h (or scmanager.c).
+  // Step 1B's decomp lookup pins the exact integers and citation lines.
+  CSS_VS:        /* TBD per Step 1B */ 0x0A,
+  STAGE_SELECT:  /* TBD per Step 1B */ 0x0E,
+  IN_GAME_VS:    /* TBD per Step 1B */ 0x10,
+  RESULTS:       /* TBD per Step 1B */ 0x18,
+};
+const IN_GAME_SCENES   = new Set([SCENE.IN_GAME_VS]);
+const CSS_PHASE_SCENES = new Set([SCENE.CSS_VS, SCENE.STAGE_SELECT]);
+
 function _fieldEligibleInPhase(fid, phase) {
-  // SCENE_BATTLE_FIELD ≈ in-game; SCENE_BATTLE_MENU ≈ pre-match menu.
-  // The exact constants come from sctypes.h and are in the spec table.
-  const inGame = (phase >= 0x0F && phase <= 0x16); // approximate range
+  const inGame = IN_GAME_SCENES.has(phase);
+  const cssPhase = CSS_PHASE_SCENES.has(phase);
   switch (fid) {
     case FIELD.STOCKS_P0: case FIELD.STOCKS_P1:
     case FIELD.STOCKS_P2: case FIELD.STOCKS_P3:
@@ -2249,9 +2320,9 @@ function _fieldEligibleInPhase(fid, phase) {
     case FIELD.CSS_CURSOR_P2: case FIELD.CSS_CURSOR_P3:
     case FIELD.CSS_SELECTED_P0: case FIELD.CSS_SELECTED_P1:
     case FIELD.CSS_SELECTED_P2: case FIELD.CSS_SELECTED_P3:
-      return !inGame; // CSS-phase only
+      return cssPhase;
     default:
-      return true; // RNG, character_id always eligible
+      return true; // RNG, character_id eligible across phases
   }
 }
 ```
@@ -2400,13 +2471,27 @@ In `web/static/netplay-lockstep.js`, find:
    }
    ```
 
-2. The post-tick frame advance (look for `rb.frame++` mirror in JS, or the `_frameNum++` site). Add:
+2. The per-tick frame increment site. There is exactly **one** `_frameNum++` increment in the lockstep tick loop, at `web/static/netplay-lockstep.js:8863`, immediately followed by `KNState.frameNum = _frameNum;` (line 8864). The surrounding control flow:
+
+   ```js
+   _syncRNGSeed(tickMod, _frameNum);
+   _inDeterministicStep = true;
+   stepOneFrame();           // calls retro_run + kn_post_tick internally
+   _inDeterministicStep = false;
+   feedAudio();
+
+   _frameNum++;
+   KNState.frameNum = _frameNum;
+   // ↑ Insert the new call here ↓
+   ```
+
+   Add immediately after `KNState.frameNum = _frameNum;`:
 
    ```js
    if (window.KNDesync) KNDesync.tick(_frameNum);
    ```
 
-   Place it after the C `kn_post_tick` returns and `_frameNum` has been incremented.
+   This is the only insertion site — other `_frameNum` references in the file are reads or branch-predicate uses (`_frameNum === 3260`, `_frameNum >= 1800`, etc.), not increments.
 
 - [ ] **Step 3: End-to-end smoke test**
 
@@ -2501,9 +2586,10 @@ The endpoint in Task 18 checks for the key at request time and returns 503 with 
 ```bash
 cd /Users/kazon/kaillera-next/server && uv sync
 uv run python -c 'import anthropic; print(anthropic.__version__)'
+uv run python -c 'from anthropic import AsyncAnthropic; print(AsyncAnthropic)'
 ```
 
-Expected: prints a version like `0.34.0` or higher.
+Expected: prints a version like `0.34.0` or higher AND prints the `AsyncAnthropic` class. The endpoint in Task 19 uses `AsyncAnthropic` specifically; verifying both classes import catches a partial-install regression up front.
 
 - [ ] **Step 4: Commit**
 
@@ -2639,6 +2725,12 @@ selected for player {slot} (in CSS) or the character on screen for player {slot}
 {slot}'s cursor is positioned on the character grid. Return strict JSON:
 {{"a_cursor": "<character-name-cursor-is-on-or-position-description>", "b_cursor": "<...>", "equal": <bool>, "confidence": "high"|"med"|"low"}}.""",
 
+    # v1 prompt — physics_motion is keyed off the global gFTManagerMotionCount
+    # counter (kn_rollback.c:1255-1263), not per-player struct hashing. When
+    # v2 lands per-fighter struct hashing, refine this prompt to ask about
+    # the specific player whose physics diverged rather than "all visible
+    # fighters." For now the broad framing is acceptable because the trigger
+    # is itself a global counter.
     "physics_motion": """Peers A and B at the same game frame. Look at all visible
 fighters' positions and animations. Return strict JSON:
 {{"differences": ["<short description>", ...], "equal": <bool>, "confidence": "high"|"med"|"low"}}.
@@ -2713,13 +2805,20 @@ class VisionRequest(BaseModel):
     replay_meta: dict[str, Any] | None = None
 
 
-@router.post("/desync-vision")
-async def desync_vision(req: VisionRequest, request: Request) -> dict[str, Any]:
+async def _do_vision_call(req: VisionRequest) -> dict[str, Any]:
+    """Run the vision call for a request that already has 2+ peers.
+    Caller is responsible for ensuring len(req.peers) >= 2 (the route
+    handler buffers single-peer POSTs in Task 21's coalesce buffer).
+
+    Returns the verdict dict (not wrapped in {'cached': ...}); the
+    caller wraps as needed.
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY")
+    # Note: the env-key check is duplicated at the route handler so
+    # a single-peer POST also gets a 503 instead of being buffered
+    # forever; keeping it here makes _do_vision_call independently safe.
     if not api_key:
         raise HTTPException(503, "vision disabled (no ANTHROPIC_API_KEY)")
-    if len(req.peers) < 2:
-        raise HTTPException(400, "need at least 2 peer screenshots")
 
     # Content-hash dedupe: identical screenshots + same field → reuse verdict.
     h = hashlib.sha256()
@@ -2785,6 +2884,23 @@ async def desync_vision(req: VisionRequest, request: Request) -> dict[str, Any]:
     _CACHE[content_hash] = {"verdict": verdict, "match_id": req.match_id, "frame": req.frame}
 
     return {"cached": False, "verdict": verdict, "match_id": req.match_id, "frame": req.frame}
+
+
+@router.post("/desync-vision")
+async def desync_vision(req: VisionRequest, request: Request) -> dict[str, Any]:
+    """Thin route handler. The actual coalesce + fire logic lives in
+    Task 21 — this initial version just forwards to _do_vision_call
+    when the request already has 2+ peers (which the v1 client does
+    not yet do; Task 21 wires the buffering)."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        raise HTTPException(503, "vision disabled (no ANTHROPIC_API_KEY)")
+    if not req.peers:
+        raise HTTPException(400, "need at least 1 peer screenshot")
+    if len(req.peers) >= 2:
+        return await _do_vision_call(req)
+    # Single-peer POSTs are buffered in Task 21. Until that task lands,
+    # return 'queued' (no error) so the v1 client doesn't see failures.
+    return {"queued": True, "match_id": req.match_id, "frame": req.frame}
 ```
 
 - [ ] **Step 3: Register the route in `app.py`**
@@ -2874,28 +2990,11 @@ content-hash dedupe cache; persists every verdict to desync_events.
     const localPng = await _captureScaledPng();
     if (!localPng) return;
 
-    // For v1 each peer captures its own canvas locally and POSTs.
-    // The server collects them per (match_id, frame, field) and runs
-    // the vision call once it has 2+ peer images.
-    //
-    // Simpler v1 path (chosen): each peer POSTs its own image; the
-    // server endpoint (Task 19) buffers per-key for ~250ms then
-    // fires the vision call when 2 peers have arrived.
-    //
-    // Actually — simpler still: have ONE peer (the host) drive the
-    // vision call by also sending the OTHER peer's most recent canvas
-    // hash via the digest packet. v2 work; v1 has the host capture
-    // both via the suspect event's hashes object (no actual peer
-    // canvas — only host's canvas). Vision still gets ground-truth
-    // for the host; cross-peer comparison is done at the hash layer
-    // upstream.
-    //
-    // Reduction for v1: only the local peer's canvas is sent.
-    // Vision verifies "what does THIS peer see?" against the
-    // previously-extracted local field state. Cross-peer divergence
-    // was already established by the hash flag — vision confirms one
-    // side's state matches reality.
-
+    // Each peer POSTs its OWN canvas only. The server (Task 21)
+    // coalesces across POSTs at the same (match_id, frame, field, slot)
+    // key, waiting up to 500ms for a second peer to arrive before
+    // firing vision. No placeholder duplicate images — that was
+    // an earlier draft hack that Task 21 now obsoletes.
     const body = {
       match_id:   detail.matchId,
       frame:      detail.frame,
@@ -2904,12 +3003,6 @@ content-hash dedupe cache; persists every verdict to desync_events.
       trigger:    detail.trigger,
       peers: [
         { slot: KNState.slot ?? 0, png_b64: localPng, hash: detail.hashes?.local ?? null },
-        // Placeholder for the remote peer's image. v2: peers exchange
-        // canvas hashes/images via the DC and assemble cross-peer
-        // image pairs locally before POSTing. For now, server-side
-        // logic in Task 19 assumes 2+ peer entries — add a stub
-        // so the endpoint doesn't 400. See follow-up note.
-        { slot: -1, png_b64: localPng, hash: detail.hashes?.remote ?? null },
       ],
       replay_meta: detail.replayMeta,
     };
@@ -2921,7 +3014,9 @@ content-hash dedupe cache; persists every verdict to desync_events.
         body: JSON.stringify(body),
       });
       const json = await res.json();
-      console.log('[KNVision] verdict:', json);
+      // Single-peer POSTs return {queued: true}; coalesced verdicts
+      // return the full result. Both shapes are fine for logging.
+      console.log('[KNVision] response:', json);
     } catch (e) {
       console.warn('[KNVision] POST failed', e);
     }
@@ -2973,33 +3068,43 @@ v1 ships one canvas per peer; server coalesces (Task 21)."
 
 ### Task 21: Server-side coalesce buffer for cross-peer images
 
-**Why:** Each peer POSTs its own canvas. The vision call needs both peers' images. Server-side, buffer incoming POSTs by `(match_id, frame, field, slot)` and fire the vision call once 2+ peers have arrived (or after a 500ms timeout, whichever first).
+**Why:** Each peer POSTs its own canvas (Task 20 sends one peer entry per POST). The vision call needs both peers' images. Buffer incoming POSTs by `(match_id, frame, field, slot)` and fire `_do_vision_call` once 2+ peers have arrived (or after a 500ms timeout, whichever first).
+
+`_do_vision_call` already exists from Task 19 — this task only adds the buffering layer and replaces the Task 19 route handler with one that funnels into the buffer.
 
 **Files:**
 
 - Modify: `server/src/api/desync_vision.py`
 
-- [ ] **Step 1: Add the coalesce buffer**
+- [ ] **Step 1: Add the coalesce buffer at module top**
 
 ```python
 import asyncio
 from collections import defaultdict
 
 _PENDING: dict[tuple, list[PeerScreenshot]] = defaultdict(list)
+_PENDING_REQ: dict[tuple, VisionRequest] = {}  # original req metadata per key
 _PENDING_TIMERS: dict[tuple, asyncio.Task] = {}
 _COALESCE_MS = 500
 
 
-async def _fire_vision(key: tuple, base_request: VisionRequest):
+async def _fire_vision(key: tuple) -> dict[str, Any] | None:
+    """Fire the vision call for a coalesced key. Drops if fewer than 2 peers
+    have accumulated by the time this is called."""
     peers = _PENDING.pop(key, [])
-    _PENDING_TIMERS.pop(key, None)
-    if len(peers) < 2:
-        return  # never got a second peer; drop
-    base_request.peers = peers
-    return await _do_vision_call(base_request)
+    base_req = _PENDING_REQ.pop(key, None)
+    timer = _PENDING_TIMERS.pop(key, None)
+    if timer:
+        timer.cancel()
+    if len(peers) < 2 or base_req is None:
+        return None  # never got a second peer; drop silently
+    base_req.peers = peers
+    return await _do_vision_call(base_req)
 ```
 
-Refactor the original endpoint logic into `_do_vision_call(req)` (everything from "Lazy import" through the persistence + cache update) and have the route handler instead append to `_PENDING` + schedule a timeout:
+- [ ] **Step 2: Replace the Task 19 route handler**
+
+Task 19's route handler (the one that says "Single-peer POSTs are buffered in Task 21") is replaced wholesale by this version:
 
 ```python
 @router.post("/desync-vision")
@@ -3011,19 +3116,18 @@ async def desync_vision(req: VisionRequest) -> dict[str, Any]:
 
     key = (req.match_id, req.frame, req.field, req.slot)
     _PENDING[key].extend(req.peers)
+    _PENDING_REQ[key] = req  # keep latest req metadata for the eventual fire
 
-    # If we already have 2+, fire immediately. Otherwise schedule a 500ms timeout.
+    # If we already have 2+, fire immediately and cancel any pending timer.
     if len(_PENDING[key]) >= 2:
-        timer = _PENDING_TIMERS.pop(key, None)
-        if timer:
-            timer.cancel()
-        verdict = await _fire_vision(key, req)
+        verdict = await _fire_vision(key)
         return {"queued": False, **(verdict or {})}
 
+    # Otherwise schedule a 500ms timeout if not already pending.
     if key not in _PENDING_TIMERS:
         async def _timeout():
             await asyncio.sleep(_COALESCE_MS / 1000)
-            await _fire_vision(key, req)
+            await _fire_vision(key)
         _PENDING_TIMERS[key] = asyncio.create_task(_timeout())
 
     return {"queued": True, "match_id": req.match_id, "frame": req.frame}
@@ -3059,13 +3163,43 @@ removes the need for cross-peer image exchange in browser-land."
 - Modify: `server/src/api/desync_vision.py` — add `run_postmortem(match_id)`
 - Modify: `server/src/api/signaling.py` — call `run_postmortem` from the `end-game` handler
 
-- [ ] **Step 1: Add `run_postmortem`**
+- [ ] **Step 1: Inspect the existing screenshots table schema**
+
+Migration 0003 (`server/alembic/versions/0003_screenshots.py`) defines the screenshots table. Read it to confirm the column names — at time of writing the columns are roughly `(match_id, slot, frame, image_data, created_at)` but the executor must verify by reading the file.
+
+- [ ] **Step 2: Implement `_load_screenshots` and `run_postmortem`**
 
 ```python
+async def _load_screenshots(match_id: str, frame: int) -> list[PeerScreenshot]:
+    """Load all peer screenshots for a (match_id, frame) from the
+    existing screenshots table (migration 0003). Returns one
+    PeerScreenshot per slot that has an image stored. Returns
+    empty list if no screenshots are within ±2 frames."""
+    rows = await db.fetch_all(
+        """SELECT slot, image_data
+           FROM screenshots
+           WHERE match_id = ? AND frame BETWEEN ? AND ?
+           ORDER BY slot, ABS(frame - ?)""",
+        (match_id, frame - 2, frame + 2, frame),
+    )
+    seen_slots: set[int] = set()
+    out: list[PeerScreenshot] = []
+    for row in rows:
+        if row["slot"] in seen_slots:
+            continue  # already have the closest-frame match for this slot
+        seen_slots.add(row["slot"])
+        # image_data column stores JPEG bytes per existing pipeline.
+        # Re-encode as base64 PNG for the vision call. (If the schema
+        # already stores base64, skip the b64encode step.)
+        b64 = base64.b64encode(row["image_data"]).decode("ascii")
+        out.append(PeerScreenshot(slot=row["slot"], png_b64=b64, hash=None))
+    return out
+
+
 async def run_postmortem(match_id: str) -> int:
-    """For each flag-only desync_event row that hasn't yet been vision-checked,
-    pull the corresponding screenshots from the screenshots table (added in
-    migration 0003) and run the vision call. Returns count processed."""
+    """For each unverified desync_event row in this match, load screenshots
+    from the existing screenshots table and fire vision via _do_vision_call.
+    Returns count processed."""
     rows = await db.fetch_all(
         """SELECT id, match_id, frame, field, slot, trigger, hashes_json, replay_meta_json
            FROM desync_events
@@ -3078,13 +3212,25 @@ async def run_postmortem(match_id: str) -> int:
         screenshots = await _load_screenshots(match_id, row["frame"])
         if len(screenshots) < 2:
             continue
-        # Compose VisionRequest from row + screenshots, run _do_vision_call
-        # ... (omitted: ~30 lines mirroring the existing endpoint logic)
-        processed += 1
+        req = VisionRequest(
+            match_id=row["match_id"],
+            frame=row["frame"],
+            field=row["field"],
+            slot=row["slot"],
+            trigger=row["trigger"],
+            peers=screenshots,
+            replay_meta=json.loads(row["replay_meta_json"]) if row["replay_meta_json"] else None,
+        )
+        try:
+            await _do_vision_call(req)
+            processed += 1
+        except Exception as e:
+            # Don't let one bad row halt the whole post-mortem.
+            print(f"[postmortem] vision call failed for event {row['id']}: {e}")
     return processed
 ```
 
-- [ ] **Step 2: Hook into `end-game`**
+- [ ] **Step 3: Hook into `end-game`**
 
 In `server/src/api/signaling.py`, find the `end-game` event handler. Add (only when not in B-mode):
 
@@ -3098,7 +3244,7 @@ async def end_game(sid, data):
 
 `asyncio.create_task` so the post-mortem doesn't block client return.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add server/src/api/{desync_vision.py,signaling.py}
@@ -3121,49 +3267,119 @@ block client end-game return."
 - Modify: `web/admin.html` and corresponding admin JS — add a "Desync events" section
 - Create: `tests/desync-e2e.spec.mjs` — Playwright test
 
-- [ ] **Step 1: Surface desync_events in admin**
+- [ ] **Step 1: Add the `/admin/api/desync-events` endpoint**
 
-In the admin UI, add a tab/section that pulls from a new `/admin/desync-events?match_id=...` endpoint (mirror the pattern of existing admin endpoints in `server/src/api/app.py`). The endpoint runs:
+Mirror the pattern of `app.get("/admin/api/session-logs")` at `server/src/api/app.py:943`. That endpoint shows the canonical structure: ADMIN_KEY check via `_verify_admin_key`, query parameters for filtering, paginated response. Copy its scaffolding; substitute the SQL.
+
+In `server/src/api/app.py`, alongside the existing admin endpoints (e.g. inside the `_register_admin_endpoints(app)` function or wherever the existing `@app.get("/admin/api/...")` decorators live):
 
 ```python
-SELECT id, frame, field, slot, trigger, vision_equal, vision_confidence, vision_verdict_json
-FROM desync_events
-WHERE match_id = ?
-ORDER BY frame
+@app.get("/admin/api/desync-events")
+async def admin_desync_events(
+    match_id: str,
+    key: str = Query(..., alias="key"),
+):
+    _verify_admin_key(key)  # same helper used by session-logs etc.
+    rows = await db.fetch_all(
+        """SELECT id, match_id, frame, field, slot, trigger,
+                  vision_equal, vision_confidence, vision_verdict_json,
+                  replay_meta_json, created_at
+           FROM desync_events
+           WHERE match_id = ?
+           ORDER BY frame""",
+        (match_id,),
+    )
+    return {
+        "match_id": match_id,
+        "events": [dict(r) for r in rows],
+        "count": len(rows),
+    }
 ```
 
-Display each row as a single line: `f={frame}  {field}[{slot}]  {trigger}  vision={equal}/{confidence}`. Click expands to show the full verdict JSON + replay meta if present.
+Then surface in the admin UI (`web/admin.html` + the existing admin JS file): add a "Desync events" tab that fetches the endpoint and renders each row as a single line `f={frame}  {field}[{slot}]  {trigger}  vision={equal}/{confidence}`, click-to-expand showing the full `vision_verdict_json` + `replay_meta_json` if present. Match the visual style of the existing session-logs list.
 
 - [ ] **Step 2: Write the E2E Playwright test**
+
+The pattern follows `tests/determinism-automation.mjs` — two browser contexts, one host one guest, drive a match. Concrete scaffolding (assertion-tuning may need adjustment based on real-run timing):
 
 `tests/desync-e2e.spec.mjs`:
 
 ```javascript
 /**
  * Forces a desync via in-tab RDRAM mutation in one of two browser tabs,
- * then verifies the full pipeline: detector flag → POST → vision call
- * (mocked or real) → SQLite row → admin endpoint surfaces it.
+ * then verifies the full pipeline: detector flag → vision-client POST →
+ * server coalesce → vision call (mocked) → SQLite row → admin endpoint
+ * surfaces the row.
  *
- * Uses the existing two-tab harness pattern from determinism-automation.mjs.
+ * Run: ANTHROPIC_API_KEY=test_only ADMIN_KEY=1234 just dev &
+ *      node tests/desync-e2e.spec.mjs
  */
 import { chromium } from 'playwright';
 
-// Mock anthropic for CI: set ANTHROPIC_API_KEY=__MOCK__ before running
-// the server. The endpoint then returns a deterministic stub verdict.
+const PLAY_URL  = 'https://localhost:27888/play.html?desync=b';
+const ADMIN_URL = 'https://localhost:27888/admin/api/desync-events';
+const ADMIN_KEY = process.env.ADMIN_KEY || '1234';
+
+async function newCtx(browser) {
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await ctx.newPage();
+  page.on('console', (msg) => console.log(`[${msg.type()}]`, msg.text()));
+  return { ctx, page };
+}
+
+async function waitForInGame(page, timeoutMs = 60_000) {
+  // Lockstep boot completes when KNState.frameNum starts incrementing past 0.
+  await page.waitForFunction(
+    () => window.KNState && KNState.frameNum > 60,
+    null,
+    { timeout: timeoutMs },
+  );
+}
 
 (async () => {
   const browser = await chromium.launch();
-  // ... setup two contexts/pages, navigate to play URL with ?desync=b
-  // ... start match, wait for in-game
-  // ... in tab1: Module.HEAPU8[Module._kn_get_rdram_ptr() + 0xA4F23] ^= 0x10
-  // ... wait 1s for detector flag + POST to fire
-  // ... GET /admin/desync-events?match_id=<id>
-  // ... assert at least one row with field='stocks', slot=0
+  const host  = await newCtx(browser);
+  const guest = await newCtx(browser);
+
+  // Open host first (creates room), grab the room id from URL, then guest joins.
+  await host.page.goto(`${PLAY_URL}&host=1`);
+  await host.page.waitForFunction(() => window.KNState?.matchId);
+  const matchId = await host.page.evaluate(() => KNState.matchId);
+  const roomId  = await host.page.evaluate(() => KNState.room);
+
+  await guest.page.goto(`${PLAY_URL}&room=${roomId}`);
+
+  // Drive each through ROM-load + match-start (repurpose helpers from
+  // determinism-automation.mjs if they exist; otherwise wait on UI cues).
+  await Promise.all([waitForInGame(host.page), waitForInGame(guest.page)]);
+
+  // Force a stock-byte divergence on the host. Detector should flag it
+  // on the next digest cadence.
+  await host.page.evaluate(() => {
+    const ptr = Module._kn_get_rdram_ptr();
+    Module.HEAPU8[ptr + 0xA4F23] ^= 0x10;
+  });
+
+  // Allow detector + POST + coalesce timeout to play out.
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Hit the admin endpoint and assert.
+  const res = await fetch(`${ADMIN_URL}?match_id=${matchId}&key=${ADMIN_KEY}`,
+                          { headers: { Accept: 'application/json' } });
+  const body = await res.json();
+  const stockEvents = body.events.filter(
+    (e) => e.field === 'stocks' && e.slot === 0,
+  );
+  if (stockEvents.length === 0) {
+    console.error('FAIL: no stocks[0] events found. body =', body);
+    process.exit(1);
+  }
+  console.log(`PASS: ${stockEvents.length} stocks[0] events`);
   await browser.close();
 })();
 ```
 
-(Full implementation deferred to executor — pattern matches `tests/determinism-automation.mjs`.)
+The test asserts `events.length >= 1` for `field='stocks', slot=0`. Confidence/equal values are not asserted — those depend on whether vision is mocked or live.
 
 - [ ] **Step 3: Run the E2E test**
 
