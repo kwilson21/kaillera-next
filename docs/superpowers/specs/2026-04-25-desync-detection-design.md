@@ -30,7 +30,10 @@ This design replaces the existing single hash signal with a **trustworthy hash t
 [Browser per peer]
   WASM core
     ├─ kn_hash_<field>(player, frame)   ← field-granular C exports, decomp-cited
-    └─ gameplay_addrs.h                  ← single source of truth for addresses
+    └─ gameplay_addrs.h                  ← extracted from existing kn_gameplay_addrs[]
+                                            (build/kn_rollback/kn_rollback.c:1136),
+                                            now the single address source for both
+                                            the rollback engine and the hash registry
 
   netplay tick (per frame)
     ├─ build digest = { field_id → hash } via the C exports
@@ -106,7 +109,17 @@ A small fixture set of known savestates with hand-labeled field values. Tests as
 
 ## History rings — frame-precise root cause without replay
 
-Each peer keeps a 600-entry C-side ring buffer (~10s at 60fps) of all field hashes per frame. When a flag fires at frame `F`, the JS detector requests `kn_hash_history_<field>(player, n)` for shrinking `n` until the chain matches the peer — that's the first divergent frame.
+Each peer keeps a 600-entry C-side ring buffer (~10s at 60fps) of all field hashes per frame.
+
+```c
+// Returns up to `count` (frame, hash) pairs ending at the most recent entry.
+// Caller passes a Uint32Array of size 2*count; C fills it.
+// Empty slots are zero-filled when ring isn't full yet.
+size_t kn_hash_history_<field>(uint8_t player_idx, uint32_t count,
+                               uint32_t* out_pairs);
+```
+
+JS reads up to `count` recent (frame, hash) pairs in a single call — no per-`n` round-tripping into the WASM module. The detector compares the local pair list against the peer's pair list (received in the digest packet alongside current-frame hashes once a flag fires) and walks backwards to find the first frame where they agreed. That's the divergence boundary.
 
 This gives "position diverged starting at frame 3104, damage followed at 3127" without needing replay-based bisection. Memory `feedback_replay_dead_end` warns that replay convergence cross-device is itself unproven; building detection on it would couple the detector to the very property desyncs violate.
 
@@ -155,6 +168,7 @@ Mode is selected by URL flag / settings (`?desync=b` for tests). Same code path,
 - **No replay-based root-cause tool in v1.** History rings give frame-precision without it. Replay tool tracked as future work; do not build until the core detector has been used on real bugs.
 - **No new transport.** Reuses the WebRTC DataChannel lockstep already opens. No second connection.
 - **No retry on missed digests.** Next frame's digest covers it.
+- **No JS-side hashing.** All hashing is C-side via the registry. JS only transports digests and runs comparisons. Mirroring hash logic in JS would re-create the very correctness problem the C-side citation rule is solving.
 
 ## Open knobs
 
@@ -170,10 +184,10 @@ All five live in one config block in `kn-desync-detector.js`; tunable without ar
 
 ## Risks
 
-- **Vision API rate limits or transient failures** during heartbeat-heavy B runs. Mitigation: server-side cache by content hash; fall back to "hash-flagged, vision-unavailable" event so the test still produces useful output. Estimated cost ~$0.05/match at Sonnet pricing.
+- **Vision API rate limits, transient failures, and cost.** Mitigation: server-side cache by content hash; fall back to "hash-flagged, vision-unavailable" event so the test still produces useful output. Cost is *upper-bounded* not point-estimated: a 60s B-mode match with the proposed 5s heartbeat fires 12 heartbeat calls per peer-pair. At ~1.6k input tokens per ~1MP image × 2 images × 12 calls + prompt + output, that's ~40k input tokens at Sonnet ($3/M input) ≈ $0.12/match before any flag-triggered calls and before cache hits. C-mode prod is ceilinged separately by flag-dedup (60-frame window per `(field, slot)`) and post-match batch coalescing; pin actual cost during implementation by sending downscaled (e.g. 512px) screenshots when full resolution isn't needed for the field's question.
 - **Frame-id alignment across peers.** Lockstep delay buffering means digests for "the same frame" may arrive at slightly different wall-clocks. Mitigation: detector buckets by `frame_id`, drops digests outside `±history_window`. Phantom flags from cross-frame comparison are eliminated by construction.
 - **Address regressions in future field additions.** Mitigation: every new `kn_hash_*` requires citation block + golden test. CI enforces.
-- **Match-phase transitions.** Damage divergence during the menu phase is meaningless; CSS divergence in-game is meaningless. Mitigation: `match_phase` is itself a hashed field and gates which other fields are eligible. Mismatches *of* `match_phase` are themselves high-priority flags ("we're not even in the same screen").
+- **Match-phase transitions.** Damage divergence during the menu phase is meaningless; CSS divergence in-game is meaningless. Mitigation: `match_phase` is itself a hashed field and gates which other fields are eligible. **Gating rule:** when peers disagree on `match_phase` itself, that becomes a single high-priority `match_phase` flag and *all other field comparisons for that frame are suppressed* — they have no defined meaning across mismatched phases. Per-field comparisons resume once peers' `match_phase` re-converges. Mismatches *of* `match_phase` are themselves high-priority flags ("we're not even in the same screen").
 
 ## Future work
 
