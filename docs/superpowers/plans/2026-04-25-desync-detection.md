@@ -58,6 +58,8 @@
 
 This chunk delivers the bedrock: extracted address table, field-granular C exports, history rings, citation enforcement, and golden tests. Nothing in JS/server-land changes here. By the end, every field listed in the v1 field set has a `kn_hash_<field>` export with a citation block, a sampling hook in `kn_post_tick`, and a passing golden test.
 
+**Length note:** this chunk runs ~1200 lines, slightly over the 1000-line chunk guideline. The overage is concentrated in Task 4, which pattern-replicates the field-add procedure for 7 additional fields. Each is mechanically the same as Task 3 (the template), so an executor working through them in sequence will move quickly. Splitting Task 4 into its own micro-chunk would add ceremony without changing the work — accepted as a deliberate inflation rather than a structural problem.
+
 ### Task 0: Update spec field table to reflect per-player physics deferral
 
 **Why:** The spec at lines 84-99 lists `damage`, `position`, `velocity`, `action_state` as v1 per-player fields. The plan defers them to v2 (see "Deviations from spec" above). The spec is the ongoing reference; leaving it inconsistent invites future drift. One small edit closes the gap before any code is written.
@@ -922,7 +924,7 @@ Repeat Step 3's pattern for the two remaining per-player CSS fields:
 - `kn_hash_css_cursor` → offset `KN_CSS_OFF_CURSOR_STATE` (0x54), 4 bytes
 - `kn_hash_css_selected` → offset `KN_CSS_OFF_SELECTED_FLAG` (0x58), 4 bytes
 
-Each in its own commit. No new fixture needed — reuse `css-p1-mario-p2-fox.rastate`. Compute expected FNV-1a values from the bytes at those offsets (use `xxd -s 0x13BADC -l 4 fixture.rdram` to read).
+Each in its own commit. No new fixture needed — reuse `css-2players-selected.rdram` from Step 3. Compute expected FNV-1a values from the bytes at those offsets (use `xxd -s 0x13BADC -l 4 fixture.rdram` to read).
 
 - [ ] **Step 5: Add the four global fields (`rng`, `match_phase`, `vs_battle_hdr`, `physics_motion`)**
 
@@ -1021,7 +1023,15 @@ size_t kn_smoke_dump_stocks(uint8_t player_idx, uint32_t count) {
 }
 ```
 
-(Add `_kn_smoke_buf_ptr,_kn_smoke_dump_stocks` to the `EXPORTED_FUNCTIONS` extension in Task 7.)
+**Important — export these helpers BEFORE running the smoke test below.** The smoke test depends on `_kn_smoke_buf_ptr` and `_kn_smoke_dump_stocks` being reachable from JS, but Task 7 (which adds the field exports) hasn't run yet. To avoid the circular dependency, add ONLY these two smoke-helper exports as part of this task — the full export list lives in Task 7.
+
+Insert into `build/build.sh` immediately after the `_kn_restore_hidden_state_boot` symbol in the existing rollback-symbols sed line (line 97; insert before the closing `|Makefile.emulatorjs`):
+
+```
+,_kn_smoke_buf_ptr,_kn_smoke_dump_stocks
+```
+
+Rebuild WASM (`bash build.sh`). Then proceed with the browser console smoke test below.
 
 Browser console smoke test:
 
@@ -1211,16 +1221,17 @@ of gSCManagerVSBattleState — the kind of mistake citations catch)."
 
 Run: `grep -A5 'kn_rollback_init' /Users/kazon/kaillera-next/build/build.sh | head -20`. Identify the exact `sed` command that builds the export list.
 
-- [ ] **Step 2: Append the new exports**
+- [ ] **Step 2: Append the new exports (single new `sed` line, keyed on `_kn_restore_hidden_state_boot`)**
 
-The existing `sed` command at `build.sh:97` rewrites `Makefile.emulatorjs` by anchor-matching `_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu` and replacing it with that anchor PLUS the existing rollback symbols. The simplest, lowest-risk way to add new symbols: append a *new* `sed` line right after that one, anchoring on the last symbol of the existing list (`_kn_restore_hidden_state_boot`) and inserting our additions:
+Task 5 already added a small `sed` line for the smoke-helper exports. This step adds a *separate* `sed` line for the field exports, keyed on the same anchor. Both end up rewriting `Makefile.emulatorjs` independently — no need to merge with the existing 60-symbol list.
+
+Insert this *after* the existing rollback-symbols sed at `build.sh:97` AND after Task 5's smoke-helpers sed:
 
 ```bash
-# After the existing line that adds the rollback symbols, add:
-sed -i 's|_kn_restore_hidden_state_boot|_kn_restore_hidden_state_boot, \\\n                     _kn_hash_fnv1a,_kn_hash_stocks,_kn_hash_history_stocks, \\\n                     _kn_hash_character_id,_kn_hash_history_character_id, \\\n                     _kn_hash_css_cursor,_kn_hash_history_css_cursor, \\\n                     _kn_hash_css_selected,_kn_hash_history_css_selected, \\\n                     _kn_hash_rng,_kn_hash_history_rng, \\\n                     _kn_hash_match_phase,_kn_hash_history_match_phase, \\\n                     _kn_hash_vs_battle_hdr,_kn_hash_history_vs_battle_hdr, \\\n                     _kn_hash_physics_motion,_kn_hash_history_physics_motion, \\\n                     _kn_hash_registry_post_tick, \\\n                     _kn_smoke_buf_ptr,_kn_smoke_dump_stocks|' Makefile.emulatorjs
+sed -i 's|_kn_restore_hidden_state_boot|_kn_restore_hidden_state_boot, \\\n                     _kn_hash_fnv1a,_kn_hash_stocks,_kn_hash_history_stocks, \\\n                     _kn_hash_character_id,_kn_hash_history_character_id, \\\n                     _kn_hash_css_cursor,_kn_hash_history_css_cursor, \\\n                     _kn_hash_css_selected,_kn_hash_history_css_selected, \\\n                     _kn_hash_rng,_kn_hash_history_rng, \\\n                     _kn_hash_match_phase,_kn_hash_history_match_phase, \\\n                     _kn_hash_vs_battle_hdr,_kn_hash_history_vs_battle_hdr, \\\n                     _kn_hash_physics_motion,_kn_hash_history_physics_motion, \\\n                     _kn_hash_registry_post_tick|' Makefile.emulatorjs
 ```
 
-This pattern (separate `sed` command keyed on the last existing symbol) avoids re-pasting the giant 60-symbol existing list and keeps the diff small.
+This pattern (separate `sed` command per logical group of symbols, all keyed on `_kn_restore_hidden_state_boot`) keeps each diff small and lets the executor add or remove a symbol group without touching the others. The order in which the sed lines run doesn't matter — each replaces the anchor with `anchor + new_symbols`, so subsequent runs find a different prefix but still match the literal `_kn_restore_hidden_state_boot` substring.
 
 Also extend `KN_ASYNCIFY_REMOVE` at `build.sh:91` so the new post-tick hook is marked synchronous (it's called inline from `kn_post_tick`). The current value is:
 
@@ -1425,27 +1436,31 @@ The exact line numbers shift across edits in this plan; locate by code structure
 
 - [ ] **Step 4: Add the new exports to `EXPORTED_FUNCTIONS`**
 
-Extend the second `sed` line from Task 7 Step 2 with the new symbols (continuing the same `_kn_restore_hidden_state_boot` anchor pattern):
+Same pattern as Task 5 / Task 7: append a separate `sed` line in `build/build.sh` keyed on `_kn_restore_hidden_state_boot`. This keeps each task's symbol group editable in isolation:
 
-```
-,_kn_hash_on_replay_enter,_kn_hash_on_replay_exit, \\\n                     _kn_get_pre_replay_hash,_kn_get_post_replay_hash, \\\n                     _kn_get_last_replay_target_frame,_kn_get_last_replay_final_frame
+```bash
+sed -i 's|_kn_restore_hidden_state_boot|_kn_restore_hidden_state_boot, \\\n                     _kn_hash_on_replay_enter,_kn_hash_on_replay_exit, \\\n                     _kn_get_pre_replay_hash,_kn_get_post_replay_hash, \\\n                     _kn_get_last_replay_target_frame,_kn_get_last_replay_final_frame|' Makefile.emulatorjs
 ```
 
-`KN_ASYNCIFY_REMOVE` extension: add `kn_hash_on_replay_enter` and `kn_hash_on_replay_exit` to the list. They're called from the synchronous tick path.
+`KN_ASYNCIFY_REMOVE` extension at `build.sh:91`: add the two new function names. The current value (after Task 7's extension) ends with `,"kn_hash_registry_post_tick"`. Replace the closing `]'` with `,"kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'`. Both are called from the synchronous tick path so must not be Asyncified.
 
 - [ ] **Step 5: Smoke-test the snapshots fire on a real rollback**
 
-In the browser console during a live match that's experiencing a rollback (or trigger one via the existing debug rollback button if it still exists):
+Trigger a rollback first. The lockstep engine fires rollbacks naturally when network jitter delivers inputs out of order, so the easiest path is a two-tab Playwright session: open the play URL twice, host one, join from the other, start a match, let it run for ~60 seconds with random inputs (the existing `tests/determinism-automation.mjs` does this). At least one rollback will fire — confirm by watching for `C-REPLAY-START` in the browser console or session logs.
+
+If no natural rollback fires, force one in devtools via the existing rollback engine path: in the lockstep tick, peers schedule rollbacks when they receive an input contradicting their prediction. Submitting an input through the existing `Module._kn_feed_input` for a frame *behind* the current frame will trigger it — but in practice waiting 60 seconds with two tabs is faster than crafting the synthetic input.
+
+Once a rollback has fired, run in either tab's console:
 
 ```js
-const pre  = Module._kn_get_pre_replay_hash(16);   // KN_FIELD_RNG
+const pre  = Module._kn_get_pre_replay_hash(16);   // KN_FIELD_RNG enum value
 const post = Module._kn_get_post_replay_hash(16);
 const tgt  = Module._kn_get_last_replay_target_frame();
 const fin  = Module._kn_get_last_replay_final_frame();
 console.log(`replay ${tgt} → ${fin}: rng pre=0x${pre.toString(16)} post=0x${post.toString(16)} delta=${pre !== post}`);
 ```
 
-After at least one rollback fires, expected: target/final are real frame numbers, pre/post are non-zero. If `tgt === -1`, no rollback has happened yet — let the match run longer or trigger one via existing diagnostics.
+Expected: target/final are real frame numbers (not -1), pre/post are non-zero. If `tgt === -1`, no rollback has happened yet.
 
 - [ ] **Step 6: Commit**
 
@@ -1537,28 +1552,16 @@ int kn_hash_registry_post_tick(int32_t frame, int in_replay) {
     return 0;
 }
 
-/* Clear the replay ring at replay enter — extend kn_hash_on_replay_enter: */
-/* (This block REPLACES the body of kn_hash_on_replay_enter from Task 8 Step 2.
- *  Add the two new lines marked NEW.) */
-KN_KEEPALIVE
-void kn_hash_on_replay_enter(int32_t target_frame) {
-    snapshot_all_fields(s_pre_replay);
-    s_last_replay_target = target_frame;
-    for (int i = 0; i < KN_FIELD_COUNT; i++) s_post_replay[i] = 0;
-    s_last_replay_final = -1;
-    s_replay_length = 0;          /* NEW: clear trajectory */
-    s_in_replay = 1;              /* NEW: flag replay window */
-    /* The trajectory itself stays in s_replay_ring; new writes overwrite
-     * old slots as s_replay_length grows from 0 again. */
-}
+/* (Two surgical edits to functions defined in Task 8 Step 2.) */
 
-/* Update kn_hash_on_replay_exit to clear the replay flag: */
-KN_KEEPALIVE
-void kn_hash_on_replay_exit(int32_t final_frame) {
-    snapshot_all_fields(s_post_replay);
-    s_last_replay_final = final_frame;
-    s_in_replay = 0;              /* NEW: clear replay flag */
-}
+/* Edit 1: in kn_hash_on_replay_enter, AFTER the line `s_last_replay_final = -1;`
+ * append two lines: */
+    s_replay_length = 0;
+    s_in_replay = 1;
+
+/* Edit 2: in kn_hash_on_replay_exit, AFTER the line `s_last_replay_final = final_frame;`
+ * append one line: */
+    s_in_replay = 0;
 
 KN_KEEPALIVE
 uint32_t kn_get_replay_frame_hash(kn_field_id_t field, uint32_t replay_offset) {
@@ -1588,10 +1591,10 @@ kn_hash_registry_post_tick(rb.frame, rb.replay_remaining > 0);
 
 - [ ] **Step 4: Add new exports**
 
-Extend the build.sh `sed` line from Task 8 Step 4:
+Same pattern: append another separate `sed` line in `build/build.sh`:
 
-```
-,_kn_get_replay_frame_hash,_kn_get_last_replay_length
+```bash
+sed -i 's|_kn_restore_hidden_state_boot|_kn_restore_hidden_state_boot, \\\n                     _kn_get_replay_frame_hash,_kn_get_last_replay_length|' Makefile.emulatorjs
 ```
 
 - [ ] **Step 5: Smoke-test trajectory recording**
@@ -1633,5 +1636,5 @@ Before moving to Chunk 3 (JS detector — to be written), the following must all
 - [ ] Rollback-event smoke-test (Task 8 Step 5) shows non-zero pre/post hashes after at least one rollback fires
 - [ ] `kn_get_last_replay_target_frame()` and `_final_frame()` return real frame numbers, not -1
 - [ ] Replay trajectory smoke-test (Task 9 Step 5) shows `kn_get_last_replay_length() > 0` and per-frame hashes for the replay window
-- [ ] Existing rollback engine behavior unchanged: `kn_get_failed_rollbacks`, `kn_get_replay_depth`, RB-CHECK firing rate, REPLAY-NORUN counter all match pre-chunk-2 levels in a clean session
+- [ ] **Existing rollback engine still works:** run a 60s two-tab session, watch for `C-REPLAY-START` / `C-REPLAY-END` log lines in the console, confirm rollbacks fire and complete normally (no new fatal errors, no `FATAL-RING-STALE` storm, no `REPLAY-NORUN` increase). This is a qualitative smoke check — exact pre-chunk-2 baseline counts are not captured because they vary session-to-session; the gate is "rollback engine fundamentally still functions," not "byte-equal counter values."
 - [ ] No regression in `uv run pytest`
