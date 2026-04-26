@@ -33,12 +33,13 @@ behavior and the half-working third instance.
 
 ## Approach
 
-**Anyone joining while `room.status === "playing"` always enters as a
-spectator.** The decision is made at `join-room` time on the joiner's
-client (the join-room ack already includes `room.status` —
-[play.js:648](web/static/play.js#L648)). No emulator boots, no ROM is
-required up front, no late-join state transfer fires from the spectator
-path.
+**Anyone joining a Smash Remix room while `room.status === "playing"`
+always enters as a spectator.** The decision is made at `join-room`
+time on the joiner's client (the join-room ack already includes
+`room.status` — [play.js:648](web/static/play.js#L648); the spec adds
+`game_id` to that response, see §Game-detection below). No emulator
+boots, no ROM is required up front, no late-join state transfer fires
+from the spectator path. Non-Smash-Remix games keep today's behavior.
 
 The host then decides *when* to promote a queued spectator into a player
 slot. The promotion predicate is `phase.inControllableMenu === true`
@@ -128,23 +129,47 @@ the spectator-first path — they re-enter as a player and run today's
 pause-and-resync. The new flow applies only to genuinely new joiners
 (no prior slot for their `persistent_id`).
 
-### Game-detection fallback
+### Game-detection: scope and required server changes
 
-`_readMenuLockstepPhase` is gated on `_isSmashRemix()`. For non-SSB64
-games the predicate returns `inControllableMenu: false` regardless of
-actual game state — so the host-promote-spectator edge would never fire
-and queued spectators would be stuck forever. To preserve today's
-behavior for unsupported games, the spectator-first auto-route in
-`play.js` is gated: it activates only when the room is running a Smash
-game. The `roomData` already includes `game_id`
-([signaling.py:571](server/src/api/signaling.py#L571)); use it. For
-other games, joiners continue to enter as players via today's
-`request-late-join` flow with the existing pause-and-load behavior.
+The host-side phase reader (`_readMenuLockstepPhase`,
+`_readGameStatus`, `_readSceneCurr`) is gated on `_isSmashRemix()` at
+[netplay-lockstep.js:1345](web/static/netplay-lockstep.js#L1345), which
+only matches `_config.gameId === 'smash-remix'` and two Smash Remix
+ROM hashes. **Vanilla SSB64 is not currently covered.** Two paths:
 
-The UX downside (for non-Smash games) is that mid-match joiners might
-still see the "controls do nothing" symptom if those games also bake
-their roster, but that's the status quo, not a regression. Per-game
-phase reads are out of scope for this spec.
+- **Recommended for v1: scope to Smash Remix only.** The auto-spectate
+  gate fires only when the room game is Smash Remix; vanilla SSB64 and
+  other games fall to today's `request-late-join` player path. This
+  matches what the host-side phase reader actually supports today and
+  avoids widening scope.
+- **Optional v1.x: widen the helper.** Replace `_isSmashRemix()` calls
+  in the new code paths with a new `_supportsSmashPhaseRead()` that
+  returns true for both vanilla SSB64 and Smash Remix. Verify the same
+  RDRAM addresses (`0x800A4D18` for game_status, scene cursor) hold for
+  vanilla SSB64 before flipping. This is a safe refactor but separate
+  from this spec.
+
+The decision is "scope to Smash Remix" unless verification of vanilla
+addresses lands first; the spec assumes Smash-Remix-only.
+
+**Server payload changes required.** The auto-spectate gate in
+`play.js` needs to know the room's `game_id` at `join-room` ack time
+*and* at the `GET /room/{room_id}` lookup that precedes joining:
+
+- `GET /room/{room_id}` ([app.py:618](server/src/api/app.py#L618))
+  currently returns `status`, `player_count`, `max_players`,
+  `has_password`, `rom_hash`, `rom_sharing`, `mode`. **Add
+  `game_id`.**
+- `join-room` ack response ([signaling.py:601–608](server/src/api/signaling.py#L601))
+  currently spreads `_players_payload(room)` and adds `status`, `mode`,
+  `rom_hash`, `rom_sharing`. **Add `game_id`** (server-side `room.game_id`).
+
+Without these two additions the spectator-first gate cannot be
+implemented client-side as written.
+
+The UX downside (for non-Smash-Remix games) is that mid-match joiners
+might still see the "controls do nothing" symptom if those games also
+bake their roster, but that's the status quo, not a regression.
 
 ## State transitions
 
@@ -519,8 +544,24 @@ Files that change:
   ([line 4653](web/static/netplay-lockstep.js#L4653)) adds
   `if (msg.targetSid && msg.targetSid !== socket.id) return;` at the
   top, before any state mutation.
-- Joiner: on receipt of `late-join-state`, fire `onPromotedToPlayer()`
-  back into `play.js` to drive `bootEmulator`.
+- **Joiner: buffer for early-arriving state.** The current handler
+  returns early on `_isSpectator || _phase === PHASE_RUNNING` and
+  assumes `gameManager` exists. With the spectator-first flow, a
+  targeted `late-join-state` can arrive *before* the joiner's
+  `bootEmulator` has finished — the `users-updated` flipping the
+  joiner to a player only fires after the server move, but the host's
+  `late-join-state` follows immediately on the same tick. The new
+  flow must:
+  1. On `late-join-state` with `targetSid === socket.id`: cache the
+     full message in a host-local `_pendingLateJoinMsg` buffer.
+  2. Trigger `onPromotedToPlayer()` if not already in flight; this
+     drives `play.js` to call `bootEmulator`.
+  3. Once `EJS_emulator?.gameManager?.Module` is ready, run the
+     existing decompression and state-apply path with the cached
+     message. Clear the buffer.
+  4. If `_pendingLateJoinMsg` is still set after
+     `LATE_JOIN_TIMEOUT_MS`, the boot stalled — fall through to the
+     existing failure path (`become-spectator`, re-queue).
 - `onUsersUpdated` ([line 2137](web/static/netplay-lockstep.js#L2137)):
   detect SID demotion (was in `players` last tick, now in `spectators`).
   For each demoted SID:
@@ -545,6 +586,23 @@ Files that change:
   with host identity check and no `room.status` block.
 - Both events broadcast `users-updated` and persist via `state.save_room`.
 - `payloads.py`: two new Pydantic v2 models for the events.
+- **`_players_payload` ([line 220](server/src/api/signaling.py#L220))
+  must expose `romReady` for spectators**, not just players. Today the
+  spectator dict includes only `socketId` and `playerName`. Add
+  `romReady: info["socketId"] in room.rom_ready` to the spectator
+  comprehension. The host's promotion gate reads `users-updated` to
+  know which queued spectators have ROM ready; without this field the
+  host can't decide whether to fire promotion.
+- **`game_id` added to** the `join-room` ack response
+  ([line 603](server/src/api/signaling.py#L603)) — one extra line:
+  `resp["game_id"] = room.game_id`.
+
+### `server/src/api/app.py`
+
+- **`GET /room/{room_id}` ([line 618](server/src/api/app.py#L618))
+  must return `game_id`** in its response dict so the lobby can decide
+  whether to apply the spectator-first gate before the join-room
+  round-trip.
 
 ### `web/play.html`
 
@@ -639,6 +697,10 @@ when the joiner is on the new code.
 - `dismissLateJoinPrompt` — [play.js:3079](web/static/play.js#L3079)
 - Auto-spectate gate (extend here for new flow) — [play.js:571](web/static/play.js#L571)
 - `roomData.status` access in join-room ack handler — [play.js:648](web/static/play.js#L648)
+- `_isSmashRemix()` helper (gameId === 'smash-remix' or hash match) — [netplay-lockstep.js:1345](web/static/netplay-lockstep.js#L1345)
+- `_players_payload` (spectator romReady missing today) — [signaling.py:220](server/src/api/signaling.py#L220)
+- `GET /room/{room_id}` (game_id missing today) — [app.py:618](server/src/api/app.py#L618)
+- `join-room` ack response (game_id missing today) — [signaling.py:601](server/src/api/signaling.py#L601)
 - `data-message` server relay (broadcast, no per-SID targeting) — [signaling.py:1020](server/src/api/signaling.py#L1020)
 - `sendLateJoinState` emit site (add `targetSid` here) — [netplay-lockstep.js:4639](web/static/netplay-lockstep.js#L4639)
 - `handleLateJoinState` receiver (add `targetSid` filter here) — [netplay-lockstep.js:4653](web/static/netplay-lockstep.js#L4653)
