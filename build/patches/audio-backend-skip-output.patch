@@ -1,8 +1,8 @@
 diff --git a/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c b/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
-index f9014bd..29dfc95 100644
+index f9014bd..9ac78c9 100644
 --- a/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
 +++ b/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
-@@ -48,6 +48,36 @@ extern retro_audio_sample_batch_t audio_batch_cb;
+@@ -48,6 +48,38 @@ extern retro_audio_sample_batch_t audio_batch_cb;
  
  static unsigned MAX_AUDIO_FRAMES = 2048;
  
@@ -19,10 +19,12 @@ index f9014bd..29dfc95 100644
 + * (after the byte-swap, since the swap mutates the caller's buffer in
 + * place — matching legacy semantics). RSP audio HLE still runs and
 + * the AI controller's internal state evolves; only the final
-+ * resampler + JS output callback is skipped. This keeps audio-DMA
-+ * cycles deterministic while losing the host's audible output during
-+ * netplay. JS layer is expected to source audio from a separate
-+ * deterministic capture path (or accept silence). */
++ * resampler + JS output callback is skipped.
++ *
++ * In deterministic mode, audible netplay audio is captured directly from
++ * the AI buffer below, before the libretro/RetroArch/OpenAL output path.
++ * That path can be suspended or bypassed by the browser, so depending on
++ * it for capture leaves JS with zero PCM samples. */
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
 +#endif
@@ -39,7 +41,53 @@ index f9014bd..29dfc95 100644
  #define VI_INTR_TIME 500000
  #define OUTPUT_RATE 44100
  
-@@ -260,6 +290,15 @@ static void aiLenChanged(void* user_data, const void* buffer, size_t size)
+@@ -57,6 +89,45 @@ static unsigned CountsPerSecond;
+ static unsigned BytesPerSecond;
+ static unsigned CountsPerByte;
+ 
++#ifdef __EMSCRIPTEN__
++extern int kn_deterministic_mode;
++extern int16_t kn_audio_buffer[];
++extern int kn_audio_sample_count;
++extern int kn_audio_rate;
++
++static void kn_capture_audio_direct(const int16_t *raw_data, size_t frames)
++{
++   size_t i;
++   size_t out_frames;
++   int space;
++
++   if (!kn_deterministic_mode || !raw_data || frames == 0 || GameFreq <= 0)
++      return;
++
++   kn_audio_rate = OUTPUT_RATE;
++   space = 48000 - kn_audio_sample_count;
++   if (space <= 0)
++      return;
++
++   out_frames = (size_t)(((uint64_t)frames * OUTPUT_RATE + ((unsigned)GameFreq / 2)) / (unsigned)GameFreq);
++   if (out_frames == 0)
++      out_frames = 1;
++   if (out_frames > (size_t)space)
++      out_frames = (size_t)space;
++
++   for (i = 0; i < out_frames; i++)
++   {
++      size_t src = (size_t)(((uint64_t)i * (unsigned)GameFreq) / OUTPUT_RATE);
++      if (src >= frames)
++         src = frames - 1;
++      kn_audio_buffer[(kn_audio_sample_count + (int)i) * 2] = raw_data[src * 2];
++      kn_audio_buffer[(kn_audio_sample_count + (int)i) * 2 + 1] = raw_data[src * 2 + 1];
++   }
++
++   kn_audio_sample_count += (int)out_frames;
++}
++#endif
++
+ #ifdef __APPLE__
+ /* Apple AudioConverter - resamples int16 to 44100 Hz.
+  * No float intermediates needed (unlike sinc resampler path). */
+@@ -260,6 +331,22 @@ static void aiLenChanged(void* user_data, const void* buffer, size_t size)
        p[i + 1] ^= p[i + 3];
     }
  
@@ -51,6 +99,13 @@ index f9014bd..29dfc95 100644
 +   if (kn_skip_audio_output) {
 +      return;
 +   }
++
++#ifdef __EMSCRIPTEN__
++   if (kn_deterministic_mode) {
++      kn_capture_audio_direct(raw_data, frames);
++      return;
++   }
++#endif
 +
  #ifdef __APPLE__
     /* Apple path: AudioConverter resamples, no float conversion needed */
