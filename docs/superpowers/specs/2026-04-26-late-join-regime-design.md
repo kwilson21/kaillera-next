@@ -72,12 +72,31 @@ the room status flips to "playing", which is unchanged.
 
 - `play.js` already auto-spectates when the room is full
   ([line 571](web/static/play.js#L571)). Extend the same gate to:
-  `if (roomData.status === 'playing' && roomData.game_id === 'smash-remix') { isSpectator = true; }`.
+  `if (roomData.status === 'playing' && roomData.gameId === 'smash-remix') { isSpectator = true; _autoSpectated = true; }`.
   This forces every late joiner through the spectator path on Smash
   Remix rooms, regardless of whether the host is at CSS or mid-match.
   Other games keep today's player-first behavior. No new server event
   is needed; the existing `join-room` with `spectate: true` does the
   job.
+- **Intent tracking** — distinguish "user wants to play but was
+  auto-routed to spectator" from "user explicitly chose to spectate."
+  The auto-spectate gate sets `_autoSpectated = true` only when the
+  gate itself fires. An explicit spectator (URL `?spectate=1`,
+  spectator link, etc.) keeps `_autoSpectated = false`.
+
+  The `join-room` extra payload carries this intent to the server:
+  `extra.autoSpectated: bool`. The server stores it on the spectator
+  info dict and exposes it through `_players_payload` so the host
+  can read it from `users-updated`.
+
+  **The host only enqueues spectators where `autoSpectated === true`
+  in `_pendingPromotions`.** Explicit spectators are left alone; they
+  watch indefinitely and are never auto-promoted.
+
+  Future: a "Play next match" button on the explicit-spectator UI
+  that emits a new `request-promotion` server event flipping
+  `autoSpectated` to true. Out of scope for v1 but the field shape
+  supports it.
 - Host's per-peer canvas stream
   ([netplay-lockstep.js:4868](web/static/netplay-lockstep.js#L4868),
   `_hostStream = captureCanvas.captureStream(0)`, attached in
@@ -126,10 +145,39 @@ Promotion timing in practice:
 Reconnect is **not** late-join. The server detects returning players by
 `persistent_id` in `join-room` ([signaling.py:475–488](server/src/api/signaling.py#L475))
 and `_swap_sid` ([signaling.py:260](server/src/api/signaling.py#L260))
-restores their slot before the join completes. A reconnect never reaches
-the spectator-first path — they re-enter as a player and run today's
-pause-and-resync. The new flow applies only to genuinely new joiners
-(no prior slot for their `persistent_id`).
+restores their slot before the join completes. The new flow applies
+only to genuinely new joiners (no prior slot for their
+`persistent_id`).
+
+**Subtlety: the auto-spectate gate fires before the server's reconnect
+short-circuit is observable.** The client-side gate at
+[play.js:571](web/static/play.js#L571) decides `spectate: true` based
+on `roomData.status === "playing"` and `gameId === "smash-remix"`,
+emits `join-room` with that flag, and only then sees the ack. The
+server's reconnect path overrides the `spectate` flag — a reconnecting
+player whose `persistent_id` is in `room.players` is restored to the
+player slot regardless of what they emitted.
+
+That means client-side state can disagree with server-side state right
+after the ack: client thinks `isSpectator = true`, server's
+`users-updated` shows the SID in `players`. The client must
+**reconcile** at ack time:
+
+1. Inspect the join-room ack body. Find self by `socketId === socket.id`.
+2. If self is in `ack.players` despite the client having emitted
+   `spectate: true`, this is a server-detected reconnect. Set
+   `isSpectator = false`, clear `_autoSpectated`, and run the legacy
+   `request-late-join` path that today's reconnect goes through (the
+   existing `bootEmulator` → `request-late-join` flow at
+   [netplay-lockstep.js:3899–3937](web/static/netplay-lockstep.js#L3899)).
+3. The Chunk 5.4 self-promotion handler (in the implementation plan)
+   must skip this case: only fire promotion-induced boot when the
+   *first* `users-updated`/ack showed self in spectators. Otherwise
+   reconnects double-up.
+
+The distinguisher is "was self in players in the FIRST authoritative
+roster snapshot." Capture this in the join-room ack handler and
+remember it across subsequent `users-updated` deliveries.
 
 ### Game-detection: scope and required server changes
 
@@ -236,8 +284,10 @@ reads `_readMenuLockstepPhase` at line 5028.
 One new host-side variable, `_lastInControllableMenu`, holds the
 previous-frame value. On a `false → true` transition, the host drains
 the `_pendingPromotions` queue (FIFO) and runs the promotion flow per
-entry that has `romReady === true`. Entries without ROM stay queued
-across cycles.
+entry that has both `romReady === true` AND `autoSpectated === true`.
+Entries without ROM stay queued across cycles. Explicit spectators
+(`autoSpectated === false`) are never enqueued in the first place
+(see §Spectator entry intent tracking).
 
 Why `inControllableMenu` rising edge (not `gameplay` falling edge): a
 match goes scene 22 (gameplay) → scene 24 (results) → scene 18 (CSS).
@@ -501,9 +551,21 @@ Files that change:
 
 - Auto-spectate gate around [line 571](web/static/play.js#L571): extend
   the existing `roomData.player_count >= max_players` check to also
-  set `isSpectator = true` when `roomData.status === "playing"` AND
-  the room game is Smash. This is the single load-bearing line for the
-  whole "spectator-first" behavior.
+  set `isSpectator = true` AND `_autoSpectated = true` when
+  `roomData.status === "playing"` AND `roomData.gameId === "smash-remix"`.
+  Pass `autoSpectated: _autoSpectated` in the `join-room` extra
+  payload so the server can propagate intent.
+- **Reconcile-on-ack** for reconnect detection: in the join-room
+  callback (line 591 + line 609), inspect the ack body. Find self by
+  `socketId === socket.id`. If self is in `ack.players` despite the
+  client emitting `spectate: true`, treat as reconnect: set
+  `isSpectator = false`, `_autoSpectated = false`, run the existing
+  bootEmulator → request-late-join legacy path. Capture the
+  authoritative initial roster snapshot in a new local
+  `_initialRosterSelfRole: 'player' | 'spectator'` so the
+  self-promotion handler in `users-updated` can distinguish
+  reconnects (was already a player) from genuine promotions (was a
+  spectator first).
 - Decouple emulator boot from join: today `bootEmulator()` runs from
   `dismissLateJoinPrompt` ([line 3079](web/static/play.js#L3079)) for
   mid-game joiners. Move the boot trigger to a new
@@ -589,15 +651,22 @@ Files that change:
 - Both events broadcast `users-updated` and persist via `state.save_room`.
 - `payloads.py`: two new Pydantic v2 models for the events.
 - **`_players_payload` ([line 220](server/src/api/signaling.py#L220))
-  must expose `romReady` for spectators**, not just players. Today the
-  spectator dict includes only `socketId` and `playerName`. Add
-  `romReady: info["socketId"] in room.rom_ready` to the spectator
-  comprehension. The host's promotion gate reads `users-updated` to
-  know which queued spectators have ROM ready; without this field the
-  host can't decide whether to fire promotion.
-- **`game_id` added to** the `join-room` ack response
+  must expose `romReady` AND `autoSpectated` for spectators**, not
+  just `socketId` and `playerName`. The host needs both fields:
+  - `romReady: info["socketId"] in room.rom_ready` — promotion gate
+    checks ROM is loaded.
+  - `autoSpectated: bool(info.get("autoSpectated", False))` —
+    promotion gate skips explicit spectators.
+- **`gameId` added to** the `join-room` ack response
   ([line 603](server/src/api/signaling.py#L603)) — one extra line:
-  `resp["game_id"] = room.game_id`.
+  `resp["gameId"] = room.game_id`.
+- **`JoinRoomExtra` payload accepts `autoSpectated: bool`** (Pydantic
+  model in `payloads.py`). Server stores it on the spectator info
+  dict at the spectator-creation site in the `join-room` handler:
+  `room.spectators[persistent_id] = {"socketId": sid, "playerName":
+  player_name, "autoSpectated": payload.extra.autoSpectated or False}`.
+  Defaults to `False` for backward compat (explicit spectators on
+  old clients).
 
 ### `server/src/api/app.py`
 
@@ -614,8 +683,10 @@ Files that change:
 
 ### `server/src/api/payloads.py`
 
-- `HostPromoteSpectatorPayload { target_sid: str }`
+- `HostPromoteSpectatorPayload { targetSid: str }`
 - `BecomeSpectatorPayload {}` (empty body; sender identifies via sid)
+- `JoinRoomExtra` (existing model) gains `autoSpectated: bool = False`
+  field. Backward-compat default for old clients.
 
 ### Out-of-spec for v1
 
