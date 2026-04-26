@@ -570,13 +570,22 @@
 
   const applyInputToWasm = (slot, input, prevInputs) => {
     const mod = window.EJS_emulator?.gameManager?.Module;
+    const writeController = mod?._kn_write_controller;
     const simulateInput = mod?._kn_netplay_simulate_input || mod?._simulate_input;
-    if (!simulateInput) return;
+    if (!writeController && !simulateInput) return;
 
     // Optional skip-if-unchanged optimization
     if (prevInputs) {
       const prev = prevInputs[slot];
       if (prev && inputEqual(input, prev)) return;
+    }
+
+    if (writeController) {
+      writeController(slot, input.buttons || 0, input.lx || 0, input.ly || 0, input.cx || 0, input.cy || 0);
+      if (prevInputs) {
+        prevInputs[slot] = input;
+      }
+      return;
     }
 
     // Digital buttons (0-15)

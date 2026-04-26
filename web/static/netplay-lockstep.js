@@ -1316,6 +1316,7 @@
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
+  let _lastControllerPresentMask = -1;
   const MENU_START_BARRIER_SETTLE_MS = 500;
   let _menuStartBarrierReleased = false;
   let _menuStartLocalReady = false;
@@ -1335,6 +1336,9 @@
   const INITIAL_SMASH_TITLE_SETTLE_FRAMES = 30;
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
+  const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
+  const _pendingLateJoinReadySids = new Set(); // ready arrived before host DC opened
+  let _lateJoinReadyRetryTimer = null;
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
   // Must match hashes in server/config/known_roms.json.
@@ -1344,6 +1348,45 @@
   ]);
   const _isSmashRemix = () =>
     _config?.gameId === 'smash-remix' || KNState?.gameId === 'smash-remix' || _SMASH_REMIX_HASHES.has(_config?.romHash);
+
+  const _controllerPresentMask = () => {
+    const slots = new Set();
+    const addSlot = (slot) => {
+      if (Number.isInteger(slot) && slot >= 0 && slot < 4) slots.add(slot);
+    };
+
+    if (_activeRoster) {
+      for (const slot of _activeRoster) addSlot(slot);
+    } else {
+      addSlot(_playerSlot);
+      for (const info of Object.values(_knownPlayers)) addSlot(info?.slot);
+      for (const peer of Object.values(_peers)) {
+        if (!peer?._intentionalLeave) addSlot(peer?.slot);
+      }
+    }
+    addSlot(_playerSlot);
+
+    let mask = 0;
+    for (const slot of slots) mask |= 1 << slot;
+    return mask & 0x0f;
+  };
+
+  const _applyControllerPresentMask = (reason = 'tick') => {
+    if (!_isSmashRemix()) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_set_controller_present_mask) return;
+    const mask = _controllerPresentMask();
+    if (!mask || mask === _lastControllerPresentMask) return;
+    _lastControllerPresentMask = mask;
+    mod._kn_set_controller_present_mask(mask);
+    _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}`);
+  };
+
+  const _resetControllerPresentMask = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (mod?._kn_set_controller_present_mask) mod._kn_set_controller_present_mask(0x0f);
+    _lastControllerPresentMask = -1;
+  };
 
   // -- Deterministic RNG sync for Smash Remix netplay --
   // Per-frame seed reset: before each frame, writes a deterministic seed
@@ -2099,32 +2142,20 @@
     }
   };
 
+  const clearLateJoinReadyRetry = () => {
+    if (_lateJoinReadyRetryTimer) {
+      clearInterval(_lateJoinReadyRetryTimer);
+      _lateJoinReadyRetryTimer = null;
+    }
+  };
+
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
     if (msg.type === 'late-join-ready') {
-      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-        if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
-        _resetPacingAfterLateJoin();
-        _broadcastRoster();
-        _syncLog('late-join resume: joiner ready (via Socket.IO)');
-        for (const p of Object.values(_peers)) {
-          if (p.dc?.readyState === 'open') {
-            try {
-              p.dc.send('late-join-resume');
-            } catch (_) {}
-          }
-        }
-      } else {
-        // Timeout already resumed us, but the joiner is now ready.
-        // Reset pacing again — the timeout reset may have expired by now,
-        // causing phantom detection on peers that were paused longer.
-        _resetPacingAfterLateJoin();
-        _broadcastRoster();
-        _syncLog('late-join-ready after timeout — pacing reset + roster broadcast');
-      }
+      finishLateJoinReady('Socket.IO', msg.senderSid || null);
     }
   };
 
@@ -2134,7 +2165,60 @@
     const requesterSid = msg.requesterSid;
     if (!requesterSid) return;
     _syncLog(`received late-join request from ${requesterSid}`);
+    const name = _knownPlayers[requesterSid]?.playerName || 'A player';
+    _config?.onToast?.(`${name} is joining...`);
+    setStatus(`${name} is joining...`);
+    _lateJoinReadyHandled.delete(requesterSid);
+    _pendingLateJoinReadySids.delete(requesterSid);
     sendLateJoinState(requesterSid);
+  };
+
+  const resumeLateJoinPause = (source, includeRoster) => {
+    if (_runSubstate !== RUN_LATE_JOIN_PAUSE) return false;
+    _runSubstate = RUN_NORMAL;
+    _lateJoinPausedAt = 0;
+    _resetPacingAfterLateJoin();
+    if (includeRoster) _broadcastRoster();
+    _syncLog(`late-join resume: ${source}${includeRoster ? '' : ' (roster waits for DC)'}`);
+    for (const p of Object.values(_peers)) {
+      if (p.dc?.readyState === 'open') {
+        try {
+          p.dc.send('late-join-resume');
+        } catch (_) {}
+      }
+    }
+    return true;
+  };
+
+  const finishLateJoinReady = (source, senderSid = null) => {
+    let newlyHandled = false;
+    if (_playerSlot === 0 && senderSid) {
+      if (_lateJoinReadyHandled.has(senderSid)) return;
+      const peer = _peers[senderSid];
+      if (peer?.dc?.readyState !== 'open') {
+        if (_pendingLateJoinReadySids.has(senderSid)) return;
+        _pendingLateJoinReadySids.add(senderSid);
+        _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; resuming existing players`);
+        resumeLateJoinPause(`${source} ready from ${senderSid}`, false);
+        return;
+      }
+      _pendingLateJoinReadySids.delete(senderSid);
+      _lateJoinReadyHandled.add(senderSid);
+      newlyHandled = true;
+    }
+
+    const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+      resumeLateJoinPause(`joiner ready (via ${source})`, true);
+      if (newlyHandled || senderSid) _config?.onToast?.(`${name} joined`);
+    } else {
+      // The Socket.IO ready path may already have resumed the old players.
+      // Now that the joiner's DC is open, activate the roster/input slot.
+      _resetPacingAfterLateJoin();
+      _broadcastRoster();
+      _syncLog(`late-join-ready (${source}) — pacing reset + roster broadcast`);
+      if (newlyHandled) _config?.onToast?.(`${name} joined`);
+    }
   };
 
   // -- users-updated ---------------------------------------------------------
@@ -2228,6 +2312,8 @@
         sendOffer(s.socketId);
       }
     }
+
+    _applyControllerPresentMask('users-updated');
 
     // Notify controller
     _config?.onPlayersChanged?.(data);
@@ -2818,6 +2904,9 @@
           ch.send(`roster:${_frameNum}:${slots.join(',')}`);
         } catch (_) {}
       }
+      if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
+        finishLateJoinReady('deferred DC open', remoteSid);
+      }
 
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
@@ -2854,34 +2943,21 @@
         }
         if (e.data === 'late-join-pause') {
           _runSubstate = RUN_LATE_JOIN_PAUSE;
+          setStatus('Player joining...');
+          _config?.onToast?.('Player joining...');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-resume') {
-          if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
+          const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
+          if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
+          _lateJoin = false;
+          clearLateJoinReadyRetry();
           _resetPacingAfterLateJoin();
+          if (wasPausedForLateJoin) _config?.onToast?.('Player joined');
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'late-join-ready') {
-          if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-            if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
-            _resetPacingAfterLateJoin();
-            // Broadcast roster NOW — the joiner is ready to send input.
-            // Broadcasting earlier causes 5s stalls per frame while the
-            // joiner boots/loads state.
-            _broadcastRoster();
-            _syncLog('late-join resume: joiner ready (via DC)');
-            for (const p of Object.values(_peers)) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send('late-join-resume');
-                } catch (_) {}
-              }
-            }
-          } else {
-            _resetPacingAfterLateJoin();
-            _broadcastRoster();
-            _syncLog('late-join-ready (DC) after timeout — pacing reset + roster broadcast');
-          }
+          finishLateJoinReady('DC', remoteSid);
         }
         if (e.data.startsWith('roster:')) {
           const parts = e.data.split(':');
@@ -2889,6 +2965,7 @@
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
+          _applyControllerPresentMask('roster');
           // Always use 4 (KN_MAX_PLAYERS) so the C engine covers all
           // slots regardless of gaps (e.g. roster [0,1,3]). Empty slots
           // get zero predictions — harmless since no input arrives.
@@ -4497,6 +4574,7 @@
     const slots = [...slotSet].sort((a, b) => a - b);
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
+    _applyControllerPresentMask('broadcast-roster');
     // Always 4 — see roster DC handler comment for rationale.
     rb_numPlayers = 4;
     const rbMod = window.EJS_emulator?.gameManager?.Module;
@@ -4546,7 +4624,11 @@
       _runSubstate = RUN_LATE_JOIN_PAUSE;
       _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
-      for (const p of Object.values(_peers)) {
+      for (const [sid, p] of Object.entries(_peers)) {
+        // The pause is for existing players while the host captures a stable
+        // state. The joiner is not part of the running timeline yet; pausing
+        // it can leave its freshly-loaded loop stuck in RUN_LATE_JOIN_PAUSE.
+        if (sid === remoteSid) continue;
         if (p.dc?.readyState === 'open') {
           try {
             p.dc.send('late-join-pause');
@@ -4640,6 +4722,7 @@
 
       socket.emit('data-message', {
         type: 'late-join-state',
+        targetSid: remoteSid,
         frame: capturedFrame,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
@@ -4653,6 +4736,7 @@
   }
 
   const handleLateJoinState = async (msg) => {
+    if (msg.targetSid && msg.targetSid !== socket.id) return;
     if (_isSpectator) return;
     if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
 
@@ -4775,6 +4859,14 @@
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
+      _activeRoster = new Set(
+        Object.values(_knownPlayers)
+          .map((info) => info?.slot)
+          .filter((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4),
+      );
+      if (Number.isInteger(_playerSlot) && _playerSlot >= 0 && _playerSlot < 4) _activeRoster.add(_playerSlot);
+      _rosterChangeFrame = _frameNum;
+      _applyControllerPresentMask('late-join-state');
 
       // Ensure rollback init can proceed — the late joiner missed the
       // host's rb-delay broadcast over DataChannel (sent at game start).
@@ -4788,6 +4880,10 @@
       }
 
       startLockstep();
+      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+        _syncLog('late-join: clearing self pause after state load');
+        _runSubstate = RUN_NORMAL;
+      }
 
       // Re-establish WebRTC connections to any players whose peer connections
       // failed or are zombied (closed PC but still in _peers). During the
@@ -4816,17 +4912,30 @@
       }
 
       // Tell host to resume — send via BOTH DC and Socket.IO for reliable
-      // delivery. Socket.IO relay can drop/delay the message (rate limiting,
-      // large queued payloads from the late-join-state broadcast), while the
-      // DC is a direct peer connection that's already open.
-      for (const p of Object.values(_peers)) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send('late-join-ready');
-          } catch (_) {}
+      // delivery. Retry briefly because CSS late-join can race with peer DC
+      // replacement/opening; the host side is idempotent per senderSid.
+      const sendLateJoinReady = () => {
+        for (const p of Object.values(_peers)) {
+          if (p.dc?.readyState === 'open') {
+            try {
+              p.dc.send('late-join-ready');
+            } catch (_) {}
+          }
         }
-      }
-      socket.emit('data-message', { type: 'late-join-ready' });
+        socket.emit('data-message', { type: 'late-join-ready', senderSid: socket.id });
+      };
+      clearLateJoinReadyRetry();
+      sendLateJoinReady();
+      let readyAttempts = 1;
+      _lateJoinReadyRetryTimer = setInterval(() => {
+        if (_phase !== PHASE_RUNNING || readyAttempts >= 20) {
+          clearLateJoinReadyRetry();
+          return;
+        }
+        readyAttempts += 1;
+        _syncLog(`late-join-ready retry ${readyAttempts}`);
+        sendLateJoinReady();
+      }, 500);
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     }
@@ -5836,6 +5945,7 @@
     const peerSlots = activePeers.map((p) => p.slot);
     _syncLog(`lockstep started -- slot: ${_playerSlot} peerSlots: ${peerSlots.join(',')} delay: ${DELAY_FRAMES}`);
     _broadcastRoster();
+    _applyControllerPresentMask('start-lockstep');
     _syncLog(`SYNC-MODE: RDRAM hash desync detection, knSync=${_hasKnSync}`);
 
     // Production netplay needs audible audio on original forward frames.
@@ -6085,6 +6195,7 @@
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
+    _resetControllerPresentMask();
 
     // Shutdown C-level rollback
     if (_useCRollback) {
@@ -9311,6 +9422,7 @@
     _remoteInputs = {};
     _peerInputStarted = {};
     _activeRoster = null;
+    _lastControllerPresentMask = -1;
     _menuStartBarrierReleased = false;
     _menuStartLocalReady = false;
     _menuStartLocalScene = 0;
@@ -9331,6 +9443,9 @@
     _runSubstate = RUN_NORMAL;
     if (window._knSyncLog === _syncLog) window._knSyncLog = null;
     _awaitingLateJoinState = false;
+    _lateJoinReadyHandled.clear();
+    _pendingLateJoinReadySids.clear();
+    clearLateJoinReadyRetry();
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
     _guestStateBytes = null;
@@ -9522,6 +9637,35 @@
       frameNum: _frameNum,
       playerSlot: _playerSlot,
       peerCount: Object.keys(_peers).length,
+      runSubstate: _runSubstate,
+      lateJoin: _lateJoin,
+      awaitingLateJoinState: _awaitingLateJoinState,
+      heldKeyCodes: [..._heldKeys],
+      localInputNow: readLocalInput(),
+      peersDetail: Object.fromEntries(
+        Object.entries(_peers).map(([sid, p]) => [
+          sid,
+          {
+            slot: p.slot,
+            dc: p.dc?.readyState || 'none',
+            rbDc: p.rbDc?.readyState || 'none',
+            pc: p.pc?.connectionState || 'none',
+            lastFrameFromPeer: p.lastFrameFromPeer ?? -1,
+            lastAckFromPeer: p.lastAckFromPeer ?? -1,
+            inputStarted: !!_peerInputStarted[p.slot],
+          },
+        ]),
+      ),
+      remoteLatest: Object.fromEntries(
+        Object.entries(_remoteInputs).map(([slot, frames]) => {
+          const keys = Object.keys(frames || {})
+            .map((f) => Number(f))
+            .filter((f) => Number.isFinite(f));
+          const latestFrame = keys.length ? Math.max(...keys) : -1;
+          const latest = latestFrame >= 0 ? frames[latestFrame] : null;
+          return [slot, { latestFrame, latest }];
+        }),
+      ),
     }),
     getDebugLog: () => _debugLog.slice(),
     _getPeers: () => _peers,

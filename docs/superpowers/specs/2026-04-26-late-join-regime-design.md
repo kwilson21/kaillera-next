@@ -1,7 +1,13 @@
 # Late-join regime by host game phase
 
 **Date:** 2026-04-26
-**Status:** design
+**Status:** superseded
+
+> Superseded by
+> [2026-04-26-late-join-simplification-decision.md](2026-04-26-late-join-simplification-decision.md).
+> The spectator-first regime grew beyond the intended scope and conflated
+> queued late joiners with real spectators. Keep this file as historical
+> analysis only; do not implement it as the active plan.
 
 ## Problem
 

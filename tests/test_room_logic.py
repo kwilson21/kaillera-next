@@ -104,7 +104,7 @@ class TestPlayersPayload:
         assert "spec-1" in payload["spectators"]
 
     def test_rom_sharing_and_mode(self):
-        room = _make_room()
+        room = _make_room(game_id="smash-remix")
         room.rom_sharing = True
         room.mode = "streaming"
 
@@ -112,6 +112,8 @@ class TestPlayersPayload:
 
         assert payload["romSharing"] is True
         assert payload["mode"] == "streaming"
+        assert payload["gameId"] == "smash-remix"
+        assert payload["game_id"] == "smash-remix"
 
 
 # ── _get_room ─────────────────────────────────────────────────────────────────
@@ -269,3 +271,51 @@ class TestLeave:
 
     def test_unknown_sid_is_noop(self):
         self._run(_leave("sid-ghost", "disconnect"))  # must not raise
+
+
+# ── data-message relay ───────────────────────────────────────────────────────
+
+
+class TestDataMessageRelay:
+    def test_target_sid_relays_only_to_target_in_same_room(self):
+        rooms["ROOM1"] = _make_room()
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+        _sid_to_room["sid-late"] = ("ROOM1", "pid-late", False)
+
+        emit = AsyncMock()
+        with patch.object(signaling.sio, "emit", new=emit):
+            _run_async(
+                signaling._relay(
+                    "sid-host",
+                    {"type": "late-join-state", "targetSid": "sid-late", "data": "payload"},
+                    "data-message",
+                    "data-message",
+                    max_bytes=4096,
+                )
+            )
+
+        emit.assert_awaited_once()
+        args, kwargs = emit.await_args
+        assert args[0] == "data-message"
+        assert kwargs["to"] == "sid-late"
+        assert "room" not in kwargs
+
+    def test_target_sid_outside_room_is_not_relayed(self):
+        rooms["ROOM1"] = _make_room()
+        rooms["ROOM2"] = _make_room()
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+        _sid_to_room["sid-other"] = ("ROOM2", "pid-other", False)
+
+        emit = AsyncMock()
+        with patch.object(signaling.sio, "emit", new=emit):
+            _run_async(
+                signaling._relay(
+                    "sid-host",
+                    {"type": "late-join-state", "targetSid": "sid-other", "data": "payload"},
+                    "data-message",
+                    "data-message",
+                    max_bytes=4096,
+                )
+            )
+
+        emit.assert_not_awaited()

@@ -26,8 +26,16 @@ KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-0}"
 KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD:-0}"
 KN_DISABLE_GLIDEN64_VEC4="${KN_DISABLE_GLIDEN64_VEC4:-1}"
 KN_DISABLE_GLIDEN64_SIMD="${KN_DISABLE_GLIDEN64_SIMD:-1}"
+if command -v nproc >/dev/null 2>&1; then
+    KN_DEFAULT_BUILD_JOBS="$(nproc)"
+else
+    KN_DEFAULT_BUILD_JOBS="4"
+fi
+KN_BUILD_JOBS="${KN_BUILD_JOBS:-${KN_DEFAULT_BUILD_JOBS}}"
+KN_SKIP_MAKE_CLEAN="${KN_SKIP_MAKE_CLEAN:-0}"
 
 mkdir -p "${SRC_DIR}" "${OUT_DIR}"
+echo "==> Build parallelism: ${KN_BUILD_JOBS} job(s)"
 
 # ============================================================
 # Stage 1: Clone repos
@@ -98,8 +106,12 @@ if [ -d "${PATCHES_DIR}" ]; then
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller,_kn_set_controller_present_mask, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
+    fi
+    if grep -q "_kn_write_controller" Makefile.emulatorjs && ! grep -q "_kn_set_controller_present_mask" Makefile.emulatorjs; then
+        sed -i 's|_kn_write_controller,|_kn_write_controller,_kn_set_controller_present_mask,|' Makefile.emulatorjs
+        echo "    Added controller-present mask WASM export"
     fi
 
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
@@ -291,6 +303,43 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
         git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
             echo "    WARN: headless tick patch failed"
+    fi
+    if grep -q "kn_apply_controller_present" libretro/libretro.c && \
+        ! grep -q "kn_controller_present_mask" libretro/libretro.c; then
+        python3 -c "
+path = 'libretro/libretro.c'
+src = open(path).read()
+needle = 'int pad_present[4] = {1, 1, 1, 1};\\n'
+insert = needle + '''static int kn_controller_present_mask = 0x0f;
+
+static void kn_apply_controller_present(int slot)
+{
+    int present;
+    if (slot < 0 || slot >= 4)
+        return;
+    present = (kn_controller_present_mask >> slot) & 1;
+    pad_present[slot] = present;
+    if (controller[slot].control)
+        controller[slot].control->Present = present;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE void kn_set_controller_present_mask(int mask)
+{
+    int i;
+    kn_controller_present_mask = mask & 0x0f;
+    for (i = 0; i < 4; i++)
+        kn_apply_controller_present(i);
+}
+#endif
+
+'''
+if needle not in src:
+    raise SystemExit('pad_present anchor not found')
+src = src.replace(needle, insert, 1)
+open(path, 'w').write(src)
+"
+        echo "    Injected controller-present mask helpers"
     fi
 
     # determinism fixes: srand(0), fixed MPK seed, fixed biopak time.
@@ -586,12 +635,31 @@ if [ -d "${SOFTFLOAT_DIR}" ]; then
     SF_OBJ_DIR="${SCRIPT_DIR}/softfloat/obj"
     mkdir -p "${SF_OBJ_DIR}"
 
-    # Compile each SoftFloat .c to .o (WASM bitcode via emcc)
+    # Compile each SoftFloat .c to .o (WASM bitcode via emcc).
+    # Keep this under the same job cap as make; unbounded background emcc jobs
+    # can overwhelm Docker/Rosetta on Apple Silicon.
+    sf_pids=()
+    sf_failed=0
     for src in "${SF_SOURCES[@]}"; do
         base="$(basename "${src}" .c)"
         emcc ${SF_CFLAGS} ${SF_INCS} -c "${src}" -o "${SF_OBJ_DIR}/${base}.o" &
+        sf_pids+=("$!")
+        if [ "${#sf_pids[@]}" -ge "${KN_BUILD_JOBS}" ]; then
+            if ! wait "${sf_pids[0]}"; then
+                sf_failed=1
+            fi
+            sf_pids=("${sf_pids[@]:1}")
+        fi
     done
-    wait
+    for pid in "${sf_pids[@]}"; do
+        if ! wait "${pid}"; then
+            sf_failed=1
+        fi
+    done
+    if [ "${sf_failed}" != "0" ]; then
+        echo "ERROR: SoftFloat compilation failed"
+        exit 1
+    fi
 
     # Archive into a static library
     emar rcs "${SCRIPT_DIR}/softfloat/libsoftfloat.a" "${SF_OBJ_DIR}"/*.o
@@ -605,10 +673,14 @@ echo "==> Stage 3: Compile core to LLVM bitcode (.bc)"
 cd "${SRC_DIR}/mupen64plus-libretro-nx"
 
 # Clean previous build artifacts
-emmake make -f Makefile platform=emscripten clean 2>/dev/null || true
+if [ "${KN_SKIP_MAKE_CLEAN}" = "1" ]; then
+    echo "    Skipping make clean (KN_SKIP_MAKE_CLEAN=1)"
+else
+    emmake make -f Makefile platform=emscripten clean 2>/dev/null || true
+fi
 
 # Build
-emmake make -j4 -f Makefile platform=emscripten LTO=1
+emmake make -j"${KN_BUILD_JOBS}" -f Makefile platform=emscripten LTO=1
 
 BC_FILE="${SRC_DIR}/mupen64plus-libretro-nx/mupen64plus_next_libretro_emscripten.bc"
 if [ ! -f "${BC_FILE}" ]; then
@@ -658,7 +730,7 @@ emmake make -f Makefile.emulatorjs \
     TARGET=mupen64plus_next_libretro.js \
     LTO=1 \
     additional_libs="${SF_ADDITIONAL}" \
-    -j4
+    -j"${KN_BUILD_JOBS}"
 
 JS_FILE="${SRC_DIR}/RetroArch/mupen64plus_next_libretro.js"
 WASM_FILE="${SRC_DIR}/RetroArch/mupen64plus_next_libretro.wasm"

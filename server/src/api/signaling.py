@@ -240,6 +240,8 @@ def _players_payload(room: Room) -> dict:
         "owner": room.owner,
         "romSharing": room.rom_sharing,
         "romHash": room.rom_hash,
+        "gameId": room.game_id,
+        "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
     }
@@ -1001,7 +1003,7 @@ async def rom_signal(sid: str, data: dict) -> None:
 
 
 async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int = _RELAY_MAX_BYTES) -> None:
-    """Validate, rate-check, and broadcast *data* to all peers in the sender's room."""
+    """Validate, rate-check, and relay *data* to a room or targetSid."""
     if not isinstance(data, dict):
         return
     if not check(sid, rate_key):
@@ -1017,6 +1019,14 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     if result is None:
         return
     session_id, _room = result
+
+    target_sid = data.get("targetSid")
+    if isinstance(target_sid, str) and target_sid:
+        target_entry = _sid_to_room.get(target_sid)
+        if target_entry and target_entry[0] == session_id:
+            await sio.emit(event, data, to=target_sid)
+        return
+
     await sio.emit(event, data, room=session_id, skip_sid=sid)
 
 
@@ -1086,22 +1096,20 @@ async def debug_logs(sid: str, data: dict) -> None:
     for line in logs[:5000]:
         log.info("[P%s] %s", slot, str(line)[:500])
 
-    # In DEBUG_MODE, also write to local file for convenience
-    if os.environ.get("DEBUG_MODE"):
-        from datetime import datetime
-        from pathlib import Path
+    from datetime import datetime
+    from pathlib import Path
 
-        filename = f"debug-{room_id}-slot{slot}-{datetime.now().strftime('%H%M%S')}.log"
-        log_dir = Path(__file__).parent.parent.parent.parent / "logs"
-        log_dir.mkdir(exist_ok=True)
-        out = log_dir / filename
-        with open(out, "w") as f:  # noqa: ASYNC230 — debug-only, gated behind DEBUG_MODE
-            f.write(f"Room: {room_id}  SID: {sid}\n")
-            f.write(f"Info: {json.dumps(info, indent=2)}\n")
-            f.write(f"Entries: {len(logs)}\n---\n")
-            for line in logs[:5000]:
-                f.write(str(line)[:500] + "\n")
-        log.info("Debug logs also written to: %s", out)
+    filename = f"debug-{room_id}-slot{slot}-{datetime.now().strftime('%H%M%S')}.log"
+    log_dir = Path(__file__).parent.parent.parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    out = log_dir / filename
+    with open(out, "w") as f:  # noqa: ASYNC230 — small diagnostic dump
+        f.write(f"Room: {room_id}  SID: {sid}\n")
+        f.write(f"Info: {json.dumps(info, indent=2)}\n")
+        f.write(f"Entries: {len(logs)}\n---\n")
+        for line in logs[:5000]:
+            f.write(str(line)[:500] + "\n")
+    log.info("Debug logs written to: %s", out)
 
 
 def _ssim_sync(img_a_bytes: bytes, img_b_bytes: bytes) -> float | None:

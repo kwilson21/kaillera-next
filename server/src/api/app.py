@@ -625,6 +625,8 @@ def create_app(lifespan=None) -> FastAPI:
             "player_count": len(room.players),
             "max_players": room.max_players,
             "has_password": room.password is not None,
+            "game_id": room.game_id,
+            "gameId": room.game_id,
             "rom_hash": room.rom_hash,
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,

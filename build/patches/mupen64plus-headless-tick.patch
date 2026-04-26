@@ -2,7 +2,7 @@ diff --git a/libretro/libretro.c b/libretro/libretro.c
 index cabae39..ee8ca7c 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -104,6 +104,53 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+@@ -104,6 +104,57 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
  
  retro_log_printf_t log_cb = NULL;
  retro_video_refresh_t video_cb = NULL;
@@ -19,6 +19,7 @@ index cabae39..ee8ca7c 100644
 + * Called by kn_rollback.c during replay to set inputs before retro_run().
 + * Mirrors the JS applyInputToWasm() logic in shared.js. */
 +extern void simulate_input(int user, int key, int down);
++static void kn_apply_controller_present(int slot);
 +
 +/* Scale N64 analog (+-83) to RetroArch range (+-32767).
 + * MUST match JS applyInputToWasm: Math.trunc(v * (32767.0 / 83.0))
@@ -33,6 +34,9 @@ index cabae39..ee8ca7c 100644
 +
 +void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy) {
 +    int i;
++    if (slot < 0 || slot >= 4)
++        return;
++    kn_apply_controller_present(slot);
 +    /* Digital buttons (0-15): each bit maps to a simulate_input key */
 +    for (i = 0; i < 16; i++) {
 +        simulate_input(slot, i, (buttons >> i) & 1);

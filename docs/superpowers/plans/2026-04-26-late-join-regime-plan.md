@@ -1,5 +1,10 @@
 # Late-join regime by host game phase — Implementation Plan
 
+> **Status:** Superseded. Do not implement this plan.
+> Use
+> [docs/superpowers/specs/2026-04-26-late-join-simplification-decision.md](../specs/2026-04-26-late-join-simplification-decision.md)
+> as the active direction.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current mid-match late-join behavior (which produces a half-initialized player whose inputs do nothing in SSB64/Smash Remix) with a spectator-first flow that promotes joiners to players only at safe menu phases.
@@ -2408,4 +2413,3 @@ This depends on the project's release flow. The CLAUDE.md notes "PRs are squash-
 PR title suggestion: `feat: spectator-first late-join for Smash Remix mid-match joiners`.
 
 PR body: copy the spec's Problem section + a one-paragraph summary of the chunked rollout.
-

@@ -566,6 +566,11 @@
         }
         const roomData = await response.json();
         if (!roomData) return;
+        const roomGameId = roomData.gameId || roomData.game_id;
+        if (roomGameId) {
+          _gameId = roomGameId;
+          KNState.gameId = _gameId;
+        }
 
         // Room full: auto-join as spectator with banner
         if (!isSpectator && roomData.player_count >= roomData.max_players) {
@@ -623,6 +628,12 @@
               }
               showError(`Failed to join: ${err}`);
               return;
+            }
+
+            const joinGameId = joinData?.gameId || joinData?.game_id;
+            if (joinGameId) {
+              _gameId = joinGameId;
+              KNState.gameId = _gameId;
             }
 
             if (!isSpectator && joinData?.players) {
@@ -2974,6 +2985,21 @@
           KNEvent('webrtc-fail', `${reason}: ${detail}`, { states });
         }
         if (text) text.textContent = `${reason} — ${detail}`;
+        crumb('connection-timeout', {
+          reason,
+          detail,
+          states: peerEntries.map((p) => ({
+            pc: p.pc?.connectionState || 'unknown',
+            dc: p.dc?.readyState || 'unknown',
+            slot: p.slot ?? null,
+          })),
+          room: roomCode,
+          mode,
+          slot: mySlot,
+        });
+        flushBreadcrumbs(reason);
+        engine?.flushSyncLog?.();
+        engine?.dumpLogs?.();
         showToast(reason);
       }
     }, 30000);
@@ -3000,6 +3026,15 @@
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
     const optResync = document.getElementById('opt-resync');
+    crumb('start-game-click', {
+      mode: selectedMode,
+      romHash: _romHash?.substring(0, 12),
+      gameId: _gameId,
+      players: lastUsersData?.players ? Object.keys(lastUsersData.players).length : null,
+      ready: lastUsersData?.players
+        ? Object.values(lastUsersData.players).map((p) => ({ slot: p.slot, romReady: !!p.romReady }))
+        : null,
+    });
     socket.emit(
       'start-game',
       {
@@ -3009,7 +3044,13 @@
         gameId: _gameId ?? null,
       },
       (err) => {
-        if (err) showToast(err);
+        if (err) {
+          crumb('start-game-error', err);
+          flushBreadcrumbs(err);
+          showToast(err);
+        } else {
+          crumb('start-game-ack', { mode: selectedMode });
+        }
       },
     );
   };
