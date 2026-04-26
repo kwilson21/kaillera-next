@@ -33,145 +33,215 @@ behavior and the half-working third instance.
 
 ## Approach
 
-Pick the late-join regime from the host's current game phase, read at the
-moment the late-join request arrives. The host already exposes phase via
-`_readMenuLockstepPhase()` ([netplay-lockstep.js:1425](web/static/netplay-lockstep.js#L1425)),
-which returns `{gameStatus, sceneCurr, inControllableMenu, gameplay, ...}`.
+**Anyone joining while `room.status === "playing"` always enters as a
+spectator.** The decision is made at `join-room` time on the joiner's
+client (the join-room ack already includes `room.status` —
+[play.js:648](web/static/play.js#L648)). No emulator boots, no ROM is
+required up front, no late-join state transfer fires from the spectator
+path.
 
-**One predicate decides the regime:** `phase.gameplay === true` (i.e.
-`sceneCurr === 22 && gameStatus === 1`) means a match is actively running.
-Anything else — title, mode select, CSS, stage select, results — is a safe
-boundary.
+The host then decides *when* to promote a queued spectator into a player
+slot. The promotion predicate is `phase.inControllableMenu === true`
+(host is at title/menus/CSS/stage-select — scenes 1, 7-21 in
+`_isControllableMenuScene` at [netplay-lockstep.js:1416](web/static/netplay-lockstep.js#L1416)).
+That set is exactly "scenes where the in-game player roster isn't yet
+baked," which is the underlying invariant the spec was reaching for in
+v1.
+
+Why `inControllableMenu` is the right predicate, and not `phase.gameplay`:
+
+- **Mid-match** (scene 22, gameStatus 1): roster baked → spectator only. ✓
+- **Start-pause** (scene 22, gameStatus 2): roster baked → spectator only.
+  `phase.gameplay === false` would have wrongly classified this as safe;
+  `inControllableMenu === false` correctly classifies it as not-safe.
+- **Results screen** (scene 24): match ended, but you can't add a P3
+  here either; CSS hasn't shown yet. `inControllableMenu === false` →
+  stay queued.
+- **CSS / stage select** (scenes in 7-21): roster not yet baked →
+  player slot is admissible. ✓
 
 `_readMenuLockstepPhase` short-circuits on `_isSmashRemix() === false`
-(returns `gameplay: false`), so non-Smash games naturally fall to "safe
-boundary" without an extra gate. The flow chart below shows the explicit
-`_isSmashRemix()` check for clarity, but it's the same code path as
-`phase.gameplay === false`.
+(returns `inControllableMenu: false`). For non-Smash games the predicate
+is never satisfied, so spectators are never auto-promoted by this
+mechanism. Non-Smash games therefore default to today's behavior:
+joiners start as players via the existing `request-late-join` flow when
+the room status flips to "playing", which is unchanged.
 
-Two regimes:
+### Spectator entry (always, when `room.status === "playing"`)
 
-### Regime A — CSS / safe menu (player path)
-
-- Joiner connects as a player.
-- Existing `request-late-join` → `late-join-pause` → `late-join-state` →
-  `late-join-resume` flow runs.
-- Pause is brief because peers are at a menu, not in active gameplay; the
-  visible "freeze" is at most a CSS that pauses for 1–2s.
-- After state applies, joiner's controls activate.
-- This is today's path with better UX (see §UX).
-
-### Regime B — Mid-match (spectator path)
-
-- Joiner is **demoted on the server** from `room.players` to
-  `room.spectators` so the room state matches reality (see §Server-side
-  state transitions). Existing slot is freed.
-- Existing spectator canvas-stream from host
+- `play.js` already auto-spectates when the room is full
+  ([line 571](web/static/play.js#L571)). Extend the same gate to:
+  `if (roomData.status === 'playing') { isSpectator = true; }`. This
+  forces every late joiner through the spectator path, regardless of
+  whether the host is at CSS or mid-match. No new server event is
+  needed; the existing `join-room` with `spectate: true` does the job.
+- Host's per-peer canvas stream
   ([netplay-lockstep.js:4868](web/static/netplay-lockstep.js#L4868),
-  `_hostStream = captureCanvas.captureStream(0)`, attached per-peer in
+  `_hostStream = captureCanvas.captureStream(0)`, attached in
   `startSpectatorStreamForPeer` at
-  [netplay-lockstep.js:4908](web/static/netplay-lockstep.js#L4908), called from
-  the new-peer branch at [netplay-lockstep.js:2724](web/static/netplay-lockstep.js#L2724))
-  carries the live video. No emulator boots on the joiner; no save-state
-  pause hits active peers.
-- Joiner's gamepad and virtual-gamepad UI are dimmed/hidden with a clear
-  status message: "Watching current match — controls activate at next
-  character select."
-- Local input is intentionally ignored at the input layer (already true for
-  spectators today).
-- When the active match ends and the host's `phase.gameplay` flips from true
-  to false (results screen → CSS), the host runs a "promote spectator →
-  player" flow that uses the existing player path: brief pause, state
-  transfer, controls enable. Joiner sees "Joining match…" → "Controls
-  enabled."
+  [netplay-lockstep.js:4908](web/static/netplay-lockstep.js#L4908),
+  called from the new-peer branch at
+  [netplay-lockstep.js:2724](web/static/netplay-lockstep.js#L2724)) starts
+  delivering video on its own. No emulator boots on the joiner.
+- Joiner's gamepad / virtual-gamepad UI is dimmed/hidden with a status
+  message: "Watching current match — joining at next character select."
+- ROM readiness still progresses during spectator mode: the existing ROM
+  prompt and host ROM-sharing flow run as today, so by the time the host
+  promotes the joiner, the ROM is in IndexedDB / cached. ROM readiness
+  is a hard precondition for promotion (see §Promotion gating below).
 
-Reconnect is **not** late-join. The server already detects returning players
-by `persistent_id` in the `join-room` handler ([signaling.py:475–488](server/src/api/signaling.py#L475))
-and `_swap_sid` ([signaling.py:260](server/src/api/signaling.py#L260)) restores
-their slot before the join completes. A reconnect therefore never reaches
-the host's `request-late-join` handler with a regime decision — the flow
-already short-circuits server-side. No `priorSlot` field is needed on
-`request-late-join`; the regime check applies only to genuinely new
-joiners.
+### Promotion to player
+
+The host promotes a queued spectator on the rising edge of
+`phase.inControllableMenu` (false → true), and immediately if a queued
+spectator's ROM becomes ready while the host is already in a controllable
+menu. Promotion runs the existing player-path machinery
+(`sendLateJoinState` → DC pause → state transfer → resume), with two
+changes:
+
+1. The server-side move from `room.spectators` to `room.players` happens
+   first via a new `host-promote-spectator` event (see §Server-side state
+   transitions). The existing `claim-slot` is unsuitable because it's
+   blocked by `room.status == "playing"` ([signaling.py:644](server/src/api/signaling.py#L644)).
+2. `late-join-state` is targeted to a single SID via a new `targetSid`
+   field, since `data-message` is room-broadcast and multiple promotions
+   could otherwise collide (see §Targeted relay).
+
+Promotion timing in practice:
+
+- **Joiner arrives during CSS/menus.** Host sees `inControllableMenu ===
+  true` immediately on the join, ROM may or may not be ready. Host waits
+  on ROM ready, then fires promotion. Total spectator-mode time: a few
+  hundred ms to a few seconds (ROM-dependent).
+- **Joiner arrives during a match.** Host sees `inControllableMenu ===
+  false`, queues the joiner. Joiner watches video until the match ends,
+  results screen passes, and CSS appears. Host fires promotion at the
+  CSS transition.
+
+### Reconnect
+
+Reconnect is **not** late-join. The server detects returning players by
+`persistent_id` in `join-room` ([signaling.py:475–488](server/src/api/signaling.py#L475))
+and `_swap_sid` ([signaling.py:260](server/src/api/signaling.py#L260))
+restores their slot before the join completes. A reconnect never reaches
+the spectator-first path — they re-enter as a player and run today's
+pause-and-resync. The new flow applies only to genuinely new joiners
+(no prior slot for their `persistent_id`).
 
 ### Game-detection fallback
 
-`_readMenuLockstepPhase` is gated on `_isSmashRemix()`. For non-SSB64 games
-the predicate returns `gameplay: false` even when a match is running, which
-would incorrectly send mid-match joiners down the player path. Until we have
-per-game phase reads, **non-Smash games default to today's behavior**: route
-new joiners through the player path with pause-and-load. The "regime by
-phase" logic only activates when `_isSmashRemix()` is true. This is a
-conservative default; it preserves existing behavior for unsupported games.
+`_readMenuLockstepPhase` is gated on `_isSmashRemix()`. For non-SSB64
+games the predicate returns `inControllableMenu: false` regardless of
+actual game state — so the host-promote-spectator edge would never fire
+and queued spectators would be stuck forever. To preserve today's
+behavior for unsupported games, the spectator-first auto-route in
+`play.js` is gated: it activates only when the room is running a Smash
+game. The `roomData` already includes `game_id`
+([signaling.py:571](server/src/api/signaling.py#L571)); use it. For
+other games, joiners continue to enter as players via today's
+`request-late-join` flow with the existing pause-and-load behavior.
+
+The UX downside (for non-Smash games) is that mid-match joiners might
+still see the "controls do nothing" symptom if those games also bake
+their roster, but that's the status quo, not a regression. Per-game
+phase reads are out of scope for this spec.
 
 ## State transitions
 
 ```
-        late-join request arrives at host
-                      │
-        (reconnects don't reach here; server short-circuits via persistent_id)
+            joiner emits join-room
                       │
                       ▼
-            phase.gameplay === true ?
-              ┌─false─┘   └─true─┐
-              ▼                   ▼
-         player path        spectator path
-              │                   │
-              ▼                   ▼
-     pause+state+resume    server demotes player → spectator
-     controls enabled      attach host video stream
-                           queue joiner for next promotion
-                                   │
-                              wait for phase edge:
-                              gameplay true → false
-                                   │
-                                   ▼
-                            promote queued joiner
-                            (player path: pause+state+resume)
-                            controls enabled
+        roomData.status === "playing" && Smash game ?
+          ┌─yes─┘                 └─no──┐
+          ▼                              ▼
+   spectate: true                 spectate: false
+   (forced)                       (today's path: player slot,
+                                   request-late-join, etc.)
+          │
+          ▼
+    server places in spectators
+    (or short-circuits as reconnect via persistent_id)
+          │
+          ▼
+    host's per-peer spectator stream
+    starts; joiner watches live video
+          │
+          │  ROM prompt / host ROM-sharing
+          │  runs in parallel; joiner emits
+          │  rom-ready when complete
+          ▼
+    host's promotion gate:
+      romReady AND phase.inControllableMenu === true
+      AND slot available
+          │
+          ▼
+   host emits host-promote-spectator
+          │
+          ▼
+   server moves joiner: spectators → players,
+   broadcasts users-updated
+          │
+          ▼
+   host sends targeted late-join-state
+   (DC pause + state transfer)
+          │
+          ▼
+   joiner boots emulator, applies state,
+   emits late-join-ready
+          │
+          ▼
+   host broadcasts late-join-resume,
+   pacing reset, controls enabled
 ```
-
-Promotion at end-of-match runs the same code as a fresh CSS-time join. The
-spectator-side joiner is not in `_activeRoster`, has no input loop, no
-rollback ring entry. Promotion goes through the same `claim-slot` + late-join
-state-transfer machinery used for a normal at-CSS player path; see
-§Server-side state transitions for the server contract.
 
 ### Phase-edge detector
 
-The host detects `phase.gameplay: true → false` inside
-`_broadcastPhaseIfNeeded` at [netplay-lockstep.js:5026](web/static/netplay-lockstep.js#L5026),
-which already runs every tick (rate-limited), already gates on
-`_isSmashRemix()`, and already reads `_readMenuLockstepPhase` at line 5028.
-One new host-side variable, `_lastPhaseGameplay`, holds the previous-frame
-value.
-On a `true → false` transition, the host:
+The host's promotion gate checks `phase.inControllableMenu === true` on
+the rising edge (false → true), and also re-checks whenever a queued
+spectator transitions to ROM-ready (handled in the `rom-ready` server
+event handler — host watches this). The detector lives in
+`_broadcastPhaseIfNeeded` at
+[netplay-lockstep.js:5026](web/static/netplay-lockstep.js#L5026) — runs
+every tick (rate-limited), already gated on `_isSmashRemix()`, already
+reads `_readMenuLockstepPhase` at line 5028.
 
-1. Drains a queue (`_pendingPromotions: SocketID[]`) of joiners parked in
-   Regime B.
-2. For each entry, fires the promotion flow (server event + DC handshake;
-   see §Server-side state transitions).
-3. Clears the queue.
+One new host-side variable, `_lastInControllableMenu`, holds the
+previous-frame value. On a `false → true` transition, the host drains
+the `_pendingPromotions` queue (FIFO) and runs the promotion flow per
+entry that has `romReady === true`. Entries without ROM stay queued
+across cycles.
+
+Why `inControllableMenu` rising edge (not `gameplay` falling edge): a
+match goes scene 22 (gameplay) → scene 24 (results) → scene 18 (CSS).
+The `gameplay → false` edge fires at the 22→24 boundary (results
+screen), where you still can't promote. By the time the controllable
+CSS scene appears, gameplay has long been false, so a `gameplay`-edge
+detector misses the actual safe point. `inControllableMenu` rising edge
+fires at the 24→18 boundary, which is exactly when CSS becomes
+available. Same logic applies for any controllable-menu scene the game
+returns to.
 
 Edge cases:
 
-- **Multiple Regime B joiners queued.** Drain in FIFO order. Each promotion
-  runs through the same pause-and-load; back-to-back is fine because we're
-  already in a safe menu phase. If a slot runs out (>= max players), the
-  remainder stays queued and the next end-of-match promotes nobody until
-  someone leaves.
+- **Multiple queued joiners.** Drain in FIFO order. Each promotion runs
+  through the same pause-and-load; back-to-back is fine because we're
+  already in a safe menu phase. If `room.players` fills (4 players), the
+  remainder stays queued.
 - **Match ends via host departure / room close.** `room-closed` already
-  routes through normal teardown ([play.js handles `room-closed`]). The
-  promotion queue is host-local state; if the host leaves, the queue dies
-  with them, which is correct — there's no game to promote into.
-- **Match ends via `end-game` (host clicked the button).** Same as natural
-  end-of-match: `phase.gameplay` flips false, queue drains.
-- **Phase reads transient false during gameplay (paused via Start).**
-  `_readGameStatus` returns `2` for paused, which has `phase.gameplay
-  === false` (gameplay requires `gameStatus === 1`). To avoid promoting
-  during a Start-pause, the edge detector also requires
-  `phase.inControllableMenu === true`. Pause + match-running has
-  `inControllableMenu === false`.
+  routes through normal teardown. The promotion queue is host-local
+  state; if the host leaves, the queue dies with them — correct, no
+  game to promote into.
+- **Match ends via `end-game` (host clicked the button).** Same as
+  natural end-of-match: `inControllableMenu` flips true at the next
+  controllable scene, queue drains.
+- **Joiner arrives at CSS already (host already inControllableMenu).**
+  No edge to detect. The host runs the same gate check on `rom-ready`
+  arrival or on the `users-updated` that adds the new spectator,
+  whichever comes second.
+- **Multiple controllable-menu transitions during a single session.**
+  Edge fires repeatedly; queue is drained on each. Idempotent — empty
+  queue means no-op.
 
 ## UX
 
@@ -187,213 +257,290 @@ toolbar:
   exists at [netplay-lockstep.js:1337](web/static/netplay-lockstep.js#L1337)).
 - Cleared on `late-join-resume` or timeout.
 
-### Joiner (player path)
+### Joiner (spectator-first, then promoted)
 
-Replace generic "Loading…" with three explicit stages:
+The joiner sees three sequential states:
 
-1. **Connecting** — WebRTC offer/answer/ICE complete to host.
-2. **Syncing game state** — `late-join-state` received, decompressing,
-   applying to RDRAM.
-3. **Almost ready** — emulator booted, awaiting `late-join-resume`.
+1. **Watching current match** — persistent status pinned to the toolbar:
+   "👀 Watching current match — joining at next character select." ROM
+   prompt and host-sharing UI are still visible/active during this phase
+   so the joiner can get their ROM ready.
+2. **Promoting…** — when the host fires the promotion path, status flips
+   to staged copy, replacing "Loading…":
+   - **Connecting** — WebRTC pause / state transfer in progress.
+   - **Syncing game state** — `late-join-state` received, decompressing,
+     applying to RDRAM.
+   - **Almost ready** — emulator booted, awaiting `late-join-resume`.
+3. **Controls enabled** — gamepad / virtual-gamepad UI un-dims. Watching
+   banner clears.
 
-Each stage maps to an existing point in `dismissLateJoinPrompt` /
-`initEngine` / `handleLateJoinState`. The status string is already routed
-through `setStatus()` at [netplay-lockstep.js:2074](web/static/netplay-lockstep.js#L2074);
-this is a copy/timing change, not new plumbing.
-
-### Joiner (spectator path)
-
-Persistent status pinned in the toolbar area:
-
-> 👀 **Watching current match** — controls activate at next character select
-
-- Visible from the moment the spectator decision is made.
-- Replaced by the player-path stage UI when promotion begins.
-- Local gamepad UI dimmed; virtual gamepad hidden.
+Each promotion stage maps to an existing point in `bootEmulator` /
+`handleLateJoinState`. Status copy routes through `setStatus()` at
+[netplay-lockstep.js:2074](web/static/netplay-lockstep.js#L2074); this is
+a copy/timing change, not new plumbing. The emulator boot now happens at
+promotion time rather than at join time.
 
 ### Failure modes
 
-If the player-path handshake doesn't complete within
+If promotion's `late-join-state` handshake doesn't complete within
 `LATE_JOIN_TIMEOUT_MS` (15s):
 
 - **Active players:** banner changes to "Couldn't add player — they're
-  spectating." then dismisses after 3s. Match continues uninterrupted (no
-  pause reset weirdness — joiner never finished entering the roster).
-- **Joiner:** their incomplete player-init is torn down through
-  `resetPeerState(slot, reason)` per **invariant I2**
-  ([CLAUDE.md netplay invariants](docs/netplay-invariants.md)) — adding new
-  per-peer state without routing cleanup through `resetPeerState` is a
-  review-level violation. After teardown, the joiner is server-demoted to
-  spectator (same path as Regime B mid-match join). Status flips to:
-  "Sync failed — watching as spectator. Will retry at next character select."
-- **No half-initialized player slot.** The joiner is either fully a player
-  or fully a spectator; there is no in-between.
+  watching." then dismisses after 3s. Match continues uninterrupted.
+- **Joiner:** their booting emulator is torn down. All per-peer
+  cleanup routes through `resetPeerState(slot, reason)` per
+  **invariant I2** ([docs/netplay-invariants.md](docs/netplay-invariants.md)) —
+  adding new per-peer state without routing cleanup through
+  `resetPeerState` is a review-level violation. Joiner emits
+  `become-spectator` to the server (see §Server-side state transitions);
+  server moves them back from players to spectators and broadcasts
+  `users-updated`. Joiner self-state: `_isSpectator = true`,
+  `_playerSlot = null`. Status flips to: "Sync failed — back to
+  watching. Will retry at next character select." The host re-queues
+  this SID into `_pendingPromotions` so the next safe-phase edge tries
+  again.
+- **No half-initialized player slot.** Either fully a player (state
+  applied, controls live) or fully a spectator (no roster slot, watching
+  stream).
 
-If the spectator-path canvas stream fails to start (host's `_hostStream`
-not yet created, ICE fails, etc.), the joiner sees a still error card with
-a manual "Retry" button. They are not promoted to the player path until a
-spectator stream is at least attempted.
+If the spectator-mode canvas stream fails to start (host's `_hostStream`
+not yet created, ICE fails, etc.), the joiner sees a status banner with
+a manual "Retry" button. They are not eligible for promotion until a
+spectator stream is at least attempted (so they can confirm video
+arrives).
+
+### Demotion: peer cleanup on the wire
+
+When the server moves a SID from `room.players` to `room.spectators`
+(triggered by `become-spectator` on a failure path, or by an out-of-band
+admin action), every peer's `onUsersUpdated` at
+[netplay-lockstep.js:2137](web/static/netplay-lockstep.js#L2137) needs
+to:
+
+1. Detect that the SID's old `peer.slot` no longer matches their entry
+   in the new `players` payload (they're now in `spectators`).
+2. Call `resetPeerState(oldSlot, reason='demoted-to-spectator')` for
+   that peer's prior slot.
+3. Set `peer.slot = null` on the existing `_peers[sid]` entry.
+4. Trigger `startSpectatorStreamForPeer(sid)` (host-side only) so the
+   demoted peer starts receiving canvas video.
+
+For the demoted peer themselves: `_playerSlot = null`, `_isSpectator =
+true`, mirror the `onUsersUpdated` cleanup for any peer entries they
+held as a "player." The existing zombie-peer eviction at
+[netplay-lockstep.js:2183](web/static/netplay-lockstep.js#L2183) is for
+SID-renaming; demotion is a different case and needs the new branch
+above.
 
 ## Server-side state transitions
 
 The server is the source of truth for `room.players` / `room.spectators`
-and broadcasts `users-updated`. Two state moves are needed beyond today's
-event vocabulary:
+and broadcasts `users-updated`. Spectator-first entry uses today's
+`join-room` with `spectate: true` — no new event for the entry path. Two
+new events are needed:
 
-### Move 1: player → spectator (Regime B entry)
+### `host-promote-spectator` — happy-path promotion
 
-When the host responds with `late-join-spectate`, the joiner must release
-its player slot. New server event, mirror of `_claim_slot_locked` at
+The existing `claim-slot` event is blocked while `room.status ==
+"playing"` ([signaling.py:644](server/src/api/signaling.py#L644)) — that
+block is correct for the normal claim-slot semantics (random spectator
+grabbing a slot mid-match) but blocks the host-driven promotion. New
+event, host-only, mirror of `_claim_slot_locked` at
 [signaling.py:634](server/src/api/signaling.py#L634):
+
+```
+@sio.on("host-promote-spectator")
+async def host_promote_spectator(sid, payload):
+    # Host (sid == room.owner_sid) promotes payload.target_sid from
+    # room.spectators into a free player slot.
+    # Returns:
+    #   None on success
+    #   "Not host"             — caller is not the room owner
+    #   "Target not spectator" — target_sid not in room.spectators
+    #   "No slots available"   — room.players is full
+    # Same room.spectators → room.players move as _claim_slot_locked,
+    # but identity check replaces the room.status block. Broadcast
+    # users-updated to the room. Persist via state.save_room.
+```
+
+The host fires this only inside the phase-edge detector
+(`inControllableMenu` rising edge or rom-ready arrival while already in
+a controllable menu), so the safety guarantee that originally motivated
+the "playing"-blocks-claim is upheld differently: trust the host's
+phase read rather than the room's coarse status.
+
+### `become-spectator` — failure recovery only
+
+If the targeted `late-join-state` transfer fails after promotion (joiner
+worker stalls past `LATE_JOIN_TIMEOUT_MS`, decompression throws, etc.),
+the joiner is already in `room.players` server-side but their emulator
+isn't actually running. They need to be moved back to spectators so
+other peers' rosters reflect reality and they aren't expected to send
+inputs. New event, mirror of `_claim_slot_locked` for the inverse:
 
 ```
 @sio.on("become-spectator")
 async def become_spectator(sid):
     # Move sid from room.players to room.spectators, free their slot,
-    # broadcast users-updated.
+    # broadcast users-updated. Used only on failure recovery paths,
+    # not on the happy path.
     # Returns:
     #   None on success
-    #   "Not in a room"      — sid has no room mapping
-    #   "Not a player"       — sid is already a spectator (no-op success
-    #                          could also be acceptable; pick one)
-    #   "Cannot self-demote — host" — owner_sid cannot become spectator
-    #                          (host departure is handled via leave-room
-    #                          and the existing host-migration path)
+    #   "Not in a room"             — sid has no room mapping
+    #   "Already spectator"         — sid is already in room.spectators (no-op)
+    #   "Cannot self-demote: host"  — owner_sid cannot become spectator
+    #                                 (host departure goes through leave-room
+    #                                 and the existing host-migration path)
 ```
 
-Why a new event instead of reusing `leave-room` + `join-room`: that round-trip
-emits user-leave / user-join toasts to other peers, which is misleading
-("they didn't leave; they got demoted"). A single `become-spectator`
-keeps the user-facing player list stable.
+This is also what the joiner's own LATE-JOIN-TIMEOUT cleanup calls. The
+host's existing `hardDisconnectPeer` path on timeout
+([netplay-lockstep.js:4630](web/static/netplay-lockstep.js#L4630)) is
+unchanged for cases where the joiner has actually disconnected.
 
-**Transient `users-updated` window.** Between the joiner's initial
-`join-room` (where they appear in `room.players` with a slot) and the
-server-side `become-spectator` after the host's regime decision, other
-peers briefly see the joiner as a player. With normal RTT this is a few
-hundred milliseconds. To avoid a flickering "P3 joined → P3 left as
-player → P3 watching" sequence in the toast UI, suppress the joiner-side
-"joined as player" toast until either (a) the regime decision arrives or
-(b) `LATE_JOIN_TIMEOUT_MS` elapses. Other peers' `users-updated` handlers
-already debounce roster changes via the diff in [play.js:899](web/static/play.js#L899);
-if the demotion lands within the same animation frame, the player-toast
-never fires.
+### Sequence: server event vs DC message during promotion
 
-### Move 2: spectator → player (promotion at next CSS)
+1. Host emits `host-promote-spectator` to server. Server moves joiner
+   from `room.spectators` to `room.players`, allocates slot, broadcasts
+   `users-updated`. Server returns success ack to the host callback.
+2. Host receives the ack. On error, host requeues the joiner for the
+   next phase edge.
+3. Host sends targeted `late-join-state` via Socket.IO `data-message`
+   with `targetSid` set (see §Targeted relay). Existing
+   `sendLateJoinState` machinery runs unchanged otherwise.
+4. Other peers receive `users-updated` (showing the joiner as a player)
+   and the host's broadcast `late-join-pause` (DC-side). Their tick
+   loops pause; resume on `late-join-resume` after the joiner sends
+   `late-join-ready`.
 
-The existing `claim-slot` event is **blocked** while `room.status ==
-"playing"` ([signaling.py:644](server/src/api/signaling.py#L644)) — a spectator
-cannot self-claim during an active match-or-CSS session. This block is
-correct for normal claim-slot semantics (random spectator grabbing a slot)
-but breaks the host-driven promotion.
+The joiner does **not** act on `users-updated` alone for promotion. The
+arrival of a `late-join-state` carrying their `targetSid` is the
+trigger to boot the emulator and apply state. This avoids a race where
+the joiner sees themselves as a player before the host's state has
+been sent.
 
-The simpler fix: add a new server event `host-promote-spectator`,
-host-only, that performs the same `room.spectators` → `room.players` move
-as `_claim_slot_locked` ([signaling.py:634](server/src/api/signaling.py#L634))
-but with the room.status check replaced by a host identity check:
+### Targeted relay
+
+Today's `late-join-state` rides on Socket.IO `data-message`, which
+broadcasts to every peer in the room
+([signaling.py:1020](server/src/api/signaling.py#L1020), `room=session_id,
+skip_sid=sid`). With multiple queued joiners, two simultaneous
+promotions could collide on the receiver side — the second joiner
+might run their `handleLateJoinState` against the first joiner's state
+because the only filter today is `_isSpectator || _phase ===
+PHASE_RUNNING`.
+
+Add a `targetSid` field to `late-join-state`. Receiver-side
+`handleLateJoinState`
+([netplay-lockstep.js:4653](web/static/netplay-lockstep.js#L4653)):
 
 ```
-@sio.on("host-promote-spectator")
-async def host_promote_spectator(sid, payload):
-    # Host (sid == room.owner_sid) promotes a target spectator
-    # (payload.target_sid) into a free player slot.
-    # Returns:
-    #   None on success
-    #   "Not host"            — caller is not the room owner
-    #   "Target not spectator" — target_sid not in room.spectators
-    #   "No slots available"   — room.players is full (matches _claim_slot_locked)
-    # Mirror of _claim_slot_locked but:
-    #   - identity check: sid must be host
-    #   - room.status check: skipped (host is asserting safe phase)
-    #   - target: payload.target_sid (not the caller)
-    # Broadcast users-updated.
+if (msg.targetSid && msg.targetSid !== socket.id) return;
 ```
 
-The host fires this only inside the phase-edge detector (gameplay true →
-false), so the safety guarantee that originally motivated the
-"playing"-blocks-claim is upheld differently: trust the host's phase read
-rather than the room's coarse status.
+This is forward-compatible: an old `late-join-state` with no `targetSid`
+falls through unchanged. Sender-side `sendLateJoinState`
+([netplay-lockstep.js:4639](web/static/netplay-lockstep.js#L4639)) sets
+`targetSid: remoteSid` on every emit.
 
-### Sequence: server event vs DC message
+**Why not switch to a new server event with explicit per-SID targeting?**
+The save-state payload is up to 4MB. Reusing `data-message`'s existing
+size limit (`_DATA_MSG_MAX_BYTES`, 4MB) and rate limiting avoids new
+server-side plumbing. The `targetSid` filter on the receiver costs one
+string comparison per message and is cheap.
 
-Promotion involves two messages — a server event for room-state truth and
-a DC message for the save-state transfer. Their ordering matters:
+### Transient `users-updated` window
 
-1. **Host emits `host-promote-spectator`** to the server. Server moves the
-   joiner from `room.spectators` to `room.players`, allocates a slot,
-   broadcasts `users-updated` to the room.
-2. **Host waits for the server's success acknowledgement** (callback
-   returns `None`). On error, the host requeues the joiner for the next
-   phase edge.
-3. **Host sends DC `late-join-promote`** carrying the save state, exactly
-   as today's `late-join-state` is sent in `sendLateJoinState`. The
-   joiner's existing `handleLateJoinState` runs unchanged.
-4. **Other peers** receive `users-updated` (showing the joiner as a
-   player) and the host's broadcast `late-join-pause` simultaneously.
-   Their tick loops pause; resume on `late-join-resume` after the joiner
-   sends `late-join-ready`.
+For non-Smash games (or pre-rollout clients), a joiner who explicitly
+asked to be a player will appear in `room.players` immediately on
+`join-room`, before the host has any chance to act. That's the existing
+behavior and the spec doesn't change it.
 
-The joiner does **not** act on `users-updated` alone for promotion — they
-wait for the DC `late-join-promote` message. This avoids a race where the
-joiner sees themselves as a player (via `users-updated`) before the host's
-state arrives.
-
-For Regime B entry (Move 1), the symmetric sequence is: host sends DC
-`late-join-spectate`, joiner emits `become-spectator` to the server, server
-broadcasts demoted `users-updated`. Other peers' rosters update; no DC
-state transfer occurs.
+For Smash games on the new path, the joiner enters as a spectator from
+the start (`spectate: true` set client-side based on `roomData.status ===
+"playing"`), so there's no "appears as player, then moved to spectator"
+flicker. Other peers see a single "watching" event, then later a
+"joined slot N" event when promotion fires. The
+`diffForToasts` in [play.js:893](web/static/play.js#L893) is an immediate
+diff (not a debounce), so each `users-updated` produces toast output —
+but with a single state change per peer-visible event, the toasts are
+clean.
 
 ## Implementation surface
 
 Files that change:
 
-### `web/static/netplay-lockstep.js`
-
-- `handleLateJoinRequest` ([line 2126](web/static/netplay-lockstep.js#L2126)):
-  branch on `_readMenuLockstepPhase().gameplay`. Mid-match Smash Remix:
-  send `late-join-spectate` (new DC/Socket.IO message) and push the
-  requester's sid onto a host-local `_pendingPromotions` queue. Otherwise
-  run today's `sendLateJoinState`.
-- Phase-edge detector: extend `_broadcastPhaseIfNeeded` at
-  [line 5026](web/static/netplay-lockstep.js#L5026) — already runs every
-  tick (rate-limited), already gated on `_isSmashRemix()`, already reads
-  the phase. Add `_lastPhaseGameplay` tracking and drain
-  `_pendingPromotions` on a true → false transition where
-  `inControllableMenu === true`.
-- New incoming message handlers: `late-join-spectate` (joiner side, in
-  `onDataMessage` near [line 2099](web/static/netplay-lockstep.js#L2099))
-  triggers server demotion via `become-spectator`, attaches host stream;
-  `late-join-promote` triggers the existing late-join-state pause-and-load
-  flow.
-- Failure path: `LATE_JOIN_TIMEOUT_MS` ([line 425](web/static/netplay-lockstep.js#L425))
-  fallback now also calls `become-spectator` for the joiner before
-  resuming peers, instead of leaving them as a half-initialized player.
-- All per-peer cleanup in failure paths must route through
-  `resetPeerState` per invariant I2.
-
 ### `web/static/play.js`
 
-- The `request-late-join` emit site itself lives in
-  `netplay-lockstep.js` ([line 3931](web/static/netplay-lockstep.js#L3931))
-  and is unchanged. `play.js` only changes the response-handling side
-  (new `late-join-spectate` and `late-join-promote` cases below).
-- New handler for `late-join-spectate` (joiner side): set
-  `isSpectator = true`, tear down the booting emulator if any, swap the
-  overlay to the persistent watching status, ensure a video element is
-  attached for the host stream.
-- New handler for `late-join-promote` (joiner side): flip
-  `isSpectator = false`, clear watching status, reuse the player-path
-  `initEngine` flow.
-- Stage-aware status copy fed into `setStatus`
-  ([line 2074](web/static/netplay-lockstep.js#L2074)) — connecting / syncing /
-  almost ready.
+- Auto-spectate gate around [line 571](web/static/play.js#L571): extend
+  the existing `roomData.player_count >= max_players` check to also
+  set `isSpectator = true` when `roomData.status === "playing"` AND
+  the room game is Smash. This is the single load-bearing line for the
+  whole "spectator-first" behavior.
+- Decouple emulator boot from join: today `bootEmulator()` runs from
+  `dismissLateJoinPrompt` ([line 3079](web/static/play.js#L3079)) for
+  mid-game joiners. Move the boot trigger to a new
+  `onPromotedToPlayer()` callback fired by `netplay-lockstep.js` when
+  the host's promotion path lands. Spectator-mode joiners never hit
+  `bootEmulator` until promotion.
+- ROM prompt timing: keep today's prompt for spectator-mode joiners so
+  the ROM is ready before promotion. Existing `notifyRomReady()`
+  emission and `rom-sharing-prompt` UI are unchanged.
+- Promotion-stage status copy fed into `setStatus`
+  ([netplay-lockstep.js:2074](web/static/netplay-lockstep.js#L2074)) —
+  connecting / syncing / almost ready.
 - Active-player banner driven by `_runSubstate === RUN_LATE_JOIN_PAUSE`
-  observation. Wall-clock counter from `_lateJoinPausedAt`
-  ([line 1337](web/static/netplay-lockstep.js#L1337)).
+  observation; wall-clock counter from `_lateJoinPausedAt`
+  ([netplay-lockstep.js:1337](web/static/netplay-lockstep.js#L1337)).
+- Watching-spectator banner shown when `isSpectator && roomData.status
+  === "playing"`. Sub-status "connecting to stream…" until host video
+  arrives.
+
+### `web/static/netplay-lockstep.js`
+
+- Host: extend `_broadcastPhaseIfNeeded`
+  ([line 5026](web/static/netplay-lockstep.js#L5026)) to maintain
+  `_lastInControllableMenu` and detect the `false → true` rising edge.
+  On that edge, drain `_pendingPromotions` for ROM-ready entries.
+- Host: new event handler for `rom-ready` arrivals on a queued
+  spectator: re-evaluate the gate; if `inControllableMenu` is already
+  true, fire promotion immediately.
+- Host: `_pendingPromotions: { sid, romReady, queuedAt }[]` —
+  populated when the host first sees a new spectator (`onUsersUpdated`)
+  in a `room.status === "playing"` room.
+- Host: new helper `promoteSpectator(sid)` that emits
+  `host-promote-spectator` to the server, awaits the ack, and on success
+  calls existing `sendLateJoinState(sid)` (which now includes the
+  `targetSid` field).
+- Host: `sendLateJoinState`
+  ([line 4639](web/static/netplay-lockstep.js#L4639)) adds
+  `targetSid: remoteSid` to the emit payload. No other change.
+- Joiner: `handleLateJoinState`
+  ([line 4653](web/static/netplay-lockstep.js#L4653)) adds
+  `if (msg.targetSid && msg.targetSid !== socket.id) return;` at the
+  top, before any state mutation.
+- Joiner: on receipt of `late-join-state`, fire `onPromotedToPlayer()`
+  back into `play.js` to drive `bootEmulator`.
+- `onUsersUpdated` ([line 2137](web/static/netplay-lockstep.js#L2137)):
+  detect SID demotion (was in `players` last tick, now in `spectators`).
+  For each demoted SID:
+  - `resetPeerState(oldSlot, 'demoted-to-spectator')` — invariant I2.
+  - Set existing `_peers[sid].slot = null`.
+  - If we're host, call `startSpectatorStreamForPeer(sid)`.
+  - If the demoted SID is self, set `_playerSlot = null` and
+    `_isSpectator = true`.
+- Failure path: the existing `LATE_JOIN_TIMEOUT_MS` host-side timeout
+  ([line 4633](web/static/netplay-lockstep.js#L4633)) currently
+  hard-disconnects the peer. Change it (for the new spectator-first
+  flow) to: emit `become-spectator` for the joiner, leave the peer's
+  WebRTC connection up so they keep getting video, and re-queue them
+  in `_pendingPromotions` for retry at the next safe-phase edge.
 
 ### `server/src/api/signaling.py`
 
 - New `become-spectator` event (~30 lines). Inverse of
   `_claim_slot_locked` at [line 634](server/src/api/signaling.py#L634).
+  Used only on failure recovery paths.
 - New `host-promote-spectator` event (~40 lines). Mirror of `claim-slot`
   with host identity check and no `room.status` block.
 - Both events broadcast `users-updated` and persist via `state.save_room`.
@@ -405,15 +552,28 @@ Files that change:
 - Persistent watching status element (likely repurposed `#guest-status`).
 - Disabled-controls visual treatment for the spectator path.
 
-The persistent watching banner appears immediately on `late-join-spectate`
-receipt — before the host's video track has arrived — so the joiner sees
-"Watching current match" with a brief "connecting to stream…" sub-status
-that clears when the `<video>` element starts rendering frames.
+### `web/static/payloads.py` / Pydantic models
 
-No protocol breaking change for older peers via WebRTC DC: the new message
-types (`late-join-spectate`, `late-join-promote`) are ignored by old
-handlers, falling back to the timeout. Server changes are additive and
-older clients never emit the new events.
+- `HostPromoteSpectatorPayload { target_sid: str }`
+- `BecomeSpectatorPayload {}` (empty body; sender identifies via sid)
+
+### Out-of-spec for v1
+
+- ROM-not-ready state shown to the joiner during long matches: a
+  "Get your ROM ready while you watch" prompt is the existing UI; no new
+  affordance. If a joiner never resolves their ROM, they stay queued
+  forever — matches today's behavior of "no ROM, no play."
+- Promoting more than one spectator at a single edge: serial drain.
+  Each promotion takes 1–2s of pause; multiple promotions chain. If
+  this is too slow in practice, batched promotion is a v2 follow-up.
+
+No protocol breaking change for older peers: the new events
+(`host-promote-spectator`, `become-spectator`) are not emitted by old
+clients, and the new `targetSid` field on `late-join-state` is ignored
+by old client handlers (forward compat). An old client joining a new
+host's room enters as a player via the existing path because
+`roomData.status === "playing"` only triggers the new auto-spectate gate
+when the joiner is on the new code.
 
 ## Out of scope
 
@@ -425,38 +585,50 @@ older clients never emit the new events.
   short-circuit the regime check entirely.
 - Host migration during a queued promotion. Out of scope; the existing
   `room-closed` path handles host departure.
-- Roster commit frame synchronization. Not needed: regime A is identical to
-  today's flow, and regime B promotes only when `phase.gameplay` is already
-  false (no active match → no roster desync risk).
+- Roster commit frame synchronization. Not needed: promotion only fires
+  while `inControllableMenu === true`, where lockstep is already
+  pausing/aligning at the menu (no active gameplay frames to disagree
+  on).
 - Per-game phase reads beyond Smash Remix. Other games default to today's
   pause-and-load behavior for new joiners.
 
 ## Decisions on previously-open questions
 
-1. **Race: joiner connects exactly at CSS→match transition.** Host's
-   regime decision is authoritative — once the host responds with
-   `late-join-state` (Regime A), the joiner stays on the player path even
-   if the match starts during state transfer. This is the same race
-   today's code tolerates and there's no observed bug. No re-check at
-   joiner-side state-apply time.
+1. **Race: joiner connects exactly at CSS→match transition.** With the
+   spectator-first design this race no longer exists. Joiner is a
+   spectator until the host explicitly fires `host-promote-spectator`
+   on a confirmed `inControllableMenu === true`. If the menu phase
+   ends before promotion completes, the in-flight promotion still
+   finishes (state-applied joiner becomes a player); the next promotion
+   waits for the next safe-phase edge.
 
 2. **Spectator stream startup latency.** Host's `_hostStream` is created
    lazily the first time a spectator connects. First-spectator may see a
    brief blank/black before the canvas track arrives. Mitigation: the
-   "Watching current match" banner appears immediately on
-   `late-join-spectate` receipt with a "connecting to stream…" sub-status
-   that clears when the `<video>` element renders its first frame.
+   "Watching current match" banner appears immediately on `users-updated`
+   with a "connecting to stream…" sub-status that clears when the
+   `<video>` element renders its first frame.
 
-3. **Cache the regime decision per-joiner?** Yes — host's decision at the
-   moment of `handleLateJoinRequest` is final. The joiner trusts the
-   message they receive. No re-evaluation.
+3. **Promotion ordering vs `users-updated`.** The joiner waits for the
+   targeted `late-join-state` (with their `targetSid`) to start booting
+   the emulator. They do not act on `users-updated` showing them as a
+   player alone — that arrives slightly before the state and would
+   otherwise race the boot.
+
+4. **What if the joiner's ROM never resolves?** They stay queued forever.
+   Same as today's "you joined but can't play because no ROM" failure
+   mode. The host's queue holds the entry; the joiner sees the watching
+   banner with the existing ROM prompt visible. Host has no special UI
+   for this — the queue is invisible to other players.
 
 ## References
 
 - `_readMenuLockstepPhase` — [netplay-lockstep.js:1425](web/static/netplay-lockstep.js#L1425)
 - `_readGameStatus` — [netplay-lockstep.js:1401](web/static/netplay-lockstep.js#L1401)
-- `handleLateJoinRequest` — [netplay-lockstep.js:2126](web/static/netplay-lockstep.js#L2126)
-- `onDataMessage` (where new handlers go) — [netplay-lockstep.js:2099](web/static/netplay-lockstep.js#L2099)
+- `_isControllableMenuScene` — [netplay-lockstep.js:1416](web/static/netplay-lockstep.js#L1416)
+- `handleLateJoinRequest` (today's path, used by reconnects) — [netplay-lockstep.js:2126](web/static/netplay-lockstep.js#L2126)
+- `onUsersUpdated` (demotion cleanup goes here) — [netplay-lockstep.js:2137](web/static/netplay-lockstep.js#L2137)
+- `onDataMessage` (where targetSid filter goes) — [netplay-lockstep.js:2099](web/static/netplay-lockstep.js#L2099)
 - `setStatus` — [netplay-lockstep.js:2074](web/static/netplay-lockstep.js#L2074)
 - Per-tick phase read site (`_broadcastPhaseIfNeeded`) — [netplay-lockstep.js:5028](web/static/netplay-lockstep.js#L5028); other call sites at 1440 (inside `_readStrictPhaseLock`) and 1497 are nested helpers, not tick-loop entry points
 - `LATE_JOIN_TIMEOUT_MS` — [netplay-lockstep.js:425](web/static/netplay-lockstep.js#L425)
@@ -465,7 +637,12 @@ older clients never emit the new events.
 - `startSpectatorStreamForPeer` — [netplay-lockstep.js:4908](web/static/netplay-lockstep.js#L4908) (called from line 2724)
 - `request-late-join` emit site (joiner side, in `bootEmulator` →  late-join branch) — [netplay-lockstep.js:3931](web/static/netplay-lockstep.js#L3931)
 - `dismissLateJoinPrompt` — [play.js:3079](web/static/play.js#L3079)
-- Spectator → player transition (slot reassignment in `onUsersUpdated`) — [netplay-lockstep.js:2146](web/static/netplay-lockstep.js#L2146)
+- Auto-spectate gate (extend here for new flow) — [play.js:571](web/static/play.js#L571)
+- `roomData.status` access in join-room ack handler — [play.js:648](web/static/play.js#L648)
+- `data-message` server relay (broadcast, no per-SID targeting) — [signaling.py:1020](server/src/api/signaling.py#L1020)
+- `sendLateJoinState` emit site (add `targetSid` here) — [netplay-lockstep.js:4639](web/static/netplay-lockstep.js#L4639)
+- `handleLateJoinState` receiver (add `targetSid` filter here) — [netplay-lockstep.js:4653](web/static/netplay-lockstep.js#L4653)
 - Server `_claim_slot_locked` (template for new events) — [signaling.py:634](server/src/api/signaling.py#L634)
+- Server `claim-slot` blocked while playing — [signaling.py:644](server/src/api/signaling.py#L644)
 - Server reconnect short-circuit (`_swap_sid` in `join-room`) — [signaling.py:475](server/src/api/signaling.py#L475)
 - Netplay invariants (I1, I2) — [docs/netplay-invariants.md](docs/netplay-invariants.md)
