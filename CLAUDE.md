@@ -57,7 +57,9 @@ kaillera-next/
 │           ├── app.py       # FastAPI app (REST + security middleware)
 │           ├── og.py        # OG card image generation (Playwright HTML screenshots)
 │           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
-│           └── payloads.py  # Pydantic v2 payload models for Socket.IO validation
+│           ├── payloads.py  # Pydantic v2 payload models for Socket.IO validation
+│           ├── desync_vision.py  # Claude/GPT-4o vision endpoint for screenshot diff
+│           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
 │   ├── index.html           # lobby: create/join rooms
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
@@ -73,6 +75,10 @@ kaillera-next/
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-state.js          # cross-module shared state (KNState)
+│       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
+│       ├── kn-desync-detector.js # field-granular cross-peer desync detection
+│       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
+│       ├── kn-vision-client.js  # Claude/GPT-4o vision API client for screenshot diff
 │       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM

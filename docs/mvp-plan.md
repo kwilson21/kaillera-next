@@ -1,3 +1,5 @@
+> **Historical — see `docs/roadmap.md` for current state.** This document is preserved for reference; it captures the original MVP plan and is no longer kept in sync with the live roadmap.
+
 # kaillera-next MVP Implementation Plan
 
 **Goal:** Friend clicks a link, lands in lobby, game starts, they are playing.
