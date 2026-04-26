@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.47.1",
+    "date": "2026-04-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "capture deterministic samples before output"
+      },
+      {
+        "type": "fix",
+        "message": "avoid strict lockstep during battle loading"
+      }
+    ]
+  },
+  {
     "version": "0.47.0",
     "date": "2026-04-26",
     "changes": [
