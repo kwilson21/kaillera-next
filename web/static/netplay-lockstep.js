@@ -2049,6 +2049,8 @@
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null; // stored for removal in stopSync()
   let _networkChangeHandler = null; // stored for removal in stopSync()
+  let _focusHandler = null; // stored for removal in stopSync()
+  let _blurHandler = null; // stored for removal in stopSync()
   let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
 
   // Spectator streaming state
@@ -6011,10 +6013,10 @@
     // Focus/blur tracking: document.hasFocus() gates gamepad reads, so
     // losing focus silently zeroes input. Log transitions so session logs
     // show exactly when input capture stopped/resumed.
-    const _focusHandler = () => {
+    _focusHandler = () => {
       if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
     };
-    const _blurHandler = () => {
+    _blurHandler = () => {
       if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
     };
     window.addEventListener('focus', _focusHandler);
@@ -6142,6 +6144,14 @@
       if (conn) conn.removeEventListener('change', _networkChangeHandler);
       window.removeEventListener('online', _networkChangeHandler);
       _networkChangeHandler = null;
+    }
+    if (_focusHandler) {
+      window.removeEventListener('focus', _focusHandler);
+      _focusHandler = null;
+    }
+    if (_blurHandler) {
+      window.removeEventListener('blur', _blurHandler);
+      _blurHandler = null;
     }
     if (_tickInterval !== null) {
       clearInterval(_tickInterval);

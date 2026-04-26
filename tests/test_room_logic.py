@@ -3,9 +3,32 @@
 Run: cd server && uv run pytest ../tests/test_room_logic.py -v
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from src.api.signaling import Room, _get_room, _players_payload, _swap_sid, rooms, _sid_to_room
+from src.api import signaling
+from src.api.signaling import (
+    Room,
+    _get_room,
+    _leave,
+    _players_payload,
+    _sid_to_room,
+    _swap_sid,
+    rooms,
+)
+
+
+def _run_async(coro):
+    """Run a coroutine in a worker thread.
+
+    pytest-playwright's autouse fixture (conftest.py) holds the main thread's
+    event loop, so asyncio.run() collides. Off-thread asyncio.run is loop-clean.
+    """
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
 
 
 @pytest.fixture(autouse=True)
@@ -166,3 +189,83 @@ class TestSwapSid:
         _swap_sid(room, "pid-2", "nonexistent", "new-sid")
         assert room.owner == "other-sid"
         assert room.players["pid-1"]["socketId"] == "other-sid"
+
+
+# ── _leave ────────────────────────────────────────────────────────────────────
+
+
+class TestLeave:
+    """_leave() handles spectator vs player removal, ownership transfer, and
+    empty-room cleanup. Regression coverage for the rm_slot UnboundLocalError
+    that previously fired on every spectator disconnect.
+    """
+
+    def _run(self, coro):
+        """Patch sio + db + state so _leave() can run without real I/O."""
+        with (
+            patch.object(signaling.sio, "leave_room", new=AsyncMock()),
+            patch.object(signaling.sio, "emit", new=AsyncMock()),
+            patch.object(signaling.db, "insert_client_event", new=AsyncMock()),
+            patch.object(signaling.db, "set_session_ended", new=AsyncMock()),
+            patch.object(signaling.state, "save_room", new=AsyncMock()),
+            patch.object(signaling.state, "delete_room", new=AsyncMock()),
+        ):
+            return _run_async(coro)
+
+    def test_spectator_leave_does_not_raise(self):
+        """Regression: rm_slot was undefined on the spectator branch."""
+        room = _make_room()
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.spectators["pid-spec"] = {"socketId": "sid-spec", "playerName": "Spec"}
+        rooms["ROOM1"] = room
+        _sid_to_room["sid-spec"] = ("ROOM1", "pid-spec", True)
+
+        self._run(_leave("sid-spec", "disconnect"))
+
+        assert "pid-spec" not in room.spectators
+        assert "ROOM1" in rooms  # host still present, room stays
+
+    def test_player_leave_clears_slot(self):
+        room = _make_room()
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[1] = "pid-2"
+        rooms["ROOM2"] = room
+        _sid_to_room["sid-2"] = ("ROOM2", "pid-2", False)
+
+        self._run(_leave("sid-2", "disconnect"))
+
+        assert "pid-2" not in room.players
+        assert 1 not in room.slots
+        assert room.slots[0] == "pid-host"
+
+    def test_empty_room_is_deleted(self):
+        room = _make_room(owner="sid-only")
+        room.players["pid-only"] = {"socketId": "sid-only", "playerName": "Solo"}
+        room.slots[0] = "pid-only"
+        rooms["ROOM3"] = room
+        _sid_to_room["sid-only"] = ("ROOM3", "pid-only", False)
+
+        self._run(_leave("sid-only", "disconnect"))
+
+        assert "ROOM3" not in rooms
+
+    def test_owner_leave_transfers_ownership(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[1] = "pid-2"
+        rooms["ROOM4"] = room
+        _sid_to_room["sid-host"] = ("ROOM4", "pid-host", False)
+
+        self._run(_leave("sid-host", "disconnect"))
+
+        assert room.owner == "sid-2"
+        assert room.slots.get(0) == "pid-2"  # promoted to P1 in lobby
+        assert "ROOM4" in rooms
+
+    def test_unknown_sid_is_noop(self):
+        self._run(_leave("sid-ghost", "disconnect"))  # must not raise

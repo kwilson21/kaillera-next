@@ -319,10 +319,10 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     if room is None:
         return
 
+    rm_slot = None  # referenced unconditionally below; spectator path leaves it None
     if is_spectator:
         room.spectators.pop(player_id, None)
     else:
-        rm_slot = None
         for s, pid in room.slots.items():
             if pid == player_id:
                 rm_slot = s
