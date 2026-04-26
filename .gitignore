@@ -62,3 +62,13 @@ tests/hash-golden/build/
 # Root-level ./static symlink that points at web/static — scoped with
 # a leading slash so it doesn't also block new files under web/static/.
 /static
+
+# Local sandboxes & generated artifacts (added 2026-04-26 for prod cut)
+server/kaillera.db
+build/build/
+build/recomp/
+build/recomp-tool/
+build/test/
+tools/dl-recorder/
+web/smash64r-test/
+web/webgpu-pivot-test/
