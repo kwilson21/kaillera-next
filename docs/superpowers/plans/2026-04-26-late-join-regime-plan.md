@@ -236,7 +236,7 @@ callbacks for E2E verification.
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
-### Task 1.3: Expose `romReady` for spectators in `_players_payload`
+### Task 1.3: Expose `romReady` AND `autoSpectated` for spectators in `_players_payload`
 
 **Files:**
 - Modify: `server/src/api/signaling.py` (`_players_payload` near line 220)
@@ -247,10 +247,10 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 Add to `tests/test_late_join_regime.py`:
 
 ```python
-def test_users_updated_includes_spectator_rom_ready(browser, server_url):
-    """The host's promotion gate reads romReady for queued spectators
-    via users-updated. Today the spectator dict in _players_payload
-    omits romReady; this test pins the new behavior."""
+def test_users_updated_includes_spectator_rom_ready_and_intent(browser, server_url):
+    """The host's promotion gate reads romReady AND autoSpectated for
+    queued spectators via users-updated. Today the spectator dict in
+    _players_payload omits both; this test pins the new behavior."""
     room = _new_room()
     host = browser.new_page()
     host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&game=smash-remix")
@@ -259,7 +259,6 @@ def test_users_updated_includes_spectator_rom_ready(browser, server_url):
     spec = browser.new_page()
     spec.goto(f"{server_url}/play.html?room={room}&name=Spec&spectate=1")
     _wait_for_room_state(spec, attribute="__kn_lastJoinAck")
-    # Wait for the host's roster to update
     host.wait_for_function(
         "window.__lastUsersUpdated && Object.keys(window.__lastUsersUpdated.spectators || {}).length >= 1",
         timeout=10000,
@@ -271,6 +270,9 @@ def test_users_updated_includes_spectator_rom_ready(browser, server_url):
     one_spec = next(iter(specs.values()))
     assert "romReady" in one_spec, f"spectator missing romReady: {one_spec}"
     assert one_spec["romReady"] is False  # no ROM declared yet
+    assert "autoSpectated" in one_spec, f"spectator missing autoSpectated: {one_spec}"
+    # ?spectate=1 URL is an explicit spectator → autoSpectated is False
+    assert one_spec["autoSpectated"] is False, "explicit spectator should have autoSpectated=False"
 
     host.close()
     spec.close()
@@ -279,14 +281,14 @@ def test_users_updated_includes_spectator_rom_ready(browser, server_url):
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-uv run pytest tests/test_late_join_regime.py::test_users_updated_includes_spectator_rom_ready -v
+uv run pytest tests/test_late_join_regime.py::test_users_updated_includes_spectator_rom_ready_and_intent -v
 ```
 
-Expected: FAIL — `romReady` not in spectator dict.
+Expected: FAIL — `romReady` and `autoSpectated` not in spectator dict.
 
 - [ ] **Step 3: Extend `_players_payload`**
 
-In `server/src/api/signaling.py` find `_players_payload` (around line 218). Add `romReady` to the spectator comprehension to mirror the players' shape:
+In `server/src/api/signaling.py` find `_players_payload` (around line 218). Add `romReady` AND `autoSpectated` to the spectator comprehension:
 
 ```python
 "spectators": {
@@ -294,6 +296,7 @@ In `server/src/api/signaling.py` find `_players_payload` (around line 218). Add 
         "socketId": info["socketId"],
         "playerName": info.get("playerName", "Player"),
         "romReady": info["socketId"] in room.rom_ready,
+        "autoSpectated": bool(info.get("autoSpectated", False)),
     }
     for pid, info in room.spectators.items()
 },
@@ -302,7 +305,7 @@ In `server/src/api/signaling.py` find `_players_payload` (around line 218). Add 
 - [ ] **Step 4: Run the test to verify it passes**
 
 ```bash
-uv run pytest tests/test_late_join_regime.py::test_users_updated_includes_spectator_rom_ready -v
+uv run pytest tests/test_late_join_regime.py::test_users_updated_includes_spectator_rom_ready_and_intent -v
 ```
 
 Expected: PASS.
@@ -311,11 +314,118 @@ Expected: PASS.
 
 ```bash
 git add server/src/api/signaling.py tests/test_late_join_regime.py
-git commit -m "feat(server): expose romReady for spectators in users-updated
+git commit -m "feat(server): expose romReady and autoSpectated for spectators
 
-The late-join promotion gate needs to know which queued spectators
-have a ROM ready before firing host-promote-spectator. _players_payload
-previously included romReady only on the players dict.
+The late-join promotion gate needs both fields:
+- romReady: only ROM-ready spectators are eligible for promotion
+- autoSpectated: only joiners who were auto-routed (vs explicit
+  spectators who clicked 'watch') should be promoted
+
+_players_payload previously included romReady only on players and
+omitted autoSpectated entirely. Default to False on read in case
+older spectator dicts lack the field.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+### Task 1.4: Add `autoSpectated` field to `JoinRoomExtra` payload + store on spectator dict
+
+**Files:**
+- Modify: `server/src/api/payloads.py` (`JoinRoomExtra`)
+- Modify: `server/src/api/signaling.py` (the spectator-creation site in `join-room` handler at line ~583)
+- Test: `tests/test_late_join_regime.py`
+
+- [ ] **Step 1: Write the failing test (Pydantic-level only)**
+
+The end-to-end happy path (auto-spectate gate fires → server stores
+`autoSpectated: true` on the spectator dict → host's
+`users-updated` shows it) requires the client-side gate change from
+Task 4.1 to be live, so the integration assertion is moved to that
+task. Here we only verify the Pydantic model accepts the new field:
+
+```python
+def test_join_room_extra_accepts_auto_spectated():
+    """JoinRoomExtra accepts the new autoSpectated field with default False."""
+    from src.api.payloads import JoinRoomExtra
+    extra_default = JoinRoomExtra(
+        sessionid="ROOM01",
+        userid="abc",
+        player_name="Tester",
+    )
+    assert extra_default.autoSpectated is False
+    extra_set = JoinRoomExtra(
+        sessionid="ROOM01",
+        userid="abc",
+        player_name="Tester",
+        autoSpectated=True,
+    )
+    assert extra_set.autoSpectated is True
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+uv run pytest tests/test_late_join_regime.py::test_join_room_extra_accepts_auto_spectated -v
+```
+
+Expected: FAIL — `JoinRoomExtra` does not accept `autoSpectated` yet.
+
+The end-to-end propagation assertion (server stores the field on the
+spectator dict → `users-updated` reflects it) lands in the Task 4.1
+test once the auto-spectate gate is wired up in `play.js`.
+
+- [ ] **Step 3: Add `autoSpectated` to `JoinRoomExtra`**
+
+In `server/src/api/payloads.py` find `JoinRoomExtra` (line 64). Add the field:
+
+```python
+class JoinRoomExtra(BaseModel):
+    sessionid: str = Field(..., min_length=1, max_length=64)
+    userid: str = Field(..., min_length=1, max_length=64)
+    player_name: str = Field(default="", max_length=24)
+    spectate: bool = False
+    persistentId: str | None = Field(default=None, max_length=64)
+    reconnectToken: str | None = Field(default=None, max_length=128)
+    autoSpectated: bool = False  # NEW: indicates the client was auto-routed
+```
+
+(Match exact existing field order; only the new line is added.)
+
+- [ ] **Step 4: Store `autoSpectated` on the spectator info dict**
+
+In `server/src/api/signaling.py` find the spectator-creation site in `join-room` (around line 583, the `if spectate:` branch):
+
+```python
+if spectate:
+    if len(room.spectators) >= MAX_SPECTATORS:
+        return ("Room spectator limit reached", None)
+    room.spectators[persistent_id] = {
+        "socketId": sid,
+        "playerName": player_name,
+        "autoSpectated": payload.extra.autoSpectated,  # NEW
+    }
+    _sid_to_room[sid] = (session_id, persistent_id, True)
+```
+
+- [ ] **Step 5: Run the Pydantic test to verify it passes**
+
+```bash
+uv run pytest tests/test_late_join_regime.py::test_join_room_extra_accepts_auto_spectated -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add server/src/api/payloads.py server/src/api/signaling.py tests/test_late_join_regime.py
+git commit -m "feat(server): accept autoSpectated in JoinRoomExtra
+
+Client passes autoSpectated=true when its auto-spectate gate fires
+(Smash Remix mid-match), false for explicit spectators
+(?spectate=1, watch links). Stored on spectator info dict so the
+host can read it via users-updated and only enqueue auto-routed
+joiners for promotion.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1080,6 +1190,15 @@ def test_auto_spectate_when_status_playing_smash_remix(browser, server_url):
     auto = guest.evaluate("window._autoSpectated || false")
     assert auto is True, "guest should have auto-spectated for Smash Remix mid-match join"
 
+    # End-to-end propagation: the server stored autoSpectated on the
+    # spectator dict and surfaces it via users-updated to the host.
+    # (Integration assertion that pairs with Task 1.4's Pydantic-level test.)
+    guest_sid = guest.evaluate("window.__test_socket.id")
+    host.wait_for_function(
+        f"window.__lastUsersUpdated && Object.values(window.__lastUsersUpdated.spectators || {{}}).some(s => s.socketId === '{guest_sid}' && s.autoSpectated === true)",
+        timeout=5000,
+    )
+
     host.close()
     guest.close()
 ```
@@ -1092,7 +1211,7 @@ uv run pytest tests/test_late_join_regime.py::test_auto_spectate_when_status_pla
 
 Expected: FAIL — guest joins as a player, `_autoSpectated` is `false`.
 
-- [ ] **Step 3: Extend the gate in `play.js`**
+- [ ] **Step 3: Extend the gate in `play.js` AND pass `autoSpectated` through join-room**
 
 In `web/static/play.js` find the auto-spectate block at line 571:
 
@@ -1119,6 +1238,26 @@ if (!isSpectator && roomData.status === 'playing' && roomData.gameId === 'smash-
 }
 ```
 
+Then in BOTH `socket.emit('join-room', ...)` callsites (lines 580 and 597), add `autoSpectated: _autoSpectated` to the `extra` object:
+
+```javascript
+socket.emit(
+  'join-room',
+  {
+    extra: {
+      sessionid: roomCode,
+      userid: socket.id,
+      player_name: playerName,
+      spectate: isSpectator,
+      persistentId: _persistentId,
+      reconnectToken: _reconnectToken,
+      autoSpectated: _autoSpectated,   // NEW
+    },
+  },
+  (err, joinData) => { /* existing */ },
+);
+```
+
 Also expose `_autoSpectated` on `window` near `window._isSpectator` (search for that line):
 
 ```javascript
@@ -1143,6 +1282,165 @@ Mid-match joiners on Smash Remix rooms are routed to spectator mode
 automatically. The host promotes them at the next controllable menu
 (CSS / stage select) via host-promote-spectator. Other games keep
 today's player-first behavior.
+
+Both join-room callsites pass autoSpectated: _autoSpectated so the
+server can store the intent on the spectator dict and the host can
+filter explicit spectators (autoSpectated=false) out of the
+promotion queue.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+### Task 4.1.5: Reconcile-on-ack to detect reconnects
+
+**Files:**
+- Modify: `web/static/play.js` (both join-room callbacks at line 591 and 609)
+- Test: `tests/test_late_join_regime.py`
+
+Today's reconnect flow (server `_swap_sid` at signaling.py:475) ignores the `spectate` flag if the `persistent_id` is in `room.players`. Result: client emitted `spectate: true` but ack body shows self in `players`. Without reconcile, the client thinks it's a spectator while the server says player — and the Chunk 5.4 self-promotion handler would later fire spuriously.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+def test_reconnect_during_smash_mid_match_reconciles(browser, server_url):
+    """A player who reconnects during Smash Remix status=playing has
+    their auto-spectate spectate flag overridden by the server's
+    reconnect short-circuit. The client must reconcile: see self in
+    ack.players despite spectate=true, set isSpectator=false, fall
+    through to the legacy late-join path."""
+    room = _new_room()
+    host = browser.new_page()
+    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&game=smash-remix")
+    _wait_for_room_state(host, attribute="__lastUsersUpdated")
+
+    # Guest joins as a player normally first.
+    guest = browser.new_page()
+    guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+    _wait_for_room_state(guest, attribute="__kn_lastJoinAck")
+    guest_pid = guest.evaluate("window._persistentId || window.__test_socket.id")
+
+    # Start the game so room.status flips to 'playing'.
+    host.evaluate("window.__test_socket.emit('rom-ready', { ready: true });")
+    guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true });")
+    host.evaluate("window.__test_socket.emit('start-game', { mode: 'lockstep' });")
+    host.wait_for_function(
+        "window.__lastUsersUpdated && window.__lastUsersUpdated.status === 'playing'",
+        timeout=5000,
+    )
+
+    # Capture the guest's reconnect token before closing — the server
+    # requires it on the reconnect path.
+    guest_token = guest.evaluate("window._reconnectToken")
+    assert guest_token, "guest never received a reconnect token"
+
+    # Simulate a reconnect: close the guest page and re-open with the
+    # same persistentId via sessionStorage. The auto-spectate gate
+    # will fire because status=='playing' but the server's reconnect
+    # path will restore the player slot.
+    guest.close()
+    guest2 = browser.new_page()
+    # play.js reads the persistentId from sessionStorage[kn-player-id]
+    # and the reconnect token from sessionStorage[kn-reconnect-token].
+    guest2.add_init_script(
+        f"sessionStorage.setItem('kn-player-id', {guest_pid!r});"
+        f"sessionStorage.setItem('kn-reconnect-token', {guest_token!r});"
+    )
+    guest2.goto(f"{server_url}/play.html?room={room}&name=Guest")
+    _wait_for_room_state(guest2, attribute="__kn_lastJoinAck")
+    # Reconcile should set _isSpectator=false and _autoSpectated=false.
+    is_spec = guest2.evaluate("window._isSpectator")
+    auto = guest2.evaluate("window._autoSpectated || false")
+    initial_role = guest2.evaluate("window.__kn_initialRosterSelfRole || null")
+    assert is_spec is False, "reconnected player should NOT be a spectator"
+    assert auto is False, "reconnected player should have _autoSpectated cleared"
+    assert initial_role == "player", f"expected initialRosterSelfRole=='player', got {initial_role}"
+
+    host.close()
+    guest2.close()
+```
+
+(Implementation note: the test reads `window._reconnectToken` and
+`window._persistentId` for the source values. Verify these are
+already exposed in `play.js`; if not, add a one-line getter on
+`window.__kn_persistentId` / `__kn_reconnectToken` exposing the
+existing module-local values. Also expose `_initialRosterSelfRole`
+as `window.__kn_initialRosterSelfRole` for the test assertion.
+sessionStorage keys (`kn-player-id`, `kn-reconnect-token`) match
+the existing read sites — verify by `grep` before writing.)
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+uv run pytest tests/test_late_join_regime.py::test_reconnect_during_smash_mid_match_reconciles -v
+```
+
+Expected: FAIL — guest2 stays spectator after reconnect ack.
+
+- [ ] **Step 3: Add the reconcile logic in both join-room callbacks**
+
+In `web/static/play.js` inside both join-room callbacks (line 591 + line 609), after `window.__kn_lastJoinAck = joinData;`, add:
+
+```javascript
+(err, joinData) => {
+  window.__kn_lastJoinAck = joinData;
+  // Reconcile: if we asked to spectate but the server restored us
+  // as a player (reconnect short-circuit at signaling.py:475), trust
+  // the server's authoritative roster and run the legacy player path.
+  if (joinData && isSpectator) {
+    const selfInPlayers = Object.values(joinData.players || {}).some(
+      (p) => p.socketId === socket.id,
+    );
+    if (selfInPlayers) {
+      console.log('[play] reconcile: server restored player slot (reconnect); clearing spectate flags');
+      isSpectator = false;
+      _autoSpectated = false;
+      window._isSpectator = false;
+      window._autoSpectated = false;
+      _initialRosterSelfRole = 'player';
+    } else {
+      _initialRosterSelfRole = 'spectator';
+    }
+  } else if (joinData) {
+    _initialRosterSelfRole = isSpectator ? 'spectator' : 'player';
+  }
+  // ... existing callback body continues
+}
+```
+
+Declare the new local at the same scope as `_autoSpectated`:
+
+```javascript
+let _initialRosterSelfRole = null; // 'player' | 'spectator' — captured from the first authoritative ack
+```
+
+This is consumed by Chunk 5.4 (self-promotion handler must skip when `_initialRosterSelfRole === 'player'`).
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+```bash
+uv run pytest tests/test_late_join_regime.py::test_reconnect_during_smash_mid_match_reconciles -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/static/play.js tests/test_late_join_regime.py
+git commit -m "feat(client): reconcile join-room ack to detect reconnects
+
+The client's auto-spectate gate sets spectate=true at the lobby
+stage. The server's reconnect short-circuit (signaling.py:475)
+restores the player slot regardless of the spectate flag — so the
+ack body shows self in players despite the client having asked to
+spectate.
+
+Reconcile in both join-room callbacks: if isSpectator was true but
+the server placed self in ack.players, clear the spectator flags
+and remember _initialRosterSelfRole='player'. The Chunk 5.4
+self-promotion handler reads this to skip reconnects (which run
+the legacy request-late-join path) vs genuine spectator-first
+promotions.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -1367,6 +1665,42 @@ def test_host_queues_new_spectator_in_pending_promotions(browser, server_url):
 
     host.close()
     guest.close()
+
+
+def test_host_does_not_queue_explicit_spectator(browser, server_url):
+    """An explicit spectator (autoSpectated=false) must NOT be
+    enqueued for promotion. They wanted to watch."""
+    room = _new_room()
+    host = browser.new_page()
+    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&game=smash-remix")
+    _wait_for_room_state(host, attribute="__lastUsersUpdated")
+    host.evaluate("window.__test_socket.emit('rom-ready', { ready: true });")
+    host.evaluate("window.__test_socket.emit('start-game', { mode: 'lockstep' });")
+    host.wait_for_function(
+        "window.__lastUsersUpdated && window.__lastUsersUpdated.status === 'playing'",
+        timeout=5000,
+    )
+
+    spec = browser.new_page()
+    spec.goto(f"{server_url}/play.html?room={room}&name=Spec&spectate=1")
+    spec.wait_for_function(
+        "window.__test_socket && window.__test_socket.connected",
+        timeout=10000,
+    )
+    spec_sid = spec.evaluate("window.__test_socket.id")
+    host.wait_for_function(
+        f"window.__lastUsersUpdated && Object.values(window.__lastUsersUpdated.spectators || {{}}).some(s => s.socketId === '{spec_sid}')",
+        timeout=5000,
+    )
+    # Give the host a tick to process the users-updated.
+    host.wait_for_timeout(500)
+
+    queue = host.evaluate("window.__kn_pendingPromotions")
+    assert not any(entry["sid"] == spec_sid for entry in queue), \
+        f"explicit spectator {spec_sid} should NOT be in queue: {queue}"
+
+    host.close()
+    spec.close()
 ```
 
 - [ ] **Step 2: Expose `_pendingPromotions` for tests**
@@ -1390,25 +1724,28 @@ Expected: FAIL — queue is empty; no enqueue logic yet.
 
 - [ ] **Step 4: Add the enqueue branch in `onUsersUpdated`**
 
-In `onUsersUpdated` (line 2137), find the spectator iteration block (search for `Object.values(spectators)`). Inside it, on the host side (`_playerSlot === 0`), enqueue any new spectator that's not already in the queue, when `room.status === 'playing'`:
+In `onUsersUpdated` (line 2137), find the spectator iteration block (search for `Object.values(spectators)`). Inside it, on the host side (`_playerSlot === 0`), enqueue any new spectator that's not already in the queue, when `room.status === 'playing'` AND the spectator was auto-routed (not an explicit spectator):
 
 ```javascript
 // Inside onUsersUpdated, after the existing spectator handling:
 if (_playerSlot === 0 && data.status === 'playing') {
   for (const s of Object.values(data.spectators || {})) {
     if (s.socketId === socket.id) continue;
+    if (!s.autoSpectated) continue; // explicit spectators stay watching
     if (_pendingPromotions.some((p) => p.sid === s.socketId)) continue;
     _pendingPromotions.push({
       sid: s.socketId,
       romReady: !!s.romReady,
       queuedAt: performance.now(),
     });
-    _syncLog(`pending-promote: queued ${s.socketId} (romReady=${!!s.romReady})`);
+    _syncLog(`pending-promote: queued ${s.socketId} (romReady=${!!s.romReady}, autoSpectated=true)`);
   }
-  // Drop entries for spectators who left
-  _pendingPromotions = _pendingPromotions.filter(
-    (p) => Object.values(data.spectators || {}).some((s) => s.socketId === p.sid),
-  );
+  // Drop entries for spectators who left OR became explicit (e.g.
+  // future "stop trying to promote me" UX).
+  _pendingPromotions = _pendingPromotions.filter((p) => {
+    const fresh = Object.values(data.spectators || {}).find((s) => s.socketId === p.sid);
+    return !!fresh && !!fresh.autoSpectated;
+  });
   // Update romReady on entries (in case rom-ready arrived since enqueue)
   for (const entry of _pendingPromotions) {
     const fresh = Object.values(data.spectators || {}).find((s) => s.socketId === entry.sid);
@@ -1515,36 +1852,44 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 When the joiner sees their own SID move from `spectators` to `players`, they need to clear the watching banner and set up for the incoming `late-join-state`. The Chunk 3.3 buffer already handles state-arrives-before-boot; this task is about UI state.
 
-In `play.js`, in the `users-updated` handler, add:
+**Placement:** APPEND a new self-promotion detection block at the end of the existing `users-updated` handler — DO NOT insert mid-body. Inserting an early-return mid-handler would skip downstream existing logic (`updateRomDeclarePrompt`, `updateStartButton`, etc.) for every plain player. The new logic must run AFTER all existing handler work finishes:
 
 ```javascript
 socket.on('users-updated', (data) => {
   window.__lastUsersUpdated = data;
-  // ... existing logic
+  // ... ALL existing handler logic runs unchanged ...
 
-  // Self-promotion detection
-  const myEntry = (data.players || {})[Object.keys(data.players || {}).find(
-    (pid) => data.players[pid].socketId === socket.id
-  )];
-  const wasSpectator = isSpectator;
-  if (wasSpectator && myEntry) {
-    isSpectator = false;
-    _autoSpectated = false;
-    mySlot = myEntry.slot;
-    window._isSpectator = false;
-    window._playerSlot = mySlot;
-    const guestStatus = document.getElementById('guest-status');
-    if (guestStatus) guestStatus.style.display = 'none';
-    // Trigger emulator boot now that we're a player.
-    // bootEmulator() at play.js:2177 early-returns if window.EJS_emulator
-    // already exists. Spectators never boot EJS today (auto-spectate
-    // gate at play.js:571-577 + downstream isSpectator checks short-
-    // circuit boot), so the call here will actually run rather than
-    // bail out. Verify with a Playwright probe in Chunk 7.3.
-    if (typeof bootEmulator === 'function') bootEmulator();
+  // ──────────────────────────────────────────────────────────────
+  // NEW: Self-promotion detection (appended at end of handler).
+  // Only fires for genuine spectator-first promotions (see Task
+  // 4.1.5 reconcile). Skips reconnects (was a player from the
+  // first ack) and plain players who never spectated.
+  // ──────────────────────────────────────────────────────────────
+  if (_initialRosterSelfRole === 'spectator' && isSpectator) {
+    const myEntry = Object.values(data.players || {}).find(
+      (p) => p.socketId === socket.id,
+    );
+    if (myEntry) {
+      isSpectator = false;
+      _autoSpectated = false;
+      mySlot = myEntry.slot;
+      window._isSpectator = false;
+      window._playerSlot = mySlot;
+      const guestStatus = document.getElementById('guest-status');
+      if (guestStatus) guestStatus.style.display = 'none';
+      // Trigger emulator boot now that we're a player.
+      // bootEmulator() at play.js:2177 early-returns if
+      // window.EJS_emulator already exists. Spectators never boot
+      // EJS today (the auto-spectate gate plus downstream
+      // isSpectator checks short-circuit boot), so this call will
+      // actually proceed rather than bail.
+      if (typeof bootEmulator === 'function') bootEmulator();
+    }
   }
 });
 ```
+
+The condition gates positively (`_initialRosterSelfRole === 'spectator' && isSpectator && self-now-in-players`) so it can only fire for the spectator-first happy path. Plain players (`_initialRosterSelfRole === 'player'`, isSpectator already false) and reconnects (reconcile cleared isSpectator on the ack) both fail the gate.
 
 - [ ] **Step 2: Smoke-verify by inspection**
 
