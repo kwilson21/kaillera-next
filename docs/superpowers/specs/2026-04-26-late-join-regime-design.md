@@ -68,14 +68,16 @@ mechanism. Non-Smash games therefore default to today's behavior:
 joiners start as players via the existing `request-late-join` flow when
 the room status flips to "playing", which is unchanged.
 
-### Spectator entry (always, when `room.status === "playing"`)
+### Spectator entry (always, when `room.status === "playing"` and Smash Remix)
 
 - `play.js` already auto-spectates when the room is full
   ([line 571](web/static/play.js#L571)). Extend the same gate to:
-  `if (roomData.status === 'playing') { isSpectator = true; }`. This
-  forces every late joiner through the spectator path, regardless of
-  whether the host is at CSS or mid-match. No new server event is
-  needed; the existing `join-room` with `spectate: true` does the job.
+  `if (roomData.status === 'playing' && roomData.game_id === 'smash-remix') { isSpectator = true; }`.
+  This forces every late joiner through the spectator path on Smash
+  Remix rooms, regardless of whether the host is at CSS or mid-match.
+  Other games keep today's player-first behavior. No new server event
+  is needed; the existing `join-room` with `spectate: true` does the
+  job.
 - Host's per-peer canvas stream
   ([netplay-lockstep.js:4868](web/static/netplay-lockstep.js#L4868),
   `_hostStream = captureCanvas.captureStream(0)`, attached in
@@ -553,7 +555,7 @@ Files that change:
   `late-join-state` follows immediately on the same tick. The new
   flow must:
   1. On `late-join-state` with `targetSid === socket.id`: cache the
-     full message in a host-local `_pendingLateJoinMsg` buffer.
+     full message in a joiner-local `_pendingLateJoinMsg` buffer.
   2. Trigger `onPromotedToPlayer()` if not already in flight; this
      drives `play.js` to call `bootEmulator`.
   3. Once `EJS_emulator?.gameManager?.Module` is ready, run the
@@ -610,7 +612,7 @@ Files that change:
 - Persistent watching status element (likely repurposed `#guest-status`).
 - Disabled-controls visual treatment for the spectator path.
 
-### `web/static/payloads.py` / Pydantic models
+### `server/src/api/payloads.py`
 
 - `HostPromoteSpectatorPayload { target_sid: str }`
 - `BecomeSpectatorPayload {}` (empty body; sender identifies via sid)
