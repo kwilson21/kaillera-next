@@ -1,0 +1,330 @@
+{
+  "room": "REC3740",
+  "rom": "/Users/kazon/Downloads/Smash Remix 2.0.1.z64",
+  "final_frame_host": 2233,
+  "final_frame_guest": 2231,
+  "duration_ms": 80140,
+  "event_count": 40,
+  "events": [
+    {
+      "type": "down",
+      "key": "v",
+      "code": "KeyV",
+      "frame": 439,
+      "window": "host",
+      "dt_ms": 41655
+    },
+    {
+      "type": "up",
+      "key": "v",
+      "code": "KeyV",
+      "frame": 443,
+      "window": "host",
+      "dt_ms": 41756
+    },
+    {
+      "type": "down",
+      "key": "s",
+      "code": "KeyS",
+      "frame": 579,
+      "window": "host",
+      "dt_ms": 44420
+    },
+    {
+      "type": "up",
+      "key": "s",
+      "code": "KeyS",
+      "frame": 584,
+      "window": "host",
+      "dt_ms": 44549
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 656,
+      "window": "host",
+      "dt_ms": 46548
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 663,
+      "window": "host",
+      "dt_ms": 46654
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 705,
+      "window": "host",
+      "dt_ms": 47424
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 712,
+      "window": "host",
+      "dt_ms": 47571
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 716,
+      "window": "host",
+      "dt_ms": 47628
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 716,
+      "window": "host",
+      "dt_ms": 47640
+    },
+    {
+      "type": "down",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 826,
+      "window": "host",
+      "dt_ms": 49414
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 843,
+      "window": "host",
+      "dt_ms": 49696
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 864,
+      "window": "host",
+      "dt_ms": 50361
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 864,
+      "window": "host",
+      "dt_ms": 50361
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 865,
+      "window": "host",
+      "dt_ms": 50375
+    },
+    {
+      "type": "up",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 866,
+      "window": "host",
+      "dt_ms": 50393
+    },
+    {
+      "type": "up",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 866,
+      "window": "host",
+      "dt_ms": 50393
+    },
+    {
+      "type": "down",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 929,
+      "window": "host",
+      "dt_ms": 52113
+    },
+    {
+      "type": "up",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 949,
+      "window": "host",
+      "dt_ms": 52530
+    },
+    {
+      "type": "down",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 1019,
+      "window": "host",
+      "dt_ms": 53654
+    },
+    {
+      "type": "up",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 1020,
+      "window": "host",
+      "dt_ms": 53731
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1064,
+      "window": "host",
+      "dt_ms": 54478
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1068,
+      "window": "host",
+      "dt_ms": 54578
+    },
+    {
+      "type": "down",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 1265,
+      "window": "guest",
+      "dt_ms": 58489
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 1272,
+      "window": "guest",
+      "dt_ms": 58617
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 1303,
+      "window": "guest",
+      "dt_ms": 59114
+    },
+    {
+      "type": "up",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 1305,
+      "window": "guest",
+      "dt_ms": 59196
+    },
+    {
+      "type": "up",
+      "key": "d",
+      "code": "KeyD",
+      "frame": 1305,
+      "window": "guest",
+      "dt_ms": 59200
+    },
+    {
+      "type": "down",
+      "key": "s",
+      "code": "KeyS",
+      "frame": 1369,
+      "window": "guest",
+      "dt_ms": 60215
+    },
+    {
+      "type": "up",
+      "key": "s",
+      "code": "KeyS",
+      "frame": 1375,
+      "window": "guest",
+      "dt_ms": 60315
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1435,
+      "window": "guest",
+      "dt_ms": 61338
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1444,
+      "window": "guest",
+      "dt_ms": 61499
+    },
+    {
+      "type": "down",
+      "key": "v",
+      "code": "KeyV",
+      "frame": 1495,
+      "window": "guest",
+      "dt_ms": 62350
+    },
+    {
+      "type": "up",
+      "key": "v",
+      "code": "KeyV",
+      "frame": 1500,
+      "window": "guest",
+      "dt_ms": 62984
+    },
+    {
+      "type": "down",
+      "key": "a",
+      "code": "KeyA",
+      "frame": 1647,
+      "window": "guest",
+      "dt_ms": 65705
+    },
+    {
+      "type": "up",
+      "key": "a",
+      "code": "KeyA",
+      "frame": 1655,
+      "window": "guest",
+      "dt_ms": 65865
+    },
+    {
+      "type": "down",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 1670,
+      "window": "guest",
+      "dt_ms": 66144
+    },
+    {
+      "type": "up",
+      "key": "w",
+      "code": "KeyW",
+      "frame": 1679,
+      "window": "guest",
+      "dt_ms": 66281
+    },
+    {
+      "type": "down",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1717,
+      "window": "guest",
+      "dt_ms": 66916
+    },
+    {
+      "type": "up",
+      "key": "c",
+      "code": "KeyC",
+      "frame": 1726,
+      "window": "guest",
+      "dt_ms": 67083
+    }
+  ]
+}
