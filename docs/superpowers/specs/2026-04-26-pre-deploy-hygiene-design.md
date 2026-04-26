@@ -32,27 +32,40 @@ ends at a clean tree on `main` that the user can then deploy.
 The order is chosen so each commit is small enough to verify on its own, and
 so later commits don't have to step around earlier untracked files.
 
+**Assumed starting state:** working tree matches the gitStatus snapshot
+captured at spec-write time — 14 modified files, ~30 untracked items as
+listed below. Implementer should `git status --short` and compare before
+beginning; if the tree has drifted (new modifications, files moved), pause
+and reconcile rather than proceed on the spec's stale assumption.
+
 ### Pre-step (no commit) — delete scratch
 
 A single `rm` batch, reviewable file-by-file before execution:
 
-- `round3-log.json`, `round3-postfix-log.json`
-- `web/static/ejs/cores/mupen64plus_next-wasm.data.bak-20260424-1245`
-- `web/static/ejs/cores/mupen64plus_next-wasm.data.bak-8927a38a`
-- `tools/deepseek_screenshot_diff.py` (dead-end path; documented as such)
-- `tests/recomp-ci/` (whole dir — mixed binaries, dSYM, screenshots, logs;
-  useful scripts were tied to deleted sandboxes)
-- `build/patch-asyncify-counter.py` (keep `.mjs`)
-- `build/patch-fpu-rounding.py`
-- `build/calc_ft_mask.py`
+- `round3-log.json`, `round3-postfix-log.json` — research log dumps
+- `web/static/ejs/cores/mupen64plus_next-wasm.data.bak-20260424-1245`,
+  `web/static/ejs/cores/mupen64plus_next-wasm.data.bak-8927a38a` — manual
+  WASM backups (per `feedback_no_sentinel_tests`, fix-forward; no kept
+  known-good copies)
+- `tools/deepseek_screenshot_diff.py` — dead-end path; documented as such in
+  the file itself and confirmed by `feedback_ssim_useless_use_vision`
+- `tests/recomp-ci/` (whole dir) — mixed binaries, dSYM, screenshots, logs;
+  useful scripts were tied to deleted sandboxes
+- `build/patch-asyncify-counter.py` — duplicate of the `.mjs` we keep
+- `build/patch-fpu-rounding.py` — one-shot speculative-SoftFloat-path
+  scratch; not wired into `build.sh`, not tracked by any plan
+- `build/calc_ft_mask.py` — one-shot research script for the FTStruct mask
+  workflow; not wired into `build.sh`, not currently active
 - The 8 untracked SoftFloat conversion `.c` files in `build/softfloat/`:
   `f32_to_i32.c`, `f32_to_i32_r_minMag.c`, `f32_to_i64.c`,
   `f32_to_i64_r_minMag.c`, `f64_to_i32.c`, `f64_to_i32_r_minMag.c`,
-  `f64_to_i64.c`, `f64_to_i64_r_minMag.c`
+  `f64_to_i64.c`, `f64_to_i64_r_minMag.c` — speculative path, not in
+  `build.sh`'s `SF_SOURCES` list (lines 517–584) so not compiled into
+  `libsoftfloat.a`
 
-Rationale for deletes: not in production build (`build/build.sh` SF_SOURCES
-list at lines 517–584 does not include them), recoverable from git reflog or
-this conversation if the speculative path is later resurrected.
+Rationale: every file above is either scratch with no upstream consumer,
+duplicate of a kept variant, or an uncalled speculative path. All are
+recoverable from git reflog or this conversation if later needed.
 
 ### Commit 1 — `chore: gitignore local sandboxes & generated artifacts`
 
@@ -104,6 +117,13 @@ tracked):**
 - `web/static/ejs/cores/mupen64plus_next-wasm.data`
 - `web/static/ejs/cores/mupen64plus_next_libretro.js`
 - `web/static/ejs/cores/mupen64plus_next_libretro.wasm`
+
+**Reproducibility assertion:** the trio is the output of a `build.sh` run
+against the patch set committed in this commit (`audio-backend-skip-output`
++ `kn_rollback` C changes), with `SF_SOURCES` in its current form (lines
+517–584) — i.e. without any of the 8 untracked SoftFloat conversion files
+that are deleted in the pre-step. Anyone wanting to reproduce the binary
+runs `build.sh` against this commit's source state.
 
 URL-param diagnostic flags (`knperf=light`, `kntrace=1`, `kndiag=deep`,
 `desync=deep`, `knflush=live`) are gated behind opt-in query strings and ship
@@ -179,12 +199,28 @@ historical note rather than rewrite if it has drifted too far.
 
 ### Mechanical pass — module headers and docstrings
 
-- Top-of-file header comments in `web/static/*.js` — update purpose lines
-  that drifted; check that referenced collaborators still exist.
-- Module docstrings in `server/src/**/*.py` — same treatment. Verify
-  `server/src/api/desync_prompts.py` and `server/src/api/desync_vision.py`
-  have accurate module docstrings (both files confirmed present in tree at
-  spec-write time).
+Scope is **explicitly limited** to files touched by commit 2 (the runtime
+fix), since these are the modules whose purpose may have drifted from their
+header. Files not in this list are skipped this pass.
+
+- `web/static/netplay-lockstep.js`
+- `web/static/kn-desync-detector.js`
+- `web/static/kn-diagnostics.js`
+- `web/static/kn-state.js`
+- `web/static/kn-audio.js`
+- `web/static/play.js`
+- `web/static/shared.js`
+- `server/src/api/payloads.py`
+- `server/src/api/signaling.py`
+- `server/src/api/desync_prompts.py` (confirmed present at spec-write time)
+- `server/src/api/desync_vision.py` (confirmed present at spec-write time)
+
+For each file: read the existing top-of-file comment / module docstring; if
+it accurately describes the file's current purpose and collaborators,
+**leave it untouched** (no-op is acceptable and expected for most files).
+Only edit when a header makes a claim that no longer holds (e.g., references
+a removed function, names the wrong module as parent).
+
 - **No new comments added** for code that didn't have them. Per CLAUDE.md
   ("default to writing no comments"), only freshen existing comments that
   have drifted.
@@ -208,11 +244,26 @@ stress run is required in this hygiene pass; cite the already-run V8/JSC
 that practical. The runtime fix was validated before this commit-split pass
 began.
 
-**Commit 3 specifically:** `git diff HEAD~1` for any `*.md`, `*.py`, or `*.js`
-should show only comment-block / markdown changes — no semantic source
-edits leaked into the docs commit.
+**Commit 3 specifically:** docs commit must not leak source edits. Run:
 
-**Final gate:** `git status --porcelain` returns empty.
+```bash
+git diff HEAD~1 -- '*.js' '*.py' \
+  | grep -E '^[+-][^+-]' \
+  | grep -vE '^[+-][[:space:]]*(//|#|/\*|\*|\*/)'
+```
+
+This filters for `+`/`-` lines that are NOT comment-block content. Output
+should be empty. If anything appears, a non-comment source edit slipped into
+the docs commit and must be split out before continuing. Markdown files
+(`*.md`) are not subject to this check.
+
+**Final gate, in order:**
+
+1. `git status --porcelain` returns empty (no untracked, no unstaged, no
+   staged-but-uncommitted).
+2. `git log origin/main..HEAD --oneline` shows the 5 commits in the expected
+   order — the user reads this list and confirms it matches the sequence
+   above before running `just deploy-dry`.
 
 ## Risks & mitigations
 
