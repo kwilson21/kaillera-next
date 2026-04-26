@@ -22,8 +22,15 @@ Client → Server events:
   data-message     — broadcast to all peers in room (save states, late-join)
   snapshot         — game snapshot relay (broadcast to room)
   input            — input relay for streaming mode (broadcast to room)
+  set-name         — player updates display name
+  session-log      — periodic sync log flush (upserts into session_logs)
+  game-screenshot  — periodic gameplay screenshot (debug/diagnostics)
   debug-sync       — upload sync diagnostic log
   debug-logs       — upload debug console log
+
+Server → Client (targeted):
+  upload-token     — HMAC token for upload endpoints (on join/open)
+  reconnect-token  — HMAC token for session reconnection (on join/open)
 
 Server → Room broadcasts:
   users-updated    — room state (players, spectators, owner)
