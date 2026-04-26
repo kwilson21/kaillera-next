@@ -20,6 +20,7 @@
     frameNum: 0, // lockstep.js → play.js info overlay
     delayAutoValue: 2, // play.js → lockstep.js
     romHash: null, // play.js → gamepad-manager.js (per-game profiles)
+    gameId: null, // play.js → lockstep.js game-specific guards
     room: null, // play.js → shared.js (KNEvent beacon)
     slot: -1, // play.js → shared.js (KNEvent beacon)
     uploadToken: null, // play.js → shared.js (KNEvent beacon)

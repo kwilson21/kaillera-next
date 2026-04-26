@@ -89,8 +89,15 @@
   let _knownRoms = {}; // populated from /api/rom-hashes on load
   let renderRomLibrary = () => {}; // replaced with full impl after IDB functions
 
+  const _gameIdHintFromUrl = () => {
+    const hint = new URLSearchParams(window.location.search).get('game');
+    return /^[a-z0-9-]{1,32}$/.test(hint || '') ? hint : null;
+  };
+
   const _gameIdFromHash = (hash) => {
     if (hash && _knownRoms[hash]?.game_id) return _knownRoms[hash].game_id;
+    const hint = _gameIdHintFromUrl();
+    if (hint) return hint;
     return 'ssb64'; // default fallback
   };
 
@@ -204,6 +211,8 @@
     _safeSet('localStorage', 'kaillera-name', playerName);
     mode = params.get('mode') || 'lockstep';
     isSpectator = params.get('spectate') === '1';
+    _gameId = _gameIdHintFromUrl();
+    KNState.gameId = _gameId;
   };
 
   // ── Global error handler ───────────────────────────────────────────────
@@ -915,6 +924,7 @@
       hasRom: !!(_romBlob || _romBlobUrl),
       romHash: _romHash?.substring(0, 12),
       hostHash: data.romHash?.substring(0, 12),
+      gameId: data.gameId || _gameId,
       sharingEnabled: _romSharingEnabled,
       sharingDecision: _romSharingDecision,
     });
@@ -929,6 +939,10 @@
     );
     mode = data.mode || mode;
     _gameResyncEnabled = !!data.resyncEnabled;
+    if (data.gameId) {
+      _gameId = data.gameId;
+      KNState.gameId = _gameId;
+    }
     KNState.matchId = data.matchId || null;
 
     gameRunning = true;
@@ -1910,6 +1924,7 @@
       _romHash = expectedHash;
       _gameId = _gameIdFromHash(expectedHash);
       KNState.romHash = expectedHash;
+      KNState.gameId = _gameId;
       afterRomTransferComplete(displayName);
     } else {
       const reader = new FileReader();
@@ -1918,6 +1933,7 @@
           _romHash = await hashArrayBuffer(reader.result);
           _gameId = _gameIdFromHash(_romHash);
           KNState.romHash = _romHash;
+          KNState.gameId = _gameId;
         } catch (_) {}
         afterRomTransferComplete(displayName);
       };
@@ -2384,6 +2400,7 @@
         _romHash = hash;
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
+        KNState.gameId = _gameId;
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
@@ -2475,6 +2492,7 @@
     _romHash = null;
     _gameId = null;
     KNState.romHash = null;
+    KNState.gameId = null;
     window.EJS_gameUrl = undefined;
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
@@ -2640,6 +2658,7 @@
         _romHash = hash;
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
+        KNState.gameId = _gameId;
         _safeSet('localStorage', 'kaillera-rom-name', val.name);
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
         if (isHost && _gameId && _gameId !== 'ssb64') {
@@ -2867,6 +2886,7 @@
       gameElement: document.getElementById('game'),
       resyncEnabled,
       romHash: _romHash ?? null,
+      gameId: _gameId ?? null,
       uploadToken: _uploadToken,
       isMobile: _isMobile,
       onStatus: (msg) => {
@@ -2986,6 +3006,7 @@
         mode: selectedMode,
         resyncEnabled: optResync ? optResync.checked : false,
         romHash: _romHash ?? null,
+        gameId: _gameId ?? null,
       },
       (err) => {
         if (err) showToast(err);
@@ -4236,6 +4257,10 @@
       .then((r) => (r.ok ? r.json() : {}))
       .then((data) => {
         _knownRoms = data;
+        if (_romHash) {
+          _gameId = _gameIdFromHash(_romHash);
+          KNState.gameId = _gameId;
+        }
         // Retroactively verify any cached ROMs that were stored before
         // the known-hash table was available (e.g. v1→v2 migration)
         _retroVerifyLibrary();

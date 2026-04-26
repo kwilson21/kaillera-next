@@ -22,6 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/src"
 OUT_DIR="${SCRIPT_DIR}/output"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
+KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-0}"
+KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD:-0}"
+KN_DISABLE_GLIDEN64_VEC4="${KN_DISABLE_GLIDEN64_VEC4:-1}"
+KN_DISABLE_GLIDEN64_SIMD="${KN_DISABLE_GLIDEN64_SIMD:-1}"
 
 mkdir -p "${SRC_DIR}" "${OUT_DIR}"
 
@@ -88,54 +92,59 @@ if [ -d "${PATCHES_DIR}" ]; then
     # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
     # video callback to silently fail (canvas freeze).
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
+    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
 
-    # Add kn_hash_registry field exports (Tasks 3-5 of desync detection v1).
-    # Keyed on _kn_hle_restore (terminal symbol of the rollback exports added
-    # above). Each sed replaces the anchor with "anchor + new symbols", so
-    # multiple sed lines are additive — order doesn't matter.
-    if ! grep -q "_kn_hash_registry_post_tick" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_fnv1a,_kn_hash_stocks,_kn_hash_history_stocks, \\\n                     _kn_hash_character_id,_kn_hash_history_character_id, \\\n                     _kn_hash_css_cursor,_kn_hash_history_css_cursor, \\\n                     _kn_hash_css_selected,_kn_hash_history_css_selected, \\\n                     _kn_hash_rng,_kn_hash_history_rng, \\\n                     _kn_hash_match_phase,_kn_hash_history_match_phase, \\\n                     _kn_hash_vs_battle_hdr,_kn_hash_history_vs_battle_hdr, \\\n                     _kn_hash_physics_motion,_kn_hash_history_physics_motion, \\\n                     _kn_hash_registry_post_tick|' Makefile.emulatorjs
-        echo "    Added kn_hash_registry field exports"
-    fi
+    if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
+        # Add kn_hash_registry field exports (Tasks 3-5 of desync detection v1).
+        # Keyed on _kn_get_skip_audio_output (terminal audio helper export added
+        # above). Each sed replaces the anchor with "anchor + new symbols", so
+        # multiple sed lines are additive — order doesn't matter. Do not anchor
+        # on _kn_hle_restore: it is a prefix of _kn_hle_restore_from.
+        if ! grep -q "_kn_hash_registry_post_tick" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_hash_fnv1a,_kn_hash_stocks,_kn_hash_history_stocks, \\\n                     _kn_hash_character_id,_kn_hash_history_character_id, \\\n                     _kn_hash_css_cursor,_kn_hash_history_css_cursor, \\\n                     _kn_hash_css_selected,_kn_hash_history_css_selected, \\\n                     _kn_hash_rng,_kn_hash_history_rng, \\\n                     _kn_hash_match_phase,_kn_hash_history_match_phase, \\\n                     _kn_hash_vs_battle_hdr,_kn_hash_history_vs_battle_hdr, \\\n                     _kn_hash_physics_motion,_kn_hash_history_physics_motion, \\\n                     _kn_hash_registry_post_tick|' Makefile.emulatorjs
+            echo "    Added kn_hash_registry field exports"
+        fi
 
-    # Smoke-test diagnostic helpers (Task 5). Separate group per the plan
-    # pattern; same anchor, additive replacement.
-    if ! grep -q "_kn_smoke_buf_ptr" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_smoke_buf_ptr,_kn_smoke_dump_stocks|' Makefile.emulatorjs
-        echo "    Added kn_hash_registry smoke-test helpers"
-    fi
+        # Smoke-test diagnostic helpers (Task 5). Separate group per the plan
+        # pattern; same anchor, additive replacement.
+        if ! grep -q "_kn_smoke_buf_ptr" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_smoke_buf_ptr,_kn_smoke_dump_stocks|' Makefile.emulatorjs
+            echo "    Added kn_hash_registry smoke-test helpers"
+        fi
 
-    # Rollback-event field snapshots (Task 8). Same anchor, additive.
-    if ! grep -q "_kn_hash_on_replay_enter" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_on_replay_enter,_kn_hash_on_replay_exit, \\\n                     _kn_get_pre_replay_hash,_kn_get_post_replay_hash, \\\n                     _kn_get_last_replay_target_frame,_kn_get_last_replay_final_frame|' Makefile.emulatorjs
-        echo "    Added kn_hash_registry rollback-event snapshot exports"
-    fi
+        # Rollback-event field snapshots (Task 8). Same anchor, additive.
+        if ! grep -q "_kn_hash_on_replay_enter" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_hash_on_replay_enter,_kn_hash_on_replay_exit, \\\n                     _kn_get_pre_replay_hash,_kn_get_post_replay_hash, \\\n                     _kn_get_last_replay_target_frame,_kn_get_last_replay_final_frame|' Makefile.emulatorjs
+            echo "    Added kn_hash_registry rollback-event snapshot exports"
+        fi
 
-    # Per-frame replay trajectory ring (Task 9). Same anchor, additive.
-    if ! grep -q "_kn_get_replay_frame_hash" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_get_replay_frame_hash,_kn_get_last_replay_length|' Makefile.emulatorjs
-        echo "    Added kn_hash_registry replay trajectory exports"
-    fi
+        # Per-frame replay trajectory ring (Task 9). Same anchor, additive.
+        if ! grep -q "_kn_get_replay_frame_hash" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_get_replay_frame_hash,_kn_get_last_replay_length|' Makefile.emulatorjs
+            echo "    Added kn_hash_registry replay trajectory exports"
+        fi
 
-    # Phase-gating scene_curr export (Task 14). Same anchor, additive.
-    if ! grep -q "_kn_get_scene_curr" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_get_scene_curr|' Makefile.emulatorjs
-        echo "    Added kn_get_scene_curr export"
-    fi
+        # Phase-gating scene_curr export (Task 14). Same anchor, additive.
+        if ! grep -q "_kn_get_scene_curr" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_get_scene_curr|' Makefile.emulatorjs
+            echo "    Added kn_get_scene_curr export"
+        fi
 
-    # ft_buffer hash export (per-fighter coverage). Same anchor, additive.
-    if ! grep -q "_kn_hash_ft_buffer" Makefile.emulatorjs; then
-        sed -i 's|_kn_hle_restore|_kn_hle_restore, \\\n                     _kn_hash_ft_buffer,_kn_hash_history_ft_buffer|' Makefile.emulatorjs
-        echo "    Added kn_hash_ft_buffer export"
+        # ft_buffer hash export (per-fighter coverage). Same anchor, additive.
+        if ! grep -q "_kn_hash_ft_buffer" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_hash_ft_buffer,_kn_hash_history_ft_buffer|' Makefile.emulatorjs
+            echo "    Added kn_hash_ft_buffer export"
+        fi
+    else
+        echo "    kn_hash_registry exports disabled (set KN_ENABLE_HASH_REGISTRY=1 for diagnostic builds)"
     fi
 
     # mupen64plus: full reset + apply patches.
@@ -148,6 +157,15 @@ if [ -d "${PATCHES_DIR}" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
             echo "    Applied mupen64plus kn-all patch (main.c)" || \
             echo "    WARN: kn-all patch failed"
+    fi
+
+    # Deep audio determinism fix: keep RSP HLE running, but bypass the
+    # libretro audio output path (sinc resampler + audio_batch_cb) during
+    # netplay. That output path was confirmed cross-engine noisy.
+    if [ -f "${PATCHES_DIR}/audio-backend-skip-output.patch" ]; then
+        git apply "${PATCHES_DIR}/audio-backend-skip-output.patch" && \
+            echo "    Applied audio backend skip-output patch" || \
+            echo "    WARN: audio backend skip-output patch failed"
     fi
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
@@ -165,6 +183,48 @@ if [ -d "${PATCHES_DIR}" ]; then
             "${PATCHES_DIR}/mupen64plus-wasm-determinism.patch" 2>/dev/null && \
             echo "    Applied mupen64plus wasm-determinism patch (strict FP, FPU canon, srand)" || \
             echo "    WARN: wasm-determinism patch failed"
+    fi
+
+    # WebKit/JSC graphics safety: GLideN64's optional VEC4 vertex batching is
+    # explicitly documented upstream as a bug-risk optimization. Disable it by
+    # default before trying heavier mitigations like full scalar WASM.
+    if [ "${KN_DISABLE_GLIDEN64_VEC4}" = "1" ] && grep -q -- '-D__VEC4_OPT' Makefile; then
+        sed -i 's| -D__VEC4_OPT||g; s|-D__VEC4_OPT ||g; s|-D__VEC4_OPT||g' Makefile && \
+            echo "    Disabled GLideN64 __VEC4_OPT (keeping WASM SIMD)" || \
+            echo "    WARN: GLideN64 __VEC4_OPT disable sed failed"
+    else
+        echo "    Keeping GLideN64 __VEC4_OPT (set KN_DISABLE_GLIDEN64_VEC4=1 to disable)"
+    fi
+
+    # WebKit/JSC graphics safety, narrower than KN_DISABLE_WASM_SIMD: keep the
+    # emulator core/RSP/audio on wasm SIMD, but compile GLideN64's renderer
+    # objects with scalar WASM codegen. This targets the observed CSS corruption
+    # without falling back to the full-core scalar build that later froze.
+    if [ "${KN_DISABLE_GLIDEN64_SIMD}" = "1" ] && \
+        grep -q '^CFLAGS      += $(CPUOPTS)' Makefile && \
+        ! grep -q 'GLideN64-only scalar WASM' Makefile; then
+        sed -i '/^CFLAGS      += $(CPUOPTS)/a\
+\
+# kaillera-next: GLideN64-only scalar WASM for WebKit/JSC graphics stability.\
+GLideN64/%.o ./GLideN64/%.o custom/GLideN64/%.o ./custom/GLideN64/%.o: CFLAGS := $(filter-out -msimd128,$(CFLAGS)) -mno-simd128\
+GLideN64/%.o ./GLideN64/%.o custom/GLideN64/%.o ./custom/GLideN64/%.o: CXXFLAGS := $(filter-out -msimd128,$(CXXFLAGS)) -mno-simd128\
+' Makefile && \
+            echo "    Disabled WASM SIMD for GLideN64 objects only" || \
+            echo "    WARN: GLideN64-only SIMD disable sed failed"
+    else
+        echo "    Keeping GLideN64 WASM SIMD (set KN_DISABLE_GLIDEN64_SIMD=1 to disable)"
+    fi
+
+    # Diagnostic escape hatch: scalar WASM fixed one WebKit CSS rendering probe,
+    # but it later reproduced a WebKit abort/freeze during recorded navigation.
+    # Keep SIMD as the default path and only disable it for targeted graphics
+    # investigation builds.
+    if [ "${KN_DISABLE_WASM_SIMD}" = "1" ] && grep -q 'CPUFLAGS += -msimd128' Makefile; then
+        sed -i 's|CPUFLAGS += -msimd128 -fno-tree-vectorize|CPUFLAGS += -mno-simd128 -fno-tree-vectorize|' Makefile && \
+            echo "    Disabled SIMD (-mno-simd128)" || \
+            echo "    WARN: SIMD disable sed failed"
+    else
+        echo "    Keeping default WASM SIMD (set KN_DISABLE_WASM_SIMD=1 for scalar graphics diagnostics)"
     fi
 
     # AI DMA determinism: replace float dma_modifier with integer-only arithmetic.
@@ -270,6 +330,84 @@ KNFP_EOF
         echo "    Injected kn_get_hidden_state_fingerprint_impl"
     fi
 
+    # Inject per-frame hidden-state pack/restore for rollback. These fields
+    # are outside, or not reliably restored by, retro_serialize and must track
+    # the same ring slot as the RDRAM savestate.
+    if ! grep -q "kn_pack_hidden_state_impl" mupen64plus-core/src/main/main.c; then
+        cat >> mupen64plus-core/src/main/main.c <<'KNHS_EOF'
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE void kn_pack_hidden_state_impl(uint32_t *out) {
+    if (!out) return;
+    out[0] = (uint32_t)g_dev.ai.fifo[0].duration;
+    out[1] = (uint32_t)g_dev.ai.fifo[0].length;
+    out[2] = (uint32_t)g_dev.ai.fifo[1].duration;
+    out[3] = (uint32_t)g_dev.ai.fifo[1].length;
+    out[4] = (uint32_t)g_dev.sp.rsp_task_locked;
+    out[5] = (uint32_t)g_dev.r4300.cp0.interrupt_unsafe_state;
+    out[6] = (uint32_t)g_dev.si.dma_duration;
+    out[7] = *r4300_cp0_last_addr(&g_dev.r4300.cp0);
+    out[8] = 0; /* Reserved for legacy kn_instr_count builds. */
+    out[9] = (uint32_t)g_dev.vi.field;
+    out[10] = (uint32_t)g_dev.vi.delay;
+    out[11] = (uint32_t)g_dev.ai.last_read;
+    out[12] = (uint32_t)g_dev.ai.delayed_carry;
+    out[13] = (uint32_t)g_dev.ai.samples_format_changed;
+    out[14] = (uint32_t)g_dev.si.dma_dir;
+    out[15] = (uint32_t)g_dev.dp.do_on_unfreeze;
+    out[16] = *r4300_cp0_next_interrupt(&g_dev.r4300.cp0);
+    out[17] = (uint32_t)*r4300_cp0_cycle_count(&g_dev.r4300.cp0);
+}
+
+EMSCRIPTEN_KEEPALIVE void kn_restore_hidden_state_impl(const uint32_t *in) {
+    if (!in) return;
+    g_dev.ai.fifo[0].duration = (unsigned int)in[0];
+    g_dev.ai.fifo[0].length = (unsigned int)in[1];
+    g_dev.ai.fifo[1].duration = (unsigned int)in[2];
+    g_dev.ai.fifo[1].length = (unsigned int)in[3];
+    g_dev.sp.rsp_task_locked = (int)in[4];
+    g_dev.r4300.cp0.interrupt_unsafe_state = (int)in[5];
+    g_dev.si.dma_duration = (unsigned int)in[6];
+    *r4300_cp0_last_addr(&g_dev.r4300.cp0) = in[7];
+    g_dev.vi.field = (unsigned int)in[9];
+    g_dev.vi.delay = (unsigned int)in[10];
+    g_dev.ai.last_read = (uint32_t)in[11];
+    g_dev.ai.delayed_carry = (uint32_t)in[12];
+    g_dev.ai.samples_format_changed = (unsigned int)in[13];
+    g_dev.si.dma_dir = (unsigned char)in[14];
+    g_dev.dp.do_on_unfreeze = (unsigned char)in[15];
+    *r4300_cp0_next_interrupt(&g_dev.r4300.cp0) = in[16];
+    *r4300_cp0_cycle_count(&g_dev.r4300.cp0) = (int)in[17];
+}
+
+EMSCRIPTEN_KEEPALIVE void kn_restore_hidden_state_boot(const uint32_t *in) {
+    if (!in) return;
+    g_dev.sp.rsp_task_locked = (int)in[4];
+    g_dev.r4300.cp0.interrupt_unsafe_state = (int)in[5];
+    *r4300_cp0_last_addr(&g_dev.r4300.cp0) = in[7];
+}
+
+EMSCRIPTEN_KEEPALIVE void kn_set_audio_fifo_state(
+    uint32_t f0_duration, uint32_t f0_length,
+    uint32_t f1_duration, uint32_t f1_length) {
+    g_dev.ai.fifo[0].duration = (unsigned int)f0_duration;
+    g_dev.ai.fifo[0].length = (unsigned int)f0_length;
+    g_dev.ai.fifo[1].duration = (unsigned int)f1_duration;
+    g_dev.ai.fifo[1].length = (unsigned int)f1_length;
+}
+
+EMSCRIPTEN_KEEPALIVE void kn_get_audio_fifo_state(uint32_t *out) {
+    if (!out) return;
+    out[0] = (uint32_t)g_dev.ai.fifo[0].duration;
+    out[1] = (uint32_t)g_dev.ai.fifo[0].length;
+    out[2] = (uint32_t)g_dev.ai.fifo[1].duration;
+    out[3] = (uint32_t)g_dev.ai.fifo[1].length;
+}
+#endif
+KNHS_EOF
+        echo "    Injected kn_pack/restore_hidden_state_impl + audio FIFO helpers"
+    fi
+
     # Inject kn_hle_save/restore into RSP HLE plugin for rollback
     if ! grep -q "kn_hle_save" mupen64plus-rsp-hle/src/plugin.c; then
         cat >> mupen64plus-rsp-hle/src/plugin.c <<'KNHLE_EOF'
@@ -288,9 +426,16 @@ EMSCRIPTEN_KEEPALIVE void kn_hle_save(void) {
 EMSCRIPTEN_KEEPALIVE void kn_hle_restore(void) {
     if (kn_hle_rb_snapshot) memcpy(((uint8_t *)&g_hle) + KN_HLE_RB_OFFSET, kn_hle_rb_snapshot, KN_HLE_RB_SIZE);
 }
+EMSCRIPTEN_KEEPALIVE int kn_hle_state_size(void) { return KN_HLE_RB_SIZE; }
+EMSCRIPTEN_KEEPALIVE void kn_hle_save_to(uint8_t *buf) {
+    if (buf) memcpy(buf, ((uint8_t *)&g_hle) + KN_HLE_RB_OFFSET, KN_HLE_RB_SIZE);
+}
+EMSCRIPTEN_KEEPALIVE void kn_hle_restore_from(const uint8_t *buf) {
+    if (buf) memcpy(((uint8_t *)&g_hle) + KN_HLE_RB_OFFSET, buf, KN_HLE_RB_SIZE);
+}
 #endif
 KNHLE_EOF
-        echo "    Injected kn_hle_save/kn_hle_restore"
+        echo "    Injected kn_hle_save/kn_hle_restore + per-frame hle ring helpers"
     fi
 
     # v3 kn_sync_read/write: complete state capture matching retro_serialize.
@@ -330,10 +475,18 @@ KNHLE_EOF
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
     cp "${SCRIPT_DIR}/kn_rollback/kn_gameplay_addrs.h" mupen64plus-core/src/main/kn_gameplay_addrs.h
-    cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.c" mupen64plus-core/src/main/kn_hash_registry.c
-    cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.h" mupen64plus-core/src/main/kn_hash_registry.h
-    # Add kn_rollback.c and kn_hash_registry.c to SOURCES_C in Makefile.common
-    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\\n\t$(CORE_DIR)/src/main/kn_hash_registry.c \\|' Makefile.common
+    # Add kn_rollback.c to SOURCES_C in Makefile.common. The hash registry is
+    # diagnostic-only so the default production core keeps the older WASM shape.
+    sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
+    if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
+        cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.c" mupen64plus-core/src/main/kn_hash_registry.c
+        cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.h" mupen64plus-core/src/main/kn_hash_registry.h
+        sed -i 's|$(CORE_DIR)/src/main/kn_rollback.c \\|$(CORE_DIR)/src/main/kn_rollback.c \\\n\t$(CORE_DIR)/src/main/kn_hash_registry.c \\|' Makefile.common
+        echo 'CFLAGS += -DKN_ENABLE_HASH_REGISTRY' >> Makefile.common
+        echo "    Enabled kn_hash_registry diagnostic storage"
+    else
+        echo "    Skipped kn_hash_registry object (set KN_ENABLE_HASH_REGISTRY=1 for diagnostic builds)"
+    fi
     echo "    Done."
 
     # softfloat patch: replace native FPU ops with Berkeley SoftFloat 3e calls

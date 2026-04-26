@@ -231,19 +231,22 @@
     const frameNum = _getFrame();
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
 
-    // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames
-    const renderHash = captureCanvasHash();
-    if (renderHash !== 0) {
-      if (renderHash !== _renderLastHash) {
-        _renderLastHash = renderHash;
-        _renderLastChangeFrame = frameNum;
-        _renderStallLogged = false;
-      } else if (frameNum - _renderLastChangeFrame >= 180 && !_renderStallLogged) {
-        _log(
-          `RENDER-STALL start=${_renderLastChangeFrame} cur=${frameNum} ` +
-            `unchanged=${frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
-        );
-        _renderStallLogged = true;
+    // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames.
+    // WebGL readPixels is a GPU sync point, so determinism stress runs opt out.
+    if (!window._knPerfLight) {
+      const renderHash = captureCanvasHash();
+      if (renderHash !== 0) {
+        if (renderHash !== _renderLastHash) {
+          _renderLastHash = renderHash;
+          _renderLastChangeFrame = frameNum;
+          _renderStallLogged = false;
+        } else if (frameNum - _renderLastChangeFrame >= 180 && !_renderStallLogged) {
+          _log(
+            `RENDER-STALL start=${_renderLastChangeFrame} cur=${frameNum} ` +
+              `unchanged=${frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
+          );
+          _renderStallLogged = true;
+        }
       }
     }
 

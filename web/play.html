@@ -383,6 +383,47 @@
       var EJS_defaultOptions = {
         'mupen64plus-cpucore': 'cached_interpreter',
       };
+      (function () {
+        var params = new URLSearchParams(window.location.search || '');
+        var gfxProfile = params.get('kngfx');
+        if (gfxProfile === 'texrect') {
+          Object.assign(EJS_defaultOptions, {
+            'mupen64plus-EnableNativeResTexrects': 'Optimized',
+            'mupen64plus-EnableTexCoordBounds': 'True',
+            'mupen64plus-CorrectTexrectCoords': 'Force',
+          });
+        } else if (gfxProfile === 'texrect-unopt') {
+          Object.assign(EJS_defaultOptions, {
+            'mupen64plus-EnableNativeResTexrects': 'Unoptimized',
+            'mupen64plus-EnableTexCoordBounds': 'True',
+            'mupen64plus-CorrectTexrectCoords': 'Force',
+            'mupen64plus-BackgroundMode': 'Stripped',
+          });
+        } else if (gfxProfile === 'webgl1') {
+          window.EJS_forceLegacyCores = true;
+          EJS_defaultOptions.webgl2Enabled = 'disabled';
+        } else if (gfxProfile === 'angrylion') {
+          EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'angrylion';
+        } else if (gfxProfile === 'parallel') {
+          EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'parallel';
+        } else if (gfxProfile === 'unpack1') {
+          [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (ctor) {
+            var proto = ctor && ctor.prototype;
+            if (!proto || proto.__knUnpackAlignmentPatched) return;
+            proto.__knUnpackAlignmentPatched = true;
+            ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach(function (name) {
+              var original = proto[name];
+              if (typeof original !== 'function') return;
+              proto[name] = function () {
+                try {
+                  this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
+                } catch (_) {}
+                return original.apply(this, arguments);
+              };
+            });
+          });
+        }
+      })();
       // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (shared.js).
       // This ensures the Emscripten SDL keyboard layer uses the same keys
       // as our netplay input system, preventing EJS TFGH defaults from

@@ -16,7 +16,16 @@
  */
 
 #include "kn_rollback.h"
+#ifdef KN_ENABLE_HASH_REGISTRY
 #include "kn_hash_registry.h"
+#define KN_HASH_REGISTRY_POST_TICK(frame, in_replay) kn_hash_registry_post_tick((frame), (in_replay))
+#define KN_HASH_ON_REPLAY_ENTER(frame) kn_hash_on_replay_enter((frame))
+#define KN_HASH_ON_REPLAY_EXIT(frame) kn_hash_on_replay_exit((frame))
+#else
+#define KN_HASH_REGISTRY_POST_TICK(frame, in_replay) ((void)(frame), (void)(in_replay), 0)
+#define KN_HASH_ON_REPLAY_ENTER(frame) ((void)(frame))
+#define KN_HASH_ON_REPLAY_EXIT(frame) ((void)(frame))
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -68,6 +77,17 @@ extern uint32_t kn_sync_hash(void);
 
 /* Forward declaration: RF5 live gameplay hash (defined later). */
 uint32_t kn_live_gameplay_hash(void);
+
+/* Hidden emulator/plugin state that retro_serialize does not fully cover.
+ * These are captured per ring slot so rollback restores the RDRAM snapshot,
+ * SoftFloat flags, core timing residue, and RSP HLE plugin state from the
+ * same logical frame. */
+#define KN_HIDDEN_STATE_WORDS 18
+extern void kn_pack_hidden_state_impl(uint32_t *out);
+extern void kn_restore_hidden_state_impl(const uint32_t *in);
+extern int kn_hle_state_size(void);
+extern void kn_hle_save_to(uint8_t *buf);
+extern void kn_hle_restore_from(const uint8_t *buf);
 
 /* Forward declaration: SoftFloat globals (not in retro_serialize — saved
  * alongside ring buffer snapshots by sf_pack/sf_restore below).
@@ -171,6 +191,9 @@ static struct {
     uint8_t **ring_bufs;  /* ring_bufs[i] = malloc'd buffer */
     int *ring_frames;     /* frame number stored in each slot */
     int *ring_sf_state;   /* SoftFloat state per slot (not in retro_serialize) */
+    uint32_t (*ring_hidden_state)[KN_HIDDEN_STATE_WORDS];
+    uint8_t **ring_hle_state;
+    int hle_state_size;
     size_t state_size;    /* retro_serialize_size() */
 
     /* Input ring: per-player, per-frame */
@@ -230,6 +253,7 @@ static struct {
      * Forces a periodic save even during long zero-input runs so
      * every ring slot stays fresh within one ring_size window. */
     int last_save_frame;
+    int endpoint_save_pending;
 
     /* Stats */
     int rollback_count;
@@ -293,6 +317,22 @@ static inline void sf_restore(int packed) {
     softfloat_exceptionFlags = packed & 0xFF;
 }
 
+static int rb_save_slot(int idx, int frame, int mark_last) {
+    if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) return 0;
+    rb.ring_sf_state[idx] = sf_pack();
+    if (rb.ring_hidden_state) kn_pack_hidden_state_impl(rb.ring_hidden_state[idx]);
+    if (rb.ring_hle_state && rb.ring_hle_state[idx]) kn_hle_save_to(rb.ring_hle_state[idx]);
+    rb.ring_frames[idx] = frame;
+    if (mark_last) rb.last_save_frame = frame;
+    return 1;
+}
+
+static void rb_restore_slot_aux(int idx) {
+    sf_restore(rb.ring_sf_state[idx]);
+    if (rb.ring_hidden_state) kn_restore_hidden_state_impl(rb.ring_hidden_state[idx]);
+    if (rb.ring_hle_state && rb.ring_hle_state[idx]) kn_hle_restore_from(rb.ring_hle_state[idx]);
+}
+
 /* ── Debug logging ─────────────────────────────────────────────────── */
 static void rb_log(const char *fmt, ...) {
     va_list args;
@@ -330,17 +370,12 @@ static void setup_frame(int frame) {
     /* Reset audio capture buffer */
     kn_reset_audio();
 
-    /* RNG seed sync (Smash Remix): write deterministic per-frame seed to RDRAM.
-     * Same hash as JS _syncRNGSeed: h = baseSeed ^ (frameNum * 0x45d9f3b7),
-     * then mix via multiply-shift. */
-    if (rb.rng_ptr) {
-        uint32_t h = rb.rng_base_seed ^ ((uint32_t)frame * 0x45d9f3b7u);
-        h = (h ^ (h >> 16)) * 0x85ebca6bu;
-        h = h ^ (h >> 13);
-        *rb.rng_ptr = h;
-        if (rb.rng_alt_ptr) *rb.rng_alt_ptr = h;
-        if (rb.rng_netplay_ptr) *rb.rng_netplay_ptr = h;
-    }
+    /* RNG force-writes are intentionally disabled. Some addresses used by
+     * older Smash Remix netplay-seed experiments are version-dependent, and
+     * 0x03CB30 was later proven to be dSYAudioCurrentTic rather than a
+     * gameplay frame counter. Let the game RNG evolve naturally and detect
+     * real divergence through the gameplay hash. */
+    (void)frame;
 }
 
 /* ── Write inputs for all players for a given frame ────────────────── */
@@ -399,6 +434,7 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
     rb.pending_rollback = -1;
     rb.last_save_frame = -1;
+    rb.endpoint_save_pending = 0;
     /* retro_serialize is now safe (static scratch buffer patch eliminates the
      * 16MB malloc per call). Same code path used by gm.getState() and resync. */
     rb.state_size = retro_serialize_size();
@@ -408,11 +444,22 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
     rb.ring_frames = (int *)calloc(rb.ring_size, sizeof(int));
     rb.ring_sf_state = (int *)calloc(rb.ring_size, sizeof(int));
+    rb.ring_hidden_state = calloc(rb.ring_size, sizeof(*rb.ring_hidden_state));
+    rb.hle_state_size = kn_hle_state_size();
+    rb.ring_hle_state = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+    if (!rb.ring_bufs || !rb.ring_frames || !rb.ring_sf_state ||
+        !rb.ring_hidden_state || !rb.ring_hle_state || rb.hle_state_size <= 0) {
+        rb_log("FATAL: failed to allocate rollback ring metadata (hle=%d)",
+            rb.hle_state_size);
+        return;
+    }
     for (i = 0; i < rb.ring_size; i++) {
         rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
+        rb.ring_hle_state[i] = (uint8_t *)malloc(rb.hle_state_size);
         rb.ring_frames[i] = -1;
-        if (!rb.ring_bufs[i]) {
-            rb_log("FATAL: failed to allocate state ring slot %d (%zu bytes)", i, rb.state_size);
+        if (!rb.ring_bufs[i] || !rb.ring_hle_state[i]) {
+            rb_log("FATAL: failed to allocate ring slot %d (state=%zu hle=%d)",
+                i, rb.state_size, rb.hle_state_size);
             return;
         }
     }
@@ -424,6 +471,8 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.initialized = 1;
     rb_log("kn_rollback_init: max=%d delay=%d slot=%d players=%d stateSize=%zu ringSlots=%d",
         max_frames, delay_frames, local_slot, num_players, rb.state_size, rb.ring_size);
+    rb_log("kn_rollback_init: hle_state_size=%d total_hle_ring=%d bytes",
+        rb.hle_state_size, rb.hle_state_size * rb.ring_size);
 
     /* Fix 4 (Option X): Taint SSB64 game object allocator pool.
      *
@@ -578,8 +627,15 @@ void kn_rollback_shutdown(void) {
         }
         free(rb.ring_bufs);
     }
+    if (rb.ring_hle_state) {
+        for (i = 0; i < rb.ring_size; i++) {
+            free(rb.ring_hle_state[i]);
+        }
+        free(rb.ring_hle_state);
+    }
     free(rb.ring_frames);
     free(rb.ring_sf_state);
+    free(rb.ring_hidden_state);
     rb.initialized = 0;
     rb_log("kn_rollback_shutdown");
 }
@@ -749,11 +805,23 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
         }
     }
 
-    /* Store real input + update dead-reckoning history */
+    /* Store real input. Always write the frame-indexed ring so late inputs
+     * can still correct old predictions, but update dead-reckoning history
+     * only monotonically. DataChannel callbacks can deliver older frames
+     * after newer ones (unordered transport, artificial jitter, reconnect
+     * backlog). Letting an old frame rewrite last_known makes future
+     * predictions depend on callback race order instead of input frame order. */
     rb.inputs[slot][idx] = real_input;
-    rb.prev_known[slot] = rb.last_known[slot];
-    rb.last_known[slot] = real_input;
-    rb.slot_active[slot] = 1;
+    if (!rb.slot_active[slot]) {
+        rb.prev_known[slot] = real_input;
+        rb.last_known[slot] = real_input;
+        rb.slot_active[slot] = 1;
+    } else if (frame > rb.last_known[slot].frame) {
+        rb.prev_known[slot] = rb.last_known[slot];
+        rb.last_known[slot] = real_input;
+    } else if (frame == rb.last_known[slot].frame) {
+        rb.last_known[slot] = real_input;
+    }
     if (frame > rb.confirmed_frame[slot])
         rb.confirmed_frame[slot] = frame;
     return misprediction;
@@ -769,6 +837,14 @@ EMSCRIPTEN_KEEPALIVE
 int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
     int s, idx, apply_frame;
     if (!rb.initialized) return -1;
+
+    if (rb.endpoint_save_pending && rb.replay_remaining == 0) {
+        int endpoint_idx = rb.frame % rb.ring_size;
+        rb_save_slot(endpoint_idx, rb.frame, 1);
+        rb.endpoint_save_pending = 0;
+        rb_log("C-REPLAY-ENDPOINT-SAVED-DEFERRED f=%d save_idx=%d",
+            rb.frame, endpoint_idx);
+    }
 
     /* ── Pacing gate: if JS says we're too far ahead, maintain ring and skip ──
      * frame_adv >= 0 means JS computed a valid frame advantage.
@@ -790,10 +866,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         }
         if (ring_needs_save) {
             int save_idx = rb.frame % rb.ring_size;
-            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-            rb.ring_sf_state[save_idx] = sf_pack();
-            rb.ring_frames[save_idx] = rb.frame;
-            rb.last_save_frame = rb.frame;
+            rb_save_slot(save_idx, rb.frame, 1);
         }
         return 3; /* ring maintained, skip frame advance */
     }
@@ -831,7 +904,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                 memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);
 
             retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
-            sf_restore(rb.ring_sf_state[ring_idx]);
+            rb_restore_slot_aux(ring_idx);
             /* R1: retro_unserialize invalidates the Emscripten rAF runner
              * captured by JS's overrideRAF interceptor. JS must re-capture
              * it via pauseMainLoop/resumeMainLoop before the next
@@ -842,7 +915,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
             rb.replay_target = rb.frame;
-            kn_hash_on_replay_enter(rb.replay_target);
+            KN_HASH_ON_REPLAY_ENTER(rb_frame);
             rb.frame = rb_frame;
             rb.replay_depth = depth;
             rb.replay_start = rb_frame;
@@ -885,9 +958,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
          * R5 diagnostic: log the replay frame details. */
         rb_log("C-REPLAY-FRAME f=%d remaining=%d apply=%d save_idx=%d",
             rb.frame, rb.replay_remaining, replay_apply, save_idx);
-        retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-        rb.ring_sf_state[save_idx] = sf_pack();
-        rb.ring_frames[save_idx] = rb.frame;
+        rb_save_slot(save_idx, rb.frame, 0);
 
         /* Write inputs for this replay frame (logged for divergence detection) */
         if (replay_apply >= 0) {
@@ -1000,13 +1071,12 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
          *
          * Cost: ~3-5ms per serialize (16MB). At 60fps with the gate, we
          * already saved ~59% of frames. Going to 100% adds ~1.5-2ms/frame
-         * average — well within the 16.6ms budget. Eliminates ring gaps. */
+        * average — well within the 16.6ms budget. Eliminates ring gaps. */
         {
             int save_idx = rb.frame % rb.ring_size;
-            retro_serialize(rb.ring_bufs[save_idx], rb.state_size);
-            rb.ring_sf_state[save_idx] = sf_pack();
-            rb.ring_frames[save_idx] = rb.frame;
-            rb.last_save_frame = rb.frame;
+            if (rb.last_save_frame != rb.frame) {
+                rb_save_slot(save_idx, rb.frame, 1);
+            }
         }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
@@ -1206,45 +1276,19 @@ int kn_post_tick(void) {
     rb.frame++;
     /* Refresh field-granular hashes and append to history rings.
      * No-op if RDRAM not yet bound. Cheap (~8 small FNV hashes per frame). */
-    kn_hash_registry_post_tick(rb.frame, rb.replay_remaining > 0);
+    KN_HASH_REGISTRY_POST_TICK(rb.frame, rb.replay_remaining > 0);
     if (rb.replay_remaining > 0) {
         rb.replay_remaining--;
         if (rb.replay_remaining == 0) {
             rb.replay_depth = 0; /* Clear so JS R5 check doesn't false-positive */
-            /* GGPO-style full serialize: keep the replay's RDRAM as-is.
-             *
-             * The previous stash-and-restore approach saved 73 gameplay bytes
-             * from replay, restored full 8MB RDRAM to forward-pass values,
-             * then patched the 73 bytes back. GP-DUMP analysis (Apr 2026)
-             * proved this CORRUPTED game state: VS_settings were zeroed after
-             * rollback, causing camera changes and damage immunity on host.
-             *
-             * Full serialize is safe because:
-             * - Gameplay-critical values (stocks, damage, char_id) are
-             *   identical between replay and normal execution (GP-DUMP confirmed)
-             * - Non-deterministic RSP audio DRAM writes are handled by mode 2
-             *   save/restore in send_alist_to_audio_plugin (384KB, not 8MB)
-             * - Timer/RNG within-frame noise is excluded from the hash
-             * - The taint system excludes audio/heap from desync detection */
-            /* R4: Post-replay live-state verification. Hash the live
-             * emulator state and compare to what the ring claims for
-             * the just-completed frame. If they differ, the replay
-             * introduced gameplay-level drift. Log loudly; no recovery.
-             * See docs/netplay-invariants.md §R4. */
-            {
-                int target = rb.frame - 1;
-                uint32_t ring_gp = kn_gameplay_hash(target);
-                uint32_t live_gp = kn_live_gameplay_hash();
-                if (ring_gp != 0 && live_gp != 0 && ring_gp != live_gp) {
-                    rb.live_mismatch_pending = 1;
-                    rb.live_mismatch_f = target;
-                    rb.live_mismatch_replay = ring_gp;
-                    rb.live_mismatch_live = live_gp;
-                    rb_log("RB-LIVE-MISMATCH f=%d ring=0x%x live=0x%x",
-                        target, ring_gp, live_gp);
-                }
-            }
-            kn_hash_on_replay_exit(rb.frame);
+            /* The replay just produced the canonical state at rb.frame
+             * (pre-frame state for the next live tick). Save it at the start
+             * of the next kn_pre_tick, matching the normal save timing and
+             * avoiding an extra post-render retro_serialize in WebKit. */
+            rb.endpoint_save_pending = 1;
+            KN_HASH_REGISTRY_POST_TICK(rb.frame, 0);
+            rb_log("C-REPLAY-ENDPOINT-SAVE-DEFERRED f=%d", rb.frame);
+            KN_HASH_ON_REPLAY_EXIT(rb.frame);
             rb_log("C-REPLAY-DONE f=%d", rb.frame);
         }
     }
@@ -1375,7 +1419,7 @@ int kn_restore_frame(int frame) {
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
     if (!retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size)) return 0;
-    sf_restore(rb.ring_sf_state[ring_idx]);
+    rb_restore_slot_aux(ring_idx);
     return 1;
 }
 

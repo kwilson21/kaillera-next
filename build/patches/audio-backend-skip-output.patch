@@ -1,0 +1,57 @@
+diff --git a/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c b/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
+index f9014bd..29dfc95 100644
+--- a/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
++++ b/custom/mupen64plus-core/plugin/audio_libretro/audio_backend_libretro.c
+@@ -48,6 +48,36 @@ extern retro_audio_sample_batch_t audio_batch_cb;
+ 
+ static unsigned MAX_AUDIO_FRAMES = 2048;
+ 
++/* 2026-04-25: deterministic-mode audio output bypass.
++ *
++ * The default aiLenChanged path runs a sinc resampler (native float) +
++ * calls audio_batch_cb (libretro audio output, which is an Emscripten
++ * JS-import → Asyncify yield point). Both have cross-engine timing/FP
++ * behavior that varies between V8 and JSC, leaking determinism through
++ * the AI/SP subsystem state hashes (confirmed via SUBSYS-DIFF on
++ * V8/JSC pairs while V8/V8 pairs stayed clean).
++ *
++ * When kn_skip_audio_output != 0, aiLenChanged returns immediately
++ * (after the byte-swap, since the swap mutates the caller's buffer in
++ * place — matching legacy semantics). RSP audio HLE still runs and
++ * the AI controller's internal state evolves; only the final
++ * resampler + JS output callback is skipped. This keeps audio-DMA
++ * cycles deterministic while losing the host's audible output during
++ * netplay. JS layer is expected to source audio from a separate
++ * deterministic capture path (or accept silence). */
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
++int kn_skip_audio_output = 0;
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE
++#endif
++void kn_set_skip_audio_output(int skip) { kn_skip_audio_output = skip ? 1 : 0; }
++#ifdef __EMSCRIPTEN__
++EMSCRIPTEN_KEEPALIVE
++#endif
++int kn_get_skip_audio_output(void) { return kn_skip_audio_output; }
++
+ #define VI_INTR_TIME 500000
+ #define OUTPUT_RATE 44100
+ 
+@@ -260,6 +290,15 @@ static void aiLenChanged(void* user_data, const void* buffer, size_t size)
+       p[i + 1] ^= p[i + 3];
+    }
+ 
++   /* 2026-04-25: deterministic-mode early exit.
++    * Skip the resampler (native FP) and audio_batch_cb (Asyncify yield)
++    * to eliminate cross-engine non-determinism in the audio output path.
++    * Audio HLE has already finished writing samples to N64 RDRAM by this
++    * point; we just don't translate them to host audio output. */
++   if (kn_skip_audio_output) {
++      return;
++   }
++
+ #ifdef __APPLE__
+    /* Apple path: AudioConverter resamples, no float conversion needed */
+    converter_ctx_t ctx;

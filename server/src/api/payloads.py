@@ -95,6 +95,7 @@ class StartGamePayload(BaseModel):
     mode: Literal["lockstep", "streaming"] = "lockstep"
     resyncEnabled: bool = False
     romHash: str | None = None
+    gameId: str | None = Field(default=None, max_length=32)
 
 
 # ── end-game ─────────────────────────────────────────────────────────────────

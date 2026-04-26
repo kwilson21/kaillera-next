@@ -570,7 +570,8 @@
 
   const applyInputToWasm = (slot, input, prevInputs) => {
     const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?._simulate_input) return;
+    const simulateInput = mod?._kn_netplay_simulate_input || mod?._simulate_input;
+    if (!simulateInput) return;
 
     // Optional skip-if-unchanged optimization
     if (prevInputs) {
@@ -580,27 +581,27 @@
 
     // Digital buttons (0-15)
     for (let btn = 0; btn < 16; btn++) {
-      mod._simulate_input(slot, btn, (input.buttons >> btn) & 1);
+      simulateInput(slot, btn, (input.buttons >> btn) & 1);
     }
 
     // Left stick — scale N64 range (±83) to WASM range (±32767)
     const scale = 32767 / N64_MAX;
     const clamp = (v) => Math.max(-32767, Math.min(32767, Math.trunc(v * scale)));
     // Bit 16 = X positive (right), 17 = X negative (left)
-    mod._simulate_input(slot, 16, input.lx > 0 ? clamp(input.lx) : 0);
-    mod._simulate_input(slot, 17, input.lx < 0 ? clamp(-input.lx) : 0);
+    simulateInput(slot, 16, input.lx > 0 ? clamp(input.lx) : 0);
+    simulateInput(slot, 17, input.lx < 0 ? clamp(-input.lx) : 0);
     // Bit 18 = Y positive (down), 19 = Y negative (up)
-    mod._simulate_input(slot, 18, input.ly > 0 ? clamp(input.ly) : 0);
-    mod._simulate_input(slot, 19, input.ly < 0 ? clamp(-input.ly) : 0);
+    simulateInput(slot, 18, input.ly > 0 ? clamp(input.ly) : 0);
+    simulateInput(slot, 19, input.ly < 0 ? clamp(-input.ly) : 0);
 
     // C-stick (bits 20-23) — axis values OR digital button bitmask.
     // C-buttons can come from either the cx/cy axis values (analog stick)
     // or from digital button mappings (bits 20-23 in input.buttons).
     const cMax = clamp(N64_MAX);
-    mod._simulate_input(slot, 20, input.cx > 0 ? clamp(input.cx) : (input.buttons >> 20) & 1 ? cMax : 0);
-    mod._simulate_input(slot, 21, input.cx < 0 ? clamp(-input.cx) : (input.buttons >> 21) & 1 ? cMax : 0);
-    mod._simulate_input(slot, 22, input.cy > 0 ? clamp(input.cy) : (input.buttons >> 22) & 1 ? cMax : 0);
-    mod._simulate_input(slot, 23, input.cy < 0 ? clamp(-input.cy) : (input.buttons >> 23) & 1 ? cMax : 0);
+    simulateInput(slot, 20, input.cx > 0 ? clamp(input.cx) : (input.buttons >> 20) & 1 ? cMax : 0);
+    simulateInput(slot, 21, input.cx < 0 ? clamp(-input.cx) : (input.buttons >> 21) & 1 ? cMax : 0);
+    simulateInput(slot, 22, input.cy > 0 ? clamp(input.cy) : (input.buttons >> 22) & 1 ? cMax : 0);
+    simulateInput(slot, 23, input.cy < 0 ? clamp(-input.cy) : (input.buttons >> 23) & 1 ? cMax : 0);
 
     // Update previous input tracker
     if (prevInputs) {

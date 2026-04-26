@@ -21,6 +21,144 @@
 #include "kn_gameplay_addrs.h"
 #include "kn_hash_registry.h"
 
+#ifndef KN_ENABLE_HASH_REGISTRY
+
+#undef KN_KEEPALIVE
+#define KN_KEEPALIVE
+
+KN_KEEPALIVE
+uint32_t kn_hash_fnv1a(const uint8_t* data, size_t len) {
+    uint32_t h = 0x811c9dc5u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint32_t)data[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+KN_KEEPALIVE int kn_hash_registry_post_tick(int32_t frame, int in_replay) {
+    (void)frame;
+    (void)in_replay;
+    return 0;
+}
+
+KN_KEEPALIVE uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame) {
+    (void)player_idx;
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_stocks(uint8_t player_idx, uint32_t count, uint32_t* out_pairs) {
+    (void)player_idx;
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_character_id(uint8_t player_idx, int32_t frame) {
+    (void)player_idx;
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_character_id(uint8_t player_idx, uint32_t count, uint32_t* out_pairs) {
+    (void)player_idx;
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_css_cursor(uint8_t player_idx, int32_t frame) {
+    (void)player_idx;
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_css_cursor(uint8_t player_idx, uint32_t count, uint32_t* out_pairs) {
+    (void)player_idx;
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_css_selected(uint8_t player_idx, int32_t frame) {
+    (void)player_idx;
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_css_selected(uint8_t player_idx, uint32_t count, uint32_t* out_pairs) {
+    (void)player_idx;
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_rng(int32_t frame) {
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_rng(uint32_t count, uint32_t* out_pairs) {
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_match_phase(int32_t frame) {
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_match_phase(uint32_t count, uint32_t* out_pairs) {
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_vs_battle_hdr(int32_t frame) {
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_vs_battle_hdr(uint32_t count, uint32_t* out_pairs) {
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_physics_motion(int32_t frame) {
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_physics_motion(uint32_t count, uint32_t* out_pairs) {
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_hash_ft_buffer(int32_t frame) {
+    (void)frame;
+    return 0;
+}
+KN_KEEPALIVE size_t kn_hash_history_ft_buffer(uint32_t count, uint32_t* out_pairs) {
+    (void)count;
+    (void)out_pairs;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_smoke_buf_ptr(void) { return 0; }
+KN_KEEPALIVE size_t kn_smoke_dump_stocks(uint8_t player_idx, uint32_t count) {
+    (void)player_idx;
+    (void)count;
+    return 0;
+}
+KN_KEEPALIVE void kn_hash_on_replay_enter(int32_t target_frame) { (void)target_frame; }
+KN_KEEPALIVE void kn_hash_on_replay_exit(int32_t final_frame) { (void)final_frame; }
+KN_KEEPALIVE uint32_t kn_get_pre_replay_hash(kn_field_id_t field) {
+    (void)field;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_get_post_replay_hash(kn_field_id_t field) {
+    (void)field;
+    return 0;
+}
+KN_KEEPALIVE int32_t kn_get_last_replay_target_frame(void) { return -1; }
+KN_KEEPALIVE int32_t kn_get_last_replay_final_frame(void) { return -1; }
+KN_KEEPALIVE uint32_t kn_get_replay_frame_hash(kn_field_id_t field, uint32_t replay_offset) {
+    (void)field;
+    (void)replay_offset;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_get_last_replay_length(void) { return 0; }
+KN_KEEPALIVE uint8_t kn_get_scene_curr(void) { return 0; }
+
+#else
+
 /* RDRAM base pointer is owned by mupen64plus-core; expose accessor.
  * Signatures match the actual definitions in
  *   build/src/mupen64plus-libretro-nx/mupen64plus-core/src/main/main.c:329-330
@@ -71,6 +209,15 @@ typedef struct {
 
 /* Ring storage and head pointers added per-field in subsequent tasks. */
 
+static uint32_t ring_find_frame(const kn_ring_entry_t* ring, uint32_t head, int32_t frame) {
+    for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
+        uint32_t idx = (head + KN_RING_SIZE - 1 - i) % KN_RING_SIZE;
+        const kn_ring_entry_t* e = &ring[idx];
+        if (e->frame == frame) return e->hash;
+    }
+    return 0;
+}
+
 /* ── kn_hash_stocks ──────────────────────────────────────────────────
  * See header for citation block. */
 static kn_ring_entry_t s_ring_stocks[4][KN_RING_SIZE];
@@ -80,12 +227,7 @@ KN_KEEPALIVE
 uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame) {
     if (player_idx >= 4) return 0;
     if (frame >= 0) {
-        /* Read from history ring at the requested frame. */
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_stocks[player_idx][i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_stocks[player_idx], s_head_stocks[player_idx], frame);
     }
     /* Live read. */
     uint32_t off = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)player_idx * KN_PLAYER_STRIDE;
@@ -125,11 +267,7 @@ KN_KEEPALIVE
 uint32_t kn_hash_character_id(uint8_t player_idx, int32_t frame) {
     if (player_idx >= 4) return 0;
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_character_id[player_idx][i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_character_id[player_idx], s_head_character_id[player_idx], frame);
     }
     uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_CHAR_ID;
     return hash_rdram_slice(off, 4);
@@ -166,11 +304,7 @@ KN_KEEPALIVE
 uint32_t kn_hash_css_cursor(uint8_t player_idx, int32_t frame) {
     if (player_idx >= 4) return 0;
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_css_cursor[player_idx][i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_css_cursor[player_idx], s_head_css_cursor[player_idx], frame);
     }
     uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_CURSOR_STATE;
     return hash_rdram_slice(off, 4);
@@ -207,11 +341,7 @@ KN_KEEPALIVE
 uint32_t kn_hash_css_selected(uint8_t player_idx, int32_t frame) {
     if (player_idx >= 4) return 0;
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_css_selected[player_idx][i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_css_selected[player_idx], s_head_css_selected[player_idx], frame);
     }
     uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_SELECTED_FLAG;
     return hash_rdram_slice(off, 4);
@@ -247,11 +377,7 @@ static uint32_t        s_head_rng;
 KN_KEEPALIVE
 uint32_t kn_hash_rng(int32_t frame) {
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_rng[i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_rng, s_head_rng, frame);
     }
     return hash_rdram_slice(KN_ADDR_SY_UTILS_RANDOM_SEED, 4);
 }
@@ -283,11 +409,7 @@ static uint32_t        s_head_match_phase;
 KN_KEEPALIVE
 uint32_t kn_hash_match_phase(int32_t frame) {
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_match_phase[i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_match_phase, s_head_match_phase, frame);
     }
     return hash_rdram_slice(KN_ADDR_SCENE_CURR, 1);
 }
@@ -319,11 +441,7 @@ static uint32_t        s_head_vs_battle_hdr;
 KN_KEEPALIVE
 uint32_t kn_hash_vs_battle_hdr(int32_t frame) {
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_vs_battle_hdr[i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_vs_battle_hdr, s_head_vs_battle_hdr, frame);
     }
     return hash_rdram_slice(KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER);
 }
@@ -355,11 +473,7 @@ static uint32_t        s_head_physics_motion;
 KN_KEEPALIVE
 uint32_t kn_hash_physics_motion(int32_t frame) {
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_physics_motion[i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_physics_motion, s_head_physics_motion, frame);
     }
     return hash_rdram_slice(KN_ADDR_FT_MOTION_COUNT, 4);
 }
@@ -408,11 +522,7 @@ static uint32_t hash_ft_buffer_live(void) {
 KN_KEEPALIVE
 uint32_t kn_hash_ft_buffer(int32_t frame) {
     if (frame >= 0) {
-        for (uint32_t i = 0; i < KN_RING_SIZE; i++) {
-            const kn_ring_entry_t* e = &s_ring_ft_buffer[i];
-            if (e->frame == frame) return e->hash;
-        }
-        return 0;
+        return ring_find_frame(s_ring_ft_buffer, s_head_ft_buffer, frame);
     }
     return hash_ft_buffer_live();
 }
@@ -558,3 +668,5 @@ uint8_t kn_get_scene_curr(void) {
     if (!base || KN_ADDR_SCENE_CURR + 1 > kn_get_rdram_size()) return 0;
     return base[KN_ADDR_SCENE_CURR];
 }
+
+#endif

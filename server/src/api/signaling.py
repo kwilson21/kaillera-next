@@ -723,12 +723,15 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.match_id = str(uuid.uuid4())
     if payload.romHash and len(payload.romHash) >= 16:
         room.rom_hash = payload.romHash
+    if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
+        room.game_id = payload.gameId
     await sio.emit(
         "game-started",
         {
             "mode": room.mode,
             "resyncEnabled": payload.resyncEnabled,
             "romHash": room.rom_hash,
+            "gameId": room.game_id,
             "matchId": room.match_id,
         },
         room=session_id,

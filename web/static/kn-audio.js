@@ -78,10 +78,17 @@
       // after the gesture — past iOS's trust window.
       if (!_audioCtx || _audioCtx.state === 'closed') {
         const preloaded = window._kn_preloadedAudioCtx;
-        if (preloaded && preloaded.state === 'running' && preloaded.currentTime < 5) {
+        if (preloaded && preloaded.state !== 'closed') {
           _audioCtx = preloaded;
           delete window._kn_preloadedAudioCtx;
-          _log(`reusing host gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
+          if (_audioCtx.state !== 'running') {
+            _audioCtx.resume().catch((e) => {
+              _log(`preloaded AudioContext resume failed: ${e.name}: ${e.message}`);
+            });
+          }
+          _log(
+            `reusing host gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate}, time: ${_audioCtx.currentTime.toFixed(2)})`,
+          );
         } else {
           _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
         }
@@ -153,10 +160,12 @@
           spNode.connect(_audioDestNode);
         }
         const gestureDest = window._kn_gestureAudioDest;
-        if (gestureDest) {
+        if (gestureDest && gestureDest.context === _audioCtx) {
           spNode.connect(gestureDest);
           _log(`audio using ScriptProcessorNode fallback via <audio> element (ring=${ringSize})`);
         } else {
+          if (gestureDest)
+            _log('gesture audio destination belongs to a different AudioContext; using direct destination');
           spNode.connect(_audioCtx.destination);
           _log(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
         }
