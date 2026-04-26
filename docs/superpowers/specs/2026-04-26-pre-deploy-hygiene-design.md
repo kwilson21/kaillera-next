@@ -33,10 +33,22 @@ The order is chosen so each commit is small enough to verify on its own, and
 so later commits don't have to step around earlier untracked files.
 
 **Assumed starting state:** working tree matches the gitStatus snapshot
-captured at spec-write time — 14 modified files, ~30 untracked items as
-listed below. Implementer should `git status --short` and compare before
-beginning; if the tree has drifted (new modifications, files moved), pause
-and reconcile rather than proceed on the spec's stale assumption.
+captured at spec-write time. Concrete check before beginning:
+
+```bash
+git status --short | awk '/^ M/' | wc -l   # expect: 14
+git status --short | awk '/^\?\?/' | wc -l # expect: ~30 (range 28–32 ok)
+```
+
+The 14 modified files are: `build/build.sh`,
+`build/kn_rollback/{kn_hash_registry,kn_rollback}.c`,
+`server/src/api/{payloads,signaling}.py`, `web/play.html`,
+`web/static/ejs/cores/mupen64plus_next-wasm.data`,
+`web/static/{kn-audio,kn-desync-detector,kn-diagnostics,kn-state,netplay-lockstep,play,shared}.js`.
+The untracked set should match the categories enumerated in commits 1–6
+below plus the pre-step delete list. If new modifications outside this set
+exist, pause and reconcile rather than proceed on the spec's stale
+assumption.
 
 ### Pre-step (no commit) — delete scratch
 
@@ -120,21 +132,41 @@ tracked):**
 
 **Reproducibility assertion:** the trio is the output of a `build.sh` run
 against the patch set committed in this commit (`audio-backend-skip-output`
-+ `kn_rollback` C changes), with `SF_SOURCES` in its current form (lines
-517–584) — i.e. without any of the 8 untracked SoftFloat conversion files
-that are deleted in the pre-step. Anyone wanting to reproduce the binary
-runs `build.sh` against this commit's source state.
++ `kn_rollback` C changes), with `SF_SOURCES` in its current form. Concrete
+check before staging the trio:
+
+```bash
+# SF_SOURCES list must be present and unchanged from the spec-write state
+grep -nE '^[[:space:]]*SF_SOURCES=\(' build/build.sh   # expect: line 516
+sed -n '517,584p' build/build.sh | grep -c '\.c"$'     # expect: 67
+# None of the 8 deleted files should appear in SF_SOURCES
+sed -n '517,584p' build/build.sh \
+  | grep -E '(f32_to_i(32|64)|f64_to_i(32|64))'        # expect: empty
+```
+
+If any check fails, the source/binary correspondence is broken and the
+implementer must rebuild the trio from the current `build.sh` before
+committing.
 
 URL-param diagnostic flags (`knperf=light`, `kntrace=1`, `kndiag=deep`,
 `desync=deep`, `knflush=live`) are gated behind opt-in query strings and ship
 as part of this commit.
 
-### Commit 3 — `docs: refresh project + module documentation for prod cut`
+### Commit 3 — `docs: refresh project documentation for prod cut`
 
-Two passes — content freshening, then mechanical sync of headers/docstrings.
-See "Doc-refresh scope" section below for the per-file plan.
+Markdown files only. See "Doc-refresh scope — content pass" below for the
+per-file plan. Splitting markdown from module-header edits gives this
+commit a trivially-mechanical leak gate (`git diff HEAD~1 --name-only`
+must be 100% `.md`).
 
-### Commit 4 — `test: determinism automation harness`
+### Commit 4 — `docs(headers): refresh module headers and docstrings`
+
+JS/Python comment-block edits only, scoped to files touched by commit 2.
+See "Doc-refresh scope — mechanical pass" below. May be a no-op commit
+(empty range) if no header has drifted; in that case, **skip the commit
+entirely** rather than create an empty one.
+
+### Commit 5 — `test: determinism automation harness`
 
 Test-infrastructure scaffolding only; not run as part of this pass.
 
@@ -143,7 +175,7 @@ Test-infrastructure scaffolding only; not run as part of this pass.
 - `tests/fixtures/nav-recording.json`
 - `tests/package.json`
 
-### Commit 5 — `chore(diagnostics): research patches + tools (not in prod build)`
+### Commit 6 — `chore(diagnostics): research patches + tools (not in prod build)`
 
 Non-runtime, non-build-input research artifacts kept for future investigation.
 
@@ -166,13 +198,13 @@ Non-runtime, non-build-input research artifacts kept for future investigation.
 - `trace_extract.py`, `trace_generate.py` (training-data tooling for vision
   pipeline; classified as research, not runtime/build/test infra)
 
-After commit 5, `git status --porcelain` is empty.
+After commit 6, `git status --porcelain` is empty.
 
-## Doc-refresh scope (commit 3)
+## Doc-refresh scope (commits 3 + 4)
 
-Two passes.
+Two passes, split into two separate commits so each has a clean leak gate.
 
-### Content pass — verify and minimally update
+### Content pass — verify and minimally update (commit 3)
 
 For each file, read it against current code and either: (a) leave unchanged
 if accurate, (b) update specific lines that drifted, or (c) prepend a
@@ -197,7 +229,7 @@ historical note rather than rewrite if it has drifted too far.
   lockstep code; add the menu-start barrier as part of the I1 deadline-site
   list if it qualifies.
 
-### Mechanical pass — module headers and docstrings
+### Mechanical pass — module headers and docstrings (commit 4)
 
 Scope is **explicitly limited** to files touched by commit 2 (the runtime
 fix), since these are the modules whose purpose may have drifted from their
@@ -244,26 +276,37 @@ stress run is required in this hygiene pass; cite the already-run V8/JSC
 that practical. The runtime fix was validated before this commit-split pass
 began.
 
-**Commit 3 specifically:** docs commit must not leak source edits. Run:
+**Commit 3 specifically (markdown-only):** mechanically verify no
+non-markdown file is in the commit:
 
 ```bash
-git diff HEAD~1 -- '*.js' '*.py' \
-  | grep -E '^[+-][^+-]' \
-  | grep -vE '^[+-][[:space:]]*(//|#|/\*|\*|\*/)'
+git diff HEAD~1 --name-only | grep -vE '\.md$'
 ```
 
-This filters for `+`/`-` lines that are NOT comment-block content. Output
-should be empty. If anything appears, a non-comment source edit slipped into
-the docs commit and must be split out before continuing. Markdown files
-(`*.md`) are not subject to this check.
+Output must be empty. No regex pitfalls — pure filename filter.
+
+**Commit 4 specifically (module headers, may be skipped):** if the commit
+exists, every changed file must be in the 11-file allowlist from the
+mechanical-pass section, and edits must be eyeball-verified comment-only.
+Concrete pre-check:
+
+```bash
+# Allowlist check
+git diff HEAD~1 --name-only | grep -vE '^(web/static/(netplay-lockstep|kn-desync-detector|kn-diagnostics|kn-state|kn-audio|play|shared)\.js|server/src/api/(payloads|signaling|desync_prompts|desync_vision)\.py)$'
+```
+
+Output must be empty. Then human eyeball pass over `git diff HEAD~1`
+confirms each `+`/`-` is inside a `//`, `/* */`, `#`, or `"""…"""` block.
+If unsure, split the suspicious file out into its own commit.
 
 **Final gate, in order:**
 
 1. `git status --porcelain` returns empty (no untracked, no unstaged, no
    staged-but-uncommitted).
-2. `git log origin/main..HEAD --oneline` shows the 5 commits in the expected
-   order — the user reads this list and confirms it matches the sequence
-   above before running `just deploy-dry`.
+2. `git log origin/main..HEAD --oneline` shows the expected commit sequence
+   (5 commits if commit 4 was a no-op skip, 6 commits otherwise) — the user
+   reads this list and confirms it matches the sequence above before running
+   `just deploy-dry`.
 
 ## Risks & mitigations
 
@@ -278,7 +321,7 @@ the docs commit and must be split out before continuing. Markdown files
 
 ## Handoff
 
-After commit 5, the user runs:
+After the final commit (5 or 6), the user runs:
 
 ```
 just deploy-dry   # preview unpushed commits + version bump
