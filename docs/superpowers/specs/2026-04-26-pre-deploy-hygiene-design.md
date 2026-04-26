@@ -228,24 +228,40 @@ historical note rather than rewrite if it has drifted too far.
 - **`docs/netplay-invariants.md`** — verify I1/I2/R1–R6 still match the
   lockstep code; add the menu-start barrier as part of the I1 deadline-site
   list if it qualifies.
+- **`docs/research/cross-engine-determinism-investigation.md`** (currently
+  untracked — newly committed) — research artifact; commit as-is, no
+  freshening (research is point-in-time by nature). Verify it has a date or
+  status header; if not, prepend one.
+- **`docs/research/floppyfloat-vs-softfloat-verdict.md`** (currently
+  untracked — newly committed) — same treatment.
+
+These two `docs/research/` files are why commit 3 is the natural home for
+the untracked doc additions: they live alongside the existing freshened
+markdown and need to land somewhere for `git status --porcelain` to be
+clean at the final gate.
 
 ### Mechanical pass — module headers and docstrings (commit 4)
 
-Scope is **explicitly limited** to files touched by commit 2 (the runtime
-fix), since these are the modules whose purpose may have drifted from their
-header. Files not in this list are skipped this pass.
+Scope is the **12-file allowlist** below: files touched by commit 2 plus the
+three vision-pipeline collaborators introduced in prior commit `35e486b`
+(`desync_prompts.py`, `desync_vision.py`, `kn-vision-client.js`). The vision
+trio is in scope because their headers describe a multi-file feature surface
+that may have drifted as the cross-peer detector wiring evolved in commit 2,
+even though the files themselves are unmodified. Files not in this list are
+skipped this pass.
 
 - `web/static/netplay-lockstep.js`
 - `web/static/kn-desync-detector.js`
 - `web/static/kn-diagnostics.js`
 - `web/static/kn-state.js`
 - `web/static/kn-audio.js`
+- `web/static/kn-vision-client.js` (vision collaborator; tracked, unmodified)
 - `web/static/play.js`
 - `web/static/shared.js`
 - `server/src/api/payloads.py`
 - `server/src/api/signaling.py`
-- `server/src/api/desync_prompts.py` (confirmed present at spec-write time)
-- `server/src/api/desync_vision.py` (confirmed present at spec-write time)
+- `server/src/api/desync_prompts.py` (vision collaborator; tracked, unmodified)
+- `server/src/api/desync_vision.py` (vision collaborator; tracked, unmodified)
 
 For each file: read the existing top-of-file comment / module docstring; if
 it accurately describes the file's current purpose and collaborators,
@@ -286,13 +302,13 @@ git diff HEAD~1 --name-only | grep -vE '\.md$'
 Output must be empty. No regex pitfalls — pure filename filter.
 
 **Commit 4 specifically (module headers, may be skipped):** if the commit
-exists, every changed file must be in the 11-file allowlist from the
+exists, every changed file must be in the 12-file allowlist from the
 mechanical-pass section, and edits must be eyeball-verified comment-only.
 Concrete pre-check:
 
 ```bash
 # Allowlist check
-git diff HEAD~1 --name-only | grep -vE '^(web/static/(netplay-lockstep|kn-desync-detector|kn-diagnostics|kn-state|kn-audio|play|shared)\.js|server/src/api/(payloads|signaling|desync_prompts|desync_vision)\.py)$'
+git diff HEAD~1 --name-only | grep -vE '^(web/static/(netplay-lockstep|kn-desync-detector|kn-diagnostics|kn-state|kn-audio|kn-vision-client|play|shared)\.js|server/src/api/(payloads|signaling|desync_prompts|desync_vision)\.py)$'
 ```
 
 Output must be empty. Then human eyeball pass over `git diff HEAD~1`
