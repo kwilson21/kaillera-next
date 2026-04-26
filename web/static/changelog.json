@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.47.0",
+    "date": "2026-04-26",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "field-granular hash registry + cross-peer detector + Claude vision pipeline"
+      },
+      {
+        "type": "feat",
+        "message": "add menu-start barrier and C-input pipeline"
+      },
+      {
+        "type": "fix",
+        "message": "skip BOOT-SYNC when match started from kn-sync initial state"
+      }
+    ]
+  },
+  {
     "version": "0.46.0",
     "date": "2026-04-14",
     "changes": [
