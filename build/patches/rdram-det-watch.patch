@@ -1,0 +1,36 @@
+diff --git a/mupen64plus-core/src/device/rdram/rdram.c b/mupen64plus-core/src/device/rdram/rdram.c
+index 28065ea..9e4cc54 100644
+--- a/mupen64plus-core/src/device/rdram/rdram.c
++++ b/mupen64plus-core/src/device/rdram/rdram.c
+@@ -32,6 +32,9 @@
+ 
+ #define RDRAM_BCAST_ADDRESS_MASK UINT32_C(0x00080000)
+ 
++extern void kn_det_watch_rdram_write(uint32_t rdram_off, uint32_t old_value, uint32_t new_value,
++                                     uint32_t raw_value, uint32_t mask, uint32_t pc, uint32_t cp0);
++
+ 
+ /* XXX: deduce # of RDRAM modules from it's total size
+  * Assume only 2Mo RDRAM modules.
+@@ -245,9 +248,21 @@ void write_rdram_dram(void* opaque, uint32_t address, uint32_t value, uint32_t m
+ {
+     struct rdram* rdram = (struct rdram*)opaque;
+     uint32_t addr = rdram_dram_address(address);
++    uint32_t rdram_off = address & 0xfffffcu;
++    int watch = (rdram_off == 0x03B940u || rdram_off == 0x130D94u);
++    uint32_t old_value = 0;
+ 
+     if (address < rdram->dram_size)
+     {
++        if (watch) old_value = rdram->dram[addr];
+         masked_write(&rdram->dram[addr], value, mask);
++        if (watch) {
++            uint32_t new_value = rdram->dram[addr];
++            if (new_value != old_value) {
++                uint32_t pc = rdram->r4300 ? *r4300_pc(rdram->r4300) : 0;
++                uint32_t cp0 = rdram->r4300 ? rdram->r4300->cp0.regs[CP0_COUNT_REG] : 0;
++                kn_det_watch_rdram_write(rdram_off, old_value, new_value, value, mask, pc, cp0);
++            }
++        }
+     }
+ }

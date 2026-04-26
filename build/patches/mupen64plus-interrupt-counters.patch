@@ -1,0 +1,92 @@
+diff --git a/mupen64plus-core/src/device/r4300/interrupt.c b/mupen64plus-core/src/device/r4300/interrupt.c
+--- a/mupen64plus-core/src/device/r4300/interrupt.c
++++ b/mupen64plus-core/src/device/r4300/interrupt.c
+@@ -575,6 +575,43 @@ void gen_interrupt(struct r4300_core* r4300)
+         return;
+     }
+
++#ifdef __EMSCRIPTEN__
++    /* kaillera-next: per-interrupt-type fire counters + last-fire cycle.
++     * Diagnostic to detect cross-peer divergence in interrupt dispatch
++     * timing: if two peers have different fire counts at the same game
++     * frame, something is driving different interrupt schedules even
++     * with identical inputs. Also log the cp0 count at each fire so we
++     * can see whether interrupts fire at identical cycles cross-peer. */
++    #include <emscripten.h>
++    /* Order matches the switch below: VI, COMPARE, CHECK, SI, PI, SPECIAL,
++     * AI, SP, DP, HW2, NMI. 11 slots; add more if switch expands. */
++    extern uint32_t kn_int_fire_count[11];
++    extern uint32_t kn_int_last_fire_cycle[11];
++    extern int kn_int_fire_type_to_idx(int type);
++#endif
++
+     switch (r4300->cp0.q.first->data.type)
+     {
++#ifdef __EMSCRIPTEN__
++#define KN_INT_COUNT(idx) do { \
++        kn_int_fire_count[(idx)]++; \
++        kn_int_last_fire_cycle[(idx)] = r4300->cp0.regs[CP0_COUNT_REG]; \
++    } while(0)
++#else
++#define KN_INT_COUNT(idx) do { } while(0)
++#endif
+         case VI_INT:
++            KN_INT_COUNT(0);
+             call_interrupt_handler(&r4300->cp0, 0);
+             break;
+
+         case COMPARE_INT:
++            KN_INT_COUNT(1);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 1);
+             break;
+
+         case CHECK_INT:
++            KN_INT_COUNT(2);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 2);
+             break;
+
+         case SI_INT:
++            KN_INT_COUNT(3);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 3);
+             break;
+
+         case PI_INT:
++            KN_INT_COUNT(4);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 4);
+             break;
+
+         case SPECIAL_INT:
++            KN_INT_COUNT(5);
+             call_interrupt_handler(&r4300->cp0, 5);
+             break;
+
+         case AI_INT:
++            KN_INT_COUNT(6);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 6);
+             break;
+
+         case SP_INT:
++            KN_INT_COUNT(7);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 7);
+             break;
+
+         case DP_INT:
++            KN_INT_COUNT(8);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 8);
+             break;
+
+         case HW2_INT:
++            KN_INT_COUNT(9);
+             remove_interrupt_event(&r4300->cp0);
+             call_interrupt_handler(&r4300->cp0, 9);
+             break;
+
+         case NMI_INT:
++            KN_INT_COUNT(10);
