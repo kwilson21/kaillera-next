@@ -1325,7 +1325,9 @@
   let _menuStartReadyLastBroadcast = 0;
   const PHASE_BROADCAST_INTERVAL_MS = 100;
   const PHASE_STALE_MS = 1500;
+  const PHASE_TRANSITION_GRACE_FRAMES = 12;
   let _peerPhases = {}; // slot -> { frame, sceneCurr, gameStatus, gameplay, seenAt }
+  let _phaseMismatchGrace = {}; // slot -> { key, frame }
   let _lastPhaseBroadcastAt = 0;
   let _lastPhaseBroadcastKey = '';
   let _lastPeerPhaseWaitLogFrame = -1;
@@ -1424,12 +1426,16 @@
     const gameStatus = _readGameStatus();
     const sceneCurr = _readSceneCurr();
     const inControllableMenu = _isControllableMenuScene(sceneCurr);
+    const inBattleTransition = sceneCurr === 22 && gameStatus === 0;
     const gameplay = sceneCurr === 22 && gameStatus === 1;
+    const strictInputLockstep = !inBattleTransition && (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
     return {
       gameStatus,
       sceneCurr,
       inControllableMenu,
+      inBattleTransition,
       gameplay,
+      strictInputLockstep,
       active: _isSmashRemix() && (inControllableMenu || (!!enabled && gameStatus >= 0 && gameStatus !== 1)),
     };
   };
@@ -1439,24 +1445,44 @@
     const waitingPeerSlots = [];
 
     if (_isSmashRemix() && !!enabled) {
-      const shouldAlignPhase =
-        phase.gameplay || phase.inControllableMenu || (phase.gameStatus >= 0 && phase.gameStatus !== 1);
+      const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;
       const nowMs = performance.now();
       for (const p of getActivePeers()) {
         if (p.reconnecting || p.slot === null || p.slot === undefined || _peerPhantom[p.slot]) continue;
         const peerPhase = _peerPhases[p.slot];
         if (!peerPhase || nowMs - (peerPhase.seenAt || 0) > PHASE_STALE_MS) {
+          delete _phaseMismatchGrace[p.slot];
           if (shouldAlignPhase) waitingPeerSlots.push(p.slot);
           continue;
         }
         if (phase.gameplay) {
+          delete _phaseMismatchGrace[p.slot];
           if (!peerPhase.gameplay && peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);
           continue;
         }
-        if (!shouldAlignPhase) continue;
+        if (!shouldAlignPhase) {
+          delete _phaseMismatchGrace[p.slot];
+          continue;
+        }
 
         const peerAligned = peerPhase.sceneCurr === phase.sceneCurr && peerPhase.gameStatus === phase.gameStatus;
-        if (!peerAligned && peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);
+        if (peerAligned) {
+          delete _phaseMismatchGrace[p.slot];
+          continue;
+        }
+
+        // Scene changes are observed after a frame has already advanced on the
+        // peer that got there first. Give this peer a few real-input-backed
+        // frames to land in the same menu before treating the phase as stuck.
+        const mismatchKey = `${phase.sceneCurr}:${phase.gameStatus}->${peerPhase.sceneCurr}:${peerPhase.gameStatus}`;
+        const grace = _phaseMismatchGrace[p.slot];
+        if (!grace || grace.key !== mismatchKey) {
+          _phaseMismatchGrace[p.slot] = { key: mismatchKey, frame: _frameNum };
+          continue;
+        }
+        if (_frameNum - grace.frame < PHASE_TRANSITION_GRACE_FRAMES) continue;
+
+        if (peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);
       }
     }
 
@@ -3317,6 +3343,8 @@
    *   - _lastRemoteFramePerSlot[slot]  (highest received frame)
    *   - _peerLastAdvanceTime[slot]     (wall-clock of last new frame)
    *   - _peerPhantom[slot]             (dead-peer flag)
+   *   - _peerPhases[slot]              (last menu/gameplay phase broadcast)
+   *   - _phaseMismatchGrace[slot]      (phase transition grace window)
    *   - _consecutiveFabrications[slot] (fabrication counter)
    *   - _inputLateLogTime[slot]        (rate-limit timestamp)
    *   - _auditRemoteInputs[slot]       (audit log buffer)
@@ -3349,6 +3377,8 @@
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
     delete _peerPhantom[slot];
+    delete _peerPhases[slot];
+    delete _phaseMismatchGrace[slot];
     delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
     delete _auditRemoteInputs[slot];
@@ -5520,6 +5550,7 @@
       _menuStartReadyPeers = {};
       _menuStartReadyLastBroadcast = 0;
       _peerPhases = {};
+      _phaseMismatchGrace = {};
       _lastPhaseBroadcastAt = 0;
       _lastPhaseBroadcastKey = '';
       _lastPeerPhaseWaitLogFrame = -1;
@@ -6639,14 +6670,16 @@
       // remote input before every frame. Prevents the boot race where
       // both emulators predict through boot frames and desync.
       //
-      // MENU (game_status != 1): pure lockstep stall — rollback's
-      // stash-and-restore only preserves ~73 bytes of in-match gameplay
-      // state (damage, stocks, RNG, screen). Menu navigation state
-      // (CSS cursors, stage selection, transition timers) lives outside
-      // those bytes. A misprediction during menus corrupts the game
-      // state: current_screen says "in match" but internal menu
-      // structures are from the prediction pass → host skips stage
-      // select entirely. Pure lockstep during menus prevents this.
+      // STRICT MENU (Title/Mode Select/CSS/stage select/pause): pure
+      // lockstep stall. Rollback's stash-and-restore only preserves
+      // in-match gameplay state; menu navigation state lives outside
+      // those bytes. A misprediction during menus can corrupt the setup
+      // path, so we never fabricate inputs there.
+      //
+      // MATCH LOADING (scene=22, game_status=0): not a controllable menu.
+      // It must not use the no-timeout menu stall path; a single missing
+      // mobile frame at this transition would otherwise freeze both peers
+      // before gameplay. Let rollback/pacing handle this phase.
       //
       // GAMEPLAY (game_status == 1, after BOOT_GRACE_FRAMES): let
       // rollback predict through the first few frames of missing input
@@ -6672,12 +6705,13 @@
       const _bootDoneForSync = _frameNum - _bootRef > BOOT_GRACE_FRAMES;
       const _bootDone = true;
       // Gate rollback on SSB64 menu/gameplay phase. Active gameplay may use
-      // rollback prediction; all non-gameplay/menu frames after boot grace use
-      // pure lockstep so irreversible menu edges are never predicted.
+      // rollback prediction; strict input menus use pure lockstep so
+      // irreversible menu edges are never predicted.
       const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
-      const { gameStatus, sceneCurr, inControllableMenu } = menuPhase;
-      // game_status: 0=wait (CSS/menus), 1=ongoing, 2=paused, 5=end.
-      // Only status 0 is dangerous for rollback (menu state corruption).
+      const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
+      // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
+      // Status 0 is dangerous only in controllable menus; scene=22/status=0
+      // is battle loading and uses rollback/pacing instead of no-timeout lockstep.
       // Status -1 means RDRAM not available (non-SSB64) — safe fallback.
       // scene_curr lets us enter strict lockstep at Title/Mode Select/1P/VS
       // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
@@ -6697,7 +6731,7 @@
       // fabricate missing remote inputs. This intentionally does not request
       // or apply a state push; menu determinism comes from preventing the bad
       // predicted frame, not resyncing after it.
-      if (inMenu && !window._knCssSyncDone) {
+      if (strictInputLockstep && !window._knCssSyncDone) {
         window._knCssSyncDone = true;
         _syncLog(`MENU-LOCKSTEP armed at f=${_frameNum}, scene=${sceneCurr}, gameStatus=${gameStatus}`);
       }
@@ -6708,10 +6742,10 @@
             `waitingPeers=[${menuPhase.waitingPeerSlots.join(',')}]`,
         );
       }
-      // Lockstep stall during controllable menus. During boot and intro, run
-      // freely; once scene_curr reaches Title/Mode Select/menus, never
-      // fabricate missing remote input.
-      const _menuLockstepActive = inMenu;
+      // Lockstep stall during controllable menus. During boot, intro, and
+      // battle loading, run freely; once scene_curr reaches Title/Mode
+      // Select/menus, never fabricate missing remote input.
+      const _menuLockstepActive = strictInputLockstep;
       const _rbBootConverged = _bootDone && !_menuLockstepActive;
       if (menuPhase.waitingPeerSlots?.length) return;
       // Boot sync: legacy savestate startup can still need one host state push
@@ -8030,7 +8064,7 @@
     // have input for the apply frame. Late joiners who haven't started
     // sending yet won't stall existing players.
     const menuLockstepPhase = _readStrictPhaseLock(_frameNum > BOOT_GRACE_FRAMES);
-    const inputPeers = getInputPeers(menuLockstepPhase.active);
+    const inputPeers = getInputPeers(menuLockstepPhase.strictInputLockstep);
     const applyFrame = _frameNum - DELAY_FRAMES;
     if (applyFrame >= 0) {
       let allArrived = true;
@@ -8044,7 +8078,7 @@
       }
 
       if (!allArrived) {
-        if (menuLockstepPhase.active) {
+        if (menuLockstepPhase.strictInputLockstep) {
           if (_stallStart === 0) {
             _stallStart = now;
             _resendSent = false;
@@ -9274,6 +9308,7 @@
     _menuStartReadyPeers = {};
     _menuStartReadyLastBroadcast = 0;
     _peerPhases = {};
+    _phaseMismatchGrace = {};
     _lastPhaseBroadcastAt = 0;
     _lastPhaseBroadcastKey = '';
     _lastPeerPhaseWaitLogFrame = -1;
