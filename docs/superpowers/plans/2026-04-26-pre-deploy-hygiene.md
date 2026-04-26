@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Take the working tree from its current state (14 modified + ~30 untracked + stale docs) to a clean `main` with semantically split commits, ready for the user to run `just deploy`.
+**Goal:** Take the working tree from its current state (14 modified + 46 untracked + stale docs) to a clean `main` with semantically split commits, ready for the user to run `just deploy`.
 
 **Architecture:** A single linear sequence of 6 commits (5 if commit 4 is a no-op skip). No code logic changes — this is a hygiene/triage/doc pass. Each commit has a concrete pre-flight assertion, a precise stage list, a diff verification, and a structured commit message. Per-commit gates catch source-edit leaks into doc commits and missing files at the final gate.
 
@@ -57,14 +57,68 @@ test ! -d .git/rebase-merge && test ! -d .git/rebase-apply && echo "no rebase in
 ```
 Expected: `main`, then a non-zero count, then `no rebase in progress`. If the branch is not `main` or a rebase is in progress, **stop and surface to user.**
 
-- [ ] **Step 2: Count modified and untracked files**
+- [ ] **Step 2: Verify the untracked set matches the expected list exactly**
 
-Run:
+A count-only check is fragile (directories collapse to one `??` entry; mixing files and dirs makes a count target ambiguous). Use a set-diff instead:
+
 ```bash
-git status --short | awk '/^ M/' | wc -l
-git status --short | awk '/^\?\?/' | wc -l
+git status --short | awk '/^\?\?/ {print $2}' | sort > /tmp/actual_untracked.txt
+cat <<'EOF' | sort > /tmp/expected_untracked.txt
+build/build/
+build/calc_ft_mask.py
+build/patch-asyncify-counter.mjs
+build/patch-asyncify-counter.py
+build/patch-fpu-rounding.py
+build/patches/audio-backend-skip-output.patch
+build/patches/mupen64plus-defer-video.patch
+build/patches/mupen64plus-interrupt-counters.patch
+build/patches/rdram-det-watch.patch
+build/recomp-tool/
+build/recomp/
+build/softfloat/f32_to_i32.c
+build/softfloat/f32_to_i32_r_minMag.c
+build/softfloat/f32_to_i64.c
+build/softfloat/f32_to_i64_r_minMag.c
+build/softfloat/f64_to_i32.c
+build/softfloat/f64_to_i32_r_minMag.c
+build/softfloat/f64_to_i64.c
+build/softfloat/f64_to_i64_r_minMag.c
+build/test/
+docs/research/
+round3-log.json
+round3-postfix-log.json
+server/kaillera.db
+tests/determinism-automation.mjs
+tests/fixtures/
+tests/package.json
+tests/recomp-ci/
+tests/record-nav-auto.mjs
+tests/record-nav.mjs
+tools/composite_grid.py
+tools/composite_screenshots.py
+tools/deepseek_screenshot_diff.py
+tools/diff_rand_calls.py
+tools/diff_thread_samples.py
+tools/dl-recorder/
+tools/pc_to_symbol.py
+tools/rdram_diff.py
+tools/trace_extract.py
+tools/trace_generate.py
+web/smash64r-test/
+web/static/ejs/cores/mupen64plus_next-wasm.data.bak-20260424-1245
+web/static/ejs/cores/mupen64plus_next-wasm.data.bak-8927a38a
+web/static/ejs/cores/mupen64plus_next_libretro.js
+web/static/ejs/cores/mupen64plus_next_libretro.wasm
+web/webgpu-pivot-test/
+EOF
+diff /tmp/expected_untracked.txt /tmp/actual_untracked.txt
 ```
-Expected: `14` for modified, a value in `28..32` for untracked. If counts don't match, the tree drifted since spec write — **stop, surface drift to user, do not proceed.**
+
+Expected: no diff output (silent success) and 46 entries on each side. If diff appears, the tree drifted since spec write — **stop, surface drift to user, do not proceed.** Likewise count modified files separately:
+
+```bash
+git status --short | awk '/^ M/' | wc -l   # expect: 14
+```
 
 - [ ] **Step 3: Verify the 14 modified files match the spec list**
 

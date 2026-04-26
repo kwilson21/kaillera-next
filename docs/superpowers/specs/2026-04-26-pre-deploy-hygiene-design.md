@@ -6,7 +6,7 @@
 
 ## Goal
 
-Take the working tree from its current state (14 modified files + ~30 untracked
+Take the working tree from its current state (14 modified files + 46 untracked
 items + stale docs) to a clean, deployable `main` with semantically split
 commits and freshened documentation. **No structural refactor of monolith
 files.** The deploy itself (`just deploy`) is out of scope — this prep pass
@@ -37,7 +37,7 @@ captured at spec-write time. Concrete check before beginning:
 
 ```bash
 git status --short | awk '/^ M/' | wc -l   # expect: 14
-git status --short | awk '/^\?\?/' | wc -l # expect: ~30 (range 28–32 ok)
+git status --short | awk '/^\?\?/' | wc -l # expect: 46 (set-diff in plan is the real gate)
 ```
 
 The 14 modified files are: `build/build.sh`,
