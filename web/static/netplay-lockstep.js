@@ -1237,6 +1237,7 @@
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
   let _guestStateBytes = null; // decompressed state bytes to load
   let _guestStateKind = 'savestate'; // 'savestate' or 'kn-sync'
+  let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateCapturedLocally = false; // host already sits at this paused state
   let _frameNum = 0; // current logical frame number
@@ -4144,6 +4145,7 @@
     // internals in reset shape while RDRAM/CPU are from the title screen.
     const readyMod = gm.Module;
     const isKnSyncInitialState = _guestStateKind === 'kn-sync';
+    _lockstepStartStateKind = isKnSyncInitialState ? 'kn-sync' : 'savestate';
     const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally && _playerSlot === 0;
     if (!_isSmashRemix() && !isKnSyncInitialState && readyMod?._retro_reset) {
       readyMod._retro_reset();
@@ -6712,16 +6714,13 @@
       const _menuLockstepActive = inMenu;
       const _rbBootConverged = _bootDone && !_menuLockstepActive;
       if (menuPhase.waitingPeerSlots?.length) return;
-      // Boot sync: guest requests host state when boot grace period ends.
-      // Different Safari/JIT versions produce different boot RDRAM (CP0_COUNT,
-      // interrupt timing, RSP work area). A one-time state push from host
-      // forces identical starting state regardless of JIT differences.
-      // Triggers on _bootDone (not _rbBootConverged) so it fires during
-      // menus — waiting for GAMEPLAY transition is too late (1500+ frames
-      // of divergent menu execution).
+      // Boot sync: legacy savestate startup can still need one host state push
+      // after boot grace. kn-sync startup already loaded the host's authoritative
+      // CPU/peripheral/RDRAM state at the manual start boundary; repeating that
+      // push can rewind the guest after menus have begun and create an input stall.
       if (_bootDoneForSync && !window._knBootSyncDone) {
         window._knBootSyncDone = true;
-        if (_syncEnabled && _playerSlot !== 0) {
+        if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
           if (hostPeer?.dc?.readyState === 'open') {
             try {
@@ -6731,6 +6730,8 @@
               _syncLog(`BOOT-SYNC send failed: ${e}`);
             }
           }
+        } else if (_syncEnabled && _playerSlot !== 0) {
+          _syncLog(`BOOT-SYNC skipped: initial state already ${_lockstepStartStateKind}`);
         }
       }
       const rbApplyFrame = _frameNum - DELAY_FRAMES;
@@ -9289,6 +9290,7 @@
     _lockstepReadyPeers = {};
     _guestStateBytes = null;
     _guestStateKind = 'savestate';
+    _lockstepStartStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateCapturedLocally = false;
     _knownPlayers = {};
