@@ -71,7 +71,7 @@
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
-  let _gameResyncEnabled = false;
+  let _gameResyncEnabled = true;
   let previousPlayers = {};
   let previousSpectators = {};
   let _lateJoin = false;
@@ -1072,7 +1072,7 @@
       `gameRunning=${gameRunning}`,
     );
     mode = data.mode || mode;
-    _gameResyncEnabled = !!data.resyncEnabled;
+    _gameResyncEnabled = data.resyncEnabled !== false;
     if (data.gameId) {
       _gameId = data.gameId;
       KNState.gameId = _gameId;
@@ -3188,7 +3188,7 @@
       'start-game',
       {
         mode: selectedMode,
-        resyncEnabled: optResync ? optResync.checked : false,
+        resyncEnabled: optResync ? optResync.checked : true,
         romHash: _romHash ?? null,
         gameId: _gameId ?? null,
       },

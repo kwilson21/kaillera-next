@@ -174,7 +174,7 @@
  *
  * ── Desync Detection & Resync (Star Topology) ────────────────────────────
  *
- *   Opt-in (resyncEnabled flag). Star topology: host (slot 0) is the
+ *   Enabled by default (resyncEnabled flag). Star topology: host (slot 0) is the
  *   sync authority. Two hashing paths:
  *
  *   1. C-level (patched core): _kn_sync_hash() hashes game-specific
@@ -187,8 +187,9 @@
  *
  *   Periodic hash broadcasts are disabled — AI DMA determinism +
  *   SoftFloat FPU makes steady-state gameplay deterministic. Resync is
- *   only triggered by reconnect/peer-recovery events and explicit
- *   sync-requests. When triggered, the host responds with compressed
+ *   triggered by reconnect, mobile lifecycle, network-change, input-stall,
+ *   boot-correction, peer-recovery, and explicit sync-request paths.
+ *   When triggered, the host responds with compressed
  *   state in 64KB DataChannel chunks. State is buffered for async
  *   application at the next clean frame boundary — no mid-frame stall.
  *   Resync attempts use exponential backoff (400ms→8s) to avoid cascades.
@@ -1796,8 +1797,8 @@
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
 
-  // State sync — host checks game state hash and pushes only when desynced
-  let _syncEnabled = false; // off by default — opt-in via toolbar button
+  // State sync — host-authoritative guest reloads for recovery paths.
+  let _syncEnabled = false; // enabled by default at init; host can disable from the toolbar
   // (sync compression uses CompressionStream/DecompressionStream directly)
   let _syncCheckInterval = 10; // check hash every N frames (~166ms at 60fps)
   let _syncBaseInterval = 10; // direct RDRAM reads are ~0.1ms (no getState)
@@ -9400,7 +9401,7 @@
     //   - RDRAM anchors: audio regions diverge cross-platform (RSP HLE WASM JIT differences)
     //   - Canvas hash: WebGL preserveDrawingBuffer returns constant; GPU rendering differs
     //   - kn_frame_hash: VI RDRAM not updated by GLideN64
-    // Resync is only triggered by reconnect/peer-recovery events.
+    // Resync is triggered by explicit recovery paths, not by periodic hash checks.
     // Lazy detection for C-level sync (needed for state transfer on reconnect)
     if (_syncEnabled && _playerSlot === 0 && _frameNum === 510) {
       const mod = window.EJS_emulator?.gameManager?.Module;
@@ -10205,7 +10206,7 @@
     _isSpectator = config.isSpectator;
 
     // Apply pre-game options
-    _syncEnabled = !!config.resyncEnabled; // default: false
+    _syncEnabled = config.resyncEnabled !== false; // default: true
     _lateJoin = !!config.lateJoin;
 
     window._playerSlot = _playerSlot;
