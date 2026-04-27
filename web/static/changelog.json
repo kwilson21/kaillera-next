@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.47.3",
+    "date": "2026-04-27",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "stabilize CSS late join activation"
+      }
+    ]
+  },
+  {
     "version": "0.47.2",
     "date": "2026-04-26",
     "changes": [
