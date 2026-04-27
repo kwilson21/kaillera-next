@@ -1,5 +1,23 @@
 [
   {
+    "version": "0.47.10",
+    "date": "2026-04-27",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "recover from mobile lifecycle desync"
+      },
+      {
+        "type": "fix",
+        "message": "prevent mobile lifecycle pause desyncs"
+      },
+      {
+        "type": "fix",
+        "message": "enable resync by default"
+      }
+    ]
+  },
+  {
     "version": "0.47.9",
     "date": "2026-04-27",
     "changes": [
