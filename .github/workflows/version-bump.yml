@@ -31,7 +31,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run version bump
-        run: bash scripts/bump-version.sh
+        # `just deploy` invokes the script with no args (range = origin/main..HEAD).
+        # Here, post-squash-merge, origin/main == HEAD, so we pass --from with
+        # the pre-push SHA (github.event.before) so the script's RANGE covers
+        # exactly the commits the merge introduced. Everything else — bump
+        # rule, changelog, commit, tag — is identical to local `just deploy`.
+        run: bash scripts/bump-version.sh --from "${{ github.event.before }}"
 
       - name: Push version bump
         run: git push --follow-tags
