@@ -50,8 +50,8 @@ Determinism, R1-R6 rollback integrity, and existing kaillera-next invariants are
 | Role | Model | Why this behavioral fit |
 |------|-------|------------------------|
 | Strategic orchestrator | **You** | Decides cadence, accepts/rejects backlogs, kicks off cycles. The team is your force multiplier, not your replacement. |
-| Weekly PM review | **GPT-5** *(initial; pending bake-off)* | OpenAI's training tilts toward decisive recommendations and less hedging. PM voice needs commitment to a call, not a list of trade-offs. To be confirmed by bake-off below. |
-| Biweekly UX critic | **GPT-5** *(initial; pending bake-off)* | Same behavioral argument: willing to commit to a strong design opinion instead of "you might consider." Multimodal vision required for screenshot critique. To be confirmed by bake-off. |
+| Weekly PM review | **OpenAI `gpt-5.5`** *(initial; pending bake-off)* | Hypothesis (not asserted as fact): OpenAI's RLHF/instruction-tuning emphasis appears to produce more decisive recommendations and less hedging than Claude's training does, which would fit a PM voice that needs to commit to a call instead of enumerating trade-offs. The bake-off below tests this hypothesis on real PM output before locking the assignment. Model ID per OpenAI's current docs (https://developers.openai.com/api/docs/models). |
+| Biweekly UX critic | **OpenAI `gpt-5.5`** *(initial; pending bake-off)* | Same hypothesis. Multimodal vision (`image_url` content type on Chat Completions) required for screenshot critique. To be confirmed by bake-off. |
 | Reviewer + scope/safety gate + spec writer + determinism gatekeeper | **Claude Opus** | Pushback and calibration are the deliverable. Reviews PM backlog for scope/safety/feasibility-against-determinism; reviews UX recommendations for design-system consistency and accessibility. |
 | Engineering review of PM/UX action items | **Codex (GPT-5 Codex)** | Catches code-correctness issues PM/UX models miss when they propose technical fixes. Reviews PM-recommended backlog items and UX-proposed code patches for technical feasibility. (Validated as cross-reviewer of Claude's spec output — see smash64r decision file.) |
 | Long-context monthly sweep *(optional, on demand)* | **Gemini 2.5 Pro** | 1M context can ingest a month of session logs + full memory dir + recent commit history in one shot for a deeper retrospective. Not on the regular cadence; activated for month-end or quarter-end reviews. |
@@ -61,8 +61,8 @@ Determinism, R1-R6 rollback integrity, and existing kaillera-next invariants are
 
 Before treating GPT-5 as the durable PM/UX choice, the **first weekly PM run** and the **first biweekly UX audit** are dispatched in parallel to multiple candidate models. The user reads the outputs and picks the one they would actually act on. The spec is then updated with the chosen model.
 
-**PM bake-off candidates:** GPT-5, Gemini 2.5 Pro, Grok 4 (if user has xAI access).
-**UX bake-off candidates:** GPT-5, Gemini 2.5 Pro, Claude Sonnet (with explicit anti-hedging system prompt — to test whether prompt-level fixes give you what you want before paying for behavioral diversification).
+**PM bake-off candidates:** OpenAI `gpt-5.5`, Google `gemini-2.5-pro`, xAI `grok-4.20` (if user has xAI access). Pin exact model IDs in the bake-off dispatch — naming evolves, and "GPT-5" / "Grok 4" without a version suffix become wrong fast.
+**UX bake-off candidates:** `gpt-5.5`, `gemini-2.5-pro`, Claude Sonnet (with explicit anti-hedging system prompt — to test whether prompt-level fixes give you what you want before paying for behavioral diversification).
 
 Bake-off outputs land at `docs/pm/bake-off-YYYY-MM-DD/<model>.md` and `docs/ux/bake-off-YYYY-MM-DD/<model>.md`. Decision recorded at `docs/team/decisions/<bake-off-task-id>.md`.
 
@@ -74,7 +74,7 @@ Bake-off outputs land at `docs/pm/bake-off-YYYY-MM-DD/<model>.md` and `docs/ux/b
 
 **Inputs (auto-fetched at run time, in this order):**
 1. Session logs from `kaillera-next.thesuperhuman.us/admin/...` — last 7 days. Admin API key from `.env` per `reference_admin_api.md`.
-2. `feedback.js` submissions (HTTPS endpoint defined in admin API).
+2. `feedback.js` submissions — POSTed to public `/api/feedback` ([web/static/feedback.js:301](web/static/feedback.js#L301), [server/src/api/app.py:887](server/src/api/app.py#L887)); admin-only listing/reading at [server/src/api/app.py:1362](server/src/api/app.py#L1362).
 3. `git log --since='7 days ago' --oneline main` plus `gh pr list --state all --limit 30 --json number,title,state,labels` for open + recently-merged PRs.
 4. `MEMORY.md` index + the active `project_*.md` memory files (read by the scheduled agent at run time).
 5. One pass through `/product-management:gaps` if available (already-installed plugin) for fresh signal.
@@ -178,9 +178,26 @@ docs/team/
 
 PM and UX dispatch use the same brief-and-shell pattern as the smash64r spec. Differences:
 
-- **OpenAI dispatch** (for GPT-5): `Bash` tool with inline `curl` POST to `https://api.openai.com/v1/chat/completions`. `OPENAI_API_KEY` from `.env` (already present per Codex CLI install). Response captured to `docs/team/outputs/<task>.gpt5.md`. Vision handled via the `image_url` content type for UX screenshots.
-- **Gemini dispatch** (for monthly sweep): `Bash` tool with `curl` to Generative Language API. `GOOGLE_API_KEY` from `.env`. Long-context-aware: helper inlines the full memory dir + log batches without truncation.
-- **Scheduled-agent dispatch:** the `/schedule` agent IS itself a Claude session, but it shells out to GPT-5 / Gemini per the brief just like an interactive Claude session would. Same protocol, different invocation context.
+- **OpenAI dispatch** (for `gpt-5.5`): `Bash` tool with inline `curl` POST to `https://api.openai.com/v1/chat/completions`. Requires `OPENAI_API_KEY` in `.env` — **bootstrap required**, the key is not currently present (see Bootstrap Requirements below; current `.env` only has `DEEPSEEK_API_KEY` per the 2026-04-27 Codex review). Response captured to `docs/team/outputs/<task>.gpt5.md`. Vision handled via the `image_url` content type on Chat Completions for UX screenshots; the alternative Responses API uses `input_image` (pin the choice in writing-plans).
+- **Gemini dispatch** (for monthly sweep): `Bash` tool with `curl` to Google Generative Language API. Requires `GOOGLE_API_KEY` in `.env` — **bootstrap required**, not currently present. Model ID `gemini-2.5-pro` (max input ≈1,048,576 tokens). For monthly sweeps where the corpus may exceed the window: helper performs token counting (use Google's count-tokens endpoint or `tiktoken`-style estimator), chunks into multiple calls, and merges. The phrase "single-shot ingestion of a full month" is aspirational — falls back to chunking when budget is exceeded.
+- **xAI dispatch** (only if Grok appears in bake-off): `curl` to xAI API with model `grok-4.20`. Requires `XAI_API_KEY` in `.env` — **bootstrap required**, not currently present. Skipped entirely if user opts out of Grok in the bake-off.
+- **Scheduled-agent dispatch:** the `/schedule` agent IS itself a Claude session, but it shells out to whichever non-Claude model is assigned to the role per the brief, using the same protocol as an interactive Claude session. Same protocol, different invocation context.
+
+## Bootstrap Requirements
+
+The cadence cannot start running until these are in place. Writing-plans owns turning each into a concrete task.
+
+| What | Where | Status (2026-04-27) | Why |
+|------|-------|---------------------|-----|
+| `OPENAI_API_KEY` | `.env` | **missing** — only `DEEPSEEK_API_KEY` present per Codex review | Required for PM/UX dispatch. |
+| `GOOGLE_API_KEY` | `.env` | **missing** | Required for monthly Gemini sweep. Optional if user skips monthly sweep. |
+| `XAI_API_KEY` | `.env` | **missing** | Required only if Grok appears in PM bake-off. Optional. |
+| `.env.example` | repo root | **missing** | Onboarding hygiene; document required keys without committing values. |
+| `.pm/product/inventory.md` + `.pm/competitors/*.md` | repo root | **missing** | Required by `/product-management:gaps` (per its command spec). PM weekly should `/product-management:analyze` first to bootstrap the inventory. |
+| `.pm/gaps/*.md` | repo root | created by `/product-management:gaps` | Required by `/product-management:file` for issue creation. |
+| `.interface-design/system.md` | repo root | **missing** | Required by `/interface-design:audit` — it is **not** a fallback heuristic; it audits *against an existing design system*. UX track should `/interface-design:extract` first (extracts a system from existing code) or `/interface-design:init` (defines one) before any audits run. |
+| Scheduled-agent capability | `/schedule` skill | already installed | Used to drive weekly + biweekly cadence. |
+| Secret hygiene | `~/.claude/projects/-Users-kazon-kaillera-next/memory/reference_admin_api.md` | **literal prod admin key value embedded in memory file** per Codex review | Rotate the key, replace the memory entry with a pointer to `.env`. Independent of this spec but flagged here because the cadence will be reading admin API and we don't want artifacts to echo it. |
 
 ## Failure Modes
 
@@ -189,10 +206,16 @@ Inheriting all smash64r-spec failure modes plus:
 | Mode | Detection | Response |
 |------|-----------|----------|
 | Scheduled job didn't run | No `weekly-YYYY-WW.md` or `audits/YYYY-MM-DD.md` exists past expected date | Surface to user. Diagnose `/schedule` (cron mis-config, auth expired, env var missing). Don't auto-retry — risk of double-runs polluting the queue. |
+| Scheduled job ran twice | Two artifacts for the same week / audit date OR the same artifact has two timestamped sections | Idempotency check: each artifact filename is keyed by week-of-year / ISO date and dispatch first checks for existence. If the file exists and was written within last hour, skip and surface to user. |
 | PM backlog item conflicts with determinism / R1-R6 / scope discipline | Claude review pass flags it | Reject the item. Decision file records what was rejected and why. PM model gets the rejection feedback inlined in next week's brief. |
 | UX fix touches code in a way that breaks invariants | Codex review pass flags it | Reject the patch path. Re-frame the fix as visual/copy-only or escalate to engineering for proper design. |
-| GPT-5 / Gemini API auth fails on scheduled run | `curl` returns 401 / 403 | Scheduled agent surfaces the failure as an artifact (e.g., `weekly-YYYY-WW.failed.md`) so user notices on next interactive session. Do not silently swap models. |
-| PM model produces a backlog Claude can't review without surface knowledge | E.g., backlog item requires reading session logs Claude doesn't have | Brief the next dispatch with the missing context inlined. Don't approve items based on incomplete review. |
+| API auth fails (OpenAI / Gemini / xAI) | `curl` returns 401 / 403 | Scheduled agent surfaces the failure as `<artifact>.failed.md` (with redaction — see below) so user notices on next interactive session. Do not silently swap models. |
+| API rate limit | `curl` returns 429 | Honor `Retry-After` header up to a reasonable cap (writing-plans defines the cap). If still rate-limited after retry, fall back to `failed.md` artifact. |
+| API timeout | `curl` exceeds dispatch timeout (writing-plans defines per-model timeouts; OpenAI typically 60-120s, Gemini up to 300s for long context) | Treat as dispatch failure. Single retry, then `failed.md`. |
+| Non-2xx / invalid JSON / `finish_reason ≠ stop` | Same patterns as smash64r spec failure modes | Same response: incomplete output, do not act, surface or re-dispatch with task split. |
+| Token-budget overrun (Gemini monthly sweep) | Token-count step shows corpus exceeds 1M | Helper chunks corpus into multiple Gemini calls and merges; only fail if even chunked dispatch exceeds budget. |
+| Secret leakage in artifact | `<task>.failed.md` or any captured output contains a value matching a `*_API_KEY` env var or admin token | Pre-commit hook redacts (replace with `<REDACTED>`) before write. If hook isn't in place, the dispatch script does its own redaction pass. Escalate to user if redaction triggered. |
+| PM model produces a backlog Claude can't review without surface knowledge | Backlog item references session logs / counters / memory entries Claude wasn't shown | Brief the next dispatch with the missing context inlined. Don't approve items based on incomplete review. |
 | Bake-off candidate hallucinates project state | Output cites memory files / commits / counters that don't exist | Reject that candidate. Don't promote it from bake-off into the durable slot. |
 
 ## Open Questions (deferred to writing-plans)
