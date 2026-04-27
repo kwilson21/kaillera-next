@@ -106,6 +106,7 @@
   let _cachedInfo = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
+  let _unmuteAbort = null; // AbortController for the unmute-banner gesture listeners; cleared in stop()
 
   // -- Sync log ring buffer (matches lockstep — uploaded on game end) --------
   const SYNC_LOG_MAX = 5000;
@@ -254,22 +255,28 @@
               const banner = document.getElementById('unmute-banner');
               if (banner) {
                 banner.classList.remove('hidden');
+                // AbortController lets stop() drop both listeners atomically
+                // even if the user never gestures. Without this, the
+                // document-level touchstart listener stays registered across
+                // game cycles (the per-listener removeEventListener calls
+                // inside doUnmute only fire when the user actually taps).
+                if (_unmuteAbort) _unmuteAbort.abort();
+                _unmuteAbort = new AbortController();
                 const doUnmute = () => {
-                  // Always detach listeners first — including when stop() has
-                  // already nulled _guestVideo. The document-level touchstart
-                  // listener fires on any touch anywhere; without this guard,
-                  // tapping the screen after a stream ends would NPE on the
-                  // next line.
+                  // Detach via the shared controller so this is idempotent
+                  // whether the user tapped or stop() aborted us first.
                   banner.classList.add('hidden');
-                  banner.removeEventListener('click', doUnmute);
-                  document.removeEventListener('touchstart', doUnmute, true);
+                  if (_unmuteAbort) {
+                    _unmuteAbort.abort();
+                    _unmuteAbort = null;
+                  }
                   if (!_guestVideo) return;
                   _guestVideo.muted = false;
                   // If unmuting paused the video (iOS), restart it
                   if (_guestVideo.paused) _guestVideo.play().catch(() => {});
                 };
-                banner.addEventListener('click', doUnmute);
-                document.addEventListener('touchstart', doUnmute, true);
+                banner.addEventListener('click', doUnmute, { signal: _unmuteAbort.signal });
+                document.addEventListener('touchstart', doUnmute, { capture: true, signal: _unmuteAbort.signal });
               }
             },
             { once: true },
@@ -1070,6 +1077,11 @@
     }
     const unmuteBanner = document.getElementById('unmute-banner');
     if (unmuteBanner) unmuteBanner.classList.add('hidden');
+    // Drop the unmute gesture listeners if the user never tapped.
+    if (_unmuteAbort) {
+      _unmuteAbort.abort();
+      _unmuteAbort = null;
+    }
 
     _heldKeys.clear();
     _knownPlayers = {};

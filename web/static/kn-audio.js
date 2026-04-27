@@ -32,6 +32,7 @@
   let _audioEmptyCount = 0;
   let _audioErrorLogged = false;
   let _audioSuspendedToastShown = false;
+  let _resumeAudioHandler = null; // gesture-resume listener; cleaned up in cleanup()
 
   // Context callbacks — set by init()
   let _log = () => {}; // (msg: string) => void
@@ -186,28 +187,31 @@
       // Resume AudioContext on user interaction (autoplay policy).
       // Use capture phase so EmulatorJS virtual controls can't block via
       // stopPropagation. Retry on every interaction until actually running.
+      // Stash the handler on a module-level var so cleanup() can drop it
+      // even when the user never gestures (otherwise the three document
+      // listeners survive across game cycles).
       if (_audioCtx.state !== 'running') {
-        const resumeAudio = async () => {
+        // Defensively drop any handler from a previous init() call that
+        // wasn't paired with a cleanup() — otherwise the prior listeners
+        // would be unrecoverable once we overwrite _resumeAudioHandler.
+        _removeResumeAudioListeners();
+        _resumeAudioHandler = async () => {
           if (!_audioCtx || _audioCtx.state === 'running') {
-            document.removeEventListener('click', resumeAudio, true);
-            document.removeEventListener('keydown', resumeAudio, true);
-            document.removeEventListener('touchstart', resumeAudio, true);
+            _removeResumeAudioListeners();
             return;
           }
           try {
             await _audioCtx.resume();
             _log(`audio resumed via gesture (state: ${_audioCtx.state})`);
-            document.removeEventListener('click', resumeAudio, true);
-            document.removeEventListener('keydown', resumeAudio, true);
-            document.removeEventListener('touchstart', resumeAudio, true);
+            _removeResumeAudioListeners();
           } catch (e) {
             _log(`audio resume failed: ${e.name}: ${e.message}`);
             _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name });
           }
         };
-        document.addEventListener('click', resumeAudio, true);
-        document.addEventListener('keydown', resumeAudio, true);
-        document.addEventListener('touchstart', resumeAudio, true);
+        document.addEventListener('click', _resumeAudioHandler, true);
+        document.addEventListener('keydown', _resumeAudioHandler, true);
+        document.addEventListener('touchstart', _resumeAudioHandler, true);
         _log(`audio context state: ${_audioCtx.state} — waiting for gesture to resume`);
       }
 
@@ -317,7 +321,19 @@
     }
   }
 
+  function _removeResumeAudioListeners() {
+    if (!_resumeAudioHandler) return;
+    document.removeEventListener('click', _resumeAudioHandler, true);
+    document.removeEventListener('keydown', _resumeAudioHandler, true);
+    document.removeEventListener('touchstart', _resumeAudioHandler, true);
+    _resumeAudioHandler = null;
+  }
+
   function cleanup() {
+    // The gesture-resume listeners normally self-detach on first user
+    // interaction. If cleanup runs first (game ends before any gesture),
+    // they would otherwise stay attached to document forever.
+    _removeResumeAudioListeners();
     if (_audioWorklet) {
       _audioWorklet.disconnect();
       _audioWorklet = null;
