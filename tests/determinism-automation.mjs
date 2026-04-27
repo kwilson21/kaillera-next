@@ -111,6 +111,10 @@ const SCENE_PLAYERS_VS = 16; // nSCKindPlayersVS
 const SCENE_MAPS = 21; // nSCKindMaps
 const SCENE_VS_BATTLE = 22; // nSCKindVSBattle
 const REPLAY_MIN_HOLD_FRAMES = 2;
+const YELLOW_SCREEN_SAMPLE_ATTEMPTS = 5;
+const YELLOW_SCREEN_SAMPLE_DELAY_MS = 500;
+const RENDERED_CANVAS_SAMPLE_W = 48;
+const RENDERED_CANVAS_SAMPLE_H = 36;
 
 // Keyboard-based input (matches DEFAULT_N64_KEYMAP in web/static/shared.js).
 // Using real keyboard events routes through the netplay engine's local-input
@@ -1063,6 +1067,431 @@ async function sampleGraphicsInfo(page) {
     .catch((err) => ({ error: err.message || String(err) }));
 }
 
+async function sampleCanvasHealth(page) {
+  return page
+    .evaluate(() => {
+      const canvas = document.querySelector('canvas#canvas, canvas.ejs_canvas, canvas');
+      const frame = window.KNState?.frameNum || 0;
+      const scene = window.EJS_emulator?.gameManager?.Module?._kn_get_scene_curr?.() ?? null;
+      if (!canvas) return { ok: false, reason: 'no-canvas', frame, scene };
+
+      const sampleW = 32;
+      const sampleH = 24;
+      const scratch = document.createElement('canvas');
+      scratch.width = sampleW;
+      scratch.height = sampleH;
+      const ctx = scratch.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return { ok: false, reason: 'no-2d-context', frame, scene };
+
+      try {
+        ctx.drawImage(canvas, 0, 0, sampleW, sampleH);
+        const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let minY = 255;
+        let maxY = 0;
+        const ys = [];
+        for (let i = 0; i < data.length; i += 4) {
+          const rr = data[i];
+          const gg = data[i + 1];
+          const bb = data[i + 2];
+          const y = (rr + gg + bb) / 3;
+          r += rr;
+          g += gg;
+          b += bb;
+          ys.push(y);
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        const n = ys.length || 1;
+        const meanR = r / n;
+        const meanG = g / n;
+        const meanB = b / n;
+        const brightness = (meanR + meanG + meanB) / 3;
+        let variance = 0;
+        for (const y of ys) variance += (y - brightness) * (y - brightness);
+        const stdev = Math.sqrt(variance / n);
+        const solidPale =
+          brightness >= 185 &&
+          stdev <= 12 &&
+          maxY - minY <= 40 &&
+          meanR >= 175 &&
+          meanG >= 185 &&
+          meanB >= 145 &&
+          meanG >= meanB + 4;
+        return {
+          ok: true,
+          frame,
+          scene,
+          canvas: {
+            width: canvas.width,
+            height: canvas.height,
+            clientWidth: canvas.clientWidth,
+            clientHeight: canvas.clientHeight,
+          },
+          mean: { r: Number(meanR.toFixed(1)), g: Number(meanG.toFixed(1)), b: Number(meanB.toFixed(1)) },
+          brightness: Number(brightness.toFixed(1)),
+          stdev: Number(stdev.toFixed(1)),
+          range: Number((maxY - minY).toFixed(1)),
+          solidPale,
+        };
+      } catch (err) {
+        return { ok: false, reason: err?.message || String(err), frame, scene };
+      }
+    })
+    .catch((err) => ({ ok: false, reason: err.message || String(err) }));
+}
+
+async function sampleRenderedCanvasScreenshot(page) {
+  try {
+    const canvas = page.locator('canvas#canvas, canvas.ejs_canvas, canvas').first();
+    const visible = await canvas.isVisible({ timeout: 2000 }).catch(() => false);
+    const buffer = visible
+      ? await canvas.screenshot({ timeout: 5000 })
+      : await page.screenshot({ fullPage: false, timeout: 5000 });
+    const dataUrl = `data:image/png;base64,${buffer.toString('base64')}`;
+    return await page.evaluate(
+      async ({ dataUrl, sampleW, sampleH }) => {
+        const loadImage = (src) =>
+          new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('screenshot image decode failed'));
+            img.src = src;
+          });
+
+        const img = await loadImage(dataUrl);
+        const scratch = document.createElement('canvas');
+        scratch.width = sampleW;
+        scratch.height = sampleH;
+        const ctx = scratch.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return { ok: false, reason: 'no-2d-context' };
+        ctx.drawImage(img, 0, 0, sampleW, sampleH);
+        const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let minY = 255;
+        let maxY = 0;
+        let palePixels = 0;
+        let yellowGreenPixels = 0;
+        const ys = [];
+        for (let i = 0; i < data.length; i += 4) {
+          const rr = data[i];
+          const gg = data[i + 1];
+          const bb = data[i + 2];
+          const y = (rr + gg + bb) / 3;
+          r += rr;
+          g += gg;
+          b += bb;
+          ys.push(y);
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (
+            rr >= 200 &&
+            gg >= 205 &&
+            bb >= 175 &&
+            gg >= bb + 2 &&
+            Math.max(rr, gg, bb) - Math.min(rr, gg, bb) <= 80
+          ) {
+            palePixels++;
+          }
+          if (rr >= 145 && gg >= 145 && bb <= 165 && gg >= bb + 18 && Math.abs(rr - gg) <= 55) {
+            yellowGreenPixels++;
+          }
+        }
+
+        const n = ys.length || 1;
+        const meanR = r / n;
+        const meanG = g / n;
+        const meanB = b / n;
+        const brightness = (meanR + meanG + meanB) / 3;
+        let variance = 0;
+        for (const y of ys) variance += (y - brightness) * (y - brightness);
+        const stdev = Math.sqrt(variance / n);
+        const range = maxY - minY;
+        const paleRatio = palePixels / n;
+        const yellowGreenRatio = yellowGreenPixels / n;
+        const solidPale =
+          brightness >= 130 &&
+          stdev <= 24 &&
+          range <= 75 &&
+          (paleRatio >= 0.78 || yellowGreenRatio >= 0.82) &&
+          meanG >= meanB + 8;
+
+        return {
+          ok: true,
+          source: visible ? 'canvas-screenshot' : 'page-screenshot',
+          image: { width: img.naturalWidth, height: img.naturalHeight },
+          mean: { r: Number(meanR.toFixed(1)), g: Number(meanG.toFixed(1)), b: Number(meanB.toFixed(1)) },
+          brightness: Number(brightness.toFixed(1)),
+          stdev: Number(stdev.toFixed(1)),
+          range: Number(range.toFixed(1)),
+          paleRatio: Number(paleRatio.toFixed(3)),
+          yellowGreenRatio: Number(yellowGreenRatio.toFixed(3)),
+          solidPale,
+        };
+      },
+      { dataUrl, sampleW: RENDERED_CANVAS_SAMPLE_W, sampleH: RENDERED_CANVAS_SAMPLE_H },
+    );
+  } catch (err) {
+    return { ok: false, reason: err.message || String(err) };
+  }
+}
+
+async function samplePageForensics(peer) {
+  const [canvasHealth, renderedCanvasHealth, graphics, runtime, setup, pageState] = await Promise.all([
+    sampleCanvasHealth(peer.page),
+    sampleRenderedCanvasScreenshot(peer.page),
+    sampleGraphicsInfo(peer.page),
+    sampleRuntimeStats(peer.page),
+    sampleMatchSetup(peer.page).catch((err) => ({ error: err.message || String(err) })),
+    peer.page
+      .evaluate(() => {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        const safeCall = (fn, fallback = null) => {
+          try {
+            return typeof fn === 'function' ? fn() : fallback;
+          } catch (err) {
+            return { error: err?.message || String(err) };
+          }
+        };
+        const syncLog = safeCall(() => window.NetplayLockstep?.exportSyncLog?.(), []);
+        const debugLog = safeCall(() => window.NetplayLockstep?.getDebugLog?.(), []);
+        const diagLog = Array.isArray(window.KNDiag?.eventLog) ? window.KNDiag.eventLog.slice(-200) : [];
+        return {
+          url: location.href,
+          title: document.title,
+          visibility: {
+            hidden: document.hidden,
+            visibilityState: document.visibilityState,
+            hasFocus: document.hasFocus?.() ?? null,
+          },
+          viewport: {
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio,
+            visualViewport: window.visualViewport
+              ? {
+                  width: window.visualViewport.width,
+                  height: window.visualViewport.height,
+                  scale: window.visualViewport.scale,
+                }
+              : null,
+          },
+          ejs: {
+            exists: !!window.EJS_emulator,
+            paused: !!window.EJS_emulator?.paused,
+            started: !!window.EJS_emulator?.started,
+            core: safeCall(() => window.EJS_emulator?.getCore?.(), null),
+            gameManager: {
+              exists: !!window.EJS_emulator?.gameManager,
+              hasModule: !!mod,
+            },
+            menuVisible: !!(
+              window.EJS_emulator?.elements?.menu &&
+              !window.EJS_emulator.elements.menu.classList.contains('ejs_menu_bar_hidden')
+            ),
+          },
+          knState: {
+            frameNum: window.KNState?.frameNum ?? null,
+            slot: window.KNState?.slot ?? null,
+            room: window.KNState?.room ?? null,
+            matchId: window.KNState?.matchId ?? null,
+            peers: Object.values(window.KNState?.peers || {}).map((p) => ({
+              slot: p.slot,
+              dc: p.dc?.readyState || null,
+              rbDc: p.rbDc?.readyState || null,
+              pc: p.pc?.connectionState || null,
+            })),
+          },
+          module: mod
+            ? {
+                frame: safeCall(() => mod._kn_get_frame?.(), null),
+                scene: safeCall(() => mod._kn_get_scene_curr?.(), null),
+                audioSamples: safeCall(() => mod._kn_get_audio_samples?.(), null),
+                audioPtr: safeCall(() => mod._kn_get_audio_ptr?.(), null),
+                audioRate: safeCall(() => mod._kn_get_audio_rate?.(), null),
+                skipAudioOutput: safeCall(() => mod._kn_get_skip_audio_output?.(), null),
+                deterministic: safeCall(() => mod._kn_get_deterministic?.(), null),
+                rollbackFrame: safeCall(() => mod._kn_get_frame?.(), null),
+                rollbackCount: safeCall(() => mod._kn_get_rollback_count?.(), null),
+                replayDepth: safeCall(() => mod._kn_get_replay_depth?.(), null),
+                failedRollbacks: safeCall(() => mod._kn_get_failed_rollbacks?.(), null),
+                alContexts: mod.AL?.contexts ? Object.keys(mod.AL.contexts) : null,
+              }
+            : null,
+          lockstep: {
+            info: safeCall(() => window.NetplayLockstep?.getInfo?.(), null),
+            debugState: safeCall(() => window.NetplayLockstep?.getDebugState?.(), null),
+            rollbackStats: safeCall(() => window.NetplayLockstep?.getRollbackStats?.(), null),
+          },
+          logs: {
+            syncTail: Array.isArray(syncLog) ? syncLog.slice(-350) : syncLog,
+            debugTail: Array.isArray(debugLog) ? debugLog.slice(-250) : debugLog,
+            diagTail: diagLog,
+          },
+          desyncSuspects: Array.isArray(window._knDesyncSuspects) ? window._knDesyncSuspects.slice(-50) : [],
+        };
+      })
+      .catch((err) => ({ error: err.message || String(err) })),
+  ]);
+
+  return {
+    name: peer.name,
+    canvasHealth,
+    renderedCanvasHealth,
+    graphics,
+    runtime,
+    setup,
+    pageState,
+    clientEvents: peer.clientEvents?.slice(-250) || [],
+    pageErrors: peer.pageErrors?.slice(-50) || [],
+  };
+}
+
+async function requireNoSolidPaleCanvas(host, guest, label, hostBrowser, guestBrowser) {
+  let lastHost = null;
+  let lastGuest = null;
+  let lastHostRendered = null;
+  let lastGuestRendered = null;
+  const attempts = [];
+  for (let attempt = 1; attempt <= YELLOW_SCREEN_SAMPLE_ATTEMPTS; attempt++) {
+    [lastHost, lastGuest, lastHostRendered, lastGuestRendered] = await Promise.all([
+      sampleCanvasHealth(host.page),
+      sampleCanvasHealth(guest.page),
+      sampleRenderedCanvasScreenshot(host.page),
+      sampleRenderedCanvasScreenshot(guest.page),
+    ]);
+    attempts.push({
+      attempt,
+      host: lastHost,
+      guest: lastGuest,
+      hostRendered: lastHostRendered,
+      guestRendered: lastGuestRendered,
+      sampledAt: new Date().toISOString(),
+    });
+    if (
+      !lastHost?.solidPale &&
+      !lastGuest?.solidPale &&
+      !lastHostRendered?.solidPale &&
+      !lastGuestRendered?.solidPale
+    ) {
+      return {
+        host: lastHost,
+        guest: lastGuest,
+        hostRendered: lastHostRendered,
+        guestRendered: lastGuestRendered,
+      };
+    }
+    if (attempt < YELLOW_SCREEN_SAMPLE_ATTEMPTS) {
+      await Promise.all([
+        host.page.waitForTimeout(YELLOW_SCREEN_SAMPLE_DELAY_MS).catch(() => {}),
+        guest.page.waitForTimeout(YELLOW_SCREEN_SAMPLE_DELAY_MS).catch(() => {}),
+      ]);
+    }
+  }
+
+  const [hostForensics, guestForensics] = await Promise.all([samplePageForensics(host), samplePageForensics(guest)]);
+  const canvasShotPaths = {
+    host: `${SHOT_DIR}/det-${label}-solid-pale-host.png`,
+    guest: `${SHOT_DIR}/det-${label}-solid-pale-guest.png`,
+    hostFull: `${SHOT_DIR}/det-${label}-solid-pale-full-host.png`,
+    guestFull: `${SHOT_DIR}/det-${label}-solid-pale-full-guest.png`,
+  };
+  const report = {
+    room: ROOM,
+    verdict: 'SOLID_PALE_CANVAS',
+    label,
+    reason: 'emulator canvas or rendered canvas screenshot stayed nearly uniform pale/yellow after startup',
+    attempts,
+    screenshots: canvasShotPaths,
+    host: hostForensics,
+    guest: guestForensics,
+    page_errors: {
+      host: host.pageErrors || [],
+      guest: guest.pageErrors || [],
+    },
+  };
+  console.error(`\n❌ ${label}: solid pale/yellow canvas guard tripped`);
+  console.error(
+    JSON.stringify(
+      { host: lastHost, guest: lastGuest, hostRendered: lastHostRendered, guestRendered: lastGuestRendered },
+      null,
+      2,
+    ),
+  );
+  await Promise.all([
+    shot(host.page, `${label}-solid-pale-host`, { canvas: true }),
+    shot(guest.page, `${label}-solid-pale-guest`, { canvas: true }),
+    shot(host.page, `${label}-solid-pale-full-host`),
+    shot(guest.page, `${label}-solid-pale-full-guest`),
+  ]);
+  writeFileSync(REPORT_FILE, JSON.stringify(report, null, 2));
+  console.error(`Saved solid pale canvas report to ${REPORT_FILE}`);
+  await Promise.allSettled([hostBrowser.close(), guestBrowser.close()]);
+  process.exit(1);
+}
+
+async function writeBootTimeoutReport(host, guest, label, err) {
+  const safeForensics = async (peer) => {
+    try {
+      return await samplePageForensics(peer);
+    } catch (forensicsErr) {
+      return {
+        name: peer.name,
+        error: forensicsErr.message || String(forensicsErr),
+        pageErrors: peer.pageErrors?.slice(-50) || [],
+        clientEvents: peer.clientEvents?.slice(-250) || [],
+      };
+    }
+  };
+  const safeBootState = async (peer) => {
+    try {
+      return await bootState(peer.page);
+    } catch (bootErr) {
+      return { error: bootErr.message || String(bootErr) };
+    }
+  };
+  const [hostState, guestState, hostForensics, guestForensics] = await Promise.all([
+    safeBootState(host),
+    safeBootState(guest),
+    safeForensics(host),
+    safeForensics(guest),
+  ]);
+  const screenshots = {
+    host: `${SHOT_DIR}/det-${label}-host.png`,
+    guest: `${SHOT_DIR}/det-${label}-guest.png`,
+    hostFull: `${SHOT_DIR}/det-${label}-full-host.png`,
+    guestFull: `${SHOT_DIR}/det-${label}-full-guest.png`,
+  };
+  await Promise.allSettled([
+    shot(host.page, `${label}-host`, { canvas: true }),
+    shot(guest.page, `${label}-guest`, { canvas: true }),
+    shot(host.page, `${label}-full-host`),
+    shot(guest.page, `${label}-full-guest`),
+  ]);
+  const report = {
+    room: ROOM,
+    verdict: 'BOOT_TICK_TIMEOUT',
+    label,
+    reason: 'one or both emulators did not begin ticking after boot prompts',
+    error: err?.stack || err?.message || String(err),
+    screenshots,
+    bootState: { host: hostState, guest: guestState },
+    host: hostForensics,
+    guest: guestForensics,
+    page_errors: {
+      host: host.pageErrors || [],
+      guest: guest.pageErrors || [],
+    },
+  };
+  writeFileSync(REPORT_FILE, JSON.stringify(report, null, 2));
+  console.error(`Saved boot-timeout report to ${REPORT_FILE}`);
+}
+
 async function captureCssGraphicsProbe(host, guest, hostBrowser, guestBrowser, label) {
   await Promise.all([
     shot(host.page, `${label}-host`, { canvas: true }),
@@ -2000,10 +2429,10 @@ async function main() {
 
   console.log('Waiting for both emulators to tick before replay...');
   await waitForBothTicking(host, guest).catch(async (err) => {
-    await shot(host.page, 'boot-timeout-host');
-    await shot(guest.page, 'boot-timeout-guest');
+    await writeBootTimeoutReport(host, guest, 'boot-timeout', err);
     throw err;
   });
+  await requireNoSolidPaleCanvas(host, guest, 'post-tick-canvas-health', hostBrowser, guestBrowser);
 
   /* Hoisted so both replay and scripted-nav branches can drive the same
    * counter that the final report reads. */
@@ -2685,10 +3114,47 @@ async function main() {
             console.log(
               `    [warn] START at title did not reach Mode Select; hostScene=${hCur} guestScene=${gCur}; waiting for next title`,
             );
+            await Promise.all([
+              shot(host.page, `01-title-start-failed-${attempts}-host`, { canvas: true }),
+              shot(guest.page, `01-title-start-failed-${attempts}-guest`, { canvas: true }),
+            ]);
+            await requireNoSolidPaleCanvas(host, guest, `title-start-failed-${attempts}`, hostBrowser, guestBrowser);
           }
           await host.page.waitForTimeout(50);
         }
         const [hCur, gCur] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+        const [hostForensics, guestForensics] = await Promise.all([
+          samplePageForensics(host),
+          samplePageForensics(guest),
+        ]);
+        await Promise.allSettled([
+          shot(host.page, 'title-start-timeout-host', { canvas: true }),
+          shot(guest.page, 'title-start-timeout-guest', { canvas: true }),
+          shot(host.page, 'title-start-timeout-full-host'),
+          shot(guest.page, 'title-start-timeout-full-guest'),
+        ]);
+        writeFileSync(
+          REPORT_FILE,
+          JSON.stringify(
+            {
+              room: ROOM,
+              verdict: 'TITLE_START_TIMEOUT',
+              reason: 'START did not move both peers from title to mode select before timeout',
+              hostScene: hCur,
+              guestScene: gCur,
+              host: hostForensics,
+              guest: guestForensics,
+              screenshots: {
+                host: `${SHOT_DIR}/det-title-start-timeout-host.png`,
+                guest: `${SHOT_DIR}/det-title-start-timeout-guest.png`,
+                hostFull: `${SHOT_DIR}/det-title-start-timeout-full-host.png`,
+                guestFull: `${SHOT_DIR}/det-title-start-timeout-full-guest.png`,
+              },
+            },
+            null,
+            2,
+          ),
+        );
         throw new Error(`Timeout pressing START from title; hostScene=${hCur} guestScene=${gCur}`);
       }
 

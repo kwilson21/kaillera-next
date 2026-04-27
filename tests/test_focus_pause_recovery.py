@@ -4,6 +4,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_JS = ROOT / "web/static/shared.js"
 LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+RETROARCH_PATCH = ROOT / "build/patches/retroarch-deterministic-timing.patch"
+CORE_JS = ROOT / "web/static/ejs/cores/mupen64plus_next_libretro.js"
 
 
 def test_key_tracking_releases_held_keys_on_focus_loss():
@@ -36,45 +38,86 @@ def test_lockstep_clears_ejs_pause_flag_on_focus_and_visibility_return():
 
     assert "const _releaseLocalFocusInput = () => {" in source
     assert "const _clearEjsPauseFlag = (reason) => {" in source
-    assert "mod._toggleMainLoop(1)" in source
-    assert "_clearEjsPauseFlag('tab visible')" in source
-    assert "_clearEjsPauseFlag('focus')" in source
+    assert "mod._platform_emscripten_update_window_hidden_cb?.(0)" in source
+    assert "mod._toggleMainLoop?.(1)" in source
+    assert "mod._cmd_unpause()" in source
+    assert "RetroArch explicit unpause sent on" in source
+    assert "_clearEjsPauseFlagWithRetries('tab visible')" in source
+    assert "_clearEjsPauseFlagWithRetries('focus')" in source
+    assert "_clearEjsPauseFlagWithRetries('pageshow')" in source
+    assert "_clearEjsPauseFlag('tab hidden')" in source
+    assert "_clearEjsPauseFlag('pagehide')" in source
     assert "_releaseLocalFocusInput()" in source
 
 
-def test_mobile_lifecycle_return_forces_full_resync():
+def test_lockstep_retries_mobile_pause_clear_after_focus_return():
     source = LOCKSTEP_JS.read_text()
 
-    assert "const _requestImmediateFullResync = (reason) => {" in source
+    assert "const EJS_PAUSE_CLEAR_RETRY_DELAYS_MS = [75, 250, 750, 1500]" in source
+    assert "const _clearEjsPauseFlagWithRetries = (reason) => {" in source
+    assert "for (const delay of EJS_PAUSE_CLEAR_RETRY_DELAYS_MS)" in source
+    assert "_clearEjsPauseFlag(`${reason}+${delay}ms`)" in source
+    assert "if (typeof document !== 'undefined' && document.hidden) return" in source
+
+
+def test_local_input_is_zeroed_while_emulator_resume_is_guarded():
+    source = LOCKSTEP_JS.read_text()
+
+    assert "let _resumeInputGuardUntil = 0" in source
+    assert "const LIFECYCLE_RESYNC_INPUT_GUARD_MS = 5000" in source
+    assert "let _lifecycleResyncPending = false" in source
+    assert "const LIFECYCLE_RESYNC_PENDING_TIMEOUT_MS = 15000" in source
+    assert "const suppressEjsPausedInput = !!window.EJS_emulator?.paused" in source
+    assert "nowInput < _resumeInputGuardUntil || _lifecycleResyncPending" in source
+    assert "suppressEjsPausedInput ||" in source
+    assert "suppressResumeGuardInput" in source
+    assert "? KNShared.ZERO_INPUT" in source
+
+
+def test_background_return_requests_full_sync_and_guards_input_until_apply():
+    source = LOCKSTEP_JS.read_text()
+
+    assert "_lifecycleResyncStartedAt + LIFECYCLE_RESYNC_INPUT_GUARD_MS" in source
+    assert "const _requestLifecycleFullResync = (reason) => {" in source
+    assert "type: 'sync-request-full-socket'" in source
+    assert "type: 'sync-state-socket'" in source
+    assert "pushSyncState(requesterSid, false, { transport: 'socket'" in source
+    assert "`${reason}: sent socket sync-request-full to host`" in source
     assert "hostPeer.dc.send('sync-request-full')" in source
-    assert "_requestImmediateFullResync('bg-return')" in source
-    assert "_requestImmediateFullResync('mobile-focus-return')" in source
-
-    helper_idx = source.index("const _requestImmediateFullResync = (reason) => {")
-    helper_window = source[helper_idx : helper_idx + 1800]
-    assert "_setLastSyncState(null, reason)" in helper_window
-    assert "_pendingResyncState = null;" in helper_window
-    assert "_syncTargetFrame = -1;" in helper_window
+    assert "sent sync-request-full to host over DC fallback" in source
+    assert "_requestLifecycleFullResync('bg-return')" in source
+    assert "_requestLifecycleFullResync('pageshow')" in source
+    assert "_resumeInputGuardUntil = now + EJS_RESUME_INPUT_GUARD_MS" in source
+    assert "_clearLifecycleResyncGuard('sync apply')" in source
+    assert "resume input guard shortened after sync apply" in source
 
 
-def test_failed_delta_retry_uses_primary_control_channel():
+def test_sync_state_chunk_timeout_falls_back_to_socket_resync():
     source = LOCKSTEP_JS.read_text()
 
-    retry_idx = source.index("delta base missing or size mismatch")
-    retry_window = source[retry_idx : retry_idx + 900]
-    assert "const hostDc = hostPeer?.dc;" in retry_window
-    assert "hostDc.send('sync-request-full')" in retry_window
-    assert "hostSyncDc" not in retry_window
+    assert "const SYNC_CHUNK_TIMEOUT_MS = 3000" in source
+    assert "sync chunks timeout:" in source
+    assert "_requestSocketFullResync('sync-chunk-timeout')" in source
+    assert "sync chunks progress:" in source
+    assert "socket sync sent to slot=" in source
+    assert "source=${source}" in source
 
 
-def test_full_resync_requests_bypass_cooldown_and_sync_dc_is_tolerated():
-    source = LOCKSTEP_JS.read_text()
+def test_retroarch_visibility_pause_is_prevented_during_netplay():
+    lockstep = LOCKSTEP_JS.read_text()
+    patch = RETROARCH_PATCH.read_text()
 
-    assert "if (!isFull && now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS)" in source
-    assert "if (_handleHostSyncRequest(_remoteSid, e.data))" in source
-    assert "_drainScheduledSyncRequests('pre-stall')" in source
-    assert "_drainScheduledSyncRequests('post-step')" in source
+    assert "window._knPreventRetroArchVisibilityPause = true" in lockstep
+    assert "window._knPreventRetroArchVisibilityPause = false" in lockstep
+    assert "window._knPreventRetroArchVisibilityPause" in patch
+    assert "_platform_emscripten_update_window_hidden_cb(hidden)" in patch
 
-    pre_stall_idx = source.index("_drainScheduledSyncRequests('pre-stall')")
-    phase_lock_idx = source.index("const menuPhase = _readStrictPhaseLock", pre_stall_idx)
-    assert pre_stall_idx < phase_lock_idx
+
+def test_core_exports_explicit_pause_controls_for_mobile_lifecycle_recovery():
+    patch = RETROARCH_PATCH.read_text()
+    core = CORE_JS.read_text()
+
+    assert "void cmd_unpause(void)" in patch
+    assert "command_event(CMD_EVENT_UNPAUSE, NULL)" in patch
+    assert "_cmd_unpause" in patch
+    assert "_cmd_unpause" in core

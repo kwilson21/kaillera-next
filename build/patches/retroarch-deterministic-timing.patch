@@ -3,7 +3,8 @@ index a626706..e2a4502 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
 @@ -126,7 +126,21 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
-                      _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
+-                     _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
++                     _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_cmd_unpause,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
                       _toggle_slow_motion,_set_sm_ratio,_toggle_rewind,_set_rewind_granularity,_get_current_frame_count,_ejs_set_keyboard_enabled, \
 -                     _set_vsync,_set_video_rotation,_get_video_dimensions,EmscriptenSendCommand,EmscriptenReceiveCommandReply,_get_memory_data
@@ -35,6 +36,19 @@ index a626706..e2a4502 100644
  else
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
+diff --git a/emscripten/library_platform_emscripten.js b/emscripten/library_platform_emscripten.js
+index 4e0d032..9a7b4b1 100644
+--- a/emscripten/library_platform_emscripten.js
++++ b/emscripten/library_platform_emscripten.js
+@@ -64,4 +64,7 @@ mergeInto(LibraryManager.library, {
+    $PlatformEmscriptenOnVisibilityChange__deps: ["platform_emscripten_update_window_hidden_cb"],
+    $PlatformEmscriptenOnVisibilityChange: function() {
+-      _platform_emscripten_update_window_hidden_cb(document.visibilityState == "hidden");
++      var hidden = document.visibilityState == "hidden";
++      if (hidden && typeof window != "undefined" && window._knPreventRetroArchVisibilityPause)
++         hidden = false;
++      _platform_emscripten_update_window_hidden_cb(hidden);
+    },
 diff --git a/audio/audio_driver.c b/audio/audio_driver.c
 index a4a28cf..ae2b9a1 100644
 --- a/audio/audio_driver.c
@@ -193,7 +207,7 @@ index c9ceed1..9ef5d8b 100644
  #include <emscripten/emscripten.h>
  #include <emscripten/html5.h>
  #include <emscripten/threading.h>
-@@ -115,6 +116,46 @@ typedef struct
+@@ -115,6 +116,51 @@ typedef struct
  
  static emscripten_platform_data_t *emscripten_platform_data = NULL;
  
@@ -235,6 +249,11 @@ index c9ceed1..9ef5d8b 100644
 +EMSCRIPTEN_KEEPALIVE int kn_get_deterministic(void)
 +{
 +   return kn_deterministic_mode;
++}
++
++void cmd_unpause(void)
++{
++   command_event(CMD_EVENT_UNPAUSE, NULL);
 +}
 +
  /* defined here since implementation is frontend dependent */

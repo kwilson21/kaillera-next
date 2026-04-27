@@ -3,6 +3,7 @@
  *
  * Extracted from netplay-lockstep.js. Handles:
  *   - RENDER-STALL: canvas pixel hash unchanged for 180+ frames
+ *   - CANVAS-HEALTH: early solid pale/yellow canvas detector
  *   - INPUT-DEAD: local input all-zero for 300+ frames
  *   - AUDIO-STALL: AudioContext not running during gameplay
  *   - Async event hooks (visibility, focus, touch, EJS menu, mainloop)
@@ -42,6 +43,9 @@
   let _glPixelBuf = null;
   let _offscreenCanvas = null;
   let _offscreenCtx = null;
+  let _healthCanvas = null;
+  let _healthCtx = null;
+  let _solidPaleLogged = false;
 
   function captureCanvasHash() {
     const canvas = document.querySelector('#game canvas');
@@ -91,6 +95,114 @@
       return h2;
     } catch (_) {
       return 0;
+    }
+  }
+
+  function sampleCanvasHealth() {
+    const canvas = document.querySelector('#game canvas');
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    try {
+      const sampleW = 32;
+      const sampleH = 24;
+      if (!_healthCanvas) {
+        _healthCanvas = document.createElement('canvas');
+        _healthCanvas.width = sampleW;
+        _healthCanvas.height = sampleH;
+        _healthCtx = _healthCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      _healthCtx.drawImage(canvas, 0, 0, sampleW, sampleH);
+      const data = _healthCtx.getImageData(0, 0, sampleW, sampleH).data;
+      const n = data.length / 4;
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let min = 255;
+      let max = 0;
+      let palePixels = 0;
+      let yellowGreenPixels = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        sumR += r;
+        sumG += g;
+        sumB += b;
+        if (r < min) min = r;
+        if (g < min) min = g;
+        if (b < min) min = b;
+        if (r > max) max = r;
+        if (g > max) max = g;
+        if (b > max) max = b;
+        if (r >= 200 && g >= 205 && b >= 175 && g >= b + 2 && Math.max(r, g, b) - Math.min(r, g, b) <= 80) {
+          palePixels++;
+        }
+        if (r >= 145 && g >= 145 && b <= 165 && g >= b + 18 && Math.abs(r - g) <= 55) {
+          yellowGreenPixels++;
+        }
+      }
+      const meanR = sumR / n;
+      const meanG = sumG / n;
+      const meanB = sumB / n;
+      let variance = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        variance += (data[i] - meanR) ** 2 + (data[i + 1] - meanG) ** 2 + (data[i + 2] - meanB) ** 2;
+      }
+      const stdev = Math.sqrt(variance / (n * 3));
+      const brightness = (meanR + meanG + meanB) / 3;
+      const range = max - min;
+      const paleRatio = palePixels / n;
+      const yellowGreenRatio = yellowGreenPixels / n;
+      const solidPale =
+        brightness >= 130 &&
+        stdev <= 24 &&
+        range <= 75 &&
+        (paleRatio >= 0.78 || yellowGreenRatio >= 0.82) &&
+        meanG >= meanB + 8;
+      return {
+        meanR: Math.round(meanR),
+        meanG: Math.round(meanG),
+        meanB: Math.round(meanB),
+        brightness: Math.round(brightness),
+        stdev: Number(stdev.toFixed(1)),
+        range,
+        paleRatio: Number(paleRatio.toFixed(3)),
+        yellowGreenRatio: Number(yellowGreenRatio.toFixed(3)),
+        solidPale,
+        canvas: {
+          width: canvas.width,
+          height: canvas.height,
+          clientWidth: canvas.clientWidth,
+          clientHeight: canvas.clientHeight,
+        },
+      };
+    } catch (e) {
+      return { error: e?.message || String(e) };
+    }
+  }
+
+  function checkCanvasHealth(frameNum, reason) {
+    const health = sampleCanvasHealth();
+    if (!health) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    _log(
+      `CANVAS-HEALTH reason=${reason} f=${frameNum} ` +
+        `rgb=${health.meanR ?? '?'},${health.meanG ?? '?'},${health.meanB ?? '?'} ` +
+        `bright=${health.brightness ?? '?'} stdev=${health.stdev ?? '?'} range=${health.range ?? '?'} ` +
+        `paleRatio=${health.paleRatio ?? '?'} yellowGreenRatio=${health.yellowGreenRatio ?? '?'} ` +
+        `solidPale=${!!health.solidPale} canvas=${health.canvas?.width ?? '?'}x${health.canvas?.height ?? '?'} ` +
+        `css=${health.canvas?.clientWidth ?? '?'}x${health.canvas?.clientHeight ?? '?'} ` +
+        `ejsPaused=${!!window.EJS_emulator?.paused} scene=${mod?._kn_get_scene_curr?.() ?? '?'}`,
+    );
+    if (health.solidPale && !_solidPaleLogged) {
+      _solidPaleLogged = true;
+      window.KNEvent?.('canvas_solid_pale', '', {
+        frame: frameNum,
+        reason,
+        ...health,
+        ejsPaused: !!window.EJS_emulator?.paused,
+        scene: mod?._kn_get_scene_curr?.() ?? null,
+      });
+      captureAndSendScreenshot();
     }
   }
 
@@ -229,6 +341,9 @@
 
   function checkFreeze(localInput) {
     const frameNum = _getFrame();
+    if (frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
+      checkCanvasHealth(frameNum, 'early');
+    }
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
 
     // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames.
@@ -245,6 +360,7 @@
             `RENDER-STALL start=${_renderLastChangeFrame} cur=${frameNum} ` +
               `unchanged=${frameNum - _renderLastChangeFrame}f hash=0x${renderHash.toString(16)}`,
           );
+          checkCanvasHealth(frameNum, 'render-stall');
           _renderStallLogged = true;
         }
       }
@@ -407,6 +523,9 @@
     _screenshotCtx = null;
     _lastScreenshotFrame = -1;
     _screenshotDebugLogged = false;
+    _healthCanvas = null;
+    _healthCtx = null;
+    _solidPaleLogged = false;
   }
 
   window.KNDiag = {
