@@ -131,14 +131,15 @@ if git tag -l "v${NEW_VERSION}" | grep -q .; then
   exit 1
 fi
 
-# ── Write version.json (commit hash filled in after the commit lands) ────
-# We use a placeholder, then rewrite-and-amend so the file accurately
-# reports its own commit. Two-step is unavoidable: the hash is not known
-# until after the commit is made.
+# ── Write version.json ───────────────────────────────────────────────────
+# `commit` records the SHA of the last release-content commit (HEAD before
+# the bump). A commit cannot contain its own hash (self-reference), so we
+# record the parent — i.e. "this version was built on top of <SHA>".
+RELEASE_COMMIT=$(git rev-parse --short HEAD)
 cat > "$VERSION_FILE" << EOF
 {
   "version": "${NEW_VERSION}",
-  "commit": "pending"
+  "commit": "${RELEASE_COMMIT}"
 }
 EOF
 
@@ -184,17 +185,6 @@ console.log('bump-version: wrote ' + changes.length + ' changelog bullets for v'
 # ── Commit + tag ─────────────────────────────────────────────────────────
 git add "$VERSION_FILE" "$CHANGELOG_FILE"
 git commit --no-verify -m "chore(version): v${NEW_VERSION}"
-
-# Now backfill the actual commit hash into version.json and amend.
-COMMIT_HASH=$(git rev-parse --short HEAD)
-cat > "$VERSION_FILE" << EOF
-{
-  "version": "${NEW_VERSION}",
-  "commit": "${COMMIT_HASH}"
-}
-EOF
-git add "$VERSION_FILE"
-git commit --amend --no-verify --no-edit > /dev/null
 
 # Annotated tag (not lightweight) so `git push --follow-tags` will pick it up.
 git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
