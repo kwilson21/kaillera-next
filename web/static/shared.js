@@ -72,6 +72,12 @@
   let _activeHeldKeys = null;
   let _keydownHandler = null;
   let _keyupHandler = null;
+  let _blurHandler = null;
+  let _visibilityHandler = null;
+
+  function clearHeldKeysOnFocusLoss() {
+    if (_activeHeldKeys) _activeHeldKeys.clear();
+  }
 
   function setupKeyTracking(keymap, heldKeys) {
     _activeHeldKeys = heldKeys;
@@ -114,8 +120,16 @@
       _keyupHandler = (e) => {
         if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
       };
+      _blurHandler = () => {
+        clearHeldKeysOnFocusLoss();
+      };
+      _visibilityHandler = () => {
+        if (document.hidden) clearHeldKeysOnFocusLoss();
+      };
       document.addEventListener('keydown', _keydownHandler, true);
       document.addEventListener('keyup', _keyupHandler, true);
+      window.addEventListener('blur', _blurHandler, true);
+      document.addEventListener('visibilitychange', _visibilityHandler, true);
       _listenersAdded = true;
     }
 
@@ -126,8 +140,12 @@
     if (_listenersAdded) {
       if (_keydownHandler) document.removeEventListener('keydown', _keydownHandler, true);
       if (_keyupHandler) document.removeEventListener('keyup', _keyupHandler, true);
+      if (_blurHandler) window.removeEventListener('blur', _blurHandler, true);
+      if (_visibilityHandler) document.removeEventListener('visibilitychange', _visibilityHandler, true);
       _keydownHandler = null;
       _keyupHandler = null;
+      _blurHandler = null;
+      _visibilityHandler = null;
       _listenersAdded = false;
     }
     if (_activeHeldKeys) {
@@ -411,12 +429,14 @@
 
   const readLocalInput = (playerSlot, keyMap, heldKeys) => {
     const input = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+    const pageFocused =
+      typeof document === 'undefined' || typeof document.hasFocus !== 'function' || document.hasFocus();
 
     // Suppress all input while remap wizard is active
     if (KNState.remapActive) return { ...ZERO_INPUT };
 
     // 1. Gamepad (analog pipeline, highest fidelity for axes)
-    if (document.hasFocus() && window.GamepadManager) {
+    if (pageFocused && window.GamepadManager) {
       const gp = GamepadManager.readGamepad(playerSlot);
       if (gp) {
         input.buttons |= gp.buttons;
@@ -430,18 +450,22 @@
     // 2. Keyboard (digital, with opposing cancellation)
     //    Buttons always merge; axes only if gamepad didn't provide them
     if (keyMap) {
-      heldKeys.forEach((kc) => {
-        const btnIdx = keyMap[kc];
-        if (btnIdx !== undefined && btnIdx < 16) input.buttons |= 1 << btnIdx;
-      });
-      const kb = readKeyboardAxes(keyMap, heldKeys);
-      if (input.lx === 0 && input.ly === 0) {
-        input.lx = kb.lx;
-        input.ly = kb.ly;
-      }
-      if (input.cx === 0 && input.cy === 0) {
-        input.cx = kb.cx;
-        input.cy = kb.cy;
+      if (!pageFocused) {
+        heldKeys?.clear?.();
+      } else {
+        heldKeys.forEach((kc) => {
+          const btnIdx = keyMap[kc];
+          if (btnIdx !== undefined && btnIdx < 16) input.buttons |= 1 << btnIdx;
+        });
+        const kb = readKeyboardAxes(keyMap, heldKeys);
+        if (input.lx === 0 && input.ly === 0) {
+          input.lx = kb.lx;
+          input.ly = kb.ly;
+        }
+        if (input.cx === 0 && input.cy === 0) {
+          input.cx = kb.cx;
+          input.cy = kb.cy;
+        }
       }
     }
 

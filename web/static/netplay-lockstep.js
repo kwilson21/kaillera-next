@@ -6378,6 +6378,35 @@
       _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
 
+    const _releaseLocalFocusInput = () => {
+      const hadKeys = _heldKeys.size > 0;
+      _heldKeys.clear();
+
+      let hadTouch = false;
+      const touchInput = KNState?.touchInput;
+      if (touchInput) {
+        for (const key in touchInput) {
+          if (!Object.prototype.hasOwnProperty.call(touchInput, key)) continue;
+          if (touchInput[key]) hadTouch = true;
+          touchInput[key] = 0;
+        }
+      }
+      return hadKeys || hadTouch;
+    };
+
+    const _clearEjsPauseFlag = (reason) => {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (!mod?._toggleMainLoop) return false;
+      try {
+        mod._toggleMainLoop(1);
+        _syncLog(`EJS pause flag cleared on ${reason}`);
+        return true;
+      } catch (e) {
+        _syncLog(`EJS pause flag clear failed on ${reason}: ${e?.name || 'Error'}: ${e?.message || e}`);
+        return false;
+      }
+    };
+
     // Background tab handling: do NOT pause the tick loop. Browser naturally
     // throttles setInterval to ~1fps in background tabs, which keeps the
     // player sending input (slowly). Pausing completely breaks multi-tab
@@ -6390,6 +6419,7 @@
       if (_phase !== PHASE_RUNNING) return;
       if (document.hidden) {
         _backgroundAt = Date.now();
+        _releaseLocalFocusInput();
         _syncLog(`tab hidden at frame ${_frameNum}`);
         // BF2: warn user if tab goes hidden during boot convergence
         const inBoot = (_rbInitFrame >= 0 && _frameNum - _rbInitFrame <= BOOT_GRACE_FRAMES) || !_inGameplay;
@@ -6399,6 +6429,8 @@
       } else {
         const bgDuration = _backgroundAt ? Date.now() - _backgroundAt : 0;
         _backgroundAt = 0;
+        _releaseLocalFocusInput();
+        _clearEjsPauseFlag('tab visible');
         _syncLog(`tab visible (was background ${bgDuration} ms)`);
 
         // BF6: resume AudioContext on visibility return — browsers suspend
@@ -6475,10 +6507,17 @@
     // losing focus silently zeroes input. Log transitions so session logs
     // show exactly when input capture stopped/resumed.
     _focusHandler = () => {
-      if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
+      if (_phase === PHASE_RUNNING) {
+        _releaseLocalFocusInput();
+        _clearEjsPauseFlag('focus');
+        _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
+      }
     };
     _blurHandler = () => {
-      if (_phase === PHASE_RUNNING) _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
+      if (_phase === PHASE_RUNNING) {
+        _releaseLocalFocusInput();
+        _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
+      }
     };
     window.addEventListener('focus', _focusHandler);
     window.addEventListener('blur', _blurHandler);
