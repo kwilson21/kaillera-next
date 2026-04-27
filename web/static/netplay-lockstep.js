@@ -51,7 +51,7 @@
  *   6. All players load the same save state (double-load: first restores
  *      CPU+RAM, then enterManualMode() captures rAF, second load fixes
  *      any free-frame drift between the loads). Frame counter resets to 0.
- *   7. Lockstep tick loop starts via setInterval(16).
+ *   7. Lockstep tick scheduler starts via a short setInterval pump.
  *
  * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
  *
@@ -68,8 +68,9 @@
  *       emulator by exactly one frame, then schedules a real rAF no-op
  *       to force GL compositing
  *
- *   The tick loop uses setInterval(16) instead of rAF because rAF is
- *   throttled to ~1fps in background tabs, which would stall the game.
+ *   The tick loop uses a short setInterval pump instead of rAF because rAF is
+ *   throttled to ~1fps in background tabs, which would stall the game. The
+ *   pump can perform a tiny catch-up burst when mobile WebKit stretches timers.
  *
  * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
  *
@@ -1792,6 +1793,8 @@
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
   const TICK_PUMP_INTERVAL_MS = 6;
+  const TICK_MAX_CATCHUP_STEPS = 3;
+  const TICK_CATCHUP_BUDGET_MS = TICK_TARGET_MS * 1.25;
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -2281,6 +2284,84 @@
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
+
+  const _isHostSyncRequestMessage = (data) =>
+    typeof data === 'string' &&
+    (data === 'sync-request' ||
+      data === 'sync-request-full' ||
+      data === 'sync-request-regions' ||
+      data.startsWith('sync-request-at:') ||
+      data.startsWith('sync-request-full-at:'));
+
+  const _handleHostSyncRequest = (remoteSid, data) => {
+    if (_playerSlot !== 0 || !_isHostSyncRequestMessage(data)) return false;
+
+    const isFull = data === 'sync-request-full' || data.startsWith('sync-request-full-at:');
+    const now = Date.now();
+    const lastRequest = _syncRequestCooldowns.get(remoteSid) || 0;
+    if (!isFull && now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS) {
+      _syncLog(`rate-limited sync-request from ${remoteSid}`);
+      return true;
+    }
+    _syncRequestCooldowns.set(remoteSid, now);
+    _syncLog(`received ${data} from ${remoteSid}`);
+    if (isFull) _setLastSyncState(null, 'guest-requested-full');
+
+    // Coordinated: parse target frame and schedule capture there.
+    // Immediate (no -at: suffix): push now — used for reconnect/visibility/network-change.
+    const colonIdx = data.lastIndexOf(':');
+    const targetFrame = data.includes('-at:') && colonIdx >= 0 ? parseInt(data.substring(colonIdx + 1), 10) : NaN;
+    if (!isNaN(targetFrame) && targetFrame > _frameNum) {
+      // Replace any existing request from this guest so requests don't stack.
+      _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+      // I1 (MF3): record wall-clock deadline so the drain loop can process
+      // the request immediately at current frame if phase lock or pacing
+      // cannot reach targetFrame in time.
+      _scheduledSyncRequests.push({
+        targetFrame,
+        targetSid: remoteSid,
+        forceFull: isFull,
+        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+      });
+      _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
+    } else {
+      pushSyncState(remoteSid);
+    }
+    return true;
+  };
+
+  const _drainScheduledSyncRequests = (reason = 'tick') => {
+    if (_playerSlot !== 0 || _scheduledSyncRequests.length === 0 || _pushingSyncState) return false;
+    const coordNow = performance.now();
+    const due = _scheduledSyncRequests.filter(
+      (r) => r.targetFrame <= _frameNum || (r.deadlineAt && coordNow > r.deadlineAt),
+    );
+    if (due.length === 0) return false;
+
+    const timedOut = due.filter((r) => r.targetFrame > _frameNum);
+    if (timedOut.length > 0) {
+      for (const r of timedOut) {
+        _syncLog(
+          `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} ` +
+            `elapsed=${Math.round(coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
+            `dispatching at current frame instead`,
+        );
+      }
+    }
+    _scheduledSyncRequests = _scheduledSyncRequests.filter(
+      (r) => r.targetFrame > _frameNum && (!r.deadlineAt || coordNow <= r.deadlineAt),
+    );
+    const forceFull = due.some((r) => r.forceFull);
+    if (forceFull) _setLastSyncState(null, 'coord-full');
+    // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame).
+    const targetSid = due.length === 1 ? due[0].targetSid : null;
+    _syncLog(
+      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum} reason=${reason}` +
+        `${targetSid === null ? ' (broadcast)' : ''}`,
+    );
+    pushSyncState(targetSid);
+    return true;
+  };
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
@@ -3575,46 +3656,8 @@
           }
         }
         // State sync: host received request from guest (sent on lockstep DC)
-        if (
-          _playerSlot === 0 &&
-          (e.data === 'sync-request' ||
-            e.data === 'sync-request-full' ||
-            e.data === 'sync-request-regions' ||
-            e.data.startsWith('sync-request-at:') ||
-            e.data.startsWith('sync-request-full-at:'))
-        ) {
-          const now = Date.now();
-          const lastRequest = _syncRequestCooldowns.get(remoteSid) || 0;
-          if (now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS) {
-            _syncLog(`rate-limited sync-request from ${remoteSid}`);
-            return;
-          }
-          _syncRequestCooldowns.set(remoteSid, now);
-          const isFull = e.data === 'sync-request-full' || e.data.startsWith('sync-request-full-at:');
-          _syncLog(`received ${e.data} from ${remoteSid}`);
-          if (isFull) _setLastSyncState(null, 'guest-requested-full');
-          // Coordinated: parse target frame and schedule capture there.
-          // Immediate (no -at: suffix): push now — used for reconnect/visibility/network-change.
-          const colonIdx = e.data.lastIndexOf(':');
-          const targetFrame =
-            e.data.includes('-at:') && colonIdx >= 0 ? parseInt(e.data.substring(colonIdx + 1), 10) : NaN;
-          if (!isNaN(targetFrame) && targetFrame > _frameNum) {
-            // Replace any existing request from this guest so requests don't stack
-            _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-            // I1 (MF3): record wall-clock deadline so the drain
-            // loop below can process the request immediately at
-            // current frame if frame pacing can't reach targetFrame
-            // in time.
-            _scheduledSyncRequests.push({
-              targetFrame,
-              targetSid: remoteSid,
-              forceFull: isFull,
-              deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
-            });
-            _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
-          } else {
-            pushSyncState(remoteSid);
-          }
+        if (_handleHostSyncRequest(remoteSid, e.data)) {
+          return;
         }
         // JSON messages
         if (e.data.charAt(0) === '{') {
@@ -3671,6 +3714,12 @@
     _syncChunks = [];
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        // Host: tolerate sync control messages on the sync-state DC. Older
+        // guests could retry a failed delta by sending sync-request-full on
+        // this channel, while the host only listened on the primary DC.
+        if (_handleHostSyncRequest(_remoteSid, e.data)) {
+          return;
+        }
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
@@ -5993,8 +6042,8 @@
 
   // -- True lockstep tick loop -----------------------------------------------
   //
-  // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
-  // game loop (background tabs would throttle it). Each tick:
+  // Strategy: short setInterval pump for ~60fps. We never use rAF for the
+  // game loop (background tabs would throttle it). Each logical tick:
   //   1. Send local input for current frame to ALL peers
   //   2. Check if ALL active player peers have input for the apply frame
   //   3. If not, stall (return early, retry via setTimeout(1))
@@ -6006,6 +6055,8 @@
   let _fpsLastTime = 0;
   let _fpsFrameCount = 0;
   let _fpsCurrent = 0;
+  let _tickPerfLastWall = 0;
+  let _tickPerfLastFrame = 0;
   let _remoteReceived = 0;
   let _remoteMissed = 0;
   let _remoteApplied = 0;
@@ -6095,6 +6146,8 @@
     _fpsLastTime = performance.now();
     _fpsFrameCount = 0;
     _fpsCurrent = 0;
+    _tickPerfLastWall = 0;
+    _tickPerfLastFrame = 0;
     _remoteReceived = 0;
     _remoteMissed = 0;
     _remoteApplied = 0;
@@ -6494,6 +6547,46 @@
       }
     };
 
+    let _lastLifecycleFullResyncAt = 0;
+    const _isMobileLifecycleClient = () =>
+      !!_config?.isMobile || /Mobile|Android|iPhone|iPad/i.test(navigator.userAgent);
+
+    const _requestImmediateFullResync = (reason) => {
+      const nowPerf = performance.now();
+      if (nowPerf - _lastLifecycleFullResyncAt < 1000) {
+        _syncLog(`${reason}: full resync skipped (recent lifecycle resync)`);
+        return;
+      }
+      _lastLifecycleFullResyncAt = nowPerf;
+      _pendingResyncState = null;
+
+      if (_playerSlot === 0) {
+        _consecutiveResyncs = 0;
+        _syncCheckInterval = _syncBaseInterval;
+        _syncLog(`${reason}: host foregrounded; reset sync cadence`);
+        return;
+      }
+
+      _setLastSyncState(null, reason);
+      _lastResyncTime = 0;
+      _resyncRequestInFlight = false;
+      _syncTargetFrame = -1;
+      _syncTargetDeadlineAt = 0;
+      const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+      if (hostPeer?.dc?.readyState === 'open') {
+        try {
+          _resyncRequestInFlight = true;
+          hostPeer.dc.send('sync-request-full');
+          _syncLog(`${reason}: sent immediate sync-request-full to host`);
+        } catch (e) {
+          _resyncRequestInFlight = false;
+          _syncLog(`${reason}: sync-request-full send failed: ${e}`);
+        }
+      } else {
+        _syncLog(`${reason}: host DC unavailable for sync-request-full`);
+      }
+    };
+
     // Background tab handling: do NOT pause the tick loop. Browser naturally
     // throttles setInterval to ~1fps in background tabs, which keeps the
     // player sending input (slowly). Pausing completely breaks multi-tab
@@ -6502,6 +6595,7 @@
     // On return to foreground: fast-forward frame counter to catch up with
     // peers, then resync emulator state from host.
     let _backgroundAt = 0;
+    let _focusLostAt = 0;
     _visChangeHandler = () => {
       if (_phase !== PHASE_RUNNING) return;
       if (document.hidden) {
@@ -6519,6 +6613,7 @@
         _releaseLocalFocusInput();
         _clearEjsPauseFlag('tab visible');
         _syncLog(`tab visible (was background ${bgDuration} ms)`);
+        _tickNextAt = performance.now() + TICK_TARGET_MS;
 
         // BF6: resume AudioContext on visibility return — browsers suspend
         // AudioContext when tab is hidden, and it won't auto-resume.
@@ -6536,13 +6631,6 @@
 
         // Short background (<500ms): no action needed (audio resume above still fires)
         if (bgDuration < 500) return;
-
-        // Force full resync after background return (delta base is stale).
-        // Only reset on guest — host's delta base should persist so it can
-        // send small deltas instead of 8MB full state every time.
-        if (_playerSlot !== 0) {
-          _setLastSyncState(null, 'bg-return');
-        }
 
         // Notify peers we returned (toast only, no gameplay effect)
         const activePeers2 = getActivePeers();
@@ -6568,24 +6656,9 @@
           }
         }
 
-        // Request resync (emulator state drifted during background throttling)
-        if (_playerSlot === 0) {
-          _consecutiveResyncs = 0;
-          _syncCheckInterval = _syncBaseInterval;
-        } else {
-          _resyncRequestInFlight = false; // override — tab-focus resync always wins
-          _syncTargetFrame = -1; // cancel any pending coord target — tab was paused, immediate sync needed
-          _syncTargetDeadlineAt = 0;
-          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-          if (hostPeer?.dc?.readyState === 'open') {
-            try {
-              _resyncRequestInFlight = true;
-              hostPeer.dc.send('sync-request');
-            } catch (_) {
-              _resyncRequestInFlight = false;
-            }
-          }
-        }
+        // Request a full resync: the guest intentionally drops its delta base
+        // on background return, so asking for a delta can never succeed.
+        _requestImmediateFullResync('bg-return');
       }
     };
     document.addEventListener('visibilitychange', _visChangeHandler);
@@ -6595,13 +6668,20 @@
     // show exactly when input capture stopped/resumed.
     _focusHandler = () => {
       if (_phase === PHASE_RUNNING) {
+        const focusLostMs = _focusLostAt ? Date.now() - _focusLostAt : 0;
+        _focusLostAt = 0;
         _releaseLocalFocusInput();
         _clearEjsPauseFlag('focus');
         _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
+        if (_isMobileLifecycleClient() && focusLostMs >= 500 && !(typeof document !== 'undefined' && document.hidden)) {
+          _tickNextAt = performance.now() + TICK_TARGET_MS;
+          _requestImmediateFullResync('mobile-focus-return');
+        }
       }
     };
     _blurHandler = () => {
       if (_phase === PHASE_RUNNING) {
+        _focusLostAt = Date.now();
         _releaseLocalFocusInput();
         _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
       }
@@ -6639,23 +6719,37 @@
     if (conn) conn.addEventListener('change', _networkChangeHandler);
     window.addEventListener('online', _networkChangeHandler);
 
-    // WebKit rounds setInterval(16) up to ~20ms in foreground tabs, which
-    // forces the JSC peer to run at ~50fps and makes faster peers throttle
-    // down. Pump more frequently, but advance at most one simulation frame
-    // per 60Hz deadline so the game cadence stays correct.
+    // WebKit can stretch foreground timers to ~30ms on mobile during longer
+    // sessions, which makes one iPhone run at ~33fps while the peer throttles
+    // down to match. Pump frequently and, when the browser wakes us late, run
+    // a tiny bounded catch-up burst so the logical cadence stays near 60Hz.
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
-      const now = performance.now();
-      if (now + 0.25 < _tickNextAt) return;
-      tick();
-      const after = performance.now();
-      _tickNextAt += TICK_TARGET_MS;
+      const pumpStart = performance.now();
+      if (pumpStart + 0.25 < _tickNextAt) return;
+      const maxSteps = typeof document !== 'undefined' && document.hidden ? 1 : TICK_MAX_CATCHUP_STEPS;
+      let steps = 0;
+      let after = pumpStart;
+      while (_phase === PHASE_RUNNING && after + 0.25 >= _tickNextAt && steps < maxSteps) {
+        const frameBefore = _frameNum;
+        tick();
+        steps++;
+        after = performance.now();
+        _tickNextAt += TICK_TARGET_MS;
+        // Pacing/stall paths intentionally do not advance the frame. Do not
+        // spin duplicate input packets inside one timer callback.
+        if (_frameNum === frameBefore) break;
+        if (after - pumpStart >= TICK_CATCHUP_BUDGET_MS) break;
+      }
       if (after - _tickNextAt > TICK_TARGET_MS * 4) {
         _tickNextAt = after + TICK_TARGET_MS;
       }
     }, TICK_PUMP_INTERVAL_MS);
-    _syncLog(`tick scheduler target=${TICK_TARGET_MS.toFixed(2)}ms pump=${TICK_PUMP_INTERVAL_MS}ms`);
+    _syncLog(
+      `tick scheduler target=${TICK_TARGET_MS.toFixed(2)}ms pump=${TICK_PUMP_INTERVAL_MS}ms ` +
+        `catchupMax=${TICK_MAX_CATCHUP_STEPS} budget=${TICK_CATCHUP_BUDGET_MS.toFixed(1)}ms`,
+    );
 
     // Live RTT probe — runs every 5s to catch latency spikes (e.g. 5G jitter).
     // Delay is fixed for the session — no live RTT probes.
@@ -6908,6 +7002,12 @@
       if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
       applySyncState(pending.bytes, pending.frame, pending.fromProactive);
     }
+
+    // Host-side coordinated resync must be allowed to dispatch before menu
+    // phase-lock or pacing early-returns. A mobile peer returning from the OS
+    // app switcher can otherwise ask for sync-at:F, then both peers stall in
+    // different menu phases before the host reaches the post-step dispatcher.
+    _drainScheduledSyncRequests('pre-stall');
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
     // Pacing decisions (stall, safety freeze, soft throttle) skip frame
@@ -7440,6 +7540,11 @@
         const median = sorted[Math.floor(sorted.length / 2)];
         const p95 = sorted[Math.floor(sorted.length * 0.95)];
         const avgFps = 1000 / (sorted.reduce((a, b) => a + b) / sorted.length);
+        const frameRateWindowMs = _tickPerfLastWall > 0 ? _tickWallNow - _tickPerfLastWall : 0;
+        const frameDelta = _tickPerfLastWall > 0 ? Math.max(0, _frameNum - _tickPerfLastFrame) : 0;
+        const frameFps = frameRateWindowMs > 0 ? (frameDelta * 1000) / frameRateWindowMs : avgFps;
+        _tickPerfLastWall = _tickWallNow;
+        _tickPerfLastFrame = _frameNum;
         // Check input availability for peers
         const inputPeers = getInputPeers();
         let inputAvail = 'none';
@@ -7448,8 +7553,9 @@
           inputAvail = `${avail}/${inputPeers.length}`;
         }
         _syncLog(
-          `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
-            `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
+          `TICK-PERF f=${_frameNum} fps=${frameFps.toFixed(1)} pumpFps=${avgFps.toFixed(1)} ` +
+            `tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} inputAvail=${inputAvail} ` +
+            `converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
         );
       }
       // Reset deadlock recovery flag periodically — without this, a single
@@ -7654,10 +7760,10 @@
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
       const _t0 = performance.now();
-      // C currently throttles at frame_adv >= delay + 2. Bias the value so
-      // the actual cap is frame_adv >= delay: once the fast peer has consumed
-      // the whole input buffer, wait instead of creating a guaranteed rollback.
-      const _frameAdvForC = _rbBootConverged ? _frameAdvRaw + 2 : -1;
+      // C throttles at frame_adv >= delay + 2. Pass the raw advantage so
+      // being exactly at the negotiated delay does not halve the framerate
+      // during steady-state iOS timer jitter.
+      const _frameAdvForC = _rbBootConverged ? _frameAdvRaw : -1;
       let catchingUp = tickMod._kn_pre_tick(
         localInput.buttons,
         localInput.lx,
@@ -9123,42 +9229,7 @@
       KNEvent('milestone_reached', '', { frame: 1800 });
     }
 
-    // Coordinated sync dispatch: when host reaches a scheduled target frame, capture
-    // and send state. Coalesces multiple guests (4P) into a single broadcast push.
-    //
-    // I1 (MF3): each request has a wall-clock deadline. If frame
-    // pacing prevents reaching targetFrame before the deadline, the
-    // request is dispatched NOW at current frame instead. This closes
-    // the coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
-    if (_playerSlot === 0 && _scheduledSyncRequests.length > 0 && !_pushingSyncState) {
-      const _coordNow = performance.now();
-      const due = _scheduledSyncRequests.filter(
-        (r) => r.targetFrame <= _frameNum || (r.deadlineAt && _coordNow > r.deadlineAt),
-      );
-      if (due.length > 0) {
-        const timedOut = due.filter((r) => r.targetFrame > _frameNum);
-        if (timedOut.length > 0) {
-          for (const r of timedOut) {
-            _syncLog(
-              `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} ` +
-                `elapsed=${Math.round(_coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
-                `dispatching at current frame instead`,
-            );
-          }
-        }
-        _scheduledSyncRequests = _scheduledSyncRequests.filter(
-          (r) => r.targetFrame > _frameNum && (!r.deadlineAt || _coordNow <= r.deadlineAt),
-        );
-        const forceFull = due.some((r) => r.forceFull);
-        if (forceFull) _setLastSyncState(null, 'coord-full');
-        // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
-        const targetSid = due.length === 1 ? due[0].targetSid : null;
-        _syncLog(
-          `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
-        );
-        pushSyncState(targetSid);
-      }
-    }
+    _drainScheduledSyncRequests('post-step');
 
     // (Deferred sync check removed — frame hash computes live, no deferral needed.)
 
@@ -9708,11 +9779,12 @@
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
           const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-          const hostSyncDc = hostPeer?.syncDc?.readyState === 'open' ? hostPeer.syncDc : hostPeer?.dc;
-          if (hostSyncDc?.readyState === 'open') {
+          const hostDc = hostPeer?.dc;
+          if (hostDc?.readyState === 'open') {
             try {
               _resyncRequestInFlight = true;
-              hostSyncDc.send('sync-request-full');
+              hostDc.send('sync-request-full');
+              _syncLog('delta base retry: sent sync-request-full on primary DC');
             } catch (_) {
               _resyncRequestInFlight = false;
             }

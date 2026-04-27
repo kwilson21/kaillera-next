@@ -1740,6 +1740,7 @@ def query_tick_performance(jsonl_dir: str) -> None:
                 mobile = (first.get("context") or {}).get("mobile", False)
                 f.seek(0)
                 fps_vals = []
+                pump_fps_vals = []
                 median_vals = []
                 p95_vals = []
                 for line in f:
@@ -1747,19 +1748,36 @@ def query_tick_performance(jsonl_dir: str) -> None:
                     msg = d.get("msg", "")
                     if "TICK-PERF" not in msg:
                         continue
-                    m = re.search(r"fps=([0-9.]+).*median=([0-9.]+).*p95=([0-9.]+)", msg)
+                    m = re.search(
+                        r"fps=([0-9.]+)(?:\s+pumpFps=([0-9.]+))?.*median=([0-9.]+).*p95=([0-9.]+)",
+                        msg,
+                    )
                     if m:
                         fps_vals.append(float(m.group(1)))
-                        median_vals.append(float(m.group(2)))
-                        p95_vals.append(float(m.group(3)))
+                        if m.group(2) is not None:
+                            pump_fps_vals.append(float(m.group(2)))
+                        median_vals.append(float(m.group(3)))
+                        p95_vals.append(float(m.group(4)))
                 if fps_vals:
                     avg_fps = sum(fps_vals) / len(fps_vals)
+                    avg_pump_fps = (
+                        sum(pump_fps_vals) / len(pump_fps_vals) if pump_fps_vals else None
+                    )
                     avg_med = sum(median_vals) / len(median_vals)
                     avg_p95 = sum(p95_vals) / len(p95_vals)
                     device = "mobile" if mobile else "desktop"
-                    print(f"  Slot {slot} ({device}): fps={avg_fps:.1f} tickMs median={avg_med:.1f} p95={avg_p95:.1f} ({len(fps_vals)} samples)")
+                    pump_part = f" pumpFps={avg_pump_fps:.1f}" if avg_pump_fps is not None else ""
+                    print(
+                        f"  Slot {slot} ({device}): fps={avg_fps:.1f}{pump_part} "
+                        f"tickMs median={avg_med:.1f} p95={avg_p95:.1f} ({len(fps_vals)} samples)"
+                    )
                     if avg_fps < 55:
-                        budget = 1000 / avg_fps
+                        if avg_pump_fps is not None and avg_pump_fps >= 55:
+                            print(
+                                "    !! BELOW 60fps: frame advancement is slow but timer pump is healthy"
+                                " — check pacing/stalls"
+                            )
+                            continue
                         # Check C-PERF total to see how much is code vs browser
                         f.seek(0)
                         totals = []
