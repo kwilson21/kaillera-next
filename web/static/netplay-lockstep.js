@@ -1239,6 +1239,7 @@
   let _guestStateKind = 'savestate'; // 'savestate' or 'kn-sync'
   let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
+  let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
   let _frameNum = 0; // current logical frame number
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
@@ -1291,6 +1292,11 @@
     _auditLastLocal.ly = input.ly;
     _auditLastLocal.cx = input.cx;
     _auditLastLocal.cy = input.cy;
+    if (input.buttons || input.lx || input.ly || input.cx || input.cy) {
+      _syncLog(
+        `LOCAL-INPUT slot=${_playerSlot} f=${frame} b=${input.buttons} lx=${input.lx} ly=${input.ly} cx=${input.cx} cy=${input.cy}`,
+      );
+    }
   };
   const _auditRecordRemote = (slot, frame, input) => {
     if (!_auditRemoteInputs[slot]) {
@@ -1338,6 +1344,13 @@
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
   const _pendingLateJoinReadySids = new Set(); // ready arrived before host DC opened
+  const _pendingLateJoinPeerSids = new Set(); // running-phase players not active until late-join-ready
+  const _pendingLateJoinPeerSlots = new Set(); // same gate, indexed by slot for non-host roster updates
+  const LATE_JOIN_ACTIVATION_GRACE_FRAMES = 45; // let an activated joiner send first phase/input packets
+  const LATE_JOIN_INPUT_BOOTSTRAP_FRAMES = 24; // deterministic zero-input ramp after roster activation
+  let _lateJoinActivatedAtFrame = {}; // slot -> local frame where pending gate was lifted
+  let _lateJoinInputBootstrapUntilFrame = -1;
+  let _lateJoinSeededInputFrames = {}; // slot -> Set<frame> seeded as deterministic late-join zeros
   let _lateJoinReadyRetryTimer = null;
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
@@ -1349,6 +1362,171 @@
   const _isSmashRemix = () =>
     _config?.gameId === 'smash-remix' || KNState?.gameId === 'smash-remix' || _SMASH_REMIX_HASHES.has(_config?.romHash);
 
+  const _isValidPlayerSlot = (slot) => Number.isInteger(slot) && slot >= 0 && slot < 4;
+
+  const _consumeLateJoinSeededInput = (slot, frame) => {
+    const seeded = _lateJoinSeededInputFrames[slot];
+    if (!seeded?.has(frame)) return false;
+    seeded.delete(frame);
+    if (seeded.size === 0) delete _lateJoinSeededInputFrames[slot];
+    return true;
+  };
+
+  const _seedLateJoinZeroInput = (slot, frame) => {
+    if (!_isValidPlayerSlot(slot) || slot === _playerSlot || frame < 0) return false;
+    if (!_remoteInputs[slot]) _remoteInputs[slot] = {};
+    if (_remoteInputs[slot][frame] !== undefined) return false;
+    _remoteInputs[slot][frame] = KNShared.ZERO_INPUT;
+    if (!_lateJoinSeededInputFrames[slot]) _lateJoinSeededInputFrames[slot] = new Set();
+    _lateJoinSeededInputFrames[slot].add(frame);
+    if (_useCRollback) {
+      _pendingCInputs.push({
+        slot,
+        frame,
+        buttons: 0,
+        lx: 0,
+        ly: 0,
+        cx: 0,
+        cy: 0,
+      });
+    }
+    return true;
+  };
+
+  const _lateJoinBootstrapSlots = (extraSlots = []) => {
+    const slots = new Set();
+    const add = (slot) => {
+      if (_isValidPlayerSlot(slot)) slots.add(slot);
+    };
+    if (_activeRoster) {
+      for (const slot of _activeRoster) add(slot);
+    }
+    for (const slot of extraSlots) add(slot);
+    for (const info of Object.values(_knownPlayers)) add(info?.slot);
+    for (const peer of Object.values(_peers)) add(peer?.slot);
+    add(_playerSlot);
+    return [...slots].filter((slot) => slot !== _playerSlot);
+  };
+
+  const _startLateJoinInputBootstrap = (reason = '', extraSlots = []) => {
+    if (!_isSmashRemix()) return;
+    if (!_isValidPlayerSlot(_playerSlot)) return;
+    const startFrame = Math.max(0, _frameNum - DELAY_FRAMES - 2);
+    const endFrame = _frameNum + Math.max(LATE_JOIN_INPUT_BOOTSTRAP_FRAMES, DELAY_FRAMES * 4);
+    _lateJoinInputBootstrapUntilFrame = Math.max(_lateJoinInputBootstrapUntilFrame, endFrame + 1);
+
+    const slots = _lateJoinBootstrapSlots(extraSlots);
+    let seeded = 0;
+    for (const slot of slots) {
+      for (let f = startFrame; f <= endFrame; f++) {
+        if (_seedLateJoinZeroInput(slot, f)) seeded++;
+      }
+    }
+
+    _bootStallFrame = -1;
+    _bootStallStartTime = 0;
+    _bootStallRecoveryFired = false;
+    _syncLog(
+      `late-join input bootstrap: frames=${startFrame}-${endFrame} slots=[${slots.join(',')}] ` +
+        `seeded=${seeded} suppressLocalUntil=${_lateJoinInputBootstrapUntilFrame}` +
+        `${reason ? ` reason=${reason}` : ''}`,
+    );
+  };
+
+  const _isPeerPendingLateJoin = (sid, peer = null) => {
+    const slot = peer?.slot ?? (sid ? _knownPlayers[sid]?.slot : null);
+    return (
+      (sid && _pendingLateJoinPeerSids.has(sid)) || (_isValidPlayerSlot(slot) && _pendingLateJoinPeerSlots.has(slot))
+    );
+  };
+
+  const _markLateJoinActivated = (slot, reason = '') => {
+    if (!_isValidPlayerSlot(slot)) return;
+    _lateJoinActivatedAtFrame[slot] = _frameNum;
+    _peerLastAdvanceTime[slot] = performance.now();
+    _syncLog(`late-join activation grace: slot=${slot} f=${_frameNum}${reason ? ` reason=${reason}` : ''}`);
+  };
+
+  const _isLateJoinActivationGrace = (slot) => {
+    const activatedAt = _lateJoinActivatedAtFrame[slot];
+    return (
+      _isValidPlayerSlot(slot) &&
+      Number.isFinite(activatedAt) &&
+      _frameNum >= activatedAt &&
+      _frameNum - activatedAt < LATE_JOIN_ACTIVATION_GRACE_FRAMES
+    );
+  };
+
+  const _slotAlreadyActive = (slot) =>
+    _isValidPlayerSlot(slot) &&
+    (slot === _playerSlot ||
+      _activeRoster?.has(slot) ||
+      !!_peerInputStarted[slot] ||
+      _lastRemoteFramePerSlot[slot] !== undefined);
+
+  const _markPendingLateJoinPeer = (sid, slot, reason = '') => {
+    if (!sid || !_isValidPlayerSlot(slot)) return;
+    const wasPending = _pendingLateJoinPeerSids.has(sid) || _pendingLateJoinPeerSlots.has(slot);
+    _pendingLateJoinPeerSids.add(sid);
+    _pendingLateJoinPeerSlots.add(slot);
+    delete _lateJoinActivatedAtFrame[slot];
+    delete _remoteInputs[slot];
+    delete _peerInputStarted[slot];
+    delete _lastRemoteFramePerSlot[slot];
+    delete _peerPhases[slot];
+    delete _phaseMismatchGrace[slot];
+    delete _menuStartReadyPeers[slot];
+    delete _lateJoinSeededInputFrames[slot];
+    for (let i = _pendingCInputs.length - 1; i >= 0; i--) {
+      if (_pendingCInputs[i].slot === slot) _pendingCInputs.splice(i, 1);
+    }
+    if (!wasPending) _syncLog(`late-join pending: sid=${sid} slot=${slot}${reason ? ` reason=${reason}` : ''}`);
+  };
+
+  const _clearPendingLateJoinPeer = (sid, slot, reason = '', opts = {}) => {
+    let cleared = false;
+    if (sid && _pendingLateJoinPeerSids.delete(sid)) cleared = true;
+    if (_isValidPlayerSlot(slot) && _pendingLateJoinPeerSlots.delete(slot)) cleared = true;
+    if (cleared) {
+      _syncLog(
+        `late-join activated/cleared: sid=${sid || 'unknown'} slot=${slot ?? 'unknown'}${reason ? ` reason=${reason}` : ''}`,
+      );
+      if (opts.activate) {
+        _markLateJoinActivated(slot, reason);
+        _startLateJoinInputBootstrap(reason, [slot]);
+      }
+    }
+  };
+
+  const _clearPendingLateJoinRosterSlots = (slots, reason = '') => {
+    const slotSet = new Set(slots.filter(_isValidPlayerSlot));
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (slotSet.has(peer?.slot)) _clearPendingLateJoinPeer(sid, peer.slot, reason, { activate: true });
+    }
+    for (const slot of slotSet) {
+      if (_pendingLateJoinPeerSlots.has(slot)) _clearPendingLateJoinPeer(null, slot, reason, { activate: true });
+    }
+  };
+
+  const _dropPendingLateJoinPeersMissingFromRoster = (players) => {
+    const liveSids = new Set(
+      Object.values(players)
+        .map((p) => p.socketId)
+        .filter(Boolean),
+    );
+    const liveSlots = new Set(
+      Object.values(players)
+        .map((p) => p.slot)
+        .filter(_isValidPlayerSlot),
+    );
+    for (const sid of [..._pendingLateJoinPeerSids]) {
+      if (!liveSids.has(sid)) _clearPendingLateJoinPeer(sid, _knownPlayers[sid]?.slot, 'users-updated missing sid');
+    }
+    for (const slot of [..._pendingLateJoinPeerSlots]) {
+      if (!liveSlots.has(slot)) _clearPendingLateJoinPeer(null, slot, 'users-updated missing slot');
+    }
+  };
+
   const _controllerPresentMask = () => {
     const slots = new Set();
     const addSlot = (slot) => {
@@ -1359,8 +1537,11 @@
       for (const slot of _activeRoster) addSlot(slot);
     } else {
       addSlot(_playerSlot);
-      for (const info of Object.values(_knownPlayers)) addSlot(info?.slot);
-      for (const peer of Object.values(_peers)) {
+      for (const [sid, info] of Object.entries(_knownPlayers)) {
+        if (!_isPeerPendingLateJoin(sid)) addSlot(info?.slot);
+      }
+      for (const [sid, peer] of Object.entries(_peers)) {
+        if (_isPeerPendingLateJoin(sid, peer)) continue;
         if (!peer?._intentionalLeave) addSlot(peer?.slot);
       }
     }
@@ -1492,6 +1673,7 @@
       const nowMs = performance.now();
       for (const p of getActivePeers()) {
         if (p.reconnecting || p.slot === null || p.slot === undefined || _peerPhantom[p.slot]) continue;
+        if (_isLateJoinActivationGrace(p.slot)) continue;
         const peerPhase = _peerPhases[p.slot];
         if (!peerPhase || nowMs - (peerPhase.seenAt || 0) > PHASE_STALE_MS) {
           delete _phaseMismatchGrace[p.slot];
@@ -2009,6 +2191,29 @@
     }
   };
 
+  const _captureAudioFifoState = (mod) => {
+    if (!_isSmashRemix() || !mod?._kn_get_audio_fifo_state || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
+      return null;
+    }
+    const ptr = mod._malloc(4 * 4);
+    if (!ptr) return null;
+    try {
+      mod._kn_get_audio_fifo_state(ptr);
+      return Array.from(new Uint32Array(mod.HEAPU32.buffer, ptr, 4));
+    } finally {
+      mod._free(ptr);
+    }
+  };
+
+  const _restoreAudioFifoState = (mod, words, reason) => {
+    if (!words?.length || !mod?._kn_set_audio_fifo_state) return false;
+    const vals = words.slice(0, 4).map((w) => w >>> 0);
+    if (vals.length < 4) return false;
+    mod._kn_set_audio_fifo_state(vals[0], vals[1], vals[2], vals[3]);
+    _syncLog(`${reason}: restored audio FIFO [${vals.join(',')}]`);
+    return true;
+  };
+
   const _captureInitialStateBytes = (gm) => {
     const mod = gm?.Module;
     if (_isSmashRemix() && mod?._kn_sync_read && mod?._kn_sync_write && mod?.HEAPU8) {
@@ -2026,6 +2231,7 @@
             bytes,
             kind: 'kn-sync',
             hiddenWords: _captureHiddenStateWords(mod),
+            audioFifo: _captureAudioFifoState(mod),
           };
         }
         _syncLog('Smash Remix initial sync: kn_sync_read returned 0, falling back to savestate');
@@ -2038,6 +2244,7 @@
       bytes,
       kind: 'savestate',
       hiddenWords: _captureHiddenStateWords(mod),
+      audioFifo: _captureAudioFifoState(mod),
     };
   };
 
@@ -2203,6 +2410,9 @@
         return;
       }
       _pendingLateJoinReadySids.delete(senderSid);
+      _clearPendingLateJoinPeer(senderSid, peer?.slot ?? _knownPlayers[senderSid]?.slot, `ready via ${source}`, {
+        activate: true,
+      });
       _lateJoinReadyHandled.add(senderSid);
       newlyHandled = true;
     }
@@ -2231,6 +2441,7 @@
     for (const p of Object.values(players)) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     }
+    _dropPendingLateJoinPeersMissingFromRoster(players);
 
     // Update my slot from server (handles spectator -> player transition)
     const myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
@@ -2257,9 +2468,21 @@
     // Late-join: joiner always initiates (host's offer would arrive before listener is ready)
     // Running host: DON'T initiate to new players — let them initiate after their init()
     for (const p of otherPlayers) {
+      const shouldHoldForLateJoin =
+        _phase === PHASE_RUNNING &&
+        !_lateJoin &&
+        !_isSpectator &&
+        _isValidPlayerSlot(p.slot) &&
+        !_slotAlreadyActive(p.slot);
+
       if (_peers[p.socketId]) {
         _syncLog(`onUsersUpdated: peer ${p.socketId} (slot ${p.slot}) already exists, skipping`);
         _peers[p.socketId].slot = p.slot;
+        if (shouldHoldForLateJoin) {
+          _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated existing running peer');
+        } else if (_activeRoster?.has(p.slot)) {
+          _clearPendingLateJoinPeer(p.socketId, p.slot, 'users-updated active roster');
+        }
         continue;
       }
 
@@ -2297,6 +2520,7 @@
         reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
+      if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
@@ -2616,6 +2840,13 @@
   // (unordered DC, used when host broadcasts rb-transport:unreliable).
   const _processInputPacket = (remoteSid, peer, data) => {
     if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
+    if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      if (!peer._pendingLateJoinInputDroppedLogged) {
+        peer._pendingLateJoinInputDroppedLogged = true;
+        _syncLog(`dropping input from pending late-join peer slot=${peer.slot} sid=${remoteSid}`);
+      }
+      return;
+    }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
@@ -2642,6 +2873,7 @@
     }
     const existingHeaderInput = _remoteInputs[peer.slot][recvFrame];
     const headerDuplicate = existingHeaderInput !== undefined && _inputEq(existingHeaderInput, recvInput);
+    const headerWasSeeded = _consumeLateJoinSeededInput(peer.slot, recvFrame);
     _remoteInputs[peer.slot][recvFrame] = recvInput;
     if (!_lastKnownInput[peer.slot] || recvFrame >= (_lastKnownInput[peer.slot].frame ?? -1)) {
       _lastKnownInput[peer.slot] = { ...recvInput, frame: recvFrame };
@@ -2662,19 +2894,22 @@
     if (decoded.redundant && decoded.redundant.length > 0) {
       for (const r of decoded.redundant) {
         if (r.frame < 0) continue;
-        // Already have real input for this frame? Skip — just a dup.
-        if (_remoteInputs[peer.slot][r.frame] !== undefined) {
-          _rbTransportDupsRecv++;
-          continue;
-        }
-        _remoteInputs[peer.slot][r.frame] = {
+        const redundantInput = {
           buttons: r.buttons,
           lx: r.lx,
           ly: r.ly,
           cx: r.cx,
           cy: r.cy,
         };
-        if (_useCRollback) {
+        const existingRedundantInput = _remoteInputs[peer.slot][r.frame];
+        const redundantWasSeeded = _consumeLateJoinSeededInput(peer.slot, r.frame);
+        // Already have real input for this frame? Skip — just a dup.
+        if (existingRedundantInput !== undefined && !redundantWasSeeded) {
+          _rbTransportDupsRecv++;
+          continue;
+        }
+        _remoteInputs[peer.slot][r.frame] = redundantInput;
+        if (_useCRollback && (!existingRedundantInput || !_inputEq(existingRedundantInput, redundantInput))) {
           _pendingCInputs.push({
             slot: peer.slot,
             frame: r.frame,
@@ -2689,7 +2924,7 @@
     }
 
     // Queue for C-level rollback engine — drained at tick boundary
-    if (_useCRollback && !headerDuplicate) {
+    if (_useCRollback && (!headerDuplicate || (headerWasSeeded && !_inputEq(existingHeaderInput, recvInput)))) {
       _pendingCInputs.push({
         slot: peer.slot,
         frame: recvFrame,
@@ -2897,8 +3132,10 @@
         }
       }
 
-      // Host: send current roster to newly connected/reconnected peer
-      if (_playerSlot === 0 && _activeRoster) {
+      // Host: send current roster to newly connected/reconnected peer.
+      // A running late joiner must not receive the old roster before it has
+      // loaded state and sent late-join-ready.
+      if (_playerSlot === 0 && _activeRoster && !_isPeerPendingLateJoin(remoteSid, peer)) {
         const slots = [..._activeRoster].sort((a, b) => a - b);
         try {
           ch.send(`roster:${_frameNum}:${slots.join(',')}`);
@@ -2963,9 +3200,15 @@
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
+          _clearPendingLateJoinRosterSlots(slots, 'host roster');
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
           _applyControllerPresentMask('roster');
+          const addedSlots = slots.filter((slot) => _isValidPlayerSlot(slot) && !previousRoster?.has(slot));
+          if (_phase === PHASE_RUNNING && addedSlots.length > 0) {
+            _startLateJoinInputBootstrap('roster added slot', addedSlots);
+          }
           // Always use 4 (KN_MAX_PLAYERS) so the C engine covers all
           // slots regardless of gaps (e.g. roster [0,1,3]). Empty slots
           // get zero predictions — harmless since no input arrives.
@@ -2977,6 +3220,13 @@
           _syncLog(`ROSTER received: frame=${rosterFrame} slots=[${slots.join(',')}]`);
         }
         if (e.data.startsWith('phase:')) {
+          if (_isPeerPendingLateJoin(remoteSid, peer)) {
+            if (!peer._pendingLateJoinPhaseDroppedLogged) {
+              peer._pendingLateJoinPhaseDroppedLogged = true;
+              _syncLog(`dropping phase from pending late-join peer slot=${peer.slot} sid=${remoteSid}`);
+            }
+            return;
+          }
           const parts = e.data.split(':');
           const phaseFrame = parseInt(parts[1], 10);
           const sceneCurr = parseInt(parts[2], 10);
@@ -3001,6 +3251,13 @@
           return;
         }
         if (e.data.startsWith('menu-ready:')) {
+          if (_isPeerPendingLateJoin(remoteSid, peer)) {
+            if (!peer._pendingLateJoinMenuReadyDroppedLogged) {
+              peer._pendingLateJoinMenuReadyDroppedLogged = true;
+              _syncLog(`dropping menu-ready from pending late-join peer slot=${peer.slot} sid=${remoteSid}`);
+            }
+            return;
+          }
           const parts = e.data.split(':');
           const readyFrame = parseInt(parts[1], 10);
           const readyScene = parseInt(parts[2], 10);
@@ -3034,6 +3291,16 @@
           const known = _knownPlayers[remoteSid];
           const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
           _config?.onToast?.(`${name} returned`);
+          return;
+        }
+        if (
+          _isPeerPendingLateJoin(remoteSid, peer) &&
+          (e.data.startsWith('rb-check:') ||
+            e.data.startsWith('rb-blocks:') ||
+            e.data.startsWith('rb-subhash:') ||
+            e.data.startsWith('rb-regions:') ||
+            e.data.startsWith('fpu-trace:'))
+        ) {
           return;
         }
         // FPU trace: cross-platform determinism verification from host
@@ -3427,6 +3694,7 @@
    *   - _consecutiveFabrications[slot] (fabrication counter)
    *   - _inputLateLogTime[slot]        (rate-limit timestamp)
    *   - _auditRemoteInputs[slot]       (audit log buffer)
+   *   - _lateJoinActivatedAtFrame[slot] (post-activation grace window)
    *
    * Fields reset for per-peer-object state (if peer provided):
    *   - peer.lastAckFromPeer
@@ -3449,6 +3717,7 @@
    */
   const resetPeerState = (slot, reason, opts = {}) => {
     if (slot === null || slot === undefined) return;
+    _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
 
     // Slot-indexed globals
     delete _remoteInputs[slot];
@@ -3461,6 +3730,8 @@
     delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
     delete _auditRemoteInputs[slot];
+    delete _lateJoinActivatedAtFrame[slot];
+    delete _lateJoinSeededInputFrames[slot];
 
     // Per-peer-object ack state
     if (opts.peer) {
@@ -3502,6 +3773,12 @@
     if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
+      return;
+    }
+
+    if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
+      hardDisconnectPeer(remoteSid);
       return;
     }
 
@@ -3693,7 +3970,16 @@
 
   // All connected player peers (for sending input to)
   const getActivePeers = () =>
-    Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined && p.dc && p.dc.readyState === 'open');
+    Object.entries(_peers)
+      .filter(
+        ([sid, p]) =>
+          p.slot !== null &&
+          p.slot !== undefined &&
+          p.dc &&
+          p.dc.readyState === 'open' &&
+          !_isPeerPendingLateJoin(sid, p),
+      )
+      .map(([, p]) => p);
 
   // Wait for all active peers that have started sending input.
   // During the boot grace window (first BOOT_GRACE_FRAMES), also include
@@ -3712,9 +3998,11 @@
       // an open DataChannel. Peers may have dead DCs — the stall/fabrication
       // path handles that.
       const bySlot = new Map();
-      for (const p of Object.values(_peers)) {
+      for (const [sid, p] of Object.entries(_peers)) {
         if (p.slot === null || p.slot === undefined) continue;
+        if (_isPeerPendingLateJoin(sid, p)) continue;
         if (!_activeRoster.has(p.slot)) continue;
+        if (_isLateJoinActivationGrace(p.slot) && !_peerInputStarted[p.slot]) continue;
         const existing = bySlot.get(p.slot);
         if (!existing || (p.dc?.readyState === 'open' && existing.dc?.readyState !== 'open')) {
           bySlot.set(p.slot, p);
@@ -4233,6 +4521,7 @@
         _guestStateBytes = gm.getState();
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
+        _guestStateAudioFifo = null;
         _guestStateCapturedLocally = false;
         _syncLog('host using own state (authoritative)');
       } else {
@@ -4274,16 +4563,19 @@
         return;
       }
       _restoreBootHiddenState(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+      _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
       if (hasLocalKnSyncCapture) {
         _syncLog('initial-sync-load: host reloaded captured kn-sync state');
       }
     } else {
       loadStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load', _isSmashRemix() ? 1 : 2);
       _restoreBootHiddenState(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+      _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
     }
     _guestStateBytes = null;
     _guestStateKind = 'savestate';
     _guestStateHiddenWords = null;
+    _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
     _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
 
@@ -4409,6 +4701,7 @@
         _guestStateBytes = idbBytes instanceof Uint8Array ? idbBytes : new Uint8Array(idbBytes);
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
+        _guestStateAudioFifo = null;
         _guestStateCapturedLocally = false;
 
         if (_playerSlot === 0) {
@@ -4447,6 +4740,7 @@
       _guestStateBytes = bytes;
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
+      _guestStateAudioFifo = null;
       _guestStateCapturedLocally = false;
 
       // Persist to local IDB for next time
@@ -4498,6 +4792,7 @@
         frame: 0,
         stateFormat: captured.kind,
         hiddenWords: captured.hiddenWords,
+        audioFifo: captured.audioFifo,
         data: encoded.data,
       });
 
@@ -4507,6 +4802,7 @@
       _guestStateBytes = cacheBytes;
       _guestStateKind = captured.kind;
       _guestStateHiddenWords = captured.hiddenWords;
+      _guestStateAudioFifo = captured.audioFifo;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
@@ -4544,6 +4840,7 @@
       _guestStateBytes = bytes;
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
+      _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
       _guestStateCapturedLocally = false;
       _syncLog(`initial state decompressed (${_guestStateKind}, ${bytes.length} bytes)`);
 
@@ -4566,7 +4863,8 @@
   const _broadcastRoster = () => {
     if (_playerSlot !== 0) return;
     const slotSet = new Set([_playerSlot]);
-    for (const p of Object.values(_peers)) {
+    for (const [sid, p] of Object.entries(_peers)) {
+      if (_isPeerPendingLateJoin(sid, p)) continue;
       if (p.slot !== null && p.slot !== undefined && !p._intentionalLeave) {
         slotSet.add(p.slot);
       }
@@ -4584,7 +4882,8 @@
     }
     const msg = `roster:${_frameNum}:${slots.join(',')}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
-    for (const p of Object.values(_peers)) {
+    for (const [sid, p] of Object.entries(_peers)) {
+      if (_isPeerPendingLateJoin(sid, p)) continue;
       if (p.dc?.readyState === 'open') {
         try {
           p.dc.send(msg);
@@ -4608,10 +4907,12 @@
       );
       return;
     }
+    _markPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer');
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) {
       _syncLog(`sendLateJoinState: gameManager not ready`);
+      _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer unavailable');
       return;
     }
 
@@ -4644,7 +4945,11 @@
       // Read game-specific RNG/settings values from RDRAM (while paused)
       let rngValues = null;
       let saveData = null;
+      let hiddenWords = null;
+      let audioFifo = null;
       const hMod = gm.Module;
+      hiddenWords = _captureHiddenStateWords(hMod);
+      audioFifo = _captureAudioFifoState(hMod);
       if (hMod?.HEAPU32 && hMod?._get_memory_data) {
         try {
           const rk = hMod.stringToNewUTF8('RETRO_MEMORY_SYSTEM_RAM');
@@ -4712,6 +5017,8 @@
           // gone), we just log.
           if (_peers[remoteSid]) {
             hardDisconnectPeer(remoteSid);
+          } else {
+            _clearPendingLateJoinPeer(remoteSid, peerSlot, 'late-join timeout');
           }
         }
       }, LATE_JOIN_TIMEOUT_MS);
@@ -4729,9 +5036,17 @@
         rbTransport: _rbTransport,
         rngValues,
         saveData,
+        hiddenWords,
+        audioFifo,
       });
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
+      _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
+      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+        _runSubstate = RUN_NORMAL;
+        _lateJoinPausedAt = 0;
+        _resetPacingAfterLateJoin();
+      }
     }
   }
 
@@ -4799,6 +5114,11 @@
         gm.loadState(bytes);
         if (mod?._task_queue_check) mod._task_queue_check();
       }
+      _restoreAudioFifoState(
+        mod,
+        Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null,
+        'late-join-state',
+      );
 
       _setLastSyncState(bytes.slice(), 'late-join');
 
@@ -4867,6 +5187,8 @@
       if (Number.isInteger(_playerSlot) && _playerSlot >= 0 && _playerSlot < 4) _activeRoster.add(_playerSlot);
       _rosterChangeFrame = _frameNum;
       _applyControllerPresentMask('late-join-state');
+      _releaseMenuStartBarrierAfterLateJoin();
+      _startLateJoinInputBootstrap('late-join-state', [..._activeRoster]);
 
       // Ensure rollback init can proceed — the late joiner missed the
       // host's rb-delay broadcast over DataChannel (sent at game start).
@@ -5174,7 +5496,9 @@
       _broadcastMenuStartReady();
     }
 
-    const expectedPeers = activePeers.filter((p) => p.slot !== null && p.slot !== undefined && !p.reconnecting);
+    const expectedPeers = activePeers.filter(
+      (p) => p.slot !== null && p.slot !== undefined && !p.reconnecting && !_isLateJoinActivationGrace(p.slot),
+    );
     const allPeersReady = expectedPeers.every((p) => _menuStartReadyPeers[p.slot]?.scene === sceneCurr);
     const allReady = _menuStartLocalReady && allPeersReady;
 
@@ -5197,6 +5521,17 @@
       suppressInput: true,
       freezeFrame: false,
     };
+  };
+
+  const _releaseMenuStartBarrierAfterLateJoin = () => {
+    if (!_isSmashRemix()) return;
+    _menuStartBarrierReleased = true;
+    _menuStartLocalReady = false;
+    _menuStartLocalScene = 0;
+    _menuStartReleaseAt = 0;
+    _menuStartReadyPeers = {};
+    _menuStartReadyLastBroadcast = 0;
+    _syncLog(`late-join: menu barrier bypassed after state load at f=${_frameNum}`);
   };
 
   // -- Frame stepping (rAF interception) -------------------------------------
@@ -5653,6 +5988,11 @@
       _remoteInputs = {};
       _peerInputStarted = {};
       _activeRoster = null;
+      _pendingLateJoinPeerSids.clear();
+      _pendingLateJoinPeerSlots.clear();
+      _lateJoinActivatedAtFrame = {};
+      _lateJoinInputBootstrapUntilFrame = -1;
+      _lateJoinSeededInputFrames = {};
       _rosterChangeFrame = -1;
       _menuStartBarrierReleased = false;
       _menuStartLocalReady = false;
@@ -5961,6 +6301,15 @@
         skipMod._kn_set_skip_audio_output(0);
         _syncLog('Audio output enabled: aiLenChanged feeds deterministic capture buffer');
       }
+      const fifo = _captureAudioFifoState(skipMod);
+      const samples = skipMod?._kn_get_audio_samples?.();
+      const skipOutput = skipMod?._kn_get_skip_audio_output?.();
+      const deterministic = skipMod?._kn_get_deterministic?.();
+      _syncLog(
+        `audio boundary start-lockstep: samples=${samples ?? 'n/a'} ` +
+          `fifo=${fifo ? `[${fifo.join(',')}]` : 'n/a'} ` +
+          `skipOutput=${skipOutput ?? 'n/a'} deterministic=${deterministic ?? 'n/a'}`,
+      );
     }
 
     installNativeInputGuard();
@@ -6276,6 +6625,11 @@
     _manualMode = false;
     _pendingRunner = null;
     _setLastSyncState(null, 'stopSync');
+    _pendingLateJoinPeerSids.clear();
+    _pendingLateJoinPeerSlots.clear();
+    _lateJoinActivatedAtFrame = {};
+    _lateJoinInputBootstrapUntilFrame = -1;
+    _lateJoinSeededInputFrames = {};
     // Free C-level sync buffers
     if (_syncBufPtr && _hasKnSync) {
       const modStop = window.EJS_emulator?.gameManager?.Module;
@@ -6657,10 +7011,18 @@
     // unconfirmed inputs (from the peer's last ACK to _frameNum - 1).
     // This guarantees recovery from arbitrary packet loss bursts — even
     // if N packets drop in a row, the (N+1)-th carries the full backlog.
+    if (_lateJoinInputBootstrapUntilFrame >= 0 && _frameNum >= _lateJoinInputBootstrapUntilFrame) {
+      _syncLog(`late-join input bootstrap ended at f=${_frameNum}`);
+      _lateJoinInputBootstrapUntilFrame = -1;
+    }
+    const suppressLateJoinBootstrapInput =
+      _lateJoinInputBootstrapUntilFrame >= 0 && _frameNum < _lateJoinInputBootstrapUntilFrame;
     const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
     const localInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
-      : _cloneInput(menuStartBarrier.suppressInput ? KNShared.ZERO_INPUT : readLocalInput());
+      : _cloneInput(
+          menuStartBarrier.suppressInput || suppressLateJoinBootstrapInput ? KNShared.ZERO_INPUT : readLocalInput(),
+        );
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
@@ -6729,6 +7091,7 @@
     if (_useCRollback && _rbTransport === 'unreliable') {
       const nowDc = performance.now();
       for (const [sid, peer] of Object.entries(_peers)) {
+        if (_isPeerPendingLateJoin(sid, peer)) continue;
         if (!peer.rbDc || peer.rbDc.readyState !== 'open') continue;
 
         let shouldFallback = false;
@@ -7207,7 +7570,7 @@
           `C-REPLAY done: caught up at f=${_frameNum} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
         );
         if (rbCheckGameplay) {
-          for (const p of Object.values(_peers)) {
+          for (const p of getActivePeers()) {
             if (p.dc?.readyState === 'open') {
               try {
                 p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
@@ -7405,7 +7768,7 @@
         let minAckFromPeer = Infinity;
         let minRecvFromPeer = Infinity;
         const peerInfo = [];
-        for (const p of Object.values(_peers)) {
+        for (const p of getActivePeers()) {
           if (p.slot === null || p.slot === undefined) continue;
           const ack = p.lastAckFromPeer ?? -1;
           const recv = p.lastFrameFromPeer ?? -1;
@@ -7453,7 +7816,7 @@
         const checkFrame = hashFrame;
         const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
         if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
-          for (const p of Object.values(_peers)) {
+          for (const p of getActivePeers()) {
             if (p.dc?.readyState === 'open') {
               try {
                 p.dc.send(`rb-check:${checkFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
@@ -7480,7 +7843,7 @@
                 .join(',');
               if (!window._rbLocalRegions) window._rbLocalRegions = {};
               window._rbLocalRegions[checkFrame] = regionsHex;
-              for (const p of Object.values(_peers)) {
+              for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
                     p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
@@ -7527,7 +7890,7 @@
           // why — same race window applies on the post-rollback path).
           if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
           window._rbLocalGameHashes[checkFrame] = gpHash;
-          for (const p of Object.values(_peers)) {
+          for (const p of getActivePeers()) {
             if (p.dc?.readyState === 'open') {
               try {
                 p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
@@ -7554,7 +7917,7 @@
               _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
               window._rbLocalBlocks[checkFrame] = blocksSnap;
               window._rbLocalTaint[checkFrame] = taintSnap;
-              for (const p of Object.values(_peers)) {
+              for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
                     p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
@@ -7582,7 +7945,7 @@
                 .join(',');
               if (!window._rbLocalRegions) window._rbLocalRegions = {};
               window._rbLocalRegions[checkFrame] = regionsHex;
-              for (const p of Object.values(_peers)) {
+              for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
                     p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
@@ -7654,7 +8017,7 @@
             }
           }
           // Broadcast regions for cross-player comparison
-          for (const p of Object.values(_peers)) {
+          for (const p of getActivePeers()) {
             if (p.dc?.readyState === 'open') {
               try {
                 p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
@@ -7686,7 +8049,7 @@
               delete window._rbLocalGameHashes[k];
             }
           }
-          for (const p of Object.values(_peers)) {
+          for (const p of getActivePeers()) {
             if (p.dc?.readyState === 'open') {
               try {
                 p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
@@ -7724,7 +8087,7 @@
             window._rbLocalBlocks[checkFrame] = blocksSnap;
             window._rbLocalTaint[checkFrame] = taintSnap;
             // Broadcast block hashes to peer for per-block divergence diff
-            for (const p of Object.values(_peers)) {
+            for (const p of getActivePeers()) {
               if (p.dc?.readyState === 'open') {
                 try {
                   p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
@@ -8051,7 +8414,7 @@
                               const key = `${f}:${ri}`;
                               window._rbLocalSubHashes[key] = subHashes;
                               const subCsv = subHashes.map((h) => h.toString(16)).join(',');
-                              for (const p of Object.values(_peers)) {
+                              for (const p of getActivePeers()) {
                                 if (p.dc?.readyState === 'open') {
                                   try {
                                     p.dc.send(`rb-subhash:${f}:${ri}:${subCsv}`);
@@ -8383,6 +8746,7 @@
         const peerSlot = inputPeers[m].slot;
         const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
         writeInputToMemory(peerSlot, remoteInput);
+        _consumeLateJoinSeededInput(peerSlot, applyFrame);
         if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
       }
 
@@ -8442,6 +8806,7 @@
       if (_frameNum % 300 === 0) {
         for (const [sid, info] of Object.entries(_knownPlayers)) {
           if (sid === socket.id) continue;
+          if (_isPeerPendingLateJoin(sid)) continue;
           const p = _peers[sid];
           if (p && p.dc?.readyState === 'open') continue; // healthy
           if (p?.reconnecting) continue; // already in progress
@@ -8571,7 +8936,7 @@
       _fpuTraceLastCheckFrame = _frameNum;
       const traceInfo = _fpuTraceHash();
       if (traceInfo) {
-        for (const p of Object.values(_peers)) {
+        for (const p of getActivePeers()) {
           if (p.dc?.readyState === 'open') {
             try {
               p.dc.send(`fpu-trace:${_frameNum}:${traceInfo.hash}:${traceInfo.count}`);
@@ -9003,8 +9368,9 @@
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
     let targets;
-    if (targetSid && _peers[targetSid]) {
-      targets = [_peers[targetSid]];
+    if (targetSid) {
+      const targetPeer = _peers[targetSid];
+      targets = targetPeer && !_isPeerPendingLateJoin(targetSid, targetPeer) ? [targetPeer] : [];
     } else {
       targets = getActivePeers();
     }
@@ -9445,6 +9811,11 @@
     _awaitingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _pendingLateJoinReadySids.clear();
+    _pendingLateJoinPeerSids.clear();
+    _pendingLateJoinPeerSlots.clear();
+    _lateJoinActivatedAtFrame = {};
+    _lateJoinInputBootstrapUntilFrame = -1;
+    _lateJoinSeededInputFrames = {};
     clearLateJoinReadyRetry();
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
@@ -9452,6 +9823,7 @@
     _guestStateKind = 'savestate';
     _lockstepStartStateKind = 'savestate';
     _guestStateHiddenWords = null;
+    _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
     _knownPlayers = {};
     _lastRemoteFrame = -1;
@@ -9632,6 +10004,10 @@
     getDebugState: () => ({
       state: _computeState(),
       activeRoster: _activeRoster ? [..._activeRoster] : null,
+      pendingLateJoinSlots: [..._pendingLateJoinPeerSlots],
+      pendingLateJoinSids: [..._pendingLateJoinPeerSids],
+      lateJoinActivationFrames: { ..._lateJoinActivatedAtFrame },
+      lateJoinInputBootstrapUntilFrame: _lateJoinInputBootstrapUntilFrame,
       inputPeerSlots: getInputPeers().map((p) => p.slot),
       running: _phase === PHASE_RUNNING,
       frameNum: _frameNum,
@@ -9642,6 +10018,7 @@
       awaitingLateJoinState: _awaitingLateJoinState,
       heldKeyCodes: [..._heldKeys],
       localInputNow: readLocalInput(),
+      menuStartBarrierReleased: _menuStartBarrierReleased,
       peersDetail: Object.fromEntries(
         Object.entries(_peers).map(([sid, p]) => [
           sid,

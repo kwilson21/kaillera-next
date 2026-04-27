@@ -11,6 +11,7 @@
  * Usage:
  *   node tests/late-join-css-automation.mjs
  *   node tests/late-join-css-automation.mjs --headless --room=LJCSS1234
+ *   node tests/late-join-css-automation.mjs --keep-open --manual-p3
  */
 import { chromium } from 'playwright';
 import { readFileSync } from 'fs';
@@ -28,7 +29,12 @@ const ROM_PATH = argValue('rom', process.env.KN_ROM_PATH || DEFAULT_ROM_PATH);
 const BASE_URL = argValue('base-url', process.env.KN_BASE_URL || DEFAULT_BASE_URL);
 const ROOM = argValue('room', process.env.KN_ROOM || `LJCSS${Date.now() % 10000}`);
 const HEADLESS = process.argv.includes('--headless');
+const INPUT_ONLY = process.argv.includes('--input-only');
+const KEEP_OPEN = process.argv.includes('--keep-open');
+const MANUAL_P3 = process.argv.includes('--manual-p3');
 const NAV_RECORDING_URL = new URL('./fixtures/nav-recording.json', import.meta.url);
+const HOST_NAV_TO_CSS_START_FRAME = 439;
+const HOST_NAV_TO_CSS_END_FRAME = 716;
 const HOST_RANDOM_SELECT_START_FRAME = 826;
 const HOST_RANDOM_SELECT_END_FRAME = 1068;
 const NAV_P2_SELECTED_FRAME = 1444;
@@ -45,10 +51,54 @@ const SCENE_VS_BATTLE = 22; // nSCKindVSBattle
 
 const KEY = {
   A: 'c',
-  START: 'v',
+  START: 'Enter',
   DDOWN: 'ArrowDown',
   DRIGHT: 'ArrowRight',
   ANA_DOWN: 's',
+};
+
+const KEYCODE_MAP = {
+  c: 67,
+  x: 88,
+  v: 86,
+  z: 90,
+  Enter: 13,
+  ArrowUp: 38,
+  ArrowDown: 40,
+  ArrowLeft: 37,
+  ArrowRight: 39,
+  t: 84,
+  y: 89,
+  a: 65,
+  s: 83,
+  d: 68,
+  w: 87,
+  j: 74,
+  l: 76,
+  k: 75,
+  i: 73,
+};
+
+const AUTOMATION_KEYBOARD_MAPPING = {
+  67: 0,
+  88: 1,
+  13: 3,
+  86: 3,
+  38: 4,
+  40: 5,
+  37: 6,
+  39: 7,
+  84: 10,
+  89: 11,
+  90: 12,
+  68: 16,
+  65: 17,
+  83: 18,
+  87: 19,
+  74: 20,
+  76: 21,
+  75: 22,
+  73: 23,
 };
 
 const CHROMIUM_ARGS = [
@@ -84,12 +134,13 @@ async function setupPeer(urlSuffix, name) {
 
   const playUrl = `${BASE_URL}/play.html?${urlSuffix}&name=${encodeURIComponent(name)}&mode=rollback`;
   await page.goto(playUrl, { waitUntil: 'domcontentloaded' });
-  await page.evaluate(() => {
+  await page.evaluate((keyboardMapping) => {
     try {
       localStorage.removeItem('KN_DEV_BUILD');
       localStorage.setItem('kn-debug', '1');
+      localStorage.setItem('keyboard-mapping', JSON.stringify(keyboardMapping));
     } catch {}
-  });
+  }, AUTOMATION_KEYBOARD_MAPPING);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1000);
   await loadRom(page, name);
@@ -247,11 +298,45 @@ async function waitForAllScene(peers, targetScene, label, timeoutMs = 60000) {
   console.log(`  [scene ${targetScene} ${label}: ${peers.map((peer, i) => `${peer.name} f=${frames[i]}`).join(' ')}]`);
 }
 
+async function pressUntilAllScene(driver, peers, key, targetScene, label, timeoutMs = 15000) {
+  const start = Date.now();
+  let lastScenes = [];
+  while (Date.now() - start < timeoutMs) {
+    await peerPress(driver, key, 160, 250);
+    lastScenes = await Promise.all(peers.map((peer) => currentScene(peer.page)));
+    if (lastScenes.every((scene) => scene === targetScene)) {
+      const frames = await Promise.all(peers.map((peer) => peer.page.evaluate(() => window.KNState?.frameNum || 0)));
+      console.log(
+        `  [scene ${targetScene} ${label}: ${peers.map((peer, i) => `${peer.name} f=${frames[i]}`).join(' ')}]`,
+      );
+      return;
+    }
+  }
+  throw new Error(`Timeout pressing ${key} for scene ${targetScene}; last=${lastScenes.join(',')}`);
+}
+
 async function press(page, key, holdMs = 120, waitAfterMs = 180) {
-  await page.keyboard.down(key);
+  await dispatchKey(page, key, 'down');
   await page.waitForTimeout(holdMs);
-  await page.keyboard.up(key);
+  await dispatchKey(page, key, 'up');
   await page.waitForTimeout(waitAfterMs);
+}
+
+async function dispatchKey(page, key, type) {
+  await page.evaluate(
+    ({ key, type, keyCode }) => {
+      const event = new KeyboardEvent(type === 'down' ? 'keydown' : 'keyup', {
+        key,
+        code: key,
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(event, 'keyCode', { get: () => keyCode });
+      Object.defineProperty(event, 'which', { get: () => keyCode });
+      document.dispatchEvent(event);
+    },
+    { key, type, keyCode: KEYCODE_MAP[key] ?? 0 },
+  );
 }
 
 async function peerPress(peer, key, holdMs = 200, waitAfterMs = 500) {
@@ -264,28 +349,8 @@ async function peerPress(peer, key, holdMs = 200, waitAfterMs = 500) {
 
 async function installReplay(page, events, label) {
   await page.evaluate(
-    ({ events, label, minHoldFrames }) => {
-      const KEYCODE_MAP = {
-        c: 67,
-        x: 88,
-        v: 86,
-        z: 90,
-        Enter: 13,
-        ArrowUp: 38,
-        ArrowDown: 40,
-        ArrowLeft: 37,
-        ArrowRight: 39,
-        t: 84,
-        y: 89,
-        a: 65,
-        s: 83,
-        d: 68,
-        w: 87,
-        j: 74,
-        l: 76,
-        k: 75,
-        i: 73,
-      };
+    ({ events, label, minHoldFrames, keyCodeMap }) => {
+      const KEYCODE_MAP = keyCodeMap || {};
       const sorted = [...events].sort((a, b) => a.frame - b.frame);
       if (window._replayTimerId) clearInterval(window._replayTimerId);
       window._replayEvents = sorted;
@@ -343,7 +408,7 @@ async function installReplay(page, events, label) {
       };
       window._replayTimerId = setInterval(poll, 8);
     },
-    { events, label, minHoldFrames: REPLAY_MIN_HOLD_FRAMES },
+    { events, label, minHoldFrames: REPLAY_MIN_HOLD_FRAMES, keyCodeMap: KEYCODE_MAP },
   );
 }
 
@@ -431,27 +496,35 @@ async function debugState(page) {
         activeRoster: debug?.activeRoster ?? null,
         inputPeerSlots: debug?.inputPeerSlots ?? null,
         frameNum: debug?.frameNum ?? window.KNState?.frameNum ?? null,
+        heldKeyCodes: debug?.heldKeyCodes ?? null,
+        localInputNow: debug?.localInputNow ?? null,
+        peersDetail: debug?.peersDetail ?? null,
+        remoteLatest: debug?.remoteLatest ?? null,
       };
     })
     .catch((err) => ({ error: String(err) }));
 }
 
-async function inputProbe(late, host, key = 'd') {
+async function inputProbe(late, host, guest, key = 'd') {
   console.log(`\n=== P3 input probe (${key}) ===`);
   await late.page.bringToFront();
   await late.page.focus('body').catch(() => {});
-  await late.page.keyboard.down(key);
+  await dispatchKey(late.page, key, 'down');
   for (let i = 0; i < 6; i++) {
     await late.page.waitForTimeout(120);
-    const [lateDebug, hostDebug] = await Promise.all([debugState(late.page), debugState(host.page)]);
+    const [lateDebug, hostDebug, guestDebug] = await Promise.all([
+      debugState(late.page),
+      debugState(host.page),
+      debugState(guest.page),
+    ]);
     console.log(
       `  probe ${i}: late f=${lateDebug.frameNum} held=${JSON.stringify(lateDebug.heldKeyCodes)} ` +
-        `local=${JSON.stringify(lateDebug.localInputNow)} peers=${JSON.stringify(lateDebug.peersDetail)} | ` +
+        `local=${JSON.stringify(lateDebug.localInputNow)} | ` +
         `host f=${hostDebug.frameNum} slot2=${JSON.stringify(hostDebug.remoteLatest?.['2'])} ` +
-        `peers=${JSON.stringify(hostDebug.peersDetail)}`,
+        `guest f=${guestDebug.frameNum} slot2=${JSON.stringify(guestDebug.remoteLatest?.['2'])}`,
     );
   }
-  await late.page.keyboard.up(key).catch(() => {});
+  await dispatchKey(late.page, key, 'up').catch(() => {});
   await late.page.waitForTimeout(300);
 }
 
@@ -589,16 +662,12 @@ async function waitForBattleReady(peers, timeoutMs = 90000) {
 async function replayTwoPlayersToCssRandom(host, guest) {
   console.log('\n=== Two-player setup to CSS ===');
   await waitForAllScene([host, guest], SCENE_TITLE, 'title before nav', 120000);
-  console.log('Waiting for settled title frame (f=1900), matching determinism setup');
-  await Promise.all([waitForFrame(host.page, 1900, 90000), waitForFrame(guest.page, 1900, 90000)]);
-  await host.page.waitForTimeout(1000);
 
   console.log('Step 1: START -> Mode Select');
-  await peerPress(host, KEY.START, 300, 500);
-  await waitForAllScene([host, guest], SCENE_MODE_SELECT, 'mode-select', 30000);
+  await pressUntilAllScene(host, [host, guest], KEY.START, SCENE_MODE_SELECT, 'mode-select', 30000);
 
   console.log('Step 2: Analog down -> VS MODE');
-  await peerPress(host, KEY.ANA_DOWN, 300, 1000);
+  await peerPress(host, KEY.ANA_DOWN, 80, 1000);
 
   console.log('Step 3: A -> enter VS MODE');
   await peerPress(host, KEY.A, 300, 500);
@@ -612,6 +681,7 @@ async function replayTwoPlayersToCssRandom(host, guest) {
     await peerPress(host, KEY.A, 300, 500);
   }
   await waitForAllScene([host, guest], SCENE_PLAYERS_VS, 'css before random select', 30000);
+  if (INPUT_ONLY) return;
 
   await replayFixtureSegment(
     host,
@@ -656,6 +726,9 @@ async function main() {
   console.log(`Base URL: ${BASE_URL}`);
   console.log(`ROM: ${ROM_PATH}`);
   console.log(`Headless: ${HEADLESS ? 'yes' : 'no'}`);
+  console.log(`Input only: ${INPUT_ONLY ? 'yes' : 'no'}`);
+  console.log(`Keep open: ${KEEP_OPEN ? 'yes' : 'no'}`);
+  console.log(`Manual P3: ${MANUAL_P3 ? 'yes' : 'no'}`);
 
   let host;
   let guest;
@@ -680,10 +753,28 @@ async function main() {
     await waitForAllScene([host, guest, late], SCENE_PLAYERS_VS, 'css after p3', 90000);
     await waitForInputTopology([host, guest, late]);
     await saveScreenshots([host, guest, late], 'p3-joined');
-    await inputProbe(late, host, 'd');
+    if (MANUAL_P3) {
+      console.log('\nSkipping synthetic P3 input probe for manual CSS selection.');
+    } else {
+      await inputProbe(late, host, guest, 'd');
+    }
+    if (INPUT_ONLY) {
+      const states = await Promise.all([host, guest, late].map((peer) => debugState(peer.page)));
+      console.log('\n=== Late-join input-only result ===');
+      console.log(`Room: ${ROOM}`);
+      console.log(`States: ${JSON.stringify(states)}`);
+      console.log(`Screenshots: /tmp/latejoin-css-p3-joined-{host,guest,late}.png`);
+      console.log(`Elapsed: ${Math.round((Date.now() - startedAt) / 1000)}s`);
+      return;
+    }
 
-    await replayP3RandomSelect(late);
-    await waitForCssSlotSelected(host.page, 2, 'host view');
+    if (MANUAL_P3) {
+      console.log('\n=== Manual P3 character select ===');
+      console.log('Drive the late/P3 browser now. Waiting for slot 2 to show selected on the host view...');
+    } else {
+      await replayP3RandomSelect(late);
+    }
+    await waitForCssSlotSelected(host.page, 2, 'host view', MANUAL_P3 ? 10 * 60 * 1000 : 30000);
     await saveScreenshots([host, guest, late], 'p3-selected');
 
     console.log('\n=== Random stage and battle ===');
@@ -701,9 +792,14 @@ async function main() {
     console.log(`Screenshots: /tmp/latejoin-css-*-{host,guest,late}.png`);
     console.log(`Elapsed: ${Math.round((Date.now() - startedAt) / 1000)}s`);
   } finally {
-    await closePeer(late);
-    await closePeer(guest);
-    await closePeer(host);
+    if (KEEP_OPEN) {
+      console.log('\nKeeping browser windows open. Stop this command when you are done watching/debugging.');
+      await new Promise(() => {});
+    } else {
+      await closePeer(late);
+      await closePeer(guest);
+      await closePeer(host);
+    }
   }
 }
 
