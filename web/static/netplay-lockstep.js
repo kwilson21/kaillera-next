@@ -2299,6 +2299,7 @@
   let _deterministicPerfNow = null; // saved override function
   let _visChangeHandler = null; // stored for removal in stopSync()
   let _networkChangeHandler = null; // stored for removal in stopSync()
+  let _unloadVisChangeHandler = null; // pagehide-equivalent for mobile Safari; removed in stop()
   let _focusHandler = null; // stored for removal in stopSync()
   let _blurHandler = null; // stored for removal in stopSync()
   let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
@@ -6346,9 +6347,10 @@
       window.addEventListener('pagehide', handler);
       // visibilitychange to 'hidden' is the mobile-Safari-friendly equivalent
       // for app backgrounding (pagehide doesn't always fire there).
-      document.addEventListener('visibilitychange', () => {
+      _unloadVisChangeHandler = () => {
         if (document.visibilityState === 'hidden') handler();
-      });
+      };
+      document.addEventListener('visibilitychange', _unloadVisChangeHandler);
     }
 
     window._lockstepActive = true;
@@ -9726,6 +9728,23 @@
     if (_flushInterval) {
       clearInterval(_flushInterval);
       _flushInterval = null;
+    }
+    // Drop the unload/hidden flush listeners so their closure (which retains
+    // _drainCDebugLog, _buildFlushPayload, _flushViaHttp) can be GC'd between
+    // game cycles. The window flag is what guards re-registration in
+    // startGameSequence, so it must be cleared too.
+    if (window._knFlushUnloadHandler) {
+      window.removeEventListener('pagehide', window._knFlushUnloadHandler);
+      window._knFlushUnloadHandler = null;
+    }
+    if (_unloadVisChangeHandler) {
+      document.removeEventListener('visibilitychange', _unloadVisChangeHandler);
+      _unloadVisChangeHandler = null;
+    }
+    // KNDesync owns its own setInterval heartbeat — without an explicit stop
+    // it keeps firing across game cycles and retains module + digest caches.
+    if (window.KNDesync && typeof window.KNDesync.stop === 'function') {
+      window.KNDesync.stop();
     }
     _startTime = 0;
     DELAY_FRAMES = 2;

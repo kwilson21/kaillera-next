@@ -461,6 +461,18 @@
       else _stopHeartbeat();
     },
 
+    // Stop the heartbeat and clear cross-game caches. Callers (lockstep stop)
+    // must invoke this; otherwise the setInterval keeps firing into the next
+    // session and _peerDigests/_localDigests carry stale frame state.
+    stop() {
+      _stopHeartbeat();
+      _enabled = false;
+      _module = null;
+      _peerDigests.clear();
+      _localDigests.clear();
+      _lastFlagFrame.clear();
+    },
+
     tick(frame) {
       if (!_module) return;
       if (!_enabled) {
