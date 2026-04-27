@@ -255,12 +255,18 @@
               if (banner) {
                 banner.classList.remove('hidden');
                 const doUnmute = () => {
-                  _guestVideo.muted = false;
-                  // If unmuting paused the video (iOS), restart it
-                  if (_guestVideo.paused) _guestVideo.play().catch(() => {});
+                  // Always detach listeners first — including when stop() has
+                  // already nulled _guestVideo. The document-level touchstart
+                  // listener fires on any touch anywhere; without this guard,
+                  // tapping the screen after a stream ends would NPE on the
+                  // next line.
                   banner.classList.add('hidden');
                   banner.removeEventListener('click', doUnmute);
                   document.removeEventListener('touchstart', doUnmute, true);
+                  if (!_guestVideo) return;
+                  _guestVideo.muted = false;
+                  // If unmuting paused the video (iOS), restart it
+                  if (_guestVideo.paused) _guestVideo.play().catch(() => {});
                 };
                 banner.addEventListener('click', doUnmute);
                 document.addEventListener('touchstart', doUnmute, true);
