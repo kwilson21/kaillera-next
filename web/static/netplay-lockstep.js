@@ -5271,6 +5271,10 @@
   const startSpectatorStream = () => {
     if (_playerSlot !== 0) return;
     if (_hostStream) return; // already started
+    // Bail if the engine has been stopped — without this the recursive
+    // setTimeout below keeps polling for #game canvas after stop() and
+    // can re-create _hostStream + audio plumbing in a torn-down engine.
+    if (_phase === PHASE_IDLE || _phase === PHASE_STOPPED) return;
 
     const canvas = document.querySelector('#game canvas');
     if (!canvas) {
