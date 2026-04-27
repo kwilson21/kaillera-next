@@ -38,8 +38,8 @@ Determinism, multiplayer, and resync invariants are **not** in scope for the pro
 
 | Role | Model | Invocation | Why this model |
 |------|-------|------------|----------------|
-| Orchestrator + integrator + reviewer | Claude (interactive Claude Code session) | n/a — driver | Holds project state across memory + spec docs, decomposes tasks, judges output quality, applies patches, runs builds. |
-| Primary systems engineer | Codex (GPT-5 Codex) | `cat <brief> \| codex exec -` (prompt via stdin per `codex exec --help`); output captured via shell redirection | Strongest single-shot patch producer for C/C++ systems work. Built for code volume. |
+| Reviewer + integrator + spec writer + determinism gatekeeper | Claude (interactive Claude Code session) | n/a — invoked by user when judgment quality matters more than throughput | Reviews Codex patches and DeepSeek audits before they're treated as final. Writes durable spec/doc artifacts where calibration and synthesis quality matter. Hard-stops anything that breaks determinism, R1-R6 rollback integrity, or scope discipline. **Strategic orchestration is the user's role**, not Claude's — the team is a force multiplier for the user, not a replacement. |
+| Primary systems engineer + spec/doc reviewer | Codex (GPT-5 Codex) | `cat <brief> \| codex exec --sandbox <mode> -o <output-file> -` (prompt via stdin, last-message captured cleanly via `-o`). `<mode>` is `read-only` for review tasks, `workspace-write` for codegen, `danger-full-access` when web verification of external API/docs claims is needed (Codex sandboxed without web access will hallucinate citations). | Strongest single-shot patch producer for C/C++ systems work. Also reviews specs/docs Claude writes — different blind spots from Claude, catches code-correctness issues, file-path/symbol fabrication, and stale design that Claude reviewers miss (validated against this spec — see `docs/team/decisions/2026-04-27-smash64r-spec-review.md`). |
 | Reasoning audits | DeepSeek `deepseek-reasoner` | `Bash` tool with inline `curl` POST to `https://api.deepseek.com/v1/chat/completions`. `DEEPSEEK_API_KEY` from env (see `.env`). | RL-tuned for chain-of-thought over code. Fits "trace mupen interp X end-to-end and identify where shim Y diverges." |
 | Cheap second opinion | DeepSeek `deepseek-chat` | same endpoint, different `model` field | Triggered when (a) a reasoner audit produces a recommendation that materially expands sprint scope, or (b) two consecutive reasoner audits return thin / hand-wavy output. Same vendor, lower cost. |
 
@@ -94,7 +94,8 @@ Exact ask. Be specific.
 
 ## Acceptance criteria
 - Build flag: KN_FAST=1 build succeeds
-- Counter: kn_um_get_swap_count > 0 within 5 seconds of dispatch enable
+- Counter: kn_fiber_get_drive_frame_calls > 0 within 5 seconds of dispatch enable
+  (real export at build/kn_recomp/kn_recomp_shim.c:520 on feat/smash64r-wasm)
 - Log signature: no "RB-INVARIANT-VIOLATION" in console
 
 ## Output format
@@ -105,7 +106,8 @@ patch | analysis | answer
 - File paths and line ranges must be real and verified by Claude before dispatch (`Read` the file, confirm the symbol is at the line range cited).
 - Acceptance criteria must reference **real symbols, counters, build flags, and log signatures** that exist in the current codebase. Inventing plausible-sounding identifiers is the canonical multi-model failure mode and acceptance criteria are the bulwark against it.
 - These two rules apply to the path and symbol citations in **this spec's own First Sprint table** as well — not just briefs the team produces.
-- Briefs reference files by path + line range. They do **not** inline file contents by default. A dispatch-time helper inlines the cited ranges into the actual model payload, so the brief stays compact and the model sees verbatim source. Implementation of that helper belongs to the writing-plans phase.
+- Briefs reference files by path + line range. They do **not** inline file contents by default. **Codex dispatches** read files directly from disk via Codex's own tooling — no inlining helper needed; the brief is piped as-is. **DeepSeek/OpenAI/other API-only dispatches** require a dispatch-time helper that inlines the cited ranges into the JSON payload (model has no filesystem access). Implementation of that helper belongs to the writing-plans phase.
+- **Gitignored paths.** `build/src/` is a local build checkout (`.gitignore:8-9`) populated by `build/build.sh`. Briefs that cite paths under `build/src/` only work if the build setup phase has run; the brief writer is responsible for verifying the path exists before dispatch.
 
 `patch` means a unified diff or full-file replacement that Claude can apply. `analysis` means prose with file:line citations. `answer` means a direct response to a closed question.
 
@@ -113,7 +115,7 @@ patch | analysis | answer
 
 1. Claude writes `briefs/<task>.md`. Verifies all cited paths/symbols exist.
 2. Claude shells out:
-   - **Codex:** `cat docs/team/briefs/<task>.md | codex exec - > docs/team/outputs/<task>.codex.md` (prompt via stdin).
+   - **Codex:** `cat docs/team/briefs/<task>.md | codex exec --sandbox <mode> -o docs/team/outputs/<task>.codex.md -`. The `-o` flag captures the model's last message cleanly; stdout redirection would mix progress events with content. `<mode>` is `read-only` for review-only tasks, `workspace-write` for codegen, and `danger-full-access` when the task requires web verification of external claims (without it, Codex hallucinates "official docs" citations with fabricated line numbers — observed in this spec's own dispatch log).
    - **DeepSeek:** `Bash` tool with inline `curl` POST. Payload assembled by Claude in the same turn: system role + the brief body + inlined file ranges. Response body captured to `docs/team/outputs/<task>.<model>.md`.
 3. Claude reads the output, validates against acceptance criteria.
 4. If `patch`: apply, build, run verification, write `decisions/<task>.md`.
@@ -169,32 +171,26 @@ This file is the durable record of what happened, independent of git history det
 
 ## First Sprint Shape
 
-This sprint takes the smash64r branch from its current state (Phase 2f Wave 1 dormant infrastructure landed) to the prototype DoD.
+**Deferred to writing-plans, pending fresh branch audit.** The original draft of this section was written against `project_recomp_m2_status.md` (dated 2026-04-15, "Phase 2f Wave 1 dormant infrastructure landed"). The 2026-04-27 Codex spec review (`docs/team/decisions/2026-04-27-smash64r-spec-review.md`) confirmed the branch has advanced significantly — Wave 5 has landed (depth-guard removed at `build/kn_recomp/kn_recomp_shim.c:741-745`), the active fiber-takeover injection target is `run_cached_interpreter` in `cached_interp.c` (not `EmuThreadFunction`), and several of the originally-planned tasks (drop depth-guard, wire osRecvMesg/osSendMesg in the cited form) are stale or already done.
 
-| # | Owner | Task | Depends on |
-|---|-------|------|-----------|
-| 1 | Codex | Implement variant 4 — fiber takeover inside `EmuThreadFunction` (`build/src/mupen64plus-libretro-nx/libretro/libretro.c`, both `#ifdef` definitions at lines 523 and 525). Inject `kn_recomp_get_enabled()` check before mupen interp call; route to `kn_um_drive_frame()` when enabled. | — |
-| 2 | Codex | Wire `osRecvMesg(BLOCK)` park via `um_thread_park_on()`; wire `osSendMesg` parked-receiver wake via `um_queue_wake_one()`. | #1 |
-| 3 | Claude | Build with `KN_FAST=1`, run, capture `kn_um_get_*` and `kn_bounce_get_*` counters + frame-counter watchdog. Verify the residual silent-display freeze is gone (frame counter advances continuously for ≥ 60 s with dispatch enabled). | #2 |
-| 4 | DeepSeek-reasoner | Parity audit: enumerate libultra primitives still routing through depth-guard. Output a prioritized list with file:line citations of each primitive's bounce site. Output: `analysis`. | parallel with #1-3 |
-| 5 | Codex (if #4 surfaces work) | Wire any libultra primitives flagged by #4 as required for safe depth-guard removal. | #4 |
-| 6 | Codex | Drop depth-guard. Benchmark dispatch ON vs OFF (frame time, dispatch rate, bounce rate). | #3 passes AND (#5 done or #4 declared no-op) |
-| 7 | DeepSeek-reasoner | Audio path audit: read `build/recomp/kn_port/AUDIO_NOTES.md`, audio shim sources, and SSB64 audio thread lifecycle. Output: `analysis` of what changes (if any) are needed for 60 fps audio under the fiber model. | parallel with #5-6 |
-| 8 | Codex (if #7 surfaces work) | Apply audio-path patches per #7 findings. | #7 |
-| 9 | Claude | Controller verification under fiber model: Playwright harness + diag counters + manual gamepad input through 1P match. | #6 done; #8 done if invoked |
-| 10 | Claude | Final prototype acceptance run: 60 s active gameplay, all five DoD criteria checked, evidence captured to `decisions/prototype-acceptance.md`. | #9 |
+Designing a concrete sprint against stale state would burn dispatch budget and produce wrong work. The first sprint is therefore designed in the writing-plans phase, where the first action is a **fresh audit of `feat/smash64r-wasm`**: read recent commits, walk current `kn_recomp_*` exports, read current `cached_interp.c` injection sites, identify the actual gap between current state and the prototype DoD. The sprint table is regenerated against that audit, not against memory.
 
-`deepseek-chat` (cheap second opinion) is invoked on #4 or #7 if either output is thin or recommends a scope expansion that Claude wants a sanity check on before committing Codex time. Second-opinion runs land their raw output at `outputs/<task>.deepseek-chat.md` and append a "Second-opinion" subsection to the parent task's `decisions/<task>.md` rather than producing a separate decision file.
+The team / protocol / dispatch flow / failure modes / DoD in this spec stay valid — those are the durable architecture. The sprint sequencing is the volatile part and belongs downstream.
+
+`deepseek-chat` (cheap second opinion) remains available — invoked on any future audit task whose output feels thin or recommends a scope expansion Claude wants sanity-checked before committing Codex time. Second-opinion runs land raw output at `outputs/<task>.deepseek-chat.md` and append a "Second-opinion" subsection to the parent task's `decisions/<task>.md`.
 
 ## Failure Modes
 
 | Mode | Detection | Response |
 |------|-----------|----------|
 | Model hallucinates file contents or invents symbols | Cited line doesn't exist or contents mismatch on Claude's `Read` | Reject. Re-brief with explicit file ranges inlined. |
+| Sandboxed Codex hallucinates external doc citations | Codex review claims to cite "official docs lines X-Y" while running with `--sandbox read-only` (no web access) | Treat as advisory, not fact. Verify externally via `WebFetch` / `WebSearch` in Claude before acting. To avoid: re-dispatch with `--sandbox danger-full-access` when web verification is required. |
 | Codex patch fails to build | `KN_FAST=1` build fails | Keep patch in working tree. Write fix-up brief with stderr inlined. Do not `git revert`. |
 | Codex patch builds but fails acceptance criteria silently | Counters flat / log signatures absent / frame watchdog stalls | Reject. Decision file records expected-vs-observed. Fix-up brief. |
 | Codex output truncated mid-patch | Patch ends mid-hunk / unmatched braces / missing closing chunk | Reject without applying. Re-brief with task split into smaller units. |
-| Wedge persists after task #3 verification | Frame counter freezes within 60 s | Diagnose with diag counters. Brief DeepSeek-reasoner for divergence audit before patching. |
+| Codex non-zero exit / empty output | `codex exec` returns non-zero status, or `<output>.codex.md` is empty / contains only progress events | Treat as dispatch failure, not a model verdict. Inspect stderr; retry once with `--sandbox` adjusted; surface to user if persistent. |
+| DeepSeek `finish_reason ≠ "stop"` | API response shows `finish_reason` of `length`, `content_filter`, or `insufficient_system_resource` | Output is incomplete or filtered. Do not act on it. For `length`: re-dispatch with task split or `max_tokens` raised. For `content_filter` / `insufficient_system_resource`: surface to user. |
+| Invalid JSON in DeepSeek response | `curl` returns non-2xx, or response body is not parseable JSON, or `choices[0].message.content` missing | Treat as dispatch failure. Re-dispatch once; surface if persistent. |
 | Determinism regression | Determinism probe fails | Hard stop. Fix-forward only. Surface to user. |
 | Codex / DeepSeek conflict | Two outputs disagree on root cause or fix shape | Claude reads code, decides. If genuinely ambiguous, escalate to user. |
 | API budget exhausted / auth error | Dispatch returns rate-limit or 401 | Pause. Surface to user. Do not silently switch models without approval. |
