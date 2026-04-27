@@ -129,6 +129,8 @@ class RomSharingTogglePayload(BaseModel):
 class RomReadyPayload(BaseModel):
     ready: bool = True
     hash: str | None = None
+    name: str | None = Field(default=None, max_length=128)
+    size: int | None = Field(default=None, ge=0, le=512 * 1024 * 1024)
 
 
 # ── rom-declare ──────────────────────────────────────────────────────────────

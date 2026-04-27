@@ -27,6 +27,8 @@ def test_serialize_roundtrip_basic():
     room.status = "playing"
     room.mode = "lockstep"
     room.rom_hash = "abc123"
+    room.rom_name = "Super Smash Bros.z64"
+    room.rom_size = 16 * 1024 * 1024
     room.rom_sharing = True
 
     serialized = _serialize_room(room)
@@ -52,6 +54,8 @@ def test_serialize_roundtrip_basic():
     assert restored.status == "playing"
     assert restored.mode == "lockstep"
     assert restored.rom_hash == "abc123"
+    assert restored.rom_name == "Super Smash Bros.z64"
+    assert restored.rom_size == 16 * 1024 * 1024
     assert restored.rom_sharing is True
 
 

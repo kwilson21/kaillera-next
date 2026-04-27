@@ -78,8 +78,12 @@
   let _romBlob = null; // raw ROM Blob for re-creating blob URLs
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
+  let _romName = null; // display name for the loaded ROM
+  let _romSize = null; // byte size for the loaded ROM
   let _gameId = null; // derived from ROM hash via known_roms table
   let _hostRomHash = null; // host's ROM hash for late-join verification
+  let _hostRomName = null; // host's current ROM display name
+  let _hostRomSize = null; // host's current ROM byte size
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _pendingLateJoin = false; // waiting for ROM before late-join init
@@ -190,6 +194,156 @@
 
   const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
+
+  const formatRomSize = (bytes) => {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+    if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+    return `${n} B`;
+  };
+
+  const hostRomIdentityKey = (hash, name, size) => {
+    if (hash) return `h:${hash}:${size ?? ''}`;
+    if (name || size !== null) return `n:${name || ''}:${size ?? ''}`;
+    return '';
+  };
+
+  const hostRomFromData = (data) => {
+    const hostRom = data?.hostRom || {};
+    const size = data?.romSize ?? data?.rom_size ?? hostRom.size ?? null;
+    return {
+      hash: data?.romHash ?? data?.rom_hash ?? hostRom.hash ?? null,
+      name: data?.romName ?? data?.rom_name ?? hostRom.name ?? null,
+      size: size === null || size === undefined ? null : Number(size),
+      gameId: data?.gameId ?? data?.game_id ?? hostRom.gameId ?? hostRom.game_id ?? null,
+    };
+  };
+
+  const hostRomDisplayName = () => {
+    if (_hostRomHash && _knownRoms[_hostRomHash]?.game) return _knownRoms[_hostRomHash].game;
+    if (_hostRomName) return _hostRomName;
+    if (_hostRomHash) return `Unknown ROM (${_hostRomHash.substring(1, 9)})`;
+    return '';
+  };
+
+  const updateHostRomInfo = () => {
+    const el = document.getElementById('host-rom-info');
+    if (!el) return;
+    if (isHost || isSpectator) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    const name = hostRomDisplayName();
+    if (!name) {
+      el.style.display = '';
+      el.textContent = 'Waiting for host to load a ROM';
+      el.className = 'host-rom-info pending';
+      return;
+    }
+    const bits = [`Host ROM: ${name}`];
+    const size = formatRomSize(_hostRomSize);
+    if (size) bits.push(size);
+    el.style.display = '';
+    el.textContent = bits.join(' | ');
+    el.className = 'host-rom-info ready';
+  };
+
+  const localRomLoaded = () => !!(_romBlob || _romBlobUrl);
+
+  const hostRomMismatch = () => {
+    if (!localRomLoaded()) return false;
+    if (romHashMismatch(_hostRomHash, _romHash)) return true;
+    if (_hostRomSize !== null && _romSize !== null && Number(_hostRomSize) !== Number(_romSize)) return true;
+    return false;
+  };
+
+  const resetTransferForHostRomChange = () => {
+    if (_romTransferState !== 'idle' || _romTransferBytesReceived > 0) {
+      resetRomTransfer();
+      setRomTransferState('idle');
+    }
+    if (_romSharingEnabled) _romSharingDecision = null;
+    cleanupPreGameConnections();
+  };
+
+  const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
+    if (isHost) return;
+    if (hadPrevious && toastOnChange) {
+      showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
+    }
+    if (!hasNext) {
+      resetTransferForHostRomChange();
+      if (socket?.connected) socket.emit('rom-ready', { ready: false });
+      updateRomSharingUI();
+      return;
+    }
+
+    if (hostRomMismatch()) {
+      console.warn(
+        '[play] host ROM mismatch - clearing cached ROM',
+        'host:',
+        _hostRomHash?.substring(0, 16) || _hostRomSize,
+        'ours:',
+        _romHash?.substring(0, 16) || _romSize,
+      );
+      clearLoadedRom();
+      resetTransferForHostRomChange();
+      if (socket?.connected) socket.emit('rom-ready', { ready: false });
+      if (_hostRomHash) autoMatchRom(_hostRomHash);
+      updateRomSharingUI();
+      return;
+    }
+
+    if (localRomLoaded()) {
+      notifyRomReady();
+    } else {
+      resetTransferForHostRomChange();
+      updateRomSharingUI();
+    }
+  };
+
+  const applyHostRomFromData = (data, { toastOnChange = false } = {}) => {
+    if (!data || isHost) {
+      updateHostRomInfo();
+      return false;
+    }
+    const prevKey = hostRomIdentityKey(_hostRomHash, _hostRomName, _hostRomSize);
+    const next = hostRomFromData(data);
+    const nextKey = hostRomIdentityKey(next.hash, next.name, Number.isFinite(next.size) ? next.size : null);
+
+    _hostRomHash = next.hash || null;
+    _hostRomName = next.name || null;
+    _hostRomSize = Number.isFinite(next.size) ? next.size : null;
+    if (next.gameId) {
+      _gameId = next.gameId;
+      KNState.gameId = _gameId;
+    }
+    const cachedHash = _safeGet('localStorage', 'kaillera-rom-hash');
+    if (!localRomLoaded() && _hostRomHash && cachedHash && romHashMismatch(_hostRomHash, cachedHash)) {
+      console.warn(
+        '[play] cached ROM mismatch - clearing before autoload',
+        'host:',
+        _hostRomHash.substring(0, 16),
+        'cached:',
+        cachedHash.substring(0, 16),
+      );
+      _safeRemove('localStorage', 'kaillera-rom-hash');
+      if (socket?.connected) socket.emit('rom-ready', { ready: false });
+    }
+
+    updateHostRomInfo();
+    if (prevKey !== nextKey) {
+      handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange);
+      return true;
+    }
+    if (hostRomMismatch()) {
+      handleHostRomChanged(false, !!nextKey, false);
+      return true;
+    }
+    return false;
+  };
 
   const getPlayerNameBySlot = (slot) => {
     if (!lastUsersData?.players) return null;
@@ -571,6 +725,7 @@
           _gameId = roomGameId;
           KNState.gameId = _gameId;
         }
+        applyHostRomFromData(roomData);
 
         // Room full: auto-join as spectator with banner
         if (!isSpectator && roomData.player_count >= roomData.max_players) {
@@ -635,6 +790,7 @@
               _gameId = joinGameId;
               KNState.gameId = _gameId;
             }
+            applyHostRomFromData(joinData || roomData);
 
             if (!isSpectator && joinData?.players) {
               for (const entry of Object.values(joinData.players)) {
@@ -660,23 +816,14 @@
               sharing: !!roomData.rom_sharing,
               hasRom: !!(_romBlob || _romBlobUrl),
               romHash: _romHash?.substring(0, 12),
-              hostHash: (joinData?.romHash ?? roomData?.rom_hash ?? '').substring(0, 12),
+              hostHash: (_hostRomHash ?? '').substring(0, 12),
             });
-            // Pick up the host's ROM hash from the join ack so we can
-            // verify our cached ROM before reporting as ready.
-            if (!isHost && joinData?.romHash) _hostRomHash = joinData.romHash;
             // If ROM was already loaded from cache, notify server immediately.
             // Skip for guests if host's ROM hash is known and doesn't match —
             // onUsersUpdated will handle activation once the host hash is verified.
-            if ((_romBlob || _romBlobUrl) && (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash))) {
+            if (localRomLoaded() && (isHost || !hostRomMismatch())) {
               notifyRomReady();
-            } else if (
-              _hostRomHash &&
-              _romHash &&
-              !_romSharingEnabled &&
-              !roomData.rom_sharing &&
-              romHashMismatch(_hostRomHash, _romHash)
-            ) {
+            } else if (!isHost && !_romSharingEnabled && !roomData.rom_sharing && hostRomMismatch()) {
               // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
               console.log('[play] join: cached ROM mismatch — clearing');
               clearLoadedRom();
@@ -690,7 +837,7 @@
                 sharing: !!roomData.rom_sharing,
                 hasRom: !!(_romBlob || _romBlobUrl),
                 romHash: _romHash?.substring(0, 12),
-                hostHash: (roomData.rom_hash ?? '').substring(0, 12),
+                hostHash: (_hostRomHash ?? '').substring(0, 12),
               });
               console.log(
                 `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
@@ -710,8 +857,8 @@
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;
 
-              // Store host's ROM hash for verification
-              _hostRomHash = roomData.rom_hash ?? null;
+              // Store host ROM metadata for verification
+              applyHostRomFromData(joinData || roomData);
 
               // Spectators and streaming guests don't need a ROM — they
               // receive a video stream. Skip ROM checks and go to engine init.
@@ -724,7 +871,7 @@
               }
 
               // If no ROM cached, check if host is sharing
-              if (!_romBlob && !_romBlobUrl) {
+              if (!localRomLoaded()) {
                 if (roomData.rom_sharing) {
                   // Show accept/decline prompt instead of ROM drop
                   crumb('late-join-sharing-prompt', { sharing: true });
@@ -741,7 +888,7 @@
               }
 
               // Verify ROM hash if available (skip when ROM came from host via sharing)
-              if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
+              if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
                 if (roomData.rom_sharing) {
                   // Cached ROM doesn't match but sharing is available —
                   // show sharing prompt instead of erroring out
@@ -790,6 +937,18 @@
     const spectators = data.spectators || {};
     const ownerSid = data.owner ?? null;
 
+    // Check if we became the host (ownership transfer)
+    const wasHost = isHost;
+    if (ownerSid) {
+      isHost = ownerSid === socket.id;
+      KNState.isLocalHost = isHost;
+    }
+    if (!wasHost && isHost) {
+      showToast('You are now the host');
+      renderRomLibrary();
+      if (localRomLoaded()) notifyRomReady();
+    }
+
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
       const prevMode = mode;
@@ -800,35 +959,7 @@
       // Re-emit rom-ready when switching to lockstep so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
-      if (
-        prevMode !== 'lockstep' &&
-        mode === 'lockstep' &&
-        (_romBlob || _romBlobUrl) &&
-        (isHost || !_hostRomHash || !romHashMismatch(_hostRomHash, _romHash))
-      ) {
-        notifyRomReady();
-      }
-    }
-
-    // Track host's ROM hash for cache verification (guests only).
-    // Skip when ROM sharing is enabled — the ROM comes from the host via transfer.
-    if (!isHost && data.romHash && data.romHash !== _hostRomHash) {
-      _hostRomHash = data.romHash;
-      // If we have a cached ROM loaded that doesn't match, clear it
-      if (_romHash && !_romSharingEnabled && romHashMismatch(_hostRomHash, _romHash)) {
-        console.log(
-          '[play] host ROM hash changed (host:',
-          _hostRomHash?.substring(0, 16),
-          'ours:',
-          _romHash?.substring(0, 16),
-          ') \u2014 checking library',
-        );
-        clearLoadedRom();
-        if (socket?.connected) socket.emit('rom-ready', { ready: false });
-        // Try auto-match from library before prompting
-        showToast('Host selected a different game');
-        autoMatchRom(_hostRomHash);
-      } else if ((_romBlob || _romBlobUrl) && _romHash && !romHashMismatch(_hostRomHash, _romHash)) {
+      if (prevMode !== 'lockstep' && mode === 'lockstep' && localRomLoaded() && (isHost || !hostRomMismatch())) {
         notifyRomReady();
       }
     }
@@ -843,6 +974,9 @@
         updateRomSharingUI();
       }
     }
+
+    // Track host ROM identity for display, cache verification, and live invalidation.
+    applyHostRomFromData(data, { toastOnChange: true });
 
     // Update my slot
     for (const entry of Object.values(players)) {
@@ -860,17 +994,6 @@
       if (_romSharingEnabled && _romSharingDecision === null) {
         updateRomSharingUI();
       }
-    }
-
-    // Check if we became the host (ownership transfer)
-    const wasHost = isHost;
-    if (ownerSid) {
-      isHost = ownerSid === socket.id;
-      KNState.isLocalHost = isHost;
-    }
-    if (!wasHost && isHost) {
-      showToast('You are now the host');
-      renderRomLibrary();
     }
 
     // Diff for toasts
@@ -954,6 +1077,7 @@
       _gameId = data.gameId;
       KNState.gameId = _gameId;
     }
+    applyHostRomFromData(data);
     KNState.matchId = data.matchId || null;
 
     gameRunning = true;
@@ -968,8 +1092,8 @@
       return;
     }
 
-    // Verify ROM hash matches host's (skip if ROM sharing — ROM comes from host)
-    if (romHashMismatch(data.romHash, _romHash) && _romSharingDecision !== 'accepted') {
+    // Verify ROM identity matches host's (skip if ROM sharing — ROM comes from host)
+    if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
       if (_romSharingEnabled && _romSharingDecision === null) {
         // Cached ROM doesn't match but sharing available and user hasn't
         // decided — stay in overlay so they can accept the host's ROM
@@ -985,7 +1109,7 @@
     // whether the guest accepted, declined, or hasn't decided), stay in overlay.
     // This handles the race where the host starts before the guest finishes
     // downloading or even accepts the sharing prompt.
-    if (_romSharingEnabled && !_romBlob && !_romBlobUrl) {
+    if (_romSharingEnabled && !localRomLoaded()) {
       initEngine();
       if (_romSharingDecision === 'accepted') {
         if (_romTransferState === 'idle') {
@@ -1917,6 +2041,8 @@
     const expectedHash = _romTransferHeader?.hash ?? null;
 
     _romBlob = blob;
+    _romName = displayName;
+    _romSize = blob.size;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(blob);
     window.EJS_gameUrl = _romBlobUrl;
@@ -1987,7 +2113,12 @@
 
   const notifyRomReady = () => {
     if (socket?.connected) {
-      socket.emit('rom-ready', { ready: true, hash: _romHash || undefined });
+      socket.emit('rom-ready', {
+        ready: true,
+        hash: _romHash || undefined,
+        name: _romName || _safeGet('localStorage', 'kaillera-rom-name') || undefined,
+        size: _romSize ?? _romBlob?.size ?? undefined,
+      });
       if (!_funnelRomLoadedSent) {
         _funnelRomLoadedSent = true;
         KNEvent('rom_loaded', '', { bytes: _romBlob?.size || 0 });
@@ -2310,6 +2441,18 @@
     // Auto-load the most recently used ROM from library
     const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
     if (lastHash) {
+      if (!isHost && _hostRomHash && romHashMismatch(_hostRomHash, lastHash)) {
+        console.warn(
+          '[play] cached ROM mismatch - clearing before autoload',
+          'host:',
+          _hostRomHash.substring(0, 16),
+          'cached:',
+          lastHash.substring(0, 16),
+        );
+        clearLoadedRom();
+        if (socket?.connected) socket.emit('rom-ready', { ready: false });
+        return;
+      }
       crumb('rom-autoload-start', { hash: lastHash.substring(0, 12) });
       loadRomFromLibrary(lastHash, (ok, name) => {
         crumb('rom-autoload-done', {
@@ -2317,7 +2460,7 @@
           name,
           pendingLateJoin: _pendingLateJoin,
           hostHash: _hostRomHash?.substring(0, 12),
-          match: !romHashMismatch(_hostRomHash, lastHash),
+          match: !_hostRomHash || !romHashMismatch(_hostRomHash, lastHash),
         });
         if (ok) {
           drop.classList.add('loaded');
@@ -2365,6 +2508,8 @@
 
   const loadRomData = (file, displayName) => {
     _romBlob = file;
+    _romName = displayName;
+    _romSize = file.size;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
     window.EJS_gameUrl = _romBlobUrl;
@@ -2425,7 +2570,7 @@
       }
       // Guest ROM mismatch check: if the host's ROM hash is known and
       // this ROM doesn't match, reject it and prompt re-upload.
-      if (!isHost && _hostRomHash && _romHash && romHashMismatch(_hostRomHash, _romHash)) {
+      if (!isHost && (_hostRomHash || _hostRomSize !== null) && hostRomMismatch()) {
         console.log(
           '[play] ROM mismatch — guest hash:',
           _romHash?.substring(0, 16),
@@ -2501,6 +2646,8 @@
     _romBlob = null;
     _romBlobUrl = null;
     _romHash = null;
+    _romName = null;
+    _romSize = null;
     _gameId = null;
     KNState.romHash = null;
     KNState.gameId = null;
@@ -2663,6 +2810,8 @@
         const val = req.result;
         const blob = new Blob([val.blob]);
         _romBlob = blob;
+        _romName = val.name;
+        _romSize = val.size || blob.size;
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
@@ -3112,7 +3261,10 @@
       const msg = document.createElement('p');
       msg.id = 'late-join-msg';
       msg.style.cssText = 'text-align:center;color:#6af;margin-bottom:12px;font-size:14px;';
-      msg.textContent = 'Game in progress — load a ROM to join';
+      const hostRomName = hostRomDisplayName();
+      msg.textContent = hostRomName
+        ? `Game in progress - load ${hostRomName} to join`
+        : 'Game in progress - load a ROM to join';
       card.insertBefore(msg, card.firstChild);
     }
   };
@@ -3127,7 +3279,7 @@
     _pendingLateJoin = false;
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
-    if (romHashMismatch(_hostRomHash, _romHash) && _romSharingDecision !== 'accepted') {
+    if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
       if (_romSharingEnabled && _romSharingDecision === null) {
         // ROM sharing available but user hasn't decided yet (e.g. auto-loaded
         // a cached ROM from a previous game). Stay on the sharing prompt so
@@ -3173,6 +3325,7 @@
 
     const roomDisplay = document.getElementById('room-display');
     if (roomDisplay) roomDisplay.textContent = roomCode;
+    updateHostRomInfo();
 
     const hostControls = document.getElementById('host-controls');
     const guestStatus = document.getElementById('guest-status');
@@ -4302,6 +4455,7 @@
           _gameId = _gameIdFromHash(_romHash);
           KNState.gameId = _gameId;
         }
+        updateHostRomInfo();
         // Retroactively verify any cached ROMs that were stored before
         // the known-hash table was available (e.g. v1→v2 migration)
         _retroVerifyLibrary();

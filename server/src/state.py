@@ -65,6 +65,8 @@ def _deserialize_room(d: dict):
         status=d.get("status", "lobby"),
         mode=d.get("mode"),
         rom_hash=d.get("rom_hash"),
+        rom_name=d.get("rom_name"),
+        rom_size=d.get("rom_size"),
         rom_sharing=d.get("rom_sharing", False),
         rom_ready=set(d.get("rom_ready", [])),
         rom_declared=set(d.get("rom_declared", [])),

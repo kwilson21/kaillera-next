@@ -628,6 +628,17 @@ def create_app(lifespan=None) -> FastAPI:
             "game_id": room.game_id,
             "gameId": room.game_id,
             "rom_hash": room.rom_hash,
+            "romName": room.rom_name,
+            "rom_name": room.rom_name,
+            "romSize": room.rom_size,
+            "rom_size": room.rom_size,
+            "hostRom": {
+                "hash": room.rom_hash,
+                "name": room.rom_name,
+                "size": room.rom_size,
+                "gameId": room.game_id,
+                "game_id": room.game_id,
+            },
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,
         }

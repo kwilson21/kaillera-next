@@ -912,6 +912,27 @@ button:hover {
   margin-top: 4px;
 }
 
+.host-rom-info {
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #cfd8ff;
+  background: rgba(102, 170, 255, 0.06);
+  overflow-wrap: anywhere;
+}
+
+.host-rom-info.pending {
+  color: #888;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.host-rom-info.ready {
+  border-color: #3d5f88;
+}
+
 /* ROM Library */
 .rom-library {
   border: 1px solid #2a2a40;

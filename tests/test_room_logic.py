@@ -107,6 +107,9 @@ class TestPlayersPayload:
         room = _make_room(game_id="smash-remix")
         room.rom_sharing = True
         room.mode = "streaming"
+        room.rom_hash = "S" + "a" * 64
+        room.rom_name = "Smash Remix.z64"
+        room.rom_size = 67108864
 
         payload = _players_payload(room)
 
@@ -114,6 +117,11 @@ class TestPlayersPayload:
         assert payload["mode"] == "streaming"
         assert payload["gameId"] == "smash-remix"
         assert payload["game_id"] == "smash-remix"
+        assert payload["romHash"] == "S" + "a" * 64
+        assert payload["romName"] == "Smash Remix.z64"
+        assert payload["romSize"] == 67108864
+        assert payload["hostRom"]["name"] == "Smash Remix.z64"
+        assert payload["hostRom"]["gameId"] == "smash-remix"
 
 
 # ── _get_room ─────────────────────────────────────────────────────────────────
@@ -271,6 +279,58 @@ class TestLeave:
 
     def test_unknown_sid_is_noop(self):
         self._run(_leave("sid-ghost", "disconnect"))  # must not raise
+
+
+# ── rom-ready ────────────────────────────────────────────────────────────────
+
+
+class TestRomReady:
+    def _run(self, sid, payload):
+        with (
+            patch.object(signaling, "check", return_value=True),
+            patch.object(signaling.sio, "emit", new=AsyncMock()),
+            patch.object(signaling.state, "save_room", new=AsyncMock()),
+        ):
+            return _run_async(signaling.rom_ready(sid, payload))
+
+    def test_host_rom_change_invalidates_other_ready_state(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        room.rom_ready.update({"sid-host", "sid-2"})
+        room.rom_declared.add("sid-2")
+        rooms["ROOM5"] = room
+        _sid_to_room["sid-host"] = ("ROOM5", "pid-host", False)
+
+        err = self._run(
+            "sid-host",
+            {"ready": True, "hash": "S" + "a" * 64, "name": "Host Game.z64", "size": 4096},
+        )
+
+        assert err is None
+        assert room.rom_hash == "S" + "a" * 64
+        assert room.rom_name == "Host Game.z64"
+        assert room.rom_size == 4096
+        assert room.rom_ready == {"sid-host"}
+        assert room.rom_declared == set()
+
+    def test_guest_mismatched_hash_is_not_ready(self):
+        room = _make_room(owner="sid-host")
+        room.rom_hash = "S" + "a" * 64
+        room.rom_size = 4096
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        rooms["ROOM6"] = room
+        _sid_to_room["sid-2"] = ("ROOM6", "pid-2", False)
+
+        err = self._run("sid-2", {"ready": True, "hash": "S" + "b" * 64, "name": "Other.z64", "size": 4096})
+
+        assert err == "ROM does not match host"
+        assert "sid-2" not in room.rom_ready
 
 
 # ── data-message relay ───────────────────────────────────────────────────────

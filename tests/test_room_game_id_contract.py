@@ -19,6 +19,7 @@ def test_rest_room_payload_includes_game_id_aliases():
 
     assert '"game_id": room.game_id' in window
     assert '"gameId": room.game_id' in window
+    assert '"hostRom": {' in window
 
 
 def test_play_join_adopts_room_game_id_before_mid_game_init():
@@ -31,6 +32,7 @@ def test_play_join_adopts_room_game_id_before_mid_game_init():
 
     assert "const roomGameId = roomData.gameId || roomData.game_id" in window
     assert "KNState.gameId = _gameId" in window
+    assert "applyHostRomFromData(roomData)" in window
 
 
 def test_join_ack_payload_includes_game_id_aliases():
@@ -41,3 +43,4 @@ def test_join_ack_payload_includes_game_id_aliases():
 
     assert '"gameId": room.game_id' in window
     assert '"game_id": room.game_id' in window
+    assert '"hostRom": {' in window

@@ -181,6 +181,8 @@ class Room:
     status: str = "lobby"  # "lobby" or "playing"
     mode: str | None = None  # "lockstep" or "streaming", set on start-game
     rom_hash: str | None = None  # SHA-256 of ROM, set on start-game
+    rom_name: str | None = None  # Host-provided display name for the currently loaded ROM
+    rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
     rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
     rom_declared: set[str] = field(default_factory=set)  # sids that declared ROM ownership (streaming)
@@ -240,11 +242,52 @@ def _players_payload(room: Room) -> dict:
         "owner": room.owner,
         "romSharing": room.rom_sharing,
         "romHash": room.rom_hash,
+        "romName": room.rom_name,
+        "rom_name": room.rom_name,
+        "romSize": room.rom_size,
+        "rom_size": room.rom_size,
+        "hostRom": {
+            "hash": room.rom_hash,
+            "name": room.rom_name,
+            "size": room.rom_size,
+            "gameId": room.game_id,
+            "game_id": room.game_id,
+        },
         "gameId": room.game_id,
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
     }
+
+
+def _clear_host_rom(room: Room) -> None:
+    """Clear host ROM identity and invalidate player readiness."""
+    room.rom_hash = None
+    room.rom_name = None
+    room.rom_size = None
+    room.rom_ready.clear()
+    room.rom_declared.clear()
+
+
+def _invalidate_non_host_rom_state(room: Room) -> None:
+    """Keep only the host ready/declaration state after the host changes ROM."""
+    room.rom_ready = {sid for sid in room.rom_ready if sid == room.owner}
+    room.rom_declared = {sid for sid in room.rom_declared if sid == room.owner}
+
+
+def _rom_hashes_conflict(expected: str | None, actual: str | None) -> bool:
+    """Return True only when two comparable client ROM hashes disagree."""
+    if not expected or not actual:
+        return False
+    if expected[0] != actual[0]:
+        return False
+    return expected != actual
+
+
+def _rom_identity(room: Room) -> tuple[str | None, str | None, int | None]:
+    if room.rom_hash:
+        return (room.rom_hash, None, room.rom_size)
+    return (room.rom_hash, room.rom_name, room.rom_size)
 
 
 def _get_room(sid: str) -> tuple[str, Room] | None:
@@ -382,6 +425,8 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
         new_owner_sid = new_owner_info["socketId"]
         room.owner = new_owner_sid
         room.rom_sharing = False
+        if room.status != "playing":
+            _clear_host_rom(room)
         # Move new owner to slot 0 (P1) only in lobby — never reshuffle slots mid-game
         # (would break input routing for the in-progress match).
         if room.status != "playing" and new_owner_pid and room.slots.get(0) != new_owner_pid:
@@ -740,6 +785,17 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
             "mode": room.mode,
             "resyncEnabled": payload.resyncEnabled,
             "romHash": room.rom_hash,
+            "romName": room.rom_name,
+            "rom_name": room.rom_name,
+            "romSize": room.rom_size,
+            "rom_size": room.rom_size,
+            "hostRom": {
+                "hash": room.rom_hash,
+                "name": room.rom_name,
+                "size": room.rom_size,
+                "gameId": room.game_id,
+                "game_id": room.game_id,
+            },
             "gameId": room.game_id,
             "matchId": room.match_id,
         },
@@ -848,6 +904,7 @@ async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
         if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
             game_id = "unknown"
         room.game_id = game_id
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
         log.info("Game ID set to %s in room %s", game_id, session_id)
     return None
@@ -884,13 +941,37 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
             return "Not in a room"
         session_id, room = result
 
-        if payload.ready:
+        if sid == room.owner:
+            if not payload.ready:
+                _clear_host_rom(room)
+            else:
+                old_identity = _rom_identity(room)
+                if payload.hash is not None:
+                    room.rom_hash = payload.hash if len(payload.hash) >= 16 else None
+                elif payload.name is not None or payload.size is not None:
+                    room.rom_hash = None
+                if payload.name is not None:
+                    rom_name = _sanitize_str(payload.name, 128).strip()
+                    room.rom_name = rom_name or None
+                if payload.size is not None:
+                    room.rom_size = payload.size
+                if old_identity != _rom_identity(room):
+                    _invalidate_non_host_rom_state(room)
+                room.rom_ready.add(sid)
+        elif payload.ready:
+            if _rom_hashes_conflict(room.rom_hash, payload.hash):
+                room.rom_ready.discard(sid)
+                await sio.emit("users-updated", _players_payload(room), room=session_id)
+                await state.save_room(session_id, room)
+                return "ROM does not match host"
+            if room.rom_size is not None and payload.size is not None and room.rom_size != payload.size:
+                room.rom_ready.discard(sid)
+                await sio.emit("users-updated", _players_payload(room), room=session_id)
+                await state.save_room(session_id, room)
+                return "ROM does not match host"
             room.rom_ready.add(sid)
         else:
             room.rom_ready.discard(sid)
-        # Store host's ROM hash so guests can verify their cached ROM
-        if sid == room.owner and payload.hash and len(payload.hash) >= 16:
-            room.rom_hash = payload.hash
         await sio.emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
     return None
