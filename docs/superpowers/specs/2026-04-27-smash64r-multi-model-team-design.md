@@ -28,7 +28,7 @@ The prototype ships when **all five** of the following hold simultaneously on th
 
 1. SSB64 boots through to a 1P match without crashes or stalls.
 2. Frame rate holds ≥ 60 fps for at least 60 seconds of continuous active gameplay.
-3. The mupen frame counter (read via `EJS_emulator.gameManager.Module._kn_get_retro_run_entries` or equivalent live counter) advances continuously across that 60 s window — no silent display-freeze stall as documented in the 2026-04-15 recomp work.
+3. The mupen frame counter (read via `EJS_emulator.gameManager.Module._kn_get_retro_run_entries`, exported by `build/kn_recomp/kn_recomp_shim.c:356` on the smash64r branch) advances continuously across that 60 s window — no silent display-freeze stall of the kind tracked in `project_recomp_m2_status.md` (issue #1).
 4. Audio plays without dropouts or pitch errors during the same window (verified by ear + audio-thread diag counters showing no underruns).
 5. A connected gamepad drives the in-match character end-to-end through the same window.
 
@@ -104,6 +104,7 @@ patch | analysis | answer
 **Rules for `Files in scope` and `Acceptance criteria`:**
 - File paths and line ranges must be real and verified by Claude before dispatch (`Read` the file, confirm the symbol is at the line range cited).
 - Acceptance criteria must reference **real symbols, counters, build flags, and log signatures** that exist in the current codebase. Inventing plausible-sounding identifiers is the canonical multi-model failure mode and acceptance criteria are the bulwark against it.
+- These two rules apply to the path and symbol citations in **this spec's own First Sprint table** as well — not just briefs the team produces.
 - Briefs reference files by path + line range. They do **not** inline file contents by default. A dispatch-time helper inlines the cited ranges into the actual model payload, so the brief stays compact and the model sees verbatim source. Implementation of that helper belongs to the writing-plans phase.
 
 `patch` means a unified diff or full-file replacement that Claude can apply. `analysis` means prose with file:line citations. `answer` means a direct response to a closed question.
@@ -172,7 +173,7 @@ This sprint takes the smash64r branch from its current state (Phase 2f Wave 1 do
 
 | # | Owner | Task | Depends on |
 |---|-------|------|-----------|
-| 1 | Codex | Implement variant 4 — fiber takeover inside `EmuThreadFunction` (`build/src/mupen64plus-libretro-nx/libretro.c` ~line 496+). Inject `kn_recomp_get_enabled()` check before mupen interp call; route to `kn_um_drive_frame()` when enabled. | — |
+| 1 | Codex | Implement variant 4 — fiber takeover inside `EmuThreadFunction` (`build/src/mupen64plus-libretro-nx/libretro/libretro.c`, both `#ifdef` definitions at lines 523 and 525). Inject `kn_recomp_get_enabled()` check before mupen interp call; route to `kn_um_drive_frame()` when enabled. | — |
 | 2 | Codex | Wire `osRecvMesg(BLOCK)` park via `um_thread_park_on()`; wire `osSendMesg` parked-receiver wake via `um_queue_wake_one()`. | #1 |
 | 3 | Claude | Build with `KN_FAST=1`, run, capture `kn_um_get_*` and `kn_bounce_get_*` counters + frame-counter watchdog. Verify the residual silent-display freeze is gone (frame counter advances continuously for ≥ 60 s with dispatch enabled). | #2 |
 | 4 | DeepSeek-reasoner | Parity audit: enumerate libultra primitives still routing through depth-guard. Output a prioritized list with file:line citations of each primitive's bounce site. Output: `analysis`. | parallel with #1-3 |
@@ -183,7 +184,7 @@ This sprint takes the smash64r branch from its current state (Phase 2f Wave 1 do
 | 9 | Claude | Controller verification under fiber model: Playwright harness + diag counters + manual gamepad input through 1P match. | #6 done; #8 done if invoked |
 | 10 | Claude | Final prototype acceptance run: 60 s active gameplay, all five DoD criteria checked, evidence captured to `decisions/prototype-acceptance.md`. | #9 |
 
-`deepseek-chat` (cheap second opinion) is invoked on #4 or #7 if either output is thin or recommends a scope expansion that Claude wants a sanity check on before committing Codex time.
+`deepseek-chat` (cheap second opinion) is invoked on #4 or #7 if either output is thin or recommends a scope expansion that Claude wants a sanity check on before committing Codex time. Second-opinion runs land their raw output at `outputs/<task>.deepseek-chat.md` and append a "Second-opinion" subsection to the parent task's `decisions/<task>.md` rather than producing a separate decision file.
 
 ## Failure Modes
 
