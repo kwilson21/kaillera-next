@@ -22,6 +22,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Persistent recording (in-tree). Used when --replay has no explicit path.
 const DEFAULT_REPLAY = join(__dirname, 'fixtures', 'nav-recording.json');
 
+function argValue(name, fallback) {
+  const prefix = `--${name}=`;
+  const found = process.argv.slice(2).find((arg) => arg.startsWith(prefix));
+  return found ? found.slice(prefix.length) : fallback;
+}
+
 const MANUAL_SETUP = process.argv.includes('--manual-setup');
 const REPLAY_ARG_IDX = process.argv.indexOf('--replay');
 const REPLAY_FILE =
@@ -59,11 +65,14 @@ const NETSIM_ENABLED = NETSIM_JITTER_MS > 0 || NETSIM_DROP_PCT > 0;
 const DESYNC_MODE_ARG_IDX = process.argv.indexOf('--desync-mode');
 const DESYNC_MODE =
   DESYNC_MODE_ARG_IDX !== -1 ? String(process.argv[DESYNC_MODE_ARG_IDX + 1] || '').toLowerCase() : null;
+const LATE_JOIN_MIDMATCH = process.argv.includes('--late-join-midmatch');
+const LATE_JOIN_DELAY_MS = Number(argValue('late-join-delay-ms', process.env.KN_LATE_JOIN_DELAY_MS || '3000'));
+const KEEP_OPEN = process.argv.includes('--keep-open');
 
 const ROM_PATH = '/Users/kazon/Downloads/Smash Remix 2.0.1.z64';
-const BASE_URL = 'https://localhost:27888';
+const BASE_URL = argValue('base-url', process.env.KN_BASE_URL || 'https://localhost:27888');
 const ADMIN_KEY = '1234';
-const ROOM = 'AUTO' + (Date.now() % 10000);
+const ROOM = argValue('room', process.env.KN_ROOM || 'AUTO' + (Date.now() % 10000));
 /* 2026-04-25: extended from 60s → 180s (3 min) per user request to
  * "let random inputs play out for a few mins and continuously capture
  * screenshots". Combined with kn-diagnostics.js SCREENSHOT_INTERVAL=60
@@ -1418,7 +1427,7 @@ async function setupPeer(browser, urlSuffix, name) {
      * data was filtered out and only end-state divergence remained. */
     if (
       t.match(
-        /MISMATCH|FATAL|ABORT|DIVERGE|KNDesync|C-REPLAY-FRAME|C-REPLAY-START|C-REPLAY-DONE|REPLAY-INPUT|RB-CHECK|RB-LIVE-FIELD/i,
+        /MISMATCH|FATAL|ABORT|DIVERGE|KNDesync|late-join|requesting game state|received late-join|C-REPLAY-FRAME|C-REPLAY-START|C-REPLAY-DONE|REPLAY-INPUT|RB-CHECK|RB-LIVE-FIELD/i,
       )
     ) {
       clientEvents.push({ ts: Date.now(), type: msg.type(), text: t });
@@ -1466,6 +1475,126 @@ async function setupPeer(browser, urlSuffix, name) {
   await fc.setFiles(ROM_PATH);
   await page.waitForTimeout(2000);
   return { ctx, page, name, clientEvents, pageErrors };
+}
+
+async function debugState(page) {
+  return page
+    .evaluate(() => {
+      const debug = window.NetplayLockstep?.getDebugState?.() || null;
+      return {
+        slot: debug?.playerSlot ?? window._playerSlot ?? window.KNState?.slot ?? null,
+        isSpectator: window._isSpectator ?? null,
+        running: debug?.running ?? null,
+        activeRoster: debug?.activeRoster ?? null,
+        inputPeerSlots: debug?.inputPeerSlots ?? null,
+        frameNum: debug?.frameNum ?? window.KNState?.frameNum ?? null,
+        localInputNow: debug?.localInputNow ?? null,
+        remoteLatest: debug?.remoteLatest ?? null,
+      };
+    })
+    .catch((err) => ({ error: String(err) }));
+}
+
+async function waitForPlayableSlot(peer, expectedSlot, timeoutMs = 120000) {
+  const start = Date.now();
+  let last = null;
+  let lastClickAt = 0;
+  while (Date.now() - start < timeoutMs) {
+    const now = Date.now();
+    if (now - lastClickAt >= 2000) {
+      lastClickAt = now;
+      await clickBootPrompt(peer.page, peer.name);
+    }
+    last = await debugState(peer.page);
+    const roster = Array.isArray(last.activeRoster) ? last.activeRoster : [];
+    if (
+      last.slot === expectedSlot &&
+      last.isSpectator !== true &&
+      last.running === true &&
+      roster.includes(expectedSlot)
+    ) {
+      console.log(`  ${peer.name}: active player slot ${expectedSlot}`);
+      return last;
+    }
+    await peer.page.waitForTimeout(500);
+  }
+  throw new Error(`${peer.name} never became active slot ${expectedSlot}; last=${JSON.stringify(last)}`);
+}
+
+async function waitForInputTopology(peers, timeoutMs = 120000) {
+  const expected = new Map([
+    [0, [1, 2]],
+    [1, [0, 2]],
+    [2, [0, 1]],
+  ]);
+  const start = Date.now();
+  let last = [];
+  while (Date.now() - start < timeoutMs) {
+    last = await Promise.all(peers.map((peer) => debugState(peer.page)));
+    const ok = last.every((state) => {
+      const roster = Array.isArray(state.activeRoster) ? state.activeRoster : [];
+      const inputs = Array.isArray(state.inputPeerSlots) ? state.inputPeerSlots : [];
+      const needed = expected.get(state.slot) || [];
+      return [0, 1, 2].every((slot) => roster.includes(slot)) && needed.every((slot) => inputs.includes(slot));
+    });
+    if (ok) {
+      console.log(
+        `  input topology: ${last.map((state) => `P${state.slot + 1} peers=[${state.inputPeerSlots}]`).join(' ')}`,
+      );
+      return last;
+    }
+    await peers[0].page.waitForTimeout(500);
+  }
+  throw new Error(`Input topology never included all three players; last=${JSON.stringify(last)}`);
+}
+
+async function waitForFrameAdvance(peers, minAdvance, label, timeoutMs = 20000) {
+  const startFrames = await Promise.all(peers.map((peer) => peer.page.evaluate(() => window.KNState?.frameNum || 0)));
+  const start = Date.now();
+  let lastFrames = startFrames;
+  while (Date.now() - start < timeoutMs) {
+    lastFrames = await Promise.all(peers.map((peer) => peer.page.evaluate(() => window.KNState?.frameNum || 0)));
+    if (lastFrames.every((frame, i) => frame - startFrames[i] >= minAdvance)) {
+      console.log(
+        `  frame advance OK (${label}): ${peers
+          .map((peer, i) => `${peer.name} ${startFrames[i]}->${lastFrames[i]}`)
+          .join(' ')}`,
+      );
+      return lastFrames;
+    }
+    await peers[0].page.waitForTimeout(250);
+  }
+  throw new Error(
+    `Frames did not advance ${minAdvance}f for ${label}: ` +
+      peers.map((peer, i) => `${peer.name} ${startFrames[i]}->${lastFrames[i]}`).join(' '),
+  );
+}
+
+async function runMidmatchLateJoin(host, guest, chromiumArgs) {
+  console.log(`\n=== Mid-match late join after ${LATE_JOIN_DELAY_MS}ms of P1/P2 random input ===`);
+  await host.page.waitForTimeout(LATE_JOIN_DELAY_MS);
+
+  const lateBrowser = await chromium.launch({ headless: false, args: chromiumArgs });
+  const late = await setupPeer(lateBrowser, `room=${ROOM}`, 'L');
+  await clickBootPrompt(late.page, 'late');
+
+  await waitForPlayableSlot(late, 2);
+  await Promise.all([
+    waitForActiveVsBattle(host.page, 120000, 50),
+    waitForActiveVsBattle(guest.page, 120000, 50),
+    waitForActiveVsBattle(late.page, 120000, 50),
+  ]);
+  await waitForInputTopology([host, guest, late]);
+  await waitForFrameAdvance([host, guest, late], 90, 'mid-match late join');
+  await Promise.all([
+    shot(host.page, 'late-midmatch-host'),
+    shot(guest.page, 'late-midmatch-guest'),
+    shot(late.page, 'late-midmatch-late'),
+  ]);
+
+  const states = await Promise.all([host, guest, late].map((peer) => debugState(peer.page)));
+  console.log(`  late-join midmatch states: ${JSON.stringify(states)}`);
+  return { browser: lateBrowser, peer: late, states };
 }
 
 async function shot(page, name, opts = {}) {
@@ -1541,6 +1670,8 @@ function randomInt(n) {
 
 async function main() {
   console.log(`Room: ${ROOM}`);
+  console.log(`Base URL: ${BASE_URL}`);
+  console.log(`Late-join midmatch: ${LATE_JOIN_MIDMATCH ? 'yes' : 'no'}`);
   // Chromium flags to prevent background tabs from having rAF/timers throttled
   // (critical for 2-peer emulator testing where both windows run simultaneously).
   const chromiumArgs = [
@@ -1602,6 +1733,7 @@ async function main() {
    * counter that the final report reads. */
   let inputCount = 0;
   let runDesyncInfo = null;
+  let lateJoinResult = null;
 
   if (REPLAY_FILE) {
     // ==================== REPLAY MODE (frame-exact via KNState.frameNum setter hook) ====================
@@ -1858,6 +1990,12 @@ async function main() {
           }
         })();
     if (NO_RANDOM_INPUTS) console.log('  --no-inputs: skipping random input generator (idle-fighter diagnostic)');
+    const lateJoinTask = LATE_JOIN_MIDMATCH
+      ? runMidmatchLateJoin(host, guest, chromiumArgs).then((result) => {
+          lateJoinResult = result;
+          return result;
+        })
+      : null;
 
     /* 2026-04-25: continuous canvas-clipped cross-peer screenshot capture
      * during the replay+input parallel phase. Saves /tmp/det-live-NNN-hfX-gfY-{host,guest}.png
@@ -2086,6 +2224,9 @@ async function main() {
     /* Stop feeding inputs (they'll get spurious key-up after abort). */
     inputAbort.abort();
     await inputTask.catch(() => {});
+    if (lateJoinTask) {
+      lateJoinResult = await lateJoinTask;
+    }
     const [hRuntime, gRuntime] = await Promise.all([sampleRuntimeStats(host.page), sampleRuntimeStats(guest.page)]);
     logRuntimeStats('final', hRuntime, gRuntime);
 
@@ -2373,6 +2514,13 @@ async function main() {
     .catch((e) => {
       console.log(`  guest flush skipped: ${String(e).split('\n')[0]}`);
     });
+  if (lateJoinResult?.peer) {
+    await lateJoinResult.peer.page
+      .evaluate(() => window._flushSyncLog?.())
+      .catch((e) => {
+        console.log(`  late flush skipped: ${String(e).split('\n')[0]}`);
+      });
+  }
   await host.page.waitForTimeout(3000);
 
   const clientSummaryFor = (peer) => {
@@ -2394,11 +2542,23 @@ async function main() {
       first_actionable: actionable[0] ? JSON.stringify(actionable[0]).substring(0, 400) : null,
     };
   };
-  const [hostDesyncEvents, guestDesyncEvents] = await Promise.all([desyncSummaryFor(host), desyncSummaryFor(guest)]);
+  const [hostDesyncEvents, guestDesyncEvents, lateDesyncEvents] = await Promise.all([
+    desyncSummaryFor(host),
+    desyncSummaryFor(guest),
+    lateJoinResult?.peer ? desyncSummaryFor(lateJoinResult.peer) : Promise.resolve(null),
+  ]);
 
   // Closing the pages triggers the pagehide keepalive path, which is the
   // most reliable way to force final session rows into the admin database.
-  await Promise.all([hostBrowser.close().catch(() => {}), guestBrowser.close().catch(() => {})]);
+  if (!KEEP_OPEN) {
+    await Promise.all([
+      hostBrowser.close().catch(() => {}),
+      guestBrowser.close().catch(() => {}),
+      lateJoinResult?.browser?.close().catch(() => {}),
+    ]);
+  } else {
+    console.log('\nKeeping browser windows open. Stop this command when you are done watching/debugging.');
+  }
   await new Promise((r) => setTimeout(r, 2000));
 
   console.log('Pulling admin logs...');
@@ -2427,11 +2587,18 @@ async function main() {
     page_errors: {
       host: host.pageErrors || [],
       guest: guest.pageErrors || [],
+      late: lateJoinResult?.peer?.pageErrors || [],
     },
     kn_desync_events: {
       host: hostDesyncEvents,
       guest: guestDesyncEvents,
+      late: lateDesyncEvents,
     },
+    late_join_midmatch: lateJoinResult
+      ? {
+          states: lateJoinResult.states,
+        }
+      : null,
     peers: [],
   };
   for (const entry of matchEntries) {
@@ -2471,6 +2638,7 @@ async function main() {
   const clientMm = report.client.host.rb_check_mismatch + report.client.guest.rb_check_mismatch;
   const clientFatal = report.client.host.fatal + report.client.guest.fatal;
   const knDesyncActionable = report.kn_desync_events.host.actionable + report.kn_desync_events.guest.actionable;
+  const lateKnDesyncActionable = report.kn_desync_events.late?.actionable || 0;
   const desyncLatched = !!report.desync_latch;
   console.log(
     `\nVERDICT: ${
@@ -2478,15 +2646,18 @@ async function main() {
       totalStuck === 0 &&
       clientMm === 0 &&
       clientFatal === 0 &&
-      knDesyncActionable === 0 &&
+      knDesyncActionable + lateKnDesyncActionable === 0 &&
       !desyncLatched
         ? '✅ PASS — no desync, no stall'
         : totalStuck > 0 || clientFatal > 0
           ? `⚠️  STALL/FATAL (admin_stuck=${totalStuck}, client_fatal=${clientFatal})`
-          : `❌ DESYNC (admin_mm=${totalMm}, client_mm=${clientMm}, kn_events=${knDesyncActionable}, latch=${desyncLatched ? report.desync_latch.trigger : 'none'})`
+          : `❌ DESYNC (admin_mm=${totalMm}, client_mm=${clientMm}, kn_events=${knDesyncActionable + lateKnDesyncActionable}, latch=${desyncLatched ? report.desync_latch.trigger : 'none'})`
     }`,
   );
 
+  if (KEEP_OPEN) {
+    await new Promise(() => {});
+  }
   await new Promise((r) => setTimeout(r, 3000));
 }
 
