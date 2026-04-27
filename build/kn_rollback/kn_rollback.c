@@ -107,6 +107,8 @@ extern uint_fast8_t softfloat_exceptionFlags;
  * 8 MB RDRAM / 64 KB = 128 blocks. One byte per block for simplicity. */
 #define KN_TAINT_BLOCKS 128
 #define KN_TAINT_BLOCK_SHIFT 16   /* 64 KB per block */
+#define KN_FNV1A_OFFSET 2166136261u
+#define KN_FNV1A_PRIME 16777619u
 uint8_t kn_rdram_taint[KN_TAINT_BLOCKS] = {0};
 
 /* Set by savestates_save_m64p — byte offset of dev->rdram.dram inside the
@@ -120,6 +122,15 @@ size_t kn_rdram_offset_in_state = 0;
  * across peers even when game logic is identical. Set by kn_rollback_init
  * once the rollback engine is in use. Never cleared. */
 int kn_skip_post_rdram_in_hash = 0;
+
+static uint32_t kn_fnv1a_stride(uint32_t hash, const uint8_t *data, size_t len, size_t stride) {
+    if (!data || stride == 0) return hash;
+    for (size_t i = 0; i < len; i += stride) {
+        hash ^= data[i];
+        hash *= KN_FNV1A_PRIME;
+    }
+    return hash;
+}
 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
@@ -141,8 +152,8 @@ void kn_taint_rdram(uint32_t addr, uint32_t size) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-uint32_t kn_get_taint_blocks(uint8_t *out) {
-    if (!out) return 0;
+uint32_t kn_get_taint_blocks(uint8_t *out, uint32_t out_size) {
+    if (!out || out_size < KN_TAINT_BLOCKS) return 0;
     memcpy(out, kn_rdram_taint, KN_TAINT_BLOCKS);
     return KN_TAINT_BLOCKS;
 }
@@ -414,10 +425,6 @@ static void write_frame_inputs_logged(int frame, int is_replay) {
     }
 }
 
-static void write_frame_inputs(int frame) {
-    write_frame_inputs_logged(frame, 0);
-}
-
 /* ── Init / Shutdown ───────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
@@ -636,6 +643,11 @@ void kn_rollback_shutdown(void) {
     free(rb.ring_frames);
     free(rb.ring_sf_state);
     free(rb.ring_hidden_state);
+    rb.ring_bufs = NULL;
+    rb.ring_hle_state = NULL;
+    rb.ring_frames = NULL;
+    rb.ring_sf_state = NULL;
+    rb.ring_hidden_state = NULL;
     rb.initialized = 0;
     rb_log("kn_rollback_shutdown");
 }
@@ -1438,6 +1450,7 @@ EMSCRIPTEN_KEEPALIVE
 int kn_get_input(int slot, int frame, int *out_buttons,
                  int *out_lx, int *out_ly, int *out_cx, int *out_cy) {
     if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
+    if (!out_buttons || !out_lx || !out_ly || !out_cx || !out_cy) return 0;
     int idx = frame % KN_INPUT_RING_SIZE;
     kn_input_t *inp = &rb.inputs[slot][idx];
     if (!inp->present || inp->frame != frame) return 0;
@@ -1460,13 +1473,9 @@ uint32_t kn_full_state_hash(int frame) {
     int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
-    uint32_t hash = 2166136261u;
+    uint32_t hash = KN_FNV1A_OFFSET;
     const uint8_t *p = rb.ring_bufs[idx];
-    size_t i;
-    for (i = 0; i < rb.state_size; i += 64) {
-        hash ^= p[i];
-        hash *= 16777619u;
-    }
+    hash = kn_fnv1a_stride(hash, p, rb.state_size, 64);
     return hash;
 }
 
@@ -1492,8 +1501,7 @@ uint32_t kn_game_state_hash(int frame) {
     const uint8_t *p = rb.ring_bufs[idx];
     const size_t rdram_start = kn_rdram_offset_in_state;
     const size_t rdram_end = rdram_start + 0x800000u;  /* 8 MB */
-    uint32_t hash = 2166136261u;
-    size_t i;
+    uint32_t hash = KN_FNV1A_OFFSET;
 
     /* Pre-RDRAM: headers + registers + DMA regs.
      * When rollback is active (kn_skip_post_rdram_in_hash), skip this
@@ -1501,20 +1509,19 @@ uint32_t kn_game_state_hash(int frame) {
      * residuals in header) that drifts harmlessly across WASM JIT engines.
      * The gameplay_hash addresses the detection gap. */
     if (!kn_skip_post_rdram_in_hash) {
-        for (i = 0; i < rdram_start && i < rb.state_size; i += 16) {
-            hash ^= p[i];
-            hash *= 16777619u;
-        }
+        size_t pre_len = rdram_start < rb.state_size ? rdram_start : rb.state_size;
+        hash = kn_fnv1a_stride(hash, p, pre_len, 16);
     }
 
-    /* RDRAM: skip tainted 64 KB blocks. */
+    /* RDRAM: skip tainted 64 KB blocks, checking taint once per block. */
     size_t actual_rdram_end = rdram_end < rb.state_size ? rdram_end : rb.state_size;
-    for (i = rdram_start; i < actual_rdram_end; i += 16) {
-        uint32_t rdram_off = (uint32_t)(i - rdram_start);
-        uint32_t block = rdram_off >> KN_TAINT_BLOCK_SHIFT;
-        if (block < KN_TAINT_BLOCKS && kn_rdram_taint[block]) continue;
-        hash ^= p[i];
-        hash *= 16777619u;
+    for (uint32_t block = 0; block < KN_TAINT_BLOCKS; block++) {
+        size_t block_start = rdram_start + ((size_t)block << KN_TAINT_BLOCK_SHIFT);
+        if (block_start >= actual_rdram_end) break;
+        if (kn_rdram_taint[block]) continue;
+        size_t block_end = block_start + ((size_t)1 << KN_TAINT_BLOCK_SHIFT);
+        if (block_end > actual_rdram_end) block_end = actual_rdram_end;
+        hash = kn_fnv1a_stride(hash, p + block_start, block_end - block_start, 16);
     }
 
     /* Post-RDRAM: SP mem, PIF, TLB LUT, cp0/cp1/cp2, event queue, fb state.
@@ -1522,10 +1529,7 @@ uint32_t kn_game_state_hash(int frame) {
      * engine is active, this section is excluded entirely from the hash
      * because cycle-clock-derived state drifts harmlessly across peers. */
     if (!kn_skip_post_rdram_in_hash) {
-        for (i = actual_rdram_end; i < rb.state_size; i += 16) {
-            hash ^= p[i];
-            hash *= 16777619u;
-        }
+        hash = kn_fnv1a_stride(hash, p + actual_rdram_end, rb.state_size - actual_rdram_end, 16);
     }
 
     return hash;
@@ -1554,16 +1558,13 @@ uint32_t kn_gameplay_hash(int frame) {
     if (rb.ring_frames[idx] != target) return 0;
 
     const uint8_t *state = rb.ring_bufs[idx];
-    uint32_t hash = 2166136261u;
+    uint32_t hash = KN_FNV1A_OFFSET;
 
-    for (int a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
+    for (size_t a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
         size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > rb.state_size) continue; /* bounds check */
-        for (uint32_t b = 0; b < sz; b++) {
-            hash ^= state[off + b];
-            hash *= 16777619u;
-        }
+        hash = kn_fnv1a_stride(hash, state + off, sz, 1);
     }
     return hash;
 }
@@ -1604,15 +1605,12 @@ uint32_t kn_live_gameplay_hash(void) {
     if (!retro_serialize(scratch, state_size)) return 0;
 
     /* Same address-list loop as kn_gameplay_hash but over scratch. */
-    uint32_t hash = 2166136261u;
+    uint32_t hash = KN_FNV1A_OFFSET;
     for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
         size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > state_size) continue;
-        for (uint32_t b = 0; b < sz; b++) {
-            hash ^= scratch[off + b];
-            hash *= 16777619u;
-        }
+        hash = kn_fnv1a_stride(hash, scratch + off, sz, 1);
     }
     return hash;
 }
@@ -1644,14 +1642,11 @@ int kn_state_region_hashes(uint32_t *out_hashes, int count) {
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
-        uint32_t hash = 2166136261u;
+        uint32_t hash = KN_FNV1A_OFFSET;
         const uint8_t *rp = p + (r * region_size);
         size_t end = (r == count - 1) ? rb.state_size : (r + 1) * region_size;
         size_t len = end - (r * region_size);
-        for (size_t i = 0; i < len; i += 16) {  /* sample every 16th byte */
-            hash ^= rp[i];
-            hash *= 16777619u;
-        }
+        hash = kn_fnv1a_stride(hash, rp, len, 16);  /* sample every 16th byte */
         out_hashes[r] = hash;
     }
     return count;
@@ -1675,14 +1670,11 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count) {
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
-        uint32_t hash = 2166136261u;
+        uint32_t hash = KN_FNV1A_OFFSET;
         const uint8_t *rp = p + (r * region_size);
         size_t end = (r == count - 1) ? rb.state_size : (r + 1) * region_size;
         size_t len = end - (r * region_size);
-        for (size_t i = 0; i < len; i += 16) {
-            hash ^= rp[i];
-            hash *= 16777619u;
-        }
+        hash = kn_fnv1a_stride(hash, rp, len, 16);
         out_hashes[r] = hash;
     }
     return count;
@@ -1717,6 +1709,11 @@ int kn_get_frame(void) { return rb.frame; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 void kn_set_frame(int frame) {
+    if (rb.replay_remaining != 0 || rb.pending_rollback >= 0) {
+        rb_log("kn_set_frame rejected during replay/rollback: requested=%d frame=%d replay_remaining=%d pending_rollback=%d",
+            frame, rb.frame, rb.replay_remaining, rb.pending_rollback);
+        return;
+    }
     rb.frame = frame;
     rb_log("kn_set_frame: %d", frame);
 }
@@ -1757,8 +1754,8 @@ int kn_get_serialize_skip_count(void) { return rb.serialize_skip_count; }
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int kn_get_mispred_breakdown(int *out) {
-    if (!out) return 0;
+int kn_get_mispred_breakdown(int *out, int out_count) {
+    if (!out || out_count < 3) return 0;
     out[0] = rb.button_mispredictions;
     out[1] = rb.stick_mispredictions;
     out[2] = rb.both_mispredictions;
@@ -1874,11 +1871,7 @@ int kn_replay_self_test(int n_frames, uint32_t *out_hashes) {
         kn_set_headless(prev_headless);
         return -2;
     }
-    uint32_t hash_b = 2166136261u;
-    for (size_t i = 0; i < state_size; i += 16) {
-        hash_b ^= scratch_b[i];
-        hash_b *= 16777619u;
-    }
+    uint32_t hash_b = kn_fnv1a_stride(KN_FNV1A_OFFSET, scratch_b, state_size, 16);
 
     /* Restore A */
     if (!retro_unserialize(scratch_a, state_size)) {
@@ -1894,11 +1887,7 @@ int kn_replay_self_test(int n_frames, uint32_t *out_hashes) {
         kn_set_headless(prev_headless);
         return -2;
     }
-    uint32_t hash_bprime = 2166136261u;
-    for (size_t i = 0; i < state_size; i += 16) {
-        hash_bprime ^= scratch_b[i];
-        hash_bprime *= 16777619u;
-    }
+    uint32_t hash_bprime = kn_fnv1a_stride(KN_FNV1A_OFFSET, scratch_b, state_size, 16);
 
     kn_set_headless(prev_headless);
 

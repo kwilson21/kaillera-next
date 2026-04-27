@@ -496,6 +496,19 @@
   // tick (before kn_pre_tick) so the C engine sees a consistent input
   // snapshot per frame — no race between async DC delivery and sync tick.
   const _pendingCInputs = []; // {slot, frame, buttons, lx, ly, cx, cy}
+  const RDRAM_TAINT_BLOCKS = 128;
+  const _clearPendingCInputs = (reason) => {
+    if (_pendingCInputs.length === 0) return;
+    const count = _pendingCInputs.length;
+    _pendingCInputs.length = 0;
+    if (typeof _syncLog === 'function') _syncLog(`C-INPUT-DRAIN reason=${reason} count=${count}`);
+  };
+  const _formatSlotMap = (obj) => {
+    const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
+    return keys.length ? keys.map((k) => `${k}:${obj[k]}`).join(',') : 'none';
+  };
+  const _formatInputBrief = (input) =>
+    input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
   // ── Freeze detection state ─────────────────────────────────────────
   // Lightweight per-frame sampling to detect when display, input, or
   // audio stop working — the "emulator froze" scenario where the tick
@@ -526,6 +539,10 @@
   let _bootStallStartTime = 0;
   let _bootStallRecoveryFired = false;
   let _bootStallRecoveryResetTime = 0;
+  let _phaseLockStallKey = '';
+  let _phaseLockStallStartTime = 0;
+  let _rbInputStallKey = '';
+  let _rbInputStallStartTime = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -598,8 +615,8 @@
         let _resultBuf = 0;
         const ensureBufs = (mod) => {
           if (!mod?._malloc) return false;
-          if (!_hashBuf) _hashBuf = mod._malloc(128 * 4);
-          if (!_taintBuf) _taintBuf = mod._malloc(128);
+          if (!_hashBuf) _hashBuf = mod._malloc(RDRAM_TAINT_BLOCKS * 4);
+          if (!_taintBuf) _taintBuf = mod._malloc(RDRAM_TAINT_BLOCKS);
           if (!_resultBuf) _resultBuf = mod._malloc(8); // 2 × uint32
           return _hashBuf && _taintBuf && _resultBuf;
         };
@@ -986,16 +1003,16 @@
               return null;
             }
             if (!ensureBufs(mod)) return null;
-            mod._kn_get_taint_blocks(_taintBuf);
-            const view = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, 128);
+            mod._kn_get_taint_blocks(_taintBuf, RDRAM_TAINT_BLOCKS);
+            const view = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, RDRAM_TAINT_BLOCKS);
             const tainted = [];
             const bitmap = [];
-            for (let i = 0; i < 128; i++) {
+            for (let i = 0; i < RDRAM_TAINT_BLOCKS; i++) {
               bitmap.push(view[i] ? '1' : '0');
               if (view[i]) tainted.push(i);
             }
             const out = { count: tainted.length, blocks: tainted, bitmap: bitmap.join('') };
-            console.log(`knDiag.tainted: ${out.count}/128 blocks tainted: [${tainted.join(',')}]`);
+            console.log(`knDiag.tainted: ${out.count}/${RDRAM_TAINT_BLOCKS} blocks tainted: [${tainted.join(',')}]`);
             return out;
           },
           // Get all 128 block hashes (one uint32 per 64KB block).
@@ -1006,8 +1023,8 @@
               return null;
             }
             if (!ensureBufs(mod)) return null;
-            mod._kn_rdram_block_hashes(_hashBuf, 128);
-            const view = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, 128);
+            mod._kn_rdram_block_hashes(_hashBuf, RDRAM_TAINT_BLOCKS);
+            const view = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, RDRAM_TAINT_BLOCKS);
             const hashes = Array.from(view).map((h) => (h >>> 0).toString(16).padStart(8, '0'));
             console.log(`knDiag.blockHashes (128 blocks):`);
             for (let i = 0; i < 128; i += 8) {
@@ -1081,14 +1098,14 @@
               rawBlocks: {},
             };
             if (mod._kn_get_taint_blocks) {
-              mod._kn_get_taint_blocks(_taintBuf);
-              const t = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, 128);
+              mod._kn_get_taint_blocks(_taintBuf, RDRAM_TAINT_BLOCKS);
+              const t = new Uint8Array(mod.HEAPU8.buffer, _taintBuf, RDRAM_TAINT_BLOCKS);
               out.taintBlocks = Array.from(t);
               out.taintCount = out.taintBlocks.filter((x) => x).length;
             }
             if (mod._kn_rdram_block_hashes) {
-              mod._kn_rdram_block_hashes(_hashBuf, 128);
-              const h = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, 128);
+              mod._kn_rdram_block_hashes(_hashBuf, RDRAM_TAINT_BLOCKS);
+              const h = new Uint32Array(mod.HEAPU8.buffer, _hashBuf, RDRAM_TAINT_BLOCKS);
               out.blockHashes = Array.from(h).map((v) => (v >>> 0).toString(16).padStart(8, '0'));
             }
             if (mod._kn_get_rdram_ptr) {
@@ -1667,6 +1684,10 @@
   const _readStrictPhaseLock = (enabled) => {
     const phase = _readMenuLockstepPhase(enabled);
     const waitingPeerSlots = [];
+    const phaseMismatchSlots = [];
+    const notePhaseMismatch = (slot) => {
+      if (!phaseMismatchSlots.includes(slot)) phaseMismatchSlots.push(slot);
+    };
 
     if (_isSmashRemix() && !!enabled) {
       const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;
@@ -1677,12 +1698,16 @@
         const peerPhase = _peerPhases[p.slot];
         if (!peerPhase || nowMs - (peerPhase.seenAt || 0) > PHASE_STALE_MS) {
           delete _phaseMismatchGrace[p.slot];
+          if (shouldAlignPhase) notePhaseMismatch(p.slot);
           if (shouldAlignPhase) waitingPeerSlots.push(p.slot);
           continue;
         }
         if (phase.gameplay) {
           delete _phaseMismatchGrace[p.slot];
-          if (!peerPhase.gameplay && peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);
+          if (!peerPhase.gameplay) {
+            notePhaseMismatch(p.slot);
+            if (peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);
+          }
           continue;
         }
         if (!shouldAlignPhase) {
@@ -1695,6 +1720,8 @@
           delete _phaseMismatchGrace[p.slot];
           continue;
         }
+
+        notePhaseMismatch(p.slot);
 
         // Scene changes are observed after a frame has already advanced on the
         // peer that got there first. Give this peer a few real-input-backed
@@ -1714,6 +1741,7 @@
     return {
       ...phase,
       waitingPeerSlots,
+      phaseMismatchSlots,
       active: phase.active || waitingPeerSlots.length > 0,
     };
   };
@@ -1899,7 +1927,7 @@
     if (m._kn_get_mispred_breakdown && m._malloc) {
       if (!window._rbMispredBuf) window._rbMispredBuf = m._malloc(12);
       try {
-        m._kn_get_mispred_breakdown(window._rbMispredBuf);
+        m._kn_get_mispred_breakdown(window._rbMispredBuf, 3);
         const view = new Int32Array(m.HEAP32.buffer, window._rbMispredBuf, 3);
         base.mispredBreakdown = {
           button: view[0],
@@ -2567,9 +2595,11 @@
       } else if (e.channel.label === 'rollback-input') {
         if (peer.rbDc)
           try {
+            peer.rbDc.onclose = null;
             peer.rbDc.close();
           } catch (_) {}
         peer.rbDc = e.channel;
+        peer.rbDcUnreliable = false;
         setupRollbackInputDataChannel(remoteSid, peer.rbDc);
       } else if (_onExtraDataChannel) {
         _onExtraDataChannel(remoteSid, e.channel);
@@ -2585,6 +2615,7 @@
     // P2: unordered input channel — always created, only used when the
     // host broadcasts rb-transport:unreliable. Cheap to leave idle.
     peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    peer.rbDcUnreliable = false;
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
     installPeerDataChannelHandlers(remoteSid, peer);
   };
@@ -2987,8 +3018,12 @@
       // Some browsers ignore init options and silently give us ordered/reliable.
       // If the mismatch matters (we're in unreliable mode but got reliable),
       // log TRANSPORT-MISMATCH so the session log captures the fallback.
+      const peer = _peers[remoteSid];
       const ordered = ch.ordered;
       const maxRetransmits = ch.maxRetransmits;
+      if (peer && peer.rbDc === ch) {
+        peer.rbDcUnreliable = ordered === false && maxRetransmits === 0;
+      }
       _syncLog(`rb-input DC open sid=${remoteSid} ordered=${ordered} maxRetransmits=${maxRetransmits}`);
       if (_rbTransport === 'unreliable' && (ordered !== false || maxRetransmits !== 0)) {
         _syncLog(
@@ -2999,6 +3034,14 @@
     ch.onopen = onOpen;
     if (ch.readyState === 'open') onOpen();
     ch.onclose = () => {
+      const peer = _peers[remoteSid];
+      if (peer && peer.rbDc === ch) {
+        resetPeerRollbackTransport(peer, remoteSid, 'rb-dc-close');
+        if (_rbTransport === 'unreliable') {
+          _rbTransport = 'reliable';
+          _syncLog(`DC-FALLBACK reason=rb-dc-close sid=${remoteSid} — inputs now via primary channel`);
+        }
+      }
       _syncLog(`rb-input DC closed sid=${remoteSid}`);
     };
     ch.onerror = () => {};
@@ -3672,6 +3715,31 @@
 
   // -- Per-peer state cleanup (Invariant I2) --------------------------------
 
+  const clearPeerStallTimers = () => {
+    if (_bootStallFrame >= 0) {
+      _bootStallFrame = -1;
+      _bootStallStartTime = 0;
+      _bootStallRecoveryFired = false;
+    }
+    if (_phaseLockStallKey) {
+      _phaseLockStallKey = '';
+      _phaseLockStallStartTime = 0;
+    }
+    if (_rbInputStallKey) {
+      _rbInputStallKey = '';
+      _rbInputStallStartTime = 0;
+    }
+  };
+
+  const resetPeerRollbackTransport = (peer, sid, reason) => {
+    if (!peer) return;
+    peer.rbDc = null;
+    peer.rbDcUnreliable = false;
+    if (sid) _dcBufferStaleStreak[sid] = 0;
+    clearPeerStallTimers();
+    _syncLog(`RB-TRANSPORT-RESET slot=${peer.slot ?? 'null'} reason=${reason}`);
+  };
+
   /**
    * Resets ALL per-peer state for a given slot. This is the single
    * authoritative cleanup path for peer disconnects, reconnects,
@@ -3749,14 +3817,10 @@
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
     }
 
-    // Boot-stall tracking — if we were stalled waiting on this slot's
-    // apply frame, clear the tracking so the stall clock restarts
-    // cleanly once a new peer fills the slot.
-    if (_bootStallFrame >= 0) {
-      _bootStallFrame = -1;
-      _bootStallStartTime = 0;
-      _bootStallRecoveryFired = false;
-    }
+    // Stall tracking — if we were stalled waiting on this slot's apply
+    // frame, clear tracking so the stall clock restarts cleanly once a
+    // new peer fills the slot.
+    clearPeerStallTimers();
 
     _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
   };
@@ -3936,9 +4000,11 @@
       } else if (e.channel.label === 'rollback-input') {
         if (peer.rbDc)
           try {
+            peer.rbDc.onclose = null;
             peer.rbDc.close();
           } catch (_) {}
         peer.rbDc = e.channel;
+        peer.rbDcUnreliable = false;
         setupRollbackInputDataChannel(remoteSid, peer.rbDc);
       } else if (_onExtraDataChannel) {
         _onExtraDataChannel(remoteSid, e.channel);
@@ -3951,6 +4017,7 @@
     peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
     peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    peer.rbDcUnreliable = false;
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
 
     try {
@@ -4019,6 +4086,14 @@
       // Boot grace: include connected peers before their first input arrives
       return _frameNum < BOOT_GRACE_FRAMES;
     });
+  };
+
+  const markPeerPhantomForStallTimeout = (slot, reason, detail = '') => {
+    if (slot === null || slot === undefined || _peerPhantom[slot]) return;
+    _peerPhantom[slot] = true;
+    const suffix = detail ? ` ${detail}` : '';
+    _syncLog(`PEER-PHANTOM slot=${slot} reason=${reason}${suffix}`);
+    window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot } }));
   };
 
   // -- Game start sequence ---------------------------------------------------
@@ -5583,6 +5658,7 @@
   const loadStateAtStartBoundary = (gm, bytes, reason, passes = 1) => {
     const mod = gm?.Module;
     if (!gm || !mod || !bytes) return false;
+    _clearPendingCInputs(`${reason}:pre-load`);
     const stateBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const lt0 = performance.now();
     let method = 'gm.loadState';
@@ -5611,6 +5687,7 @@
     }
 
     recaptureManualRunner(mod, reason);
+    _clearPendingCInputs(`${reason}:post-load`);
     const lt1 = performance.now();
     _syncLog(
       `${reason}: ${method} passes=${passes} result=${result} ` +
@@ -5622,6 +5699,7 @@
   const loadKnSyncStateAtStartBoundary = (gm, bytes, reason) => {
     const mod = gm?.Module;
     if (!gm || !mod || !bytes || !mod._kn_sync_write || !mod._malloc || !mod._free || !mod.HEAPU8) return false;
+    _clearPendingCInputs(`${reason}:pre-kn-sync`);
     const stateBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const lt0 = performance.now();
     const statePtr = mod._malloc(stateBytes.length);
@@ -5637,6 +5715,7 @@
       mod._free(statePtr);
     }
     recaptureManualRunner(mod, reason);
+    _clearPendingCInputs(`${reason}:post-kn-sync`);
     const lt1 = performance.now();
     _syncLog(
       `${reason}: kn_sync_write result=${result} bytes=${Math.round(stateBytes.length / 1024)}KB ms=${(lt1 - lt0).toFixed(1)}`,
@@ -6026,6 +6105,10 @@
     _consecutiveFabrications = {};
     _inputLateLogTime = {};
     _stallStart = 0;
+    _phaseLockStallKey = '';
+    _phaseLockStallStartTime = 0;
+    _rbInputStallKey = '';
+    _rbInputStallStartTime = 0;
     window._netplayFrameLog = [];
 
     // Always frozen time — audio plays via bypass, not OpenAL
@@ -6663,6 +6746,8 @@
       _tickInterval = null;
     }
     _tickNextAt = 0;
+    if (window._knTickDeltas) window._knTickDeltas.length = 0;
+    window._knLastTickWall = 0;
     // Restore rAF if we intercepted it (other overrides restored in stop())
     if (_manualMode) {
       APISandbox.restoreAll();
@@ -7099,19 +7184,26 @@
       _rbLocalHistory.shift();
     }
     // Tail excludes the current frame (it's already in the packet header).
-    const redundantTail = shouldSendRedundancy ? _rbLocalHistory.slice(0, _rbLocalHistory.length - 1) : null;
+    // Build lazily so reliable-only sends don't pay for Array.slice().
+    let redundantTail = null;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
       try {
         const peer = activePeers[i];
         const ackFrame = peer.lastFrameFromPeer ?? -1;
-        const peerBuf = KNShared.encodeInput(_frameNum, localInput, ackFrame, redundantTail).buffer;
+        const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
+        if (needsRedundancy && redundantTail === null) {
+          redundantTail = _rbLocalHistory.slice(0, _rbLocalHistory.length - 1);
+        }
+        const peerBuf = KNShared.encodeInput(
+          _frameNum,
+          localInput,
+          ackFrame,
+          needsRedundancy ? redundantTail : null,
+        ).buffer;
         // Use unreliable rb-input DC when available, fall back to primary DC
         const inputDc =
-          _rbTransport === 'unreliable' &&
-          peer.rbDc?.readyState === 'open' &&
-          peer.rbDc.ordered === false &&
-          peer.rbDc.maxRetransmits === 0
+          _rbTransport === 'unreliable' && peer.rbDc?.readyState === 'open' && peer.rbDcUnreliable
             ? peer.rbDc
             : peer.dc;
         if (inputDc?.readyState === 'open') {
@@ -7276,7 +7368,38 @@
       // Select/menus, never fabricate missing remote input.
       const _menuLockstepActive = strictInputLockstep;
       const _rbBootConverged = _bootDone && !_menuLockstepActive;
-      if (menuPhase.waitingPeerSlots?.length) return;
+      const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
+      const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
+      const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);
+      if (phaseLockSlots.length) {
+        const waitKey = `${sceneCurr}:${gameStatus}:${phaseLockSlots.join(',')}`;
+        if (_phaseLockStallKey !== waitKey) {
+          _phaseLockStallKey = waitKey;
+          _phaseLockStallStartTime = _tickNow;
+        }
+        const stallMs = _tickNow - _phaseLockStallStartTime;
+        if (stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+          for (const slot of phaseLockSlots) {
+            markPeerPhantomForStallTimeout(
+              slot,
+              'phase-lock-timeout',
+              `stalledMs=${Math.round(stallMs)} scene=${sceneCurr} gameStatus=${gameStatus}`,
+            );
+          }
+          _syncLog(
+            `PHASE-LOCK-TIMEOUT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
+              `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
+              `stalledMs=${Math.round(stallMs)} — force-releasing phase lock`,
+          );
+          _phaseLockStallKey = '';
+          _phaseLockStallStartTime = 0;
+        } else if (phaseWaitSlots.length) {
+          return;
+        }
+      } else {
+        _phaseLockStallKey = '';
+        _phaseLockStallStartTime = 0;
+      }
       // Boot sync: legacy savestate startup can still need one host state push
       // after boot grace. kn-sync startup already loaded the host's authoritative
       // CPU/peripheral/RDRAM state at the manual start boundary; repeating that
@@ -7361,6 +7484,7 @@
           let stalled = false;
           let missingSlot = -1;
           for (const p of bootInputPeers) {
+            if (_peerPhantom[p.slot]) continue;
             if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
               stalled = true;
               missingSlot = p.slot;
@@ -7377,54 +7501,84 @@
             }
             const stallDuration = nowWall - _bootStallStartTime;
             if (_menuLockstepActive) {
-              if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-                _resendSent = true;
-                const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
-                try {
-                  missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
-                } catch (_) {}
-                _syncLog(
-                  `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
+              if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+                markPeerPhantomForStallTimeout(
+                  missingSlot,
+                  'menu-lockstep-timeout',
+                  `stalledMs=${Math.round(stallDuration)} apply=${rbApplyFrame}`,
                 );
-              }
-              if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                window._knLastBootStallLogFrame = _frameNum;
+                if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
+                if (!_remoteInputs[missingSlot][rbApplyFrame]) {
+                  _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
+                  _pendingCInputs.push({
+                    slot: missingSlot,
+                    frame: rbApplyFrame,
+                    buttons: 0,
+                    lx: 0,
+                    ly: 0,
+                    cx: 0,
+                    cy: 0,
+                  });
+                }
                 _syncLog(
-                  `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                    `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                  `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot} ` +
+                    `stalledMs=${Math.round(stallDuration)} — force-releasing strict lockstep`,
                 );
+                _bootStallFrame = -1;
+                _bootStallStartTime = 0;
+                _bootStallRecoveryFired = false;
+              } else {
+                if (stallDuration >= MAX_STALL_MS && !_resendSent) {
+                  _resendSent = true;
+                  const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
+                  try {
+                    missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
+                  } catch (_) {}
+                  _syncLog(
+                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
+                  );
+                }
+                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                  window._knLastBootStallLogFrame = _frameNum;
+                  _syncLog(
+                    `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                  );
+                }
+                return;
               }
-              return;
             }
 
             // Boot/pre-menu fallback: stall briefly, then fabricate zero to
             // avoid deadlock before user-controlled setup state exists.
-            const _bootStallTimeout = Math.max(33, Math.min(250, (_rttMedian || 50) * 2));
-            if (stallDuration < _bootStallTimeout) {
-              if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                window._knLastBootStallLogFrame = _frameNum;
-                _syncLog(
-                  `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                    `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
-                );
+            if (!_menuLockstepActive) {
+              const _bootStallTimeout = Math.max(33, Math.min(250, (_rttMedian || 50) * 2));
+              if (stallDuration < _bootStallTimeout) {
+                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                  window._knLastBootStallLogFrame = _frameNum;
+                  _syncLog(
+                    `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                  );
+                }
+                return;
               }
-              return;
+              // Fabricate zero input and continue
+              if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
+              if (!_remoteInputs[missingSlot][rbApplyFrame]) {
+                _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
+                _pendingCInputs.push({
+                  slot: missingSlot,
+                  frame: rbApplyFrame,
+                  buttons: 0,
+                  lx: 0,
+                  ly: 0,
+                  cx: 0,
+                  cy: 0,
+                });
+              }
+              // Fall through to normal tick with fabricated zero input
             }
-            // Fabricate zero input and continue
-            if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
-            if (!_remoteInputs[missingSlot][rbApplyFrame]) {
-              _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
-              _pendingCInputs.push({
-                slot: missingSlot,
-                frame: rbApplyFrame,
-                buttons: 0,
-                lx: 0,
-                ly: 0,
-                cx: 0,
-                cy: 0,
-              });
-            }
-            // Fall through to normal tick with fabricated zero input
           }
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
@@ -7440,10 +7594,32 @@
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
             if (adv >= DELAY_FRAMES + 4) {
+              const nowRbInputStall = performance.now();
+              const rbStallKey = `${p.slot}:${rbApplyFrame}`;
+              if (_rbInputStallKey !== rbStallKey) {
+                _rbInputStallKey = rbStallKey;
+                _rbInputStallStartTime = nowRbInputStall;
+              }
+              const stalledMs = nowRbInputStall - _rbInputStallStartTime;
+              if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+                markPeerPhantomForStallTimeout(
+                  p.slot,
+                  'rb-input-stall-timeout',
+                  `stalledMs=${Math.round(stalledMs)} apply=${rbApplyFrame} adv=${adv}`,
+                );
+                _syncLog(
+                  `RB-INPUT-STALL-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
+                    `adv=${adv} stalledMs=${Math.round(stalledMs)} — force-releasing rollback input stall`,
+                );
+                _rbInputStallKey = '';
+                _rbInputStallStartTime = 0;
+                continue;
+              }
               // Too far ahead — stall to let peer catch up
               if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
                 _syncLog(
-                  `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} adv=${adv} — stalling (rollback budget exhausted)`,
+                  `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
+                    `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling (rollback budget exhausted)`,
                 );
                 _rbStallLogged = _frameNum;
               }
@@ -7452,6 +7628,8 @@
             // Within rollback budget — let C engine predict through it
           }
         }
+        _rbInputStallKey = '';
+        _rbInputStallStartTime = 0;
       }
 
       // ── Drain queued remote inputs into C engine ──────────────────────
@@ -7461,16 +7639,11 @@
       // input snapshot per frame. No race between async DC delivery and
       // the sync prediction/serialize logic inside kn_pre_tick.
       if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
-        _pendingCInputs.sort((a, b) => a.frame - b.frame || a.slot - b.slot);
-        const feedQueue = [];
+        const feedByKey = new Map();
         for (const qi of _pendingCInputs) {
-          const prev = feedQueue[feedQueue.length - 1];
-          if (prev && prev.slot === qi.slot && prev.frame === qi.frame) {
-            feedQueue[feedQueue.length - 1] = qi;
-          } else {
-            feedQueue.push(qi);
-          }
+          feedByKey.set(`${qi.slot}:${qi.frame}`, qi);
         }
+        const feedQueue = [...feedByKey.values()].sort((a, b) => a.frame - b.frame || a.slot - b.slot);
         for (const qi of feedQueue) {
           tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
         }
@@ -7948,13 +8121,13 @@
           // broadcast so the peer can diff at this exact frame. Skips if
           // the WASM exports or malloc aren't available (old core).
           if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
-            if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(128 * 4);
-            if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(128);
+            if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
+            if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
             if (_rbHashBufPtr && _rbTaintBufPtr) {
-              tickMod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
-              tickMod._kn_get_taint_blocks(_rbTaintBufPtr);
-              const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, 128);
-              const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, 128);
+              tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+              tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
+              const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+              const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
               const blocksSnap = Array.from(blocks);
               const taintSnap = Array.from(taint);
               const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
@@ -8108,13 +8281,13 @@
         // we can pinpoint which untainted block is diverging and map it back
         // to the subsystem that owns that address.
         if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
-          if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(128 * 4);
-          if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(128);
+          if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
+          if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
           if (_rbHashBufPtr && _rbTaintBufPtr) {
-            tickMod._kn_rdram_block_hashes(_rbHashBufPtr, 128);
-            tickMod._kn_get_taint_blocks(_rbTaintBufPtr);
-            const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, 128);
-            const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, 128);
+            tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+            tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
+            const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+            const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
             // Snapshot — use Array.from so later mutation of HEAPU8 can't
             // corrupt what we stored for comparison against the peer.
             const blocksSnap = Array.from(blocks);
@@ -8618,6 +8791,28 @@
             );
           }
           const stallDuration = now - _stallStart;
+          if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+            const repeatInfo = [];
+            for (const s of _missingSlots) {
+              markPeerPhantomForStallTimeout(
+                s,
+                'menu-lockstep-timeout',
+                `stalledMs=${Math.round(stallDuration)} apply=${applyFrame}`,
+              );
+              if (!_remoteInputs[s]) _remoteInputs[s] = {};
+              if (_remoteInputs[s][applyFrame] === undefined) {
+                _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
+                _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
+                repeatInfo.push(`s${s}=0`);
+              }
+            }
+            _syncLog(
+              `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
+                `stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
+            );
+            _stallStart = 0;
+            return;
+          }
           if (stallDuration >= MAX_STALL_MS && !_resendSent) {
             _resendSent = true;
             for (const p of inputPeers) {
@@ -8689,7 +8884,9 @@
               rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
             }
             _syncLog(
-              `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${JSON.stringify(rBufSizes)} peerStarted=${JSON.stringify(_peerInputStarted)}`,
+              `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
+                `inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${_formatSlotMap(rBufSizes)} ` +
+                `peerStarted=${_formatSlotMap(_peerInputStarted)}`,
             );
           }
           const stallDuration = now - _stallStart;
@@ -8828,7 +9025,12 @@
           }
         }
         _syncLog(
-          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${JSON.stringify(localInput)} delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] rBuf=${JSON.stringify(rBufDetail)} dc=${JSON.stringify(dcStates)} missed=${_remoteMissed} applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw} roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}]`,
+          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${_formatInputBrief(localInput)} ` +
+            `delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] ` +
+            `rBuf=${_formatSlotMap(rBufDetail)} dc=${_formatSlotMap(dcStates)} missed=${_remoteMissed} ` +
+            `applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} ` +
+            `fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw} ` +
+            `roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}]`,
         );
       }
       // Periodic pacing summary (~5s)

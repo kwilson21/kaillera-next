@@ -21,6 +21,12 @@ import https from 'https';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Persistent recording (in-tree). Used when --replay has no explicit path.
 const DEFAULT_REPLAY = join(__dirname, 'fixtures', 'nav-recording.json');
+const HOST_RANDOM_SELECT_START_FRAME = 826;
+const HOST_RANDOM_SELECT_END_FRAME = 1068;
+const GUEST_RANDOM_SELECT_START_FRAME = 1265;
+const NAV_P2_SELECTED_FRAME = 1444;
+const GUEST_STAGE_SELECT_START_FRAME = 1495;
+const GUEST_STAGE_PICK_END_FRAME = 1726;
 
 function argValue(name, fallback) {
   const prefix = `--${name}=`;
@@ -115,6 +121,7 @@ const KEY = {
   A: 'c',
   B: 'x',
   START: 'Enter',
+  START_ALT: 'v',
   Z: 'z',
   DUP: 'ArrowUp',
   DDOWN: 'ArrowDown',
@@ -128,11 +135,196 @@ const KEY = {
   R: 'y',
 };
 
+const KEYCODE_MAP = {
+  c: 67,
+  x: 88,
+  v: 86,
+  z: 90,
+  Enter: 13,
+  ArrowUp: 38,
+  ArrowDown: 40,
+  ArrowLeft: 37,
+  ArrowRight: 39,
+  t: 84,
+  y: 89,
+  a: 65,
+  s: 83,
+  d: 68,
+  w: 87,
+  j: 74,
+  l: 76,
+  k: 75,
+  i: 73,
+};
+
+const SYNTHETIC_INPUT = {
+  [KEY.A]: { bit: 0, value: 1 },
+  [KEY.B]: { bit: 1, value: 1 },
+  [KEY.START]: { bit: 3, value: 1 },
+  [KEY.START_ALT]: { bit: 3, value: 1 },
+  [KEY.DUP]: { bit: 4, value: 1 },
+  [KEY.DDOWN]: { bit: 5, value: 1 },
+  [KEY.DLEFT]: { bit: 6, value: 1 },
+  [KEY.DRIGHT]: { bit: 7, value: 1 },
+  [KEY.L]: { bit: 10, value: 1 },
+  [KEY.R]: { bit: 11, value: 1 },
+  [KEY.Z]: { bit: 12, value: 1 },
+  [KEY.ANA_RIGHT]: { bit: 16, value: 32767 },
+  [KEY.ANA_LEFT]: { bit: 17, value: 32767 },
+  [KEY.ANA_DOWN]: { bit: 18, value: 32767 },
+  [KEY.ANA_UP]: { bit: 19, value: 32767 },
+};
+
+async function setSyntheticInput(page, key, down) {
+  const spec = SYNTHETIC_INPUT[key];
+  if (!spec) return;
+  await page
+    .evaluate(
+      ({ bit, value, down }) => {
+        if (!window.KNState?.touchInput) return;
+        window.KNState.touchInput[bit] = down ? value : 0;
+      },
+      { ...spec, down },
+    )
+    .catch(() => {});
+}
+
+async function keyDown(page, key) {
+  await page.keyboard.down(key).catch(() => {});
+  await setSyntheticInput(page, key, true);
+}
+
+async function keyUp(page, key) {
+  await setSyntheticInput(page, key, false);
+  await page.keyboard.up(key).catch(() => {});
+}
+
 async function press(page, key, holdMs = 120) {
-  await page.keyboard.down(key);
+  await keyDown(page, key);
   await page.waitForTimeout(holdMs);
-  await page.keyboard.up(key);
+  await keyUp(page, key);
   await page.waitForTimeout(180);
+}
+
+async function installReplayEvents(page, events, label) {
+  await page.evaluate(
+    ({ events, label, minHoldFrames, keyCodeMap, syntheticInput }) => {
+      const sorted = [...events].sort((a, b) => a.frame - b.frame);
+      window._replayEvents = sorted;
+      window._replayNext = 0;
+      window._replayFired = 0;
+      window._replayLabel = label;
+      window._replayLastFrame = 0;
+      window._replayPendingUps = [];
+      const setTouchInput = (event) => {
+        const spec = syntheticInput[event.key];
+        if (!spec || !window.KNState?.touchInput) return;
+        window.KNState.touchInput[spec.bit] = event.type === 'down' ? spec.value : 0;
+      };
+      const dispatch = (event) => {
+        const kc = keyCodeMap[event.key] ?? 0;
+        const kbd = new KeyboardEvent(event.type === 'down' ? 'keydown' : 'keyup', {
+          key: event.key,
+          code: event.code,
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(kbd, 'keyCode', { get: () => kc });
+        Object.defineProperty(kbd, 'which', { get: () => kc });
+        document.dispatchEvent(kbd);
+        setTouchInput(event);
+        window._replayFired++;
+      };
+      const fire = (event, frame) => {
+        if (event.type !== 'up') {
+          dispatch(event);
+          return;
+        }
+        const prevDown = window._replayEvents
+          .slice(0, window._replayNext)
+          .reverse()
+          .find((candidate) => candidate.key === event.key && candidate.type === 'down');
+        const minFrame = prevDown ? prevDown.frame + minHoldFrames : event.frame;
+        const targetFrame = Math.max(event.frame, minFrame);
+        if (frame >= targetFrame) dispatch(event);
+        else window._replayPendingUps.push({ event, targetFrame });
+      };
+      const poll = () => {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        const frame = mod?._kn_get_frame?.() ?? (window.KNState?.frameNum || 0);
+        if (frame === window._replayLastFrame) return;
+        window._replayLastFrame = frame;
+        if (window._replayPendingUps.length) {
+          const stillPending = [];
+          for (const pending of window._replayPendingUps) {
+            if (frame >= pending.targetFrame) dispatch(pending.event);
+            else stillPending.push(pending);
+          }
+          window._replayPendingUps = stillPending;
+        }
+        while (
+          window._replayNext < window._replayEvents.length &&
+          window._replayEvents[window._replayNext].frame <= frame
+        ) {
+          fire(window._replayEvents[window._replayNext++], frame);
+        }
+      };
+      window._replayTimerId = setInterval(poll, 8);
+    },
+    { events, label, minHoldFrames: REPLAY_MIN_HOLD_FRAMES, keyCodeMap: KEYCODE_MAP, syntheticInput: SYNTHETIC_INPUT },
+  );
+}
+
+async function stopReplayEvents(page) {
+  await page
+    .evaluate(() => {
+      if (window._replayTimerId) clearInterval(window._replayTimerId);
+      window._replayTimerId = null;
+    })
+    .catch(() => {});
+}
+
+async function waitForReplayDone(page, expectedCount, label, timeoutMs = 60000) {
+  const start = Date.now();
+  let last = { fired: 0, frame: 0 };
+  while (Date.now() - start < timeoutMs) {
+    last = await page
+      .evaluate(() => ({
+        fired: window._replayFired || 0,
+        frame: window.KNState?.frameNum || 0,
+      }))
+      .catch(() => last);
+    process.stdout.write(`\r    ${label}: ${last.fired}/${expectedCount} f=${last.frame}   `);
+    if (last.fired >= expectedCount) {
+      console.log('');
+      return last;
+    }
+    await page.waitForTimeout(250);
+  }
+  console.log('');
+  throw new Error(`${label} replay did not finish: ${last.fired}/${expectedCount} f=${last.frame}`);
+}
+
+async function replayFixtureSegment(peer, windowName, startFrame, endFrame, label) {
+  const rec = JSON.parse(readFileSync(DEFAULT_REPLAY, 'utf8'));
+  const segmentEvents = rec.events.filter(
+    (event) => event.window === windowName && event.frame >= startFrame && event.frame <= endFrame,
+  );
+  if (!segmentEvents.length) throw new Error(`${label} has no fixture events`);
+  const firstFrame = segmentEvents[0].frame;
+  const currentFrame = await peer.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0);
+  const baseFrame = currentFrame + 10;
+  const replayEvents = segmentEvents.map((event) => ({
+    ...event,
+    frame: baseFrame + (event.frame - firstFrame),
+    window: peer.name,
+  }));
+  console.log(
+    `    ${label} using fixture ${windowName}:${startFrame}-${endFrame} (current=${currentFrame}, events=${replayEvents.length})`,
+  );
+  await installReplayEvents(peer.page, replayEvents, label);
+  await waitForReplayDone(peer.page, replayEvents.length, label);
+  await stopReplayEvents(peer.page);
 }
 
 async function waitForFrame(page, minFrame, timeoutMs = 60000, pollMs = 50) {
@@ -280,6 +472,69 @@ async function waitForActiveVsBattle(page, timeoutMs = 60000, pollMs = 50) {
   }
   const [scene, gameStatus] = await Promise.all([readScene(page), readGameStatus(page)]);
   throw new Error(`Timeout waiting for active VS Battle, scene=${scene} gameStatus=${gameStatus}`);
+}
+
+async function readBattleState(page) {
+  return page
+    .evaluate(() => {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (!mod) return { unavailable: true, frame: 0, scene: null, gameStatus: null, active: false };
+      const frame = mod._kn_get_frame?.() ?? window.KNState?.frameNum ?? 0;
+      let scene = null;
+      if (typeof mod._kn_get_scene_curr === 'function') {
+        scene = mod._kn_get_scene_curr();
+      } else if (mod._kn_get_rdram_ptr && mod.HEAPU8) {
+        scene = mod.HEAPU8[mod._kn_get_rdram_ptr() + (0xa4ad0 ^ 3)] ?? null;
+      }
+      let gameStatus = null;
+      if (mod._kn_get_rdram_ptr && mod.HEAPU32) {
+        const ptr = mod._kn_get_rdram_ptr();
+        gameStatus = (mod.HEAPU32[(ptr + 0xa4d18) >> 2] >>> 16) & 0xff;
+      }
+      return {
+        unavailable: false,
+        frame,
+        scene,
+        gameStatus,
+        active: scene === 22 && gameStatus === 1,
+      };
+    })
+    .catch(() => ({ unavailable: true, frame: 0, scene: null, gameStatus: null, active: false }));
+}
+
+async function readBothBattleStates(host, guest) {
+  const [hostState, guestState] = await Promise.all([readBattleState(host.page), readBattleState(guest.page)]);
+  return { host: hostState, guest: guestState };
+}
+
+function formatBattleState(state) {
+  return (
+    `host(scene=${state.host.scene},status=${state.host.gameStatus},f=${state.host.frame},active=${state.host.active}) ` +
+    `guest(scene=${state.guest.scene},status=${state.guest.gameStatus},f=${state.guest.frame},active=${state.guest.active})`
+  );
+}
+
+async function resolveBattleEnd(host, guest, initialState, label, graceMs = 5000) {
+  let state = initialState;
+  const start = Date.now();
+  while (Date.now() - start < graceMs) {
+    if (state.host.unavailable || state.guest.unavailable) {
+      throw new Error(`${label}: page unavailable while checking battle end — ${formatBattleState(state)}`);
+    }
+    if (!state.host.active && !state.guest.active) {
+      return {
+        label,
+        reason: 'both-peers-left-active-vs-battle',
+        elapsedGraceMs: Date.now() - start,
+        host: state.host,
+        guest: state.guest,
+      };
+    }
+    if (state.host.active && state.guest.active) return null;
+    await host.page.waitForTimeout(100);
+    state = await readBothBattleStates(host, guest);
+  }
+  throw new Error(`${label}: asymmetric battle end after ${graceMs}ms — ${formatBattleState(state)}`);
 }
 
 async function waitForAnyScene(page, targetScenes, timeoutMs = 60000, pollMs = 50) {
@@ -489,6 +744,27 @@ async function sampleMatchSetup(page) {
       return out;
     })
     .catch(() => null);
+}
+
+function cssSlotSelected(player) {
+  if (!player) return false;
+  const flagSelected = Number.isFinite(player.css_selected_flag) && player.css_selected_flag !== 0;
+  const hashSelected = Number.isFinite(player.hashes?.css_selected) && player.hashes.css_selected !== 0;
+  return flagSelected || hashSelected;
+}
+
+async function waitForCssSlotSelected(page, slot, label, timeoutMs = 30000) {
+  const start = Date.now();
+  let last = null;
+  while (Date.now() - start < timeoutMs) {
+    last = await sampleMatchSetup(page);
+    if (cssSlotSelected(last?.players?.[slot])) {
+      console.log(`    ${label}: P${slot + 1} selected ${JSON.stringify(last.players[slot])}`);
+      return last;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`${label}: P${slot + 1} did not become selected; last=${JSON.stringify(last)}`);
 }
 
 async function sampleHashHistory(page, depth = 600) {
@@ -1734,6 +2010,7 @@ async function main() {
   let inputCount = 0;
   let runDesyncInfo = null;
   let lateJoinResult = null;
+  let matchEndInfo = null;
 
   if (REPLAY_FILE) {
     // ==================== REPLAY MODE (frame-exact via KNState.frameNum setter hook) ====================
@@ -1753,7 +2030,7 @@ async function main() {
       // Object.defineProperty (JSC issue) or rAF (background tab throttle).
       // Runs at 8ms intervals to catch frame advances promptly.
       await page.evaluate(
-        ({ events, label, minHoldFrames }) => {
+        ({ events, label, minHoldFrames, syntheticInput }) => {
           const KEYCODE_MAP = {
             c: 67,
             x: 88,
@@ -1782,6 +2059,11 @@ async function main() {
           window._replayLabel = label;
           window._replayLastFrame = 0;
           window._replayPendingUps = [];
+          const setTouchInput = (event) => {
+            const spec = syntheticInput[event.key];
+            if (!spec || !window.KNState?.touchInput) return;
+            window.KNState.touchInput[spec.bit] = event.type === 'down' ? spec.value : 0;
+          };
           const dispatch = (e) => {
             const kc = KEYCODE_MAP[e.key] ?? 0;
             const kbd = new KeyboardEvent(e.type === 'down' ? 'keydown' : 'keyup', {
@@ -1793,6 +2075,7 @@ async function main() {
             Object.defineProperty(kbd, 'keyCode', { get: () => kc });
             Object.defineProperty(kbd, 'which', { get: () => kc });
             document.dispatchEvent(kbd);
+            setTouchInput(e);
             window._replayFired++;
           };
           const fire = (e, f) => {
@@ -1833,7 +2116,7 @@ async function main() {
           };
           window._replayTimerId = setInterval(poll, 8);
         },
-        { events, label, minHoldFrames: REPLAY_MIN_HOLD_FRAMES },
+        { events, label, minHoldFrames: REPLAY_MIN_HOLD_FRAMES, syntheticInput: SYNTHETIC_INPUT },
       );
     }
 
@@ -1971,6 +2254,8 @@ async function main() {
     const inputAbort = new AbortController();
     const desyncAbort = new AbortController();
     const inputKeys = [KEY.A, KEY.B, KEY.Z, KEY.L, KEY.R, KEY.ANA_LEFT, KEY.ANA_RIGHT, KEY.ANA_UP, KEY.ANA_DOWN];
+    let replayMatchEnd = null;
+    let inputTaskError = null;
     /* Asymmetric random-input stress — different key per peer each
      * tick, exercising real netplay input broadcasting. The symmetric
      * diagnostic variant (same key to both peers) was used 2026-04-24
@@ -1980,15 +2265,29 @@ async function main() {
       ? Promise.resolve()
       : (async () => {
           while (!inputAbort.signal.aborted) {
+            const battleState = await readBothBattleStates(host, guest);
+            if (!battleState.host.active || !battleState.guest.active) {
+              replayMatchEnd = await resolveBattleEnd(host, guest, battleState, 'replay-random-input');
+              if (replayMatchEnd) {
+                console.log(`\n  Match ended during replay random-input phase: ${formatBattleState(replayMatchEnd)}`);
+                inputAbort.abort();
+                desyncAbort.abort();
+                break;
+              }
+            }
             const hk = inputKeys[randomInt(inputKeys.length)];
             const gk = inputKeys[randomInt(inputKeys.length)];
-            Promise.all([host.page.keyboard.down(hk), guest.page.keyboard.down(gk)]).catch(() => {});
+            Promise.all([keyDown(host.page, hk), keyDown(guest.page, gk)]).catch(() => {});
             await new Promise((r) => setTimeout(r, 80));
-            Promise.all([host.page.keyboard.up(hk), guest.page.keyboard.up(gk)]).catch(() => {});
+            Promise.all([keyUp(host.page, hk), keyUp(guest.page, gk)]).catch(() => {});
             await new Promise((r) => setTimeout(r, RANDOM_INPUT_INTERVAL_MS - 80));
             inputCount++;
           }
-        })();
+        })().catch((err) => {
+          inputTaskError = err;
+          inputAbort.abort();
+          desyncAbort.abort();
+        });
     if (NO_RANDOM_INPUTS) console.log('  --no-inputs: skipping random input generator (idle-fighter diagnostic)');
     const lateJoinTask = LATE_JOIN_MIDMATCH
       ? runMidmatchLateJoin(host, guest, chromiumArgs).then((result) => {
@@ -2025,10 +2324,31 @@ async function main() {
      * we actually use to find fixable bugs. */
     let desyncLogged = false;
     for (const cp of CP_FRAMES) {
+      if (replayMatchEnd) break;
+      const battleBeforeCp = await readBothBattleStates(host, guest);
+      if (!battleBeforeCp.host.active || !battleBeforeCp.guest.active) {
+        replayMatchEnd = await resolveBattleEnd(host, guest, battleBeforeCp, 'replay-checkpoint');
+        if (replayMatchEnd) {
+          console.log(`  Match ended before checkpoint f=${cp}: ${formatBattleState(replayMatchEnd)}`);
+          inputAbort.abort();
+          desyncAbort.abort();
+          break;
+        }
+      }
       await Promise.all([
         waitForFrame(host.page, cp, 15000, 25).catch(() => {}),
         waitForFrame(guest.page, cp, 15000, 25).catch(() => {}),
       ]);
+      const battleAfterCp = await readBothBattleStates(host, guest);
+      if (!battleAfterCp.host.active || !battleAfterCp.guest.active) {
+        replayMatchEnd = await resolveBattleEnd(host, guest, battleAfterCp, 'replay-checkpoint');
+        if (replayMatchEnd) {
+          console.log(`  Match ended at checkpoint f=${cp}: ${formatBattleState(replayMatchEnd)}`);
+          inputAbort.abort();
+          desyncAbort.abort();
+          break;
+        }
+      }
       if (!desyncLogged) {
         /* Non-blocking peek at desyncTask — see if it's settled. */
         const peeked = await Promise.race([
@@ -2201,7 +2521,7 @@ async function main() {
     /* If we haven't seen desync yet, let random input run until the
      * deadline OR desync fires, whichever comes first. Either way,
      * capture a final desync-moment RDRAM dump for offline diff. */
-    if (!desyncInfo) {
+    if (!desyncInfo && !replayMatchEnd) {
       console.log(
         `  checkpoints done, continuing random input until desync or ${(GAMEPLAY_DURATION_MS / 1000).toFixed(0)}s cap...`,
       );
@@ -2223,7 +2543,9 @@ async function main() {
 
     /* Stop feeding inputs (they'll get spurious key-up after abort). */
     inputAbort.abort();
-    await inputTask.catch(() => {});
+    await inputTask;
+    if (inputTaskError) throw inputTaskError;
+    if (replayMatchEnd) matchEndInfo = replayMatchEnd;
     if (lateJoinTask) {
       lateJoinResult = await lateJoinTask;
     }
@@ -2290,25 +2612,25 @@ async function main() {
       await enablePostSetupNetsim(host, guest);
     } else {
       // ==================== SCRIPTED NAV ====================
-      // Smash Remix 2.0.1 intro plays N64/HAL/Smash splashes until ~f=1600,
-      // then lands on the "PRESS START" title. Pressing START before f=~1600
-      // is eaten by the splash sequence, leaving the cursor on 1P MODE when
-      // it finally reaches Mode Select — causing A to select 1P MODE instead
-      // of VS MODE. Wait to f=1900 to guarantee we're past the splashes.
-      console.log('Waiting for both to boot past intro...');
-      await waitForFrame(host.page, 1900, 90000);
-      await waitForFrame(guest.page, 1900, 90000);
+      // kn-sync startup usually begins from the captured "PRESS START" title
+      // state. Older savestate startup may still play through splashes first.
+      // Wait only for the runner to be live here; Step 1 catches the next
+      // actual title frame and presses START immediately so the harness does
+      // not wait itself into the attract loop.
+      console.log('Waiting for both emulators to start menu ticking...');
+      await waitForFrame(host.page, 60, 90000);
+      await waitForFrame(guest.page, 60, 90000);
       await host.page.waitForTimeout(1000);
       const hf = await host.page.evaluate(() => window.KNState?.frameNum || 0);
       const gf = await guest.page.evaluate(() => window.KNState?.frameNum || 0);
-      console.log(`Both past intro (host=${hf} guest=${gf}).\n`);
+      console.log(`Both menu runners live (host=${hf} guest=${gf}).\n`);
 
       // === NAVIGATION ===
       // SSB64 / Smash Remix menu flow, host-driven (netplay syncs inputs on P1 slot;
       // only the guest's A press on CSS registers for P2). Each step has a screenshot.
       //
       //   Title       → START → Mode Select (1P MODE highlighted)
-      //   Mode Select → DDOWN → VS MODE → A → VS options
+      //   Mode Select → analog down → VS MODE → A → VS options
       //   VS options  → A → CSS (default: Stock Match)
       //   CSS         → host A (picks P1), guest A (picks P2) → START → SSS
       //   SSS         → A → Match begins
@@ -2329,20 +2651,54 @@ async function main() {
         const f = await guest.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0);
         console.log(`    [guest f=${f} after ${key}]`);
       }
+      async function hostPressStartOnNextTitle(timeoutMs = 180000) {
+        const start = Date.now();
+        let attempts = 0;
+        while (Date.now() - start < timeoutMs) {
+          const [hostScene, guestScene] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+          if (hostScene === SCENE_MODE_SELECT && guestScene === SCENE_MODE_SELECT) return;
+          if (hostScene === SCENE_TITLE && guestScene === SCENE_TITLE) {
+            attempts += 1;
+            const [hfNow, gfNow] = await Promise.all([
+              host.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
+              guest.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
+            ]);
+            console.log(`    [scene ${SCENE_TITLE} title attempt ${attempts}: host f=${hfNow} guest f=${gfNow}]`);
+            await host.page.bringToFront();
+            await host.page.focus('body').catch(() => {});
+            await press(host.page, KEY.START, 300);
+
+            const modeDeadline = Date.now() + 6000;
+            while (Date.now() < modeDeadline) {
+              const [hAfter, gAfter] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+              if (hAfter === SCENE_MODE_SELECT && gAfter === SCENE_MODE_SELECT) {
+                const [hfMode, gfMode] = await Promise.all([
+                  host.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
+                  guest.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
+                ]);
+                console.log(`    [scene ${SCENE_MODE_SELECT} mode-select: host f=${hfMode} guest f=${gfMode}]`);
+                return;
+              }
+              await host.page.waitForTimeout(50);
+            }
+            const [hCur, gCur] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+            console.log(
+              `    [warn] START at title did not reach Mode Select; hostScene=${hCur} guestScene=${gCur}; waiting for next title`,
+            );
+          }
+          await host.page.waitForTimeout(50);
+        }
+        const [hCur, gCur] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+        throw new Error(`Timeout pressing START from title; hostScene=${hCur} guestScene=${gCur}`);
+      }
 
       console.log('Step 1: Wait for title screen, press START → Mode Select');
-      await waitForBothScene(host, guest, SCENE_TITLE, 'title', 120000).catch(() => {
-        console.log('    [warn] title scene not observed; falling back to frame gate');
-      });
-      await shot(host.page, '01-title-host');
-      await shot(guest.page, '01-title-guest');
-      await hostPress(KEY.START, 300, 500);
-      await waitForBothScene(host, guest, SCENE_MODE_SELECT, 'mode-select', 30000);
+      await hostPressStartOnNextTitle();
       await shot(host.page, '02-mode-select-host');
       await shot(guest.page, '02-mode-select-guest');
 
-      console.log('Step 2: Mode Select → DDOWN (1P MODE → VS MODE)');
-      await hostPress(KEY.DDOWN, 300, 1000);
+      console.log('Step 2: Mode Select → analog down (1P MODE → VS MODE)');
+      await hostPress(KEY.ANA_DOWN, 80, 1000);
       await shot(host.page, '03-vs-highlighted-host');
 
       console.log('Step 3: A → enter VS MODE');
@@ -2362,23 +2718,41 @@ async function main() {
       await shot(host.page, '05-css-host');
       await shot(guest.page, '05-css-guest');
 
-      console.log('Step 5: CSS — host presses A to pick P1 char (default cursor position)');
-      await hostPress(KEY.A, 300, 1500);
+      console.log('Step 5: CSS — host picks P1 with recorded random-select path');
+      await replayFixtureSegment(
+        host,
+        'host',
+        HOST_RANDOM_SELECT_START_FRAME,
+        HOST_RANDOM_SELECT_END_FRAME,
+        'P1 random-select',
+      );
+      await waitForCssSlotSelected(host.page, 0, 'host view');
       await shot(host.page, '06-p1-picked-host');
 
-      console.log('Step 6: CSS — guest presses A to pick P2 char');
-      await guestPress(KEY.A, 300, 1500);
+      console.log('Step 6: CSS — guest picks P2 with recorded random-select path');
+      await replayFixtureSegment(
+        guest,
+        'guest',
+        GUEST_RANDOM_SELECT_START_FRAME,
+        NAV_P2_SELECTED_FRAME,
+        'P2 random-select',
+      );
+      await waitForCssSlotSelected(host.page, 1, 'host view');
       await shot(host.page, '07-both-picked-host');
       await shot(guest.page, '07-both-picked-guest');
 
-      console.log('Step 7: Host presses START → Stage Select');
-      await hostPress(KEY.START, 300, 500);
-      await waitForBothScene(host, guest, SCENE_MAPS, 'stage-select', 30000);
+      console.log('Step 7: Stage Select + stage pick with recorded P2 path');
+      await replayFixtureSegment(
+        guest,
+        'guest',
+        GUEST_STAGE_SELECT_START_FRAME,
+        GUEST_STAGE_PICK_END_FRAME,
+        'P2 stage-select',
+      );
       await shot(host.page, '08-sss-host');
       await shot(guest.page, '08-sss-guest');
 
-      console.log('Step 8: A → pick stage → match begins');
-      await hostPress(KEY.A, 300, 500);
+      console.log('Step 8: Waiting for match begin');
       console.log('Waiting for both peers to enter VS Battle...');
       await requireBothInVsBattle(host, guest, 'scripted-post-nav', hostBrowser, guestBrowser);
       await shot(host.page, '09-gameplay-host');
@@ -2447,13 +2821,24 @@ async function main() {
     // Keys that do gameplay things (no START — would pause mid-match).
     const keys = [KEY.A, KEY.B, KEY.Z, KEY.L, KEY.R, KEY.ANA_LEFT, KEY.ANA_RIGHT, KEY.ANA_UP, KEY.ANA_DOWN];
     inputCount = 0;
+    let scriptedMatchEnd = null;
     while (Date.now() < endAt) {
+      const battleState = await readBothBattleStates(host, guest);
+      if (!battleState.host.active || !battleState.guest.active) {
+        scriptedMatchEnd = await resolveBattleEnd(host, guest, battleState, 'scripted-random-input');
+        if (scriptedMatchEnd) {
+          console.log(`\n  Match ended during random-input phase: ${formatBattleState(scriptedMatchEnd)}`);
+          break;
+        }
+      }
       const hostKey = keys[randomInt(keys.length)];
       const guestKey = keys[randomInt(keys.length)];
-      // Real keyboard events on each peer's page
-      Promise.all([host.page.keyboard.down(hostKey), guest.page.keyboard.down(guestKey)]).catch(() => {});
+      // Drive both real keyboard and the virtual-gamepad input state. The
+      // latter keeps automation stable when the OS/browser focus model refuses
+      // to report document.hasFocus() for a Playwright page.
+      Promise.all([keyDown(host.page, hostKey), keyDown(guest.page, guestKey)]).catch(() => {});
       await new Promise((r) => setTimeout(r, 80));
-      Promise.all([host.page.keyboard.up(hostKey), guest.page.keyboard.up(guestKey)]).catch(() => {});
+      Promise.all([keyUp(host.page, hostKey), keyUp(guest.page, guestKey)]).catch(() => {});
       await new Promise((r) => setTimeout(r, RANDOM_INPUT_INTERVAL_MS - 80));
       inputCount++;
       if (inputCount % 20 === 0) {
@@ -2462,6 +2847,7 @@ async function main() {
         process.stdout.write(`\r  inputs=${inputCount} host_f=${hf} guest_f=${gf} gap=${Math.abs(hf - gf)}   `);
       }
     }
+    if (scriptedMatchEnd) matchEndInfo = scriptedMatchEnd;
     const captureStats = stopCapture();
     console.log(
       `\n  Fed ${inputCount} inputs. Captured ${captureStats.captured} cross-peer pairs (${captureStats.failed} failed).`,
@@ -2580,6 +2966,7 @@ async function main() {
     gameplay_ms: GAMEPLAY_DURATION_MS,
     input_count: inputCount,
     desync_latch: runDesyncInfo,
+    match_end: matchEndInfo,
     client: {
       host: clientSummaryFor(host),
       guest: clientSummaryFor(guest),

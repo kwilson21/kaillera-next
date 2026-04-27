@@ -91,7 +91,7 @@ int kn_get_max_depth(void);
 int kn_get_failed_rollbacks(void);
 /* T2: Misprediction breakdown by category.
  * Writes 3 ints to out: [button_only, stick_only, both]. Returns 3. */
-int kn_get_mispred_breakdown(int *out);
+int kn_get_mispred_breakdown(int *out, int out_count);
 
 /* Experiment A: count of tolerance hits (rollbacks skipped due to
  * stick tolerance window). Returns cumulative count since rollback init. */
@@ -120,7 +120,7 @@ uint32_t kn_game_state_hash(int frame);
 /* Taint API — mark an RDRAM range as non-deterministic. Called from
  * RSP HLE dram_store_* and GLideN64 ColorBufferToRDRAM::_copy. */
 void kn_taint_rdram(uint32_t addr, uint32_t size);
-uint32_t kn_get_taint_blocks(uint8_t *out);  /* copies 128 bytes out */
+uint32_t kn_get_taint_blocks(uint8_t *out, uint32_t out_size);  /* copies 128 bytes out */
 int kn_get_tainted_block_count(void);
 void kn_reset_taint(void);
 

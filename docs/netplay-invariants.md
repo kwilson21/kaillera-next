@@ -30,6 +30,9 @@ local-state branches (`if (!_running) return;`) are not stalls.
 | `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |
+| PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer(s), release phase lock | `PHASE-LOCK-TIMEOUT` | rollback health audit 2026-04-27 |
+| MENU-LOCKSTEP stall (strict controllable menu input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom missing peer(s), fabricate ZERO_INPUT for the timed-out frame | `MENU-LOCKSTEP-TIMEOUT` | rollback health audit 2026-04-27 |
+| RB-INPUT-STALL (rollback gameplay input missing beyond budget) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiner loads state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Resume, broadcast roster, `hardDisconnectPeer()` the joining peer | `LATE-JOIN-TIMEOUT` | §MF5 |
 | Late-join worker round-trip (joiner decompresses initial state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Abort late-join; host's timeout cleans up the joiner | `WORKER-STALL` | §MF5 |
 | BOOT-LOCKSTEP stall (pure-lockstep boot convergence) | 3000ms (in tick loop) | Guest requests immediate `sync-request-full` | `BOOT-DEADLOCK-RECOVERY` | commit 788add0 |
@@ -70,6 +73,12 @@ tab-visibility reset, and game-stop path routes through it.
 **Boot-stall tracking** (when currently stalled):
 
 - `_bootStallFrame`, `_bootStallStartTime`, `_bootStallRecoveryFired`
+
+Rollback-input DC close is intentionally lighter than a full peer
+reset: `resetPeerRollbackTransport(peer, sid, 'rb-dc-close')` clears
+only `peer.rbDc`, `peer.rbDcUnreliable`, unreliable-DC buffer state,
+and stall timers, then falls back to the primary reliable DC without
+dropping `_remoteInputs[slot]` or phase history.
 
 ### Call sites
 
