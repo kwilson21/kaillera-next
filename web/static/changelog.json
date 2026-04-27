@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.47.6",
+    "date": "2026-04-27",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "expose host ROM metadata to joiners"
+      },
+      {
+        "type": "fix",
+        "message": "recover lockstep from focus pause"
+      }
+    ]
+  },
+  {
     "version": "0.47.5",
     "date": "2026-04-27",
     "changes": [
