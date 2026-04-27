@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 #
-# bump-version.sh — invoked by `just deploy`, NOT by a git hook.
+# bump-version.sh — invoked by `just deploy` locally, or by
+# .github/workflows/version-bump.yml after a PR squash-merge.
 #
-# Scans all unpushed commits on main since origin/main, infers a version
-# bump from conventional commit prefixes, writes one chore(version)
-# commit + tag containing one changelog bullet per substantive commit,
-# and exits. The caller (`just deploy`) handles `git push --follow-tags`.
+# Scans a range of commits on main, infers a version bump from
+# conventional commit prefixes, writes one chore(version) commit + tag
+# containing one changelog bullet per feat/fix commit, and exits. The
+# caller pushes (`just deploy` and the Action both run
+# `git push --follow-tags` after).
 #
-# Bump rule:
+# Range selection:
+#   --from <sha>   Action mode (post-squash-merge): RANGE = <sha>..HEAD
+#                  where <sha> is `github.event.before` (main's tip
+#                  before the push that triggered the workflow).
+#   (no flag)      Local mode (just deploy): RANGE = origin/main..HEAD,
+#                  i.e. all unpushed commits on main.
+#
+# Bump rule (identical in both modes):
 #   any feat:  → minor
 #   any fix:   → patch
 #   neither    → no bump (exit 0, no commit)
@@ -15,6 +24,24 @@
 # Idempotent: re-running when there's nothing new to bump is a no-op.
 #
 set -euo pipefail
+
+ACTION_FROM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from)
+      ACTION_FROM="${2:-}"
+      if [ -z "$ACTION_FROM" ]; then
+        echo "bump-version: --from requires a SHA argument" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    *)
+      echo "bump-version: unknown argument '$1'" >&2
+      exit 1
+      ;;
+  esac
+done
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 VERSION_FILE="$REPO_ROOT/web/static/version.json"
@@ -34,14 +61,32 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 1
 fi
 
-# Need an up-to-date view of origin/main to compute the unpushed range.
-git fetch --quiet origin main
-
-UNPUSHED_RANGE="origin/main..HEAD"
-TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
-if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
-  echo "bump-version: nothing to bump (HEAD is at origin/main)"
-  exit 0
+if [ -n "$ACTION_FROM" ]; then
+  # Action mode. Reject the all-zero SHA that GitHub sends for branch creation
+  # — version-bump.yml only fires on push to main, but be defensive.
+  if [ "$ACTION_FROM" = "0000000000000000000000000000000000000000" ]; then
+    echo "bump-version: --from is the all-zero SHA (new-branch event); nothing to bump"
+    exit 0
+  fi
+  if ! git cat-file -e "${ACTION_FROM}^{commit}" 2>/dev/null; then
+    echo "bump-version: --from SHA $ACTION_FROM not in this checkout (need fetch-depth: 0)" >&2
+    exit 1
+  fi
+  UNPUSHED_RANGE="${ACTION_FROM}..HEAD"
+  TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
+  if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
+    echo "bump-version: --from range is empty ($ACTION_FROM == HEAD)"
+    exit 0
+  fi
+else
+  # Local mode (just deploy). Need an up-to-date view of origin/main.
+  git fetch --quiet origin main
+  UNPUSHED_RANGE="origin/main..HEAD"
+  TOTAL_UNPUSHED=$(git rev-list --count "$UNPUSHED_RANGE")
+  if [ "$TOTAL_UNPUSHED" -eq 0 ]; then
+    echo "bump-version: nothing to bump (HEAD is at origin/main)"
+    exit 0
+  fi
 fi
 
 # Idempotency: if there's already an unpushed chore(version) commit, the
