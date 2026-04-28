@@ -103,7 +103,7 @@ const DESYNC_GRACE_FRAMES = 60; // after desync detected, capture ~1s more RDRAM
  * early-exits on meaningful divergence, not on rendering variance. */
 const SSIM_EARLY_EXIT_THRESHOLD = 0.7;
 const REPORT_FILE = '/tmp/determinism-report.json';
-const STARTUP_STATE_REPORT_FILE = process.env.KN_STARTUP_STATE_REPORT_FILE || '/tmp/startup-state-probe.json';
+const STARTUP_STATE_REPORT_FILE = '/tmp/startup-state-probe.json';
 const CSS_PROBE_FILE = '/tmp/css-graphics-probe.json';
 const SHOT_DIR = '/tmp';
 const SCENE_TITLE = 1; // nSCKindTitle
@@ -2042,10 +2042,7 @@ async function writeStartupStateProbeReport(host, guest, hostBrowser, guestBrows
     },
   };
 
-  const roomReportFile = `/tmp/startup-state-${ROOM}-probe.json`;
-  const reportJson = JSON.stringify(report, null, 2);
-  writeFileSync(roomReportFile, reportJson);
-  if (roomReportFile !== STARTUP_STATE_REPORT_FILE) writeFileSync(STARTUP_STATE_REPORT_FILE, reportJson);
+  writeFileSync(STARTUP_STATE_REPORT_FILE, JSON.stringify(report, null, 2));
   console.log(
     `  host: ${hostState.meta.kind || 'none'} ${hostState.meta.size || 0} bytes ${hostState.meta.sha256 || ''}`,
   );
@@ -2064,8 +2061,7 @@ async function writeStartupStateProbeReport(host, guest, hostBrowser, guestBrows
         .join(', ')}`,
     );
   }
-  console.log(`  report: ${roomReportFile}`);
-  if (roomReportFile !== STARTUP_STATE_REPORT_FILE) console.log(`  latest report: ${STARTUP_STATE_REPORT_FILE}`);
+  console.log(`  report: ${STARTUP_STATE_REPORT_FILE}`);
   console.log(`  bins: ${hostState.meta.path || 'n/a'} | ${guestState.meta.path || 'n/a'}`);
 
   await Promise.allSettled([
