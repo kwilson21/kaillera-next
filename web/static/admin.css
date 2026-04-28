@@ -168,6 +168,16 @@ button.btn-pin.pinned {
   gap: 8px;
 }
 
+#session-search {
+  width: 320px;
+  padding: 6px 10px;
+}
+
+#desync-match-id {
+  width: 360px;
+  padding: 6px 10px;
+}
+
 /* Room groups */
 .room-group {
   margin-bottom: 16px;
@@ -438,4 +448,24 @@ tbody tr {
 }
 .vision-dot.unknown {
   background: #888;
+}
+
+@media (max-width: 599px) {
+  .log-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .log-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  #session-search,
+  #desync-match-id {
+    max-width: 100%;
+    width: 100%;
+  }
 }
