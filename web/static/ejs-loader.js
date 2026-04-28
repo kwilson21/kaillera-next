@@ -78,13 +78,18 @@
     }
   }
 
+  const emulatorClassLoaded = typeof window.EmulatorJS === 'function';
   if ('undefined' != typeof EJS_DEBUG_XX && true === EJS_DEBUG_XX) {
-    for (let i = 0; i < scripts.length; i++) {
-      await loadScript(scripts[i]);
+    if (!emulatorClassLoaded) {
+      for (let i = 0; i < scripts.length; i++) {
+        await loadScript(scripts[i]);
+      }
     }
     await loadStyle('emulator.css');
   } else {
-    await loadScript('emulator.min.js');
+    if (!emulatorClassLoaded) {
+      await loadScript('emulator.min.js');
+    }
     await loadStyle('emulator.min.css');
   }
   const config = {};
@@ -184,4 +189,5 @@
   if (typeof window.EJS_onSaveSave === 'function') {
     window.EJS_emulator.on('saveSave', window.EJS_onSaveSave);
   }
+  window.dispatchEvent(new CustomEvent('kn-ejs-loader-complete'));
 })();

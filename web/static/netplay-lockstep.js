@@ -1346,6 +1346,7 @@
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
   let _lastControllerPresentMask = -1;
+  let _lastControllerPresentMaskModule = null;
   const MENU_START_BARRIER_SETTLE_MS = 500;
   let _menuStartBarrierReleased = false;
   let _menuStartLocalReady = false;
@@ -1576,11 +1577,12 @@
   };
 
   const _applyControllerPresentMask = (reason = 'tick') => {
-    if (!_isSmashRemix()) return;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_set_controller_present_mask) return;
     const mask = _controllerPresentMask();
-    if (!mask || mask === _lastControllerPresentMask) return;
+    if (!mask) return;
+    if (mod === _lastControllerPresentMaskModule && mask === _lastControllerPresentMask) return;
+    _lastControllerPresentMaskModule = mod;
     _lastControllerPresentMask = mask;
     mod._kn_set_controller_present_mask(mask);
     _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}`);
@@ -1590,6 +1592,7 @@
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (mod?._kn_set_controller_present_mask) mod._kn_set_controller_present_mask(0x0f);
     _lastControllerPresentMask = -1;
+    _lastControllerPresentMaskModule = null;
   };
 
   // -- Deterministic RNG sync for Smash Remix netplay --
@@ -4348,6 +4351,10 @@
             if (window.AudioContext) window.AudioContext = _HijackAC;
             if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
+          // Start or wake EmulatorJS from the same gesture path every time.
+          // Guests defer fresh EJS construction until here so a second ROM in
+          // the same tab follows the same boot path as the first ROM.
+          window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
           // Start emulator within gesture context so audio works
           KNShared.bootWithCheats('lockstep');
           setStatus('Loading emulator...');
@@ -4468,6 +4475,7 @@
       // Pause immediately to prevent any more free frames
       mod.pauseMainLoop();
       _syncLog(`emulator ready (${frames} frames) — paused${_playerSlot === 0 ? ' (host)' : ' (guest)'}`);
+      _applyControllerPresentMask('emulator-ready');
 
       // Set up key tracking now that ejs.controls is available
       _p1KeyMap = null; // force re-read from EJS controls
@@ -10354,6 +10362,7 @@
     _peerInputStarted = {};
     _activeRoster = null;
     _lastControllerPresentMask = -1;
+    _lastControllerPresentMaskModule = null;
     _menuStartBarrierReleased = false;
     _menuStartLocalReady = false;
     _menuStartLocalScene = 0;

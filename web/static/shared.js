@@ -279,6 +279,8 @@
     // memory layout and the cheat addresses cause memory access out of bounds.
     if (window.KNState?.romHash === SSB64_HASH) {
       applyStandardCheats(SSB64_ONLINE_CHEATS);
+    } else {
+      clearCheats();
     }
     disableEJSInput(label);
   }
@@ -786,6 +788,7 @@
 
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
+    SSB64_HASH: SSB64_HASH,
     DEFAULT_N64_KEYMAP: DEFAULT_N64_KEYMAP,
     applyStandardCheats: applyStandardCheats,
     clearCheats: clearCheats,
@@ -799,6 +802,7 @@
     setupKeyTracking: setupKeyTracking,
     teardownKeyTracking: teardownKeyTracking,
     waitForEmulator: waitForEmulator,
+    resetBootState: resetBootState,
     readLocalInput: readLocalInput,
     disableEJSInput: disableEJSInput,
     applyInputToWasm: applyInputToWasm,

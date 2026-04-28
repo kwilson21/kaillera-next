@@ -86,6 +86,7 @@
   let _hostRomSize = null; // host's current ROM byte size
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
+  let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
   let _pendingLateJoin = false; // waiting for ROM before late-join init
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
@@ -2062,6 +2063,7 @@
       _gameId = _gameIdFromHash(expectedHash);
       KNState.romHash = expectedHash;
       KNState.gameId = _gameId;
+      window.EJS_gameID = expectedHash;
       afterRomTransferComplete(displayName);
     } else {
       const reader = new FileReader();
@@ -2071,6 +2073,7 @@
           _gameId = _gameIdFromHash(_romHash);
           KNState.romHash = _romHash;
           KNState.gameId = _gameId;
+          window.EJS_gameID = _romHash;
         } catch (_) {}
         afterRomTransferComplete(displayName);
       };
@@ -2092,7 +2095,7 @@
 
     // If game is running and we were waiting for the ROM (connect-only mode),
     // hide overlay, show toolbar, and boot the emulator
-    if (gameRunning && !window.EJS_emulator) {
+    if (gameRunning && !window.EJS_emulator && (isHost || mode !== 'lockstep')) {
       hideOverlay();
       showToolbar();
       bootEmulator();
@@ -2135,6 +2138,7 @@
 
   const destroyEmulator = () => {
     console.log('[play] destroyEmulator:', `EJS=${!!window.EJS_emulator}`);
+    _emulatorBootInFlight = false;
     const emu = window.EJS_emulator;
     if (emu) {
       // Stop the Emscripten main loop to prevent stale rAF callbacks
@@ -2316,11 +2320,15 @@
     _hibernatedRomHash = null;
   };
 
-  const bootEmulator = () => {
+  const bootEmulator = ({ forceStartOnLoad = false } = {}) => {
     if (window.__test_skipBoot) return;
     // Re-initialize EmulatorJS if it was destroyed
     if (window.EJS_emulator) {
       console.log('[play] bootEmulator: EJS already exists, skipping');
+      return;
+    }
+    if (_emulatorBootInFlight) {
+      console.log('[play] bootEmulator: boot already in flight');
       return;
     }
     if (!_romBlob && !_romBlobUrl) {
@@ -2334,35 +2342,36 @@
       if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = URL.createObjectURL(_romBlob);
     }
-    // Guests: disable auto-start so the emulator waits for a user gesture.
-    // Without a gesture, browsers block the AudioContext and the WASM emulator
-    // stalls at frame 6. The lockstep engine's gesture handler clicks the EJS
-    // start button within a real user gesture context.
-    if (!isHost) {
-      window.EJS_startOnLoaded = false;
-      console.log('[play] bootEmulator: guest — disabled auto-start for gesture gate');
+    // Guests normally wait for the lockstep gesture prompt. When boot is
+    // launched from that prompt, force EJS auto-start so the first EJS start
+    // path is the same on initial boot and after a ROM swap.
+    window.EJS_startOnLoaded = !!(isHost || forceStartOnLoad);
+    if (!isHost && !forceStartOnLoad) {
+      console.log('[play] bootEmulator: guest — waiting for gesture-gated start');
+    } else if (!isHost) {
+      console.log('[play] bootEmulator: guest — starting from gesture');
     }
 
     console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
-
-    // If EmulatorJS class is already loaded (game restart), instantiate
-    // directly to avoid const re-declaration errors from re-injecting scripts
-    if (typeof EmulatorJS === 'function') {
-      console.log('[play] bootEmulator: reusing existing EmulatorJS class');
-      window.EJS_gameUrl = _romBlobUrl;
-      window.EJS_emulator = new EmulatorJS(window.EJS_player || '#game', {
-        gameUrl: _romBlobUrl,
-        dataPath: window.EJS_pathtodata || '/static/ejs/',
-        system: window.EJS_core || 'n64',
-        startOnLoad: isHost,
-      });
-      return;
-    }
+    window.EJS_gameID = _romHash || window.KNState?.romHash || 'kaillera-next';
+    KNShared.resetBootState?.();
 
     // Wait for IDB cache clear (core-redirector) before loading EJS.
     // If the clear hasn't finished, EJS might use stale cached core data.
     const injectLoader = () => {
+      _emulatorBootInFlight = true;
+      let bootDoneTimer = null;
+      const markBootDone = () => {
+        _emulatorBootInFlight = false;
+        if (bootDoneTimer) {
+          clearTimeout(bootDoneTimer);
+          bootDoneTimer = null;
+        }
+        window.removeEventListener('kn-ejs-loader-complete', markBootDone);
+      };
+      window.addEventListener('kn-ejs-loader-complete', markBootDone);
+      bootDoneTimer = setTimeout(markBootDone, 30000);
       const script = document.createElement('script');
       script.src = '/static/ejs-loader.js';
       script.onload = () => {
@@ -2370,6 +2379,7 @@
       };
       script.onerror = () => {
         console.log('[play] loader.js FAILED to load');
+        markBootDone();
         // BF5: surface EJS loader failure to the user
         window.knShowError?.('Failed to load emulator \u2014 please refresh the page.');
         KNEvent?.('wasm-fail', 'ejs-loader script error');
@@ -2390,6 +2400,27 @@
       injectLoader();
     }
   };
+
+  const ensureEmulatorBooted = ({ forceStartOnLoad = false } = {}) => {
+    if (_hibernated && _hibernatedRomHash === _romHash) {
+      wakeEmulator();
+      if (mode === 'streaming') {
+        const wakeMod = window.EJS_emulator?.gameManager?.Module;
+        if (wakeMod?.resumeMainLoop) wakeMod.resumeMainLoop();
+      }
+      return;
+    }
+    if (_hibernated) {
+      // ROM changed — the old WASM instance cannot be reused safely.
+      console.log('[play] ensureEmulatorBooted: ROM changed, full restart');
+      destroyEmulator();
+      _hibernated = false;
+      _hibernatedRomHash = null;
+    }
+    bootEmulator({ forceStartOnLoad });
+  };
+
+  window.KNStartEmulatorBoot = ensureEmulatorBooted;
 
   const setupRomDrop = () => {
     const drop = document.getElementById('rom-drop');
@@ -2652,6 +2683,7 @@
     KNState.romHash = null;
     KNState.gameId = null;
     window.EJS_gameUrl = undefined;
+    window.EJS_gameID = 'kaillera-next';
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
@@ -2819,6 +2851,7 @@
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
         KNState.gameId = _gameId;
+        window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-name', val.name);
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
         if (isHost && _gameId && _gameId !== 'ssb64') {
@@ -3004,24 +3037,10 @@
         const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (_detected.length > 0) VirtualGamepad.setVisible(false);
       }
-      if (_hibernated && _hibernatedRomHash === _romHash) {
-        wakeEmulator();
-        // Streaming host needs the emulator free-running for canvas capture.
-        // Lockstep doesn't — enterManualMode() captures the runner via rAF
-        // override without ever giving EJS free frames to show its UI menus.
-        if (mode === 'streaming') {
-          const wakeMod = window.EJS_emulator?.gameManager?.Module;
-          if (wakeMod?.resumeMainLoop) wakeMod.resumeMainLoop();
-        }
+      if (!isHost && mode === 'lockstep') {
+        console.log('[play] initEngine: guest lockstep boot deferred until gesture');
       } else {
-        if (_hibernated) {
-          // ROM changed — can't reuse hibernated emulator
-          console.log('[play] initEngine: ROM changed, full restart');
-          destroyEmulator();
-          _hibernated = false;
-          _hibernatedRomHash = null;
-        }
-        bootEmulator();
+        ensureEmulatorBooted();
       }
     } else {
       console.log('[play] initEngine: connect-only mode (spectator or no ROM)');
