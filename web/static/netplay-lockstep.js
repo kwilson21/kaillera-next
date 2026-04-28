@@ -1371,10 +1371,10 @@
   let _lastPeerPhaseWaitLogFrame = -1;
   const INITIAL_SMASH_TITLE_TIMEOUT_MS = 60000;
   const INITIAL_SMASH_TITLE_SETTLE_FRAMES = 30;
-  // Remix title/menu startup needs a complete EmulatorJS savestate. The
-  // partial kn-sync snapshot plus rollback ring can strand Remix on its
-  // yellow/thread-interrupt screen after a same-tab ROM switch.
-  const REMIX_INITIAL_SYNC_USE_KN_SYNC = false;
+  // Remix title/menu startup must avoid the RetroArch RASTATE load path:
+  // reloading that savestate can strand Remix on its yellow/thread-interrupt
+  // screen. Use the C-level snapshot plus hidden-state sidecar instead.
+  const REMIX_INITIAL_SYNC_USE_KN_SYNC = true;
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
@@ -1396,6 +1396,12 @@
   ]);
   const _isSmashRemix = () =>
     _config?.gameId === 'smash-remix' || KNState?.gameId === 'smash-remix' || _SMASH_REMIX_HASHES.has(_config?.romHash);
+
+  const _isSameRomEmulatorResume = () => {
+    const ctx = window.KNEmulatorResumeContext;
+    if (!ctx?.reused || !ctx?.sameRom) return false;
+    return !ctx.romHash || !_config?.romHash || ctx.romHash === _config.romHash;
+  };
 
   const _isValidPlayerSlot = (slot) => Number.isInteger(slot) && slot >= 0 && slot < 4;
 
@@ -2227,8 +2233,9 @@
     }
   };
 
-  const _restoreBootHiddenState = (mod, words, reason) => {
-    if (!words?.length || !mod?._kn_restore_hidden_state_boot || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
+  const _restoreHiddenStateWords = (mod, words, reason) => {
+    const restoreFn = mod?._kn_restore_hidden_state_impl || mod?._kn_restore_hidden_state_boot;
+    if (!words?.length || !restoreFn || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
       return false;
     }
     const wordCount = Math.min(18, words.length);
@@ -2236,8 +2243,9 @@
     if (!ptr) return false;
     try {
       new Uint32Array(mod.HEAPU32.buffer, ptr, wordCount).set(words.slice(0, wordCount).map((w) => w >>> 0));
-      mod._kn_restore_hidden_state_boot(ptr);
-      _syncLog(`${reason}: restored Remix boot hidden state words=${wordCount}`);
+      restoreFn(ptr);
+      const method = mod._kn_restore_hidden_state_impl ? 'full' : 'boot';
+      _syncLog(`${reason}: restored Remix hidden state (${method}) words=${wordCount}`);
       return true;
     } finally {
       mod._free(ptr);
@@ -4808,20 +4816,22 @@
     // kn_sync_write because it carries CPU/peripheral/event-queue state that
     // the libretro savestate path has historically under-specified for startup.
     if (isKnSyncInitialState) {
-      if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
-        _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
-        setStatus('Sync failed — incompatible core state');
-        _config?.onToast?.('Sync failed — restart with the same core build');
-        return;
-      }
-      _restoreBootHiddenState(readyMod, _guestStateHiddenWords, 'initial-sync-load');
-      _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
       if (hasLocalKnSyncCapture) {
-        _syncLog('initial-sync-load: host reloaded captured kn-sync state');
+        recaptureManualRunner(readyMod, 'initial-sync-local-capture');
+        _syncLog('initial-sync-load: host kept locally captured kn-sync state');
+      } else {
+        if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
+          _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
+          setStatus('Sync failed — incompatible core state');
+          _config?.onToast?.('Sync failed — restart with the same core build');
+          return;
+        }
+        _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+        _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
       }
     } else {
       loadStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load', _isSmashRemix() ? 1 : 2);
-      _restoreBootHiddenState(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+      _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
       _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
     }
     _guestStateBytes = null;
@@ -4840,7 +4850,7 @@
       // Clear any stale cheats from a previous game in the same tab.
       // The EJS cheat table persists across game restarts — SSB64 cheats
       // set by the old ungated path corrupt Smash Remix (e.g. "Timer On").
-      KNShared.clearCheats();
+      KNShared.clearCheats(false);
       _syncLog('cleared stale cheats (Smash Remix)');
     }
 
@@ -4894,6 +4904,13 @@
     if (!_isSmashRemix()) return;
     const mod = gm?.Module;
     if (!mod) return;
+
+    if (_isSameRomEmulatorResume()) {
+      mod.pauseMainLoop?.();
+      const frame = mod._get_current_frame_count?.() ?? '?';
+      _syncLog(`Smash Remix initial sync: same-ROM resume, capturing current state at coreFrame=${frame}`);
+      return;
+    }
 
     const start = performance.now();
     let titleFrame = -1;
@@ -5368,6 +5385,11 @@
         gm.loadState(bytes);
         if (mod?._task_queue_check) mod._task_queue_check();
       }
+      _restoreHiddenStateWords(
+        mod,
+        Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null,
+        'late-join-state',
+      );
       _restoreAudioFifoState(
         mod,
         Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null,
@@ -6695,9 +6717,11 @@
     };
 
     const _clearEjsPauseFlag = (reason) => {
-      const mod = window.EJS_emulator?.gameManager?.Module;
+      const emu = window.EJS_emulator;
+      const mod = emu?.gameManager?.Module;
+      if (emu) emu.paused = false;
       if (!mod?._cmd_unpause && !mod?._toggleMainLoop && !mod?._platform_emscripten_update_window_hidden_cb)
-        return false;
+        return !!emu;
       try {
         // RetroArch derives focus from platform_emscripten_is_window_hidden().
         // iOS can miss or delay the internal visibility callback when returning
@@ -6935,6 +6959,18 @@
 
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
+    // Pause before restoring native rAF. In manual mode, Emscripten still
+    // thinks its main loop is resumed, but its runner is captured by the rAF
+    // interceptor. Restoring native rAF while resumed can leave a stale runner
+    // plus the next streaming resume loop alive at once.
+    if (_manualMode && stopMod?.pauseMainLoop) {
+      try {
+        stopMod.pauseMainLoop();
+        _syncLog('paused EJS main loop before restoring native rAF');
+      } catch (e) {
+        _syncLog(`pause before rAF restore failed: ${e?.message || e}`);
+      }
+    }
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
     _resetControllerPresentMask();
 
@@ -10379,15 +10415,6 @@
     }
     _peers = {};
     KNState.peers = _peers;
-
-    // Pause the emulator before restoring rAF — without this, the Emscripten
-    // main loop is still in "resumed" state with a captured runner. Restoring
-    // native rAF while the loop is resumed causes two concurrent frame runners
-    // (the captured one + a new rAF callback), resulting in 2x FPS.
-    const stopMod = window.EJS_emulator?.gameManager?.Module;
-    if (stopMod?.pauseMainLoop && _manualMode) {
-      stopMod.pauseMainLoop();
-    }
 
     // Restore all overridden browser APIs (rAF, performance.now, getGamepads)
     APISandbox.restoreAll();

@@ -56,7 +56,7 @@
     }
   }
 
-  async function clearCheats() {
+  async function clearCheats(disableKnownCheats = true) {
     try {
       const gm = await waitForEmulator();
       if (typeof gm.resetCheat === 'function') {
@@ -64,9 +64,11 @@
       } else if (typeof gm.Module?._reset_cheat === 'function') {
         gm.Module._reset_cheat();
       }
-      SSB64_ONLINE_CHEATS.forEach((c, i) => {
-        gm.setCheat(i, 0, c.code);
-      });
+      if (disableKnownCheats) {
+        SSB64_ONLINE_CHEATS.forEach((c, i) => {
+          gm.setCheat(i, 0, c.code);
+        });
+      }
       console.log('[netplay] cleared all cheats');
     } catch (e) {
       console.error('[netplay] cheat clear failed:', e?.message);
@@ -84,9 +86,34 @@
     if (_activeHeldKeys) _activeHeldKeys.clear();
   }
 
+  function ensureKeyTrackingListeners() {
+    if (!_listenersAdded) {
+      _keydownHandler = (e) => {
+        if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
+      };
+      _keyupHandler = (e) => {
+        if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
+      };
+      _blurHandler = () => {
+        clearHeldKeysOnFocusLoss();
+      };
+      _visibilityHandler = () => {
+        if (document.hidden) clearHeldKeysOnFocusLoss();
+      };
+      document.addEventListener('keydown', _keydownHandler, true);
+      document.addEventListener('keyup', _keyupHandler, true);
+      window.addEventListener('blur', _blurHandler, true);
+      document.addEventListener('visibilitychange', _visibilityHandler, true);
+      _listenersAdded = true;
+    }
+  }
+
   function setupKeyTracking(keymap, heldKeys) {
     _activeHeldKeys = heldKeys;
-    if (keymap) return keymap;
+    if (keymap) {
+      ensureKeyTrackingListeners();
+      return keymap;
+    }
 
     let resolved = null;
 
@@ -118,25 +145,7 @@
       resolved = Object.assign({}, DEFAULT_N64_KEYMAP);
     }
 
-    if (!_listenersAdded) {
-      _keydownHandler = (e) => {
-        if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
-      };
-      _keyupHandler = (e) => {
-        if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
-      };
-      _blurHandler = () => {
-        clearHeldKeysOnFocusLoss();
-      };
-      _visibilityHandler = () => {
-        if (document.hidden) clearHeldKeysOnFocusLoss();
-      };
-      document.addEventListener('keydown', _keydownHandler, true);
-      document.addEventListener('keyup', _keyupHandler, true);
-      window.addEventListener('blur', _blurHandler, true);
-      document.addEventListener('visibilitychange', _visibilityHandler, true);
-      _listenersAdded = true;
-    }
+    ensureKeyTrackingListeners();
 
     return resolved;
   }
@@ -286,7 +295,7 @@
       applyStandardCheats(SSB64_ONLINE_CHEATS);
     } else {
       window.EJS_cheats = [];
-      clearCheats();
+      clearCheats(false);
     }
     disableEJSInput(label);
   }

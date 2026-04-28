@@ -119,6 +119,10 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller,_kn_set_controller_present_mask, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
     fi
+    if grep -q "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot" Makefile.emulatorjs && ! grep -q "_kn_restore_hidden_state_impl" Makefile.emulatorjs; then
+        sed -i 's|_kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot|_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot|' Makefile.emulatorjs
+        echo "    Added full hidden-state restore WASM export"
+    fi
     if grep -q "_kn_write_controller" Makefile.emulatorjs && ! grep -q "_kn_set_controller_present_mask" Makefile.emulatorjs; then
         sed -i 's|_kn_write_controller,|_kn_write_controller,_kn_set_controller_present_mask,|' Makefile.emulatorjs
         echo "    Added controller-present mask WASM export"
@@ -497,9 +501,9 @@ KNHLE_EOF
         echo "    Injected kn_hle_save/kn_hle_restore + per-frame hle ring helpers"
     fi
 
-    # v3 kn_sync_read/write: complete state capture matching retro_serialize.
+    # v4 kn_sync_read/write: complete state capture matching retro_serialize.
     # Must run AFTER kn-all.patch which creates the v1 functions.
-    echo "    Upgrading kn_sync_read/write to v3 (complete state capture)..."
+    echo "    Upgrading kn_sync_read/write to v4 (complete state capture)..."
     python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
 
     # static save scratch: replace malloc/free in savestates_save_m64p with

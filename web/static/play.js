@@ -19,11 +19,11 @@
  *
  * ── Emulator Lifecycle ──────────────────────────────────────────────────
  *
- *   The WASM module is kept alive between games via hibernateEmulator() /
- *   wakeEmulator(). Emscripten's main loop corrupts on the 3rd
- *   EmulatorJS destroy/recreate cycle, so we never destroy — we pause
- *   the emulator, hide the canvas, and suppress EJS UI via CSS. Mode
- *   switching (lockstep ↔ streaming) works without page reload.
+ *   The WASM module is kept alive between same-ROM games via
+ *   hibernateEmulator() / wakeEmulator(). Emscripten's main loop corrupts on
+ *   repeated EmulatorJS destroy/recreate cycles, so we pause and hide the
+ *   emulator for same-ROM restarts and mode switches. When the ROM hash
+ *   changes, the old instance is destroyed before booting the new ROM.
  *
  * ── Major Sections ──────────────────────────────────────────────────────
  *
@@ -2147,6 +2147,7 @@
   const destroyEmulator = () => {
     console.log('[play] destroyEmulator:', `EJS=${!!window.EJS_emulator}`);
     _emulatorBootInFlight = false;
+    window.KNEmulatorResumeContext = null;
     const emu = window.EJS_emulator;
     if (emu) {
       // Stop the Emscripten main loop to prevent stale rAF callbacks
@@ -2229,6 +2230,20 @@
     _hibernatedRomHash = null;
   };
 
+  const markSameRomEmulatorResume = (reason) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    window.KNEmulatorResumeContext = {
+      reused: true,
+      sameRom: true,
+      mode,
+      matchId: window.KNState?.matchId || null,
+      romHash: _romHash || null,
+      coreFrame: mod?._get_current_frame_count?.() ?? null,
+      reason,
+      at: Date.now(),
+    };
+  };
+
   const hibernateEmulator = () => {
     const emu = window.EJS_emulator;
     if (!emu) return;
@@ -2238,8 +2253,8 @@
     if (mod) {
       // Establish a known paused state. stopSync() restores native rAF but
       // never resumes the Emscripten main loop — it's left in limbo (not
-      // paused, not running). Calling pauseMainLoop() here guarantees that
-      // resumeMainLoop() in wakeEmulator() will schedule a fresh rAF callback.
+      // paused, not running). Calling pauseMainLoop() here gives the next
+      // engine start a known state to resume from.
       try {
         mod.pauseMainLoop();
       } catch (_) {}
@@ -2282,7 +2297,16 @@
     if (mod) {
       // Clear EJS_PAUSED C flag — without this, emscripten_mainloop() bails
       // at the top (retroarch.c:6126) and retro_run never executes.
-      if (mod._toggleMainLoop) mod._toggleMainLoop(1);
+      emu.paused = false;
+      try {
+        mod._platform_emscripten_update_window_hidden_cb?.(0);
+      } catch (_) {}
+      try {
+        mod._toggleMainLoop?.(1);
+      } catch (_) {}
+      try {
+        mod._cmd_unpause?.();
+      } catch (_) {}
 
       // Don't resume the main loop here — let each engine handle it:
       // - Lockstep: enterManualMode() does pause+overrideRAF+resume, capturing
@@ -2340,6 +2364,36 @@
     _hibernatedRomHash = null;
   };
 
+  const resumeStreamingMainLoop = (reason) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?.resumeMainLoop) return;
+
+    // A same-ROM switch out of lockstep leaves Emscripten paused while the
+    // rAF sandbox is being restored. Pause once more after restore, then
+    // resume on native rAF so stale captured runners cannot overlap with the
+    // streaming loop.
+    try {
+      mod.pauseMainLoop?.();
+    } catch (err) {
+      console.warn('[play] streaming main loop pause before resume failed:', err?.message || err);
+    }
+
+    const resume = () => {
+      if (window.EJS_emulator?.gameManager?.Module !== mod) return;
+      try {
+        mod.resumeMainLoop();
+        console.log(`[play] streaming main loop resumed (${reason})`);
+      } catch (err) {
+        console.warn('[play] streaming main loop resume failed:', err?.message || err);
+      }
+    };
+
+    const nativeRAF = window.APISandbox?.nativeRAF;
+    if (typeof nativeRAF === 'function') nativeRAF(resume);
+    else if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(resume);
+    else setTimeout(resume, 0);
+  };
+
   const bootEmulator = ({ forceStartOnLoad = false } = {}) => {
     if (window.__test_skipBoot) return;
     // Re-initialize EmulatorJS if it was destroyed
@@ -2375,6 +2429,7 @@
     console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
     window.EJS_gameUrl = _romBlobUrl;
     window.EJS_gameID = _romHash || window.KNState?.romHash || 'kaillera-next';
+    window.KNEmulatorResumeContext = null;
     KNShared.resetBootState?.();
 
     // Wait for IDB cache clear (core-redirector) before loading EJS.
@@ -2423,11 +2478,9 @@
 
   const ensureEmulatorBooted = ({ forceStartOnLoad = false } = {}) => {
     if (_hibernated && _hibernatedRomHash === _romHash) {
+      markSameRomEmulatorResume('same-rom-wake');
       wakeEmulator();
-      if (mode === 'streaming') {
-        const wakeMod = window.EJS_emulator?.gameManager?.Module;
-        if (wakeMod?.resumeMainLoop) wakeMod.resumeMainLoop();
-      }
+      if (mode === 'streaming') resumeStreamingMainLoop('same-rom-wake');
       return;
     }
     if (_hibernated) {
@@ -3158,6 +3211,7 @@
         const peerEntries = Object.values(peers);
         let reason = 'Connection timed out';
         let detail = 'check your network or firewall';
+        let eventType = 'webrtc-fail';
         if (peerEntries.length === 0) {
           reason = 'No peers connected';
           detail = 'the other players never showed up — they may have left or the signaling server is unreachable';
@@ -3171,9 +3225,13 @@
           } else if (stuck > 0) {
             reason = 'WebRTC handshake stalled';
             detail = `${stuck} of ${states.length} peer connection${states.length === 1 ? '' : 's'} stuck in ${states.includes('new') ? 'new' : 'connecting'} state — ICE may not be reaching candidates`;
+          } else if (states.every((s) => s === 'connected' || s === 'completed')) {
+            reason = 'Game boot timed out';
+            detail = 'peer connection is up, but emulator sync did not finish';
+            eventType = 'wasm-fail';
           }
           // Report to telemetry so funnel timeline shows the specific reason
-          KNEvent('webrtc-fail', `${reason}: ${detail}`, { states });
+          KNEvent(eventType, `${reason}: ${detail}`, { states });
         }
         if (text) text.textContent = `${reason} — ${detail}`;
         crumb('connection-timeout', {

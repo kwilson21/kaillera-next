@@ -87,6 +87,11 @@
   'use strict';
 
   const _getIceServers = () => window._iceServers || KNState.DEFAULT_ICE_SERVERS;
+  const STREAM_CAPTURE_FPS = 60;
+  const STREAM_CAPTURE_FRAME_MS = 1000 / STREAM_CAPTURE_FPS;
+  const STREAMING_CORE_FPS_SAMPLE_MS = 1000;
+  const STREAMING_CORE_FPS_RESET_THRESHOLD = 70;
+  const STREAMING_CORE_FPS_RESET_COOLDOWN_MS = 5000;
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -103,6 +108,8 @@
   let _gameRunning = false;
   let _hostInputInterval = null;
   let _hostInputAbort = null;
+  let _hostFrameRateWatchdog = null;
+  let _hostFrameRateResetCooldownUntil = 0;
   let _guestInputInterval = null;
   let _guestInputAbort = null;
   let _cachedInfo = null;
@@ -170,6 +177,100 @@
     if (mod?._kn_set_controller_present_mask) mod._kn_set_controller_present_mask(0x0f);
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
+  };
+
+  const _normalizeStreamingTiming = (reason = 'start') => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod) return false;
+
+    try {
+      // Lockstep owns deterministic timing; streaming should return to normal
+      // RetroArch pacing with fast-forward and slow-motion explicitly off.
+      window._kn_inStep = false;
+      window._kn_frameTime = 0;
+      window._kn_useRelativeCycles = false;
+      mod._kn_set_deterministic?.(0);
+      mod._kn_set_normalize_events?.(0);
+      mod._kn_set_drain_interrupts?.(0);
+      mod._toggle_fastforward?.(0);
+      mod._toggle_slow_motion?.(0);
+      mod._set_ff_ratio?.(1);
+      mod._set_sm_ratio?.(1);
+      mod._set_vsync?.(1);
+      _syncLog(`streaming timing normalized (${reason})`);
+      return true;
+    } catch (err) {
+      _syncLog(`streaming timing normalize failed (${reason}): ${err?.message || err}`);
+      return false;
+    }
+  };
+
+  const _resetStreamingMainLoop = (reason) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?.resumeMainLoop) return false;
+
+    try {
+      mod.pauseMainLoop?.();
+    } catch (err) {
+      _syncLog(`streaming main loop pause failed (${reason}): ${err?.message || err}`);
+    }
+
+    const resume = () => {
+      if (!_gameRunning) return;
+      if (window.EJS_emulator?.gameManager?.Module !== mod) return;
+      try {
+        mod.resumeMainLoop();
+        _syncLog(`streaming main loop reset (${reason})`);
+      } catch (err) {
+        _syncLog(`streaming main loop resume failed (${reason}): ${err?.message || err}`);
+      }
+    };
+
+    const nativeRAF = window.APISandbox?.nativeRAF;
+    if (typeof nativeRAF === 'function') nativeRAF(resume);
+    else if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(resume);
+    else setTimeout(resume, 0);
+    return true;
+  };
+
+  const stopHostFrameRateWatchdog = () => {
+    if (_hostFrameRateWatchdog) {
+      clearInterval(_hostFrameRateWatchdog);
+      _hostFrameRateWatchdog = null;
+    }
+  };
+
+  const startHostFrameRateWatchdog = () => {
+    stopHostFrameRateWatchdog();
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._get_current_frame_count) return;
+
+    let lastFrame = mod._get_current_frame_count() || 0;
+    let lastAt = performance.now();
+    _hostFrameRateWatchdog = setInterval(() => {
+      if (!_gameRunning) return;
+      const currentMod = window.EJS_emulator?.gameManager?.Module;
+      if (currentMod !== mod) {
+        stopHostFrameRateWatchdog();
+        return;
+      }
+
+      const now = performance.now();
+      const frame = mod._get_current_frame_count?.() || 0;
+      const elapsed = now - lastAt;
+      const delta = frame - lastFrame;
+      lastAt = now;
+      lastFrame = frame;
+      if (elapsed <= 0 || delta <= 0) return;
+
+      const fps = (delta * 1000) / elapsed;
+      if (fps <= STREAMING_CORE_FPS_RESET_THRESHOLD || now < _hostFrameRateResetCooldownUntil) return;
+
+      _hostFrameRateResetCooldownUntil = now + STREAMING_CORE_FPS_RESET_COOLDOWN_MS;
+      _syncLog(`streaming core fps high (${fps.toFixed(1)}); resetting main loop`);
+      _normalizeStreamingTiming('fps-watchdog');
+      _resetStreamingMainLoop('fps-watchdog');
+    }, STREAMING_CORE_FPS_SAMPLE_MS);
   };
 
   // ── users-updated (star topology) ──────────────────────────────────────
@@ -642,7 +743,7 @@
   };
 
   const startDirectCanvasCapture = (srcCanvas) => {
-    _hostStream = srcCanvas.captureStream(60);
+    _hostStream = srcCanvas.captureStream(STREAM_CAPTURE_FPS);
     const captureTrack = _hostStream.getVideoTracks()[0];
     if (!captureTrack) throw new Error('direct capture produced no video track');
 
@@ -657,7 +758,7 @@
     }
 
     _syncLog(
-      `direct canvas capture started (${srcCanvas.width}x${srcCanvas.height}@60, scaleDown=${_captureScaleDownBy.toFixed(2)})`,
+      `direct canvas capture started (${srcCanvas.width}x${srcCanvas.height}@${STREAM_CAPTURE_FPS}, scaleDown=${_captureScaleDownBy.toFixed(2)})`,
     );
   };
 
@@ -694,7 +795,7 @@
     // Safari's captureStream(0) + requestFrame() is broken in some versions —
     // frames never get pushed. Use auto-capture as primary, with requestFrame
     // as a bonus hint when available.
-    _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
+    _hostStream = captureCanvas.captureStream(isSafari ? STREAM_CAPTURE_FPS : 0);
     const captureTrack = _hostStream.getVideoTracks()[0];
     // 'motion' hint tells the browser encoder to use a low-latency profile
     // (e.g. CBP H264, shorter GOP) rather than optimizing for quality.
@@ -706,9 +807,13 @@
     let _blitCount = 0;
     let _lastSrcW = srcCanvas.width;
     let _lastSrcH = srcCanvas.height;
+    let _lastCaptureAt = 0;
     const blitFrame = () => {
       if (!_gameRunning) return;
       requestAnimationFrame(blitFrame);
+      const now = performance.now();
+      if (_lastCaptureAt && now - _lastCaptureAt < STREAM_CAPTURE_FRAME_MS - 0.5) return;
+      _lastCaptureAt = now;
       // Recompute crop if source canvas resized (e.g. window resize)
       if (srcCanvas.width !== _lastSrcW || srcCanvas.height !== _lastSrcH) {
         _lastSrcW = srcCanvas.width;
@@ -753,12 +858,16 @@
     setupKeyTracking();
 
     const MIN_HOST_FRAMES = 10;
+    let timingNormalized = false;
     const waitForEmu = () => {
       if (!_gameRunning) return;
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         setTimeout(waitForEmu, 100);
         return;
+      }
+      if (!timingNormalized) {
+        timingNormalized = _normalizeStreamingTiming('host-start');
       }
 
       const frames = gm.Module?._get_current_frame_count?.() ?? 0;
@@ -792,6 +901,7 @@
 
       setStatus('🟢 Hosting — game on!');
       startHostInputLoop();
+      startHostFrameRateWatchdog();
 
       if (!_audioStreamDest) {
         let audioAttempts = 0;
@@ -1289,6 +1399,8 @@
       _hostInputAbort.abort();
       _hostInputAbort = null;
     }
+    stopHostFrameRateWatchdog();
+    _hostFrameRateResetCooldownUntil = 0;
     if (_guestInputInterval) {
       clearInterval(_guestInputInterval);
       _guestInputInterval = null;

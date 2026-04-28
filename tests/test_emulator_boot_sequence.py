@@ -55,18 +55,50 @@ def test_non_ssb64_boot_clears_stale_standard_cheats():
     assert "window.KNState?.romHash === SSB64_HASH" in window
     assert "applyStandardCheats(SSB64_ONLINE_CHEATS)" in window
     assert "window.EJS_cheats = []" in window
-    assert "clearCheats()" in window
+    assert "clearCheats(false)" in window
     assert "gm.resetCheat()" in source or "gm.Module?._reset_cheat" in source
+    assert "async function clearCheats(disableKnownCheats = true)" in source
+    assert "if (disableKnownCheats)" in source
     assert "SSB64_HASH: SSB64_HASH" in source
 
 
-def test_smash_remix_startup_avoids_partial_kn_sync_and_c_rollback():
+def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
 
-    assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = false" in source
+    assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = true" in source
     assert "REMIX_INITIAL_SYNC_USE_KN_SYNC && _isSmashRemix()" in source
+    assert "Smash Remix initial sync: kn_sync_read" in source
+    assert "kind: 'kn-sync'" in source
+    assert "Smash Remix: bypassing cached pre-title state; using host title-screen capture" in source
     assert "C-ROLLBACK disabled for Smash Remix title/menu startup" in source
     assert "detMod?._kn_rollback_init && !_isSmashRemix()" in source
+    assert "KNShared.clearCheats(false)" in source
+
+
+def test_smash_remix_startup_restores_full_hidden_state_sidecar():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    build_source = (REPO_ROOT / "build/build.sh").read_text()
+
+    assert "const _restoreHiddenStateWords = (mod, words, reason) =>" in source
+    assert "mod?._kn_restore_hidden_state_impl || mod?._kn_restore_hidden_state_boot" in source
+    assert "const method = mod._kn_restore_hidden_state_impl ? 'full' : 'boot'" in source
+    assert "restored Remix hidden state (${method}) words=${wordCount}" in source
+
+    initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
+    assert initial_idx != -1
+    initial_window = source[initial_idx : initial_idx + 1800]
+    assert "_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')" in initial_window
+
+    late_join_idx = source.find("const handleLateJoinState = async (msg) =>")
+    assert late_join_idx != -1
+    late_join_window = source[late_join_idx : late_join_idx + 5200]
+    hidden_idx = late_join_window.find("_restoreHiddenStateWords(")
+    audio_idx = late_join_window.find("_restoreAudioFifoState(")
+    assert hidden_idx != -1
+    assert audio_idx > hidden_idx
+    assert "Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null" in late_join_window
+
+    assert "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot" in build_source
 
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
@@ -84,7 +116,7 @@ def test_controller_mask_reapplies_when_emulator_module_changes():
     assert "_lastControllerPresentMaskModule = null" in source[reset_idx : reset_idx + 400]
 
 
-def test_rom_switch_discards_hibernated_old_core():
+def test_same_rom_resumes_hibernated_core_and_rom_switch_discards_old_core():
     source = (REPO_ROOT / "web/static/play.js").read_text()
     helper_idx = source.find("const discardHibernatedEmulatorForRomChange = (nextHash) =>")
     assert helper_idx != -1
@@ -96,3 +128,96 @@ def test_rom_switch_discards_hibernated_old_core():
     assert "discardHibernatedEmulatorForRomChange(expectedHash)" in source
     assert "discardHibernatedEmulatorForRomChange(hash)" in source
     assert "discardHibernatedEmulatorForRomChange(null)" in source
+
+    assert "const markSameRomEmulatorResume = (reason) => {" in source
+    assert "window.KNEmulatorResumeContext = {" in source
+    assert "sameRom: true" in source
+    assert "window.KNEmulatorResumeContext = null" in source
+    assert "const resumeStreamingMainLoop = (reason) => {" in source
+    resume_idx = source.find("const resumeStreamingMainLoop = (reason) => {")
+    resume_window = source[resume_idx : resume_idx + 1300]
+    assert "mod.pauseMainLoop?.()" in resume_window
+    assert "window.APISandbox?.nativeRAF" in resume_window
+    assert "mod.resumeMainLoop()" in resume_window
+
+    ensure_idx = source.find("const ensureEmulatorBooted = ({ forceStartOnLoad = false } = {}) =>")
+    assert ensure_idx != -1
+    ensure_window = source[ensure_idx : ensure_idx + 1200]
+    assert "if (_hibernated && _hibernatedRomHash === _romHash)" in ensure_window
+    assert "markSameRomEmulatorResume('same-rom-wake')" in ensure_window
+    assert "wakeEmulator()" in ensure_window
+    assert "if (mode === 'streaming') resumeStreamingMainLoop('same-rom-wake')" in ensure_window
+    assert "if (_hibernated)" in ensure_window
+    assert "destroyEmulator()" in ensure_window
+    assert "bootEmulator({ forceStartOnLoad })" in ensure_window
+    assert "window._knHibernatedWakePending" not in source
+    assert "KNForceEmulatorReboot" not in source
+
+    wake_idx = source.find("const wakeEmulator = () => {")
+    assert wake_idx != -1
+    wake_window = source[wake_idx : wake_idx + 1800]
+    assert "emu.paused = false;" in wake_window
+    assert "mod._platform_emscripten_update_window_hidden_cb?.(0)" in wake_window
+    assert "mod._toggleMainLoop?.(1)" in wake_window
+    assert "mod._cmd_unpause?.()" in wake_window
+
+
+def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+
+    assert "const _isSameRomEmulatorResume = () => {" in source
+    assert "window.KNEmulatorResumeContext" in source
+    assert "ctx.romHash === _config.romHash" in source
+
+    wait_idx = source.find("const waitForSmashTitleState = async (gm) => {")
+    assert wait_idx != -1
+    wait_window = source[wait_idx : wait_idx + 900]
+    resume_idx = wait_window.find("if (_isSameRomEmulatorResume())")
+    title_wait_idx = wait_window.find("Smash Remix initial sync: waiting for title-screen state")
+    assert resume_idx != -1
+    assert title_wait_idx > resume_idx
+    assert "same-ROM resume, capturing current state" in wait_window
+    assert "mod.pauseMainLoop?.()" in wait_window
+
+
+def test_host_local_kn_sync_initial_capture_is_not_reloaded():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+
+    start_idx = source.find("const hasLocalKnSyncCapture =")
+    assert start_idx != -1
+    window = source[start_idx : start_idx + 1800]
+
+    local_idx = window.find("if (hasLocalKnSyncCapture)")
+    load_idx = window.find("loadKnSyncStateAtStartBoundary")
+    assert local_idx != -1
+    assert load_idx > local_idx
+    assert "recaptureManualRunner(readyMod, 'initial-sync-local-capture')" in window
+    assert "initial-sync-load: host kept locally captured kn-sync state" in window
+    assert "initial-sync-load: host reloaded captured kn-sync state" not in source
+
+
+def test_kn_sync_v4_preserves_r4300_delay_slot_and_skip_jump():
+    source = (REPO_ROOT / "build/patch-sync-v3.py").read_text()
+    build_source = (REPO_ROOT / "build/build.sh").read_text()
+
+    assert "header[0] = 0x4B4E5334; header[1] = 4" in source
+    assert "header[0] == 0x4B4E5334 && header[1] == 4" in source
+    assert "else if (header[0] == 0x4B4E5333 && header[1] == 3) version = 3" in source
+    assert "delay_slot=dev->r4300.delay_slot" in source
+    assert "skip_jump=dev->r4300.skip_jump" in source
+    assert "if (version >= 4)" in source
+    assert "dev->r4300.delay_slot = delay_slot" in source
+    assert "dev->r4300.skip_jump = skip_jump" in source
+    assert "Upgrading kn_sync_read/write to v4" in build_source
+
+
+def test_connected_peers_timeout_is_reported_as_boot_failure_not_webrtc():
+    source = (REPO_ROOT / "web/static/play.js").read_text()
+    timeout_idx = source.find("let eventType = 'webrtc-fail'")
+    assert timeout_idx != -1
+    timeout_window = source[timeout_idx : timeout_idx + 1400]
+
+    assert "states.every((s) => s === 'connected' || s === 'completed')" in timeout_window
+    assert "reason = 'Game boot timed out'" in timeout_window
+    assert "eventType = 'wasm-fail'" in timeout_window
+    assert "KNEvent(eventType" in timeout_window

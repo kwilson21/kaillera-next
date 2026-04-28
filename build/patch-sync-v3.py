@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replace kn_sync_read/write v1 with v3 (complete state capture) in main.c."""
+"""Replace kn_sync_read/write v1 with v4 (complete state capture) in main.c."""
 import sys
 
 MAIN_C = sys.argv[1] if len(sys.argv) > 1 else "src/mupen64plus-libretro-nx/mupen64plus-core/src/main/main.c"
@@ -10,7 +10,7 @@ with open(MAIN_C, 'r') as f:
 KN_SYNC_READ_V3 = '''EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size) {
     struct device *dev = &g_dev; uint8_t *p = buf; uint32_t *header; int i; char queue[1024];
     if (!buf || max_size < RDRAM_MAX_SIZE + 32768) return 0;
-    header = (uint32_t *)p; header[0] = 0x4B4E5333; header[1] = 3; header[2] = 0; header[3] = 0; p += 16;
+    header = (uint32_t *)p; header[0] = 0x4B4E5334; header[1] = 4; header[2] = 0; header[3] = 0; p += 16;
     memcpy(p, dev->rdram.dram, RDRAM_MAX_SIZE); p += RDRAM_MAX_SIZE;
     for (i = 0; i < RDRAM_MAX_MODULES_COUNT; i++) { memcpy(p, dev->rdram.regs[i], RDRAM_REGS_COUNT*4); p += RDRAM_REGS_COUNT*4; }
     memcpy(p, r4300_regs(&dev->r4300), 32*8); p += 32*8;
@@ -18,7 +18,7 @@ KN_SYNC_READ_V3 = '''EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, ui
     { unsigned int ni = *r4300_cp0_next_interrupt(&dev->r4300.cp0); uint32_t cnt = dev->r4300.cp0.regs[CP0_COUNT_REG]; memcpy(p,&ni,4); p+=4; memcpy(p,&cnt,4); p+=4; }
     memcpy(p, r4300_cp1_regs(&dev->r4300.cp1), 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg);
     { uint32_t f0=*r4300_cp1_fcr0(&dev->r4300.cp1), f31=*r4300_cp1_fcr31(&dev->r4300.cp1); memcpy(p,&f0,4); p+=4; memcpy(p,&f31,4); p+=4; }
-    { unsigned int lb=*r4300_llbit(&dev->r4300); int64_t hi=*r4300_mult_hi(&dev->r4300), lo=*r4300_mult_lo(&dev->r4300); uint32_t pc=*r4300_pc(&dev->r4300); memcpy(p,&lb,4); p+=4; memcpy(p,&hi,8); p+=8; memcpy(p,&lo,8); p+=8; memcpy(p,&pc,4); p+=4; }
+    { unsigned int lb=*r4300_llbit(&dev->r4300); int64_t hi=*r4300_mult_hi(&dev->r4300), lo=*r4300_mult_lo(&dev->r4300); uint32_t pc=*r4300_pc(&dev->r4300), delay_slot=dev->r4300.delay_slot, skip_jump=dev->r4300.skip_jump; memcpy(p,&lb,4); p+=4; memcpy(p,&hi,8); p+=8; memcpy(p,&lo,8); p+=8; memcpy(p,&pc,4); p+=4; memcpy(p,&delay_slot,4); p+=4; memcpy(p,&skip_jump,4); p+=4; }
     memcpy(p, dev->mi.regs, MI_REGS_COUNT*4); p += MI_REGS_COUNT*4;
     memcpy(p, dev->pi.regs, PI_REGS_COUNT*4); p += PI_REGS_COUNT*4;
     memcpy(p, dev->sp.regs, SP_REGS_COUNT*4); p += SP_REGS_COUNT*4;
@@ -53,10 +53,11 @@ KN_SYNC_READ_V3 = '''EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, ui
 '''
 
 KN_SYNC_WRITE_V3 = '''EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf, uint32_t size) {
-    struct device *dev = &g_dev; const uint8_t *p = buf; const uint32_t *header; int i, version; char queue[1024]; uint32_t pc_val;
+    struct device *dev = &g_dev; const uint8_t *p = buf; const uint32_t *header; int i, version; char queue[1024]; uint32_t pc_val, delay_slot = 0, skip_jump = 0;
     if (!buf || size < 16) return -1;
     header = (const uint32_t *)p;
-    if (header[0] == 0x4B4E5333 && header[1] == 3) version = 3;
+    if (header[0] == 0x4B4E5334 && header[1] == 4) version = 4;
+    else if (header[0] == 0x4B4E5333 && header[1] == 3) version = 3;
     else if (header[0] == 0x4B4E5331 && header[1] == 1) version = 1;
     else return -1;
     p += 16;
@@ -67,7 +68,7 @@ KN_SYNC_WRITE_V3 = '''EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf,
     { unsigned int ni; uint32_t cnt; memcpy(&ni,p,4); p+=4; memcpy(&cnt,p,4); p+=4; *r4300_cp0_next_interrupt(&dev->r4300.cp0)=ni; dev->r4300.cp0.regs[CP0_COUNT_REG]=cnt; }
     memcpy(r4300_cp1_regs(&dev->r4300.cp1), p, 32*sizeof(cp1_reg)); p += 32*sizeof(cp1_reg);
     { uint32_t f0,f31; memcpy(&f0,p,4); p+=4; memcpy(&f31,p,4); p+=4; *r4300_cp1_fcr0(&dev->r4300.cp1)=f0; *r4300_cp1_fcr31(&dev->r4300.cp1)=f31; }
-    { unsigned int lb; int64_t hi,lo; memcpy(&lb,p,4); p+=4; memcpy(&hi,p,8); p+=8; memcpy(&lo,p,8); p+=8; memcpy(&pc_val,p,4); p+=4; *r4300_llbit(&dev->r4300)=lb; *r4300_mult_hi(&dev->r4300)=hi; *r4300_mult_lo(&dev->r4300)=lo; }
+    { unsigned int lb; int64_t hi,lo; memcpy(&lb,p,4); p+=4; memcpy(&hi,p,8); p+=8; memcpy(&lo,p,8); p+=8; memcpy(&pc_val,p,4); p+=4; if (version >= 4) { memcpy(&delay_slot,p,4); p+=4; memcpy(&skip_jump,p,4); p+=4; } *r4300_llbit(&dev->r4300)=lb; *r4300_mult_hi(&dev->r4300)=hi; *r4300_mult_lo(&dev->r4300)=lo; }
     if (version >= 3) {
         memcpy(dev->mi.regs, p, MI_REGS_COUNT*4); p += MI_REGS_COUNT*4;
         memcpy(dev->pi.regs, p, PI_REGS_COUNT*4); p += PI_REGS_COUNT*4;
@@ -106,7 +107,7 @@ KN_SYNC_WRITE_V3 = '''EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf,
     }
     if (p + 2 <= buf + size) { softfloat_roundingMode = *p++; softfloat_exceptionFlags = *p++; }
     setup_channels_format(&dev->pif);
-    { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); }
+    { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); dev->r4300.delay_slot = delay_slot; dev->r4300.skip_jump = skip_jump; }
     return 0;
 }
 '''
@@ -124,4 +125,4 @@ for line in lines:
 with open(MAIN_C, 'w') as f:
     f.writelines(new_lines)
 
-print(f"Replaced kn_sync_read/write with v3 in {MAIN_C}")
+print(f"Replaced kn_sync_read/write with v4 in {MAIN_C}")

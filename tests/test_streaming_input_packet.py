@@ -95,7 +95,6 @@ def test_streaming_host_applies_controller_present_mask_like_lockstep():
     stop_window = streaming[stop_idx : stop_idx + 1200]
     assert "_resetControllerPresentMask();" in stop_window
 
-
 def test_streaming_late_join_waits_until_guest_listener_is_ready():
     streaming = STREAMING_JS.read_text()
     play = PLAY_JS.read_text()
@@ -126,22 +125,62 @@ def test_streaming_late_join_waits_until_guest_listener_is_ready():
 def test_streaming_direct_capture_is_default_with_blit_escape_hatch():
     streaming = STREAMING_JS.read_text()
 
+    assert "const STREAM_CAPTURE_FPS = 60;" in streaming
+    assert "const STREAM_CAPTURE_FRAME_MS = 1000 / STREAM_CAPTURE_FPS;" in streaming
     assert "raw = params.get('streamCapture') || params.get('captureMode')" in streaming
     assert "if (raw === 'blit') return 'blit';" in streaming
     assert "return 'direct';" in streaming
 
     assert "const startDirectCanvasCapture = (srcCanvas) => {" in streaming
-    assert "_hostStream = srcCanvas.captureStream(60)" in streaming
+    assert "_hostStream = srcCanvas.captureStream(STREAM_CAPTURE_FPS)" in streaming
     assert "const STREAM_CAPTURE_TARGET_WIDTH = 640;" in streaming
     assert "const STREAM_CAPTURE_TARGET_HEIGHT = 480;" in streaming
     assert "return Math.max(1, sh / STREAM_CAPTURE_TARGET_HEIGHT);" in streaming
     assert "return Math.max(1, sw / STREAM_CAPTURE_TARGET_WIDTH);" in streaming
     assert "const startBlitCanvasCapture = (srcCanvas, isSafari) => {" in streaming
+    assert "captureCanvas.captureStream(isSafari ? STREAM_CAPTURE_FPS : 0)" in streaming
+    assert "now - _lastCaptureAt < STREAM_CAPTURE_FRAME_MS - 0.5" in streaming
     assert "direct canvas capture failed, falling back to blit" in streaming
     assert "direct canvas capture disabled on Safari" in streaming
 
     assert "params.encodings[0].scaleResolutionDownBy = _captureScaleDownBy;" in streaming
     assert "capture=${_captureMode}" in streaming
+
+
+def test_streaming_host_normalizes_timing_after_lockstep_resume():
+    streaming = STREAMING_JS.read_text()
+
+    assert "const STREAMING_CORE_FPS_RESET_THRESHOLD = 70;" in streaming
+    assert "const _normalizeStreamingTiming = (reason = 'start') => {" in streaming
+    assert "window._kn_inStep = false;" in streaming
+    assert "window._kn_frameTime = 0;" in streaming
+    assert "window._kn_useRelativeCycles = false;" in streaming
+    assert "mod._kn_set_deterministic?.(0);" in streaming
+    assert "mod._kn_set_normalize_events?.(0);" in streaming
+    assert "mod._toggle_fastforward?.(0);" in streaming
+    assert "mod._toggle_slow_motion?.(0);" in streaming
+    assert "mod._set_ff_ratio?.(1);" in streaming
+    assert "mod._set_sm_ratio?.(1);" in streaming
+    assert "mod._set_vsync?.(1);" in streaming
+    assert "const _resetStreamingMainLoop = (reason) => {" in streaming
+    assert "mod.pauseMainLoop?.();" in streaming
+    assert "window.APISandbox?.nativeRAF" in streaming
+    assert "mod.resumeMainLoop();" in streaming
+    assert "const startHostFrameRateWatchdog = () => {" in streaming
+    assert "streaming core fps high" in streaming
+    assert "_normalizeStreamingTiming('fps-watchdog')" in streaming
+    assert "_resetStreamingMainLoop('fps-watchdog')" in streaming
+    assert "stopHostFrameRateWatchdog();" in streaming
+
+    host_idx = streaming.find("const startHost = () => {")
+    assert host_idx != -1
+    host_window = streaming[host_idx : host_idx + 2100]
+    normalize_idx = host_window.find("_normalizeStreamingTiming('host-start')")
+    frame_idx = host_window.find("const frames = gm.Module?._get_current_frame_count")
+    watchdog_idx = host_window.find("startHostFrameRateWatchdog();")
+    assert normalize_idx != -1
+    assert frame_idx > normalize_idx
+    assert watchdog_idx > frame_idx
 
 
 def test_stream_overlay_uses_game_sized_flex_slot():

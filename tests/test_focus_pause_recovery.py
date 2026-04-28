@@ -1,3 +1,5 @@
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -12,11 +14,82 @@ def test_key_tracking_releases_held_keys_on_focus_loss():
     source = SHARED_JS.read_text()
 
     assert "function clearHeldKeysOnFocusLoss()" in source
+    assert "function ensureKeyTrackingListeners()" in source
     assert "window.addEventListener('blur', _blurHandler, true)" in source
     assert "document.addEventListener('visibilitychange', _visibilityHandler, true)" in source
     assert "if (document.hidden) clearHeldKeysOnFocusLoss()" in source
     assert "window.removeEventListener('blur', _blurHandler, true)" in source
     assert "document.removeEventListener('visibilitychange', _visibilityHandler, true)" in source
+
+
+def test_key_tracking_reinstalls_listeners_when_reusing_cached_keymap():
+    source = SHARED_JS.read_text()
+
+    setup_idx = source.find("function setupKeyTracking(keymap, heldKeys) {")
+    assert setup_idx != -1
+    setup_window = source[setup_idx : setup_idx + 1800]
+
+    cached_idx = setup_window.find("if (keymap) {")
+    cached_ensure_idx = setup_window.find("ensureKeyTrackingListeners();", cached_idx)
+    cached_return_idx = setup_window.find("return keymap;", cached_idx)
+    resolved_ensure_idx = setup_window.rfind("ensureKeyTrackingListeners();")
+    resolved_return_idx = setup_window.find("return resolved;")
+
+    assert cached_idx != -1
+    assert cached_idx < cached_ensure_idx < cached_return_idx
+    assert resolved_ensure_idx != -1
+    assert resolved_ensure_idx < resolved_return_idx
+
+
+def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
+    script = textwrap.dedent(
+        r"""
+        const fs = require('fs');
+        const listeners = new Map();
+        const key = (scope, type) => `${scope}:${type}`;
+        const add = (scope, type, fn) => {
+          const k = key(scope, type);
+          if (!listeners.has(k)) listeners.set(k, new Set());
+          listeners.get(k).add(fn);
+        };
+        const remove = (scope, type, fn) => listeners.get(key(scope, type))?.delete(fn);
+        const dispatch = (scope, evt) => {
+          for (const fn of Array.from(listeners.get(key(scope, evt.type)) || [])) fn(evt);
+        };
+        global.document = {
+          hidden: false,
+          addEventListener: (type, fn) => add('document', type, fn),
+          removeEventListener: (type, fn) => remove('document', type, fn),
+          dispatchEvent: (evt) => dispatch('document', evt),
+        };
+        global.window = {
+          document,
+          KNState: { safeGet: () => null },
+          addEventListener: (type, fn) => add('window', type, fn),
+          removeEventListener: (type, fn) => remove('window', type, fn),
+        };
+        global.navigator = {};
+        eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+
+        const firstHeld = new Set();
+        const cachedKeymap = window.KNShared.setupKeyTracking({ 65: 0 }, firstHeld);
+        document.dispatchEvent({ type: 'keydown', keyCode: 65 });
+        if (!firstHeld.has(65)) throw new Error('initial keydown was not captured');
+
+        window.KNShared.teardownKeyTracking();
+        const secondHeld = new Set();
+        const reusedKeymap = window.KNShared.setupKeyTracking(cachedKeymap, secondHeld);
+        if (reusedKeymap !== cachedKeymap) throw new Error('cached keymap was not reused');
+
+        document.dispatchEvent({ type: 'keydown', keyCode: 65 });
+        if (!secondHeld.has(65)) throw new Error('reused keymap did not recapture keydown');
+        document.dispatchEvent({ type: 'keyup', keyCode: 65 });
+        if (secondHeld.has(65)) throw new Error('keyup did not release reused keymap input');
+        """
+    )
+
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_unfocused_keyboard_input_is_suppressed_and_cleared():
@@ -38,6 +111,7 @@ def test_lockstep_clears_ejs_pause_flag_on_focus_and_visibility_return():
 
     assert "const _releaseLocalFocusInput = () => {" in source
     assert "const _clearEjsPauseFlag = (reason) => {" in source
+    assert "if (emu) emu.paused = false;" in source
     assert "mod._platform_emscripten_update_window_hidden_cb?.(0)" in source
     assert "mod._toggleMainLoop?.(1)" in source
     assert "mod._cmd_unpause()" in source
@@ -101,6 +175,20 @@ def test_sync_state_chunk_timeout_falls_back_to_socket_resync():
     assert "sync chunks progress:" in source
     assert "socket sync sent to slot=" in source
     assert "source=${source}" in source
+
+
+def test_lockstep_stop_pauses_main_loop_before_restoring_raf():
+    source = LOCKSTEP_JS.read_text()
+
+    stop_idx = source.find("const stopSync = () => {")
+    assert stop_idx != -1
+    stop_window = source[stop_idx : stop_idx + 4600]
+
+    pause_idx = stop_window.find("paused EJS main loop before restoring native rAF")
+    restore_idx = stop_window.find("APISandbox.restoreAll()")
+    assert pause_idx != -1
+    assert restore_idx > pause_idx
+    assert "if (_manualMode && stopMod?.pauseMainLoop)" in stop_window
 
 
 def test_retroarch_visibility_pause_is_prevented_during_netplay():
