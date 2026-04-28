@@ -2348,6 +2348,7 @@
   let _unloadVisChangeHandler = null; // pagehide-equivalent for mobile Safari; removed in stop()
   let _focusHandler = null; // stored for removal in stopSync()
   let _blurHandler = null; // stored for removal in stopSync()
+  let _bootGestureAbort = null; // AbortController for the gesture-prompt listeners; aborted in stop()
   let _pageShowHandler = null; // stored for removal in stopSync()
   let _pageHideHandler = null; // stored for removal in stopSync()
   let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
@@ -4275,6 +4276,11 @@
         const promptEl = document.getElementById('gesture-prompt');
         if (!promptEl) return;
         promptEl.classList.remove('hidden');
+        // AbortController so stop() can drop the click+touchend listeners
+        // even when the user never gestures. Replaces the manual
+        // removeEventListener pair below — abort() cleans both atomically.
+        if (_bootGestureAbort) _bootGestureAbort.abort();
+        _bootGestureAbort = new AbortController();
         const onPromptClick = () => {
           if (_bootGestureReceived) return;
           _bootGestureReceived = true;
@@ -4363,11 +4369,13 @@
           KNShared.bootWithCheats('lockstep');
           setStatus('Loading emulator...');
           _syncLog('gesture received — emulator starting');
-          promptEl.removeEventListener('click', onPromptClick);
-          promptEl.removeEventListener('touchend', onPromptClick);
+          if (_bootGestureAbort) {
+            _bootGestureAbort.abort();
+            _bootGestureAbort = null;
+          }
         };
-        promptEl.addEventListener('click', onPromptClick);
-        promptEl.addEventListener('touchend', onPromptClick);
+        promptEl.addEventListener('click', onPromptClick, { signal: _bootGestureAbort.signal });
+        promptEl.addEventListener('touchend', onPromptClick, { signal: _bootGestureAbort.signal });
       };
 
       if (window.EJS_gameUrl) {
@@ -4386,6 +4394,11 @@
     }
 
     const waitForEmu = () => {
+      // Bail if the engine stopped before the user ever gestured —
+      // without this, the "wait for gesture" branch keeps rescheduling
+      // setTimeout(waitForEmu, 200) every 200ms after stop(). The 30s
+      // poll-timeout below only fires once _bootGestureReceived flips.
+      if (_phase === PHASE_IDLE || _phase === PHASE_STOPPED) return;
       // Wait for gesture before polling
       if (!_bootGestureReceived) {
         setTimeout(waitForEmu, 200);
@@ -10511,6 +10524,12 @@
     // Dismiss gesture prompt if still showing
     const gp = document.getElementById('gesture-prompt');
     if (gp) gp.classList.add('hidden');
+    // Drop the gesture-prompt listeners if the user never tapped (the
+    // onPromptClick path's manual removes never run otherwise).
+    if (_bootGestureAbort) {
+      _bootGestureAbort.abort();
+      _bootGestureAbort = null;
+    }
 
     // Restore original console.log
     if (_originalConsoleLog) {
