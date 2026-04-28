@@ -24,13 +24,10 @@ def test_restarts_reuse_ejs_loader_instead_of_direct_constructor():
     assert "kn-ejs-loader-complete" in loader_source
 
 
-def test_lockstep_guest_prewarms_without_starting_until_gesture():
+def test_lockstep_guest_boot_is_deferred_until_gesture():
     play_source = (REPO_ROOT / "web/static/play.js").read_text()
     lockstep_source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
 
-    assert "function warmGuestLockstepEmulator(reason = 'rom-ready')" in play_source
-    assert "warmGuestLockstepEmulator('rom-ready')" in play_source
-    assert "bootEmulator({ forceStartOnLoad: false })" in play_source
     assert "guest lockstep boot deferred until gesture" in play_source
     assert "window.KNStartEmulatorBoot = ensureEmulatorBooted" in play_source
 
@@ -38,17 +35,6 @@ def test_lockstep_guest_prewarms_without_starting_until_gesture():
     cheats_idx = lockstep_source.find("KNShared.bootWithCheats('lockstep')", boot_idx)
     assert boot_idx != -1
     assert cheats_idx > boot_idx
-
-
-def test_rom_change_discards_prewarmed_guest_emulator():
-    source = (REPO_ROOT / "web/static/play.js").read_text()
-    discard_idx = source.find("const discardHibernatedEmulatorForRomChange =")
-    assert discard_idx != -1
-    window = source[discard_idx : discard_idx + 1400]
-
-    assert "ROM changed while emulator prewarmed, destroying old core" in window
-    assert "!gameRunning && window.EJS_emulator" in window
-    assert "_prewarmedGuestRomHash = null" in source
 
 
 def test_library_rom_updates_ejs_identity_for_next_boot():
@@ -157,9 +143,9 @@ def test_same_rom_resumes_hibernated_core_and_rom_switch_discards_old_core():
     source = (REPO_ROOT / "web/static/play.js").read_text()
     helper_idx = source.find("const discardHibernatedEmulatorForRomChange = (nextHash) =>")
     assert helper_idx != -1
-    helper_window = source[helper_idx : helper_idx + 1500]
+    helper_window = source[helper_idx : helper_idx + 700]
 
-    assert "if (_hibernated)" in helper_window
+    assert "if (!_hibernated) return" in helper_window
     assert "if (nextHash && _hibernatedRomHash === nextHash) return" in helper_window
     assert "destroyEmulator()" in helper_window
     assert "discardHibernatedEmulatorForRomChange(expectedHash)" in source

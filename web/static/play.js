@@ -86,7 +86,6 @@
   let _hostRomSize = null; // host's current ROM byte size
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
-  let _prewarmedGuestRomHash = null; // ROM hash for a pre-game guest EmulatorJS warm boot
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
   let _pendingLateJoin = false; // waiting for ROM before late-join init
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
@@ -337,8 +336,6 @@
     return false;
   };
 
-  const hostRomIdentityKnown = () => !!_hostRomHash || !!_hostRomName || _hostRomSize !== null;
-
   const resetTransferForHostRomChange = () => {
     if (_romTransferState !== 'idle' || _romTransferBytesReceived > 0) {
       resetRomTransfer();
@@ -354,7 +351,6 @@
       showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
     }
     if (!hasNext) {
-      discardHibernatedEmulatorForRomChange(null);
       resetTransferForHostRomChange();
       if (socket?.connected) socket.emit('rom-ready', { ready: false });
       updateRomSharingUI();
@@ -1046,8 +1042,6 @@
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
       if (prevMode !== 'lockstep' && mode === 'lockstep' && localRomLoaded() && (isHost || !hostRomMismatch())) {
         notifyRomReady();
-      } else if (prevMode === 'lockstep' && mode !== 'lockstep' && !isHost && !gameRunning) {
-        discardHibernatedEmulatorForRomChange(null);
       }
     }
 
@@ -1351,11 +1345,6 @@
       if (modeSel) modeSel.value = mode;
       updateRomDeclarePrompt();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
-      if (mode === 'lockstep' && localRomLoaded() && !hostRomMismatch()) {
-        warmGuestLockstepEmulator('mode-select');
-      } else if (mode !== 'lockstep' && !gameRunning) {
-        discardHibernatedEmulatorForRomChange(null);
-      }
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
       if (typeof data.sender !== 'string' || !_isKnownPeerSid(data.sender)) return;
@@ -2223,7 +2212,6 @@
         KNEvent('rom_loaded', '', { bytes: _romBlob?.size || 0 });
       }
     }
-    warmGuestLockstepEmulator('rom-ready');
   };
 
   const onUnhandledEngineMessage = (remoteSid, msg) => {
@@ -2299,7 +2287,6 @@
     try {
       delete window.EJS_emulator;
     } catch (_) {}
-    _prewarmedGuestRomHash = null;
 
     // Revoke the consumed blob URL — bootEmulator() will create a fresh one
     if (_romBlobUrl) {
@@ -2309,27 +2296,15 @@
   };
 
   const discardHibernatedEmulatorForRomChange = (nextHash) => {
-    if (_hibernated) {
-      if (nextHash && _hibernatedRomHash === nextHash) return;
-      console.log(
-        '[play] ROM changed while emulator hibernated, destroying old core',
-        `${_hibernatedRomHash?.substring(0, 16) || 'unknown'} -> ${nextHash?.substring(0, 16) || 'none'}`,
-      );
-      destroyEmulator();
-      _hibernated = false;
-      _hibernatedRomHash = null;
-      return;
-    }
-
-    if (!gameRunning && window.EJS_emulator) {
-      const currentHash = _prewarmedGuestRomHash || window.EJS_gameID || _romHash;
-      if (nextHash && currentHash === nextHash) return;
-      console.log(
-        '[play] ROM changed while emulator prewarmed, destroying old core',
-        `${currentHash?.substring?.(0, 16) || 'unknown'} -> ${nextHash?.substring?.(0, 16) || 'none'}`,
-      );
-      destroyEmulator();
-    }
+    if (!_hibernated) return;
+    if (nextHash && _hibernatedRomHash === nextHash) return;
+    console.log(
+      '[play] ROM changed while emulator hibernated, destroying old core',
+      `${_hibernatedRomHash?.substring(0, 16) || 'unknown'} -> ${nextHash?.substring(0, 16) || 'none'}`,
+    );
+    destroyEmulator();
+    _hibernated = false;
+    _hibernatedRomHash = null;
   };
 
   const markSameRomEmulatorResume = (reason) => {
@@ -2388,7 +2363,6 @@
 
     _hibernated = true;
     _hibernatedRomHash = _romHash;
-    _prewarmedGuestRomHash = null;
   };
 
   const wakeEmulator = () => {
@@ -2465,7 +2439,6 @@
 
     _hibernated = false;
     _hibernatedRomHash = null;
-    _prewarmedGuestRomHash = null;
   };
 
   const resumeStreamingMainLoop = (reason) => {
@@ -2525,13 +2498,9 @@
     // path is the same on initial boot and after a ROM swap.
     window.EJS_startOnLoaded = !!(isHost || forceStartOnLoad);
     if (!isHost && !forceStartOnLoad) {
-      _prewarmedGuestRomHash = _romHash || window.KNState?.romHash || null;
       console.log('[play] bootEmulator: guest — waiting for gesture-gated start');
     } else if (!isHost) {
-      _prewarmedGuestRomHash = null;
       console.log('[play] bootEmulator: guest — starting from gesture');
-    } else {
-      _prewarmedGuestRomHash = null;
     }
 
     console.log('[play] bootEmulator: gameUrl:', _romBlobUrl.substring(0, 50));
@@ -2600,18 +2569,6 @@
     }
     bootEmulator({ forceStartOnLoad });
   };
-
-  function warmGuestLockstepEmulator(reason = 'rom-ready') {
-    if (gameRunning || isHost || isSpectator || mode !== 'lockstep') return false;
-    if (!localRomLoaded() || hostRomMismatch()) return false;
-    if (!hostRomIdentityKnown() && _romSharingDecision !== 'accepted') return false;
-    if (window.EJS_emulator || _emulatorBootInFlight) return false;
-
-    const hashLabel = (_romHash || window.KNState?.romHash || '').substring(0, 12);
-    console.log(`[play] warmGuestLockstepEmulator: ${reason}${hashLabel ? ` (${hashLabel})` : ''}`);
-    bootEmulator({ forceStartOnLoad: false });
-    return true;
-  }
 
   window.KNStartEmulatorBoot = ensureEmulatorBooted;
 
