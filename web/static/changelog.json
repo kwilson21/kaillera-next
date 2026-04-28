@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.48.5",
+    "date": "2026-04-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "tech-debt audit — 2026-04-28 (3 fixes) (#7)"
+      }
+    ]
+  },
+  {
     "version": "0.48.4",
     "date": "2026-04-28",
     "changes": [
