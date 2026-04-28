@@ -108,6 +108,8 @@
   let _cachedInfo = null;
   let _captureMode = 'none';
   let _captureScaleDownBy = 1;
+  let _lastControllerPresentMask = -1;
+  let _lastControllerPresentMaskModule = null;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
   let _unmuteAbort = null; // AbortController for the unmute-banner gesture listeners; cleared in stop()
@@ -131,6 +133,43 @@
   const setStatus = (msg) => {
     if (_config?.onStatus) _config.onStatus(msg);
     _syncLog(msg);
+  };
+
+  const _isValidPlayerSlot = (slot) => Number.isInteger(slot) && slot >= 0 && slot < 4;
+
+  const _controllerPresentMask = () => {
+    const slots = new Set();
+    const addSlot = (slot) => {
+      if (_isValidPlayerSlot(slot)) slots.add(slot);
+    };
+
+    addSlot(_playerSlot);
+    for (const info of Object.values(_knownPlayers)) addSlot(info?.slot);
+    for (const peer of Object.values(_peers)) addSlot(peer?.slot);
+
+    let mask = 0;
+    for (const slot of slots) mask |= 1 << slot;
+    return mask & 0x0f;
+  };
+
+  const _applyControllerPresentMask = (reason = 'tick') => {
+    if (_playerSlot !== 0) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_set_controller_present_mask) return;
+    const mask = _controllerPresentMask();
+    if (!mask) return;
+    if (mod === _lastControllerPresentMaskModule && mask === _lastControllerPresentMask) return;
+    _lastControllerPresentMaskModule = mod;
+    _lastControllerPresentMask = mask;
+    mod._kn_set_controller_present_mask(mask);
+    _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}`);
+  };
+
+  const _resetControllerPresentMask = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (mod?._kn_set_controller_present_mask) mod._kn_set_controller_present_mask(0x0f);
+    _lastControllerPresentMask = -1;
+    _lastControllerPresentMaskModule = null;
   };
 
   // ── users-updated (star topology) ──────────────────────────────────────
@@ -160,17 +199,27 @@
         }
         _syncLog(`new peer: ${p.socketId} slot=${p.slot} hostStream=${!!_hostStream}`);
         createPeer(p.socketId, p.slot, true);
-        sendOffer(p.socketId);
+        if (_gameRunning && _hostStream) {
+          _syncLog(`new peer: waiting for late-join ready before offer (${p.socketId})`);
+        } else {
+          sendOffer(p.socketId);
+        }
       }
       for (const s of Object.values(spectators)) {
         if (s.socketId === socket.id) continue;
         if (_peers[s.socketId]) continue;
         _syncLog(`new spectator peer: ${s.socketId}`);
         createPeer(s.socketId, null, true);
-        sendOffer(s.socketId);
+        if (_gameRunning && _hostStream) {
+          _syncLog(`new spectator peer: waiting for late-join ready before offer (${s.socketId})`);
+        } else {
+          sendOffer(s.socketId);
+        }
       }
     }
     // Guests/spectators: wait for host to initiate (don't create connections)
+
+    _applyControllerPresentMask('users-updated');
 
     // Notify controller
     if (_config?.onPlayersChanged) {
@@ -420,6 +469,35 @@
     } catch (err) {
       _syncLog(`WebRTC signal error: ${err.message || err}`);
     }
+  };
+
+  const onDataMessage = (data) => {
+    if (!data || data.type !== 'streaming-late-join-ready') return;
+    if (_playerSlot !== 0) return;
+    const remoteSid = typeof data.senderSid === 'string' ? data.senderSid : '';
+    if (!remoteSid || remoteSid === socket.id) return;
+
+    const known = _knownPlayers[remoteSid];
+    if (!known && data.isSpectator !== true) return;
+    const remoteSlot = known ? known.slot : null;
+    let peer = _peers[remoteSid];
+    if (peer?.dc?.readyState === 'open' || peer?.pc?.connectionState === 'connected') return;
+
+    if (!peer) {
+      peer = createPeer(remoteSid, remoteSlot, true);
+    } else if (remoteSlot !== null && remoteSlot !== undefined) {
+      peer.slot = remoteSlot;
+    }
+
+    const offer = peer.pc.localDescription;
+    if (offer?.type === 'offer') {
+      _syncLog(`late join ready: resending pending offer for ${remoteSid} slot=${remoteSlot}`);
+      socket.emit('webrtc-signal', { target: remoteSid, offer });
+      return;
+    }
+
+    _syncLog(`late join ready: sending offer for ${remoteSid} slot=${remoteSlot}`);
+    sendOffer(remoteSid);
   };
 
   // ── Data channel ───────────────────────────────────────────────────────
@@ -689,6 +767,7 @@
         return;
       }
       _syncLog(`emulator running (${frames} frames) — capturing stream`);
+      _applyControllerPresentMask('emulator-ready');
 
       const srcCanvas = document.querySelector('#game canvas');
       if (!srcCanvas) {
@@ -1157,6 +1236,7 @@
     // Register socket listeners
     socket.on('users-updated', onUsersUpdated);
     socket.on('webrtc-signal', onWebRTCSignal);
+    socket.on('data-message', onDataMessage);
 
     if (!_isSpectator && _playerSlot !== 0) {
       setupKeyTracking();
@@ -1170,6 +1250,13 @@
     // Process current peers immediately
     if (config.initialPlayers) {
       onUsersUpdated(config.initialPlayers);
+    }
+    if (config.lateJoin && (_playerSlot !== 0 || _isSpectator)) {
+      socket.emit('data-message', {
+        type: 'streaming-late-join-ready',
+        senderSid: socket.id,
+        isSpectator: _isSpectator,
+      });
     }
     // startHost() / startGuestInputLoop() triggered from ch.onopen
 
@@ -1210,6 +1297,7 @@
       _guestInputAbort.abort();
       _guestInputAbort = null;
     }
+    _resetControllerPresentMask();
 
     // Close all peer connections
     for (const sid of Object.keys(_peers)) {
@@ -1272,6 +1360,7 @@
     if (socket) {
       socket.off('users-updated', onUsersUpdated);
       socket.off('webrtc-signal', onWebRTCSignal);
+      socket.off('data-message', onDataMessage);
     }
 
     // Clean up virtual gamepad

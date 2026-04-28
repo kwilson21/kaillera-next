@@ -706,6 +706,10 @@
           mySlot = 0;
           KNEvent('room_created', '', { mode });
           sendDeviceType();
+          if (mode === 'lockstep' || mode === 'streaming') {
+            socket.emit('data-message', { type: 'mode-select', mode });
+            socket.emit('set-mode', { mode });
+          }
           // If ROM was already loaded from cache, notify server immediately
           if (_romBlob || _romBlobUrl) notifyRomReady();
           showOverlay();
@@ -844,7 +848,6 @@
                 `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
               );
               gameRunning = true;
-              _lateJoin = !isSpectator;
               // Set matchId for late joiners — game-started event doesn't fire
               // for them, so session logging would silently fail without this.
               // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
@@ -854,6 +857,7 @@
               // since the game is already running. Try REST then join callback.
               if (roomData.mode) mode = roomData.mode;
               else if (joinData?.mode) mode = joinData.mode;
+              _lateJoin = !isSpectator || mode === 'streaming';
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;

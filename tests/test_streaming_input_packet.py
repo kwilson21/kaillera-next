@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 STREAMING_JS = ROOT / "web/static/netplay-streaming.js"
 SHARED_JS = ROOT / "web/static/shared.js"
+PLAY_JS = ROOT / "web/static/play.js"
 PLAY_CSS = ROOT / "web/static/play.css"
 VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
 
@@ -62,6 +63,64 @@ def test_streaming_host_applies_local_input_immediately_too():
     assert "document.addEventListener('touchstart', queueImmediateHostInput" in loop_window
     assert "window.addEventListener('gamepadconnected', queueImmediateHostInput" in loop_window
     assert "_hostInputAbort.abort()" in streaming
+
+
+def test_streaming_host_applies_controller_present_mask_like_lockstep():
+    streaming = STREAMING_JS.read_text()
+
+    assert "let _lastControllerPresentMask = -1;" in streaming
+    assert "let _lastControllerPresentMaskModule = null;" in streaming
+    assert "const _controllerPresentMask = () => {" in streaming
+    assert "for (const info of Object.values(_knownPlayers)) addSlot(info?.slot);" in streaming
+    assert "for (const peer of Object.values(_peers)) addSlot(peer?.slot);" in streaming
+    assert "const _applyControllerPresentMask = (reason = 'tick') => {" in streaming
+    assert "if (_playerSlot !== 0) return;" in streaming
+    assert "mod._kn_set_controller_present_mask(mask);" in streaming
+    assert "`controller present mask (${reason}): 0x${mask.toString(16)}`" in streaming
+    assert "const _resetControllerPresentMask = () => {" in streaming
+    assert "mod._kn_set_controller_present_mask(0x0f)" in streaming
+
+    users_idx = streaming.find("const onUsersUpdated = (data) => {")
+    assert users_idx != -1
+    users_window = streaming[users_idx : users_idx + 2200]
+    assert "_applyControllerPresentMask('users-updated');" in users_window
+
+    host_idx = streaming.find("const startHost = () => {")
+    assert host_idx != -1
+    host_window = streaming[host_idx : host_idx + 1400]
+    assert "_applyControllerPresentMask('emulator-ready');" in host_window
+
+    stop_idx = streaming.find("const stop = () => {")
+    assert stop_idx != -1
+    stop_window = streaming[stop_idx : stop_idx + 1200]
+    assert "_resetControllerPresentMask();" in stop_window
+
+
+def test_streaming_late_join_waits_until_guest_listener_is_ready():
+    streaming = STREAMING_JS.read_text()
+    play = PLAY_JS.read_text()
+
+    assert "socket.on('data-message', onDataMessage);" in streaming
+    assert "socket.off('data-message', onDataMessage);" in streaming
+    assert "data.type !== 'streaming-late-join-ready'" in streaming
+    assert "type: 'streaming-late-join-ready'" in streaming
+    assert "senderSid: socket.id" in streaming
+    assert "config.lateJoin && (_playerSlot !== 0 || _isSpectator)" in streaming
+
+    users_idx = streaming.find("const onUsersUpdated = (data) => {")
+    assert users_idx != -1
+    users_window = streaming[users_idx : users_idx + 2800]
+    assert "waiting for late-join ready before offer" in users_window
+    assert "if (_gameRunning && _hostStream)" in users_window
+
+    data_idx = streaming.find("const onDataMessage = (data) => {")
+    assert data_idx != -1
+    data_window = streaming[data_idx : data_idx + 1800]
+    assert "const known = _knownPlayers[remoteSid];" in data_window
+    assert "createPeer(remoteSid, remoteSlot, true)" in data_window
+    assert "sendOffer(remoteSid);" in data_window
+    assert "resending pending offer" in data_window
+    assert "_lateJoin = !isSpectator || mode === 'streaming';" in play
 
 
 def test_streaming_direct_capture_is_default_with_blit_escape_hatch():
