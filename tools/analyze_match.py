@@ -9,7 +9,7 @@ Sections:
   1. Match metrics (precomputed summary)
   2. Rollback summary (per-peer stats from session meta)
   3. Event counts (log entry types by peer)
-  4. Desync timeline (SSIM, hash agreement, mismatch timing, diverging regions)
+  4. Desync timeline (vision verdicts, hash agreement, mismatch timing, diverging regions)
   5. Performance timeline (frame timing, serialize skip rate, replay stats)
   6. Network health (ack lag trends, input lateness, DC events)
   7. Pacing analysis (throttle frequency, frame advantage distribution)
@@ -71,17 +71,20 @@ def _fetch_match_metrics(base: str, key: str, match_id: str) -> dict | None:
         return None
 
 
-_ssim_cache: dict[str, list[dict]] = {}
+_desync_events_cache: dict[str, list[dict]] = {}
 
-def _fetch_ssim(base: str, key: str, match_id: str) -> list[dict]:
-    """Fetch SSIM comparison data from the screenshots endpoint. Cached."""
-    if match_id in _ssim_cache:
-        return _ssim_cache[match_id]
+
+def _fetch_desync_events(base: str, key: str, match_id: str) -> list[dict]:
+    """Fetch Claude vision desync verdicts for a match. Cached."""
+    if match_id in _desync_events_cache:
+        return _desync_events_cache[match_id]
     import time
-    for attempt in range(3):
+
+    for _attempt in range(3):
         try:
             r = requests.get(
-                f"{base}/admin/api/screenshots/{match_id}/comparisons",
+                f"{base}/admin/api/desync-events",
+                params={"match_id": match_id},
                 headers={"X-Admin-Key": key},
                 verify=False,
                 timeout=10,
@@ -90,16 +93,16 @@ def _fetch_ssim(base: str, key: str, match_id: str) -> list[dict]:
                 time.sleep(1)
                 continue
             if r.status_code != 200:
-                _ssim_cache[match_id] = []
+                _desync_events_cache[match_id] = []
                 return []
             data = r.json()
-            result = data.get("comparisons", []) if isinstance(data, dict) else data
-            _ssim_cache[match_id] = result
+            result = data.get("events", []) if isinstance(data, dict) else []
+            _desync_events_cache[match_id] = result
             return result
         except (requests.RequestException, ValueError):
-            _ssim_cache[match_id] = []
+            _desync_events_cache[match_id] = []
             return []
-    _ssim_cache[match_id] = []
+    _desync_events_cache[match_id] = []
     return []
 
 
@@ -380,44 +383,47 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
         print("(missing msg/f columns)")
         return
 
-    # 4a. SSIM progression (from screenshots API)
-    ssim_data = _fetch_ssim(base, key, match_id)
+    # 4a. Vision verdicts (Claude vision verdicts on screenshot pairs).
+    events = _fetch_desync_events(base, key, match_id)
     first_visual_desync_frame: int | None = None
-    if ssim_data:
-        print("  SSIM progression (visual similarity, 1.0 = identical):")
+    if events:
+        print("  Vision verdicts (Claude on screenshot pairs):")
         desync_start = None
-        for s in ssim_data:
-            frame = s.get("frame", "?")
-            ssim = s.get("ssim", 0)
-            is_desync = s.get("is_desync", 0)
-            marker = " << DESYNC" if is_desync else ""
-            if is_desync and desync_start is None:
+        for e in events:
+            frame = e.get("frame", "?")
+            field = e.get("field", "?")
+            slot = e.get("slot")
+            equal = e.get("vision_equal")
+            conf = e.get("vision_confidence") or "?"
+            verdict = "NEQ" if equal is False else "eq" if equal is True else "??"
+            marker = " << DESYNC" if equal is False else ""
+            if equal is False and desync_start is None:
                 desync_start = frame
                 try:
                     first_visual_desync_frame = int(frame)
                 except (ValueError, TypeError):
                     pass
-            # Only show transitions and boundaries, not every entry
-            print(f"    f={frame:>6}  ssim={ssim:.4f}{marker}")
-        total_desync = sum(1 for s in ssim_data if s.get("is_desync"))
-        print(f"  Summary: {total_desync}/{len(ssim_data)} frames desynced", end="")
+            slot_label = f"P{slot}" if slot is not None else "g"
+            print(f"    f={frame:>6}  {field}[{slot_label}] vision={verdict}/{conf}{marker}")
+        neq_count = sum(1 for e in events if e.get("vision_equal") is False)
+        print(f"  Summary: {neq_count}/{len(events)} verdicts NEQ", end="")
         if desync_start is not None:
-            print(f", first visual desync at f={desync_start}")
+            print(f", first NEQ at f={desync_start}")
         else:
             print()
     else:
-        print("  (no SSIM data — screenshots not captured or match not found)")
+        print("  (no vision verdicts — KNDesync detector did not flag, or vision pipeline disabled)")
 
     # 4b. Mismatch timing (from hash comparison events)
     print()
     mismatches = df.filter(pl.col("msg").str.contains("MISMATCH"))
     if mismatches.height == 0:
         print("  Hash comparison: no MISMATCH events — hashes agreed across all peers.")
-        # 4b-bis. Visual-only desync detection. SSIM drops while gameplay/
-        # RDRAM hashes agree indicates a RENDERING divergence (GPU/GL
-        # path, screenshot capture timing, cursor offset, etc.) rather
-        # than a logical desync. These are a distinct bug class from the
-        # network-state deadlocks MF1-MF6 target. Per
+        # 4b-bis. Visual-only desync detection. Vision flags NEQ while
+        # gameplay/RDRAM hashes agree indicates a RENDERING divergence
+        # (GPU/GL path, screenshot capture timing, cursor offset, etc.)
+        # rather than a logical desync. These are a distinct bug class
+        # from the network-state deadlocks MF1-MF6 target. Per
         # `feedback_visual_over_rdram.md` the visual output is still
         # ground truth — a visual-only desync still needs fixing, but
         # the root cause is in rendering, not state sync.
@@ -432,7 +438,7 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
                 else "late-match"
             )
             print(
-                f"  !! VISUAL-ONLY DESYNC detected: SSIM divergence at f={first_visual_desync_frame} "
+                f"  !! VISUAL-ONLY DESYNC detected: vision NEQ at f={first_visual_desync_frame} "
                 f"({phase} phase) while gameplay hashes agree."
             )
             print("     This is a RENDERING divergence, not a state-sync bug.")
@@ -1841,8 +1847,9 @@ def query_gp_dump_comparison(jsonl_dir: str) -> None:
 
 
 def query_desync_summary(jsonl_dir: str, base: str = "", key: str = "", match_id: str = "") -> None:
-    """Quick-glance desync diagnosis: screen, stage, character, CSS state, SSIM per slot."""
-    _print_section("11c. DESYNC SUMMARY (screen, stage, character, CSS, SSIM)")
+    """Quick-glance desync diagnosis: screen, stage, character, CSS state,
+    vision verdicts per slot."""
+    _print_section("11c. DESYNC SUMMARY (screen, stage, character, CSS, vision)")
     import glob as _glob
 
     # Extract key state per slot over time
@@ -1855,7 +1862,6 @@ def query_desync_summary(jsonl_dir: str, base: str = "", key: str = "", match_id
                 f.seek(0)
                 gp = []
                 css = []
-                ssim_entries = []
                 for line in f:
                     d = json.loads(line)
                     msg = d.get("msg", "")
@@ -1864,9 +1870,7 @@ def query_desync_summary(jsonl_dir: str, base: str = "", key: str = "", match_id
                         gp.append((fr, msg))
                     elif msg.startswith("GP-CSS"):
                         css.append((fr, msg))
-                    elif "SSIM" in msg or "visual_desync" in msg.lower():
-                        ssim_entries.append((fr, msg))
-                slot_data[slot] = {"gp": gp, "css": css, "ssim": ssim_entries}
+                slot_data[slot] = {"gp": gp, "css": css}
         except Exception:
             continue
 
@@ -2050,29 +2054,25 @@ def query_desync_summary(jsonl_dir: str, base: str = "", key: str = "", match_id
             else:
                 print(f"\n  CSS state: IDENTICAL across {len(css_common)} common frames")
 
-        # SSIM visual comparison
+        # Vision verdicts (Claude on screenshot pairs)
         if base and key and match_id:
-            ssim_data = _fetch_ssim(base, key, match_id)
-            if ssim_data:
-                print(f"\n  ── SSIM Visual Comparison ({len(ssim_data)} frames) ──")
-                desynced = [s for s in ssim_data if s.get("is_desync")]
-                synced = [s for s in ssim_data if not s.get("is_desync")]
-                print(f"  Synced: {len(synced)}/{len(ssim_data)}  Desynced: {len(desynced)}/{len(ssim_data)}")
-                if desynced:
-                    first = desynced[0]
-                    worst = min(desynced, key=lambda s: s.get("ssim", 1))
-                    print(f"  First visual desync: f={first.get('frame')} ssim={first.get('ssim', 0):.4f}")
-                    print(f"  Worst visual desync: f={worst.get('frame')} ssim={worst.get('ssim', 0):.4f}")
-                    print(f"  SSIM timeline (desynced frames):")
-                    for s in desynced[:20]:
-                        print(f"    f={s.get('frame', '?'):>6}  ssim={s.get('ssim', 0):.4f}")
-                    if len(desynced) > 20:
-                        print(f"    ... +{len(desynced) - 20} more")
-                if synced:
-                    avg_ssim = sum(s.get("ssim", 0) for s in synced) / len(synced)
-                    print(f"  Average SSIM (synced frames): {avg_ssim:.4f}")
+            events = _fetch_desync_events(base, key, match_id)
+            if events:
+                neq = [e for e in events if e.get("vision_equal") is False]
+                eq = [e for e in events if e.get("vision_equal") is True]
+                unk = [e for e in events if e.get("vision_equal") is None]
+                print(f"\n  ── Vision Verdicts ({len(events)} events) ──")
+                print(f"  NEQ: {len(neq)}  eq: {len(eq)}  unknown: {len(unk)}")
+                if neq:
+                    first = neq[0]
+                    print(f"  First NEQ: f={first.get('frame')} field={first.get('field')} conf={first.get('vision_confidence', '?')}")
+                    print(f"  NEQ timeline:")
+                    for e in neq[:20]:
+                        print(f"    f={e.get('frame', '?'):>6}  {e.get('field', '?')}/{e.get('vision_confidence', '?')}")
+                    if len(neq) > 20:
+                        print(f"    ... +{len(neq) - 20} more")
             else:
-                print(f"\n  (no SSIM data available)")
+                print("\n  (no vision verdicts available)")
 
 
 def query_full_state_comparison(jsonl_dir: str) -> None:

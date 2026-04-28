@@ -88,10 +88,10 @@ _FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
 async def cleanup_old_data() -> None:
     """Background task: delete session logs, client events, and visual desync
-    artifacts (screenshots, SSIM comparisons, vision verdicts) older than the
-    retention period. Screenshots are the bulk consumer — at ~5KB/frame and
-    SCREENSHOT_INTERVAL=300 (~5s) per player, an unbounded table grows fast
-    once captures are default-on in prod."""
+    artifacts (screenshots, vision verdicts) older than the retention period.
+    Screenshots are the bulk consumer — at ~5KB/frame and SCREENSHOT_INTERVAL=300
+    (~5s) per player, an unbounded table grows fast once captures are default-on
+    in prod."""
     while True:
         await asyncio.sleep(86400)  # daily
         try:
@@ -101,7 +101,6 @@ async def cleanup_old_data() -> None:
                 "session_logs",
                 "client_events",
                 "screenshots",
-                "screenshot_comparisons",
                 "desync_events",
             ):
                 await db.execute_write(
@@ -1003,12 +1002,12 @@ def create_app(lifespan=None) -> FastAPI:
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry["summary"] = json.loads(entry["summary"])
 
-        # Enrich with visual desync counts from screenshot_comparisons
+        # Enrich with vision-flagged desync counts (NEQ verdicts).
         match_ids = {e["match_id"] for e in entries if e.get("match_id")}
         desync_counts: dict[str, int] = {}
         for mid in match_ids:
             rows = await db.query(
-                "SELECT COUNT(*) as cnt FROM screenshot_comparisons WHERE match_id = ? AND is_desync = 1",
+                "SELECT COUNT(*) as cnt FROM desync_events WHERE match_id = ? AND vision_equal = 0",
                 (mid,),
             )
             if rows and rows[0]["cnt"]:
@@ -1061,19 +1060,20 @@ def create_app(lifespan=None) -> FastAPI:
         else:
             entry["client_events"] = []
 
-        # Bundle SSIM comparisons for this match
+        # Bundle vision desync verdicts for this match.
         if match_id:
-            ssim_rows = await db.query(
-                """SELECT frame, ssim, is_desync, created_at
-                   FROM screenshot_comparisons
+            entry["desync_events"] = await db.query(
+                """SELECT id, frame, field, slot, trigger,
+                          vision_equal, vision_confidence, vision_verdict_json,
+                          replay_meta_json, created_at
+                   FROM desync_events
                    WHERE match_id = ?
                    ORDER BY frame ASC
                    LIMIT 200""",
                 (match_id,),
             )
-            entry["ssim"] = ssim_rows
         else:
-            entry["ssim"] = []
+            entry["desync_events"] = []
 
         return entry
 
@@ -1458,20 +1458,6 @@ def create_app(lifespan=None) -> FastAPI:
         """List all screenshots for a given match (metadata only, no blobs)."""
         screenshots = await db.get_screenshots(match_id)
         return {"matchId": match_id, "screenshots": screenshots}
-
-    @app.get("/admin/api/screenshots/{match_id}/comparisons")
-    async def admin_screenshot_comparisons(
-        request: Request, match_id: str, _auth: None = Depends(_require_admin)
-    ) -> dict:
-        """List SSIM comparison results for a match."""
-        comparisons = await db.get_screenshot_comparisons(match_id)
-        desync_count = sum(1 for c in comparisons if c["is_desync"])
-        return {
-            "matchId": match_id,
-            "comparisons": comparisons,
-            "desyncCount": desync_count,
-            "totalComparisons": len(comparisons),
-        }
 
     @app.get("/admin/api/desync-events")
     async def admin_desync_events(request: Request, _auth: None = Depends(_require_admin)) -> dict:
