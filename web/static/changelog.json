@@ -1,5 +1,43 @@
 [
   {
+    "version": "0.48.2",
+    "date": "2026-04-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "stack lobby join controls on mobile"
+      },
+      {
+        "type": "fix",
+        "message": "keep play feedback prompt clear of setup"
+      },
+      {
+        "type": "fix",
+        "message": "make admin filters responsive"
+      },
+      {
+        "type": "fix",
+        "message": "brighten muted content text"
+      },
+      {
+        "type": "fix",
+        "message": "collapse advanced overlay controls"
+      },
+      {
+        "type": "fix",
+        "message": "simplify overlay controller controls"
+      },
+      {
+        "type": "fix",
+        "message": "tighten mobile overlay spacing"
+      },
+      {
+        "type": "fix",
+        "message": "polish play controls and overlays"
+      }
+    ]
+  },
+  {
     "version": "0.48.1",
     "date": "2026-04-28",
     "changes": [
