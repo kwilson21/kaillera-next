@@ -4019,6 +4019,35 @@
 
   // ── UI: More (overflow) Dropdown ──────────────────────────────────────
 
+  const isPopoverOpen = (el) => {
+    try {
+      return !!el?.matches?.(':popover-open');
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const showMoreDropdownTopLayer = (dd) => {
+    if (typeof dd?.showPopover !== 'function') return false;
+    dd.setAttribute('popover', 'manual');
+    try {
+      if (!isPopoverOpen(dd)) dd.showPopover();
+      return true;
+    } catch (_) {
+      dd.removeAttribute('popover');
+      return false;
+    }
+  };
+
+  const hideMoreDropdownTopLayer = (dd) => {
+    try {
+      if (typeof dd?.hidePopover === 'function' && isPopoverOpen(dd)) dd.hidePopover();
+    } catch (_) {
+      // Best-effort only; the z-index fallback still covers older engines.
+    }
+    dd?.removeAttribute?.('popover');
+  };
+
   const positionMoreDropdown = (dd, btn) => {
     if (!dd || !btn) return;
     const rect = btn.getBoundingClientRect();
@@ -4037,7 +4066,7 @@
     const dd = document.getElementById('more-dropdown');
     const btn = document.getElementById('toolbar-more');
     if (!dd) return;
-    const isOpen = !dd.classList.contains('hidden');
+    const isOpen = !dd.classList.contains('hidden') || isPopoverOpen(dd);
     if (isOpen) {
       closeMoreDropdown();
     } else {
@@ -4046,7 +4075,13 @@
         dd.classList.add('floating');
       }
       dd.classList.remove('hidden');
+      const topLayer = showMoreDropdownTopLayer(dd);
       positionMoreDropdown(dd, btn);
+      if (topLayer) {
+        requestAnimationFrame(() => {
+          if (!dd.classList.contains('hidden')) positionMoreDropdown(dd, btn);
+        });
+      }
       if (btn) {
         btn.classList.add('active');
         btn.setAttribute('aria-expanded', 'true');
@@ -4058,6 +4093,7 @@
     const dd = document.getElementById('more-dropdown');
     const btn = document.getElementById('toolbar-more');
     if (dd) {
+      hideMoreDropdownTopLayer(dd);
       dd.classList.add('hidden');
       dd.classList.remove('floating');
       dd.removeAttribute('style');
@@ -4069,6 +4105,8 @@
       btn.setAttribute('aria-expanded', 'false');
     }
   };
+
+  window.KNCloseMoreDropdown = closeMoreDropdown;
 
   // ── Gamepad Detection ─────────────────────────────────────────────────
 

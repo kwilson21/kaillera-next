@@ -409,7 +409,8 @@
     _toolbarItem.textContent = 'Feedback';
     _toolbarItem.style.display = 'none';
     _toolbarItem.addEventListener('click', () => {
-      dropdown.classList.add('hidden');
+      if (typeof window.KNCloseMoreDropdown === 'function') window.KNCloseMoreDropdown();
+      else dropdown.classList.add('hidden');
       _openModal();
     });
 

@@ -658,8 +658,15 @@ button:hover {
   position: fixed;
   right: auto;
   bottom: auto;
-  margin-bottom: 0;
-  z-index: 9999;
+  margin: 0;
+  z-index: 2147483647;
+}
+.more-dropdown[popover] {
+  inset: auto;
+  color: #eee;
+}
+.more-dropdown:popover-open {
+  display: flex;
 }
 .more-dropdown.hidden {
   display: none;
