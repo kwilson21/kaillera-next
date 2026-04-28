@@ -1,5 +1,31 @@
 [
   {
+    "version": "0.48.0",
+    "date": "2026-04-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "switch admin panel to vision verdicts; default-on screenshots + detector mode C"
+      },
+      {
+        "type": "fix",
+        "message": "stabilize guest emulator boot"
+      },
+      {
+        "type": "fix",
+        "message": "stabilize smash remix boot after rom switch"
+      },
+      {
+        "type": "fix",
+        "message": "reduce input latency and preserve direct sizing"
+      },
+      {
+        "type": "fix",
+        "message": "stabilize late joins and controller ports"
+      }
+    ]
+  },
+  {
     "version": "0.47.10",
     "date": "2026-04-27",
     "changes": [
