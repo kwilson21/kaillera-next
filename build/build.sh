@@ -40,16 +40,26 @@ echo "==> Build parallelism: ${KN_BUILD_JOBS} job(s)"
 # ============================================================
 # Stage 1: Clone repos
 # ============================================================
+# Pinned SHAs — bump in lockstep with web/static/VENDORED.md.
+# Floating HEAD here was non-reproducible; pinning protects future builds.
+MUPEN_REPO="https://github.com/EmulatorJS/mupen64plus-libretro-nx.git"
+MUPEN_BRANCH="develop"
+MUPEN_SHA="4a3925d2861f17719586dffb178c1dd5339d3a68"
+
+RETROARCH_REPO="https://github.com/EmulatorJS/RetroArch.git"
+RETROARCH_BRANCH="next"
+RETROARCH_SHA="ed3265745eccec99b48f99e2a2ffc8a6a93823bb"
+
 if [ ! -d "${SRC_DIR}/mupen64plus-libretro-nx" ]; then
-    echo "==> Cloning mupen64plus-libretro-nx (EmulatorJS fork)..."
-    git clone --depth 1 https://github.com/EmulatorJS/mupen64plus-libretro-nx.git \
-        "${SRC_DIR}/mupen64plus-libretro-nx"
+    echo "==> Cloning mupen64plus-libretro-nx @ ${MUPEN_SHA} (EmulatorJS fork)..."
+    git clone -b "${MUPEN_BRANCH}" "${MUPEN_REPO}" "${SRC_DIR}/mupen64plus-libretro-nx"
+    git -C "${SRC_DIR}/mupen64plus-libretro-nx" checkout "${MUPEN_SHA}"
 fi
 
 if [ ! -d "${SRC_DIR}/RetroArch" ]; then
-    echo "==> Cloning RetroArch (EmulatorJS fork, branch next)..."
-    git clone --depth 1 -b next https://github.com/EmulatorJS/RetroArch.git \
-        "${SRC_DIR}/RetroArch"
+    echo "==> Cloning RetroArch @ ${RETROARCH_SHA} (EmulatorJS fork, branch ${RETROARCH_BRANCH})..."
+    git clone -b "${RETROARCH_BRANCH}" "${RETROARCH_REPO}" "${SRC_DIR}/RetroArch"
+    git -C "${SRC_DIR}/RetroArch" checkout "${RETROARCH_SHA}"
 fi
 
 echo "==> Source repos ready"
