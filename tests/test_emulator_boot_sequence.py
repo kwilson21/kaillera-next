@@ -106,6 +106,24 @@ def test_smash_remix_startup_restores_full_hidden_state_sidecar():
     assert "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot" in build_source
 
 
+def test_smash_remix_jsc_guest_skips_remote_title_kn_sync_restore():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+
+    assert "let _guestStateUseLocalRemixTitle = false" in source
+    assert "const _isWebKitJscRuntime = () => {" in source
+    assert "Smash Remix initial sync: JSC guest aligning local title before lockstep" in source
+    assert "await waitForSmashTitleState(gm)" in source
+    assert "_guestStateUseLocalRemixTitle = true" in source
+    assert "JSC guest kept local Remix title state; skipped remote kn-sync restore" in source
+
+    load_idx = source.find("const useLocalRemixTitleState =")
+    skip_idx = source.find("JSC guest kept local Remix title state", load_idx)
+    remote_idx = source.find("loadKnSyncStateAtStartBoundary", load_idx)
+    assert load_idx != -1
+    assert skip_idx != -1
+    assert remote_idx > skip_idx
+
+
 def test_controller_mask_reapplies_when_emulator_module_changes():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
     apply_idx = source.find("const _applyControllerPresentMask =")

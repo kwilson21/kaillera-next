@@ -1271,6 +1271,7 @@
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
+  let _guestStateUseLocalRemixTitle = false; // JSC/iOS: avoid remote kn-sync restore on Remix title
   let _frameNum = 0; // current logical frame number
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
   let _localInputs = {}; // frame -> input object
@@ -1404,6 +1405,12 @@
   ]);
   const _isSmashRemix = () =>
     _config?.gameId === 'smash-remix' || KNState?.gameId === 'smash-remix' || _SMASH_REMIX_HASHES.has(_config?.romHash);
+
+  const _isWebKitJscRuntime = () => {
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPad|iPod/.test(ua)) return true;
+    return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
+  };
 
   const _isSameRomEmulatorResume = () => {
     const ctx = window.KNEmulatorResumeContext;
@@ -4841,6 +4848,8 @@
     const isKnSyncInitialState = _guestStateKind === 'kn-sync';
     _lockstepStartStateKind = isKnSyncInitialState ? 'kn-sync' : 'savestate';
     const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally && _playerSlot === 0;
+    const useLocalRemixTitleState =
+      isKnSyncInitialState && _isSmashRemix() && _guestStateUseLocalRemixTitle && _playerSlot !== 0;
     if (!_isSmashRemix() && !isKnSyncInitialState && readyMod?._retro_reset) {
       readyMod._retro_reset();
       _syncLog('core soft-reset before state load');
@@ -4855,6 +4864,9 @@
       if (hasLocalKnSyncCapture) {
         recaptureManualRunner(readyMod, 'initial-sync-local-capture');
         _syncLog('initial-sync-load: host kept locally captured kn-sync state');
+      } else if (useLocalRemixTitleState) {
+        recaptureManualRunner(readyMod, 'initial-sync-local-remix-title');
+        _syncLog('initial-sync-load: JSC guest kept local Remix title state; skipped remote kn-sync restore');
       } else {
         if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
           _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
@@ -4875,7 +4887,11 @@
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
-    _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
+    _guestStateUseLocalRemixTitle = false;
+    _syncLog(
+      `${useLocalRemixTitleState ? 'state kept' : 'state loaded'} ` +
+        `(manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`,
+    );
 
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
@@ -5204,7 +5220,35 @@
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
       _guestStateCapturedLocally = false;
+      _guestStateUseLocalRemixTitle = false;
       _syncLog(`initial state decompressed (${_guestStateKind}, ${bytes.length} bytes)`);
+
+      if (_isSmashRemix() && _guestStateKind === 'kn-sync' && _playerSlot !== 0 && _isWebKitJscRuntime()) {
+        const gm = window.EJS_emulator?.gameManager;
+        if (gm?.Module) {
+          setStatus('Aligning title screen...');
+          _syncLog('Smash Remix initial sync: JSC guest aligning local title before lockstep');
+          await waitForSmashTitleState(gm);
+          const localScene = _readSceneCurr();
+          const localStatus = _readGameStatus();
+          if (localScene === 1) {
+            _guestStateUseLocalRemixTitle = true;
+            _guestStateHiddenWords = null;
+            _guestStateAudioFifo = null;
+            _syncLog(
+              `Smash Remix initial sync: JSC guest will skip remote kn-sync restore ` +
+                `after local title scene=${localScene} gameStatus=${localStatus}`,
+            );
+          } else {
+            _syncLog(
+              `Smash Remix initial sync: JSC local title not ready ` +
+                `scene=${localScene} gameStatus=${localStatus}; using remote kn-sync restore`,
+            );
+          }
+        } else {
+          _syncLog('Smash Remix initial sync: JSC local title alignment skipped — emulator unavailable');
+        }
+      }
 
       // Cache locally for next time
       const romHash = _config?.romHash;
@@ -10597,6 +10641,7 @@
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
+    _guestStateUseLocalRemixTitle = false;
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
