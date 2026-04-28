@@ -1372,7 +1372,7 @@
   const INITIAL_SMASH_TITLE_TIMEOUT_MS = 60000;
   const INITIAL_SMASH_TITLE_SETTLE_FRAMES = 30;
   const INITIAL_SMASH_MENU_FALLBACK_MS = 8000;
-  const INITIAL_SMASH_MENU_SETTLE_FRAMES = 30;
+  const INITIAL_SMASH_MENU_SETTLE_MS = 500;
   const INITIAL_SMASH_FALLBACK_SCENES = new Set([55]);
   const INITIAL_SMASH_CONFIRM_SCENES = new Set([55]);
   const INITIAL_SMASH_CONFIRM_AFTER_MS = 2500;
@@ -4975,6 +4975,7 @@
     const start = performance.now();
     let titleFrame = -1;
     let fallbackFrame = -1;
+    let fallbackElapsedAt = -1;
     let fallbackScene = 0;
     let lastConfirmPulseAt = -Infinity;
     let lastProgressLogAt = 0;
@@ -5029,24 +5030,28 @@
           gameStatus >= 0 &&
           gameStatus !== 1;
         if (fallbackReady) {
-          if (fallbackFrame < 0 || fallbackScene !== scene) {
+          if (fallbackElapsedAt < 0 || fallbackScene !== scene) {
             fallbackFrame = frame;
+            fallbackElapsedAt = elapsed;
             fallbackScene = scene;
             _syncLog(
               `Smash Remix initial sync: fallback scene=${scene} gameStatus=${gameStatus} ` +
                 `reached at coreFrame=${frame}`,
             );
           }
-          if (frame - fallbackFrame >= INITIAL_SMASH_MENU_SETTLE_FRAMES) {
+          const fallbackSettledMs = elapsed - fallbackElapsedAt;
+          if (fallbackSettledMs >= INITIAL_SMASH_MENU_SETTLE_MS) {
             mod.pauseMainLoop?.();
             _syncLog(
               `Smash Remix initial sync: capturing fallback scene=${scene} ` +
-                `gameStatus=${gameStatus} at coreFrame=${frame} (settled ${frame - fallbackFrame}f)`,
+                `gameStatus=${gameStatus} at coreFrame=${frame} ` +
+                `(settled ${Math.round(fallbackSettledMs)}ms, ${frame - fallbackFrame}f)`,
             );
             return;
           }
         } else {
           fallbackFrame = -1;
+          fallbackElapsedAt = -1;
           fallbackScene = 0;
         }
 
@@ -6880,14 +6885,22 @@
       _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
 
+    let _retroArchUnpauseDisabled = false;
+
     const _forceRetroArchUnpause = (mod, reason) => {
-      if (!mod?._cmd_unpause) return false;
+      if (!mod?._cmd_unpause || _retroArchUnpauseDisabled) return false;
       try {
         mod._cmd_unpause();
         _syncLog(`RetroArch explicit unpause sent on ${reason}`);
         return true;
       } catch (e) {
-        _syncLog(`RetroArch explicit unpause failed on ${reason}: ${e?.name || 'Error'}: ${e?.message || e}`);
+        const name = e?.name || 'Error';
+        const message = e?.message || String(e);
+        _syncLog(`RetroArch explicit unpause failed on ${reason}: ${name}: ${message}`);
+        if (/memory access out of bounds/i.test(message)) {
+          _retroArchUnpauseDisabled = true;
+          _syncLog('RetroArch explicit unpause disabled after WASM OOB; relying on foreground/main-loop refresh');
+        }
         return false;
       }
     };
