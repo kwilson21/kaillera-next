@@ -4256,6 +4256,9 @@
   let _wizardHotPlugCheck = 0;
 
   const startWizard = (inGame) => {
+    // Idempotent: if the wizard is already running, tear it down first so we
+    // don't orphan the previous _wizardKeyHandler when overwriting it below.
+    if (_wizardActive) cancelWizard();
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const gamepadId = detected.length > 0 ? detected[0].id : null;
 

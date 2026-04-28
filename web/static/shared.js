@@ -554,16 +554,42 @@
   // Disables EmulatorJS's native keyboard, gamepad, and (if APISandbox is
   // available) WASM-level gamepad handling.
   //   label: string for the timeout warning, e.g. 'lockstep' or 'streaming'
+  //
+  // Idempotent across same-ROM rematches: hibernation reuses the EJS parent,
+  // so we track the previously-installed parent listeners + retry timer and
+  // remove them before re-installing on the next call.
+
+  let _ejsBlockHandler = null;
+  let _ejsBlockedParent = null;
+  let _ejsBlockTimer = null;
+
+  const _clearPriorBlockers = () => {
+    if (_ejsBlockTimer) {
+      clearTimeout(_ejsBlockTimer);
+      _ejsBlockTimer = null;
+    }
+    if (_ejsBlockedParent && _ejsBlockHandler) {
+      _ejsBlockedParent.removeEventListener('keydown', _ejsBlockHandler, true);
+      _ejsBlockedParent.removeEventListener('keyup', _ejsBlockHandler, true);
+    }
+    _ejsBlockedParent = null;
+    _ejsBlockHandler = null;
+  };
 
   const disableEJSInput = (label) => {
+    // Drop the previous boot's parent listeners + retry timer so a same-ROM
+    // rematch (which reuses the hibernated EJS parent) does not stack blockers.
+    _clearPriorBlockers();
+
     let attempts = 0;
     const tag = label || 'netplay';
     const attempt = () => {
+      _ejsBlockTimer = null;
       const ejs = window.EJS_emulator;
       const gm = ejs?.gameManager;
       if (!gm) {
         if (++attempts < 150) {
-          setTimeout(attempt, 200);
+          _ejsBlockTimer = setTimeout(attempt, 200);
         } else {
           console.warn(`[${tag}] disableEJSInput timed out`);
         }
@@ -579,6 +605,8 @@
         };
         parent.addEventListener('keydown', block, true);
         parent.addEventListener('keyup', block, true);
+        _ejsBlockHandler = block;
+        _ejsBlockedParent = parent;
       }
 
       // Disable EJS gamepad handling — stop its JS-level 10ms polling loop
