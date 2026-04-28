@@ -14,7 +14,7 @@
   let _modal = null;
   let _fab = null;
   let _toolbarItem = null;
-  const _isGamePage = window.location.pathname.includes('play.html');
+  const _isGamePage = window.location.pathname.includes('/play');
 
   // ── Context gathering ───────────────────────────────────────────────
   const _gatherContext = () => {
@@ -69,6 +69,16 @@
         font-size: 20px; display: flex; align-items: center; justify-content: center;
         box-shadow: 0 4px 16px rgba(233,69,96,0.4);
         transition: transform 0.15s, box-shadow 0.15s;
+      }
+      .kn-feedback-fab.kn-feedback-play-fab {
+        bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+        z-index: 120;
+      }
+      @media (max-width: 600px) {
+        .kn-feedback-fab.kn-feedback-play-fab {
+          right: calc(16px + env(safe-area-inset-right, 0px));
+          bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+        }
       }
       .kn-feedback-fab:hover {
         transform: scale(1.1);
@@ -193,7 +203,7 @@
 
   const _createFAB = () => {
     _fab = document.createElement('button');
-    _fab.className = 'kn-feedback-fab';
+    _fab.className = _isGamePage ? 'kn-feedback-fab kn-feedback-play-fab' : 'kn-feedback-fab';
     _fab.setAttribute('aria-label', 'Send feedback');
     _fab.innerHTML = '💬<span class="kn-feedback-fab-tooltip">Send Feedback</span>';
     _fab.addEventListener('click', _openModal);
@@ -380,7 +390,10 @@
     if (!_isGamePage || !_fab) return;
     const toolbar = document.getElementById('toolbar');
     const gameActive = toolbar && !toolbar.classList.contains('hidden');
-    _fab.hidden = gameActive;
+    const overlay = document.getElementById('overlay');
+    const setupActive = overlay && !overlay.classList.contains('hidden');
+    const narrow = window.matchMedia('(max-width: 600px)').matches;
+    _fab.hidden = gameActive || (setupActive && narrow);
     if (_toolbarItem) _toolbarItem.style.display = gameActive ? '' : 'none';
   };
 
@@ -396,6 +409,11 @@
       if (toolbar) {
         const observer = new MutationObserver(_updateFABVisibility);
         observer.observe(toolbar, { attributes: true, attributeFilter: ['class'] });
+      }
+      const overlay = document.getElementById('overlay');
+      if (overlay) {
+        const observer = new MutationObserver(_updateFABVisibility);
+        observer.observe(overlay, { attributes: true, attributeFilter: ['class'] });
       }
       // Fallback polling — toolbar may not exist at load time
       setInterval(_updateFABVisibility, 1000);
@@ -415,7 +433,7 @@
 
     // First-visit callout — pulse + tooltip, dismissed on click or after 6s
     try {
-      if (!localStorage.getItem('kn-feedback-seen') && _fab) {
+      if (!_isGamePage && !localStorage.getItem('kn-feedback-seen') && _fab) {
         const callout = document.createElement('span');
         callout.className = 'kn-feedback-callout';
         callout.textContent = 'Got feedback? Let us know!';
