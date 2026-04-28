@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.48.1",
+    "date": "2026-04-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "tech-debt audit — 2026-04-27 run 3 (boot gesture cleanup) (#6)"
+      }
+    ]
+  },
+  {
     "version": "0.48.0",
     "date": "2026-04-28",
     "changes": [
