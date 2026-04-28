@@ -91,6 +91,21 @@ button:hover {
 .join-row input {
   flex: 1;
   margin-bottom: 0;
+  min-width: 0;
+}
+
+@media (max-width: 599px) {
+  .join-row {
+    flex-wrap: wrap;
+  }
+
+  .join-row input {
+    flex-basis: 100%;
+  }
+
+  .join-row button {
+    flex: 1 1 0;
+  }
 }
 
 /* Footer links */
