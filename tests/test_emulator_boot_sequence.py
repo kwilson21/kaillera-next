@@ -54,8 +54,19 @@ def test_non_ssb64_boot_clears_stale_standard_cheats():
 
     assert "window.KNState?.romHash === SSB64_HASH" in window
     assert "applyStandardCheats(SSB64_ONLINE_CHEATS)" in window
+    assert "window.EJS_cheats = []" in window
     assert "clearCheats()" in window
+    assert "gm.resetCheat()" in source or "gm.Module?._reset_cheat" in source
     assert "SSB64_HASH: SSB64_HASH" in source
+
+
+def test_smash_remix_startup_avoids_partial_kn_sync_and_c_rollback():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+
+    assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = false" in source
+    assert "REMIX_INITIAL_SYNC_USE_KN_SYNC && _isSmashRemix()" in source
+    assert "C-ROLLBACK disabled for Smash Remix title/menu startup" in source
+    assert "detMod?._kn_rollback_init && !_isSmashRemix()" in source
 
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
@@ -71,3 +82,17 @@ def test_controller_mask_reapplies_when_emulator_module_changes():
     assert "mod === _lastControllerPresentMaskModule" in apply_window
     assert "_lastControllerPresentMaskModule = mod" in apply_window
     assert "_lastControllerPresentMaskModule = null" in source[reset_idx : reset_idx + 400]
+
+
+def test_rom_switch_discards_hibernated_old_core():
+    source = (REPO_ROOT / "web/static/play.js").read_text()
+    helper_idx = source.find("const discardHibernatedEmulatorForRomChange = (nextHash) =>")
+    assert helper_idx != -1
+    helper_window = source[helper_idx : helper_idx + 700]
+
+    assert "if (!_hibernated) return" in helper_window
+    assert "if (nextHash && _hibernatedRomHash === nextHash) return" in helper_window
+    assert "destroyEmulator()" in helper_window
+    assert "discardHibernatedEmulatorForRomChange(expectedHash)" in source
+    assert "discardHibernatedEmulatorForRomChange(hash)" in source
+    assert "discardHibernatedEmulatorForRomChange(null)" in source

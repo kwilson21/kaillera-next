@@ -1364,6 +1364,10 @@
   let _lastPeerPhaseWaitLogFrame = -1;
   const INITIAL_SMASH_TITLE_TIMEOUT_MS = 60000;
   const INITIAL_SMASH_TITLE_SETTLE_FRAMES = 30;
+  // Remix title/menu startup needs a complete EmulatorJS savestate. The
+  // partial kn-sync snapshot plus rollback ring can strand Remix on its
+  // yellow/thread-interrupt screen after a same-tab ROM switch.
+  const REMIX_INITIAL_SYNC_USE_KN_SYNC = false;
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
@@ -2258,7 +2262,7 @@
 
   const _captureInitialStateBytes = (gm) => {
     const mod = gm?.Module;
-    if (_isSmashRemix() && mod?._kn_sync_read && mod?._kn_sync_write && mod?.HEAPU8) {
+    if (REMIX_INITIAL_SYNC_USE_KN_SYNC && _isSmashRemix() && mod?._kn_sync_read && mod?._kn_sync_write && mod?.HEAPU8) {
       ensureSyncBuffer();
       if (_syncBufPtr && _syncBufSize > 0) {
         const t0 = performance.now();
@@ -6420,7 +6424,7 @@
       };
       window._rbDoInit = doRollbackInit;
 
-      if (detMod?._kn_rollback_init) {
+      if (detMod?._kn_rollback_init && !_isSmashRemix()) {
         if (_playerSlot === 0) {
           // Host: init immediately with the value we just broadcast.
           doRollbackInit(DELAY_FRAMES);
@@ -6441,6 +6445,9 @@
           }
         }
       } else {
+        if (_isSmashRemix() && detMod?._kn_rollback_init) {
+          _syncLog('C-ROLLBACK disabled for Smash Remix title/menu startup');
+        }
         _useCRollback = false;
       }
 

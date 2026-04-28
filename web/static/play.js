@@ -2059,6 +2059,7 @@
     // passed) and recomputing locally can produce a different hash if the host
     // uses SHA-256 (HTTPS/localhost) while the guest uses FNV-1a (HTTP LAN IP).
     if (expectedHash) {
+      discardHibernatedEmulatorForRomChange(expectedHash);
       _romHash = expectedHash;
       _gameId = _gameIdFromHash(expectedHash);
       KNState.romHash = expectedHash;
@@ -2069,7 +2070,9 @@
       const reader = new FileReader();
       reader.onload = async () => {
         try {
-          _romHash = await hashArrayBuffer(reader.result);
+          const hash = await hashArrayBuffer(reader.result);
+          discardHibernatedEmulatorForRomChange(hash);
+          _romHash = hash;
           _gameId = _gameIdFromHash(_romHash);
           KNState.romHash = _romHash;
           KNState.gameId = _gameId;
@@ -2207,6 +2210,18 @@
       URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = null;
     }
+  };
+
+  const discardHibernatedEmulatorForRomChange = (nextHash) => {
+    if (!_hibernated) return;
+    if (nextHash && _hibernatedRomHash === nextHash) return;
+    console.log(
+      '[play] ROM changed while emulator hibernated, destroying old core',
+      `${_hibernatedRomHash?.substring(0, 16) || 'unknown'} -> ${nextHash?.substring(0, 16) || 'none'}`,
+    );
+    destroyEmulator();
+    _hibernated = false;
+    _hibernatedRomHash = null;
   };
 
   const hibernateEmulator = () => {
@@ -2584,6 +2599,7 @@
       if (_hashTimedOut) return;
       try {
         const hash = await hashArrayBuffer(reader.result);
+        discardHibernatedEmulatorForRomChange(hash);
         _romHash = hash;
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
@@ -2674,6 +2690,7 @@
   // Compare ROM hashes: returns true if they definitely mismatch.
   const clearLoadedRom = () => {
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
+    discardHibernatedEmulatorForRomChange(null);
     _romBlob = null;
     _romBlobUrl = null;
     _romHash = null;
@@ -2847,6 +2864,7 @@
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);
         window.EJS_gameUrl = _romBlobUrl;
+        discardHibernatedEmulatorForRomChange(hash);
         _romHash = hash;
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;

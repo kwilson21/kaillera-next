@@ -59,6 +59,11 @@
   async function clearCheats() {
     try {
       const gm = await waitForEmulator();
+      if (typeof gm.resetCheat === 'function') {
+        gm.resetCheat();
+      } else if (typeof gm.Module?._reset_cheat === 'function') {
+        gm.Module._reset_cheat();
+      }
       SSB64_ONLINE_CHEATS.forEach((c, i) => {
         gm.setCheat(i, 0, c.code);
       });
@@ -280,6 +285,7 @@
     if (window.KNState?.romHash === SSB64_HASH) {
       applyStandardCheats(SSB64_ONLINE_CHEATS);
     } else {
+      window.EJS_cheats = [];
       clearCheats();
     }
     disableEJSInput(label);
