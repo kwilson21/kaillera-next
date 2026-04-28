@@ -87,19 +87,27 @@ _FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
 
 async def cleanup_old_data() -> None:
-    """Background task: delete session logs and client events older than retention period."""
+    """Background task: delete session logs, client events, and visual desync
+    artifacts (screenshots, SSIM comparisons, vision verdicts) older than the
+    retention period. Screenshots are the bulk consumer — at ~5KB/frame and
+    SCREENSHOT_INTERVAL=300 (~5s) per player, an unbounded table grows fast
+    once captures are default-on in prod."""
     while True:
         await asyncio.sleep(86400)  # daily
         try:
             days = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
-            await db.execute_write(
-                "DELETE FROM session_logs WHERE created_at < datetime('now', ?)",
-                (f"-{days} days",),
-            )
-            await db.execute_write(
-                "DELETE FROM client_events WHERE created_at < datetime('now', ?)",
-                (f"-{days} days",),
-            )
+            cutoff = (f"-{days} days",)
+            for table in (
+                "session_logs",
+                "client_events",
+                "screenshots",
+                "screenshot_comparisons",
+                "desync_events",
+            ):
+                await db.execute_write(
+                    f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
+                    cutoff,
+                )
             log.info("DB cleanup complete (retention: %d days)", days)
         except Exception as e:
             log.warning("DB cleanup error: %s", e)

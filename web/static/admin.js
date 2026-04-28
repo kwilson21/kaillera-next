@@ -260,7 +260,7 @@
     // the timeline so the horizontal overview can include them inline.
     // See project_session_timeline_vision for the direction.
     if (extras && (data.match_id || data.room)) {
-      const [tl, ssData, compData] = await Promise.all([
+      const [tl, ssData, dvData] = await Promise.all([
         fetchSessionTimeline(data.match_id, data.room),
         data.match_id
           ? fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() })
@@ -268,26 +268,26 @@
               .catch(() => ({ screenshots: [] }))
           : Promise.resolve({ screenshots: [] }),
         data.match_id
-          ? fetch(`/admin/api/screenshots/${data.match_id}/comparisons`, { headers: headers() })
-              .then((r) => (r.ok ? r.json() : { comparisons: [] }))
-              .catch(() => ({ comparisons: [] }))
-          : Promise.resolve({ comparisons: [] }),
+          ? fetch(`/admin/api/desync-events?match_id=${encodeURIComponent(data.match_id)}`, { headers: headers() })
+              .then((r) => (r.ok ? r.json() : { events: [] }))
+              .catch(() => ({ events: [] }))
+          : Promise.resolve({ events: [] }),
       ]);
       const screenshots = ssData.screenshots || [];
-      const comparisons = compData.comparisons || [];
+      const desyncEvents = dvData.events || [];
       if (tl?._error) {
         extras.innerHTML = `<p style="color:#e89; margin:12px 0">Failed to load session timeline: ${escapeHtml(tl._error)}. If the endpoint is missing, the dev server may need a restart.</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [], comparisons: [] };
+        _currentSessionContext = { data, events: [], screenshots: [], desyncEvents: [] };
       } else if (tl?.events?.length || screenshots.length) {
         const events = tl?.events || [];
         extras.innerHTML =
-          renderHorizontalTimeline(events, screenshots, comparisons) +
+          renderHorizontalTimeline(events, screenshots, desyncEvents) +
           renderSessionHeader(events) +
           renderEventTimeline(events);
-        _currentSessionContext = { data, events, screenshots, comparisons };
+        _currentSessionContext = { data, events, screenshots, desyncEvents };
       } else {
         extras.innerHTML = `<p class="dim" style="margin:12px 0">No timeline events recorded for this session (session may predate funnel telemetry).</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [], comparisons: [] };
+        _currentSessionContext = { data, events: [], screenshots: [], desyncEvents: [] };
       }
     }
 
@@ -307,13 +307,13 @@
           }
           const slotKeys = Object.keys(bySlot).sort((a, b) => a - b);
           if (slotKeys.length >= 2) {
-            const playerComps = _currentSessionContext?.comparisons || [];
+            const playerEvents = _currentSessionContext?.desyncEvents || [];
             const html =
               '<div id="screenshot-section" style="margin-top:16px">' +
               buildComparisonPlayer(bySlot, slotKeys) +
               '</div>';
             content.insertAdjacentHTML('afterend', html);
-            initComparisonPlayer(bySlot, slotKeys, playerComps);
+            initComparisonPlayer(bySlot, slotKeys, playerEvents);
           }
         }
       }
@@ -326,6 +326,30 @@
 
   let _compState = null; // { frames, index, playing, timer, canvas, ctx, slotKeys, cols, rows }
   const SCREENSHOT_BUCKET = 300; // must match SCREENSHOT_INTERVAL in lockstep
+
+  // Pick the most-severe vision verdict from a list of desync_events sharing
+  // a frame bucket. Severity order: NEQ > unknown > equal. NEQ at higher
+  // confidence beats NEQ at lower confidence. Returns null for empty input.
+  const _confidenceRank = (c) => (c === 'high' ? 3 : c === 'medium' ? 2 : c === 'low' ? 1 : 0);
+  const _verdictSeverity = (e) => {
+    if (e.vision_equal === false) return 200 + _confidenceRank(e.vision_confidence);
+    if (e.vision_equal === null || e.vision_equal === undefined) return 100;
+    return _confidenceRank(e.vision_confidence); // equal=true: 0–3
+  };
+  const pickWorstEvent = (eventsForFrame) => {
+    if (!eventsForFrame?.length) return null;
+    return eventsForFrame.reduce(
+      (worst, e) => (worst == null || _verdictSeverity(e) > _verdictSeverity(worst) ? e : worst),
+      null,
+    );
+  };
+  const isDesyncEvent = (e) => e?.vision_equal === false;
+  const formatVerdictLabel = (e) => {
+    if (!e) return '';
+    if (e.vision_equal === false) return `vision NEQ (${e.vision_confidence ?? '?'})`;
+    if (e.vision_equal === true) return `vision eq (${e.vision_confidence ?? '?'})`;
+    return 'vision unknown';
+  };
 
   const buildComparisonPlayer = (bySlot, slotKeys) => {
     const W = 160,
@@ -369,7 +393,7 @@
       </div>`;
   };
 
-  const initComparisonPlayer = (bySlot, slotKeys, comparisons = []) => {
+  const initComparisonPlayer = (bySlot, slotKeys, desyncEvents = []) => {
     const W = 160,
       H = 120,
       GAP = 4;
@@ -406,11 +430,16 @@
 
     if (!frames.length) return;
 
-    // Build comparison lookup by frame bucket
+    // Build verdict lookup by frame bucket — collapse multiple events per
+    // bucket to the worst-severity verdict (NEQ > unknown > equal).
+    const eventsByBucket = {};
+    for (const e of desyncEvents) {
+      const bucket = Math.round(e.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+      (eventsByBucket[bucket] ??= []).push(e);
+    }
     const compLookup = {};
-    for (const c of comparisons) {
-      const bucket = Math.round(c.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-      compLookup[bucket] = c;
+    for (const [bucket, list] of Object.entries(eventsByBucket)) {
+      compLookup[bucket] = pickWorstEvent(list);
     }
 
     const canvas = document.getElementById('comp-canvas');
@@ -441,9 +470,9 @@
       scrub.value = String(idx);
       const entry = frames[idx];
       const comp = compLookup[entry.frame];
-      const ssimText = comp ? ` · SSIM ${comp.ssim.toFixed(3)}${comp.is_desync ? ' ⚠ DESYNC' : ''}` : '';
-      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})${ssimText}`;
-      label.style.color = comp?.is_desync ? '#e74c3c' : '#64748b';
+      const verdictText = comp ? ` · ${formatVerdictLabel(comp)}${isDesyncEvent(comp) ? ' ⚠ DESYNC' : ''}` : '';
+      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})${verdictText}`;
+      label.style.color = isDesyncEvent(comp) ? '#e74c3c' : '#64748b';
 
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -903,14 +932,19 @@
     return clean[clean.length - 1];
   };
 
-  const renderHorizontalTimeline = (events, screenshots, comparisons = []) => {
+  const renderHorizontalTimeline = (events, screenshots, desyncEvents = []) => {
     if (!events.length && !screenshots.length) return '';
 
-    // Build a lookup: frame bucket → comparison for quick dot rendering
+    // Build a lookup: frame bucket → worst vision verdict for quick dot
+    // rendering. Multiple events per bucket collapse to the most severe.
+    const eventsByBucket = {};
+    for (const e of desyncEvents) {
+      const bucket = Math.round(e.frame / 300) * 300;
+      (eventsByBucket[bucket] ??= []).push(e);
+    }
     const compByFrame = {};
-    for (const c of comparisons) {
-      const bucket = Math.round(c.frame / 300) * 300;
-      compByFrame[bucket] = c;
+    for (const [bucket, list] of Object.entries(eventsByBucket)) {
+      compByFrame[bucket] = pickWorstEvent(list);
     }
 
     // Compute the session time span from both events and screenshots so the
@@ -978,10 +1012,17 @@
             const relLabel = formatRelTime(ts - minTs);
             const frameBucket = Math.round(ss.frame / 300) * 300;
             const comp = compByFrame[frameBucket];
-            const ssimLabel = comp ? ` · SSIM ${comp.ssim.toFixed(3)}` : '';
-            const title = `P${slot} · frame ${ss.frame} · ${relLabel}${ssimLabel}`;
+            const verdictLabel = comp ? ` · ${formatVerdictLabel(comp)}` : '';
+            const title = `P${slot} · frame ${ss.frame} · ${relLabel}${verdictLabel}`;
+            const dotClass = isDesyncEvent(comp)
+              ? 'desync'
+              : comp?.vision_equal === true
+                ? 'clean'
+                : comp
+                  ? 'unknown'
+                  : '';
             const dotHtml = comp
-              ? `<div class="ssim-dot ${comp.is_desync ? 'desync' : 'clean'}" title="SSIM ${comp.ssim.toFixed(3)}${comp.is_desync ? ' — DESYNC' : ''}"></div>`
+              ? `<div class="vision-dot ${dotClass}" title="${escapeHtml(formatVerdictLabel(comp))}${isDesyncEvent(comp) ? ' — DESYNC' : ''}"></div>`
               : '';
             return `<div
               class="tl-thumb-wrap"
@@ -991,7 +1032,7 @@
             >
               <img
                 src="${url}"
-                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${comp?.is_desync ? '#e74c3c' : border}; border-radius:4px; cursor:pointer"
+                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${isDesyncEvent(comp) ? '#e74c3c' : border}; border-radius:4px; cursor:pointer"
                 onclick="window.open('${url}','_blank')"
               />
               <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums; max-width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">f${escapeHtml(String(ss.frame))}</div>
@@ -1130,21 +1171,25 @@
 
     const eventCount = events.length;
     const ssCount = screenshots.length;
-    const desyncFrames = comparisons.filter((c) => c.is_desync);
-    const compCount = comparisons.length;
+    const desyncVerdicts = desyncEvents.filter((e) => e.vision_equal === false);
+    const equalVerdicts = desyncEvents.filter((e) => e.vision_equal === true);
+    const unknownVerdicts = desyncEvents.filter((e) => e.vision_equal === null || e.vision_equal === undefined);
+    const totalVerdicts = desyncEvents.length;
+    const highConfDesyncs = desyncVerdicts.filter((e) => e.vision_confidence === 'high').length;
     const viewportWidth = window.innerWidth || 1200;
     const scrollNote = contentWidth > viewportWidth - 100 ? ' (scroll horizontally →)' : '';
 
-    const desyncBanner = desyncFrames.length
+    const confSummary = highConfDesyncs > 0 ? `${highConfDesyncs} high-confidence` : 'none high-confidence';
+    const desyncBanner = desyncVerdicts.length
       ? `<div style="background:#3b1111; border:1px solid #e74c3c; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-          <span style="color:#e74c3c; font-weight:bold">VISUAL DESYNC DETECTED</span>
-          <span style="color:#ccc"> — ${desyncFrames.length} of ${compCount} compared frame${compCount === 1 ? '' : 's'} mismatched (SSIM &lt; 0.95).
-          Lowest: ${Math.min(...desyncFrames.map((c) => c.ssim)).toFixed(3)}</span>
+          <span style="color:#e74c3c; font-weight:bold">VISION DESYNC DETECTED</span>
+          <span style="color:#ccc"> — ${desyncVerdicts.length} of ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'} flagged NEQ (${confSummary}).
+          ${equalVerdicts.length} equal · ${unknownVerdicts.length} unknown</span>
         </div>`
-      : compCount
+      : totalVerdicts
         ? `<div style="background:#0f2b1a; border:1px solid #2ecc71; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-            <span style="color:#2ecc71; font-weight:bold">VISUALLY IN SYNC</span>
-            <span style="color:#ccc"> — ${compCount} frame${compCount === 1 ? '' : 's'} compared, all clean</span>
+            <span style="color:#2ecc71; font-weight:bold">VISION IN SYNC</span>
+            <span style="color:#ccc"> — ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'}, none flagged${unknownVerdicts.length ? ` (${unknownVerdicts.length} unknown)` : ''}</span>
           </div>`
         : '';
 

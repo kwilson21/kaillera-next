@@ -288,6 +288,11 @@
   const _knTraceDiagnostics = _urlParams.get('kntrace') === '1';
   const _knDeepDiagnostics = _urlParams.get('kndiag') === 'deep' || _urlParams.get('desync') === 'deep';
   const _knRuntimeDiagnostics = !_knPerfLight && _knDeepDiagnostics;
+  // Screenshots are default-on (cheap: ~5KB JPEG every 5s/player) so the
+  // admin panel always has visual ground truth for desync triage. Opt out
+  // with ?screenshots=off; ?knperf=light also disables them. Independent
+  // from the heavier _knRuntimeDiagnostics gate.
+  const _knScreenshots = !_knPerfLight && _urlParams.get('screenshots') !== 'off';
   const _knLiveFlush = _urlParams.get('knflush') === 'live';
   window._knPerfLight = _knPerfLight;
 
@@ -6017,10 +6022,15 @@
 
     runner(frameTimeMs);
 
-    // Periodic deep diagnostics are opt-in; screenshots/readbacks/hash dumps
-    // cause visible stalls during cross-engine stress tests.
-    if (_knRuntimeDiagnostics && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+    // Cheap visual ground-truth capture — default-on in prod so the admin
+    // panel always has frames for desync triage. Opt out with ?screenshots=off.
+    if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
       _diag.captureAndSendScreenshot();
+    }
+    // Heavier per-frame readbacks (event-queue hash, interrupt trace) are
+    // opt-in via ?kndiag=deep — they cause visible stalls in cross-engine
+    // stress tests.
+    if (_knRuntimeDiagnostics && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
       // Log event queue hash + interrupt trace for cross-peer comparison
       const eqMod = window.EJS_emulator?.gameManager?.Module;
       if (eqMod?._kn_eventqueue_hash) {
@@ -6214,11 +6224,15 @@
       _syncLog('stock core — JS-level timing patch (fallback)');
     }
 
-    // Wire field-granular desync detector only when explicitly requested.
-    // It hashes/broadcasts RDRAM fields every few frames, which is too much
-    // overhead for normal rollback pacing and determinism stress runs.
+    // Wire field-granular desync detector. Default mode is C — host-
+    // authoritative comparison, digest every 6 frames, no heartbeat — which
+    // is cheap in steady state (~3KB/s/peer) and only triggers Claude vision
+    // calls when peers actually diverge. Stock CDN cores silently no-op via
+    // _hasRequiredExports. Opt out with ?desync=off; ?desync=b promotes to
+    // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
+    // vision sampling — for active triage only).
     const desyncParam = _urlParams.get('desync');
-    if (lsMod && window.KNDesync && (desyncParam === 'b' || desyncParam === 'c' || desyncParam === 'deep')) {
+    if (lsMod && window.KNDesync && desyncParam !== 'off') {
       const desyncMode = desyncParam === 'b' ? 'B' : 'C';
       KNDesync.init(lsMod, desyncMode);
     }
@@ -8989,7 +9003,7 @@
           dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
         }
       }
-      if (_knRuntimeDiagnostics && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+      if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
         _diag.captureAndSendScreenshot();
       }
       return;

@@ -423,16 +423,19 @@ tbody tr {
   }
 }
 
-.ssim-dot {
+.vision-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   margin: 2px auto 0;
 }
-.ssim-dot.desync {
+.vision-dot.desync {
   background: #e74c3c;
   box-shadow: 0 0 4px #e74c3c;
 }
-.ssim-dot.clean {
+.vision-dot.clean {
   background: #2ecc71;
+}
+.vision-dot.unknown {
+  background: #888;
 }
