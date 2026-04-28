@@ -339,6 +339,41 @@ body {
   flex-direction: column;
   gap: 4px;
 }
+
+.advanced-options {
+  margin-top: 8px;
+}
+
+.advanced-options summary {
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 13px;
+  list-style: none;
+  padding: 6px 0;
+}
+
+.advanced-options summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-options summary::before {
+  color: #888;
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+
+.advanced-options[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.advanced-options .summary-status {
+  color: #8a8a8a;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
 #lockstep-options label {
   display: flex;
   align-items: center;

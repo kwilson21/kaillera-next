@@ -4460,6 +4460,104 @@
 
   const KAILLERA_LABELS = ['LAN', 'Excellent', 'Excellent', 'Good', 'Good', 'Average', 'Average', 'Low', 'Bad', 'Bad'];
 
+  const directAdvancedOptions = (parent) =>
+    Array.from(parent?.children || []).find((el) => el.classList?.contains('advanced-options')) || null;
+
+  const createAdvancedOptions = () => {
+    const details = document.createElement('details');
+    details.className = 'advanced-options';
+    const summary = document.createElement('summary');
+    const status = document.createElement('span');
+    status.className = 'summary-status';
+    summary.append(document.createTextNode('Advanced '), status);
+    details.appendChild(summary);
+    return details;
+  };
+
+  const ensureAdvancedSummary = (details) => {
+    if (!details) return null;
+    let summary = Array.from(details.children).find((el) => el.tagName === 'SUMMARY');
+    if (!summary) {
+      summary = document.createElement('summary');
+      details.prepend(summary);
+    }
+    if (!summary.textContent.trim().startsWith('Advanced')) {
+      summary.prepend(document.createTextNode('Advanced'));
+    }
+    let status = summary.querySelector('.summary-status');
+    if (!status) {
+      status = document.createElement('span');
+      status.className = 'summary-status';
+      summary.appendChild(status);
+    }
+    return status;
+  };
+
+  const normalizeAdvancedOptionsMarkup = () => {
+    const hostControls = document.getElementById('host-controls');
+    if (hostControls) {
+      let hostDetails = directAdvancedOptions(hostControls);
+      const startBtn = document.getElementById('start-btn');
+      if (!hostDetails) {
+        hostDetails = createAdvancedOptions();
+        hostControls.insertBefore(hostDetails, startBtn || null);
+      }
+      ensureAdvancedSummary(hostDetails);
+      for (const id of ['lockstep-options', 'rom-sharing-options', 'rom-sharing-disclaimer']) {
+        const el = document.getElementById(id);
+        if (el && el.parentElement !== hostDetails) hostDetails.appendChild(el);
+      }
+      if (startBtn?.parentElement === hostControls && startBtn.previousElementSibling !== hostDetails) {
+        hostControls.insertBefore(hostDetails, startBtn);
+      }
+    }
+
+    const playerControls = document.getElementById('player-controls');
+    if (playerControls) {
+      let delayDetails = directAdvancedOptions(playerControls);
+      const delayPicker = document.getElementById('delay-picker');
+      if (!delayDetails) {
+        delayDetails = createAdvancedOptions();
+        playerControls.appendChild(delayDetails);
+      }
+      ensureAdvancedSummary(delayDetails);
+      if (delayPicker && delayPicker.parentElement !== delayDetails) delayDetails.appendChild(delayPicker);
+    }
+  };
+
+  const updateAdvancedSummaryStatuses = () => {
+    const hostStatus = document.querySelector('#host-controls .advanced-options .summary-status');
+    if (hostStatus) {
+      const resyncOn = document.getElementById('opt-resync')?.checked ?? false;
+      const romSharingOn = document.getElementById('opt-rom-sharing')?.checked ?? false;
+      hostStatus.textContent = `Resync ${resyncOn ? 'on' : 'off'} · ROM sharing ${romSharingOn ? 'on' : 'off'}`;
+    }
+
+    const delayStatus = document.querySelector('#player-controls .advanced-options .summary-status');
+    if (delayStatus) {
+      const autoEl = document.getElementById('delay-auto');
+      const selectEl = document.getElementById('delay-select');
+      const effective = document.getElementById('delay-effective')?.textContent.trim() || '--';
+      delayStatus.textContent = autoEl?.checked ? `Auto · effective ${effective}` : `Fixed ${selectEl?.value || '0'}`;
+    }
+  };
+
+  const wireAdvancedSummaryStatus = () => {
+    const optResync = document.getElementById('opt-resync');
+    if (optResync) optResync.addEventListener('change', updateAdvancedSummaryStatuses);
+
+    const romShareCb = document.getElementById('opt-rom-sharing');
+    if (romShareCb) romShareCb.addEventListener('change', () => requestAnimationFrame(updateAdvancedSummaryStatuses));
+
+    const delayAuto = document.getElementById('delay-auto');
+    if (delayAuto) delayAuto.addEventListener('change', () => requestAnimationFrame(updateAdvancedSummaryStatuses));
+
+    const delaySelect = document.getElementById('delay-select');
+    if (delaySelect) delaySelect.addEventListener('change', updateAdvancedSummaryStatuses);
+
+    updateAdvancedSummaryStatuses();
+  };
+
   const showEffectiveDelay = (own, room) => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
@@ -4469,6 +4567,7 @@
     } else {
       el.textContent = label ? `(${label})` : '';
     }
+    updateAdvancedSummaryStatuses();
   };
 
   window.showEffectiveDelay = showEffectiveDelay;
@@ -4508,6 +4607,7 @@
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
     normalizeRomSharingMarkup();
+    normalizeAdvancedOptionsMarkup();
     // Agent 21 badge — gold jersey number for the creator's handle
     const _a21style = document.createElement('style');
     _a21style.textContent =
@@ -4742,6 +4842,7 @@
         delaySelect.disabled = delayAuto.checked;
       });
     }
+    wireAdvancedSummaryStatus();
 
     connect();
     startGamepadManager();

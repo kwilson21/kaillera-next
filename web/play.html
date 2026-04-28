@@ -140,42 +140,54 @@
               <option value="streaming">Streaming</option>
             </select>
           </div>
-          <div id="lockstep-options">
-            <div class="host-options-row">
-              <label
-                title="Keeps players in sync by reloading guests from the host after reconnects, mobile app switches, network changes, or long input dropouts."
-                ><input type="checkbox" id="opt-resync" checked /> Resync <span class="opt-hint">(auto)</span></label
-              >
+          <details class="advanced-options">
+            <summary>
+              Advanced
+              <span class="summary-status"></span>
+            </summary>
+            <div id="lockstep-options">
+              <div class="host-options-row">
+                <label
+                  title="Keeps players in sync by reloading guests from the host after reconnects, mobile app switches, network changes, or long input dropouts."
+                  ><input type="checkbox" id="opt-resync" checked /> Resync <span class="opt-hint">(auto)</span></label
+                >
+              </div>
             </div>
-          </div>
-          <div id="rom-sharing-options" class="host-options-row">
-            <label><input type="checkbox" id="opt-rom-sharing" disabled /> Share ROM with players</label>
-          </div>
-          <p id="rom-sharing-disclaimer" class="opt-hint rom-sharing-disclaimer" style="display: none">
-            By sharing, you confirm you have the legal right to distribute this file. Recipients must own a legal copy
-            of this game.
-          </p>
+            <div id="rom-sharing-options" class="host-options-row">
+              <label><input type="checkbox" id="opt-rom-sharing" disabled /> Share ROM with players</label>
+            </div>
+            <p id="rom-sharing-disclaimer" class="opt-hint rom-sharing-disclaimer" style="display: none">
+              By sharing, you confirm you have the legal right to distribute this file. Recipients must own a legal copy
+              of this game.
+            </p>
+          </details>
           <button id="start-btn" disabled>Start Game (need 2+)</button>
         </div>
 
         <div class="card-section" id="player-controls" style="display: none">
-          <div class="host-options-row" id="delay-picker">
-            <label>Frame Delay:</label>
-            <label><input type="checkbox" id="delay-auto" checked /> Auto</label>
-            <select id="delay-select" disabled>
-              <option value="0">--</option>
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="5">5</option>
-              <option value="6">6</option>
-              <option value="7">7</option>
-              <option value="8">8</option>
-              <option value="9">9</option>
-            </select>
-            <span id="delay-effective" class="opt-hint"></span>
-          </div>
+          <details class="advanced-options">
+            <summary>
+              Advanced
+              <span class="summary-status"></span>
+            </summary>
+            <div class="host-options-row" id="delay-picker">
+              <label>Frame Delay:</label>
+              <label><input type="checkbox" id="delay-auto" checked /> Auto</label>
+              <select id="delay-select" disabled>
+                <option value="0">--</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
+                <option value="9">9</option>
+              </select>
+              <span id="delay-effective" class="opt-hint"></span>
+            </div>
+          </details>
         </div>
 
         <!-- ROM ownership declaration (streaming mode guests) -->
