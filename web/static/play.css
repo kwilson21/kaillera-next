@@ -232,6 +232,21 @@ body {
   margin-bottom: 8px;
 }
 
+@media (max-width: 600px) {
+  .overlay-card {
+    padding: 0.75rem;
+  }
+
+  .card-section {
+    padding: 6px 8px;
+    margin-bottom: 6px;
+  }
+
+  .overlay-card h2 {
+    font-size: 0.95rem;
+  }
+}
+
 /* Player list */
 .player-slot {
   display: flex;
