@@ -464,8 +464,13 @@
       imageCache: new Map(),
     };
 
+    // Capture the comparison state in a local so async image callbacks can
+    // detect post-cleanup or post-switch races and bail safely.
+    const ownState = _compState;
+
     const drawFrame = (idx) => {
       if (idx < 0 || idx >= frames.length) return;
+      if (_compState !== ownState) return;
       _compState.index = idx;
       scrub.value = String(idx);
       const entry = frames[idx];
@@ -486,14 +491,15 @@
         const x = col * (W + GAP);
         const y = row * (H + GAP);
         const key = ss.id;
-        if (_compState.imageCache.has(key)) {
-          ctx.drawImage(_compState.imageCache.get(key), x, y, W, H);
+        if (ownState.imageCache.has(key)) {
+          ctx.drawImage(ownState.imageCache.get(key), x, y, W, H);
           return;
         }
         const img = new Image();
         img.onload = () => {
-          _compState.imageCache.set(key, img);
-          if (_compState.index === idx) ctx.drawImage(img, x, y, W, H);
+          if (_compState !== ownState) return;
+          ownState.imageCache.set(key, img);
+          if (ownState.index === idx) ctx.drawImage(img, x, y, W, H);
         };
         img.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
       };
@@ -506,9 +512,12 @@
       for (let i = idx + 1; i < Math.min(idx + 4, frames.length); i++) {
         for (const slot of slotKeys) {
           const ss = frames[i].slots[slot];
-          if (ss && !_compState.imageCache.has(ss.id)) {
+          if (ss && !ownState.imageCache.has(ss.id)) {
             const pre = new Image();
-            pre.onload = () => _compState.imageCache.set(ss.id, pre);
+            pre.onload = () => {
+              if (_compState !== ownState) return;
+              ownState.imageCache.set(ss.id, pre);
+            };
             pre.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
           }
         }
