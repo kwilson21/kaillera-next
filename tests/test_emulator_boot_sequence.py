@@ -70,6 +70,8 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     assert "Smash Remix initial sync: kn_sync_read" in source
     assert "kind: 'kn-sync'" in source
     assert "Smash Remix: bypassing cached pre-title state; using host title-screen capture" in source
+    assert "const INITIAL_SMASH_FALLBACK_SCENES = new Set([55]);" in source
+    assert "Smash Remix initial sync: capturing fallback scene=${scene}" in source
     assert "C-ROLLBACK disabled for Smash Remix title/menu startup" in source
     assert "detMod?._kn_rollback_init && !_isSmashRemix()" in source
     assert "KNShared.clearCheats(false)" in source

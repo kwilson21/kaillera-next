@@ -119,6 +119,9 @@
   let _romTransferDCs = {}; // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
   const ROM_MAX_SIZE = 128 * 1024 * 1024; // 128MB
+  const _GFX_RECOVERY_PROFILES = ['texrect', 'texrect-unopt', 'webgl1', 'angrylion'];
+  let _gfxRecoveryAttempt = 0;
+  let _runtimeGfxProfile = null;
 
   // ── Breadcrumb Trail ────────────────────────────────────────────────
   // Ring buffer of pre-game events — auto-flushed via debug-logs on error.
@@ -171,6 +174,79 @@
     osc.start();
     window._kn_keepAliveOsc = osc;
   };
+
+  const applyRuntimeGfxProfile = (profile) => {
+    if (!_GFX_RECOVERY_PROFILES.includes(profile) && profile !== 'unpack1') return false;
+    window.EJS_defaultOptions = window.EJS_defaultOptions || {};
+    if (profile === 'texrect') {
+      Object.assign(window.EJS_defaultOptions, {
+        'mupen64plus-EnableNativeResTexrects': 'Optimized',
+        'mupen64plus-EnableTexCoordBounds': 'True',
+        'mupen64plus-CorrectTexrectCoords': 'Force',
+      });
+    } else if (profile === 'texrect-unopt') {
+      Object.assign(window.EJS_defaultOptions, {
+        'mupen64plus-EnableNativeResTexrects': 'Unoptimized',
+        'mupen64plus-EnableTexCoordBounds': 'True',
+        'mupen64plus-CorrectTexrectCoords': 'Force',
+        'mupen64plus-BackgroundMode': 'Stripped',
+      });
+    } else if (profile === 'webgl1') {
+      window.EJS_forceLegacyCores = true;
+      window.EJS_defaultOptions.webgl2Enabled = 'disabled';
+    } else if (profile === 'angrylion') {
+      window.EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'angrylion';
+    } else if (profile === 'unpack1') {
+      window.__knInstallUnpackAlignmentShim?.();
+    }
+    _runtimeGfxProfile = profile;
+    window.__knRuntimeGfxProfile = profile;
+    console.log('[play] applied graphics profile:', profile);
+    return true;
+  };
+
+  const initialRuntimeGfxProfile =
+    new URLSearchParams(window.location.search).get('kngfx') || _safeGet('sessionStorage', 'kn-gfx-recovery-profile');
+  if (initialRuntimeGfxProfile) applyRuntimeGfxProfile(initialRuntimeGfxProfile);
+
+  const recoverSolidCanvas = ({ reason = 'solid-pale-canvas', health = null } = {}) => {
+    while (_gfxRecoveryAttempt < _GFX_RECOVERY_PROFILES.length) {
+      const profile = _GFX_RECOVERY_PROFILES[_gfxRecoveryAttempt++];
+      if (profile === _runtimeGfxProfile) continue;
+      applyRuntimeGfxProfile(profile);
+      _safeSet('sessionStorage', 'kn-gfx-recovery-profile', profile);
+      crumb('gfx-recovery', {
+        reason,
+        profile,
+        attempt: _gfxRecoveryAttempt,
+        health: health
+          ? {
+              brightness: health.brightness,
+              stdev: health.stdev,
+              range: health.range,
+              paleRatio: health.paleRatio,
+              yellowGreenRatio: health.yellowGreenRatio,
+            }
+          : null,
+      });
+      KNEvent('compat', 'Renderer returned a solid pale/yellow frame; retrying with safer graphics profile', {
+        reason,
+        profile,
+        attempt: _gfxRecoveryAttempt,
+        health,
+      });
+      showToast(`Renderer retry: ${profile}`);
+      engine?.flushSyncLog?.();
+      destroyEmulator();
+      _hibernated = false;
+      _hibernatedRomHash = null;
+      return { profile, attempt: _gfxRecoveryAttempt };
+    }
+    KNEvent('compat', 'Renderer recovery exhausted all graphics profiles', { reason, health });
+    return false;
+  };
+
+  window.KNRecoverSolidCanvas = recoverSolidCanvas;
 
   const ROM_CHUNK_SIZE = 64 * 1024; // 64KB — same for all platforms
   const ROM_BUFFER_THRESHOLD = 1024 * 1024; // 1MB — DC handles this fine on mobile
@@ -1085,6 +1161,7 @@
     }
     applyHostRomFromData(data);
     KNState.matchId = data.matchId || null;
+    _gfxRecoveryAttempt = 0;
 
     gameRunning = true;
 

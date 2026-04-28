@@ -33,6 +33,7 @@
   let _audioErrorLogged = false;
   let _audioSuspendedToastShown = false;
   let _resumeAudioHandler = null; // gesture-resume listener; cleaned up in cleanup()
+  let _lastResumeAttemptAt = 0;
 
   // Context callbacks — set by init()
   let _log = () => {}; // (msg: string) => void
@@ -119,6 +120,11 @@
           }
 
           _audioWorklet.connect(_audioCtx.destination);
+          _audioWorklet.onprocessorerror = (e) => {
+            const msg = e?.message || 'AudioWorklet processor error';
+            _log(`AudioWorklet processor error: ${msg}`);
+            _knEvent('audio-fail', `AudioWorklet processor error: ${msg}`, { error: msg });
+          };
           workletOk = true;
           _log('audio using AudioWorklet');
         } catch (wErr) {
@@ -184,35 +190,8 @@
 
       _audioReady = true;
 
-      // Resume AudioContext on user interaction (autoplay policy).
-      // Use capture phase so EmulatorJS virtual controls can't block via
-      // stopPropagation. Retry on every interaction until actually running.
-      // Stash the handler on a module-level var so cleanup() can drop it
-      // even when the user never gestures (otherwise the three document
-      // listeners survive across game cycles).
       if (_audioCtx.state !== 'running') {
-        // Defensively drop any handler from a previous init() call that
-        // wasn't paired with a cleanup() — otherwise the prior listeners
-        // would be unrecoverable once we overwrite _resumeAudioHandler.
-        _removeResumeAudioListeners();
-        _resumeAudioHandler = async () => {
-          if (!_audioCtx || _audioCtx.state === 'running') {
-            _removeResumeAudioListeners();
-            return;
-          }
-          try {
-            await _audioCtx.resume();
-            _log(`audio resumed via gesture (state: ${_audioCtx.state})`);
-            _removeResumeAudioListeners();
-          } catch (e) {
-            _log(`audio resume failed: ${e.name}: ${e.message}`);
-            _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name });
-          }
-        };
-        document.addEventListener('click', _resumeAudioHandler, true);
-        document.addEventListener('keydown', _resumeAudioHandler, true);
-        document.addEventListener('touchstart', _resumeAudioHandler, true);
-        _log(`audio context state: ${_audioCtx.state} — waiting for gesture to resume`);
+        ensureRunning('init');
       }
 
       _log(`audio playback initialized (rate: ${_audioRate})`);
@@ -225,9 +204,11 @@
   function feed() {
     try {
       if (!_audioReady || !_audioCtx) return;
-      // BF1/BF8: don't feed audio into a suspended context — attempt resume instead
-      if (_audioCtx.state === 'suspended') {
-        _audioCtx.resume().catch(() => {});
+      // BF1/BF8: don't feed audio into a suspended/interrupted context.
+      // Attempt a browser-allowed resume and keep gesture listeners armed
+      // until the context actually reports running.
+      if (_audioCtx.state !== 'running') {
+        ensureRunning('feed');
         return;
       }
       const mod = window.EJS_emulator?.gameManager?.Module;
@@ -305,11 +286,17 @@
         if (ring) {
           const rSize = ring.length;
           for (let i = 0; i < n; i++) {
+            if (window._kn_audioRingCount + 2 > rSize) {
+              // Drop the oldest stereo sample on overflow instead of letting
+              // the read pointer lag behind overwritten data.
+              window._kn_audioRingRead = (window._kn_audioRingRead + 2) % rSize;
+              window._kn_audioRingCount = Math.max(0, window._kn_audioRingCount - 2);
+            }
             ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
             ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
             window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
+            window._kn_audioRingCount += 2;
           }
-          window._kn_audioRingCount += n * 2;
           if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
         }
       }
@@ -321,10 +308,84 @@
     }
   }
 
+  function _installResumeAudioListeners(reason) {
+    if (!_audioCtx || _audioCtx.state === 'running' || _audioCtx.state === 'closed') {
+      _removeResumeAudioListeners();
+      return;
+    }
+    if (_resumeAudioHandler) return;
+
+    // Resume AudioContext on user interaction (autoplay policy).
+    // Use capture phase so EmulatorJS virtual controls can't block via
+    // stopPropagation. Retry on every interaction until actually running.
+    // Stash the handler on a module-level var so cleanup() can drop it
+    // even when the user never gestures.
+    _resumeAudioHandler = async () => {
+      if (!_audioCtx || _audioCtx.state === 'running' || _audioCtx.state === 'closed') {
+        _removeResumeAudioListeners();
+        return;
+      }
+      try {
+        await _audioCtx.resume();
+        _log(`audio resumed via gesture (${reason}, state: ${_audioCtx.state})`);
+        if (_audioCtx.state === 'running') {
+          _audioSuspendedToastShown = false;
+          _removeResumeAudioListeners();
+        }
+      } catch (e) {
+        _log(`audio resume failed: ${e.name}: ${e.message}`);
+        _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name, reason });
+      }
+    };
+    document.addEventListener('click', _resumeAudioHandler, true);
+    document.addEventListener('keydown', _resumeAudioHandler, true);
+    document.addEventListener('pointerdown', _resumeAudioHandler, true);
+    document.addEventListener('touchstart', _resumeAudioHandler, true);
+    _log(`audio context state: ${_audioCtx.state} — waiting for gesture to resume (${reason})`);
+  }
+
+  function ensureRunning(reason = 'manual') {
+    if (!_audioCtx || _audioCtx.state === 'closed') return false;
+    if (_audioCtx.state === 'running') {
+      _removeResumeAudioListeners();
+      _audioSuspendedToastShown = false;
+      return true;
+    }
+
+    const now = performance.now();
+    if (now - _lastResumeAttemptAt > 1000) {
+      _lastResumeAttemptAt = now;
+      _audioCtx
+        .resume()
+        .then(() => {
+          _log(`audio resume attempt (${reason}) -> ${_audioCtx?.state || 'none'}`);
+          if (_audioCtx?.state === 'running') {
+            _audioSuspendedToastShown = false;
+            _removeResumeAudioListeners();
+          }
+        })
+        .catch((e) => {
+          _log(`audio resume attempt failed (${reason}): ${e.name}: ${e.message}`);
+          _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, {
+            error: e.name,
+            reason,
+          });
+        });
+    }
+
+    _installResumeAudioListeners(reason);
+    if (!_audioSuspendedToastShown && reason !== 'init' && !document.hidden) {
+      _audioSuspendedToastShown = true;
+      window.knShowToast?.('Audio blocked — click anywhere to enable sound', 'warn');
+    }
+    return false;
+  }
+
   function _removeResumeAudioListeners() {
     if (!_resumeAudioHandler) return;
     document.removeEventListener('click', _resumeAudioHandler, true);
     document.removeEventListener('keydown', _resumeAudioHandler, true);
+    document.removeEventListener('pointerdown', _resumeAudioHandler, true);
     document.removeEventListener('touchstart', _resumeAudioHandler, true);
     _resumeAudioHandler = null;
   }
@@ -370,11 +431,13 @@
     _audioEmptyCount = 0;
     _audioErrorLogged = false;
     _audioSuspendedToastShown = false;
+    _lastResumeAttemptAt = 0;
   }
 
   window.KNAudio = {
     init,
     feed,
+    ensureRunning,
     cleanup,
     get destNode() {
       return _audioDestNode;

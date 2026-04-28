@@ -850,10 +850,30 @@
     startBlitCanvasCapture(srcCanvas, isSafari);
   };
 
+  const recoverSolidCanvasIfNeeded = (reason) => {
+    const bootCanvasHealth = window.KNDiag?.sampleCanvasHealth?.();
+    if (!bootCanvasHealth?.solidPale) return null;
+    _syncLog(
+      `streaming CANVAS-BOOT-BLOCK solid pale/yellow ` +
+        `bright=${bootCanvasHealth.brightness ?? '?'} stdev=${bootCanvasHealth.stdev ?? '?'} ` +
+        `paleRatio=${bootCanvasHealth.paleRatio ?? '?'} yellowGreenRatio=${bootCanvasHealth.yellowGreenRatio ?? '?'}`,
+    );
+    const recovery = window.KNRecoverSolidCanvas?.({
+      reason,
+      health: bootCanvasHealth,
+    });
+    if (!recovery) {
+      setStatus('Renderer failed to start — try reloading');
+      return { failed: true };
+    }
+    return recovery;
+  };
+
   const startHost = () => {
     if (_gameRunning) return;
     _gameRunning = true;
     setStatus('Starting emulator…');
+    window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
     KNShared.bootWithCheats('streaming');
     setupKeyTracking();
 
@@ -873,6 +893,15 @@
       const frames = gm.Module?._get_current_frame_count?.() ?? 0;
       if (frames < MIN_HOST_FRAMES) {
         setTimeout(waitForEmu, 100);
+        return;
+      }
+      const recovery = recoverSolidCanvasIfNeeded('streaming-host-boot');
+      if (recovery) {
+        if (!recovery.failed) {
+          _gameRunning = false;
+          setStatus(`Renderer retry (${recovery.profile})…`);
+          setTimeout(startHost, 0);
+        }
         return;
       }
       _syncLog(`emulator running (${frames} frames) — capturing stream`);

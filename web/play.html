@@ -396,6 +396,23 @@
         'mupen64plus-cpucore': 'cached_interpreter',
       };
       (function () {
+        window.__knInstallUnpackAlignmentShim = function () {
+          [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (ctor) {
+            var proto = ctor && ctor.prototype;
+            if (!proto || proto.__knUnpackAlignmentPatched) return;
+            proto.__knUnpackAlignmentPatched = true;
+            ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach(function (name) {
+              var original = proto[name];
+              if (typeof original !== 'function') return;
+              proto[name] = function () {
+                try {
+                  this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
+                } catch (_) {}
+                return original.apply(this, arguments);
+              };
+            });
+          });
+        };
         var params = new URLSearchParams(window.location.search || '');
         var gfxProfile = params.get('kngfx');
         if (gfxProfile === 'texrect') {
@@ -419,21 +436,7 @@
         } else if (gfxProfile === 'parallel') {
           EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'parallel';
         } else if (gfxProfile === 'unpack1') {
-          [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (ctor) {
-            var proto = ctor && ctor.prototype;
-            if (!proto || proto.__knUnpackAlignmentPatched) return;
-            proto.__knUnpackAlignmentPatched = true;
-            ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach(function (name) {
-              var original = proto[name];
-              if (typeof original !== 'function') return;
-              proto[name] = function () {
-                try {
-                  this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
-                } catch (_) {}
-                return original.apply(this, arguments);
-              };
-            });
-          });
+          window.__knInstallUnpackAlignmentShim();
         }
       })();
       // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (shared.js).

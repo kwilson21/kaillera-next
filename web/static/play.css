@@ -631,6 +631,7 @@ button:hover {
 #more-wrapper {
   position: relative;
   flex-shrink: 0;
+  z-index: 70;
 }
 #toolbar-more {
   min-width: 44px;
@@ -658,7 +659,7 @@ button:hover {
   right: auto;
   bottom: auto;
   margin-bottom: 0;
-  z-index: 299;
+  z-index: 9999;
 }
 .more-dropdown.hidden {
   display: none;

@@ -202,6 +202,17 @@
         ejsPaused: !!window.EJS_emulator?.paused,
         scene: mod?._kn_get_scene_curr?.() ?? null,
       });
+      window.dispatchEvent(
+        new CustomEvent('kn-canvas-solid-pale', {
+          detail: {
+            frame: frameNum,
+            reason,
+            health,
+            ejsPaused: !!window.EJS_emulator?.paused,
+            scene: mod?._kn_get_scene_curr?.() ?? null,
+          },
+        }),
+      );
       captureAndSendScreenshot();
     }
   }
@@ -533,6 +544,8 @@
     installHooks,
     cleanup,
     checkFreeze,
+    checkCanvasHealth,
+    sampleCanvasHealth,
     captureCanvasHash,
     captureAndSendScreenshot,
     SCREENSHOT_INTERVAL,

@@ -1371,6 +1371,9 @@
   let _lastPeerPhaseWaitLogFrame = -1;
   const INITIAL_SMASH_TITLE_TIMEOUT_MS = 60000;
   const INITIAL_SMASH_TITLE_SETTLE_FRAMES = 30;
+  const INITIAL_SMASH_MENU_FALLBACK_MS = 8000;
+  const INITIAL_SMASH_MENU_SETTLE_FRAMES = 30;
+  const INITIAL_SMASH_FALLBACK_SCENES = new Set([55]);
   // Remix title/menu startup must avoid the RetroArch RASTATE load path:
   // reloading that savestate can strand Remix on its yellow/thread-interrupt
   // screen. Use the C-level snapshot plus hidden-state sidecar instead.
@@ -1684,9 +1687,10 @@
 
   const _isControllableMenuScene = (scene) => {
     // Smash Remix / SSB64 scenes: 1=Title, 7=Mode Select, 8-21=menus,
-    // CSS, and stage select. These screens are edge-sensitive: predicting
-    // or fabricating one A/Start/down frame can put peers on different paths.
-    return scene === 1 || (scene >= 7 && scene <= 21);
+    // CSS, stage select, and 55=Remix startup/menu shell. These screens
+    // are edge-sensitive: predicting or fabricating one A/Start/down frame
+    // can put peers on different paths.
+    return scene === 1 || (scene >= 7 && scene <= 21) || INITIAL_SMASH_FALLBACK_SCENES.has(scene);
   };
 
   const _readMenuLockstepPhase = (enabled) => {
@@ -4465,6 +4469,31 @@
         return;
       }
 
+      const bootCanvasHealth = _diag.sampleCanvasHealth?.();
+      if (bootCanvasHealth?.solidPale) {
+        _syncLog(
+          `CANVAS-BOOT-BLOCK solid pale/yellow before sync ` +
+            `rgb=${bootCanvasHealth.meanR ?? '?'},${bootCanvasHealth.meanG ?? '?'},${bootCanvasHealth.meanB ?? '?'} ` +
+            `bright=${bootCanvasHealth.brightness ?? '?'} stdev=${bootCanvasHealth.stdev ?? '?'} ` +
+            `paleRatio=${bootCanvasHealth.paleRatio ?? '?'} yellowGreenRatio=${bootCanvasHealth.yellowGreenRatio ?? '?'}`,
+        );
+        const recovery = window.KNRecoverSolidCanvas?.({
+          reason: 'lockstep-boot',
+          health: bootCanvasHealth,
+        });
+        if (recovery) {
+          _bootPollCount = 0;
+          _bootGestureReceived = false;
+          setStatus(`Renderer retry (${recovery.profile}) — tap to continue`);
+          showGesturePrompt();
+          setTimeout(waitForEmu, 200);
+          return;
+        }
+        setStatus('Renderer failed to start — try reloading the page');
+        _config?.onStatus?.('Renderer failed to start — try reloading');
+        return;
+      }
+
       // Auto-discover INPUT_BASE by calling _simulate_input and detecting the change
       if (mod._simulate_input) {
         try {
@@ -4914,6 +4943,9 @@
 
     const start = performance.now();
     let titleFrame = -1;
+    let fallbackFrame = -1;
+    let fallbackScene = 0;
+    let lastProgressLogAt = 0;
     setStatus('Waiting for title screen...');
     _syncLog('Smash Remix initial sync: waiting for title-screen state');
 
@@ -4922,7 +4954,9 @@
       while (performance.now() - start < INITIAL_SMASH_TITLE_TIMEOUT_MS) {
         _getRdramBase(mod);
         const scene = _readSceneCurr();
+        const gameStatus = _readGameStatus();
         const frame = mod._get_current_frame_count?.() ?? 0;
+        const elapsed = performance.now() - start;
 
         if (scene === 1) {
           if (titleFrame < 0) {
@@ -4939,6 +4973,41 @@
           }
         } else {
           titleFrame = -1;
+        }
+
+        const fallbackReady =
+          elapsed >= INITIAL_SMASH_MENU_FALLBACK_MS &&
+          INITIAL_SMASH_FALLBACK_SCENES.has(scene) &&
+          gameStatus >= 0 &&
+          gameStatus !== 1;
+        if (fallbackReady) {
+          if (fallbackFrame < 0 || fallbackScene !== scene) {
+            fallbackFrame = frame;
+            fallbackScene = scene;
+            _syncLog(
+              `Smash Remix initial sync: fallback scene=${scene} gameStatus=${gameStatus} ` +
+                `reached at coreFrame=${frame}`,
+            );
+          }
+          if (frame - fallbackFrame >= INITIAL_SMASH_MENU_SETTLE_FRAMES) {
+            mod.pauseMainLoop?.();
+            _syncLog(
+              `Smash Remix initial sync: capturing fallback scene=${scene} ` +
+                `gameStatus=${gameStatus} at coreFrame=${frame} (settled ${frame - fallbackFrame}f)`,
+            );
+            return;
+          }
+        } else {
+          fallbackFrame = -1;
+          fallbackScene = 0;
+        }
+
+        if (elapsed - lastProgressLogAt >= 5000) {
+          lastProgressLogAt = elapsed;
+          _syncLog(
+            `Smash Remix initial sync: still waiting ` +
+              `scene=${scene} gameStatus=${gameStatus} coreFrame=${frame} elapsedMs=${Math.round(elapsed)}`,
+          );
         }
 
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -6819,11 +6888,9 @@
 
         // BF6: resume AudioContext on visibility return — browsers suspend
         // AudioContext when tab is hidden, and it won't auto-resume.
-        if (_audio?.ctx?.state === 'suspended') {
-          _audio.ctx.resume().catch((e) => {
-            _syncLog(`audio re-resume on visibility failed: ${e.name}: ${e.message}`);
-          });
-          _syncLog(`audio context resumed on tab return (was suspended)`);
+        if (_audio?.ctx?.state && _audio.ctx.state !== 'running') {
+          _audio.ensureRunning?.('visibility-return');
+          _syncLog(`audio context resume requested on tab return (state=${_audio.ctx.state})`);
         }
         // Also resume EJS AudioContext if accessible
         const ejsAudioCtx = window.EJS_emulator?.audioContext;
