@@ -106,7 +106,7 @@ def test_smash_remix_startup_restores_full_hidden_state_sidecar():
     assert "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot" in build_source
 
 
-def test_smash_remix_runtime_mismatch_waits_before_received_kn_sync_restore():
+def test_smash_remix_runtime_mismatch_substitutes_verified_local_kn_sync_capture():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
 
     assert "let _guestStateUseLocalRemixTitle" not in source
@@ -114,11 +114,14 @@ def test_smash_remix_runtime_mismatch_waits_before_received_kn_sync_restore():
     assert "JSC guest kept local Remix title state; skipped remote kn-sync restore" not in source
     assert "const _getRuntimeFamily = () => {" in source
     assert "sourceRuntimeFamily: _getRuntimeFamily()" in source
+    assert "startupFingerprint" in source
     assert "const _shouldWaitBeforeInitialKnSyncRestore = (sourceRuntimeFamily) => {" in source
     assert "hostRuntimeFamily !== localRuntimeFamily" in source
-    assert "waiting for local title before received kn-sync restore" in source
+    assert "booting locally to title and substituting local capture" in source
     assert "await waitForSmashTitleState(gm)" in source
-    assert "received kn-sync will still be restored" in source
+    assert "const fingerprintMismatches = _startupFingerprintMismatches(" in source
+    assert "refusing unsafe substitution" in source
+    assert "substituted local kn-sync capture" in source
 
     load_idx = source.find("if (isKnSyncInitialState)")
     host_local_idx = source.find("if (hasLocalKnSyncCapture)", load_idx)

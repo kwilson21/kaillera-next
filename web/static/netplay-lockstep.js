@@ -2342,6 +2342,107 @@
     };
   };
 
+  const _u32OrNull = (value) => (Number.isFinite(value) ? value >>> 0 : null);
+  const _intOrNull = (value) => (Number.isFinite(value) ? Math.trunc(value) : null);
+
+  const _captureStartupFingerprint = (gm) => {
+    const mod = gm?.Module;
+    if (!mod) return null;
+    return {
+      coreHash: typeof window._knCoreHash === 'string' && window._knCoreHash ? window._knCoreHash : null,
+      coreFrame: _intOrNull(mod._get_current_frame_count?.()),
+      scene: _intOrNull(_readSceneCurr()),
+      gameStatus: _intOrNull(_readGameStatus()),
+      syncHash: _u32OrNull(mod._kn_sync_hash?.()),
+      gameplayHash: _u32OrNull(mod._kn_gameplay_hash?.(-1)),
+      gameStateHash: _u32OrNull(mod._kn_game_state_hash?.(-1)),
+      softfloatState: _u32OrNull(mod._kn_get_softfloat_state?.()),
+      hiddenFingerprint: _u32OrNull(mod._kn_get_hidden_state_fingerprint?.()),
+      fullStateHash: _u32OrNull(mod._kn_full_state_hash?.(-1)),
+    };
+  };
+
+  const _normalizeStartupFingerprint = (value) => {
+    if (!value || typeof value !== 'object') return null;
+    return {
+      coreHash: typeof value.coreHash === 'string' && value.coreHash ? value.coreHash : null,
+      coreFrame: _intOrNull(value.coreFrame),
+      scene: _intOrNull(value.scene),
+      gameStatus: _intOrNull(value.gameStatus),
+      syncHash: _u32OrNull(value.syncHash),
+      gameplayHash: _u32OrNull(value.gameplayHash),
+      gameStateHash: _u32OrNull(value.gameStateHash),
+      softfloatState: _u32OrNull(value.softfloatState),
+      hiddenFingerprint: _u32OrNull(value.hiddenFingerprint),
+      fullStateHash: _u32OrNull(value.fullStateHash),
+    };
+  };
+
+  const _formatStartupFingerprint = (fp) => {
+    if (!fp) return 'none';
+    return [
+      `core=${fp.coreHash ? fp.coreHash.substring(0, 12) : 'unknown'}`,
+      `frame=${fp.coreFrame ?? 'n/a'}`,
+      `scene=${fp.scene ?? 'n/a'}`,
+      `status=${fp.gameStatus ?? 'n/a'}`,
+      `sync=${fp.syncHash != null ? fp.syncHash.toString(16) : 'n/a'}`,
+      `gp=${fp.gameplayHash != null ? fp.gameplayHash.toString(16) : 'n/a'}`,
+      `game=${fp.gameStateHash != null ? fp.gameStateHash.toString(16) : 'n/a'}`,
+      `sf=${fp.softfloatState != null ? fp.softfloatState.toString(16) : 'n/a'}`,
+      `hidden=${fp.hiddenFingerprint != null ? fp.hiddenFingerprint.toString(16) : 'n/a'}`,
+      `full=${fp.fullStateHash != null ? fp.fullStateHash.toString(16) : 'n/a'}`,
+    ].join(' ');
+  };
+
+  const _startupFingerprintMismatches = (hostFp, localFp) => {
+    if (!hostFp || !localFp) return [];
+    const fields = [
+      'coreHash',
+      'coreFrame',
+      'scene',
+      'gameStatus',
+      'syncHash',
+      'gameplayHash',
+      'gameStateHash',
+      'softfloatState',
+    ];
+    const mismatches = [];
+    for (const field of fields) {
+      if (hostFp[field] == null || localFp[field] == null) continue;
+      if (hostFp[field] !== localFp[field]) mismatches.push(`${field}:host=${hostFp[field]} local=${localFp[field]}`);
+    }
+    return mismatches;
+  };
+
+  const _summarizeByteDiff = (a, b, sampleLimit = 4) => {
+    if (!a || !b) return null;
+    const left = a instanceof Uint8Array ? a : new Uint8Array(a);
+    const right = b instanceof Uint8Array ? b : new Uint8Array(b);
+    const len = Math.min(left.length, right.length);
+    const samples = [];
+    let diffCount = Math.abs(left.length - right.length);
+    let firstDiffOffset = left.length === right.length ? -1 : len;
+    for (let i = 0; i < len; i++) {
+      if (left[i] === right[i]) continue;
+      diffCount++;
+      if (firstDiffOffset < 0) firstDiffOffset = i;
+      if (samples.length < sampleLimit) samples.push(`0x${i.toString(16)}:${left[i]}!=${right[i]}`);
+    }
+    return {
+      diffCount,
+      firstDiffOffset,
+      lengthDelta: left.length - right.length,
+      samples,
+    };
+  };
+
+  const _formatByteDiff = (summary) => {
+    if (!summary) return 'byteDiff=n/a';
+    const first = summary.firstDiffOffset >= 0 ? `first=0x${summary.firstDiffOffset.toString(16)}` : 'first=none';
+    const samples = summary.samples.length ? ` samples=${summary.samples.join(',')}` : '';
+    return `byteDiff=${summary.diffCount} sizeDelta=${summary.lengthDelta} ${first}${samples}`;
+  };
+
   let _awaitingResyncAt = 0; // timestamp when pause started (safety timeout)
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
@@ -4864,7 +4965,7 @@
     const readyMod = gm.Module;
     const isKnSyncInitialState = _guestStateKind === 'kn-sync';
     _lockstepStartStateKind = isKnSyncInitialState ? 'kn-sync' : 'savestate';
-    const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally && _playerSlot === 0;
+    const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;
     if (!_isSmashRemix() && !isKnSyncInitialState && readyMod?._retro_reset) {
       readyMod._retro_reset();
       _syncLog('core soft-reset before state load');
@@ -4878,7 +4979,16 @@
     if (isKnSyncInitialState) {
       if (hasLocalKnSyncCapture) {
         recaptureManualRunner(readyMod, 'initial-sync-local-capture');
-        _syncLog('initial-sync-load: host kept locally captured kn-sync state');
+        if (_playerSlot === 0) {
+          _syncLog('initial-sync-load: host kept locally captured kn-sync state');
+        } else {
+          // Cross-engine guest substituted its own title-state capture; apply
+          // the host's hiddenWords/audioFifo deltas to align non-deterministic
+          // startup state (RNG-driven hidden flags, AI FIFO fill levels).
+          _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+          _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
+          _syncLog('initial-sync-load: guest kept locally captured kn-sync state (cross-engine)');
+        }
       } else {
         if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
           _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
@@ -5179,6 +5289,7 @@
     try {
       await waitForSmashTitleState(gm);
       const captured = _captureInitialStateBytes(gm);
+      const startupFingerprint = _captureStartupFingerprint(gm);
       const bytes = captured.bytes;
       // Copy before compressAndEncode — worker transfer detaches the buffer
       const cacheBytes = new Uint8Array(bytes);
@@ -5194,6 +5305,7 @@
         frame: 0,
         stateFormat: captured.kind,
         sourceRuntimeFamily: _getRuntimeFamily(),
+        startupFingerprint,
         hiddenWords: captured.hiddenWords,
         audioFifo: captured.audioFifo,
         data: encoded.data,
@@ -5244,6 +5356,7 @@
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
+      const hostStartupFingerprint = _normalizeStartupFingerprint(msg.startupFingerprint);
       _guestStateCapturedLocally = false;
       _syncLog(`initial state decompressed (${_guestStateKind}, ${bytes.length} bytes)`);
 
@@ -5255,13 +5368,54 @@
           _syncLog(
             `Smash Remix initial sync: runtime mismatch/unknown ` +
               `host=${sourceRuntimeFamily} local=${localRuntimeFamily}; ` +
-              `waiting for local title before received kn-sync restore`,
+              `booting locally to title and substituting local capture`,
           );
           await waitForSmashTitleState(gm);
-          _syncLog(
-            `Smash Remix initial sync: local pre-restore scene=${_readSceneCurr()} ` +
-              `gameStatus=${_readGameStatus()}; received kn-sync will still be restored`,
-          );
+          // Cross-engine kn_sync_write can trip Remix's thread-5 yellow crash
+          // screen. Avoid importing the host's engine-shaped scratch directly;
+          // first prove that both peers reached the same startup fingerprint,
+          // then keep the guest's local bytes and apply host sidecars below.
+          const localCapture = _captureInitialStateBytes(gm);
+          if (localCapture && localCapture.kind === 'kn-sync' && localCapture.bytes?.length) {
+            const localStartupFingerprint = _captureStartupFingerprint(gm);
+            const fingerprintMismatches = _startupFingerprintMismatches(
+              hostStartupFingerprint,
+              localStartupFingerprint,
+            );
+            const byteDiff = _summarizeByteDiff(bytes, localCapture.bytes);
+            _syncLog(
+              `Smash Remix initial sync: host fingerprint ${_formatStartupFingerprint(hostStartupFingerprint)}; ` +
+                `local fingerprint ${_formatStartupFingerprint(localStartupFingerprint)}; ${_formatByteDiff(byteDiff)}`,
+            );
+            if (fingerprintMismatches.length) {
+              _syncLog(
+                `FATAL: cross-engine local title capture fingerprint mismatch; ` +
+                  `${fingerprintMismatches.join(', ')}; refusing unsafe substitution`,
+              );
+              setStatus('Sync failed — cross-engine startup mismatch');
+              _config?.onToast?.('Sync failed — try the same browser/runtime');
+              _guestStateBytes = null;
+              _guestStateKind = 'savestate';
+              _guestStateHiddenWords = null;
+              _guestStateAudioFifo = null;
+              _guestStateCapturedLocally = false;
+              return;
+            }
+            _guestStateBytes = localCapture.bytes;
+            _guestStateKind = 'kn-sync';
+            _guestStateCapturedLocally = true;
+            _syncLog(
+              `Smash Remix initial sync: substituted local kn-sync capture ` +
+                `(${Math.round(localCapture.bytes.length / 1024)}KB) for ` +
+                `host bytes (${sourceRuntimeFamily} -> ${localRuntimeFamily}); ` +
+                `host hiddenWords/audioFifo deltas retained`,
+            );
+          } else {
+            _syncLog(
+              `Smash Remix initial sync: local capture unavailable (kind=${localCapture?.kind ?? 'none'}); ` +
+                `falling back to host bytes — thread-fault risk`,
+            );
+          }
         } else {
           _syncLog('Smash Remix initial sync: runtime-mismatch pre-restore wait skipped; emulator unavailable');
         }
