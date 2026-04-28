@@ -124,6 +124,35 @@ def test_lockstep_clears_ejs_pause_flag_on_focus_and_visibility_return():
     assert "_releaseLocalFocusInput()" in source
 
 
+def test_lockstep_surfaces_and_recovers_browser_focus_loss():
+    source = LOCKSTEP_JS.read_text()
+
+    assert "let _focusRestoreHandler = null" in source
+    assert "let _controlsFocusLost = false" in source
+    assert "const _markControlsFocusLost = () => {" in source
+    assert "setStatus('Click game to refocus controls')" in source
+    assert "_config?.onToast?.('Game controls lost focus" in source
+    assert "const _restoreControlsFocus = (reason = 'pointer') => {" in source
+    assert "target.focus?.({ preventScroll: true })" in source
+    assert "_syncLog(`TAB-FOCUS recovered via ${reason} f=${_frameNum}`)" in source
+
+    start_idx = source.find("_focusRestoreHandler = (event) => {")
+    stop_idx = source.find("const stopSync = () => {")
+    assert start_idx != -1
+    assert stop_idx != -1
+    start_window = source[start_idx : start_idx + 700]
+    stop_window = source[stop_idx : stop_idx + 4600]
+
+    assert "_restoreControlsFocus(event?.type || 'pointer')" in start_window
+    assert "_clearEjsPauseFlagWithRetries(event?.type || 'pointer')" in start_window
+    assert "document.addEventListener('pointerdown', _focusRestoreHandler, true)" in start_window
+    assert "document.addEventListener('touchstart', _focusRestoreHandler, true)" in start_window
+
+    assert "document.removeEventListener('pointerdown', _focusRestoreHandler, true)" in stop_window
+    assert "document.removeEventListener('touchstart', _focusRestoreHandler, true)" in stop_window
+    assert "_controlsFocusLost = false" in stop_window
+
+
 def test_lockstep_retries_mobile_pause_clear_after_focus_return():
     source = LOCKSTEP_JS.read_text()
 

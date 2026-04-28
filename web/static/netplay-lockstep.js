@@ -1374,6 +1374,11 @@
   const INITIAL_SMASH_MENU_FALLBACK_MS = 8000;
   const INITIAL_SMASH_MENU_SETTLE_FRAMES = 30;
   const INITIAL_SMASH_FALLBACK_SCENES = new Set([55]);
+  const INITIAL_SMASH_CONFIRM_SCENES = new Set([55]);
+  const INITIAL_SMASH_CONFIRM_AFTER_MS = 2500;
+  const INITIAL_SMASH_CONFIRM_INTERVAL_MS = 1200;
+  const INITIAL_SMASH_CONFIRM_HOLD_MS = 90;
+  const INITIAL_SMASH_CONFIRM_INPUT = Object.freeze({ buttons: (1 << 0) | (1 << 3), lx: 0, ly: 0, cx: 0, cy: 0 });
   // Remix title/menu startup must avoid the RetroArch RASTATE load path:
   // reloading that savestate can strand Remix on its yellow/thread-interrupt
   // screen. Use the C-level snapshot plus hidden-state sidecar instead.
@@ -2367,6 +2372,8 @@
   let _unloadVisChangeHandler = null; // pagehide-equivalent for mobile Safari; removed in stop()
   let _focusHandler = null; // stored for removal in stopSync()
   let _blurHandler = null; // stored for removal in stopSync()
+  let _focusRestoreHandler = null; // pointer/touch recovery when browser chrome stole focus
+  let _controlsFocusLost = false;
   let _bootGestureAbort = null; // AbortController for the gesture-prompt listeners; aborted in stop()
   let _pageShowHandler = null; // stored for removal in stopSync()
   let _pageHideHandler = null; // stored for removal in stopSync()
@@ -4945,6 +4952,7 @@
     let titleFrame = -1;
     let fallbackFrame = -1;
     let fallbackScene = 0;
+    let lastConfirmPulseAt = -Infinity;
     let lastProgressLogAt = 0;
     setStatus('Waiting for title screen...');
     _syncLog('Smash Remix initial sync: waiting for title-screen state');
@@ -4973,6 +4981,22 @@
           }
         } else {
           titleFrame = -1;
+        }
+
+        if (
+          elapsed >= INITIAL_SMASH_CONFIRM_AFTER_MS &&
+          INITIAL_SMASH_CONFIRM_SCENES.has(scene) &&
+          elapsed - lastConfirmPulseAt >= INITIAL_SMASH_CONFIRM_INTERVAL_MS
+        ) {
+          lastConfirmPulseAt = elapsed;
+          try {
+            KNShared.applyInputToWasm(0, INITIAL_SMASH_CONFIRM_INPUT);
+            _syncLog(`Smash Remix initial sync: confirm pulse scene=${scene} coreFrame=${frame}`);
+            await new Promise((resolve) => setTimeout(resolve, INITIAL_SMASH_CONFIRM_HOLD_MS));
+          } finally {
+            KNShared.applyInputToWasm(0, KNShared.ZERO_INPUT);
+          }
+          continue;
         }
 
         const fallbackReady =
@@ -6309,6 +6333,33 @@
     }
     return hadKeys || hadTouch;
   };
+
+  const _markControlsFocusLost = () => {
+    if (_controlsFocusLost) return;
+    _controlsFocusLost = true;
+    setStatus('Click game to refocus controls');
+    _config?.onToast?.('Game controls lost focus — click the game');
+  };
+
+  const _restoreControlsFocus = (reason = 'pointer') => {
+    if (_phase !== PHASE_RUNNING) return;
+    try {
+      window.focus?.();
+    } catch (_) {}
+    const target = document.getElementById('game') || document.body;
+    if (target) {
+      try {
+        if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+        target.focus?.({ preventScroll: true });
+      } catch (_) {}
+    }
+    _releaseLocalFocusInput();
+    if (_controlsFocusLost) {
+      _controlsFocusLost = false;
+      setStatus('Connected -- game on!');
+      _syncLog(`TAB-FOCUS recovered via ${reason} f=${_frameNum}`);
+    }
+  };
   const PEER_DEAD_MS = 5000; // 5s without frame advance → peer is dead
   // Rollback-mode hard stall threshold. Faster than PEER_DEAD_MS because
   // rollback's frame-advantage ring fills up within ~10 frames (~167ms at
@@ -6926,7 +6977,7 @@
     // show exactly when input capture stopped/resumed.
     _focusHandler = () => {
       if (_phase === PHASE_RUNNING) {
-        _releaseLocalFocusInput();
+        _restoreControlsFocus('focus');
         _clearEjsPauseFlagWithRetries('focus');
         _syncLog(`TAB-FOCUS gained f=${_frameNum}`);
       }
@@ -6934,11 +6985,20 @@
     _blurHandler = () => {
       if (_phase === PHASE_RUNNING) {
         _releaseLocalFocusInput();
+        _markControlsFocusLost();
         _syncLog(`TAB-FOCUS lost f=${_frameNum}`);
       }
     };
     window.addEventListener('focus', _focusHandler);
     window.addEventListener('blur', _blurHandler);
+
+    _focusRestoreHandler = (event) => {
+      if (_phase !== PHASE_RUNNING) return;
+      _restoreControlsFocus(event?.type || 'pointer');
+      _clearEjsPauseFlagWithRetries(event?.type || 'pointer');
+    };
+    document.addEventListener('pointerdown', _focusRestoreHandler, true);
+    document.addEventListener('touchstart', _focusRestoreHandler, true);
 
     _pageHideHandler = (event) => {
       if (_phase !== PHASE_RUNNING) return;
@@ -7108,6 +7168,12 @@
       window.removeEventListener('blur', _blurHandler);
       _blurHandler = null;
     }
+    if (_focusRestoreHandler) {
+      document.removeEventListener('pointerdown', _focusRestoreHandler, true);
+      document.removeEventListener('touchstart', _focusRestoreHandler, true);
+      _focusRestoreHandler = null;
+    }
+    _controlsFocusLost = false;
     if (_pageHideHandler) {
       window.removeEventListener('pagehide', _pageHideHandler);
       _pageHideHandler = null;
