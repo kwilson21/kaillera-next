@@ -92,10 +92,10 @@
             <p id="rom-status" class="rom-status"></p>
           </div>
           <div id="rom-library" style="display: none"></div>
-          <div id="rom-sharing-prompt" style="display: none">
-            <p class="rom-sharing-prompt-text" style="font-size: 14px; color: #999; margin-bottom: 6px">
+          <div id="rom-sharing-prompt" hidden>
+            <p class="rom-sharing-prompt-text">
               Or accept ROM from host
-              <span style="font-size: 12px; color: #777; display: block; margin-top: 2px">
+              <span class="rom-sharing-prompt-legal">
                 By accepting, you confirm you own a legal copy. Transferred directly from host.
               </span>
             </p>
@@ -103,12 +103,12 @@
               <button id="rom-accept-btn" class="small-btn">Accept from Host</button>
             </div>
           </div>
-          <div id="rom-transfer-progress" style="display: none">
+          <div id="rom-transfer-progress" hidden>
             <div class="rom-progress-bar-container">
               <div id="rom-progress-bar" class="rom-progress-bar"></div>
             </div>
             <p id="rom-progress-text" class="rom-status">Waiting for ROM from host...</p>
-            <button id="rom-transfer-retry" class="small-btn" style="display: none">Retry</button>
+            <button id="rom-transfer-retry" class="small-btn" hidden>Retry</button>
             <button id="rom-transfer-cancel" class="small-btn">Cancel</button>
           </div>
         </div>

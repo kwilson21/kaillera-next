@@ -1319,24 +1319,24 @@
     );
 
     // Hide retry button by default — only shown in paused state
-    if (retryBtn) retryBtn.style.display = 'none';
+    if (retryBtn) retryBtn.hidden = true;
 
     if (_romSharingEnabled && _romSharingDecision === null && !_romBlob) {
       // Show ROM drop zone with compact "accept from host" option below
       if (romDrop) romDrop.style.display = '';
-      if (prompt) prompt.style.display = '';
-      if (progress) progress.style.display = 'none';
+      if (prompt) prompt.hidden = false;
+      if (progress) progress.hidden = true;
     } else if (_romTransferState === 'receiving') {
       // Transfer in progress — show progress bar
       if (romDrop) romDrop.style.display = 'none';
-      if (prompt) prompt.style.display = 'none';
-      if (progress) progress.style.display = '';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = false;
     } else if (_romTransferState === 'paused') {
       // Paused — show progress bar with retry button
       if (romDrop) romDrop.style.display = 'none';
-      if (prompt) prompt.style.display = 'none';
-      if (progress) progress.style.display = '';
-      if (retryBtn) retryBtn.style.display = '';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = false;
+      if (retryBtn) retryBtn.hidden = false;
       const text = document.getElementById('rom-progress-text');
       if (text && _romTransferHeader) {
         const pct = Math.round((_romTransferBytesReceived / _romTransferHeader.size) * 100);
@@ -1347,8 +1347,8 @@
     } else if (_romTransferState === 'resuming') {
       // Resuming — show progress bar with reconnecting text
       if (romDrop) romDrop.style.display = 'none';
-      if (prompt) prompt.style.display = 'none';
-      if (progress) progress.style.display = '';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = false;
       const text = document.getElementById('rom-progress-text');
       if (text) text.textContent = 'ROM transfer reconnecting...';
     } else if (_romTransferState === 'complete' || (_romSharingDecision === 'accepted' && _romBlob)) {
@@ -1357,13 +1357,13 @@
         romDrop.style.display = '';
         romDrop.classList.add('loaded');
       }
-      if (prompt) prompt.style.display = 'none';
-      if (progress) progress.style.display = 'none';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = true;
     } else {
       // Default: show normal drop zone
       if (romDrop) romDrop.style.display = '';
-      if (prompt) prompt.style.display = 'none';
-      if (progress) progress.style.display = 'none';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = true;
     }
   };
 
@@ -2001,12 +2001,12 @@
     if (!wrap) return;
 
     if (state === 'idle') {
-      wrap.style.display = 'none';
+      wrap.hidden = true;
       wrap.style.borderColor = '';
       return;
     }
 
-    wrap.style.display = '';
+    wrap.hidden = false;
     if (message && text) text.textContent = message;
 
     // Border color hint by severity (uses inline style so it overrides
@@ -2022,9 +2022,9 @@
     wrap.style.borderColor = borderColor;
 
     // Retry button visible only when the user can act on it
-    if (retryBtn) retryBtn.style.display = state === 'failed' || state === 'stalled' ? '' : 'none';
+    if (retryBtn) retryBtn.hidden = !(state === 'failed' || state === 'stalled');
     // Cancel button always visible while a transfer state exists
-    if (cancelBtn) cancelBtn.style.display = '';
+    if (cancelBtn) cancelBtn.hidden = false;
   };
 
   const finishRomTransfer = () => {
@@ -3385,7 +3385,7 @@
     const gamepadArea = document.getElementById('gamepad-area');
     if (isSpectator) {
       if (romDrop) romDrop.style.display = 'none';
-      if (romSharingPrompt) romSharingPrompt.style.display = 'none';
+      if (romSharingPrompt) romSharingPrompt.hidden = true;
       if (gamepadArea) gamepadArea.style.display = 'none';
       if (guestStatus) guestStatus.textContent = 'Waiting for host to start the game...';
     }
@@ -4473,12 +4473,41 @@
 
   window.showEffectiveDelay = showEffectiveDelay;
 
+  const normalizeRomSharingMarkup = () => {
+    const prompt = document.getElementById('rom-sharing-prompt');
+    if (prompt) {
+      prompt.hidden = prompt.hidden || prompt.style.display === 'none';
+      prompt.style.display = '';
+      const promptText = prompt.querySelector('.rom-sharing-prompt-text');
+      if (promptText) promptText.removeAttribute('style');
+      const legal =
+        prompt.querySelector('.rom-sharing-prompt-legal') || prompt.querySelector('.rom-sharing-prompt-text span');
+      if (legal) {
+        legal.classList.add('rom-sharing-prompt-legal');
+        legal.removeAttribute('style');
+      }
+    }
+
+    const progress = document.getElementById('rom-transfer-progress');
+    if (progress) {
+      progress.hidden = progress.hidden || progress.style.display === 'none';
+      progress.style.display = '';
+    }
+
+    const retryBtn = document.getElementById('rom-transfer-retry');
+    if (retryBtn) {
+      retryBtn.hidden = retryBtn.hidden || retryBtn.style.display === 'none';
+      retryBtn.style.display = '';
+    }
+  };
+
   // ── Init ───────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', () => {
     console.log('kaillera-next — v0.9 forever');
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
+    normalizeRomSharingMarkup();
     // Agent 21 badge — gold jersey number for the creator's handle
     const _a21style = document.createElement('style');
     _a21style.textContent =
@@ -4664,7 +4693,7 @@
       const sharingPrompt = document.getElementById('rom-sharing-prompt');
       const sharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
       if (sharingRow) sharingRow.style.display = 'none';
-      if (sharingPrompt) sharingPrompt.style.display = 'none';
+      if (sharingPrompt) sharingPrompt.hidden = true;
       if (sharingDisclaimer) sharingDisclaimer.style.display = 'none';
     } else {
       if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);

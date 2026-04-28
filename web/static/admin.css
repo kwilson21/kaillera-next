@@ -178,6 +178,13 @@ button.btn-pin.pinned {
   padding: 6px 10px;
 }
 
+#desync-event-list {
+  font-family: monospace;
+  font-size: 13px;
+  list-style: none;
+  padding: 0;
+}
+
 /* Room groups */
 .room-group {
   margin-bottom: 16px;
