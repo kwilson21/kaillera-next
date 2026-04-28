@@ -416,6 +416,9 @@ def test_guest_sees_delay_picker(page, server_url):
     page.wait_for_function(
         "document.getElementById('player-controls') !== null", timeout=10000
     )
+    page.wait_for_function(
+        "typeof window.getDelayPreference === 'function'", timeout=10000
+    )
 
     # Player controls with delay picker exists
     assert page.locator("#player-controls #delay-picker").count() == 1
@@ -428,6 +431,11 @@ def test_guest_sees_delay_picker(page, server_url):
 
     # Select element exists
     assert page.locator("#delay-select").count() == 1
+    assert page.evaluate("document.getElementById('delay-select').hidden") is True
+    assert page.evaluate("document.querySelector('#delay-select option[value=\"0\"]')?.textContent.trim() === '0'")
+    assert page.evaluate(
+        "[...document.querySelectorAll('#delay-select option')].every((o) => o.textContent.trim() !== '--')"
+    )
 
 
 def test_host_delay_hidden_streaming(page, server_url):
@@ -439,24 +447,35 @@ def test_host_delay_hidden_streaming(page, server_url):
         "document.getElementById('player-controls') !== null", timeout=10000
     )
 
-    # Player controls start hidden (display:none from HTML)
-    # and the mode-change handler also keeps them hidden in streaming.
-    # Verify by checking computed visibility.
+    # Host player controls stay hidden; host delay now lives in host Advanced.
     visible = page.evaluate(
         "getComputedStyle(document.getElementById('player-controls')).display !== 'none'"
     )
-    assert visible is False, "player-controls should be hidden in streaming mode"
+    assert visible is False, "player-controls should be hidden for hosts"
+    delay_visible = page.evaluate(
+        "getComputedStyle(document.getElementById('delay-picker')).display !== 'none'"
+    )
+    assert delay_visible is False, "delay picker should be hidden in streaming mode"
 
-    # Verify switching to lockstep shows them
+    # Verify switching to lockstep shows delay inside host Advanced, not a
+    # second player-controls disclosure.
     page.evaluate("document.getElementById('mode-select').value = 'lockstep'")
     page.evaluate(
         "document.getElementById('mode-select')"
         ".dispatchEvent(new Event('change'))"
     )
+    page.wait_for_function(
+        "getComputedStyle(document.getElementById('delay-picker')).display !== 'none'",
+        timeout=10000,
+    )
     visible_after = page.evaluate(
         "getComputedStyle(document.getElementById('player-controls')).display !== 'none'"
     )
-    assert visible_after is True, "player-controls should show after switching to lockstep"
+    assert visible_after is False, "player-controls should remain hidden for hosts"
+    delay_visible_after = page.evaluate(
+        "getComputedStyle(document.getElementById('delay-picker')).display !== 'none'"
+    )
+    assert delay_visible_after is True, "host delay picker should show in lockstep"
 
 
 def test_host_still_has_delay_picker(page, server_url):
@@ -466,33 +485,113 @@ def test_host_still_has_delay_picker(page, server_url):
         "document.getElementById('delay-picker') !== null", timeout=10000
     )
 
-    # Delay picker exists in player-controls
-    assert page.locator("#player-controls #delay-picker").count() == 1
+    # Delay picker exists in host Advanced, not as a second Advanced section.
+    assert page.locator("#host-controls .advanced-options #delay-picker").count() == 1
+    assert page.locator("#player-controls #delay-picker").count() == 0
     # Start button is in host-controls (not player-controls)
     assert page.locator("#host-controls #start-btn").count() == 1
     # delay-auto checkbox exists
     assert page.locator("#delay-auto").count() == 1
 
 
-def test_guest_delay_preference_readable(page, server_url):
+def test_guest_delay_preference_readable(context, server_url):
     """getDelayPreference returns manual delay when set."""
-    page.goto(f"{server_url}/play.html?room=DLYS4{_R}&host=1&name=Host")
-    page.wait_for_function(
-        "typeof window.getDelayPreference === 'function'", timeout=10000
-    )
+    host = context.new_page()
+    guest = context.new_page()
 
-    # Default auto delay = 2
-    delay = page.evaluate("window.getDelayPreference()")
-    assert delay == 2, f"Expected default delay 2, got {delay}"
+    try:
+        host.goto(f"{server_url}/play.html?room=DLYS4{_R}&host=1&name=Host")
+        host.wait_for_function(
+            "typeof window.getDelayPreference === 'function'", timeout=10000
+        )
+        host.wait_for_function("window.getDelayPreference() === 0", timeout=10000)
 
-    # Set manual delay to 5
-    page.evaluate("""
-        document.getElementById('delay-auto').checked = false;
-        document.getElementById('delay-select').disabled = false;
-        document.getElementById('delay-select').value = '5';
-    """)
-    delay = page.evaluate("window.getDelayPreference()")
-    assert delay == 5, f"Expected manual delay 5, got {delay}"
+        solo_state = host.evaluate("""
+            ({
+                delay: window.getDelayPreference(),
+                value: document.getElementById('delay-select').value,
+                hidden: document.getElementById('delay-select').hidden,
+                effective: document.getElementById('delay-effective').textContent,
+                summary: document.querySelector('#host-controls .summary-status')?.textContent,
+            });
+        """)
+        assert solo_state == {
+            "delay": 0,
+            "value": "0",
+            "hidden": True,
+            "effective": "(solo: no delay)",
+            "summary": "Resync on · ROM sharing off · Solo · no delay",
+        }
+
+        guest.goto(f"{server_url}/play.html?room=DLYS4{_R}&name=Guest")
+        host.wait_for_function("window.getDelayPreference() === 2", timeout=10000)
+
+        # Set manual delay to 5 once there is an actual netplay peer.
+        host.evaluate("""
+            document.getElementById('delay-auto').checked = false;
+            document.getElementById('delay-select').disabled = false;
+            document.getElementById('delay-select').value = '5';
+            document.getElementById('delay-select').dispatchEvent(new Event('change', { bubbles: true }));
+        """)
+        manual_state = host.evaluate("""
+            ({
+                delay: window.getDelayPreference(),
+                hidden: document.getElementById('delay-select').hidden,
+                effective: document.getElementById('delay-effective').textContent,
+                summary: document.querySelector('#host-controls .summary-status')?.textContent,
+            });
+        """)
+        assert manual_state["delay"] == 5, f"Expected manual delay 5, got {manual_state['delay']}"
+        assert manual_state["hidden"] is False
+        assert manual_state["effective"] == "(Average)"
+        assert manual_state["summary"].endswith("Fixed 5")
+
+        reset_state = host.evaluate("""
+            const auto = document.getElementById('delay-auto');
+            const select = document.getElementById('delay-select');
+            auto.checked = true;
+            auto.dispatchEvent(new Event('change', { bubbles: true }));
+            ({
+                disabled: select.disabled,
+                hidden: select.hidden,
+                value: select.value,
+                delay: window.getDelayPreference(),
+                effective: document.getElementById('delay-effective').textContent,
+            });
+        """)
+        assert reset_state == {"disabled": True, "hidden": True, "value": "2", "delay": 2, "effective": "(Excellent)"}
+
+        # DOM-tampered values stay in the picker-safe range.
+        host.evaluate("""
+            document.getElementById('delay-auto').checked = false;
+            const sel = document.getElementById('delay-select');
+            sel.disabled = false;
+            sel.appendChild(new Option('999', '999'));
+            sel.value = '999';
+        """)
+        delay = host.evaluate("window.getDelayPreference()")
+        assert delay == 9, f"Expected clamped delay 9, got {delay}"
+
+        zero_state = host.evaluate("""
+            const sel = document.getElementById('delay-select');
+            sel.value = '0';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            ({
+                value: sel.value,
+                delay: window.getDelayPreference(),
+                effective: document.getElementById('delay-effective').textContent,
+                summary: document.querySelector('#host-controls .summary-status')?.textContent,
+            });
+        """)
+        assert zero_state == {
+            "value": "2",
+            "delay": 2,
+            "effective": "(Excellent)",
+            "summary": "Resync on · ROM sharing off · Fixed 2",
+        }
+    finally:
+        host.close()
+        guest.close()
 
 
 # ── Worker Base64 Test ────────────────────────────────────────────────

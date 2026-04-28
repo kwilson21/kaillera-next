@@ -49,6 +49,36 @@ def test_rollback_stall_sites_have_wall_clock_recovery_markers():
     assert "markPeerPhantomForStallTimeout" in src
 
 
+def test_rollback_delay_inputs_are_clamped_to_engine_window():
+    src = LOCKSTEP_JS.read_text()
+
+    assert (
+        "const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES)"
+        in src
+    )
+    assert (
+        "return Math.min(ROLLBACK_MAX_DELAY_FRAMES, Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));"
+        in src
+    )
+    assert "const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);" in src
+    assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
+    assert "window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);" in src
+    assert (
+        "const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);"
+        in src
+    )
+
+
+def test_solo_delay_does_not_initialize_rollback():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "const soloMode = playerPeerSids.length === 0;" in src
+    assert "ownDelay = 0;" in src
+    assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
+    assert "detMod?._kn_rollback_init && !_isSmashRemix() && DELAY_FRAMES > 0" in src
+    assert "C-ROLLBACK disabled for zero-delay solo play" in src
+
+
 def test_phase_lock_deadline_tracks_intermittent_phase_mismatch():
     src = LOCKSTEP_JS.read_text()
 

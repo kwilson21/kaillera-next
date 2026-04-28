@@ -1026,6 +1026,7 @@
         if (hostControls) hostControls.style.display = 'none';
         if (guestStatus) guestStatus.style.display = '';
       }
+      syncDelayPickerPlacement();
     }
   };
 
@@ -3390,11 +3391,7 @@
       if (guestStatus) guestStatus.textContent = 'Waiting for host to start the game...';
     }
 
-    // Show player controls (delay picker) for all non-spectator players in lockstep mode
-    const playerControls = document.getElementById('player-controls');
-    if (playerControls) {
-      playerControls.style.display = !isSpectator && mode === 'lockstep' ? '' : 'none';
-    }
+    syncDelayPickerPlacement();
 
     const modeSel = document.getElementById('mode-select');
     if (modeSel) modeSel.value = mode;
@@ -3887,19 +3884,34 @@
 
   // ── UI: More (overflow) Dropdown ──────────────────────────────────────
 
+  const positionMoreDropdown = (dd, btn) => {
+    if (!dd || !btn) return;
+    const rect = btn.getBoundingClientRect();
+    const gap = 6;
+    const edge = 8;
+    dd.style.maxHeight = `${Math.max(160, rect.top - edge - gap)}px`;
+    dd.style.overflowY = 'auto';
+    const menuRect = dd.getBoundingClientRect();
+    const left = Math.min(window.innerWidth - menuRect.width - edge, Math.max(edge, rect.right - menuRect.width));
+    const top = Math.max(edge, rect.top - menuRect.height - gap);
+    dd.style.left = `${left}px`;
+    dd.style.top = `${top}px`;
+  };
+
   const toggleMoreDropdown = () => {
     const dd = document.getElementById('more-dropdown');
     const btn = document.getElementById('toolbar-more');
     if (!dd) return;
     const isOpen = !dd.classList.contains('hidden');
     if (isOpen) {
-      dd.classList.add('hidden');
-      if (btn) {
-        btn.classList.remove('active');
-        btn.setAttribute('aria-expanded', 'false');
-      }
+      closeMoreDropdown();
     } else {
+      if (btn) {
+        document.body.appendChild(dd);
+        dd.classList.add('floating');
+      }
       dd.classList.remove('hidden');
+      positionMoreDropdown(dd, btn);
       if (btn) {
         btn.classList.add('active');
         btn.setAttribute('aria-expanded', 'true');
@@ -3910,7 +3922,13 @@
   const closeMoreDropdown = () => {
     const dd = document.getElementById('more-dropdown');
     const btn = document.getElementById('toolbar-more');
-    if (dd) dd.classList.add('hidden');
+    if (dd) {
+      dd.classList.add('hidden');
+      dd.classList.remove('floating');
+      dd.removeAttribute('style');
+      const home = document.getElementById('more-wrapper');
+      if (home && dd.parentElement !== home) home.appendChild(dd);
+    }
     if (btn) {
       btn.classList.remove('active');
       btn.setAttribute('aria-expanded', 'false');
@@ -4430,35 +4448,87 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  KNState.delayAutoValue = 2;
+  const SOLO_FRAME_DELAY = 0;
+  const DEFAULT_FRAME_DELAY = 2;
+  const MIN_FRAME_DELAY = 1;
+  const MAX_FRAME_DELAY = 9;
+
+  const sanitizeFrameDelay = (value, fallback = DEFAULT_FRAME_DELAY, { allowZero = false } = {}) => {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    if (allowZero && parsed === SOLO_FRAME_DELAY) return SOLO_FRAME_DELAY;
+    if (parsed <= 0) return fallback;
+    return Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed));
+  };
+
+  KNState.delayAutoValue = DEFAULT_FRAME_DELAY;
+
+  const isSoloDelayContext = () => {
+    if (isSpectator || !lastUsersData?.players) return false;
+    return Object.keys(lastUsersData.players).length <= 1;
+  };
+
+  const currentAutoDelayValue = () =>
+    isSoloDelayContext() ? SOLO_FRAME_DELAY : sanitizeFrameDelay(KNState.delayAutoValue);
 
   const getDelayPreference = () => {
+    if (isSoloDelayContext()) return SOLO_FRAME_DELAY;
     const autoEl = document.getElementById('delay-auto');
     const selectEl = document.getElementById('delay-select');
     if (autoEl?.checked) {
-      return KNState.delayAutoValue;
+      return currentAutoDelayValue();
     }
     if (selectEl) {
-      const v = parseInt(selectEl.value, 10);
-      return v > 0 ? v : 2;
+      return sanitizeFrameDelay(selectEl.value);
     }
-    return 2;
+    return DEFAULT_FRAME_DELAY;
   };
 
   window.getDelayPreference = getDelayPreference;
 
   const setAutoDelay = (value) => {
-    KNState.delayAutoValue = value;
+    KNState.delayAutoValue = sanitizeFrameDelay(value);
     const selectEl = document.getElementById('delay-select');
     const autoEl = document.getElementById('delay-auto');
     if (selectEl && autoEl?.checked) {
-      selectEl.value = String(value);
+      selectEl.value = String(currentAutoDelayValue());
+      updateDelayEffectiveHintFromPicker();
     }
   };
 
   window.setAutoDelay = setAutoDelay;
 
   const KAILLERA_LABELS = ['LAN', 'Excellent', 'Excellent', 'Good', 'Good', 'Average', 'Average', 'Low', 'Bad', 'Bad'];
+
+  const delayQualityLabel = (delay) => {
+    const parsed = parseInt(delay, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return '';
+    return KAILLERA_LABELS[Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed))] ?? '';
+  };
+
+  const updateDelayEffectiveHintFromPicker = () => {
+    const el = document.getElementById('delay-effective');
+    if (!el) return;
+    syncDelaySelectSoloOption();
+    syncDelaySelectVisibility();
+    const autoEl = document.getElementById('delay-auto');
+    const selectEl = document.getElementById('delay-select');
+    if (isSoloDelayContext()) {
+      if (autoEl?.checked && selectEl) selectEl.value = String(SOLO_FRAME_DELAY);
+      const manualDelay = sanitizeFrameDelay(selectEl?.value);
+      el.textContent = autoEl?.checked ? '(solo: no delay)' : `(solo: no delay · fixed ${manualDelay} for netplay)`;
+      updateAdvancedSummaryStatuses();
+      return;
+    }
+    let delay = selectEl?.value;
+    if (autoEl?.checked) {
+      delay = currentAutoDelayValue();
+      if (selectEl) selectEl.value = String(delay);
+    }
+    const label = delayQualityLabel(delay);
+    el.textContent = label ? `(${label})` : '';
+    updateAdvancedSummaryStatuses();
+  };
 
   const directAdvancedOptions = (parent) =>
     Array.from(parent?.children || []).find((el) => el.classList?.contains('advanced-options')) || null;
@@ -4472,6 +4542,69 @@
     summary.append(document.createTextNode('Advanced '), status);
     details.appendChild(summary);
     return details;
+  };
+
+  const syncDelaySelectSoloOption = () => {
+    const selectEl = document.getElementById('delay-select');
+    if (!selectEl) return;
+    const autoEl = document.getElementById('delay-auto');
+    let zeroOption = selectEl.querySelector('option[value="0"]');
+    if (!zeroOption) {
+      zeroOption = new Option('0', '0');
+      selectEl.prepend(zeroOption);
+    }
+    zeroOption.textContent = '0';
+    zeroOption.disabled = !(isSoloDelayContext() && autoEl?.checked !== false);
+    if (zeroOption.disabled && selectEl.value === '0') {
+      selectEl.value = String(currentAutoDelayValue() || DEFAULT_FRAME_DELAY);
+    }
+  };
+
+  const normalizeDelaySelectOptions = () => {
+    syncDelaySelectSoloOption();
+    syncDelaySelectVisibility();
+  };
+
+  const syncDelaySelectVisibility = () => {
+    const autoEl = document.getElementById('delay-auto');
+    const selectEl = document.getElementById('delay-select');
+    if (selectEl) selectEl.hidden = !!autoEl?.checked;
+  };
+
+  const selectedModeIsLockstep = () => (document.getElementById('mode-select')?.value || mode) === 'lockstep';
+
+  const updatePlayerControlsVisibility = (isLockstepMode = selectedModeIsLockstep()) => {
+    const playerControls = document.getElementById('player-controls');
+    if (playerControls) playerControls.style.display = !isHost && !isSpectator && isLockstepMode ? '' : 'none';
+  };
+
+  const updateDelayPickerVisibility = (isLockstepMode = selectedModeIsLockstep()) => {
+    const delayPicker = document.getElementById('delay-picker');
+    if (delayPicker) delayPicker.style.display = !isSpectator && isLockstepMode ? '' : 'none';
+  };
+
+  const getDelaySummaryText = () => {
+    const autoEl = document.getElementById('delay-auto');
+    const selectEl = document.getElementById('delay-select');
+    if (isSoloDelayContext()) {
+      if (autoEl?.checked) return 'Solo · no delay';
+      return `Solo · no delay · Fixed ${sanitizeFrameDelay(selectEl?.value)} for netplay`;
+    }
+    const effective = document.getElementById('delay-effective')?.textContent.trim() || 'pending';
+    return autoEl?.checked ? `Auto · effective ${effective}` : `Fixed ${sanitizeFrameDelay(selectEl?.value)}`;
+  };
+
+  const syncDelayPickerPlacement = (isLockstepMode = selectedModeIsLockstep()) => {
+    const hostDetails = document.querySelector('#host-controls .advanced-options');
+    const playerDetails = document.querySelector('#player-controls .advanced-options');
+    const delayPicker = document.getElementById('delay-picker');
+    const targetDetails = isHost ? hostDetails : playerDetails;
+    if (delayPicker && targetDetails && delayPicker.parentElement !== targetDetails) {
+      targetDetails.appendChild(delayPicker);
+    }
+    updatePlayerControlsVisibility(isLockstepMode);
+    updateDelayPickerVisibility(isLockstepMode);
+    updateDelayEffectiveHintFromPicker();
   };
 
   const ensureAdvancedSummary = (details) => {
@@ -4515,14 +4648,14 @@
     const playerControls = document.getElementById('player-controls');
     if (playerControls) {
       let delayDetails = directAdvancedOptions(playerControls);
-      const delayPicker = document.getElementById('delay-picker');
       if (!delayDetails) {
         delayDetails = createAdvancedOptions();
         playerControls.appendChild(delayDetails);
       }
       ensureAdvancedSummary(delayDetails);
-      if (delayPicker && delayPicker.parentElement !== delayDetails) delayDetails.appendChild(delayPicker);
     }
+    normalizeDelaySelectOptions();
+    syncDelayPickerPlacement();
   };
 
   const normalizeGamepadControlsMarkup = () => {
@@ -4534,19 +4667,17 @@
   };
 
   const updateAdvancedSummaryStatuses = () => {
+    const delayText = getDelaySummaryText();
     const hostStatus = document.querySelector('#host-controls .advanced-options .summary-status');
     if (hostStatus) {
       const resyncOn = document.getElementById('opt-resync')?.checked ?? false;
       const romSharingOn = document.getElementById('opt-rom-sharing')?.checked ?? false;
-      hostStatus.textContent = `Resync ${resyncOn ? 'on' : 'off'} · ROM sharing ${romSharingOn ? 'on' : 'off'}`;
+      hostStatus.textContent = `Resync ${resyncOn ? 'on' : 'off'} · ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
     }
 
     const delayStatus = document.querySelector('#player-controls .advanced-options .summary-status');
     if (delayStatus) {
-      const autoEl = document.getElementById('delay-auto');
-      const selectEl = document.getElementById('delay-select');
-      const effective = document.getElementById('delay-effective')?.textContent.trim() || '--';
-      delayStatus.textContent = autoEl?.checked ? `Auto · effective ${effective}` : `Fixed ${selectEl?.value || '0'}`;
+      delayStatus.textContent = delayText;
     }
   };
 
@@ -4561,14 +4692,19 @@
     if (delayAuto) delayAuto.addEventListener('change', () => requestAnimationFrame(updateAdvancedSummaryStatuses));
 
     const delaySelect = document.getElementById('delay-select');
-    if (delaySelect) delaySelect.addEventListener('change', updateAdvancedSummaryStatuses);
+    if (delaySelect) delaySelect.addEventListener('change', updateDelayEffectiveHintFromPicker);
 
-    updateAdvancedSummaryStatuses();
+    updateDelayEffectiveHintFromPicker();
   };
 
   const showEffectiveDelay = (own, room) => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
+    if (room <= 0) {
+      el.textContent = '(solo: no delay)';
+      updateAdvancedSummaryStatuses();
+      return;
+    }
     const label = KAILLERA_LABELS[room] ?? '';
     if (room > own) {
       el.textContent = `(room: ${room} — ${label})`;
@@ -4614,6 +4750,9 @@
     console.log('kaillera-next — v0.9 forever');
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
+    parseParams();
+    const initialModeSelect = document.getElementById('mode-select');
+    if (initialModeSelect) initialModeSelect.value = mode;
     normalizeRomSharingMarkup();
     normalizeAdvancedOptionsMarkup();
     normalizeGamepadControlsMarkup();
@@ -4624,7 +4763,6 @@
       `margin-left:5px;padding:1px 5px;background:#c9a227;color:#111;` +
       `border-radius:3px;font-size:.7em;font-weight:700;vertical-align:middle;}`;
     document.head.appendChild(_a21style);
-    parseParams();
     // Fetch known ROM hashes for verification
     fetch('/api/rom-hashes')
       .then((r) => (r.ok ? r.json() : {}))
@@ -4738,7 +4876,8 @@
     // Close dropdowns on outside click or Escape
     document.addEventListener('click', (e) => {
       const moreW = document.getElementById('more-wrapper');
-      if (moreW && !moreW.contains(e.target)) closeMoreDropdown();
+      const dd = document.getElementById('more-dropdown');
+      if (moreW && !moreW.contains(e.target) && !dd?.contains(e.target)) closeMoreDropdown();
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
@@ -4758,10 +4897,9 @@
       let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
         const isLockstep = modeSelect.value === 'lockstep';
+        mode = modeSelect.value;
         lockstepOpts.style.display = isLockstep ? '' : 'none';
-        // Toggle player controls (delay picker) for all players
-        const pc = document.getElementById('player-controls');
-        if (pc) pc.style.display = isLockstep ? '' : 'none';
+        syncDelayPickerPlacement(isLockstep);
         // Hide ROM sharing options in streaming mode
         const romSharingRow = document.getElementById('rom-sharing-options');
         const romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
@@ -4849,6 +4987,8 @@
     if (delayAuto && delaySelect) {
       delayAuto.addEventListener('change', () => {
         delaySelect.disabled = delayAuto.checked;
+        if (delayAuto.checked) delaySelect.value = String(currentAutoDelayValue());
+        updateDelayEffectiveHintFromPicker();
       });
     }
     wireAdvancedSummaryStatus();

@@ -197,6 +197,41 @@
         cursor: pointer; font-size: 14px;
       }
       .kn-feedback-toolbar-item:hover { background: #1a1a3e; }
+
+      .kn-feedback-session-prompt {
+        position: fixed;
+        bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+        left: 50%;
+        transform: translateX(-50%);
+        background: #0f0f23;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 10px 20px;
+        color: #eee;
+        font-size: 14px;
+        z-index: 151;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        cursor: pointer;
+        max-width: calc(100vw - 24px);
+        text-align: center;
+        white-space: nowrap;
+      }
+      .kn-feedback-session-prompt a {
+        color: #e94560;
+        text-decoration: underline;
+        margin-left: 4px;
+      }
+      .kn-feedback-session-prompt-lobby {
+        top: calc(12px + env(safe-area-inset-top, 0px));
+        bottom: auto;
+      }
+      @media (max-width: 600px) {
+        .kn-feedback-session-prompt {
+          padding: 8px 12px;
+          font-size: 13px;
+          white-space: normal;
+        }
+      }
     `;
     document.head.appendChild(style);
   };
@@ -455,35 +490,39 @@
     } catch (_) {}
   };
 
+  const _isPregameLobbyActive = () => {
+    if (!_isGamePage) return false;
+    const overlay = document.getElementById('overlay');
+    return !!overlay && !overlay.classList.contains('hidden');
+  };
+
+  const _updateSessionPromptPlacement = (el) => {
+    if (!el) return;
+    el.classList.toggle('kn-feedback-session-prompt-lobby', _isPregameLobbyActive());
+  };
+
   // ── Public API ──────────────────────────────────────────────────────
   // Exposed for play.js to nudge users after games.
   const _promptFeedback = () => {
     if (!_fab && !_toolbarItem) return;
     const el = document.createElement('div');
-    el.innerHTML =
-      'How was your session? <a href="#" style="color:#e94560;text-decoration:underline;margin-left:4px;">Share feedback</a>';
-    Object.assign(el.style, {
-      position: 'fixed',
-      bottom: '80px',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      background: '#0f0f23',
-      border: '1px solid #333',
-      borderRadius: '8px',
-      padding: '10px 20px',
-      color: '#eee',
-      fontSize: '14px',
-      zIndex: '100001',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-      cursor: 'pointer',
-    });
+    el.className = 'kn-feedback-session-prompt';
+    el.innerHTML = 'How was your session? <a href="#">Share feedback</a>';
+    _updateSessionPromptPlacement(el);
     el.querySelector('a').addEventListener('click', (e) => {
       e.preventDefault();
       el.remove();
       _openModal();
     });
     document.body.appendChild(el);
+    const overlay = document.getElementById('overlay');
+    let observer = null;
+    if (_isGamePage && overlay) {
+      observer = new MutationObserver(() => _updateSessionPromptPlacement(el));
+      observer.observe(overlay, { attributes: true, attributeFilter: ['class'] });
+    }
     setTimeout(() => {
+      if (observer) observer.disconnect();
       if (el.parentNode) el.remove();
     }, 8000);
   };

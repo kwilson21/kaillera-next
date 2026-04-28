@@ -330,9 +330,16 @@
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
-  let DELAY_FRAMES = 2;
+  const DEFAULT_DELAY_FRAMES = 2;
+  let DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
   const ROLLBACK_MIN_DELAY_FRAMES = 4;
   const ROLLBACK_MAX_DELAY_FRAMES = 7;
+  const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES) => {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    if (parsed <= 0) return fallback;
+    return Math.min(ROLLBACK_MAX_DELAY_FRAMES, Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
+  };
 
   let _onExtraDataChannel = null;
   let _onUnhandledMessage = null;
@@ -401,7 +408,7 @@
   };
 
   const broadcastLockstepReady = () => {
-    const dl = window.getDelayPreference ? window.getDelayPreference() : 2;
+    const dl = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
     for (const p of Object.values(_peers)) {
       if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
         try {
@@ -3532,7 +3539,7 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
-          const hostDelay = parseInt(e.data.split(':')[1], 10);
+          const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);
           if (hostDelay > 0) {
             // Cache for guests that haven't reached the init code yet.
             window._rbHostDelay = hostDelay;
@@ -4622,6 +4629,7 @@
       const p = _peers[sid];
       return p.slot !== null && p.slot !== undefined;
     });
+    const soloMode = playerPeerSids.length === 0;
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
 
     if (readyCount < playerPeerSids.length) return;
@@ -4632,7 +4640,10 @@
     // so we recalculate them using peer RTT samples with the rollback formula.
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     let ownDelay;
-    if (hasRollback && _rttMedian > 0) {
+    if (soloMode) {
+      ownDelay = 0;
+      _syncLog('solo delay: no player peers, effective delay=0');
+    } else if (hasRollback && _rttMedian > 0) {
       // Fix #1: Adaptive jitter buffer.
       //
       // Rollback delay sets the input prediction window — peers wait this
@@ -4682,10 +4693,11 @@
           `effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
       );
     } else {
-      ownDelay = window.getDelayPreference ? window.getDelayPreference() : 2;
+      ownDelay = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
     }
+    if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);
     let maxDelay = ownDelay;
-    if (hasRollback) {
+    if (hasRollback && !soloMode) {
       // Recalculate peer delay from their RTT+jitter using IQR-filtered formula
       for (const p of Object.values(_peers)) {
         if (p.rttSamples?.length > 0) {
@@ -4708,7 +4720,7 @@
           if (peerDelay > maxDelay) maxDelay = peerDelay;
         }
       }
-    } else {
+    } else if (!soloMode) {
       for (const p of Object.values(_peers)) {
         if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
       }
@@ -5324,8 +5336,10 @@
         return;
       }
 
-      if (msg.effectiveDelay) {
-        DELAY_FRAMES = msg.effectiveDelay;
+      if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null) {
+        const parsedDelay = parseInt(msg.effectiveDelay, 10);
+        const roomDelay = gm.Module?._kn_pre_tick && parsedDelay > 0 ? clampRollbackDelay(parsedDelay) : parsedDelay;
+        DELAY_FRAMES = Number.isFinite(roomDelay) && roomDelay >= 0 ? roomDelay : DELAY_FRAMES;
         _syncLog(`late-join: using room delay ${DELAY_FRAMES}`);
       }
 
@@ -5434,8 +5448,8 @@
       // host's rb-delay broadcast over DataChannel (sent at game start).
       // Without this, startLockstep sets _rbPendingInit=true and the
       // tick loop is completely gated, causing a black screen.
-      if (msg.effectiveDelay) {
-        window._rbHostDelay = msg.effectiveDelay;
+      if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null && DELAY_FRAMES > 0) {
+        window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);
       }
       if (msg.rbTransport) {
         _rbTransport = msg.rbTransport === 'unreliable' ? 'unreliable' : 'reliable';
@@ -6437,7 +6451,7 @@
       };
       window._rbDoInit = doRollbackInit;
 
-      if (detMod?._kn_rollback_init && !_isSmashRemix()) {
+      if (detMod?._kn_rollback_init && !_isSmashRemix() && DELAY_FRAMES > 0) {
         if (_playerSlot === 0) {
           // Host: init immediately with the value we just broadcast.
           doRollbackInit(DELAY_FRAMES);
@@ -6458,6 +6472,9 @@
           }
         }
       } else {
+        if (DELAY_FRAMES <= 0 && detMod?._kn_rollback_init) {
+          _syncLog('C-ROLLBACK disabled for zero-delay solo play');
+        }
         if (_isSmashRemix() && detMod?._kn_rollback_init) {
           _syncLog('C-ROLLBACK disabled for Smash Remix title/menu startup');
         }
@@ -7094,7 +7111,7 @@
     if (window._rbPendingInit) {
       const _rbPendingStart = window._rbPendingInitAt || 0;
       if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
-        const _rbFallbackDelay = DELAY_FRAMES > 0 ? DELAY_FRAMES : 3;
+        const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
         _syncLog(
           `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
             `host rb-delay never arrived, falling back to local delay=${_rbFallbackDelay}`,
@@ -10321,7 +10338,7 @@
       window.KNDesync.stop();
     }
     _startTime = 0;
-    DELAY_FRAMES = 2;
+    DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
     _rttSamples = [];
     _rttComplete = false;
     _rttPeersComplete = 0;
