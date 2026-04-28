@@ -17,7 +17,7 @@ body {
   display: none !important;
 }
 .dim {
-  color: #666;
+  color: #8a8a8a;
 }
 .error {
   color: #e55;
@@ -223,7 +223,7 @@ thead th {
   text-align: left;
   padding: 6px 8px;
   border-bottom: 1px solid #2a2a40;
-  color: #666;
+  color: #8a8a8a;
   font-weight: normal;
   font-size: 10px;
   text-transform: uppercase;
@@ -398,7 +398,7 @@ tbody tr {
 }
 .feedback-date {
   font-size: 11px;
-  color: #666;
+  color: #8a8a8a;
 }
 .feedback-message {
   font-size: 14px;

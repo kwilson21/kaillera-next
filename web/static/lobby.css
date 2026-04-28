@@ -76,7 +76,7 @@ button:hover {
 }
 
 .divider {
-  color: #555;
+  color: #8a8a8a;
   font-size: 13px;
   margin: 1.5rem 0;
   text-transform: uppercase;
@@ -114,7 +114,7 @@ button:hover {
   align-items: center;
   vertical-align: middle;
   gap: 4px;
-  color: #777;
+  color: #8a8a8a;
   text-decoration: none;
   font-size: 14px;
   min-height: 44px;
