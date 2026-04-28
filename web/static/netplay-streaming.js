@@ -14,11 +14,10 @@
  *
  *   Host (slot 0):
  *     - Runs EmulatorJS, applies standard online cheats via KNShared
- *     - Captures the emulator's WebGL canvas by blitting it onto a
- *       smaller 640x480 2D canvas via drawImage() each frame. The 2D
- *       canvas is captured via captureStream(0) with manual frame
- *       control (requestFrame()). This avoids expensive GPU readback
- *       from the WebGL canvas — the drawImage blit is GPU-accelerated.
+ *     - Captures the emulator's WebGL canvas directly by default on
+ *       non-Safari hosts for lowest latency. The guest renders it in the same
+ *       4:3 footprint as the old blit path. Use ?streamCapture=blit to force
+ *       the older normalized capture path.
  *     - Captures emulator audio via AudioContext → MediaStreamDestination,
  *       adds the audio track to the host MediaStream so guests/spectators
  *       receive video + audio over the same RTCPeerConnection
@@ -35,9 +34,9 @@
  *     - Video starts muted for autoplay compliance; attempts programmatic
  *       unmute, falls back to a "tap to unmute" banner (iOS workaround)
  *     - Reads keyboard/gamepad input (or VirtualGamepad on mobile) and
- *       sends encoded input object (16 bytes) to the host over DC
- *     - Only sends when input changes (delta encoding) to minimize
- *       DataChannel overhead
+ *       sends encoded input packet (currently 24 bytes) to the host over DC
+ *     - Repeats input at 60Hz and queues an immediate send after local
+ *       input events so the host sees changes before the next video frame
  *
  *   Spectator (slot null):
  *     - Same as guest but sends no input
@@ -61,8 +60,8 @@
  *   (keyboard keyCode tracking + GamepadManager profiles + VirtualGamepad
  *   on mobile). All input is applied via applyInputForSlot() which calls
  *   _simulate_input() per button/axis. Only changed bits are written (diff
- *   against previous mask per slot). Guest input tick uses rAF since guests
- *   have no emulator to drive.
+ *   against previous mask per slot). Guest input uses a 60Hz setInterval
+ *   plus event-triggered sends for the lowest practical input latency.
  *
  *   DataChannel config: { ordered: false, maxRetransmits: 0 } — unreliable
  *   delivery is acceptable for input since each message contains the full
@@ -103,7 +102,12 @@
   let _prevSlotInputs = {};
   let _gameRunning = false;
   let _hostInputInterval = null;
+  let _hostInputAbort = null;
+  let _guestInputInterval = null;
+  let _guestInputAbort = null;
   let _cachedInfo = null;
+  let _captureMode = 'none';
+  let _captureScaleDownBy = 1;
   // Touch state lives in KNState.touchInput (shared with VirtualGamepad)
   let _audioStreamDest = null; // MediaStreamAudioDestinationNode (host only)
   let _unmuteAbort = null; // AbortController for the unmute-banner gesture listeners; cleared in stop()
@@ -289,7 +293,8 @@
           const overlay = document.createElement('div');
           overlay.id = 'stream-overlay';
           // Take #game's flex slot — hide #game so overlay gets all the space
-          overlay.style.cssText = 'width:100%;max-width:100vw;flex:1 1 0;overflow:hidden;order:1;';
+          overlay.style.cssText =
+            'width:100%;max-width:100vw;flex:1 1 0;min-height:0;overflow:hidden;order:1;display:flex;align-items:center;justify-content:center;';
           gameDiv.style.display = 'none';
           overlay.appendChild(_guestVideo);
           gameDiv.parentNode.insertBefore(overlay, gameDiv.nextSibling);
@@ -477,8 +482,15 @@
       const peer = _peers[remoteSid];
       if (!peer || peer.slot === null || peer.slot === undefined) return;
 
-      // Guest sends encoded input object — 16 bytes
-      if (e.data instanceof ArrayBuffer && e.data.byteLength === 16) {
+      // Guest sends KNShared.encodeInput(...).buffer. The shared encoder's
+      // packet grew from the original 16-byte shape to a 24-byte header, and
+      // may grow again if redundancy is enabled, so validate the Int32 packet
+      // envelope instead of pinning one exact byte length.
+      if (
+        e.data instanceof ArrayBuffer &&
+        e.data.byteLength >= 16 &&
+        e.data.byteLength % Int32Array.BYTES_PER_ELEMENT === 0
+      ) {
         const decoded = KNShared.decodeInput(e.data);
         applyInputForSlot(peer.slot, {
           buttons: decoded.buttons,
@@ -515,6 +527,146 @@
 
   // ── Host: emulator + stream ────────────────────────────────────────────
 
+  const STREAM_CAPTURE_TARGET_WIDTH = 640;
+  const STREAM_CAPTURE_TARGET_HEIGHT = 480;
+
+  const isSafariBrowser = () => /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+  const getCaptureModePreference = () => {
+    let raw = null;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      raw = params.get('streamCapture') || params.get('captureMode');
+    } catch (_) {}
+    if (!raw) {
+      try {
+        raw = localStorage.getItem('kn-stream-capture');
+      } catch (_) {}
+    }
+    raw = String(raw || '').toLowerCase();
+    if (raw === 'blit') return 'blit';
+    return 'direct';
+  };
+
+  const computeDirectScaleDownBy = (canvas) => {
+    const sw = canvas.width || 0;
+    const sh = canvas.height || 0;
+    if (!sw || !sh) return 1;
+    const targetAspect = STREAM_CAPTURE_TARGET_WIDTH / STREAM_CAPTURE_TARGET_HEIGHT;
+    const srcAspect = sw / sh;
+    if (srcAspect > targetAspect + 0.01) {
+      return Math.max(1, sh / STREAM_CAPTURE_TARGET_HEIGHT);
+    }
+    if (srcAspect < targetAspect - 0.01) {
+      return Math.max(1, sw / STREAM_CAPTURE_TARGET_WIDTH);
+    }
+    return Math.max(1, sw / STREAM_CAPTURE_TARGET_WIDTH, sh / STREAM_CAPTURE_TARGET_HEIGHT);
+  };
+
+  const startDirectCanvasCapture = (srcCanvas) => {
+    _hostStream = srcCanvas.captureStream(60);
+    const captureTrack = _hostStream.getVideoTracks()[0];
+    if (!captureTrack) throw new Error('direct capture produced no video track');
+
+    _captureMode = 'direct';
+    _captureScaleDownBy = computeDirectScaleDownBy(srcCanvas);
+
+    if ('contentHint' in captureTrack) captureTrack.contentHint = 'motion';
+    if (captureTrack.applyConstraints) {
+      captureTrack
+        .applyConstraints({ frameRate: { ideal: 60, max: 60 } })
+        .catch((err) => _syncLog(`direct capture constraints ignored: ${err?.message || err}`));
+    }
+
+    _syncLog(
+      `direct canvas capture started (${srcCanvas.width}x${srcCanvas.height}@60, scaleDown=${_captureScaleDownBy.toFixed(2)})`,
+    );
+  };
+
+  const startBlitCanvasCapture = (srcCanvas, isSafari) => {
+    const captureCanvas = document.createElement('canvas');
+    captureCanvas.width = 640;
+    captureCanvas.height = 480;
+    const ctx = captureCanvas.getContext('2d');
+
+    // Compute crop region: extract the 4:3 game area from the source canvas
+    // (source may be wider due to widescreen displays / Retina scaling)
+    const TARGET_ASPECT = 4 / 3;
+    const computeCrop = () => {
+      const sw = srcCanvas.width;
+      const sh = srcCanvas.height;
+      const srcAspect = sw / sh;
+      if (srcAspect > TARGET_ASPECT + 0.01) {
+        // Source wider than 4:3 — crop sides
+        const cropW = Math.round(sh * TARGET_ASPECT);
+        return { sx: Math.round((sw - cropW) / 2), sy: 0, sw: cropW, sh };
+      } else if (srcAspect < TARGET_ASPECT - 0.01) {
+        // Source taller than 4:3 — crop top/bottom
+        const cropH = Math.round(sw / TARGET_ASPECT);
+        return { sx: 0, sy: Math.round((sh - cropH) / 2), sw, sh: cropH };
+      }
+      return { sx: 0, sy: 0, sw, sh };
+    };
+    let crop = computeCrop();
+
+    _syncLog(
+      `source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480 (crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`,
+    );
+
+    // Safari's captureStream(0) + requestFrame() is broken in some versions —
+    // frames never get pushed. Use auto-capture as primary, with requestFrame
+    // as a bonus hint when available.
+    _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
+    const captureTrack = _hostStream.getVideoTracks()[0];
+    // 'motion' hint tells the browser encoder to use a low-latency profile
+    // (e.g. CBP H264, shorter GOP) rather than optimizing for quality.
+    if ('contentHint' in captureTrack) captureTrack.contentHint = 'motion';
+
+    _captureMode = 'blit';
+    _captureScaleDownBy = 1;
+
+    let _blitCount = 0;
+    let _lastSrcW = srcCanvas.width;
+    let _lastSrcH = srcCanvas.height;
+    const blitFrame = () => {
+      if (!_gameRunning) return;
+      requestAnimationFrame(blitFrame);
+      // Recompute crop if source canvas resized (e.g. window resize)
+      if (srcCanvas.width !== _lastSrcW || srcCanvas.height !== _lastSrcH) {
+        _lastSrcW = srcCanvas.width;
+        _lastSrcH = srcCanvas.height;
+        crop = computeCrop();
+      }
+      ctx.drawImage(srcCanvas, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 640, 480);
+      if (captureTrack.requestFrame) captureTrack.requestFrame();
+      if (++_blitCount === 60) {
+        _syncLog(
+          `blit 60 frames, captureTrack: ${captureTrack.readyState} enabled=${captureTrack.enabled} muted=${captureTrack.muted}`,
+        );
+      }
+    };
+    blitFrame();
+
+    _syncLog(`blit capture stream started (640x480 ${isSafari ? 'auto' : 'manual'} capture)`);
+  };
+
+  const startCanvasCapture = (srcCanvas) => {
+    const preference = getCaptureModePreference();
+    const isSafari = isSafariBrowser();
+    if (preference === 'direct' && !isSafari) {
+      try {
+        startDirectCanvasCapture(srcCanvas);
+        return;
+      } catch (err) {
+        _syncLog(`direct canvas capture failed, falling back to blit: ${err?.message || err}`);
+      }
+    } else if (preference === 'direct' && isSafari) {
+      _syncLog('direct canvas capture disabled on Safari — using blit capture');
+    }
+
+    startBlitCanvasCapture(srcCanvas, isSafari);
+  };
+
   const startHost = () => {
     if (_gameRunning) return;
     _gameRunning = true;
@@ -545,68 +697,7 @@
         return;
       }
 
-      const captureCanvas = document.createElement('canvas');
-      captureCanvas.width = 640;
-      captureCanvas.height = 480;
-      const ctx = captureCanvas.getContext('2d');
-
-      // Compute crop region: extract the 4:3 game area from the source canvas
-      // (source may be wider due to widescreen displays / Retina scaling)
-      const TARGET_ASPECT = 4 / 3;
-      const computeCrop = () => {
-        const sw = srcCanvas.width;
-        const sh = srcCanvas.height;
-        const srcAspect = sw / sh;
-        if (srcAspect > TARGET_ASPECT + 0.01) {
-          // Source wider than 4:3 — crop sides
-          const cropW = Math.round(sh * TARGET_ASPECT);
-          return { sx: Math.round((sw - cropW) / 2), sy: 0, sw: cropW, sh };
-        } else if (srcAspect < TARGET_ASPECT - 0.01) {
-          // Source taller than 4:3 — crop top/bottom
-          const cropH = Math.round(sw / TARGET_ASPECT);
-          return { sx: 0, sy: Math.round((sh - cropH) / 2), sw, sh: cropH };
-        }
-        return { sx: 0, sy: 0, sw, sh };
-      };
-      let crop = computeCrop();
-
-      _syncLog(
-        `source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480 (crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`,
-      );
-
-      // Safari's captureStream(0) + requestFrame() is broken in some versions —
-      // frames never get pushed. Use auto-capture as primary, with requestFrame
-      // as a bonus hint when available.
-      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-      _hostStream = captureCanvas.captureStream(isSafari ? 60 : 0);
-      const captureTrack = _hostStream.getVideoTracks()[0];
-      // 'motion' hint tells the browser encoder to use a low-latency profile
-      // (e.g. CBP H264, shorter GOP) rather than optimizing for quality.
-      if ('contentHint' in captureTrack) captureTrack.contentHint = 'motion';
-
-      let _blitCount = 0;
-      let _lastSrcW = srcCanvas.width;
-      let _lastSrcH = srcCanvas.height;
-      const blitFrame = () => {
-        if (!_gameRunning) return;
-        requestAnimationFrame(blitFrame);
-        // Recompute crop if source canvas resized (e.g. window resize)
-        if (srcCanvas.width !== _lastSrcW || srcCanvas.height !== _lastSrcH) {
-          _lastSrcW = srcCanvas.width;
-          _lastSrcH = srcCanvas.height;
-          crop = computeCrop();
-        }
-        ctx.drawImage(srcCanvas, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 640, 480);
-        if (captureTrack.requestFrame) captureTrack.requestFrame();
-        if (++_blitCount === 60) {
-          _syncLog(
-            `blit 60 frames, captureTrack: ${captureTrack.readyState} enabled=${captureTrack.enabled} muted=${captureTrack.muted}`,
-          );
-        }
-      };
-      blitFrame();
-
-      _syncLog(`capture stream started (640x480 ${isSafari ? 'auto' : 'manual'} capture)`);
+      startCanvasCapture(srcCanvas);
 
       captureEmulatorAudio();
 
@@ -726,11 +817,15 @@
         params.encodings[0].maxBitrate = 2_500_000; // 2.5 Mbps (ample for 640x480 N64)
         params.encodings[0].maxFramerate = 60;
         params.encodings[0].networkPriority = 'high'; // DSCP EF — minimize queuing delay
-        // No scaleResolutionDownBy needed — capture canvas is already 640x480
+        if (_captureMode === 'direct' && _captureScaleDownBy > 1.001) {
+          params.encodings[0].scaleResolutionDownBy = _captureScaleDownBy;
+        }
         params.degradationPreference = 'maintain-framerate';
         try {
           await sender.setParameters(params);
-          _syncLog('video encoding optimized: 60fps, 2.5Mbps max');
+          _syncLog(
+            `video encoding optimized: 60fps, 2.5Mbps max, capture=${_captureMode}, scaleDown=${_captureScaleDownBy.toFixed(2)}`,
+          );
         } catch (err) {
           _syncLog(`setParameters failed: ${err}`);
         }
@@ -740,10 +835,47 @@
 
   const startHostInputLoop = () => {
     let _debugFrame = 0;
-    const tick = () => {
+    const applyHostInput = () => {
+      if (!_gameRunning) return;
       if (!_p1KeyMap) setupKeyTracking();
       const localInput = readLocalInput();
       applyInputForSlot(0, localInput);
+    };
+
+    let immediateQueued = false;
+    const queueImmediateHostInput = () => {
+      if (immediateQueued) return;
+      immediateQueued = true;
+      queueMicrotask(() => {
+        immediateQueued = false;
+        applyHostInput();
+      });
+    };
+
+    if (_hostInputAbort) _hostInputAbort.abort();
+    _hostInputAbort = new AbortController();
+    document.addEventListener('keydown', queueImmediateHostInput, {
+      capture: true,
+      signal: _hostInputAbort.signal,
+    });
+    document.addEventListener('keyup', queueImmediateHostInput, {
+      capture: true,
+      signal: _hostInputAbort.signal,
+    });
+    document.addEventListener('touchstart', queueImmediateHostInput, { passive: true, signal: _hostInputAbort.signal });
+    document.addEventListener('touchmove', queueImmediateHostInput, { passive: true, signal: _hostInputAbort.signal });
+    document.addEventListener('touchend', queueImmediateHostInput, { passive: true, signal: _hostInputAbort.signal });
+    document.addEventListener('touchcancel', queueImmediateHostInput, {
+      passive: true,
+      signal: _hostInputAbort.signal,
+    });
+    window.addEventListener('blur', queueImmediateHostInput, { signal: _hostInputAbort.signal });
+    window.addEventListener('gamepadconnected', queueImmediateHostInput, { signal: _hostInputAbort.signal });
+    window.addEventListener('gamepaddisconnected', queueImmediateHostInput, { signal: _hostInputAbort.signal });
+    document.addEventListener('visibilitychange', queueImmediateHostInput, { signal: _hostInputAbort.signal });
+
+    const tick = () => {
+      applyHostInput();
 
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
@@ -755,6 +887,8 @@
 
   // ── Guest: input sender ────────────────────────────────────────────────
 
+  const GUEST_INPUT_SEND_MS = 1000 / 60;
+
   let _guestLoopStarted = false;
 
   const startGuestInputLoop = () => {
@@ -763,27 +897,58 @@
 
     let _lastSentInput = KNShared.ZERO_INPUT;
     let _debugFrame = 0;
-    const tick = () => {
-      if (!_guestLoopStarted) return;
-      requestAnimationFrame(tick);
+
+    const sendGuestInput = (force = false) => {
+      if (!_guestLoopStarted) return false;
       if (!_p1KeyMap) setupKeyTracking();
       const localInput = readLocalInput();
 
-      // Only send when input changes — reduces DC overhead
-      if (!KNShared.inputEqual(localInput, _lastSentInput)) {
-        const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-        if (hostPeer?.dc?.readyState === 'open') {
-          try {
-            hostPeer.dc.send(KNShared.encodeInput(0, localInput).buffer);
-          } catch (_) {}
+      if (!force && KNShared.inputEqual(localInput, _lastSentInput)) return false;
+
+      const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+      if (hostPeer?.dc?.readyState === 'open') {
+        try {
+          hostPeer.dc.send(KNShared.encodeInput(0, localInput).buffer);
           _lastSentInput = localInput;
-        }
+          return true;
+        } catch (_) {}
       }
+      return false;
+    };
+
+    let immediateQueued = false;
+    const queueImmediateSend = () => {
+      if (immediateQueued) return;
+      immediateQueued = true;
+      queueMicrotask(() => {
+        immediateQueued = false;
+        sendGuestInput(false);
+      });
+    };
+
+    if (_guestInputAbort) _guestInputAbort.abort();
+    _guestInputAbort = new AbortController();
+    document.addEventListener('keydown', queueImmediateSend, { capture: true, signal: _guestInputAbort.signal });
+    document.addEventListener('keyup', queueImmediateSend, { capture: true, signal: _guestInputAbort.signal });
+    document.addEventListener('touchstart', queueImmediateSend, { passive: true, signal: _guestInputAbort.signal });
+    document.addEventListener('touchmove', queueImmediateSend, { passive: true, signal: _guestInputAbort.signal });
+    document.addEventListener('touchend', queueImmediateSend, { passive: true, signal: _guestInputAbort.signal });
+    document.addEventListener('touchcancel', queueImmediateSend, { passive: true, signal: _guestInputAbort.signal });
+    window.addEventListener('blur', queueImmediateSend, { signal: _guestInputAbort.signal });
+    window.addEventListener('gamepadconnected', queueImmediateSend, { signal: _guestInputAbort.signal });
+    window.addEventListener('gamepaddisconnected', queueImmediateSend, { signal: _guestInputAbort.signal });
+    document.addEventListener('visibilitychange', queueImmediateSend, { signal: _guestInputAbort.signal });
+
+    _syncLog(`guest input loop: ${Math.round(1000 / GUEST_INPUT_SEND_MS)}Hz repeat + immediate sends`);
+
+    const tick = () => {
+      sendGuestInput(true);
 
       // Update debug overlay every 30 frames (~0.5s)
       if (++_debugFrame % 30 === 0) updateDebugOverlay();
     };
     tick();
+    _guestInputInterval = setInterval(tick, GUEST_INPUT_SEND_MS);
   };
 
   // ── Debug overlay ────────────────────────────────────────────────────────
@@ -1033,6 +1198,18 @@
       clearInterval(_hostInputInterval);
       _hostInputInterval = null;
     }
+    if (_hostInputAbort) {
+      _hostInputAbort.abort();
+      _hostInputAbort = null;
+    }
+    if (_guestInputInterval) {
+      clearInterval(_guestInputInterval);
+      _guestInputInterval = null;
+    }
+    if (_guestInputAbort) {
+      _guestInputAbort.abort();
+      _guestInputAbort = null;
+    }
 
     // Close all peer connections
     for (const sid of Object.keys(_peers)) {
@@ -1064,6 +1241,8 @@
       }
       _hostStream = null;
     }
+    _captureMode = 'none';
+    _captureScaleDownBy = 1;
     if (_guestVideo) {
       _guestVideo.srcObject = null;
       // Remove the stream overlay container (sibling of #game)

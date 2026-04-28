@@ -480,8 +480,8 @@
       '    z-index: 55;',
       '  }',
 
-      // Game canvas: gets ALL space between panels. 4:3 preserved by object-fit.
-      '  #game {',
+      // Game/stream surface: gets ALL space between panels. 4:3 preserved by object-fit.
+      '  #game, #stream-overlay {',
       '    max-width: calc(100vw - var(--panel-l) - var(--panel-r) - var(--offset-l) - var(--offset-r)) !important;',
       '    width: auto !important;',
       '    margin: auto !important;',
