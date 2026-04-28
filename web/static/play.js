@@ -4525,6 +4525,14 @@
     }
   };
 
+  const normalizeGamepadControlsMarkup = () => {
+    document.getElementById('remap-btn')?.remove();
+    document.getElementById('reset-mapping-btn')?.remove();
+
+    const overlaySettingsBtn = document.getElementById('overlay-settings-btn');
+    if (overlaySettingsBtn) overlaySettingsBtn.textContent = 'Configure Controller';
+  };
+
   const updateAdvancedSummaryStatuses = () => {
     const hostStatus = document.querySelector('#host-controls .advanced-options .summary-status');
     if (hostStatus) {
@@ -4608,6 +4616,7 @@
     console.log('Edit language.properties to setup your login announcements');
     normalizeRomSharingMarkup();
     normalizeAdvancedOptionsMarkup();
+    normalizeGamepadControlsMarkup();
     // Agent 21 badge — gold jersey number for the creator's handle
     const _a21style = document.createElement('style');
     _a21style.textContent =
