@@ -17,6 +17,7 @@ import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import https from 'https';
+import { createHash } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Persistent recording (in-tree). Used when --replay has no explicit path.
@@ -74,6 +75,7 @@ const DESYNC_MODE =
 const LATE_JOIN_MIDMATCH = process.argv.includes('--late-join-midmatch');
 const LATE_JOIN_DELAY_MS = Number(argValue('late-join-delay-ms', process.env.KN_LATE_JOIN_DELAY_MS || '3000'));
 const KEEP_OPEN = process.argv.includes('--keep-open');
+const STARTUP_STATE_PROBE = process.argv.includes('--startup-state-probe');
 
 const ROM_PATH = '/Users/kazon/Downloads/Smash Remix 2.0.1.z64';
 const BASE_URL = argValue('base-url', process.env.KN_BASE_URL || 'https://localhost:27888');
@@ -101,6 +103,7 @@ const DESYNC_GRACE_FRAMES = 60; // after desync detected, capture ~1s more RDRAM
  * early-exits on meaningful divergence, not on rendering variance. */
 const SSIM_EARLY_EXIT_THRESHOLD = 0.7;
 const REPORT_FILE = '/tmp/determinism-report.json';
+const STARTUP_STATE_REPORT_FILE = '/tmp/startup-state-probe.json';
 const CSS_PROBE_FILE = '/tmp/css-graphics-probe.json';
 const SHOT_DIR = '/tmp';
 const SCENE_TITLE = 1; // nSCKindTitle
@@ -1778,6 +1781,298 @@ function logRuntimeStats(label, hostStats, guestStats) {
   console.log(`  ${label} guest runtime: ${JSON.stringify(guestStats)}`);
 }
 
+function sha256(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+function summarizeBinaryDiff(hostBuf, guestBuf, limit = 32) {
+  if (!hostBuf || !guestBuf) return null;
+  const minLen = Math.min(hostBuf.length, guestBuf.length);
+  const firstDiffs = [];
+  const regions = [];
+  let diffCount = 0;
+  let firstDiffOffset = -1;
+  let regionStart = -1;
+
+  for (let i = 0; i < minLen; i++) {
+    if (hostBuf[i] !== guestBuf[i]) {
+      diffCount++;
+      if (firstDiffOffset < 0) firstDiffOffset = i;
+      if (firstDiffs.length < limit) firstDiffs.push({ offset: i, host: hostBuf[i], guest: guestBuf[i] });
+      if (regionStart < 0) regionStart = i;
+    } else if (regionStart >= 0) {
+      if (regions.length < limit) regions.push({ start: regionStart, end: i, size: i - regionStart });
+      regionStart = -1;
+    }
+  }
+  if (regionStart >= 0 && regions.length < limit) {
+    regions.push({ start: regionStart, end: minLen, size: minLen - regionStart });
+  }
+
+  const lengthDelta = hostBuf.length - guestBuf.length;
+  if (lengthDelta !== 0 && firstDiffOffset < 0) firstDiffOffset = minLen;
+  return {
+    hostSize: hostBuf.length,
+    guestSize: guestBuf.length,
+    lengthDelta,
+    sha256: {
+      host: sha256(hostBuf),
+      guest: sha256(guestBuf),
+    },
+    diffCount,
+    firstDiffOffset,
+    firstDiffs,
+    regions,
+  };
+}
+
+function summarizeArrayDiff(hostArr, guestArr, limit = 32) {
+  if (!Array.isArray(hostArr) || !Array.isArray(guestArr)) return null;
+  const diffs = [];
+  const len = Math.min(hostArr.length, guestArr.length);
+  for (let i = 0; i < len; i++) {
+    const h = hostArr[i] >>> 0;
+    const g = guestArr[i] >>> 0;
+    if (h !== g) diffs.push({ idx: i, host: h, guest: g, delta: (h - g) | 0 });
+    if (diffs.length >= limit) break;
+  }
+  return {
+    hostLength: hostArr.length,
+    guestLength: guestArr.length,
+    diffCount: diffs.length,
+    firstDiffs: diffs,
+  };
+}
+
+function compareStartupSetup(hostSetup, guestSetup) {
+  if (!hostSetup || !guestSetup) return [{ field: 'setup_sample', host: !!hostSetup, guest: !!guestSetup }];
+  const diffs = [];
+  const cmp = (field, hostValue, guestValue) => {
+    if (hostValue !== guestValue) diffs.push({ field, host: hostValue, guest: guestValue });
+  };
+  cmp('scene', hostSetup.scene, guestSetup.scene);
+  cmp('netplayGameStatus', hostSetup.netplayGameStatus, guestSetup.netplayGameStatus);
+  for (const field of ['match_phase', 'vs_battle_hdr', 'rng']) {
+    cmp(`hashes.${field}`, hostSetup.hashes?.[field], guestSetup.hashes?.[field]);
+  }
+  for (let p = 0; p < 4; p++) {
+    const h = hostSetup.players?.[p] || {};
+    const g = guestSetup.players?.[p] || {};
+    for (const field of ['css_char_id', 'css_cursor_state', 'css_selected_flag', 'css_panel_state']) {
+      cmp(`p${p}.${field}`, h[field], g[field]);
+    }
+  }
+  return diffs;
+}
+
+async function captureStartupState(peer, label) {
+  const captured = await peer.page
+    .evaluate(() => {
+      const toB64 = (u8) => {
+        let bin = '';
+        for (let i = 0; i < u8.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+        }
+        return btoa(bin);
+      };
+      const runtimeFamily = (() => {
+        const ua = navigator.userAgent || '';
+        if (/AppleWebKit/i.test(ua) && !/Chrome|Chromium|CriOS|Edg/i.test(ua)) return 'webkit-jsc';
+        if (/Chrome|Chromium|CriOS|Edg/i.test(ua)) return 'chromium-v8';
+        if (/Firefox/i.test(ua)) return 'firefox-spidermonkey';
+        return 'unknown';
+      })();
+      const gm = window.EJS_emulator?.gameManager;
+      const mod = gm?.Module;
+      const out = {
+        ok: false,
+        kind: null,
+        size: 0,
+        bytesB64: null,
+        runtime: {
+          family: runtimeFamily,
+          userAgent: navigator.userAgent,
+          brands: navigator.userAgentData?.brands || null,
+          platform: navigator.platform || null,
+          hardwareConcurrency: navigator.hardwareConcurrency || null,
+          devicePixelRatio: window.devicePixelRatio,
+          webkit: /AppleWebKit/i.test(navigator.userAgent || ''),
+        },
+        ejs: {
+          exists: !!window.EJS_emulator,
+          started: !!window.EJS_emulator?.started,
+          core: window.EJS_emulator?.getCore?.() || null,
+          coreHash: window._knCoreHash || null,
+          coreDataOverride: window.__knCoreDataOverride || null,
+        },
+        kn: {
+          room: window.KNState?.room || null,
+          slot: window.KNState?.slot ?? null,
+          frame: window.KNState?.frameNum ?? null,
+          romHash: window.KNState?.romHash || null,
+          matchId: window.KNState?.matchId || null,
+        },
+        module: mod
+          ? {
+              frame: mod._kn_get_frame?.() ?? null,
+              coreFrame: mod._get_current_frame_count?.() ?? null,
+              scene: mod._kn_get_scene_curr?.() ?? null,
+              cp0: mod._kn_get_cp0_count?.() ?? null,
+              hasKnSync: !!mod._kn_sync_read,
+              hasSavestate: !!gm?.getState,
+            }
+          : null,
+        hiddenWords: null,
+        audioFifo: null,
+      };
+
+      const captureHiddenWords = () => {
+        if (!mod?._kn_pack_hidden_state_impl || !mod?._malloc || !mod?._free || !mod.HEAPU32) return null;
+        const ptr = mod._malloc(18 * 4);
+        if (!ptr) return null;
+        try {
+          mod._kn_pack_hidden_state_impl(ptr);
+          return Array.from(new Uint32Array(mod.HEAPU32.buffer, ptr, 18), (v) => v >>> 0);
+        } finally {
+          mod._free(ptr);
+        }
+      };
+      const captureAudioFifo = () => {
+        if (!mod?._kn_get_audio_fifo_state || !mod?._malloc || !mod?._free || !mod.HEAPU32) return null;
+        const ptr = mod._malloc(4 * 4);
+        if (!ptr) return null;
+        try {
+          mod._kn_get_audio_fifo_state(ptr);
+          return Array.from(new Uint32Array(mod.HEAPU32.buffer, ptr, 4), (v) => v >>> 0);
+        } finally {
+          mod._free(ptr);
+        }
+      };
+
+      let bytes = null;
+      if (mod?._kn_sync_read && mod?._malloc && mod?._free && mod.HEAPU8) {
+        const size = 8 * 1024 * 1024 + 64 * 1024;
+        const ptr = mod._malloc(size);
+        if (ptr) {
+          try {
+            const n = mod._kn_sync_read(ptr, size) >>> 0;
+            if (n > 0 && n <= size) {
+              bytes = new Uint8Array(mod.HEAPU8.buffer, ptr, n).slice();
+              out.kind = 'kn-sync';
+            }
+          } finally {
+            mod._free(ptr);
+          }
+        }
+      }
+      if (!bytes && typeof gm?.getState === 'function') {
+        const raw = gm.getState();
+        bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+        out.kind = 'savestate';
+      }
+
+      out.hiddenWords = captureHiddenWords();
+      out.audioFifo = captureAudioFifo();
+      if (bytes) {
+        out.ok = true;
+        out.size = bytes.length;
+        out.bytesB64 = toB64(bytes);
+      }
+      return out;
+    })
+    .catch((err) => ({ ok: false, error: err.message || String(err) }));
+
+  let bytes = null;
+  if (captured.bytesB64) {
+    bytes = Buffer.from(captured.bytesB64, 'base64');
+    delete captured.bytesB64;
+    captured.sha256 = sha256(bytes);
+    captured.path = `/tmp/startup-state-${ROOM}-${label}.bin`;
+    writeFileSync(captured.path, bytes);
+  }
+  return { meta: captured, bytes };
+}
+
+async function writeStartupStateProbeReport(host, guest, hostBrowser, guestBrowser) {
+  console.log('\n=== Startup State Probe ===');
+  const [hostState, guestState, hostTiming, guestTiming, hostSubsys, guestSubsys, hostSetup, guestSetup] =
+    await Promise.all([
+      captureStartupState(host, 'host'),
+      captureStartupState(guest, 'guest'),
+      sampleTimingState(host.page),
+      sampleTimingState(guest.page),
+      sampleSubsystemHashes(host.page),
+      sampleSubsystemHashes(guest.page),
+      sampleMatchSetup(host.page),
+      sampleMatchSetup(guest.page),
+    ]);
+
+  const byteDiff = summarizeBinaryDiff(hostState.bytes, guestState.bytes);
+  const hiddenDiff = summarizeArrayDiff(hostState.meta.hiddenWords, guestState.meta.hiddenWords);
+  const audioFifoDiff = summarizeArrayDiff(hostState.meta.audioFifo, guestState.meta.audioFifo);
+  const timingHiddenDiff = summarizeArrayDiff(hostTiming?.hidden, guestTiming?.hidden);
+  const subsysDiffs =
+    Array.isArray(hostSubsys) && Array.isArray(guestSubsys)
+      ? hostSubsys
+          .map((h, idx) => ({ idx, name: SUBSYS_NAMES[idx], host: h >>> 0, guest: guestSubsys[idx] >>> 0 }))
+          .filter((d) => d.host !== d.guest)
+      : null;
+  const startupSetupDiffs = compareStartupSetup(hostSetup, guestSetup);
+  const report = {
+    room: ROOM,
+    verdict:
+      byteDiff && byteDiff.diffCount === 0 && byteDiff.lengthDelta === 0 ? 'STATE_BYTES_MATCH' : 'STATE_BYTES_DIFFER',
+    host: hostState.meta,
+    guest: guestState.meta,
+    byteDiff,
+    sidecars: {
+      hiddenDiff,
+      audioFifoDiff,
+      timing: {
+        host: hostTiming,
+        guest: guestTiming,
+        hiddenDiff: timingHiddenDiff,
+      },
+      subsystemDiffs: subsysDiffs,
+      setup: {
+        host: hostSetup,
+        guest: guestSetup,
+        diffs: startupSetupDiffs,
+      },
+    },
+  };
+
+  writeFileSync(STARTUP_STATE_REPORT_FILE, JSON.stringify(report, null, 2));
+  console.log(
+    `  host: ${hostState.meta.kind || 'none'} ${hostState.meta.size || 0} bytes ${hostState.meta.sha256 || ''}`,
+  );
+  console.log(
+    `  guest: ${guestState.meta.kind || 'none'} ${guestState.meta.size || 0} bytes ${guestState.meta.sha256 || ''}`,
+  );
+  if (byteDiff) {
+    const first = byteDiff.firstDiffOffset >= 0 ? ` first=0x${byteDiff.firstDiffOffset.toString(16)}` : '';
+    console.log(`  byte diff: count=${byteDiff.diffCount} sizeDelta=${byteDiff.lengthDelta}${first}`);
+  }
+  if (subsysDiffs?.length) {
+    console.log(
+      `  subsystem diff: ${subsysDiffs
+        .slice(0, 8)
+        .map((d) => `${d.idx}:${d.name}`)
+        .join(', ')}`,
+    );
+  }
+  console.log(`  report: ${STARTUP_STATE_REPORT_FILE}`);
+  console.log(`  bins: ${hostState.meta.path || 'n/a'} | ${guestState.meta.path || 'n/a'}`);
+
+  await Promise.allSettled([
+    host.page.evaluate(() => window._flushSyncLog?.()),
+    guest.page.evaluate(() => window._flushSyncLog?.()),
+  ]);
+  if (!KEEP_OPEN) {
+    await Promise.allSettled([hostBrowser.close(), guestBrowser.close()]);
+  }
+}
+
 /* Sample per-slot inputs across a window of recent frames.
  * Returns { frames: [F-N+1...F], slots: [4][N] of {btn,lx,ly,cx,cy,present} }.
  * Uses kn_get_input which reads rb.inputs[slot][frame % ring]. The ring
@@ -2377,6 +2672,7 @@ async function main() {
   console.log(`Room: ${ROOM}`);
   console.log(`Base URL: ${BASE_URL}`);
   console.log(`Late-join midmatch: ${LATE_JOIN_MIDMATCH ? 'yes' : 'no'}`);
+  console.log(`Startup state probe: ${STARTUP_STATE_PROBE ? 'yes' : 'no'}`);
   // Chromium flags to prevent background tabs from having rAF/timers throttled
   // (critical for 2-peer emulator testing where both windows run simultaneously).
   const chromiumArgs = [
@@ -2433,6 +2729,10 @@ async function main() {
     throw err;
   });
   await requireNoSolidPaleCanvas(host, guest, 'post-tick-canvas-health', hostBrowser, guestBrowser);
+  if (STARTUP_STATE_PROBE) {
+    await writeStartupStateProbeReport(host, guest, hostBrowser, guestBrowser);
+    return;
+  }
 
   /* Hoisted so both replay and scripted-nav branches can drive the same
    * counter that the final report reads. */
