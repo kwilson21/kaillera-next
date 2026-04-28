@@ -37,6 +37,17 @@ def test_lockstep_guest_boot_is_deferred_until_gesture():
     assert cheats_idx > boot_idx
 
 
+def test_startup_state_probe_keeps_room_scoped_analysis_artifacts():
+    determinism_source = (REPO_ROOT / "tests/determinism-automation.mjs").read_text()
+    analyzer_source = (REPO_ROOT / "tests/analyze-startup-states.mjs").read_text()
+
+    assert "const roomReportFile = `/tmp/startup-state-${ROOM}-probe.json`" in determinism_source
+    assert "latest report: ${STARTUP_STATE_REPORT_FILE}" in determinism_source
+    assert "stableRoleBytes" in analyzer_source
+    assert "coreFrameDelta" in analyzer_source
+    assert "No stable role-specific host/guest byte pattern" in analyzer_source
+
+
 def test_library_rom_updates_ejs_identity_for_next_boot():
     source = (REPO_ROOT / "web/static/play.js").read_text()
     load_idx = source.find("const loadRomFromLibrary =")
