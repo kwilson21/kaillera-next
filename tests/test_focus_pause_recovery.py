@@ -140,9 +140,12 @@ def test_lockstep_surfaces_and_recovers_browser_focus_loss():
     stop_idx = source.find("const stopSync = () => {")
     assert start_idx != -1
     assert stop_idx != -1
-    start_window = source[start_idx : start_idx + 700]
+    start_window = source[start_idx : start_idx + 1100]
     stop_window = source[stop_idx : stop_idx + 4600]
 
+    assert "event?.target?.closest?.('#virtual-gamepad')" in start_window
+    assert "TAB-FOCUS recovered via virtual-gamepad" in start_window
+    assert "_clearEjsPauseFlagWithRetries(event?.type || 'virtual-gamepad', { guardInput: false })" in start_window
     assert "_restoreControlsFocus(event?.type || 'pointer')" in start_window
     assert "_clearEjsPauseFlagWithRetries(event?.type || 'pointer')" in start_window
     assert "document.addEventListener('pointerdown', _focusRestoreHandler, true)" in start_window
@@ -157,7 +160,8 @@ def test_lockstep_retries_mobile_pause_clear_after_focus_return():
     source = LOCKSTEP_JS.read_text()
 
     assert "const EJS_PAUSE_CLEAR_RETRY_DELAYS_MS = [75, 250, 750, 1500]" in source
-    assert "const _clearEjsPauseFlagWithRetries = (reason) => {" in source
+    assert "const _clearEjsPauseFlagWithRetries = (reason, { guardInput = true } = {}) => {" in source
+    assert "if (guardInput)" in source
     assert "for (const delay of EJS_PAUSE_CLEAR_RETRY_DELAYS_MS)" in source
     assert "_clearEjsPauseFlag(`${reason}+${delay}ms`)" in source
     assert "if (typeof document !== 'undefined' && document.hidden) return" in source

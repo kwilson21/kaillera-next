@@ -106,22 +106,26 @@ def test_smash_remix_startup_restores_full_hidden_state_sidecar():
     assert "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot" in build_source
 
 
-def test_smash_remix_jsc_guest_skips_remote_title_kn_sync_restore():
+def test_smash_remix_runtime_mismatch_waits_before_received_kn_sync_restore():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
 
-    assert "let _guestStateUseLocalRemixTitle = false" in source
-    assert "const _isWebKitJscRuntime = () => {" in source
-    assert "Smash Remix initial sync: JSC guest aligning local title before lockstep" in source
+    assert "let _guestStateUseLocalRemixTitle" not in source
+    assert "Smash Remix initial sync: JSC guest aligning local title before lockstep" not in source
+    assert "JSC guest kept local Remix title state; skipped remote kn-sync restore" not in source
+    assert "const _getRuntimeFamily = () => {" in source
+    assert "sourceRuntimeFamily: _getRuntimeFamily()" in source
+    assert "const _shouldWaitBeforeInitialKnSyncRestore = (sourceRuntimeFamily) => {" in source
+    assert "hostRuntimeFamily !== localRuntimeFamily" in source
+    assert "waiting for local title before received kn-sync restore" in source
     assert "await waitForSmashTitleState(gm)" in source
-    assert "_guestStateUseLocalRemixTitle = true" in source
-    assert "JSC guest kept local Remix title state; skipped remote kn-sync restore" in source
+    assert "received kn-sync will still be restored" in source
 
-    load_idx = source.find("const useLocalRemixTitleState =")
-    skip_idx = source.find("JSC guest kept local Remix title state", load_idx)
+    load_idx = source.find("if (isKnSyncInitialState)")
+    host_local_idx = source.find("if (hasLocalKnSyncCapture)", load_idx)
     remote_idx = source.find("loadKnSyncStateAtStartBoundary", load_idx)
     assert load_idx != -1
-    assert skip_idx != -1
-    assert remote_idx > skip_idx
+    assert host_local_idx != -1
+    assert remote_idx > host_local_idx
 
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
@@ -213,6 +217,7 @@ def test_host_local_kn_sync_initial_capture_is_not_reloaded():
     local_idx = window.find("if (hasLocalKnSyncCapture)")
     load_idx = window.find("loadKnSyncStateAtStartBoundary")
     assert local_idx != -1
+    assert load_idx != -1
     assert load_idx > local_idx
     assert "recaptureManualRunner(readyMod, 'initial-sync-local-capture')" in window
     assert "initial-sync-load: host kept locally captured kn-sync state" in window

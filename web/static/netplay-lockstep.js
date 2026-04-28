@@ -1271,7 +1271,6 @@
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
-  let _guestStateUseLocalRemixTitle = false; // JSC/iOS: avoid remote kn-sync restore on Remix title
   let _frameNum = 0; // current logical frame number
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
   let _localInputs = {}; // frame -> input object
@@ -1406,10 +1405,28 @@
   const _isSmashRemix = () =>
     _config?.gameId === 'smash-remix' || KNState?.gameId === 'smash-remix' || _SMASH_REMIX_HASHES.has(_config?.romHash);
 
-  const _isWebKitJscRuntime = () => {
+  const _getRuntimeFamily = () => {
     const ua = navigator.userAgent || '';
-    if (/iPhone|iPad|iPod/.test(ua)) return true;
-    return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
+    const platform = navigator.platform || '';
+    const isiOS = /iPhone|iPad|iPod/i.test(ua) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (isiOS) return 'webkit-jsc';
+    if (/Firefox/i.test(ua)) return 'firefox-spidermonkey';
+    if (/Chrome|Chromium|CriOS|Edg|OPR/i.test(ua)) return 'chromium-v8';
+    if (/Safari/i.test(ua)) return 'webkit-jsc';
+    return 'unknown';
+  };
+
+  const _isWebKitJscRuntime = () => _getRuntimeFamily() === 'webkit-jsc';
+
+  const _shouldWaitBeforeInitialKnSyncRestore = (sourceRuntimeFamily) => {
+    if (!_isSmashRemix() || _guestStateKind !== 'kn-sync' || _playerSlot === 0) return false;
+    const localRuntimeFamily = _getRuntimeFamily();
+    const hostRuntimeFamily =
+      typeof sourceRuntimeFamily === 'string' && sourceRuntimeFamily ? sourceRuntimeFamily : 'unknown';
+    if (hostRuntimeFamily === 'unknown' || localRuntimeFamily === 'unknown') {
+      return _isWebKitJscRuntime();
+    }
+    return hostRuntimeFamily !== localRuntimeFamily;
   };
 
   const _isSameRomEmulatorResume = () => {
@@ -4848,8 +4865,6 @@
     const isKnSyncInitialState = _guestStateKind === 'kn-sync';
     _lockstepStartStateKind = isKnSyncInitialState ? 'kn-sync' : 'savestate';
     const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally && _playerSlot === 0;
-    const useLocalRemixTitleState =
-      isKnSyncInitialState && _isSmashRemix() && _guestStateUseLocalRemixTitle && _playerSlot !== 0;
     if (!_isSmashRemix() && !isKnSyncInitialState && readyMod?._retro_reset) {
       readyMod._retro_reset();
       _syncLog('core soft-reset before state load');
@@ -4864,9 +4879,6 @@
       if (hasLocalKnSyncCapture) {
         recaptureManualRunner(readyMod, 'initial-sync-local-capture');
         _syncLog('initial-sync-load: host kept locally captured kn-sync state');
-      } else if (useLocalRemixTitleState) {
-        recaptureManualRunner(readyMod, 'initial-sync-local-remix-title');
-        _syncLog('initial-sync-load: JSC guest kept local Remix title state; skipped remote kn-sync restore');
       } else {
         if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
           _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
@@ -4887,11 +4899,7 @@
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
-    _guestStateUseLocalRemixTitle = false;
-    _syncLog(
-      `${useLocalRemixTitleState ? 'state kept' : 'state loaded'} ` +
-        `(manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`,
-    );
+    _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
 
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
@@ -5088,12 +5096,17 @@
               _syncLog(
                 `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
               );
-              socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
+              socket.emit('data-message', {
+                type: 'save-state',
+                frame: 0,
+                stateFormat: 'savestate',
+                sourceRuntimeFamily: _getRuntimeFamily(),
+                data: encoded.data,
+              });
             })
             .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
         }
 
-        _phase = PHASE_LOCKSTEP_READY;
         _phase = PHASE_LOCKSTEP_READY;
         if (_rttComplete) broadcastLockstepReady();
         checkAllLockstepReady();
@@ -5130,7 +5143,13 @@
             _syncLog(
               `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
             );
-            socket.emit('data-message', { type: 'save-state', frame: 0, data: encoded.data });
+            socket.emit('data-message', {
+              type: 'save-state',
+              frame: 0,
+              stateFormat: 'savestate',
+              sourceRuntimeFamily: _getRuntimeFamily(),
+              data: encoded.data,
+            });
           })
           .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
       }
@@ -5169,6 +5188,7 @@
         type: 'save-state',
         frame: 0,
         stateFormat: captured.kind,
+        sourceRuntimeFamily: _getRuntimeFamily(),
         hiddenWords: captured.hiddenWords,
         audioFifo: captured.audioFifo,
         data: encoded.data,
@@ -5220,33 +5240,25 @@
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
       _guestStateCapturedLocally = false;
-      _guestStateUseLocalRemixTitle = false;
       _syncLog(`initial state decompressed (${_guestStateKind}, ${bytes.length} bytes)`);
 
-      if (_isSmashRemix() && _guestStateKind === 'kn-sync' && _playerSlot !== 0 && _isWebKitJscRuntime()) {
+      if (_shouldWaitBeforeInitialKnSyncRestore(msg.sourceRuntimeFamily)) {
+        const localRuntimeFamily = _getRuntimeFamily();
+        const sourceRuntimeFamily = msg.sourceRuntimeFamily || 'unknown';
         const gm = window.EJS_emulator?.gameManager;
         if (gm?.Module) {
-          setStatus('Aligning title screen...');
-          _syncLog('Smash Remix initial sync: JSC guest aligning local title before lockstep');
+          _syncLog(
+            `Smash Remix initial sync: runtime mismatch/unknown ` +
+              `host=${sourceRuntimeFamily} local=${localRuntimeFamily}; ` +
+              `waiting for local title before received kn-sync restore`,
+          );
           await waitForSmashTitleState(gm);
-          const localScene = _readSceneCurr();
-          const localStatus = _readGameStatus();
-          if (localScene === 1) {
-            _guestStateUseLocalRemixTitle = true;
-            _guestStateHiddenWords = null;
-            _guestStateAudioFifo = null;
-            _syncLog(
-              `Smash Remix initial sync: JSC guest will skip remote kn-sync restore ` +
-                `after local title scene=${localScene} gameStatus=${localStatus}`,
-            );
-          } else {
-            _syncLog(
-              `Smash Remix initial sync: JSC local title not ready ` +
-                `scene=${localScene} gameStatus=${localStatus}; using remote kn-sync restore`,
-            );
-          }
+          _syncLog(
+            `Smash Remix initial sync: local pre-restore scene=${_readSceneCurr()} ` +
+              `gameStatus=${_readGameStatus()}; received kn-sync will still be restored`,
+          );
         } else {
-          _syncLog('Smash Remix initial sync: JSC local title alignment skipped — emulator unavailable');
+          _syncLog('Smash Remix initial sync: runtime-mismatch pre-restore wait skipped; emulator unavailable');
         }
       }
 
@@ -6902,8 +6914,10 @@
       }
     };
 
-    const _clearEjsPauseFlagWithRetries = (reason) => {
-      _resumeInputGuardUntil = Math.max(_resumeInputGuardUntil, performance.now() + EJS_RESUME_INPUT_GUARD_MS);
+    const _clearEjsPauseFlagWithRetries = (reason, { guardInput = true } = {}) => {
+      if (guardInput) {
+        _resumeInputGuardUntil = Math.max(_resumeInputGuardUntil, performance.now() + EJS_RESUME_INPUT_GUARD_MS);
+      }
       _clearEjsPauseFlag(reason);
       for (const delay of EJS_PAUSE_CLEAR_RETRY_DELAYS_MS) {
         setTimeout(() => {
@@ -7038,6 +7052,18 @@
 
     _focusRestoreHandler = (event) => {
       if (_phase !== PHASE_RUNNING) return;
+      if (event?.target?.closest?.('#virtual-gamepad')) {
+        const hadControlsFocusLost = _controlsFocusLost;
+        if (hadControlsFocusLost) {
+          _controlsFocusLost = false;
+          setStatus('Connected -- game on!');
+          _syncLog(`TAB-FOCUS recovered via virtual-gamepad f=${_frameNum}`);
+        }
+        if (hadControlsFocusLost || window.EJS_emulator?.paused) {
+          _clearEjsPauseFlagWithRetries(event?.type || 'virtual-gamepad', { guardInput: false });
+        }
+        return;
+      }
       _restoreControlsFocus(event?.type || 'pointer');
       _clearEjsPauseFlagWithRetries(event?.type || 'pointer');
     };
@@ -10641,7 +10667,6 @@
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
     _guestStateCapturedLocally = false;
-    _guestStateUseLocalRemixTitle = false;
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
