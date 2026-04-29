@@ -508,6 +508,22 @@ EMSCRIPTEN_KEEPALIVE void kn_post_state_load_cleanup(void) {
         kn_normalize_event_queue();
     }
     {
+        /* 2026-04-29 audio-stuck fix: if the captured state has AI BUSY set
+         * without an AI_INT scheduled, synthesize a fire-now AI_INT so
+         * ai_end_of_dma_event runs on the next dispatch and recovers via
+         * fifo_pop (advances FIFO[1] when FULL, otherwise clears BUSY).
+         * Without this, audio is silent for the entire match because
+         * kn_sync_read can capture host state between AI_INT firing and
+         * the next AI DMA scheduling its successor. */
+        extern unsigned int* get_event(const struct interrupt_queue* q, int type);
+        extern void add_interrupt_event_count(struct cp0* cp0, int type, unsigned int count);
+        if ((g_dev.ai.regs[AI_STATUS_REG] & UINT32_C(0x40000000)) &&
+            get_event(&g_dev.r4300.cp0.q, AI_INT) == NULL) {
+            uint32_t cnt = r4300_cp0_regs(&g_dev.r4300.cp0)[CP0_COUNT_REG];
+            add_interrupt_event_count(&g_dev.r4300.cp0, AI_INT, cnt);
+        }
+    }
+    {
         extern void invalidate_cached_code_hacktarux(struct r4300_core* r4300, uint32_t address, size_t size);
         invalidate_cached_code_hacktarux(&g_dev.r4300, 0, 0);
     }

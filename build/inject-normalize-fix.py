@@ -215,76 +215,9 @@ def apply_vi_handler_reorder() -> None:
     print(f"[inject-normalize-fix] {VI_C}: reordered VI handler (reschedule before new_vi) + remove_event(VI_INT)")
 
 
-# ---------------------------------------------------------------------------
-# main.c: synthesize a fire-now AI_INT in kn_post_state_load_cleanup if the
-# loaded state has AI_STATUS_BUSY set but no AI_INT scheduled.
-#
-# Root cause (room DUU25RDG, 2026-04-29): kn_sync_read can capture state
-# between AI_INT firing (event removed from queue) and the next AI DMA
-# scheduling its successor. The captured ai.regs[AI_STATUS_REG] still has
-# BUSY set, but the cp0 event queue has no AI_INT. After kn_sync_write,
-# the AI controller is permanently stuck BUSY with no scheduled interrupt
-# → ai_end_of_dma_event never runs → fifo_pop never runs → no AI DMA
-# progression → audio_backend's aiLenChanged callback never fires → 0
-# samples for the entire match. Visible in logs as continuous audio-empty
-# events on every frame from match start.
-#
-# Fix: after kn_normalize_event_queue, detect the inconsistency and
-# schedule AI_INT at the current count (rel = 0). On next dispatch
-# ai_end_of_dma_event runs and fifo_pop either advances FIFO[1] (FULL set,
-# starts new DMA which schedules the next AI_INT properly) or clears BUSY
-# (FULL clear). Either way the AI controller resumes normal operation.
-# ---------------------------------------------------------------------------
-POST_LOAD_OLD = """    {
-        extern void kn_normalize_event_queue(void);
-        kn_normalize_event_queue();
-    }
-    {
-        extern void invalidate_cached_code_hacktarux(struct r4300_core* r4300, uint32_t address, size_t size);
-        invalidate_cached_code_hacktarux(&g_dev.r4300, 0, 0);
-    }
-}"""
-
-POST_LOAD_NEW = """    {
-        extern void kn_normalize_event_queue(void);
-        kn_normalize_event_queue();
-    }
-    {
-        /* 2026-04-29 audio-stuck fix: if the captured state has AI BUSY
-         * set without an AI_INT scheduled, synthesize a fire-now AI_INT
-         * so ai_end_of_dma_event runs on the next dispatch and recovers
-         * via fifo_pop. Without this, audio is silent for the whole match. */
-        extern unsigned int* get_event(const struct interrupt_queue* q, int type);
-        extern void add_interrupt_event_count(struct cp0* cp0, int type, unsigned int count);
-        if ((g_dev.ai.regs[AI_STATUS_REG] & UINT32_C(0x40000000)) &&
-            get_event(&g_dev.r4300.cp0.q, AI_INT) == NULL) {
-            uint32_t cnt = r4300_cp0_regs(&g_dev.r4300.cp0)[CP0_COUNT_REG];
-            add_interrupt_event_count(&g_dev.r4300.cp0, AI_INT, cnt);
-        }
-    }
-    {
-        extern void invalidate_cached_code_hacktarux(struct r4300_core* r4300, uint32_t address, size_t size);
-        invalidate_cached_code_hacktarux(&g_dev.r4300, 0, 0);
-    }
-}"""
-
-
-def apply_post_load_ai_synth_fix() -> None:
-    text = MAIN_C.read_text()
-    if "audio-stuck fix" in text:
-        print(f"[inject-normalize-fix] {MAIN_C}: AI_INT synth already applied")
-        return
-    if POST_LOAD_OLD not in text:
-        raise RuntimeError(f"kn_post_state_load_cleanup anchor not found in {MAIN_C}")
-    text = text.replace(POST_LOAD_OLD, POST_LOAD_NEW, 1)
-    MAIN_C.write_text(text)
-    print(f"[inject-normalize-fix] {MAIN_C}: synthesize fire-now AI_INT when BUSY without AI_INT post-load")
-
-
 def apply() -> None:
     apply_normalize_fix()
     apply_vi_handler_reorder()
-    apply_post_load_ai_synth_fix()
 
 
 if __name__ == "__main__":
