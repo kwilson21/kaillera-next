@@ -225,7 +225,6 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
 | `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
 | `mupen64plus-ai-determinism.patch` | AI DMA deterministic audio interface timing |
-| `mupen64plus-rsp-skip-audio.patch` | RSP audio skip for deterministic frame pacing |
 | `mupen64plus-fpu-trace.patch` | FPU operation tracing for cross-platform determinism verification |
 | `mupen64plus-softfloat.patch` | SoftFloat FPU for bit-exact cross-platform floating point |
 | `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override + AUDIO_FLAG_SUSPENDED bypass |
