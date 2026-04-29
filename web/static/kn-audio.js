@@ -35,6 +35,16 @@
   let _resumeAudioHandler = null; // gesture-resume listener; cleaned up in cleanup()
   let _lastResumeAttemptAt = 0;
 
+  // Zombie-context detection: iOS Safari can leave _audioCtx.state === 'running'
+  // after an audio-session interruption (silent-switch, ringer, headphone
+  // unplug) while currentTime stops advancing — feeding samples past that
+  // point goes nowhere. Track ctx clock vs wall clock to catch it.
+  let _ctxClockProbeTime = 0;
+  let _ctxClockProbeWallMs = 0;
+  let _zombieDetected = false;
+  let _zombieRecoveryAttempts = 0;
+  let _lastZombieRecoveryAt = 0;
+
   // Context callbacks — set by init()
   let _log = () => {}; // (msg: string) => void
   let _getFrame = () => 0; // () => number (current frame)
@@ -281,6 +291,8 @@
         );
       }
 
+      _checkCtxClockHealth();
+
       const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
 
       if (_audioWorklet) {
@@ -350,6 +362,95 @@
     document.addEventListener('pointerdown', _resumeAudioHandler, true);
     document.addEventListener('touchstart', _resumeAudioHandler, true);
     _log(`audio context state: ${_audioCtx.state} — waiting for gesture to resume (${reason})`);
+  }
+
+  // Detect "zombie" AudioContext: state === 'running' but currentTime stops
+  // advancing. iOS Safari leaves the context in this state after an audio-
+  // session interruption (silent-switch toggle, ringer, AirPods unplug, brief
+  // background-app interruption). resume() resolves successfully but no
+  // samples actually reach the speaker. Without detection we keep pushing
+  // PCM into the void for the rest of the match.
+  //
+  // Strategy: every ~1s of wall time, compare AudioContext.currentTime delta
+  // against wall delta. If wall advances but ctx clock is stuck, fire a
+  // suspend()→resume() cycle which forces iOS to reactivate the audio
+  // session. After repeated automatic recoveries fail, install a gesture
+  // listener and toast the user — same pattern as the explicit-suspended
+  // path in ensureRunning().
+  function _checkCtxClockHealth() {
+    if (!_audioCtx || _audioCtx.state !== 'running') return;
+    const ctxNow = _audioCtx.currentTime;
+    const wallNow = performance.now();
+    if (_ctxClockProbeWallMs === 0) {
+      _ctxClockProbeTime = ctxNow;
+      _ctxClockProbeWallMs = wallNow;
+      return;
+    }
+    const wallDelta = (wallNow - _ctxClockProbeWallMs) / 1000;
+    if (wallDelta < 1.0) return;
+    const ctxDelta = ctxNow - _ctxClockProbeTime;
+    _ctxClockProbeTime = ctxNow;
+    _ctxClockProbeWallMs = wallNow;
+
+    // Healthy: ctx advances roughly with wall (allow some jitter).
+    if (ctxDelta >= wallDelta * 0.5) {
+      if (_zombieDetected) {
+        _log(
+          `audio-zombie recovered f=${_getFrame()} ctxDelta=${ctxDelta.toFixed(2)}s wallDelta=${wallDelta.toFixed(2)}s attempts=${_zombieRecoveryAttempts}`,
+        );
+        _knEvent('audio-recovered', `audio-zombie recovered after ${_zombieRecoveryAttempts} attempts`, {
+          attempts: _zombieRecoveryAttempts,
+        });
+        _zombieDetected = false;
+        _zombieRecoveryAttempts = 0;
+        _audioSuspendedToastShown = false;
+      }
+      return;
+    }
+
+    // Zombie: ctx clock stalled despite state === 'running'.
+    if (!_zombieDetected) {
+      _zombieDetected = true;
+      _log(
+        `audio-zombie f=${_getFrame()} ctx clock stalled (wallDelta=${wallDelta.toFixed(2)}s ctxDelta=${ctxDelta.toFixed(2)}s state=${_audioCtx.state})`,
+      );
+      _knEvent(
+        'audio-fail',
+        `audio-zombie ctx clock stalled wallDelta=${wallDelta.toFixed(2)}s ctxDelta=${ctxDelta.toFixed(2)}s`,
+        {
+          wallDelta,
+          ctxDelta,
+          state: _audioCtx.state,
+        },
+      );
+    }
+    _attemptZombieRecovery();
+  }
+
+  function _attemptZombieRecovery() {
+    if (!_audioCtx || _audioCtx.state === 'closed') return;
+    const now = performance.now();
+    if (now - _lastZombieRecoveryAt < 2000) return;
+    _lastZombieRecoveryAt = now;
+    _zombieRecoveryAttempts++;
+    const attempt = _zombieRecoveryAttempts;
+    // suspend() then resume() forces iOS to re-acquire the audio session.
+    // Plain resume() alone resolves successfully but doesn't reactivate
+    // a session that was interrupted.
+    _audioCtx
+      .suspend()
+      .then(() => _audioCtx.resume())
+      .then(() => {
+        _log(`audio-zombie recovery #${attempt}: state=${_audioCtx.state} time=${_audioCtx.currentTime.toFixed(2)}`);
+      })
+      .catch((e) => {
+        _log(`audio-zombie recovery #${attempt} failed: ${e.name}: ${e.message}`);
+      });
+    if (attempt >= 3 && !_audioSuspendedToastShown) {
+      _audioSuspendedToastShown = true;
+      window.knShowToast?.('Audio interrupted — tap anywhere to restart sound', 'warn');
+      _installResumeAudioListeners('zombie');
+    }
   }
 
   function ensureRunning(reason = 'manual') {
@@ -440,6 +541,11 @@
     _audioErrorLogged = false;
     _audioSuspendedToastShown = false;
     _lastResumeAttemptAt = 0;
+    _ctxClockProbeTime = 0;
+    _ctxClockProbeWallMs = 0;
+    _zombieDetected = false;
+    _zombieRecoveryAttempts = 0;
+    _lastZombieRecoveryAt = 0;
   }
 
   window.KNAudio = {
