@@ -72,10 +72,12 @@ const NETSIM_ENABLED = NETSIM_JITTER_MS > 0 || NETSIM_DROP_PCT > 0;
 const DESYNC_MODE_ARG_IDX = process.argv.indexOf('--desync-mode');
 const DESYNC_MODE =
   DESYNC_MODE_ARG_IDX !== -1 ? String(process.argv[DESYNC_MODE_ARG_IDX + 1] || '').toLowerCase() : null;
+const VERBOSE_DEEP_LOGS = process.argv.includes('--verbose-diag') || DESYNC_MODE === 'deep';
 const LATE_JOIN_MIDMATCH = process.argv.includes('--late-join-midmatch');
 const LATE_JOIN_DELAY_MS = Number(argValue('late-join-delay-ms', process.env.KN_LATE_JOIN_DELAY_MS || '3000'));
 const KEEP_OPEN = process.argv.includes('--keep-open');
 const STARTUP_STATE_PROBE = process.argv.includes('--startup-state-probe');
+const SETUP_ONLY = process.argv.includes('--setup-only');
 
 const ROM_PATH = '/Users/kazon/Downloads/Smash Remix 2.0.1.z64';
 const BASE_URL = argValue('base-url', process.env.KN_BASE_URL || 'https://localhost:27888');
@@ -102,6 +104,9 @@ const DESYNC_GRACE_FRAMES = 60; // after desync detected, capture ~1s more RDRAM
  * damage) shows up at ssim<0.70. Using 0.70 here so the test only
  * early-exits on meaningful divergence, not on rendering variance. */
 const SSIM_EARLY_EXIT_THRESHOLD = 0.7;
+const SETUP_VISUAL_MEAN_ABS_LIMIT = 30;
+const SETUP_VISUAL_MISMATCH_RATIO_LIMIT = 0.3;
+const SETUP_VISUAL_STRONG_MISMATCH_LIMIT = 0.12;
 const REPORT_FILE = '/tmp/determinism-report.json';
 const STARTUP_STATE_REPORT_FILE = '/tmp/startup-state-probe.json';
 const CSS_PROBE_FILE = '/tmp/css-graphics-probe.json';
@@ -113,6 +118,7 @@ const SCENE_VS_OPTIONS = 10; // nSCKindVSOptions
 const SCENE_PLAYERS_VS = 16; // nSCKindPlayersVS
 const SCENE_MAPS = 21; // nSCKindMaps
 const SCENE_VS_BATTLE = 22; // nSCKindVSBattle
+const CSS_RANDOM_CHAR_ID = 0x1b000000;
 const REPLAY_MIN_HOLD_FRAMES = 2;
 const YELLOW_SCREEN_SAMPLE_ATTEMPTS = 5;
 const YELLOW_SCREEN_SAMPLE_DELAY_MS = 500;
@@ -196,6 +202,31 @@ async function setSyntheticInput(page, key, down) {
     .catch(() => {});
 }
 
+async function pulseSyntheticInput(page, key, value, holdMs = 80) {
+  const spec = SYNTHETIC_INPUT[key];
+  if (!spec) return;
+  await page
+    .evaluate(
+      ({ bit, value }) => {
+        if (!window.KNState?.touchInput) return;
+        window.KNState.touchInput[bit] = value;
+      },
+      { bit: spec.bit, value },
+    )
+    .catch(() => {});
+  await page.waitForTimeout(holdMs);
+  await page
+    .evaluate(
+      ({ bit }) => {
+        if (!window.KNState?.touchInput) return;
+        window.KNState.touchInput[bit] = 0;
+      },
+      { bit: spec.bit },
+    )
+    .catch(() => {});
+  await page.waitForTimeout(120);
+}
+
 async function keyDown(page, key) {
   await page.keyboard.down(key).catch(() => {});
   await setSyntheticInput(page, key, true);
@@ -258,7 +289,7 @@ async function installReplayEvents(page, events, label) {
       };
       const poll = () => {
         const mod = window.EJS_emulator?.gameManager?.Module;
-        const frame = mod?._kn_get_frame?.() ?? (window.KNState?.frameNum || 0);
+        const frame = window.KNState?.frameNum || mod?._kn_get_frame?.() || 0;
         if (frame === window._replayLastFrame) return;
         window._replayLastFrame = frame;
         if (window._replayPendingUps.length) {
@@ -624,7 +655,53 @@ async function sampleMatchSetup(page) {
           return null;
         }
       };
-      const frame = call('_kn_get_frame') ?? (window.KNState?.frameNum || 0);
+      const frame = window.KNState?.frameNum || call('_kn_get_frame') || 0;
+      const readU32Array = (fnName, count, ...args) => {
+        if (!mod._malloc || !mod._free || !mod.HEAPU32 || typeof mod[fnName] !== 'function') return null;
+        const ptrOut = mod._malloc(count * 4);
+        try {
+          const n = mod[fnName](ptrOut, count, ...args) >>> 0;
+          const base = ptrOut >> 2;
+          const limit = Math.min(n, count);
+          const out = [];
+          for (let i = 0; i < limit; i++) out.push(mod.HEAPU32[base + i] >>> 0);
+          return out;
+        } catch {
+          return null;
+        } finally {
+          mod._free(ptrOut);
+        }
+      };
+      const readRegionHashes = () => {
+        if (!mod._malloc || !mod._free || !mod.HEAPU32 || typeof mod._kn_sync_hash_regions !== 'function') return null;
+        const count = 12;
+        const ptrOut = mod._malloc(count * 4);
+        try {
+          const n = mod._kn_sync_hash_regions(ptrOut, count) >>> 0;
+          const base = ptrOut >> 2;
+          const regions = [
+            '0x0a4000',
+            '0x0ba000',
+            '0x0bf000',
+            '0x0c4000',
+            '0x262000',
+            '0x266000',
+            '0x26a000',
+            '0x290000',
+            '0x2f6000',
+            '0x32b000',
+            '0x330000',
+            '0x335000',
+          ];
+          const out = {};
+          for (let i = 0; i < Math.min(n, count); i++) out[regions[i] || String(i)] = mod.HEAPU32[base + i] >>> 0;
+          return out;
+        } catch {
+          return null;
+        } finally {
+          mod._free(ptrOut);
+        }
+      };
       const out = {
         frame,
         scene: null,
@@ -632,6 +709,16 @@ async function sampleMatchSetup(page) {
           match_phase: call('_kn_hash_match_phase', -1),
           vs_battle_hdr: call('_kn_hash_vs_battle_hdr', -1),
           rng: call('_kn_hash_rng', -1),
+          sync: call('_kn_sync_hash'),
+          event_queue: call('_kn_eventqueue_hash'),
+          gameplay: call('_kn_gameplay_hash', -1),
+          game_state: call('_kn_game_state_hash', -1),
+          full_state: call('_kn_full_state_hash', -1),
+          softfloat: call('_kn_get_softfloat_state'),
+          hidden: call('_kn_get_hidden_state_fingerprint'),
+          sync_regions: readRegionHashes(),
+          event_queue_dump: readU32Array('_kn_eventqueue_dump', 64),
+          rdram_blocks: readU32Array('_kn_rdram_block_hashes', 128),
         },
         rdramReady: false,
         battle: null,
@@ -756,22 +843,72 @@ async function sampleMatchSetup(page) {
 function cssSlotSelected(player) {
   if (!player) return false;
   const flagSelected = Number.isFinite(player.css_selected_flag) && player.css_selected_flag !== 0;
-  const hashSelected = Number.isFinite(player.hashes?.css_selected) && player.hashes.css_selected !== 0;
-  return flagSelected || hashSelected;
+  return flagSelected;
 }
 
-async function waitForCssSlotSelected(page, slot, label, timeoutMs = 30000) {
+function cssSlotRandomSelected(player) {
+  return cssSlotSelected(player) && player.css_char_id >>> 0 === CSS_RANDOM_CHAR_ID;
+}
+
+async function waitForCssSlotSelected(page, slot, label, timeoutMs = 30000, predicate = cssSlotSelected) {
   const start = Date.now();
   let last = null;
   while (Date.now() - start < timeoutMs) {
     last = await sampleMatchSetup(page);
-    if (cssSlotSelected(last?.players?.[slot])) {
+    if (predicate(last?.players?.[slot])) {
       console.log(`    ${label}: P${slot + 1} selected ${JSON.stringify(last.players[slot])}`);
       return last;
     }
     await page.waitForTimeout(250);
   }
   throw new Error(`${label}: P${slot + 1} did not become selected; last=${JSON.stringify(last)}`);
+}
+
+async function ensureCssRandomSelected(inputPage, viewPage, slot, label, timeoutMs = 30000) {
+  const start = Date.now();
+  const attempts = [
+    { key: KEY.ANA_LEFT, value: 5000, holdMs: 80 },
+    { key: KEY.ANA_LEFT, value: 7000, holdMs: 80 },
+    { key: KEY.ANA_LEFT, value: 9000, holdMs: 70 },
+    { key: KEY.ANA_RIGHT, value: 5000, holdMs: 80 },
+    { key: KEY.ANA_RIGHT, value: 7000, holdMs: 80 },
+    { key: KEY.ANA_UP, value: 7000, holdMs: 80 },
+    { key: KEY.ANA_DOWN, value: 7000, holdMs: 80 },
+  ];
+  let last = await sampleMatchSetup(viewPage);
+  if (cssSlotRandomSelected(last?.players?.[slot])) {
+    console.log(`    ${label}: P${slot + 1} selected ${JSON.stringify(last.players[slot])}`);
+    return last;
+  }
+  if (last?.players?.[slot]?.css_char_id >>> 0 === CSS_RANDOM_CHAR_ID) {
+    await press(inputPage, KEY.A, 260);
+    return waitForCssSlotSelected(
+      viewPage,
+      slot,
+      label,
+      Math.max(1000, timeoutMs - (Date.now() - start)),
+      cssSlotRandomSelected,
+    );
+  }
+  for (const attempt of attempts) {
+    if (Date.now() - start >= timeoutMs) break;
+    await pulseSyntheticInput(inputPage, attempt.key, attempt.value, attempt.holdMs);
+    last = await sampleMatchSetup(viewPage);
+    const player = last?.players?.[slot];
+    console.log(
+      `    ${label}: P${slot + 1} hover after ${attempt.key}/${attempt.value} ` +
+        `char=0x${((player?.css_char_id ?? 0) >>> 0).toString(16)} selected=0x${((player?.css_selected_flag ?? 0) >>> 0).toString(16)}`,
+    );
+    if (cssSlotSelected(player) && !cssSlotRandomSelected(player)) {
+      throw new Error(`${label}: P${slot + 1} selected non-random char; player=${JSON.stringify(player)}`);
+    }
+    if (player?.css_char_id >>> 0 === CSS_RANDOM_CHAR_ID) {
+      await press(inputPage, KEY.A, 260);
+      const remaining = Math.max(1000, Math.min(3000, timeoutMs - (Date.now() - start)));
+      return waitForCssSlotSelected(viewPage, slot, label, remaining, cssSlotRandomSelected);
+    }
+  }
+  throw new Error(`${label}: P${slot + 1} did not select RANDOM; last=${JSON.stringify(last)}`);
 }
 
 async function sampleHashHistory(page, depth = 600) {
@@ -928,14 +1065,64 @@ function compareMatchSetup(hostSetup, guestSetup) {
   return diffs;
 }
 
+function compareSetupDiagnostics(hostSetup, guestSetup, limit = 24) {
+  if (!hostSetup?.hashes || !guestSetup?.hashes) return [];
+  const diffs = [];
+  const cmp = (field, hostValue, guestValue) => {
+    if (diffs.length >= limit) return;
+    if (hostValue !== guestValue) diffs.push({ field, host: hostValue, guest: guestValue });
+  };
+  for (const field of ['sync', 'event_queue', 'gameplay', 'game_state', 'full_state', 'softfloat', 'hidden']) {
+    cmp(`hashes.${field}`, hostSetup.hashes[field], guestSetup.hashes[field]);
+  }
+  const hostRegions = hostSetup.hashes.sync_regions || {};
+  const guestRegions = guestSetup.hashes.sync_regions || {};
+  for (const key of new Set([...Object.keys(hostRegions), ...Object.keys(guestRegions)])) {
+    cmp(`sync_regions.${key}`, hostRegions[key], guestRegions[key]);
+  }
+  const hostQueue = hostSetup.hashes.event_queue_dump;
+  const guestQueue = guestSetup.hashes.event_queue_dump;
+  if (Array.isArray(hostQueue) && Array.isArray(guestQueue)) {
+    const n = Math.min(hostQueue.length, guestQueue.length);
+    for (let i = 0; i < n && diffs.length < limit; i++) {
+      if (hostQueue[i] !== guestQueue[i]) {
+        diffs.push({ field: `event_queue_dump.${i}`, host: hostQueue[i], guest: guestQueue[i] });
+      }
+    }
+    if (hostQueue.length !== guestQueue.length && diffs.length < limit) {
+      diffs.push({ field: 'event_queue_dump.length', host: hostQueue.length, guest: guestQueue.length });
+    }
+  }
+  const hostBlocks = hostSetup.hashes.rdram_blocks;
+  const guestBlocks = guestSetup.hashes.rdram_blocks;
+  if (Array.isArray(hostBlocks) && Array.isArray(guestBlocks)) {
+    const n = Math.min(hostBlocks.length, guestBlocks.length);
+    let mismatchCount = Math.abs(hostBlocks.length - guestBlocks.length);
+    let first = null;
+    for (let i = 0; i < n; i++) {
+      if (hostBlocks[i] === guestBlocks[i]) continue;
+      mismatchCount++;
+      if (!first) first = { index: i, host: hostBlocks[i], guest: guestBlocks[i] };
+      if (diffs.length < limit && diffs.filter((d) => d.field.startsWith('rdram_blocks.')).length < 8) {
+        diffs.push({ field: `rdram_blocks.${i}`, host: hostBlocks[i], guest: guestBlocks[i] });
+      }
+    }
+    if (mismatchCount && first && diffs.length < limit) {
+      diffs.push({ field: 'rdram_blocks.summary', mismatchCount, first });
+    }
+  }
+  return diffs.slice(0, limit);
+}
+
 async function requireMatchSetupAligned(host, guest, label, hostBrowser, guestBrowser) {
   const [hostSetup, guestSetup] = await Promise.all([sampleMatchSetup(host.page), sampleMatchSetup(guest.page)]);
   const diffs = compareMatchSetup(hostSetup, guestSetup);
+  const diagnosticDiffs = compareSetupDiagnostics(hostSetup, guestSetup, 32);
   if (diffs.length === 0) {
     console.log(
       `  setup gate OK (${label}): scene=${hostSetup.scene} gameStatus=${hostSetup.netplayGameStatus} menuStage=${hostSetup.menu?.gkind} battleStage=${hostSetup.battle?.gkind} battleChars=${hostSetup.players.map((p) => p.battle_fkind).join(',')}`,
     );
-    return { hostSetup, guestSetup, diffs };
+    return { hostSetup, guestSetup, diffs, diagnosticDiffs };
   }
 
   const report = {
@@ -944,6 +1131,7 @@ async function requireMatchSetupAligned(host, guest, label, hostBrowser, guestBr
     label,
     reason: 'host and guest are not in the same completed VS battle setup before random-input stress',
     first_diffs: diffs.slice(0, 24),
+    diagnostic_diffs: diagnosticDiffs,
     page_errors: {
       host: host.pageErrors || [],
       guest: guest.pageErrors || [],
@@ -960,6 +1148,10 @@ async function requireMatchSetupAligned(host, guest, label, hostBrowser, guestBr
   };
   console.error(`\n❌ MATCH SETUP MISMATCH before random inputs (${label})`);
   console.error(JSON.stringify(report.first_diffs, null, 2));
+  if (diagnosticDiffs.length > 0) {
+    console.error('First setup diagnostic diffs:');
+    console.error(JSON.stringify(diagnosticDiffs.slice(0, 12), null, 2));
+  }
   if (historyDiffs.length > 0) {
     console.error('First field-history diffs:');
     console.error(JSON.stringify(historyDiffs, null, 2));
@@ -972,6 +1164,77 @@ async function requireMatchSetupAligned(host, guest, label, hostBrowser, guestBr
   console.error(`Saved invalid setup report to ${REPORT_FILE}`);
   await Promise.allSettled([hostBrowser.close(), guestBrowser.close()]);
   process.exit(1);
+}
+
+async function finishSetupOnly(host, guest, hostBrowser, guestBrowser, label, alignment) {
+  const visual = await captureAndCompareSetupVisual(host, guest, label).catch((err) => ({
+    pass: false,
+    error: err.message || String(err),
+  }));
+  const diagnosticDiffs = compareSetupDiagnostics(alignment.hostSetup, alignment.guestSetup, 32);
+  const [hostHistory, guestHistory] = await Promise.all([sampleHashHistory(host.page), sampleHashHistory(guest.page)]);
+  const historyDiffs = findHashHistoryDiffs(hostHistory, guestHistory, 32);
+  const players = (alignment.hostSetup?.players || []).map((p) => ({
+    slot: p.slot,
+    battle_pkind: p.battle_pkind,
+    battle_fkind: p.battle_fkind,
+    css_char_id: p.css_char_id,
+    css_selected_flag: p.css_selected_flag,
+  }));
+  const report = {
+    room: ROOM,
+    verdict: 'PASS_SETUP_ONLY',
+    label,
+    reason: 'host and guest reached the same completed VS Battle setup before random-input stress',
+    stage: {
+      menu: alignment.hostSetup?.menu?.gkind ?? null,
+      battle: alignment.hostSetup?.battle?.gkind ?? null,
+    },
+    visual,
+    diagnostic_diffs: diagnosticDiffs,
+    hash_history: {
+      hostFrame: hostHistory?.frame ?? null,
+      guestFrame: guestHistory?.frame ?? null,
+      first_diffs: historyDiffs,
+    },
+    players,
+    host: alignment.hostSetup,
+    guest: alignment.guestSetup,
+    page_errors: {
+      host: host.pageErrors || [],
+      guest: guest.pageErrors || [],
+    },
+  };
+  writeFileSync(REPORT_FILE, JSON.stringify(report, null, 2));
+  if (!visual.pass) {
+    report.verdict = 'SETUP_VISUAL_MISMATCH';
+    report.reason =
+      'host and guest setup fields matched, but the rendered canvas differed enough to suggest different visible chars/stage';
+    writeFileSync(REPORT_FILE, JSON.stringify(report, null, 2));
+    console.error(
+      `\nSETUP-ONLY VISUAL MISMATCH: meanAbs=${visual.comparison?.meanAbs ?? 'n/a'} ` +
+        `mismatch=${visual.comparison?.mismatchRatio ?? 'n/a'} ` +
+        `strongMismatch=${visual.comparison?.strongMismatchRatio ?? 'n/a'}`,
+    );
+    if (diagnosticDiffs.length > 0) {
+      console.error('First setup diagnostic diffs:');
+      console.error(JSON.stringify(diagnosticDiffs.slice(0, 12), null, 2));
+    }
+    if (historyDiffs.length > 0) {
+      console.error('First field-history diffs:');
+      console.error(JSON.stringify(historyDiffs.slice(0, 12), null, 2));
+    }
+    console.error(`Saved setup-only report to ${REPORT_FILE}`);
+    if (!KEEP_OPEN) await Promise.allSettled([hostBrowser.close(), guestBrowser.close()]);
+    process.exit(1);
+  }
+  console.log(`\nSETUP-ONLY PASS: stage=${report.stage.battle} chars=${players.map((p) => p.battle_fkind).join(',')}`);
+  console.log(
+    `Visual setup compare: meanAbs=${visual.comparison.meanAbs} mismatch=${visual.comparison.mismatchRatio} strongMismatch=${visual.comparison.strongMismatchRatio}`,
+  );
+  if (diagnosticDiffs.length > 0) console.log(`Setup diagnostic diffs: ${JSON.stringify(diagnosticDiffs.slice(0, 8))}`);
+  console.log(`Saved setup-only report to ${REPORT_FILE}`);
+  if (!KEEP_OPEN) await Promise.allSettled([hostBrowser.close(), guestBrowser.close()]);
 }
 
 async function requireBothInVsBattle(host, guest, label, hostBrowser, guestBrowser) {
@@ -1146,6 +1409,114 @@ async function sampleCanvasHealth(page) {
     .catch((err) => ({ ok: false, reason: err.message || String(err) }));
 }
 
+async function sampleVsStartOptionsVisible(page) {
+  return page
+    .evaluate(() => {
+      const canvas = document.querySelector('canvas#canvas, canvas.ejs_canvas, canvas');
+      const frame = window.KNState?.frameNum || 0;
+      const scene = window.EJS_emulator?.gameManager?.Module?._kn_get_scene_curr?.() ?? null;
+      if (!canvas) return { ok: false, reason: 'no-canvas', frame, scene, looksLikeVsStart: false };
+
+      const sx = Math.floor(canvas.width * 0.4);
+      const sy = Math.floor(canvas.height * 0.1);
+      const sw = Math.floor(canvas.width * 0.4);
+      const sh = Math.floor(canvas.height * 0.18);
+      const sampleW = 96;
+      const sampleH = 40;
+      const scratch = document.createElement('canvas');
+      scratch.width = sampleW;
+      scratch.height = sampleH;
+      const ctx = scratch.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return { ok: false, reason: 'no-2d-context', frame, scene, looksLikeVsStart: false };
+
+      try {
+        ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
+        const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+        let white = 0;
+        let neutralBright = 0;
+        let bright = 0;
+        const n = sampleW * sampleH;
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          if (r >= 220 && g >= 220 && b >= 220) white++;
+          if (r >= 185 && g >= 185 && b >= 185 && max - min <= 45) neutralBright++;
+          if ((r + g + b) / 3 >= 170) bright++;
+        }
+        const whiteRatio = white / n;
+        const neutralBrightRatio = neutralBright / n;
+        const brightRatio = bright / n;
+        return {
+          ok: true,
+          frame,
+          scene,
+          whiteRatio: Number(whiteRatio.toFixed(3)),
+          neutralBrightRatio: Number(neutralBrightRatio.toFixed(3)),
+          brightRatio: Number(brightRatio.toFixed(3)),
+          looksLikeVsStart: whiteRatio >= 0.2 && neutralBrightRatio >= 0.28,
+        };
+      } catch (err) {
+        return { ok: false, reason: err?.message || String(err), frame, scene, looksLikeVsStart: false };
+      }
+    })
+    .catch((err) => ({ ok: false, reason: err.message || String(err), looksLikeVsStart: false }));
+}
+
+async function sampleTitleReadyVisible(page) {
+  return page
+    .evaluate(() => {
+      const canvas = document.querySelector('canvas#canvas, canvas.ejs_canvas, canvas');
+      const frame = window.KNState?.frameNum || 0;
+      const scene = window.EJS_emulator?.gameManager?.Module?._kn_get_scene_curr?.() ?? null;
+      if (!canvas) return { ok: false, reason: 'no-canvas', frame, scene, ready: false };
+
+      const sampleW = 96;
+      const sampleH = 72;
+      const scratch = document.createElement('canvas');
+      scratch.width = sampleW;
+      scratch.height = sampleH;
+      const ctx = scratch.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return { ok: false, reason: 'no-2d-context', frame, scene, ready: false };
+
+      try {
+        ctx.drawImage(canvas, 0, 0, sampleW, sampleH);
+        const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+        let pink = 0;
+        let white = 0;
+        let bright = 0;
+        const n = sampleW * sampleH;
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          if (r >= 210 && g <= 175 && b >= 190) pink++;
+          if (r >= 220 && g >= 220 && b >= 220) white++;
+          if ((r + g + b) / 3 >= 170) bright++;
+        }
+        const pinkRatio = pink / n;
+        const whiteRatio = white / n;
+        const brightRatio = bright / n;
+        const looksLikeDisclaimer = pinkRatio >= 0.05;
+        return {
+          ok: true,
+          frame,
+          scene,
+          pinkRatio: Number(pinkRatio.toFixed(3)),
+          whiteRatio: Number(whiteRatio.toFixed(3)),
+          brightRatio: Number(brightRatio.toFixed(3)),
+          looksLikeDisclaimer,
+          ready: scene === 1 && !looksLikeDisclaimer,
+        };
+      } catch (err) {
+        return { ok: false, reason: err?.message || String(err), frame, scene, ready: false };
+      }
+    })
+    .catch((err) => ({ ok: false, reason: err.message || String(err), ready: false }));
+}
+
 async function sampleRenderedCanvasScreenshot(page) {
   try {
     const canvas = page.locator('canvas#canvas, canvas.ejs_canvas, canvas').first();
@@ -1242,6 +1613,145 @@ async function sampleRenderedCanvasScreenshot(page) {
   } catch (err) {
     return { ok: false, reason: err.message || String(err) };
   }
+}
+
+async function captureCanvasScreenshotBuffer(page) {
+  const canvas = page.locator('canvas#canvas, canvas.ejs_canvas, canvas').first();
+  const visible = await canvas.isVisible({ timeout: 2000 }).catch(() => false);
+  return visible ? canvas.screenshot({ timeout: 5000 }) : page.screenshot({ fullPage: false, timeout: 5000 });
+}
+
+async function compareImageBuffers(page, hostBuffer, guestBuffer) {
+  return page.evaluate(
+    async ({ hostPng, guestPng }) => {
+      const loadImage = (src) =>
+        new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('screenshot image decode failed'));
+          img.src = src;
+        });
+
+      const [hostImg, guestImg] = await Promise.all([
+        loadImage(`data:image/png;base64,${hostPng}`),
+        loadImage(`data:image/png;base64,${guestPng}`),
+      ]);
+      const sampleW = 320;
+      const sampleH = 240;
+      const draw = (img) => {
+        const source = document.createElement('canvas');
+        source.width = Math.max(1, img.naturalWidth || img.width || sampleW);
+        source.height = Math.max(1, img.naturalHeight || img.height || sampleH);
+        const sourceCtx = source.getContext('2d', { willReadFrequently: true });
+        if (!sourceCtx) throw new Error('no-2d-context');
+        sourceCtx.drawImage(img, 0, 0, source.width, source.height);
+        const sourceData = sourceCtx.getImageData(0, 0, source.width, source.height).data;
+        let minX = source.width;
+        let minY = source.height;
+        let maxX = -1;
+        let maxY = -1;
+        for (let y = 0; y < source.height; y++) {
+          for (let x = 0; x < source.width; x++) {
+            const i = (y * source.width + x) * 4;
+            const r = sourceData[i];
+            const g = sourceData[i + 1];
+            const b = sourceData[i + 2];
+            const a = sourceData[i + 3];
+            if (a > 8 && r + g + b > 18) {
+              if (x < minX) minX = x;
+              if (y < minY) minY = y;
+              if (x > maxX) maxX = x;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        let sx = 0;
+        let sy = 0;
+        let sw = source.width;
+        let sh = source.height;
+        if (maxX >= minX && maxY >= minY) {
+          const margin = Math.max(4, Math.round(Math.max(maxX - minX + 1, maxY - minY + 1) * 0.03));
+          sx = Math.max(0, minX - margin);
+          sy = Math.max(0, minY - margin);
+          sw = Math.min(source.width - sx, maxX - minX + 1 + margin * 2);
+          sh = Math.min(source.height - sy, maxY - minY + 1 + margin * 2);
+        }
+        const scratch = document.createElement('canvas');
+        scratch.width = sampleW;
+        scratch.height = sampleH;
+        const ctx = scratch.getContext('2d', { willReadFrequently: true });
+        if (!ctx) throw new Error('no-2d-context');
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, sampleW, sampleH);
+        ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
+        return {
+          data: ctx.getImageData(0, 0, sampleW, sampleH).data,
+          crop: { x: sx, y: sy, width: sw, height: sh },
+        };
+      };
+      const hostDraw = draw(hostImg);
+      const guestDraw = draw(guestImg);
+      const a = hostDraw.data;
+      const b = guestDraw.data;
+      let sumAbs = 0;
+      let sumSq = 0;
+      let mismatch = 0;
+      let strongMismatch = 0;
+      const pixels = sampleW * sampleH;
+      for (let i = 0; i < a.length; i += 4) {
+        const dr = Math.abs(a[i] - b[i]);
+        const dg = Math.abs(a[i + 1] - b[i + 1]);
+        const db = Math.abs(a[i + 2] - b[i + 2]);
+        const d = (dr + dg + db) / 3;
+        sumAbs += d;
+        sumSq += d * d;
+        if (d > 30) mismatch++;
+        if (d > 90) strongMismatch++;
+      }
+      return {
+        ok: true,
+        hostImage: { width: hostImg.naturalWidth, height: hostImg.naturalHeight },
+        guestImage: { width: guestImg.naturalWidth, height: guestImg.naturalHeight },
+        crop: { host: hostDraw.crop, guest: guestDraw.crop },
+        sample: { width: sampleW, height: sampleH },
+        meanAbs: Number((sumAbs / pixels).toFixed(2)),
+        rmse: Number(Math.sqrt(sumSq / pixels).toFixed(2)),
+        mismatchRatio: Number((mismatch / pixels).toFixed(4)),
+        strongMismatchRatio: Number((strongMismatch / pixels).toFixed(4)),
+      };
+    },
+    {
+      hostPng: hostBuffer.toString('base64'),
+      guestPng: guestBuffer.toString('base64'),
+    },
+  );
+}
+
+async function captureAndCompareSetupVisual(host, guest, label) {
+  const hostPath = `${SHOT_DIR}/det-${label}-setup-canvas-host.png`;
+  const guestPath = `${SHOT_DIR}/det-${label}-setup-canvas-guest.png`;
+  const [hostBuffer, guestBuffer] = await Promise.all([
+    captureCanvasScreenshotBuffer(host.page),
+    captureCanvasScreenshotBuffer(guest.page),
+  ]);
+  writeFileSync(hostPath, hostBuffer);
+  writeFileSync(guestPath, guestBuffer);
+  const comparison = await compareImageBuffers(host.page, hostBuffer, guestBuffer);
+  const pass =
+    comparison.ok &&
+    comparison.meanAbs <= SETUP_VISUAL_MEAN_ABS_LIMIT &&
+    comparison.mismatchRatio <= SETUP_VISUAL_MISMATCH_RATIO_LIMIT &&
+    comparison.strongMismatchRatio <= SETUP_VISUAL_STRONG_MISMATCH_LIMIT;
+  return {
+    pass,
+    screenshots: { host: hostPath, guest: guestPath },
+    limits: {
+      meanAbs: SETUP_VISUAL_MEAN_ABS_LIMIT,
+      mismatchRatio: SETUP_VISUAL_MISMATCH_RATIO_LIMIT,
+      strongMismatchRatio: SETUP_VISUAL_STRONG_MISMATCH_LIMIT,
+    },
+    comparison,
+  };
 }
 
 async function samplePageForensics(peer) {
@@ -2289,6 +2799,14 @@ async function setupPeer(browser, urlSuffix, name) {
     ...(GUEST_DSF2 && name === 'G' ? { deviceScaleFactor: 2 } : {}),
   });
   const page = await ctx.newPage();
+  if (VERBOSE_DEEP_LOGS) {
+    await page.addInitScript(() => {
+      window._KN_DIAG = true;
+      try {
+        localStorage.setItem('kn-debug', '1');
+      } catch {}
+    });
+  }
   if (CORE_DATA_URL) {
     await page.addInitScript(
       ({ url, hash }) => {
@@ -2426,6 +2944,10 @@ async function setupPeer(browser, urlSuffix, name) {
      * alongside MISMATCH/DIVERGE. Was too narrow before — replay timing
      * data was filtered out and only end-state divergence remained. */
     if (
+      (VERBOSE_DEEP_LOGS &&
+        t.match(
+          /initial-sync|POST-SYNC-DIAG|C-PERF|C-REGIONS|C-BLOCKS|RB-|RDRAM-DESYNC|EQ-|NORMAL-INPUT|LOCAL-INPUT|INPUT-LOG|MENU-BARRIER|PHASE|KNDesync|DIVERGE|MISMATCH|FATAL|ABORT/i,
+        )) ||
       t.match(
         /MISMATCH|FATAL|ABORT|DIVERGE|KNDesync|late-join|requesting game state|received late-join|C-REPLAY-FRAME|C-REPLAY-START|C-REPLAY-DONE|REPLAY-INPUT|RB-CHECK|RB-LIVE-FIELD/i,
       )
@@ -2906,7 +3428,11 @@ async function main() {
     await host.page.waitForTimeout(1000);
     await shot(host.page, '09-match-host');
     await shot(guest.page, '09-match-guest');
-    await requireMatchSetupAligned(host, guest, 'replay-post-nav', hostBrowser, guestBrowser);
+    const setupAlignment = await requireMatchSetupAligned(host, guest, 'replay-post-nav', hostBrowser, guestBrowser);
+    if (SETUP_ONLY) {
+      await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'replay-post-nav', setupAlignment);
+      return;
+    }
     await enablePostSetupNetsim(host, guest);
 
     if (process.env.KN_DET_WATCH === '1') {
@@ -3337,7 +3863,11 @@ async function main() {
       await requireBothInVsBattle(host, guest, 'manual-post-nav', hostBrowser, guestBrowser);
       await shot(host.page, '09-manual-gameplay-host');
       await shot(guest.page, '09-manual-gameplay-guest');
-      await requireMatchSetupAligned(host, guest, 'manual-post-nav', hostBrowser, guestBrowser);
+      const setupAlignment = await requireMatchSetupAligned(host, guest, 'manual-post-nav', hostBrowser, guestBrowser);
+      if (SETUP_ONLY) {
+        await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'manual-post-nav', setupAlignment);
+        return;
+      }
       await enablePostSetupNetsim(host, guest);
     } else {
       // ==================== SCRIPTED NAV ====================
@@ -3380,19 +3910,64 @@ async function main() {
         const f = await guest.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0);
         console.log(`    [guest f=${f} after ${key}]`);
       }
+      async function waitForVisibleCharacterSelect(timeoutMs = 30000) {
+        const start = Date.now();
+        let last = null;
+        while (Date.now() - start < timeoutMs) {
+          const [hostScene, guestScene, hostVsStart, guestVsStart] = await Promise.all([
+            readScene(host.page),
+            readScene(guest.page),
+            sampleVsStartOptionsVisible(host.page),
+            sampleVsStartOptionsVisible(guest.page),
+          ]);
+          last = { hostScene, guestScene, hostVsStart, guestVsStart };
+          const bothInPlayersVs = hostScene === SCENE_PLAYERS_VS && guestScene === SCENE_PLAYERS_VS;
+          if (bothInPlayersVs && !hostVsStart.looksLikeVsStart && !guestVsStart.looksLikeVsStart) {
+            console.log(
+              `    [visible CSS ready: host f=${hostVsStart.frame} guest f=${guestVsStart.frame} white=${hostVsStart.whiteRatio}/${guestVsStart.whiteRatio}]`,
+            );
+            return last;
+          }
+          if (bothInPlayersVs && (hostVsStart.looksLikeVsStart || guestVsStart.looksLikeVsStart)) {
+            console.log(
+              `    [scene ${SCENE_PLAYERS_VS} still VS START/options; pressing A ` +
+                `white=${hostVsStart.whiteRatio}/${guestVsStart.whiteRatio}]`,
+            );
+            await hostPress(KEY.A, 300, 700);
+            continue;
+          }
+          await host.page.waitForTimeout(100);
+        }
+        throw new Error(`Timeout waiting for visible character select; last=${JSON.stringify(last)}`);
+      }
       async function hostPressStartOnNextTitle(timeoutMs = 180000) {
         const start = Date.now();
         let attempts = 0;
+        let lastTitleWaitLog = 0;
         while (Date.now() - start < timeoutMs) {
-          const [hostScene, guestScene] = await Promise.all([readScene(host.page), readScene(guest.page)]);
+          const [hostScene, guestScene, hostTitle, guestTitle] = await Promise.all([
+            readScene(host.page),
+            readScene(guest.page),
+            sampleTitleReadyVisible(host.page),
+            sampleTitleReadyVisible(guest.page),
+          ]);
           if (hostScene === SCENE_MODE_SELECT && guestScene === SCENE_MODE_SELECT) return;
-          if (hostScene === SCENE_TITLE && guestScene === SCENE_TITLE) {
+          if (hostScene === SCENE_MODE_SELECT || guestScene === SCENE_MODE_SELECT) {
+            throw new Error(
+              `Title START split peers before both title screens were visually ready: ` +
+                `hostScene=${hostScene} guestScene=${guestScene} hostTitle=${JSON.stringify(hostTitle)} guestTitle=${JSON.stringify(guestTitle)}`,
+            );
+          }
+          if (hostScene === SCENE_TITLE && guestScene === SCENE_TITLE && hostTitle.ready && guestTitle.ready) {
             attempts += 1;
             const [hfNow, gfNow] = await Promise.all([
               host.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
               guest.page.evaluate(() => window.KNState?.frameNum || 0).catch(() => 0),
             ]);
-            console.log(`    [scene ${SCENE_TITLE} title attempt ${attempts}: host f=${hfNow} guest f=${gfNow}]`);
+            console.log(
+              `    [scene ${SCENE_TITLE} title attempt ${attempts}: host f=${hfNow} guest f=${gfNow} ` +
+                `pink=${hostTitle.pinkRatio}/${guestTitle.pinkRatio}]`,
+            );
             await host.page.bringToFront();
             await host.page.focus('body').catch(() => {});
             await press(host.page, KEY.START, 300);
@@ -3419,6 +3994,13 @@ async function main() {
               shot(guest.page, `01-title-start-failed-${attempts}-guest`, { canvas: true }),
             ]);
             await requireNoSolidPaleCanvas(host, guest, `title-start-failed-${attempts}`, hostBrowser, guestBrowser);
+          } else if (Date.now() - lastTitleWaitLog > 3000) {
+            lastTitleWaitLog = Date.now();
+            console.log(
+              `    [waiting title-ready host scene=${hostScene} ready=${!!hostTitle.ready} ` +
+                `pink=${hostTitle.pinkRatio ?? '?'} guest scene=${guestScene} ready=${!!guestTitle.ready} ` +
+                `pink=${guestTitle.pinkRatio ?? '?'}]`,
+            );
           }
           await host.page.waitForTimeout(50);
         }
@@ -3480,7 +4062,8 @@ async function main() {
         console.log('Step 4b: A → enter CSS from VS options');
         await hostPress(KEY.A, 300, 500);
       }
-      await waitForBothScene(host, guest, SCENE_PLAYERS_VS, 'css', 30000);
+      await waitForBothScene(host, guest, SCENE_PLAYERS_VS, 'css-scene', 30000);
+      await waitForVisibleCharacterSelect(30000);
       await shot(host.page, '05-css-host');
       await shot(guest.page, '05-css-guest');
 
@@ -3492,7 +4075,7 @@ async function main() {
         HOST_RANDOM_SELECT_END_FRAME,
         'P1 random-select',
       );
-      await waitForCssSlotSelected(host.page, 0, 'host view');
+      await ensureCssRandomSelected(host.page, host.page, 0, 'host view');
       await shot(host.page, '06-p1-picked-host');
 
       console.log('Step 6: CSS — guest picks P2 with recorded random-select path');
@@ -3503,7 +4086,7 @@ async function main() {
         NAV_P2_SELECTED_FRAME,
         'P2 random-select',
       );
-      await waitForCssSlotSelected(host.page, 1, 'host view');
+      await ensureCssRandomSelected(guest.page, host.page, 1, 'host view');
       await shot(host.page, '07-both-picked-host');
       await shot(guest.page, '07-both-picked-guest');
 
@@ -3523,7 +4106,17 @@ async function main() {
       await requireBothInVsBattle(host, guest, 'scripted-post-nav', hostBrowser, guestBrowser);
       await shot(host.page, '09-gameplay-host');
       await shot(guest.page, '09-gameplay-guest');
-      await requireMatchSetupAligned(host, guest, 'scripted-post-nav', hostBrowser, guestBrowser);
+      const setupAlignment = await requireMatchSetupAligned(
+        host,
+        guest,
+        'scripted-post-nav',
+        hostBrowser,
+        guestBrowser,
+      );
+      if (SETUP_ONLY) {
+        await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment);
+        return;
+      }
       await enablePostSetupNetsim(host, guest);
     }
   } // end else (manual/scripted nav)

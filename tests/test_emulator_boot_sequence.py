@@ -80,7 +80,7 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     assert "KNShared.clearCheats(false)" in source
 
 
-def test_smash_remix_startup_restores_full_hidden_state_sidecar():
+def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fallback():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
     build_source = (REPO_ROOT / "build/build.sh").read_text()
 
@@ -92,7 +92,17 @@ def test_smash_remix_startup_restores_full_hidden_state_sidecar():
     initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
     assert initial_idx != -1
     initial_window = source[initial_idx : initial_idx + 1800]
-    assert "_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')" in initial_window
+    remix_log_idx = initial_window.find(
+        "initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup"
+    )
+    hidden_idx = initial_window.find("_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')")
+    audio_idx = initial_window.find("_restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load')")
+    cleanup_idx = initial_window.find("_postRemixStateLoadCleanup(readyMod, 'initial-sync-load')")
+    assert remix_log_idx != -1
+    assert hidden_idx != -1
+    assert audio_idx > hidden_idx
+    assert cleanup_idx > audio_idx
+    assert remix_log_idx > cleanup_idx
 
     late_join_idx = source.find("const handleLateJoinState = async (msg) =>")
     assert late_join_idx != -1
@@ -104,24 +114,45 @@ def test_smash_remix_startup_restores_full_hidden_state_sidecar():
     assert "Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null" in late_join_window
 
     assert "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot" in build_source
+    assert "_kn_post_state_load_cleanup" in build_source
+    assert "g_dev.sp.rsp_task_locked = 0;" in build_source
+    assert "g_dev.r4300.cp0.interrupt_unsafe_state = 0;" in build_source
+    assert "kn_normalize_event_queue();" in build_source
+    assert "invalidate_cached_code_hacktarux(&g_dev.r4300, 0, 0);" in build_source
 
 
-def test_smash_remix_runtime_mismatch_substitutes_verified_local_kn_sync_capture():
+def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
     source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
 
     assert "let _guestStateUseLocalRemixTitle" not in source
     assert "Smash Remix initial sync: JSC guest aligning local title before lockstep" not in source
     assert "JSC guest kept local Remix title state; skipped remote kn-sync restore" not in source
+    assert "const _shouldWaitBeforeInitialKnSyncRestore" not in source
+    assert "waiting for local title before received kn-sync restore" not in source
+    assert "received kn-sync will still be restored" not in source
+    assert "startupFingerprint" not in source
+    assert "booting locally to title and substituting local capture" not in source
+    assert "const fingerprintMismatches = _startupFingerprintMismatches(" not in source
+    assert "refusing unsafe substitution" not in source
+    assert "substituted local kn-sync capture" not in source
     assert "const _getRuntimeFamily = () => {" in source
     assert "sourceRuntimeFamily: _getRuntimeFamily()" in source
-    assert "startupFingerprint" in source
-    assert "const _shouldWaitBeforeInitialKnSyncRestore = (sourceRuntimeFamily) => {" in source
-    assert "hostRuntimeFamily !== localRuntimeFamily" in source
-    assert "booting locally to title and substituting local capture" in source
+    assert "_shouldUseLocalInitialKnSyncCapture" not in source
+    assert "hostRuntimeFamily" not in source
+    assert "_captureRemixStartupSidecar" not in source
+    assert "startupSidecar:" not in source
+    assert "_guestStateStartupSidecar" not in source
+    assert "using local title capture" not in source
+    assert "kept local kn-sync capture" not in source
+    assert "guest kept local kn-sync state" not in source
+    assert "_restoreRemixStartupSidecar" not in source
     assert "await waitForSmashTitleState(gm)" in source
-    assert "const fingerprintMismatches = _startupFingerprintMismatches(" in source
-    assert "refusing unsafe substitution" in source
-    assert "substituted local kn-sync capture" in source
+    assert "initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup" in source
+    assert "_postRemixStateLoadCleanup(mod, `${reason}:post-kn-sync`);" not in source
+    assert "Remix post-state cleanup applied" in source
+    assert (
+        "const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;"
+    ) in source
 
     load_idx = source.find("if (isKnSyncInitialState)")
     host_local_idx = source.find("if (hasLocalKnSyncCapture)", load_idx)
@@ -129,6 +160,66 @@ def test_smash_remix_runtime_mismatch_substitutes_verified_local_kn_sync_capture
     assert load_idx != -1
     assert host_local_idx != -1
     assert remote_idx > host_local_idx
+    assert "_postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture')" in source
+
+
+def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
+    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+
+    assert "const _rngSeedForFrame = (frameNum) => {" not in source
+    assert "KN_NETPLAY_RNG_SEED_RDRAM" not in source
+    assert "_netplayRNGSeedForFrame" not in source
+    assert "_configureNetplayRNGPtr" not in source
+
+    sync_idx = source.find("const _syncRNGSeed = (mod, frameNum) => {")
+    assert sync_idx != -1
+    sync_window = source[sync_idx : sync_idx + 700]
+    assert "HEAPU32[_rdram32(mod, KN_RNG_SEED_RDRAM)]" not in sync_window
+    assert "HEAPU32[_rdram32(mod, KN_RNG_ALT_SEED_RDRAM)]" not in sync_window
+    assert "HEAPU32[_rdram32(mod, KN_FRAME_COUNTER_RDRAM)]" not in sync_window
+    assert "void mod" in sync_window
+    assert "void frameNum" in sync_window
+
+    tick_idx = source.find("// Step one frame with audio capture")
+    assert tick_idx != -1
+    tick_window = source[tick_idx : tick_idx + 700]
+    assert tick_window.count("_syncRNGSeed(tickMod, _frameNum);") == 1
+    sync_idx = tick_window.find("_syncRNGSeed(tickMod, _frameNum);")
+    step_idx = tick_window.find("stepOneFrame();")
+    assert sync_idx != -1
+    assert step_idx > sync_idx
+
+
+def test_determinism_harness_has_setup_only_css_character_gate():
+    source = (REPO_ROOT / "tests/determinism-automation.mjs").read_text()
+
+    assert "const SETUP_ONLY = process.argv.includes('--setup-only');" in source
+    assert "const VERBOSE_DEEP_LOGS = process.argv.includes('--verbose-diag') || DESYNC_MODE === 'deep';" in source
+    assert "const SETUP_VISUAL_MEAN_ABS_LIMIT = 30;" in source
+    assert "const SETUP_VISUAL_MISMATCH_RATIO_LIMIT = 0.3;" in source
+    assert "const SETUP_VISUAL_STRONG_MISMATCH_LIMIT = 0.12;" in source
+    assert "async function captureAndCompareSetupVisual(" in source
+    assert "det-${label}-setup-canvas-host.png" in source
+    assert "det-${label}-setup-canvas-guest.png" in source
+    assert "async function finishSetupOnly(" in source
+    assert "verdict: 'PASS_SETUP_ONLY'" in source
+    assert "SETUP_VISUAL_MISMATCH" in source
+    assert "diagnostic_diffs: diagnosticDiffs" in source
+    assert "hash_history:" in source
+    assert "First setup diagnostic diffs:" in source
+    assert "window._KN_DIAG = true;" in source
+    assert "POST-SYNC-DIAG|C-PERF|C-REGIONS|C-BLOCKS" in source
+    assert "Visual setup compare:" in source
+    assert "battle_fkind" in source
+    assert "css_selected_flag" in source
+    assert "setup gate OK" in source
+
+    scripted_idx = source.find("'scripted-post-nav',", source.find("const setupAlignment = await requireMatchSetupAligned("))
+    assert scripted_idx != -1
+    scripted_window = source[scripted_idx : scripted_idx + 700]
+    assert "if (SETUP_ONLY)" in scripted_window
+    assert "await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment)" in scripted_window
+    assert "return;" in scripted_window
 
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
@@ -223,6 +314,7 @@ def test_host_local_kn_sync_initial_capture_is_not_reloaded():
     assert load_idx != -1
     assert load_idx > local_idx
     assert "recaptureManualRunner(readyMod, 'initial-sync-local-capture')" in window
+    assert "_postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture')" in window
     assert "initial-sync-load: host kept locally captured kn-sync state" in window
     assert "initial-sync-load: host reloaded captured kn-sync state" not in source
 
@@ -240,6 +332,15 @@ def test_kn_sync_v4_preserves_r4300_delay_slot_and_skip_jump():
     assert "dev->r4300.delay_slot = delay_slot" in source
     assert "dev->r4300.skip_jump = skip_jump" in source
     assert "Upgrading kn_sync_read/write to v4" in build_source
+
+
+def test_kn_sync_write_matches_savestate_post_load_cleanup():
+    source = (REPO_ROOT / "build/patch-sync-v3.py").read_text()
+
+    assert "dev->sp.rsp_task_locked = 0;" in source
+    assert "dev->r4300.cp0.interrupt_unsafe_state = 0;" in source
+    assert "*r4300_cp0_last_addr(&dev->r4300.cp0) = *r4300_pc(&dev->r4300);" in source
+    assert "invalidate_cached_code_hacktarux(&dev->r4300, 0, 0);" in source
 
 
 def test_connected_peers_timeout_is_reported_as_boot_failure_not_webrtc():

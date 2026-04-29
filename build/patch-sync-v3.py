@@ -108,6 +108,14 @@ KN_SYNC_WRITE_V3 = '''EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf,
     if (p + 2 <= buf + size) { softfloat_roundingMode = *p++; softfloat_exceptionFlags = *p++; }
     setup_channels_format(&dev->pif);
     { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); dev->r4300.delay_slot = delay_slot; dev->r4300.skip_jump = skip_jump; }
+    /* Match savestates_load_m64p cleanup. Importing host RDRAM/CPU state
+     * without invalidating cached interpreter blocks can execute stale local
+     * code after startup sync; stale interrupt-unsafe bookkeeping can also
+     * strand Smash Remix in its yellow thread-error screen. */
+    dev->sp.rsp_task_locked = 0;
+    dev->r4300.cp0.interrupt_unsafe_state = 0;
+    *r4300_cp0_last_addr(&dev->r4300.cp0) = *r4300_pc(&dev->r4300);
+    { extern void invalidate_cached_code_hacktarux(struct r4300_core* r4300, uint32_t address, size_t size); invalidate_cached_code_hacktarux(&dev->r4300, 0, 0); }
     return 0;
 }
 '''

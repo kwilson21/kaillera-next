@@ -110,7 +110,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
     # video callback to silently fail (canvas freeze).
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
+    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
@@ -126,6 +126,10 @@ if [ -d "${PATCHES_DIR}" ]; then
     if grep -q "_kn_write_controller" Makefile.emulatorjs && ! grep -q "_kn_set_controller_present_mask" Makefile.emulatorjs; then
         sed -i 's|_kn_write_controller,|_kn_write_controller,_kn_set_controller_present_mask,|' Makefile.emulatorjs
         echo "    Added controller-present mask WASM export"
+    fi
+    if grep -q "_kn_get_audio_fifo_state" Makefile.emulatorjs && ! grep -q "_kn_post_state_load_cleanup" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_audio_fifo_state,|_kn_get_audio_fifo_state,_kn_post_state_load_cleanup,|' Makefile.emulatorjs
+        echo "    Added post-state-load cleanup WASM export"
     fi
 
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
@@ -465,6 +469,20 @@ EMSCRIPTEN_KEEPALIVE void kn_get_audio_fifo_state(uint32_t *out) {
     out[1] = (uint32_t)g_dev.ai.fifo[0].length;
     out[2] = (uint32_t)g_dev.ai.fifo[1].duration;
     out[3] = (uint32_t)g_dev.ai.fifo[1].length;
+}
+
+EMSCRIPTEN_KEEPALIVE void kn_post_state_load_cleanup(void) {
+    g_dev.sp.rsp_task_locked = 0;
+    g_dev.r4300.cp0.interrupt_unsafe_state = 0;
+    *r4300_cp0_last_addr(&g_dev.r4300.cp0) = *r4300_pc(&g_dev.r4300);
+    {
+        extern void kn_normalize_event_queue(void);
+        kn_normalize_event_queue();
+    }
+    {
+        extern void invalidate_cached_code_hacktarux(struct r4300_core* r4300, uint32_t address, size_t size);
+        invalidate_cached_code_hacktarux(&g_dev.r4300, 0, 0);
+    }
 }
 #endif
 KNHS_EOF
