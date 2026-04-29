@@ -2400,6 +2400,13 @@
   let _focusRestoreHandler = null; // pointer/touch recovery when browser chrome stole focus
   let _controlsFocusLost = false;
   let _bootGestureAbort = null; // AbortController for the gesture-prompt listeners; aborted in stop()
+  // Restore handle for the AudioContext hijack installed in the gesture handler.
+  // If EJS never calls `new AudioContext()` during a match (hibernate/wake reuse),
+  // the hijack is never consumed and would leak across matches — a subsequent
+  // `new AC({sampleRate: 44100})` call from play.js would hit the stale hijack,
+  // ignore its arguments, and return the previous match's _ejsCtx at the device's
+  // native rate (48000 on iPhone), causing an audible pitch shift.
+  let _acHijackRestore = null;
   let _pageShowHandler = null; // stored for removal in stopSync()
   let _pageHideHandler = null; // stored for removal in stopSync()
   let _syncWorkerUrl = null; // Blob URL for sync worker (revoke on stop)
@@ -4394,6 +4401,7 @@
               _syncLog(`lockstep AudioContext pre-created in gesture (rate: ${_preCtx.sampleRate})`);
             }
             const _RealAC = AC;
+            const _RealWebkitAC = window.webkitAudioContext || _RealAC;
             let _hijacked = false;
             // CONSTRUCTOR — called with `new` by EmulatorJS. Must remain a
             // `function` declaration (arrow functions cannot be constructors).
@@ -4402,13 +4410,15 @@
                 _hijacked = true;
                 // Restore original constructors
                 if (window.AudioContext === _HijackAC) window.AudioContext = _RealAC;
-                if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealAC;
+                if (window.webkitAudioContext === _HijackAC) window.webkitAudioContext = _RealWebkitAC;
+                _acHijackRestore = null;
                 _syncLog('AudioContext hijack: returning gesture-unlocked context');
                 return _ejsCtx;
               }
               return new _RealAC();
             };
             _HijackAC.prototype = _RealAC.prototype;
+            _acHijackRestore = { real: _RealAC, realWebkit: _RealWebkitAC, hijack: _HijackAC };
             if (window.AudioContext) window.AudioContext = _HijackAC;
             if (window.webkitAudioContext) window.webkitAudioContext = _HijackAC;
           }
@@ -10727,6 +10737,21 @@
 
     // Clean up audio (delegated to kn-audio.js)
     _audio?.cleanup();
+
+    // Restore window.AudioContext if our gesture-handler hijack is still
+    // installed. Otherwise a `new AC(...)` call between matches (e.g.,
+    // play.js _preloadAudioCtx via acceptRomSharing) returns the stale
+    // _ejsCtx at the device's native rate (48000 on iPhone), which then
+    // leaks into the next match as _kn_preloadedAudioCtx and shifts pitch.
+    if (_acHijackRestore) {
+      if (window.AudioContext === _acHijackRestore.hijack) {
+        window.AudioContext = _acHijackRestore.real;
+      }
+      if (window.webkitAudioContext === _acHijackRestore.hijack) {
+        window.webkitAudioContext = _acHijackRestore.realWebkit;
+      }
+      _acHijackRestore = null;
+    }
 
     // Clean up spectator stream
     if (_hostStream) {
