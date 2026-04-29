@@ -135,8 +135,8 @@ if [ -d "${PATCHES_DIR}" ]; then
     # the trailing terminal audio export. Removed once the silent-iPhone-audio
     # bug is root-caused.
     if grep -q "_kn_get_skip_audio_output" Makefile.emulatorjs && ! grep -q "_kn_dump_audio_state" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output,_kn_dump_audio_state,_kn_diag_reset_audio_counters|' Makefile.emulatorjs
-        echo "    Added audio diagnostic WASM exports (kn_dump_audio_state, kn_diag_reset_audio_counters)"
+        sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output,_kn_dump_audio_state,_kn_diag_reset_audio_counters,_kn_diag_check_invariant|' Makefile.emulatorjs
+        echo "    Added audio diagnostic WASM exports (kn_dump_audio_state, kn_diag_reset_audio_counters, kn_diag_check_invariant)"
     fi
 
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
@@ -213,6 +213,17 @@ if [ -d "${PATCHES_DIR}" ]; then
         python3 "${SCRIPT_DIR}/inject-audio-diag.py" "${SRC_DIR}/mupen64plus-libretro-nx" && \
             echo "    Injected audio diagnostic counters + dump" || \
             echo "    WARN: audio-diag injection failed"
+    fi
+
+    # 2026-04-29 root-cause fix: signed-rel clamp + cp0_update_count + queue
+    # metadata reset in kn_normalize_event_queue, plus VI handler reorder
+    # so VI_INT reschedule happens BEFORE new_vi() (which yields to JS via
+    # retro_return → co_switch). Codex-reviewed. MUST run after the diag
+    # injection because both patch the same single-line normalize body.
+    if [ -f "${SCRIPT_DIR}/inject-normalize-fix.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-normalize-fix.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-normalize-fix.py failed"; exit 1; }
+        echo "    Injected normalize signed-clamp + VI handler reorder"
     fi
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
