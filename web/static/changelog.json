@@ -1,5 +1,47 @@
 [
   {
+    "version": "0.48.9",
+    "date": "2026-04-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "restore AudioContext after lockstep stop"
+      },
+      {
+        "type": "fix",
+        "message": "end game locally on host ack"
+      },
+      {
+        "type": "fix",
+        "message": "clamp mobile analog inputs"
+      },
+      {
+        "type": "fix",
+        "message": "preserve inputs across rematch"
+      },
+      {
+        "type": "fix",
+        "message": "prevent emulator pause divergence in lockstep"
+      },
+      {
+        "type": "fix",
+        "message": "symmetric Remix initial-sync restore on host"
+      },
+      {
+        "type": "fix",
+        "message": "synthesize fire-now AI_INT post-state-load"
+      },
+      {
+        "type": "fix",
+        "message": "defensive try/finally around stepOneFrame + kn-sync menu-barrier bypass"
+      },
+      {
+        "type": "fix",
+        "message": "detect and recover iOS zombie AudioContext"
+      }
+    ]
+  },
+  {
     "version": "0.48.8",
     "date": "2026-04-29",
     "changes": [
