@@ -56,6 +56,39 @@ def test_game_ended_toast_appears(browser, server_url):
         guest.close()
 
 
+def test_host_end_game_ack_returns_to_lobby_without_self_broadcast(browser, server_url):
+    """Host still exits gameplay if its own game-ended broadcast is missed."""
+    host = browser.new_page()
+    guest = browser.new_page()
+
+    try:
+        room = f"UXEACK{_R}"
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+
+        _mark_rom_ready(host)
+        _mark_rom_ready(guest)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+
+        host.click("#start-btn")
+        expect(host.locator("#overlay")).to_be_hidden(timeout=10000)
+        expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
+
+        host.evaluate("window.__test_socket.off('game-ended')")
+        host.click("#toolbar-more")
+        expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
+        host.click("#toolbar-end")
+
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
 def test_dump_logs_hidden_from_toolbar(page, server_url):
     """Dump Logs button is hidden from the toolbar (still in info overlay)."""
     page.goto(f"{server_url}/play.html?room=UX002{_R}&host=1&name=Host")

@@ -71,6 +71,8 @@
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
+  let _endGameInFlight = false;
+  let _lastHandledGameEndMatchId = null;
   let _gameResyncEnabled = true;
   let previousPlayers = {};
   let previousSpectators = {};
@@ -1223,13 +1225,19 @@
     initEngine();
   };
 
-  const onGameEnded = () => {
+  const onGameEnded = (data = {}) => {
+    const endedMatchId = data?.matchId || KNState.matchId || null;
+    if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
+    if (!gameRunning && !engine && !_lateJoin && !_pendingLateJoin) return;
+    if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
+    _endGameInFlight = false;
     console.log(
       '[play] onGameEnded:',
       `engine=${!!engine}`,
       `EJS=${!!window.EJS_emulator}`,
       `romBlob=${!!_romBlob}`,
       `romBlobUrl=${!!_romBlobUrl}`,
+      `matchId=${endedMatchId || 'none'}`,
     );
     gameRunning = false;
     _lateJoin = false;
@@ -3382,12 +3390,29 @@
   };
 
   const endGame = () => {
+    if (_endGameInFlight) return;
+    _endGameInFlight = true;
+    const endingMatchId = KNState.matchId || null;
     socket.emit('end-game', {}, (err) => {
       if (err) {
+        _endGameInFlight = false;
         console.log('[play] end-game error:', err);
         showToast(`End game failed: ${err}`);
+        return;
       }
+      // The server emits game-ended to the whole room, but the host should not
+      // remain in gameplay if its own self-broadcast is missed. The handler is
+      // idempotent, so this is harmless when the normal event arrives first.
+      onGameEnded({ matchId: endingMatchId, localAck: true });
     });
+    setTimeout(() => {
+      if (!_endGameInFlight) return;
+      _endGameInFlight = false;
+      if (gameRunning || engine) {
+        showToast('Ending game locally...');
+        onGameEnded({ matchId: endingMatchId, localTimeout: true });
+      }
+    }, 5000);
   };
 
   const leaveGame = () => {

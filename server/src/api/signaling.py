@@ -839,7 +839,7 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
 
     room.status = "lobby"
     # mode persists for rematch convenience
-    await sio.emit("game-ended", {}, room=session_id)
+    await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
