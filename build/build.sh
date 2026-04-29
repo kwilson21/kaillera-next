@@ -139,6 +139,22 @@ if [ -d "${PATCHES_DIR}" ]; then
         echo "    Added audio diagnostic WASM exports (kn_dump_audio_state, kn_diag_reset_audio_counters, kn_diag_check_invariant)"
     fi
 
+    # 2026-04-29 kn_sync_write OOB-throw localization probes. Exports the
+    # last-reached section/offset so JS can pinpoint which memcpy/struct
+    # call inside kn_sync_write threw. Remove once root cause is found.
+    if grep -q "_kn_sync_write_regions" Makefile.emulatorjs && ! grep -q "_kn_get_diag_ksw_section" Makefile.emulatorjs; then
+        sed -i 's|_kn_sync_read_regions,_kn_sync_write_regions|_kn_sync_read_regions,_kn_sync_write_regions,_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset|' Makefile.emulatorjs
+        echo "    Added kn_sync_write probe diagnostic exports"
+    fi
+
+    # 2026-04-29 rollback-engine OOB-throw localization probes. Exports the
+    # last rollback phase/frame/slot/serialize counters so JS can dump them
+    # in the STEP-THREW handler. Remove once root cause is found.
+    if grep -q "_kn_get_diag_ksw_offset" Makefile.emulatorjs && ! grep -q "_kn_get_diag_rb_phase" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset|_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset,_kn_get_diag_rb_phase,_kn_get_diag_rb_frame,_kn_get_diag_rb_save_slot,_kn_get_diag_rb_serialize_count,_kn_get_diag_rb_serialize_ret,_kn_get_diag_rb_unserialize_count,_kn_get_diag_rb_unserialize_frame,_kn_get_diag_rb_unserialize_ret|' Makefile.emulatorjs
+        echo "    Added rollback-engine probe diagnostic exports"
+    fi
+
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
         # Add kn_hash_registry field exports (Tasks 3-5 of desync detection v1).
         # Keyed on _kn_get_skip_audio_output (terminal audio helper export added
@@ -568,6 +584,16 @@ KNHLE_EOF
     echo "    Upgrading kn_sync_read/write to v4 (complete state capture)..."
     python3 "${SCRIPT_DIR}/patch-sync-v3.py" "mupen64plus-core/src/main/main.c"
 
+    # 2026-04-29 kn_sync_write OOB-throw localization probes (diagnostic).
+    # Inserts volatile globals + KSW_PROBE(N) markers throughout kn_sync_write
+    # so JS can pinpoint which memcpy/struct-call threw a WASM RuntimeError.
+    # MUST run AFTER patch-sync-v3.py (the v4 baseline this script expects).
+    # Remove this hook and build/inject-ksw-probes.py once root cause is found.
+    if [ -f "${SCRIPT_DIR}/inject-ksw-probes.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-ksw-probes.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-ksw-probes.py failed"; exit 1; }
+    fi
+
     # static save scratch: replace malloc/free in savestates_save_m64p with
     # a static reusable buffer. retro_serialize is called 60×/sec by the
     # rollback engine; the malloc was suspected to cause WASM heap growth.
@@ -600,6 +626,15 @@ KNHLE_EOF
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.c" mupen64plus-core/src/main/kn_rollback.c
     cp "${SCRIPT_DIR}/kn_rollback/kn_rollback.h" mupen64plus-core/src/main/kn_rollback.h
     cp "${SCRIPT_DIR}/kn_rollback/kn_gameplay_addrs.h" mupen64plus-core/src/main/kn_gameplay_addrs.h
+
+    # 2026-04-29 rollback-engine OOB-throw localization probes (diagnostic).
+    # Captures last rollback phase/frame/slot into volatile globals so JS
+    # can dump them in STEP-THREW. Runs AFTER kn_rollback.c is copied.
+    # Remove this hook and build/inject-rb-probes.py once root cause is found.
+    if [ -f "${SCRIPT_DIR}/inject-rb-probes.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-rb-probes.py" "mupen64plus-core/src/main" \
+            || { echo "FATAL: inject-rb-probes.py failed"; exit 1; }
+    fi
     # Add kn_rollback.c to SOURCES_C in Makefile.common. The hash registry is
     # diagnostic-only so the default production core keeps the older WASM shape.
     sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common

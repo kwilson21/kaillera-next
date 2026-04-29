@@ -1977,7 +1977,32 @@
       .slice(0, 16)
       .join(' | ');
     if (stack.length > 1500) stack = stack.slice(0, 1500) + '…';
-    return `STEP-THREW f=${_frameNum} branch=${branch}: ${name}: ${message} | stack=${stack}`;
+
+    // Rollback-engine breadcrumb. The cached-interpreter trap doesn't unwind
+    // through C, so we read the volatile globals C wrote on its way through.
+    // Phase IDs come from build/inject-rb-probes.py:
+    //   10=preTick entry, 20/21=endpointSave pre/post, 30/31=pacingSave pre/post,
+    //   40/41=rollback unserialize pre/post, 50/51=replaySave pre/post,
+    //   60/61=normalSave pre/post, 70/71/72=preTick exit (normal/replay/pacing-skip),
+    //   80=postTick entry, 100/101=inside rb_save_slot pre/post retro_serialize.
+    let rb = '';
+    const m = window.EJS_emulator?.gameManager?.Module;
+    if (m?._kn_get_diag_rb_phase) {
+      try {
+        rb =
+          ` rb=phase:${m._kn_get_diag_rb_phase()}` +
+          `,f:${m._kn_get_diag_rb_frame()}` +
+          `,slot:${m._kn_get_diag_rb_save_slot()}` +
+          `,serN:${m._kn_get_diag_rb_serialize_count()}` +
+          `,serRet:${m._kn_get_diag_rb_serialize_ret()}` +
+          `,unsN:${m._kn_get_diag_rb_unserialize_count()}` +
+          `,unsF:${m._kn_get_diag_rb_unserialize_frame()}` +
+          `,unsRet:${m._kn_get_diag_rb_unserialize_ret()}`;
+      } catch (_) {
+        rb = ' rb=read-failed';
+      }
+    }
+    return `STEP-THREW f=${_frameNum} branch=${branch}: ${name}: ${message}${rb} | stack=${stack}`;
   };
 
   // MF6: Detection-only tick watchdog snapshot emitter. Gathers a

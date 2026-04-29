@@ -17,6 +17,17 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
     this._writePos = 0;
     this._count = 0; // samples available
 
+    // Steady-state fill target. The N64 core paces audio for the game's
+    // internal frame rate (e.g. ~57.95 fps for Smash Remix at 44.1kHz, =
+    // 761 samples/frame), but the JS lockstep tick fires at 60 wall-fps,
+    // so the producer pushes ~3-4% more samples per wall-second than the
+    // AudioContext consumes. Without bleed the ring fills to _bufSize in
+    // ~14s and parks there, leaving the user with a steady ~500ms delay.
+    // Bleeding back toward _target on every quantum holds perceived
+    // latency near _target while preserving the full ring as headroom
+    // for legitimate stall recovery.
+    this._target = Math.ceil(rate * 0.03) * 2; // ~30ms
+
     this.port.onmessage = this._onMessage.bind(this);
   }
 
@@ -40,6 +51,19 @@ class LockstepAudioProcessor extends AudioWorkletProcessor {
     const outL = outputs[0][0];
     const outR = outputs[0][1];
     if (!outL) return true;
+
+    // Adaptive bleed: when the ring has more than _target queued, drop a
+    // capped chunk before output so latency converges back toward _target
+    // instead of pinning at the 500ms ring ceiling. Cap is 32 elements
+    // (16 stereo pairs / ~0.36ms at 44.1kHz) per quantum — smooth enough
+    // to be inaudible while still outpacing the typical producer surplus
+    // of ~9 elements/quantum. Pair-aligned (& ~1) so L/R stay matched.
+    const overTarget = this._count - this._target;
+    if (overTarget >= 2) {
+      const bleed = Math.min(overTarget & ~1, 32);
+      this._readPos = (this._readPos + bleed) % this._bufSize;
+      this._count -= bleed;
+    }
 
     const frames = outL.length; // typically 128
     for (let i = 0; i < frames; i++) {
