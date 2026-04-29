@@ -4988,33 +4988,38 @@
     // Load state synchronously at the manual start boundary. Remix prefers
     // kn_sync_write because it carries CPU/peripheral/event-queue state that
     // the libretro savestate path has historically under-specified for startup.
+    //
+    // Host runs the IDENTICAL restore stack as guest (kn_sync_write of its own
+    // captured bytes + restoreHiddenState + restoreAudioFifo + cleanup). Even
+    // though the emulator was paused since capture, the restore path has
+    // side effects the host's runtime hasn't been through (TLB rebuild, JIT
+    // invalidate, full event-queue normalize). Skipping them on host meant
+    // host and guest started lockstep from subtly different states —
+    // visible later as different "Random!" character/stage selections
+    // because the SSB Remix RNG advances differently from non-identical
+    // event-queue/cycle-count starting points.
     if (isKnSyncInitialState) {
-      if (hasLocalKnSyncCapture) {
-        recaptureManualRunner(readyMod, 'initial-sync-local-capture');
-        _postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture');
-        // 2026-04-29 audio-diag: post-cleanup snapshot on host's local capture path.
-        _logAudioDump(readyMod, 'host:post-cleanup-local-capture');
-        _syncLog('initial-sync-load: host kept locally captured kn-sync state');
-      } else {
-        // 2026-04-29 audio-diag: 4 guest-side restore-stage snapshots.
-        _logAudioDump(readyMod, 'guest:pre-knsync-write');
-        if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
-          _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
-          setStatus('Sync failed — incompatible core state');
-          _config?.onToast?.('Sync failed — restart with the same core build');
-          return;
-        }
-        _checkAiInvariant(readyMod, 4);
-        _logAudioDump(readyMod, 'guest:post-knsync-write');
-        _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
-        _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
-        _logAudioDump(readyMod, 'guest:post-fifo-restore');
-        if (_isSmashRemix()) {
-          _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
-          _checkAiInvariant(readyMod, 5);
-          _logAudioDump(readyMod, 'guest:post-cleanup');
-          _syncLog('initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup');
-        }
+      const stagePrefix = hasLocalKnSyncCapture ? 'host' : 'guest';
+      _logAudioDump(readyMod, `${stagePrefix}:pre-knsync-write`);
+      if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
+        _syncLog('FATAL: kn-sync initial state but kn_sync_write failed');
+        setStatus('Sync failed — incompatible core state');
+        _config?.onToast?.('Sync failed — restart with the same core build');
+        return;
+      }
+      _checkAiInvariant(readyMod, 4);
+      _logAudioDump(readyMod, `${stagePrefix}:post-knsync-write`);
+      _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+      _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
+      _logAudioDump(readyMod, `${stagePrefix}:post-fifo-restore`);
+      if (_isSmashRemix()) {
+        _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+        _checkAiInvariant(readyMod, 5);
+        _logAudioDump(readyMod, `${stagePrefix}:post-cleanup`);
+        _syncLog(
+          `initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup ` +
+            `(${hasLocalKnSyncCapture ? 'host self-restore' : 'guest from-host'})`,
+        );
       }
     } else {
       loadStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load', _isSmashRemix() ? 1 : 2);
