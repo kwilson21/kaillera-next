@@ -15,9 +15,17 @@ def test_key_tracking_releases_held_keys_on_focus_loss():
 
     assert "function clearHeldKeysOnFocusLoss()" in source
     assert "function ensureKeyTrackingListeners()" in source
+    assert "window.addEventListener('keydown', _keydownHandler, true)" in source
+    assert "window.addEventListener('keyup', _keyupHandler, true)" in source
+    assert "document.addEventListener('keydown', _keydownHandler, true)" in source
+    assert "document.addEventListener('keyup', _keyupHandler, true)" in source
     assert "window.addEventListener('blur', _blurHandler, true)" in source
     assert "document.addEventListener('visibilitychange', _visibilityHandler, true)" in source
     assert "if (document.hidden) clearHeldKeysOnFocusLoss()" in source
+    assert "window.removeEventListener('keydown', _keydownHandler, true)" in source
+    assert "window.removeEventListener('keyup', _keyupHandler, true)" in source
+    assert "document.removeEventListener('keydown', _keydownHandler, true)" in source
+    assert "document.removeEventListener('keyup', _keyupHandler, true)" in source
     assert "window.removeEventListener('blur', _blurHandler, true)" in source
     assert "document.removeEventListener('visibilitychange', _visibilityHandler, true)" in source
 
@@ -85,6 +93,72 @@ def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
         if (!secondHeld.has(65)) throw new Error('reused keymap did not recapture keydown');
         document.dispatchEvent({ type: 'keyup', keyCode: 65 });
         if (secondHeld.has(65)) throw new Error('keyup did not release reused keymap input');
+        """
+    )
+
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_key_tracking_window_capture_survives_document_blocker():
+    script = textwrap.dedent(
+        r"""
+        const fs = require('fs');
+        const listeners = new Map();
+        const key = (scope, type) => `${scope}:${type}`;
+        const add = (scope, type, fn) => {
+          const k = key(scope, type);
+          if (!listeners.has(k)) listeners.set(k, []);
+          listeners.get(k).push(fn);
+        };
+        const remove = (scope, type, fn) => {
+          const list = listeners.get(key(scope, type)) || [];
+          const idx = list.indexOf(fn);
+          if (idx !== -1) list.splice(idx, 1);
+        };
+        const dispatch = (scope, evt) => {
+          for (const fn of Array.from(listeners.get(key(scope, evt.type)) || [])) {
+            if (evt._stopped) break;
+            fn(evt);
+          }
+        };
+        const browserDispatch = (evt) => {
+          dispatch('window', evt);
+          dispatch('document', evt);
+        };
+        global.document = {
+          hidden: false,
+          addEventListener: (type, fn) => add('document', type, fn),
+          removeEventListener: (type, fn) => remove('document', type, fn),
+        };
+        global.window = {
+          document,
+          KNState: { safeGet: () => null },
+          addEventListener: (type, fn) => add('window', type, fn),
+          removeEventListener: (type, fn) => remove('window', type, fn),
+        };
+        global.navigator = {};
+        eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+
+        document.addEventListener('keydown', (evt) => evt.stopImmediatePropagation(), true);
+        document.addEventListener('keyup', (evt) => evt.stopImmediatePropagation(), true);
+
+        const held = new Set();
+        window.KNShared.setupKeyTracking({ 65: 0 }, held);
+
+        browserDispatch({
+          type: 'keydown',
+          keyCode: 65,
+          stopImmediatePropagation() { this._stopped = true; },
+        });
+        if (!held.has(65)) throw new Error('window keydown capture was blocked by document listener');
+
+        browserDispatch({
+          type: 'keyup',
+          keyCode: 65,
+          stopImmediatePropagation() { this._stopped = true; },
+        });
+        if (held.has(65)) throw new Error('window keyup capture was blocked by document listener');
         """
     )
 

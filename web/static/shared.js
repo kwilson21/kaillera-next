@@ -100,6 +100,8 @@
       _visibilityHandler = () => {
         if (document.hidden) clearHeldKeysOnFocusLoss();
       };
+      window.addEventListener('keydown', _keydownHandler, true);
+      window.addEventListener('keyup', _keyupHandler, true);
       document.addEventListener('keydown', _keydownHandler, true);
       document.addEventListener('keyup', _keyupHandler, true);
       window.addEventListener('blur', _blurHandler, true);
@@ -152,8 +154,14 @@
 
   function teardownKeyTracking() {
     if (_listenersAdded) {
-      if (_keydownHandler) document.removeEventListener('keydown', _keydownHandler, true);
-      if (_keyupHandler) document.removeEventListener('keyup', _keyupHandler, true);
+      if (_keydownHandler) {
+        window.removeEventListener('keydown', _keydownHandler, true);
+        document.removeEventListener('keydown', _keydownHandler, true);
+      }
+      if (_keyupHandler) {
+        window.removeEventListener('keyup', _keyupHandler, true);
+        document.removeEventListener('keyup', _keyupHandler, true);
+      }
       if (_blurHandler) window.removeEventListener('blur', _blurHandler, true);
       if (_visibilityHandler) document.removeEventListener('visibilitychange', _visibilityHandler, true);
       _keydownHandler = null;

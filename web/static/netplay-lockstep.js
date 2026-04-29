@@ -1307,6 +1307,37 @@
     cx: input?.cx | 0,
     cy: input?.cy | 0,
   });
+  const _resetInputAudit = () => {
+    _auditLocalInputs.length = 0;
+    for (const slot of Object.keys(_auditRemoteInputs)) delete _auditRemoteInputs[slot];
+    _auditLastLocal.b = null;
+    _auditLastLocal.lx = null;
+    _auditLastLocal.ly = null;
+    _auditLastLocal.cx = null;
+    _auditLastLocal.cy = null;
+    for (const slot of Object.keys(_auditLastRemote)) delete _auditLastRemote[slot];
+  };
+  const _cloneAuditEntries = (entries) =>
+    entries.map((entry) => ({
+      f: entry.f | 0,
+      b: entry.b | 0,
+      lx: entry.lx | 0,
+      ly: entry.ly | 0,
+      cx: entry.cx | 0,
+      cy: entry.cy | 0,
+    }));
+  const _buildInputAuditPayload = () => {
+    const remote = {};
+    for (const [slot, entries] of Object.entries(_auditRemoteInputs)) {
+      remote[slot] = _cloneAuditEntries(entries);
+    }
+    return {
+      localCount: _auditLocalInputs.length,
+      remoteCount: Object.fromEntries(Object.entries(_auditRemoteInputs).map(([s, a]) => [s, a.length])),
+      local: _cloneAuditEntries(_auditLocalInputs),
+      remote,
+    };
+  };
   const _auditRecordLocal = (frame, input) => {
     if (_auditLocalInputs.length > 0 && _inputEq(input, _auditLastLocal)) return;
     _auditLocalInputs.push({
@@ -2030,12 +2061,7 @@
     // something to compare even if the match ends abruptly. Delta-encoded
     // to keep size reasonable — we only record the count here and the full
     // data in a separate field that the server stores as log context.
-    inputAudit: {
-      localCount: _auditLocalInputs.length,
-      remoteCount: Object.fromEntries(Object.entries(_auditRemoteInputs).map(([s, a]) => [s, a.length])),
-      local: _auditLocalInputs,
-      remote: _auditRemoteInputs,
-    },
+    inputAudit: _buildInputAuditPayload(),
   });
 
   const _flushViaHttp = (payload) => {
@@ -4060,6 +4086,7 @@
     delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
     delete _auditRemoteInputs[slot];
+    delete _auditLastRemote[slot];
     delete _lateJoinActivatedAtFrame[slot];
     delete _lateJoinSeededInputFrames[slot];
 
@@ -4561,7 +4588,9 @@
         setTimeout(waitForEmu, 100);
         return;
       }
-      if (!mod._simulate_input) {
+      const rawSimulateInputForDiscovery = mod?._kn_netplay_simulate_input || mod?._simulate_input;
+      const simulateInputForDiscovery = rawSimulateInputForDiscovery?.bind(mod);
+      if (!simulateInputForDiscovery) {
         if (_bootPollCount++ % 5 === 0) setStatus('Booting emulator...');
         setTimeout(waitForEmu, 100);
         return;
@@ -4593,20 +4622,20 @@
       }
 
       // Auto-discover INPUT_BASE by calling _simulate_input and detecting the change
-      if (mod._simulate_input) {
+      if (simulateInputForDiscovery) {
         try {
           // Reset button 0 for player 0
-          mod._simulate_input(0, 0, 0);
+          simulateInputForDiscovery(0, 0, 0);
           const scanEnd = Math.min(mod.HEAPU8.length, 4 * 1024 * 1024);
           const snap = new Uint8Array(mod.HEAPU8.buffer.slice(0, scanEnd));
-          mod._simulate_input(0, 0, 1);
+          simulateInputForDiscovery(0, 0, 1);
           for (let si = 0; si < scanEnd; si++) {
             if (mod.HEAPU8[si] !== snap[si]) {
               INPUT_BASE = si;
               break;
             }
           }
-          mod._simulate_input(0, 0, 0);
+          simulateInputForDiscovery(0, 0, 0);
           _syncLog(`INPUT_BASE auto-discovered: ${INPUT_BASE}`);
 
           // Discover per-player input base addresses (button 0 address for each player)
@@ -4614,16 +4643,16 @@
           const scanRange = 8 * 1024 * 1024; // 8MB scan window
           const scanLen = Math.min(mod.HEAPU8.length, scanRange);
           for (let pi = 0; pi < 4; pi++) {
-            mod._simulate_input(pi, 0, 0);
+            simulateInputForDiscovery(pi, 0, 0);
             const pSnap = new Uint8Array(mod.HEAPU8.buffer.slice(0, scanLen));
-            mod._simulate_input(pi, 0, 1);
+            simulateInputForDiscovery(pi, 0, 1);
             for (let psi = 0; psi < scanLen; psi++) {
               if (mod.HEAPU8[psi] !== pSnap[psi]) {
                 _diag.playerAddrs[pi] = psi;
                 break;
               }
             }
-            mod._simulate_input(pi, 0, 0);
+            simulateInputForDiscovery(pi, 0, 0);
           }
           _syncLog(`per-player input addrs: ${JSON.stringify(_diag.playerAddrs)}`);
         } catch (e) {
@@ -10571,6 +10600,7 @@
 
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
+    _resetInputAudit();
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
@@ -10624,6 +10654,7 @@
 
   const stop = () => {
     _flushSyncLog();
+    _resetInputAudit();
     _cachedMatchId = null;
     _cachedRoom = null;
     _cachedUploadToken = null;
