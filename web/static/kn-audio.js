@@ -233,6 +233,14 @@
               `ctxState=${ctxState} ` +
               `workletPort=${workletPort}`,
           );
+          // 2026-04-29 audio-diag: dump AI/cp0 state on first audio-empty
+          // so we can correlate post-restore state against actual sample
+          // production. Removed once silent-audio root cause is fixed.
+          if (_audioEmptyCount === 1) {
+            try {
+              window._knDumpAudioState?.(`first-audio-empty f=${_getFrame()}`);
+            } catch (_) {}
+          }
         }
         // Log once after 300 consecutive empty frames (~5s) to detect silent audio
         if (_audioEmptyCount === 300) {

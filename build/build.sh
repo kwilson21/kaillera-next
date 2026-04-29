@@ -131,6 +131,13 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_get_audio_fifo_state,|_kn_get_audio_fifo_state,_kn_post_state_load_cleanup,|' Makefile.emulatorjs
         echo "    Added post-state-load cleanup WASM export"
     fi
+    # 2026-04-29 audio-diag exports. Anchored on _kn_get_skip_audio_output,
+    # the trailing terminal audio export. Removed once the silent-iPhone-audio
+    # bug is root-caused.
+    if grep -q "_kn_get_skip_audio_output" Makefile.emulatorjs && ! grep -q "_kn_dump_audio_state" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output,_kn_dump_audio_state,_kn_diag_reset_audio_counters|' Makefile.emulatorjs
+        echo "    Added audio diagnostic WASM exports (kn_dump_audio_state, kn_diag_reset_audio_counters)"
+    fi
 
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
         # Add kn_hash_registry field exports (Tasks 3-5 of desync detection v1).
@@ -196,6 +203,16 @@ if [ -d "${PATCHES_DIR}" ]; then
         git apply "${PATCHES_DIR}/audio-backend-skip-output.patch" && \
             echo "    Applied audio backend skip-output patch" || \
             echo "    WARN: audio backend skip-output patch failed"
+    fi
+
+    # 2026-04-29 audio-diag: counters in ai_controller.c and audio_backend
+    # plus kn_dump_audio_state in main.c. Idempotent; runs after both
+    # kn-all and audio-backend-skip-output patches so anchors line up.
+    # Removed when the silent-iPhone-audio root cause is fixed.
+    if [ -f "${SCRIPT_DIR}/inject-audio-diag.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-audio-diag.py" "${SRC_DIR}/mupen64plus-libretro-nx" && \
+            echo "    Injected audio diagnostic counters + dump" || \
+            echo "    WARN: audio-diag injection failed"
     fi
 
     if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then

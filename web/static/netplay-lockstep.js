@@ -2294,6 +2294,60 @@
     return true;
   };
 
+  // 2026-04-29 audio-diag helpers. Capture cp0+AI state at restore stages
+  // so we can pinpoint which step (kn_sync_write, hidden+FIFO restore, or
+  // post-state cleanup) breaks aiLenChanged scheduling on iPhone guests.
+  // Removed once the silent-audio root cause is fixed.
+  const _AUDIO_DUMP_WORDS = 64;
+  const _dumpAudioStateRaw = (mod) => {
+    if (!mod?._kn_dump_audio_state || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
+      return null;
+    }
+    const ptr = mod._malloc(_AUDIO_DUMP_WORDS * 4);
+    if (!ptr) return null;
+    try {
+      mod._kn_dump_audio_state(ptr, _AUDIO_DUMP_WORDS);
+      return Array.from(new Uint32Array(mod.HEAPU32.buffer, ptr, _AUDIO_DUMP_WORDS));
+    } finally {
+      mod._free(ptr);
+    }
+  };
+  const _formatAudioDump = (raw, label) => {
+    if (!raw) return `${label}: <no kn_dump_audio_state export>`;
+    const u = (n) => raw[n] >>> 0;
+    const hex = (n) => '0x' + (raw[n] >>> 0).toString(16);
+    const evtCount = u(28);
+    const events = [];
+    for (let k = 0; k < evtCount; k++) {
+      const base = 29 + k * 2;
+      if (base + 1 >= raw.length) break;
+      const type = u(base);
+      const relU = u(base + 1);
+      const relS = relU | 0;
+      events.push(`t${type}:${relU}u/${relS}s`);
+    }
+    return (
+      `AUDIO-DUMP ${label} ` +
+      `aiStatus=${hex(0)} aiLen=${u(1)} aiDram=${hex(2)} dacrate=${u(3)} ` +
+      `f0=[a:${hex(4)} l:${u(5)} d:${u(6)}] f1=[a:${hex(7)} l:${u(8)} d:${u(9)}] ` +
+      `lastRead=${u(10)} delayedCarry=${u(11)} fmtChanged=${u(12)} ` +
+      `count=${hex(13)} nextInt=${hex(14)} cycCount=${u(14) | 0}s/${u(14)}u compare=${hex(16)} ` +
+      `det=${u(17)} skip=${u(18)} smpCount=${u(19)} smpRate=${u(20)} ` +
+      `lastFreq=${u(21)} lastSkipReason=${hex(22)} ` +
+      `cnt[dma=${u(23)} eod=${u(24)} ailen=${u(25)} cap=${u(26)} skp=${u(27)}] ` +
+      `q[${events.join(',')}]`
+    );
+  };
+  const _logAudioDump = (mod, label) => {
+    const raw = _dumpAudioStateRaw(mod);
+    if (raw) _syncLog(_formatAudioDump(raw, label));
+  };
+  // Expose so kn-audio.js can request a dump from outside this module.
+  window._knDumpAudioState = (label) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (mod) _logAudioDump(mod, label);
+  };
+
   const _postRemixStateLoadCleanup = (mod, reason) => {
     if (!_isSmashRemix()) return false;
     if (mod?._kn_post_state_load_cleanup) {
@@ -2314,6 +2368,8 @@
     if (REMIX_INITIAL_SYNC_USE_KN_SYNC && _isSmashRemix() && mod?._kn_sync_read && mod?._kn_sync_write && mod?.HEAPU8) {
       ensureSyncBuffer();
       if (_syncBufPtr && _syncBufSize > 0) {
+        // 2026-04-29 audio-diag: capture host AI state before payload read.
+        _logAudioDump(mod, 'host:before-kn-sync-read');
         const t0 = performance.now();
         const bytesWritten = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
         const t1 = performance.now();
@@ -4890,18 +4946,25 @@
       if (hasLocalKnSyncCapture) {
         recaptureManualRunner(readyMod, 'initial-sync-local-capture');
         _postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture');
+        // 2026-04-29 audio-diag: post-cleanup snapshot on host's local capture path.
+        _logAudioDump(readyMod, 'host:post-cleanup-local-capture');
         _syncLog('initial-sync-load: host kept locally captured kn-sync state');
       } else {
+        // 2026-04-29 audio-diag: 4 guest-side restore-stage snapshots.
+        _logAudioDump(readyMod, 'guest:pre-knsync-write');
         if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
           _syncLog('FATAL: received kn-sync initial state but kn_sync_write failed');
           setStatus('Sync failed — incompatible core state');
           _config?.onToast?.('Sync failed — restart with the same core build');
           return;
         }
+        _logAudioDump(readyMod, 'guest:post-knsync-write');
         _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
         _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
+        _logAudioDump(readyMod, 'guest:post-fifo-restore');
         if (_isSmashRemix()) {
           _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+          _logAudioDump(readyMod, 'guest:post-cleanup');
           _syncLog('initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup');
         }
       }
