@@ -1257,12 +1257,20 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
     slot = pid_to_slot.get(player_id)
 
     _SUMMARY_MAX = 4096
+    _CONTEXT_MAX = 2 * 1024 * 1024
     summary_str = json.dumps(payload.summary)
     if len(summary_str) > _SUMMARY_MAX:
         summary_str = "{}"
-    context_str = json.dumps(payload.context)
-    if len(context_str) > _SUMMARY_MAX:
-        context_str = "{}"
+
+    context = dict(payload.context) if isinstance(payload.context, dict) else {}
+    if isinstance(payload.inputAudit, dict) and payload.inputAudit:
+        context["inputAudit"] = payload.inputAudit
+    context_str = json.dumps(context)
+    if len(context_str) > _CONTEXT_MAX:
+        context.pop("inputAudit", None)
+        context_str = json.dumps(context)
+        if len(context_str) > _SUMMARY_MAX:
+            context_str = "{}"
 
     entries = payload.entries if isinstance(payload.entries, list) else []
     log_data_str = json.dumps(entries)

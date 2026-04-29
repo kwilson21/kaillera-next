@@ -162,6 +162,7 @@ class SessionLogPayload(BaseModel):
     entries: list = Field(default_factory=list)
     summary: dict = Field(default_factory=dict)
     context: dict = Field(default_factory=dict)
+    inputAudit: dict = Field(default_factory=dict)
 
 
 # ── feedback ────────────────────────────────────────────────────────────────

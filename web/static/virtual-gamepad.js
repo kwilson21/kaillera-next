@@ -1042,17 +1042,18 @@
     if (!_stickCenter || !st) return;
     let dx = clientX - _stickCenter.x;
     let dy = clientY - _stickCenter.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > STICK_RADIUS) {
-      dx = (dx / dist) * STICK_RADIUS;
-      dy = (dy / dist) * STICK_RADIUS;
+    const rawDist = Math.sqrt(dx * dx + dy * dy);
+    const clampedDist = Math.min(rawDist, STICK_RADIUS);
+    if (rawDist > STICK_RADIUS) {
+      dx = (dx / rawDist) * STICK_RADIUS;
+      dy = (dy / rawDist) * STICK_RADIUS;
     }
     if (_stickEl) {
       _stickEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
     }
     // N64-style analog: deadzone + non-linear response curve.
     // Normalized magnitude 0–1, then apply deadzone and power curve.
-    const mag = dist / STICK_RADIUS; // 0 to 1
+    const mag = clampedDist / STICK_RADIUS; // 0 to 1
     let output = 0;
     if (mag > DEADZONE) {
       // Remap deadzone–1 range to 0–1, then apply power curve
@@ -1060,9 +1061,9 @@
       output = Math.pow(remapped, EDGE_EXPONENT);
     }
     // Convert back to directional axis values
-    if (dist > 0.001) {
-      const ax = (dx / dist) * output * MAX_AXIS;
-      const ay = (dy / dist) * output * MAX_AXIS;
+    if (clampedDist > 0.001) {
+      const ax = (dx / clampedDist) * output * MAX_AXIS;
+      const ay = (dy / clampedDist) * output * MAX_AXIS;
       st[16] = ax > 0 ? Math.round(ax) : 0;
       st[17] = ax < 0 ? Math.round(-ax) : 0;
       st[18] = ay > 0 ? Math.round(ay) : 0;

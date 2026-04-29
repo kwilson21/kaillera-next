@@ -437,6 +437,16 @@
     };
   };
 
+  const clampN64Axis = (value) => Math.max(-N64_MAX, Math.min(N64_MAX, Math.trunc(Number(value) || 0)));
+
+  const normalizeInput = (input) => ({
+    buttons: input?.buttons || 0,
+    lx: clampN64Axis(input?.lx),
+    ly: clampN64Axis(input?.ly),
+    cx: clampN64Axis(input?.cx),
+    cy: clampN64Axis(input?.cy),
+  });
+
   // ── readLocalInput(playerSlot, keyMap, heldKeys) ───────────────────────
   // Reads keyboard, gamepad, and virtual-gamepad (touch) state and returns
   // an input object { buttons, lx, ly, cx, cy }.
@@ -511,9 +521,9 @@
       const stThresh = stMajor * 0.4;
       // Convert per-direction magnitudes to signed N64 range
       const touchScale = (pos, neg, thresh) => {
-        const p = pos > thresh ? pos : 0;
-        const n = neg > thresh ? neg : 0;
-        return Math.trunc(((p - n) / TOUCH_MAX) * N64_MAX);
+        const p = pos > thresh ? Math.min(pos, TOUCH_MAX) : 0;
+        const n = neg > thresh ? Math.min(neg, TOUCH_MAX) : 0;
+        return clampN64Axis(((p - n) / TOUCH_MAX) * N64_MAX);
       };
       input.lx = touchScale(stR, stL, stThresh);
       input.ly = touchScale(stD, stU, stThresh);
@@ -537,6 +547,11 @@
         }
       }
     }
+
+    input.lx = clampN64Axis(input.lx);
+    input.ly = clampN64Axis(input.ly);
+    input.cx = clampN64Axis(input.cx);
+    input.cy = clampN64Axis(input.cy);
 
     // Debug input logging
     if (window._debugInputUntil && performance.now() < window._debugInputUntil) {
@@ -642,48 +657,49 @@
     const writeController = mod?._kn_write_controller;
     const simulateInput = mod?._kn_netplay_simulate_input || mod?._simulate_input;
     if (!writeController && !simulateInput) return;
+    const safeInput = normalizeInput(input);
 
     // Optional skip-if-unchanged optimization
     if (prevInputs) {
       const prev = prevInputs[slot];
-      if (prev && inputEqual(input, prev)) return;
+      if (prev && inputEqual(safeInput, prev)) return;
     }
 
     if (writeController) {
-      writeController(slot, input.buttons || 0, input.lx || 0, input.ly || 0, input.cx || 0, input.cy || 0);
+      writeController(slot, safeInput.buttons, safeInput.lx, safeInput.ly, safeInput.cx, safeInput.cy);
       if (prevInputs) {
-        prevInputs[slot] = input;
+        prevInputs[slot] = safeInput;
       }
       return;
     }
 
     // Digital buttons (0-15)
     for (let btn = 0; btn < 16; btn++) {
-      simulateInput(slot, btn, (input.buttons >> btn) & 1);
+      simulateInput(slot, btn, (safeInput.buttons >> btn) & 1);
     }
 
     // Left stick — scale N64 range (±83) to WASM range (±32767)
     const scale = 32767 / N64_MAX;
     const clamp = (v) => Math.max(-32767, Math.min(32767, Math.trunc(v * scale)));
     // Bit 16 = X positive (right), 17 = X negative (left)
-    simulateInput(slot, 16, input.lx > 0 ? clamp(input.lx) : 0);
-    simulateInput(slot, 17, input.lx < 0 ? clamp(-input.lx) : 0);
+    simulateInput(slot, 16, safeInput.lx > 0 ? clamp(safeInput.lx) : 0);
+    simulateInput(slot, 17, safeInput.lx < 0 ? clamp(-safeInput.lx) : 0);
     // Bit 18 = Y positive (down), 19 = Y negative (up)
-    simulateInput(slot, 18, input.ly > 0 ? clamp(input.ly) : 0);
-    simulateInput(slot, 19, input.ly < 0 ? clamp(-input.ly) : 0);
+    simulateInput(slot, 18, safeInput.ly > 0 ? clamp(safeInput.ly) : 0);
+    simulateInput(slot, 19, safeInput.ly < 0 ? clamp(-safeInput.ly) : 0);
 
     // C-stick (bits 20-23) — axis values OR digital button bitmask.
     // C-buttons can come from either the cx/cy axis values (analog stick)
     // or from digital button mappings (bits 20-23 in input.buttons).
     const cMax = clamp(N64_MAX);
-    simulateInput(slot, 20, input.cx > 0 ? clamp(input.cx) : (input.buttons >> 20) & 1 ? cMax : 0);
-    simulateInput(slot, 21, input.cx < 0 ? clamp(-input.cx) : (input.buttons >> 21) & 1 ? cMax : 0);
-    simulateInput(slot, 22, input.cy > 0 ? clamp(input.cy) : (input.buttons >> 22) & 1 ? cMax : 0);
-    simulateInput(slot, 23, input.cy < 0 ? clamp(-input.cy) : (input.buttons >> 23) & 1 ? cMax : 0);
+    simulateInput(slot, 20, safeInput.cx > 0 ? clamp(safeInput.cx) : (safeInput.buttons >> 20) & 1 ? cMax : 0);
+    simulateInput(slot, 21, safeInput.cx < 0 ? clamp(-safeInput.cx) : (safeInput.buttons >> 21) & 1 ? cMax : 0);
+    simulateInput(slot, 22, safeInput.cy > 0 ? clamp(safeInput.cy) : (safeInput.buttons >> 22) & 1 ? cMax : 0);
+    simulateInput(slot, 23, safeInput.cy < 0 ? clamp(-safeInput.cy) : (safeInput.buttons >> 23) & 1 ? cMax : 0);
 
     // Update previous input tracker
     if (prevInputs) {
-      prevInputs[slot] = input;
+      prevInputs[slot] = safeInput;
     }
   };
 
