@@ -1669,12 +1669,38 @@
   const KN_RNG_SEED_RDRAM = 0x0003b940; // sSYUtilsRandomSeed
   const KN_RNG_ALT_SEED_RDRAM = 0x000a0578; // alternate seed
   const KN_FRAME_COUNTER_RDRAM = 0x0003cb30; // Global.frame_counter (get_random_int_safe_ uses fc%64)
-  const KN_SCENE_CURR_RDRAM = 0x000a4ad0; // gSCManagerSceneData.scene_curr
-  // SSB64/Smash Remix game_status — VS settings word at N64 0x800A4D18.
-  // game_status is byte 1 (bits 23-16): 0=wait, 1=ongoing, 2=paused, 5=end.
-  // Used to gate rollback prediction: during menus (status == 0), rollback's
-  // stash-and-restore only preserves ~73 bytes of in-match state, corrupting
-  // menu navigation state and causing screen-skip desyncs.
+  // ── Per-game RDRAM addresses ──────────────────────────────────────────
+  // Keep SSB64 base and Smash Remix addresses physically separate. These
+  // games store game state at different RDRAM offsets; conflating them
+  // (e.g. applying decomp-derived addresses to Remix or vice versa) silently
+  // breaks rollback gating and was the cause of the 2026-04-29 regression.
+  // Always cite the source file when adding/changing a constant here.
+  //
+  // scene_curr — happens to be the same in both games (verified):
+  //   SSB64 base: gSCManagerSceneData @ 0x800A4AD0
+  //     (ssb-decomp/src/sc/scmanager.c:29-30, struct SCCommonData.scene_curr at offset 0)
+  //   Smash Remix: current_screen @ 0x800A4AD0
+  //     (smashremix/src/Global.asm: `constant current_screen(0x800A4AD0)`)
+  const KN_SCENE_CURR_RDRAM = 0x000a4ad0;
+
+  // game_status — DIFFERS by game. Used to gate rollback prediction:
+  // during menus (status != 1), rollback's stash-and-restore only preserves
+  // in-match gameplay state, so we run pure lockstep there. Byte semantics:
+  // 0=wait, 1=ongoing, 2=paused, 5=end.
+  //
+  //   Smash Remix: game_status @ 0x800A4D19
+  //     (smashremix/src/Global.asm:165: `constant game_status(0x800A4D19)`)
+  //     Word-aligned 0x000a4d18, byte 1 of the BE word = game_status.
+  const KN_REMIX_GAME_STATUS_WORD_RDRAM = 0x000a4d18;
+  //   SSB64 base: gSCManagerBattleState->game_status — VS state struct
+  //     at RDRAM 0xA4EF8 (kn_gameplay_addrs.h KN_ADDR_VS_BATTLE_HEADER),
+  //     struct offset 0x11 (ssb-decomp/src/sc/sctypes.h SCBattleState).
+  //     Word-aligned 0x000a4f08, byte 1 of the BE word = game_status.
+  //   Currently unused (no SSB64-base reader today; menu phase logic is
+  //   gated on _isSmashRemix elsewhere). Defined so future SSB64-base
+  //   callers use the right address and don't accidentally pull the
+  //   Remix one.
+  const KN_SSB64_GAME_STATUS_WORD_RDRAM = 0x000a4f08; // eslint-disable-line no-unused-vars
   let _rngPatched = false;
   let _rngSeed = 0;
   let _rdramBase = 0; // WASM heap byte offset of RDRAM
@@ -1705,23 +1731,21 @@
     return (_rdramBase >> 2) + (rdramOffset >> 2);
   };
 
-  // Read SSB64 game_status from RDRAM. Returns 1 when the match is
-  // actively running (gameplay), 0 during menus/CSS/stage-select, or
-  // -1 if RDRAM isn't available yet.
+  // Read game_status from RDRAM. Returns 1 when the match is actively
+  // running (gameplay), 0 during menus/CSS/stage-select, or -1 if RDRAM
+  // isn't available yet or this is a non-Remix game (no reader wired).
   //
   // BYTE ORDER: mupen64plus stores RDRAM in host (little-endian) byte
   // order. N64 byte 1 of a BE word is at LE offset (byte_offset ^ 3).
   // Using HEAPU32 + shift avoids XOR-3 confusion: read the 32-bit word
   // at the word-aligned address, then extract the correct byte position.
-  // game_status is byte 1 (bits 23-16) of the N64 word at 0x800A4D18.
-  const KN_GAME_STATUS_WORD_RDRAM = 0x000a4d18; // word-aligned address
   let _inGameplay = false;
   let _inGameplayLoggedAt = -1; // frame where we last logged a transition
   const _readGameStatus = () => {
     if (!_rdramBase || !_isSmashRemix()) return -1;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?.HEAPU32) return -1;
-    const word = mod.HEAPU32[(_rdramBase + KN_GAME_STATUS_WORD_RDRAM) >> 2];
+    const word = mod.HEAPU32[(_rdramBase + KN_REMIX_GAME_STATUS_WORD_RDRAM) >> 2];
     return (word >> 16) & 0xff;
   };
 
@@ -1928,6 +1952,33 @@
     }
   };
   window._knSyncLog = _syncLog;
+
+  // Format a STEP-THREW log line including a truncated stack trace.
+  // The Asyncify export wrapper in the WASM JS shim hides the C-side
+  // line info, but the JS frames around it (Asyncify.maybeStopUnwind,
+  // wasm-function names if symbol-stripped) are enough to narrow the
+  // failing export. Stack is the only differentiator beyond
+  // "Aborted(unreachable)" without rebuilding the core with -sASSERTIONS.
+  // Cap length so a deep stack doesn't blow the 10KB log entry budget.
+  const _formatStepThrew = (branch, e) => {
+    const name = e?.name || 'Error';
+    const message = e?.message || String(e);
+    let stack = e?.stack || '';
+    // Drop the first line if it just repeats name+message (V8 does this).
+    if (stack.startsWith(name) || stack.startsWith(`${name}:`)) {
+      const nl = stack.indexOf('\n');
+      if (nl > -1) stack = stack.slice(nl + 1);
+    }
+    // Compress whitespace, trim leading "    at " noise, cap to 1500 chars.
+    stack = stack
+      .split('\n')
+      .map((l) => l.trim().replace(/^at\s+/, ''))
+      .filter(Boolean)
+      .slice(0, 16)
+      .join(' | ');
+    if (stack.length > 1500) stack = stack.slice(0, 1500) + '…';
+    return `STEP-THREW f=${_frameNum} branch=${branch}: ${name}: ${message} | stack=${stack}`;
+  };
 
   // MF6: Detection-only tick watchdog snapshot emitter. Gathers a
   // rich view of every candidate stall state so the analyzer can
@@ -6251,9 +6302,12 @@
       result = mod._kn_sync_write(statePtr, stateBytes.length);
       stage = 'post-write';
     } catch (e) {
+      const dSec = mod._kn_get_diag_ksw_section ? mod._kn_get_diag_ksw_section() : -1;
+      const dOff = mod._kn_get_diag_ksw_offset ? mod._kn_get_diag_ksw_offset() : -1;
       _syncLog(
         `KN-SYNC-WRITE-THREW ${reason} stage=${stage} bytes=${stateBytes.length} ` +
           `heapBuf=${mod.HEAPU8?.buffer?.byteLength ?? '?'} ` +
+          `lastSection=${dSec} lastOffset=${dOff} ` +
           `${e?.name || 'Error'}: ${e?.message || e}`,
       );
       console.error('[lockstep] kn_sync_write threw:', e);
@@ -6871,35 +6925,64 @@
           _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
         }
         _backfillCInputsFromJs(detMod, 'rollback-init');
+
+        // kn_rollback_init mallocs ringSize × stateSize (~208MB) + an 8MB
+        // rdram-preserve buffer. On Smash Remix, this consistently grows
+        // the WASM heap, detaching HEAPU8 and stranding _pendingRunner with
+        // stale memory views — the next stepOneFrame throws WASM
+        // RuntimeError ('null function' on V8, 'call_indirect signature
+        // mismatch' on JSC), and the no-runner recapture path then loops
+        // forever logging 'manual runner recaptured after stepOneFrame:no-runner'.
+        // Re-capture here forces updateMemoryViews + a fresh rAF runner.
+        recaptureManualRunner(detMod, 'kn-rollback-init');
       };
       window._rbDoInit = doRollbackInit;
 
-      if (detMod?._kn_rollback_init && !_isSmashRemix() && DELAY_FRAMES > 0) {
+      // Common init dispatcher: host inits with the broadcast delay; guest
+      // either inits with the already-received host delay or arms the
+      // rb-delay handler to fire init when the broadcast arrives.
+      const tryInitRollback = () => {
         if (_playerSlot === 0) {
           // Host: init immediately with the value we just broadcast.
           doRollbackInit(DELAY_FRAMES);
+        } else if (window._rbHostDelay !== undefined && window._rbHostDelay > 0) {
+          DELAY_FRAMES = window._rbHostDelay;
+          doRollbackInit(window._rbHostDelay);
         } else {
-          // Guest: if host's rb-delay broadcast already arrived, init now.
-          // Otherwise defer init to the rb-delay handler (see top of file).
-          if (window._rbHostDelay !== undefined && window._rbHostDelay > 0) {
-            DELAY_FRAMES = window._rbHostDelay;
-            doRollbackInit(window._rbHostDelay);
-          } else {
-            // I1 (MF2): record the wall-clock start of the pending
-            // state so tick() can fire RB-INIT-TIMEOUT if the host's
-            // rb-delay broadcast never arrives (DC died mid-send,
-            // host crashed, etc).
-            window._rbPendingInit = true;
-            window._rbPendingInitAt = performance.now();
-            _syncLog(`C-ROLLBACK deferred: waiting for host rb-delay broadcast (own delay=${DELAY_FRAMES})`);
-          }
+          // I1 (MF2): record the wall-clock start of the pending
+          // state so tick() can fire RB-INIT-TIMEOUT if the host's
+          // rb-delay broadcast never arrives (DC died mid-send,
+          // host crashed, etc).
+          window._rbPendingInit = true;
+          window._rbPendingInitAt = performance.now();
+          _syncLog(`C-ROLLBACK deferred: waiting for host rb-delay broadcast (own delay=${DELAY_FRAMES})`);
+        }
+      };
+
+      if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
+        if (_isSmashRemix()) {
+          // Smash Remix's title/menu code path triggers a WASM `unreachable`
+          // abort when the rollback engine's per-frame retro_serialize runs
+          // concurrently — observed at host f=908 in match 85d7a6c8 after
+          // 15s of menu navigation. Stock SSB64 doesn't hit this. Defer
+          // rollback init until the local emulator transitions into
+          // gameplay (gameStatus=1 scene=22). Until then, both peers run
+          // pure lockstep with frame delay (no ring serialize, no
+          // predictions). Once gameplay starts, init kicks in and rollback
+          // is active for the entire match — where it actually matters
+          // competitively. Fired from the MENU→GAMEPLAY transition handler
+          // in tick().
+          window._rbDeferredForGameplay = tryInitRollback;
+          _syncLog(
+            `C-ROLLBACK deferred for Smash Remix: will init at MENU→GAMEPLAY transition ` +
+              `(own delay=${DELAY_FRAMES} slot=${_playerSlot})`,
+          );
+        } else {
+          tryInitRollback();
         }
       } else {
         if (DELAY_FRAMES <= 0 && detMod?._kn_rollback_init) {
           _syncLog('C-ROLLBACK disabled for zero-delay solo play');
-        }
-        if (_isSmashRemix() && detMod?._kn_rollback_init) {
-          _syncLog('C-ROLLBACK disabled for Smash Remix title/menu startup');
         }
         _useCRollback = false;
       }
@@ -7428,6 +7511,11 @@
       _useCRollback = false;
       _inGameplay = false;
     }
+    // Always clear the SR-deferred init closure, even when _useCRollback was
+    // never set (SR match ended before MENU→GAMEPLAY fired). Without this, a
+    // subsequent non-SR match's f=0 MENU→GAMEPLAY block fires the stale
+    // closure and double-calls _kn_rollback_init, breaking GL/main-loop state.
+    window._rbDeferredForGameplay = null;
 
     // Disable FPU trace
     if (_fpuTraceEnabled) {
@@ -8065,6 +8153,26 @@
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
     if (_skipFrameAdvance) return;
 
+    // ── SR deferred-init hook ───────────────────────────────────────────
+    // The MENU→GAMEPLAY transition logic that fires the deferred init
+    // lives inside the `if (_useCRollback)` branch below — but for
+    // Smash Remix we hold init back precisely so `_useCRollback` stays
+    // false until gameplay starts (chicken-and-egg). Detect the gameplay
+    // phase here so the closure can run, after which `_useCRollback` is
+    // true and the rollback branch handles the rest of this tick normally.
+    if (window._rbDeferredForGameplay) {
+      const earlyPhase = _readMenuLockstepPhase(_frameNum > BOOT_GRACE_FRAMES);
+      if (earlyPhase.gameplay) {
+        const fn = window._rbDeferredForGameplay;
+        window._rbDeferredForGameplay = null;
+        _syncLog(
+          `C-ROLLBACK firing deferred init at f=${_frameNum} ` +
+            `gameStatus=${earlyPhase.gameStatus} scene=${earlyPhase.sceneCurr}`,
+        );
+        fn();
+      }
+    }
+
     // ── C-level rollback path ──────────────────────────────────────────
     // C manages: state ring buffer, input storage, prediction, misprediction detection
     // JS handles: all frame stepping (normal + replay) via writeInputToMemory + stepOneFrame
@@ -8139,6 +8247,16 @@
       if (!_inGameplay && !inMenu && _bootDone) {
         _inGameplay = true;
         _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
+        // Smash Remix defers rollback init until here — see line ~6900.
+        // Both peers fire on their own local transition; doRollbackInit
+        // calls _kn_set_frame(_frameNum) so per-peer frame-skew at init
+        // time is handled the same way as late-join.
+        if (window._rbDeferredForGameplay) {
+          const fn = window._rbDeferredForGameplay;
+          window._rbDeferredForGameplay = null;
+          _syncLog(`C-ROLLBACK firing deferred init at f=${_frameNum}`);
+          fn();
+        }
       } else if (_inGameplay && inMenu) {
         _inGameplay = false;
         if (_frameNum - _inGameplayLoggedAt > 60) {
@@ -8668,7 +8786,7 @@
         try {
           stepOneFrame();
         } catch (e) {
-          _syncLog(`STEP-THREW f=${_frameNum} branch=replay: ${e?.name || 'Error'}: ${e?.message || e}`);
+          _syncLog(_formatStepThrew('replay', e));
           console.error('[lockstep] stepOneFrame threw (replay):', e);
         } finally {
           _inDeterministicStep = false;
@@ -8746,7 +8864,7 @@
       try {
         stepOneFrame();
       } catch (e) {
-        _syncLog(`STEP-THREW f=${_frameNum} branch=normal: ${e?.name || 'Error'}: ${e?.message || e}`);
+        _syncLog(_formatStepThrew('normal', e));
         console.error('[lockstep] stepOneFrame threw (normal):', e);
       } finally {
         _inDeterministicStep = false;
@@ -9943,7 +10061,7 @@
     try {
       stepOneFrame();
     } catch (e) {
-      _syncLog(`STEP-THREW f=${_frameNum} branch=fallback: ${e?.name || 'Error'}: ${e?.message || e}`);
+      _syncLog(_formatStepThrew('fallback', e));
       console.error('[lockstep] stepOneFrame threw (fallback):', e);
     } finally {
       _inDeterministicStep = false;
@@ -10667,6 +10785,13 @@
         _syncLog(`kn_sync_write failed: ${result} (bytes=${bytes.length} ptr=${_syncBufPtr})`);
         return;
       }
+
+      // kn_sync_write calls invalidate_cached_code_hacktarux which clears
+      // mupen64plus's cached interpreter blocks. Without re-capturing the
+      // rAF runner, the next stepOneFrame dispatches into a stale block
+      // and throws WASM RuntimeError. The fallback gm.loadState branch
+      // below does this explicitly; the kn-sync branch was missing it.
+      recaptureManualRunner(mod, 'kn-sync-write');
 
       // Cache applied state as delta base for next resync.
       // Proactive states must NOT update the delta base — the host's delta base only
