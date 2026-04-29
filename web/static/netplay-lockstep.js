@@ -2320,11 +2320,12 @@
     return true;
   };
 
-  // 2026-04-29 audio-diag helpers. Capture cp0+AI state at restore stages
-  // so we can pinpoint which step (kn_sync_write, hidden+FIFO restore, or
-  // post-state cleanup) breaks aiLenChanged scheduling on iPhone guests.
-  // Removed once the silent-audio root cause is fixed.
-  const _AUDIO_DUMP_WORDS = 64;
+  // 2026-04-29 audio-diag helpers. Capture cp0+AI state plus the
+  // AI-controller invariant probe (BUSY ⇒ AI_INT scheduled) at restore
+  // stages and around kn_normalize_event_queue. Includes the signed-rel
+  // snapshot of AI_INT pre/post normalize. Removed once the silent-audio
+  // root cause is fixed.
+  const _AUDIO_DUMP_WORDS = 96;
   const _dumpAudioStateRaw = (mod) => {
     if (!mod?._kn_dump_audio_state || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
       return null;
@@ -2341,26 +2342,35 @@
   const _formatAudioDump = (raw, label) => {
     if (!raw) return `${label}: <no kn_dump_audio_state export>`;
     const u = (n) => raw[n] >>> 0;
+    const s = (n) => raw[n] | 0;
     const hex = (n) => '0x' + (raw[n] >>> 0).toString(16);
-    const evtCount = u(28);
+    const evtCount = u(56);
     const events = [];
     for (let k = 0; k < evtCount; k++) {
-      const base = 29 + k * 2;
+      const base = 57 + k * 2;
       if (base + 1 >= raw.length) break;
       const type = u(base);
       const relU = u(base + 1);
       const relS = relU | 0;
       events.push(`t${type}:${relU}u/${relS}s`);
     }
+    const aiBusy = (u(0) & 0x40000000) !== 0;
+    const aiHasInt = events.some((e) => e.startsWith('t64:'));
+    const invariantOk = !aiBusy || aiHasInt;
     return (
       `AUDIO-DUMP ${label} ` +
       `aiStatus=${hex(0)} aiLen=${u(1)} aiDram=${hex(2)} dacrate=${u(3)} ` +
       `f0=[a:${hex(4)} l:${u(5)} d:${u(6)}] f1=[a:${hex(7)} l:${u(8)} d:${u(9)}] ` +
       `lastRead=${u(10)} delayedCarry=${u(11)} fmtChanged=${u(12)} ` +
-      `count=${hex(13)} nextInt=${hex(14)} cycCount=${u(14) | 0}s/${u(14)}u compare=${hex(16)} ` +
+      `count=${hex(13)} nextInt=${hex(14)} cycCount=${s(15)}s/${u(15)}u compare=${hex(16)} ` +
       `det=${u(17)} skip=${u(18)} smpCount=${u(19)} smpRate=${u(20)} ` +
       `lastFreq=${u(21)} lastSkipReason=${hex(22)} ` +
       `cnt[dma=${u(23)} eod=${u(24)} ailen=${u(25)} cap=${u(26)} skp=${u(27)}] ` +
+      `probe[norm=${u(28)} allocFail=${u(29)} preN=${u(30)} postN=${u(31)} postStep=${u(32)} postKnSync=${u(33)} postClean=${u(34)}] ` +
+      `aiRel[preS=${s(35)} postS=${s(36)} preCnt=${hex(37)} postCnt=${hex(38)}] ` +
+      `firstViol[loc=${u(39)} status=${hex(40)} count=${hex(41)} dma=${u(42)} eod=${u(43)}] ` +
+      `vi[vsync=${u(44)} vintr=${u(45)} status=${hex(46)} delay=${u(47)} cps=${u(48)} field=${u(49)} noEvt=${u(50)} preCnt=${u(51)} postCnt=${u(52)} rel1=${s(53)} rel2=${s(54)}] ` +
+      `INVARIANT=${invariantOk ? 'ok' : 'VIOLATED'} ` +
       `q[${events.join(',')}]`
     );
   };
@@ -2372,6 +2382,13 @@
   window._knDumpAudioState = (label) => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (mod) _logAudioDump(mod, label);
+  };
+  // Cheap per-call invariant check; returns 1 if the AI invariant is
+  // violated AT THIS MOMENT (BUSY without AI_INT). Counters in C track
+  // total + per-location.
+  const _checkAiInvariant = (mod, locationId) => {
+    if (!mod?._kn_diag_check_invariant) return 0;
+    return mod._kn_diag_check_invariant(locationId) | 0;
   };
 
   const _postRemixStateLoadCleanup = (mod, reason) => {
@@ -4987,12 +5004,14 @@
           _config?.onToast?.('Sync failed — restart with the same core build');
           return;
         }
+        _checkAiInvariant(readyMod, 4);
         _logAudioDump(readyMod, 'guest:post-knsync-write');
         _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
         _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
         _logAudioDump(readyMod, 'guest:post-fifo-restore');
         if (_isSmashRemix()) {
           _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+          _checkAiInvariant(readyMod, 5);
           _logAudioDump(readyMod, 'guest:post-cleanup');
           _syncLog('initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup');
         }
@@ -6078,6 +6097,52 @@
     // Resume to capture fresh runner
     mod.resumeMainLoop();
 
+    // Block any pause attempt for the duration of lockstep. Pauses cause
+    // peer divergence: the lockstep tick advances _frameNum every ~16ms
+    // regardless, but a paused emulator skips retro_run, so peer A's game
+    // state falls behind peer B's by however many frames pass before the
+    // pointerdown unpause path recovers the rAF chain. Random char/stage
+    // selection happens later from a now-diverged RNG state.
+    //
+    // Pauses can come from: EJS togglePlaying (accidental pause-button
+    // click in the auto-shown menu bar), gameManager.toggleMainLoop(0),
+    // RetroArch focus-loss pause_nonactive, or cmd_pause. Block all
+    // paths; allow toggleMainLoop(1) / cmd_unpause for our recovery.
+    const ejs = window.EJS_emulator;
+    const gm = ejs?.gameManager;
+    if (gm && !gm._knOriginalToggleMainLoop) {
+      gm._knOriginalToggleMainLoop = gm.toggleMainLoop.bind(gm);
+      gm.toggleMainLoop = (arg) => {
+        if (arg === 0) {
+          _syncLog('blocked gameManager.toggleMainLoop(0)');
+          return;
+        }
+        return gm._knOriginalToggleMainLoop(arg);
+      };
+    }
+    if (ejs && !ejs._knOriginalPause) {
+      ejs._knOriginalPause = ejs.pause;
+      ejs._knOriginalTogglePlaying = ejs.togglePlaying;
+      ejs.pause = () => {
+        _syncLog('blocked EJS.pause()');
+      };
+      ejs.togglePlaying = () => {
+        _syncLog('blocked EJS.togglePlaying()');
+      };
+    }
+    if (mod._cmd_pause && !mod._knOriginalCmdPause) {
+      mod._knOriginalCmdPause = mod._cmd_pause;
+      mod._cmd_pause = () => {
+        _syncLog('blocked mod._cmd_pause()');
+      };
+    }
+    if (mod._cmd_toggle_pause && !mod._knOriginalCmdTogglePause) {
+      mod._knOriginalCmdTogglePause = mod._cmd_toggle_pause;
+      mod._cmd_toggle_pause = () => {
+        _syncLog('blocked mod._cmd_toggle_pause()');
+      };
+    }
+
     _manualMode = true;
     _syncLog('entered manual mode');
   };
@@ -6257,6 +6322,20 @@
   ];
 
   const stepOneFrame = () => {
+    if (!_pendingRunner) {
+      // Try to recapture immediately. If we wait for the pointerdown retry
+      // chain to find this (75/250/750/1500ms), the lockstep tick has
+      // already advanced _frameNum many times while the emulator was
+      // frozen — that's the peer-divergence path observed in production
+      // (host log showed `manual runner recaptured after focus+750ms`,
+      // i.e. ~45 frames of skew). Self-heal here keeps both peers
+      // bit-identical: at most one tick of skew before recovery, which
+      // is recovered by the runner's own emscripten_mainloop call below.
+      if (_manualMode && !_isSpectator) {
+        const recapMod = window.EJS_emulator?.gameManager?.Module;
+        if (recapMod) recaptureManualRunner(recapMod, 'stepOneFrame:no-runner');
+      }
+    }
     if (!_pendingRunner) {
       // ── R2: no silent no-ops during rollback replay ──────────────
       // If a replay tick lands here with a null runner, retro_unserialize
@@ -7008,6 +7087,16 @@
         mod._platform_emscripten_update_window_hidden_cb?.(0);
         mod._toggleMainLoop?.(1);
         _forceRetroArchUnpause(mod, reason);
+        // Manual-mode rAF chain can break silently: when EJS_PAUSED is set
+        // mid-frame, emscripten_mainloop calls emscripten_pause_main_loop()
+        // and returns without scheduling next rAF, so our overrideRAF never
+        // re-captures and _pendingRunner stays null. toggleMainLoop(1) only
+        // resumes if EJS_MAINLOOP_PAUSED is true at that moment, which can
+        // miss this case (e.g., toolbar/popover clicks that briefly toggled
+        // EJS pause). Force-recapture so the next stepOneFrame() runs.
+        if (_manualMode && !_pendingRunner) {
+          recaptureManualRunner(mod, `unpause-no-runner:${reason}`);
+        }
         _syncLog(`emulator foreground/pause state refreshed on ${reason}`);
         return true;
       } catch (e) {
@@ -7364,6 +7453,30 @@
     // Restore rAF if we intercepted it (other overrides restored in stop())
     if (_manualMode) {
       APISandbox.restoreAll();
+      // Restore EJS / gameManager / WASM pause overrides installed in
+      // enterManualMode. Match the install order so any chained restore
+      // unwinds cleanly even if some refs were never patched.
+      const ejs = window.EJS_emulator;
+      const gm = ejs?.gameManager;
+      const mod = gm?.Module;
+      if (gm?._knOriginalToggleMainLoop) {
+        gm.toggleMainLoop = gm._knOriginalToggleMainLoop;
+        delete gm._knOriginalToggleMainLoop;
+      }
+      if (ejs?._knOriginalPause) {
+        ejs.pause = ejs._knOriginalPause;
+        ejs.togglePlaying = ejs._knOriginalTogglePlaying;
+        delete ejs._knOriginalPause;
+        delete ejs._knOriginalTogglePlaying;
+      }
+      if (mod?._knOriginalCmdPause) {
+        mod._cmd_pause = mod._knOriginalCmdPause;
+        delete mod._knOriginalCmdPause;
+      }
+      if (mod?._knOriginalCmdTogglePause) {
+        mod._cmd_toggle_pause = mod._knOriginalCmdTogglePause;
+        delete mod._knOriginalCmdTogglePause;
+      }
     }
     _manualMode = false;
     _pendingRunner = null;
@@ -8566,6 +8679,9 @@
       _inDeterministicStep = true;
       stepOneFrame();
       _inDeterministicStep = false;
+      // 2026-04-29 audio-diag: invariant check post-step. Counters tick
+      // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
+      _checkAiInvariant(tickMod, 3);
       const _tStep = performance.now();
       // Post-step RNG reseed: the game advances RNG during the frame a
       // different number of times on each peer (from interrupt timing
