@@ -5000,26 +5000,48 @@
     // event-queue/cycle-count starting points.
     if (isKnSyncInitialState) {
       const stagePrefix = hasLocalKnSyncCapture ? 'host' : 'guest';
-      _logAudioDump(readyMod, `${stagePrefix}:pre-knsync-write`);
-      if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
-        _syncLog('FATAL: kn-sync initial state but kn_sync_write failed');
-        setStatus('Sync failed — incompatible core state');
-        _config?.onToast?.('Sync failed — restart with the same core build');
-        return;
-      }
-      _checkAiInvariant(readyMod, 4);
-      _logAudioDump(readyMod, `${stagePrefix}:post-knsync-write`);
-      _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
-      _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
-      _logAudioDump(readyMod, `${stagePrefix}:post-fifo-restore`);
-      if (_isSmashRemix()) {
-        _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
-        _checkAiInvariant(readyMod, 5);
-        _logAudioDump(readyMod, `${stagePrefix}:post-cleanup`);
+      // PUCFCIB8 (2026-04-29): host hung silently between pre-knsync-write
+      // and post-knsync-write with no diagnostic. Wrap each stage so a throw
+      // surfaces a labeled log instead of an uncaught exception that strands
+      // the lockstep flow until the 80s sync watchdog fires.
+      let kStage = 'pre-knsync';
+      try {
+        _logAudioDump(readyMod, `${stagePrefix}:pre-knsync-write`);
+        kStage = 'kn_sync_write';
+        if (!loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')) {
+          _syncLog('FATAL: kn-sync initial state but kn_sync_write failed');
+          setStatus('Sync failed — incompatible core state');
+          _config?.onToast?.('Sync failed — restart with the same core build');
+          return;
+        }
+        kStage = 'post-write-dump';
+        _checkAiInvariant(readyMod, 4);
+        _logAudioDump(readyMod, `${stagePrefix}:post-knsync-write`);
+        kStage = 'restore-hidden';
+        _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
+        kStage = 'restore-audio-fifo';
+        _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
+        kStage = 'post-fifo-dump';
+        _logAudioDump(readyMod, `${stagePrefix}:post-fifo-restore`);
+        if (_isSmashRemix()) {
+          kStage = 'post-state-cleanup';
+          _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+          _checkAiInvariant(readyMod, 5);
+          kStage = 'post-cleanup-dump';
+          _logAudioDump(readyMod, `${stagePrefix}:post-cleanup`);
+          _syncLog(
+            `initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup ` +
+              `(${hasLocalKnSyncCapture ? 'host self-restore' : 'guest from-host'})`,
+          );
+        }
+      } catch (e) {
         _syncLog(
-          `initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup ` +
-            `(${hasLocalKnSyncCapture ? 'host self-restore' : 'guest from-host'})`,
+          `KN-SYNC-RESTORE-THREW prefix=${stagePrefix} stage=${kStage} ` + `${e?.name || 'Error'}: ${e?.message || e}`,
         );
+        console.error('[lockstep] kn-sync restore stack threw:', e);
+        setStatus('Sync failed — restore stack threw');
+        _config?.onToast?.('Sync failed — restart the match');
+        return;
       }
     } else {
       loadStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load', _isSmashRemix() ? 1 : 2);
@@ -6221,14 +6243,34 @@
       return false;
     }
     let result = -1;
+    let stage = 'pre-set';
     try {
+      stage = 'heapu8.set';
       mod.HEAPU8.set(stateBytes, statePtr);
+      stage = 'kn_sync_write';
       result = mod._kn_sync_write(statePtr, stateBytes.length);
+      stage = 'post-write';
+    } catch (e) {
+      _syncLog(
+        `KN-SYNC-WRITE-THREW ${reason} stage=${stage} bytes=${stateBytes.length} ` +
+          `heapBuf=${mod.HEAPU8?.buffer?.byteLength ?? '?'} ` +
+          `${e?.name || 'Error'}: ${e?.message || e}`,
+      );
+      console.error('[lockstep] kn_sync_write threw:', e);
+      return false;
     } finally {
-      mod._free(statePtr);
+      try {
+        mod._free(statePtr);
+      } catch (_) {}
     }
-    recaptureManualRunner(mod, reason);
-    _clearPendingCInputs(`${reason}:post-kn-sync`);
+    try {
+      recaptureManualRunner(mod, reason);
+      _clearPendingCInputs(`${reason}:post-kn-sync`);
+    } catch (e) {
+      _syncLog(`KN-SYNC-RECAPTURE-THREW ${reason} ${e?.name || 'Error'}: ${e?.message || e}`);
+      console.error('[lockstep] post kn_sync_write recapture threw:', e);
+      return false;
+    }
     const lt1 = performance.now();
     _syncLog(
       `${reason}: kn_sync_write result=${result} bytes=${Math.round(stateBytes.length / 1024)}KB ms=${(lt1 - lt0).toFixed(1)}`,
@@ -6664,7 +6706,12 @@
       _lateJoinInputBootstrapUntilFrame = -1;
       _lateJoinSeededInputFrames = {};
       _rosterChangeFrame = -1;
-      _menuStartBarrierReleased = false;
+      // On a kn-sync rematch, both peers boot from a bit-identical state
+      // captured by the host — the menu-start barrier (which exists to
+      // bridge the cold-boot scene-mismatch window) serves no purpose
+      // and would suppress input forever if the resumed state is in a
+      // gameplay scene (where _isControllableMenuScene returns false).
+      _menuStartBarrierReleased = _lockstepStartStateKind === 'kn-sync';
       _menuStartLocalReady = false;
       _menuStartLocalScene = 0;
       _menuStartReleaseAt = 0;
@@ -8613,9 +8660,19 @@
           _resetAudioCallsSinceRb++;
         }
         _syncRNGSeed(tickMod, _frameNum);
+        // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
+        // performance.now() override stays armed and returns frozen WASM
+        // cycle time, which freezes the setInterval tick scheduler and the
+        // entire game loop. See netplay-lockstep.js:6873.
         _inDeterministicStep = true;
-        stepOneFrame();
-        _inDeterministicStep = false;
+        try {
+          stepOneFrame();
+        } catch (e) {
+          _syncLog(`STEP-THREW f=${_frameNum} branch=replay: ${e?.name || 'Error'}: ${e?.message || e}`);
+          console.error('[lockstep] stepOneFrame threw (replay):', e);
+        } finally {
+          _inDeterministicStep = false;
+        }
         _syncRNGSeed(tickMod, _frameNum);
         // Replay audio was generated to keep emulator state faithful, but it
         // is intentionally not fed to WebAudio from the replay branch. The
@@ -8681,9 +8738,19 @@
       }
       _syncRNGSeed(tickMod, _frameNum);
       const _tStep0 = performance.now();
+      // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
+      // performance.now() override stays armed and returns frozen WASM
+      // cycle time, which freezes the setInterval tick scheduler and the
+      // entire game loop. See netplay-lockstep.js:6873.
       _inDeterministicStep = true;
-      stepOneFrame();
-      _inDeterministicStep = false;
+      try {
+        stepOneFrame();
+      } catch (e) {
+        _syncLog(`STEP-THREW f=${_frameNum} branch=normal: ${e?.name || 'Error'}: ${e?.message || e}`);
+        console.error('[lockstep] stepOneFrame threw (normal):', e);
+      } finally {
+        _inDeterministicStep = false;
+      }
       // 2026-04-29 audio-diag: invariant check post-step. Counters tick
       // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
       _checkAiInvariant(tickMod, 3);
@@ -9778,13 +9845,21 @@
             dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
           }
         }
+        const _ti = KNState?.touchInput || {};
+        let _touchActive = 0;
+        for (const _tk in _ti) if (_ti[_tk]) _touchActive++;
+        const _keymapSize = _p1KeyMap ? Object.keys(_p1KeyMap).length : -1;
+        const _hasFocus =
+          typeof document !== 'undefined' && typeof document.hasFocus === 'function' ? document.hasFocus() : 'n/a';
         _syncLog(
           `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${_formatInputBrief(localInput)} ` +
             `delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] ` +
             `rBuf=${_formatSlotMap(rBufDetail)} dc=${_formatSlotMap(dcStates)} missed=${_remoteMissed} ` +
             `applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} ` +
             `fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw} ` +
-            `roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}]`,
+            `roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}] ` +
+            `remap=${!!KNState?.remapActive} hasFocus=${_hasFocus} ` +
+            `heldKeys=${_heldKeys.size} touchKeys=${_touchActive} keymapSize=${_keymapSize}`,
         );
       }
       // Periodic pacing summary (~5s)
@@ -9860,9 +9935,19 @@
       _resetAudioCallsSinceRb++;
     }
     _syncRNGSeed(tickMod, _frameNum);
+    // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
+    // performance.now() override stays armed and returns frozen WASM
+    // cycle time, which freezes the setInterval tick scheduler and the
+    // entire game loop. See netplay-lockstep.js:6873.
     _inDeterministicStep = true;
-    stepOneFrame();
-    _inDeterministicStep = false;
+    try {
+      stepOneFrame();
+    } catch (e) {
+      _syncLog(`STEP-THREW f=${_frameNum} branch=fallback: ${e?.name || 'Error'}: ${e?.message || e}`);
+      console.error('[lockstep] stepOneFrame threw (fallback):', e);
+    } finally {
+      _inDeterministicStep = false;
+    }
     feedAudio();
 
     _frameNum++;
