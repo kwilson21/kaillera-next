@@ -58,7 +58,18 @@
           canvas.getContext('webgl', { preserveDrawingBuffer: true });
       }
       const gl = _glCtxCache;
-      if (gl) {
+      // GLideN64's color-buffer-to-RDRAM readback leaves a PIXEL_PACK_BUFFER
+      // bound across the Emscripten event-loop yield. WebGL2 forbids the
+      // typed-array form of readPixels while a PBO is bound — calling it
+      // here would spam INVALID_OPERATION every capture. The previous
+      // attempt to save/unbind/restore was reverted: mutating GL state
+      // from JS while the C core is suspended mid-frame corrupted the
+      // core's render pipeline and surfaced as a WASM OOB on match start.
+      // Detect-and-skip is cheap (getParameter is a synchronous query on
+      // driver-cached state, not a GPU sync) and never mutates state.
+      const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+      const pboBound = isWebGL2 ? !!gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) : false;
+      if (gl && !pboBound) {
         const w = gl.drawingBufferWidth;
         const h = gl.drawingBufferHeight;
         const totalBytes = w * h * 4;
@@ -76,7 +87,10 @@
         }
         return hash;
       }
-      // Fallback: 2D canvas full resolution
+      // Fallback: 2D canvas full resolution. Used when no GL context (very
+      // rare) or when the core has a PBO bound (most frames during render
+      // — drawImage + getImageData doesn't share GL state with the core,
+      // so it's the safe path under that condition).
       if (!_offscreenCanvas || _offscreenCanvas.width !== canvas.width || _offscreenCanvas.height !== canvas.height) {
         _offscreenCanvas = document.createElement('canvas');
         _offscreenCanvas.width = canvas.width;

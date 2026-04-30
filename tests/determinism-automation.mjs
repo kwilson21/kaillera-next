@@ -2906,7 +2906,14 @@ async function setupPeer(browser, urlSuffix, name) {
       console.log(`[${name}] PAGE ERROR: ${err.message}`);
     }
   });
+  // Count noisy WebGL warnings — used to verify the kn-diagnostics
+  // captureCanvasHash fix (skip readPixels when GLideN64 leaves a PBO
+  // bound). Surface in the final summary so a regression is immediately
+  // visible.
+  let pboWarningCount = 0;
+  page.pboWarningCount = () => pboWarningCount;
   page.on('console', (msg) => {
+    if (msg.text().includes('PIXEL_PACK')) pboWarningCount++;
     const t = msg.text();
     /* Loosened 2026-04-25: include C-REPLAY-FRAME, REPLAY-INPUT, RB-CHECK so
      * we can see input streams + per-step replay flow in the test log
@@ -2935,16 +2942,24 @@ async function setupPeer(browser, urlSuffix, name) {
   const perfSuffix = DESYNC_MODE === 'deep' ? '&kndiag=deep' : '&knperf=light';
   const playUrl = `${BASE_URL}/play.html?${urlSuffix}&name=${name}&mode=rollback${perfSuffix}${gfxSuffix}${desyncSuffix}`;
   if (GFX_PROFILE) console.log(`  ${name}: gfx profile ${GFX_PROFILE}`);
-  await page.goto(playUrl, {
-    waitUntil: 'domcontentloaded',
-  });
-  await page.evaluate(() => {
+  // Set the debug-build flags BEFORE the first navigation so they're in
+  // place when play.js initializes. The previous goto+evaluate+reload
+  // pattern broke because the reload re-triggers `open-room` for the
+  // host on a room the server already considers occupied, so the
+  // open-room callback never fires and the lobby overlay stays hidden.
+  await ctx.addInitScript(() => {
     try {
       localStorage.removeItem('KN_DEV_BUILD');
       localStorage.setItem('kn-debug', '1');
     } catch {}
   });
-  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.goto(playUrl, {
+    waitUntil: 'domcontentloaded',
+  });
+  // Wait for the lobby overlay so the host has actually completed
+  // open-room. Without this, the click on #rom-drop hits a hidden node
+  // and never opens a filechooser.
+  await page.waitForSelector('#overlay:not(.hidden)', { timeout: 30000 });
   await page.evaluate(() => {
     window._knDesyncSuspects = [];
     const wire = () => {
@@ -4236,6 +4251,15 @@ async function main() {
       });
   }
   await host.page.waitForTimeout(3000);
+
+  // Surface the PIXEL_PACK_BUFFER warning count up front. If the
+  // kn-diagnostics captureCanvasHash fix regresses, this jumps from 0
+  // to "many per second" and is visible without combing through logs.
+  console.log(
+    `\n[pbo-warn] host=${host.page.pboWarningCount?.() ?? 'n/a'} ` +
+      `guest=${guest.page.pboWarningCount?.() ?? 'n/a'} ` +
+      `(target: 0 — non-zero means readPixels is firing while a PBO is bound)`,
+  );
 
   const clientSummaryFor = (peer) => {
     const rbMismatch = peer.clientEvents.filter((e) => e.text.includes('RB-CHECK') && e.text.includes('MISMATCH'));
