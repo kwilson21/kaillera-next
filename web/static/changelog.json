@@ -1,5 +1,31 @@
 [
   {
+    "version": "0.48.10",
+    "date": "2026-04-30",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "unblock C rollback init for Smash Remix"
+      },
+      {
+        "type": "fix",
+        "message": "drop Remix gate on post-state-load cleanup"
+      },
+      {
+        "type": "fix",
+        "message": "broadcast host init frame so guest rb.frame matches"
+      },
+      {
+        "type": "fix",
+        "message": "clean teardown across full match lifecycle"
+      },
+      {
+        "type": "fix",
+        "message": "three late-join UX bugs from CIVYZF4Q repro"
+      }
+    ]
+  },
+  {
     "version": "0.48.9",
     "date": "2026-04-29",
     "changes": [
