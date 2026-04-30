@@ -142,8 +142,8 @@ if [ -d "${PATCHES_DIR}" ]; then
     # 2026-04-29 kn_sync_write OOB-throw localization probes. Exports the
     # last-reached section/offset so JS can pinpoint which memcpy/struct
     # call inside kn_sync_write threw. Remove once root cause is found.
-    if grep -q "_kn_sync_write_regions" Makefile.emulatorjs && ! grep -q "_kn_get_diag_ksw_section" Makefile.emulatorjs; then
-        sed -i 's|_kn_sync_read_regions,_kn_sync_write_regions|_kn_sync_read_regions,_kn_sync_write_regions,_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset|' Makefile.emulatorjs
+    if grep -q "_kn_rdram_block_hashes" Makefile.emulatorjs && ! grep -q "_kn_get_diag_ksw_section" Makefile.emulatorjs; then
+        sed -i 's|_kn_sync_write,_kn_rdram_block_hashes|_kn_sync_write,_kn_rdram_block_hashes,_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset|' Makefile.emulatorjs
         echo "    Added kn_sync_write probe diagnostic exports"
     fi
 

@@ -190,9 +190,7 @@
  *
  *   1. C-level (patched core): _kn_sync_hash() hashes game-specific
  *      RDRAM regions directly in C — fast and deterministic.
- *      _kn_sync_hash_regions and _kn_sync_read/write_regions exports
- *      exist but are disabled pending frame-level state management (v2).
- *      Currently uses full _kn_sync_read/write for state transfer.
+ *      Uses full _kn_sync_read/write for state transfer.
  *   2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access,
  *      falling back to getState() serialization.
  *
@@ -2389,15 +2387,6 @@
   let _hasKnSync = false;
   let _syncBufPtr = 0;
   let _syncBufSize = 0;
-  // C-level regions sync: kn_sync_read_regions/kn_sync_write_regions
-  // Patches only the 4 diverged 64KB RDRAM blocks (~256KB) instead of full 8MB.
-  // Produces ~1-2 frame correction snap vs ~30 frames for full state write.
-  let _hasKnSyncRegions = false;
-  let _regionsBufPtr = 0; // WASM buffer for region data (4 × 64KB)
-  let _regionsOffsetPtr = 0; // WASM buffer for the offset array (4 × uint32)
-  // Fixed block offsets: ps0*/ps1* → 0xB0000, ps2* → 0xC0000, ph1b* → 0x260000, ph3c → 0x330000
-  const _SYNC_REGION_OFFSETS = [0xb0000, 0xc0000, 0x260000, 0x330000];
-  const _SYNC_REGIONS_TOTAL = _SYNC_REGION_OFFSETS.length * 0x10000; // 4 × 64KB = 262144
 
   // Lazy-allocate the WASM sync buffer. Called before any kn_sync_read/write.
   // Deferred from startup because the 8MB malloc can trigger WASM memory growth
@@ -4019,35 +4008,9 @@
             }
             return;
           }
-          // RDRAM mismatch — log per-region hashes to identify which anchors diverge
-          const names = ['cfg', 'ps0*', 'ps1*', 'ps2*', 'ph1a', 'ph1b*', 'ph1c', 'misc', 'ph2', 'ph3a', 'ph3b', 'ph3c'];
-          let regionLog = '';
-          if (gMod._kn_sync_hash_regions) {
-            const hb = gMod._malloc(48);
-            const rc = gMod._kn_sync_hash_regions(hb, 12);
-            const localRegions = [];
-            for (let ri = 0; ri < rc; ri++) localRegions.push(gMod.HEAPU32[(hb >> 2) + ri] >>> 0);
-            gMod._free(hb);
-            // Parse host regions from message (after parts[2])
-            const hostRegions =
-              parts.length > 3
-                ? parts
-                    .slice(3)
-                    .filter((p) => !p.includes('='))
-                    .map((v) => parseInt(v, 10) >>> 0)
-                : null;
-            if (hostRegions && hostRegions.length >= 12) {
-              const diffs = names.filter((_, i) => localRegions[i] !== hostRegions[i]);
-              regionLog = ` DIFF=[${diffs.join(',')}]`;
-              _syncLog(`REGION-HASH local ${localRegions.map((h, i) => `${names[i]}=${h}`).join(' ')}`);
-              _syncLog(`REGION-HASH host  ${hostRegions.map((h, i) => `${names[i]}=${h}`).join(' ')}`);
-            } else {
-              regionLog = ` local-regions=[${localRegions.map((h, i) => `${names[i]}=${h}`).join(' ')}]`;
-            }
-          }
           const eqHashMM = gMod._kn_eventqueue_hash?.() ?? 0;
           _syncLog(
-            `RDRAM-DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash} eq=${(eqHashMM >>> 0).toString(16)} myFrame=${_frameNum}${regionLog}`,
+            `RDRAM-DESYNC frame=${syncFrame} local=${guestHash} host=${hostHash} eq=${(eqHashMM >>> 0).toString(16)} myFrame=${_frameNum}`,
           );
           KNState.sessionStats.desyncs++;
           _syncMismatchStreak++;
@@ -7455,19 +7418,11 @@
     // growth at startup when sync may never be needed.
     const knMod = window.EJS_emulator?.gameManager?.Module;
     _hasKnSync = !!(knMod && knMod._kn_sync_hash && knMod._kn_sync_read && knMod._kn_sync_write);
-    // kn_frame_hash detection removed — using canvas hash instead
-    // kn_sync_write_regions is disabled: patching only RDRAM mid-frame causes video
-    // freeze + UI resize because the N64 CPU state (PC, registers) is inconsistent
-    // with the patched data. Safe partial sync requires frame-level state management (v2). Exports remain
-    // compiled in for future diagnostic use.
-    _hasKnSyncRegions = false;
     if (_hasKnSync) {
       // Sync buffer allocation deferred to first use (ensureSyncBuffer is called
       // inside pushSyncState/applySyncState). Allocating 8MB at init on mobile
       // can trigger WASM memory growth that disrupts DataChannel stability.
-      _syncLog(
-        `C-level sync available${_syncBufPtr ? `, buf at ${_syncBufPtr}` : ' (buffer deferred)'}${_hasKnSyncRegions ? ' [regions]' : ''}`,
-      );
+      _syncLog(`C-level sync available${_syncBufPtr ? `, buf at ${_syncBufPtr}` : ' (buffer deferred)'}`);
     } else {
       _syncLog('C-level sync NOT available, using getState/loadState fallback');
     }
@@ -7957,15 +7912,10 @@
       const modStop = window.EJS_emulator?.gameManager?.Module;
       if (modStop?._free) {
         modStop._free(_syncBufPtr);
-        if (_regionsBufPtr) modStop._free(_regionsBufPtr);
-        if (_regionsOffsetPtr) modStop._free(_regionsOffsetPtr);
       }
       _syncBufPtr = 0;
-      _regionsBufPtr = 0;
-      _regionsOffsetPtr = 0;
     }
     _hasKnSync = false;
-    _hasKnSyncRegions = false;
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
     if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;

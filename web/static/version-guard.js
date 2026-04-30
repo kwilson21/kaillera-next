@@ -2,13 +2,16 @@
  * Version-mismatch force-reload guard
  * ───────────────────────────────────
  *
- * Every HTML response has a `<script>` tag injected by CacheBustMiddleware
- * that sets `window.__KN_ASSET_VERSION` to the server's asset-version tag at
+ * Every HTML response has a `<meta name="kn-asset-version">` tag injected
+ * by CacheBustMiddleware that carries the server's asset-version tag at
  * page load time. This module polls `/api/version` at startup and
  * periodically, and if the server's current version differs from what the
  * page was loaded with, it logs a VERSION-MISMATCH event (to the console,
  * the session log if available, and the feedback telemetry path) and
  * force-reloads the page with cache bypass.
+ *
+ * The meta-tag approach (vs an inline <script>) is required so the strict
+ * CSP (script-src 'self') on non-/play.html routes doesn't block the value.
  *
  * Why this exists: local testing repeatedly hit cases where a browser tab
  * held a cached netplay-lockstep.js from before a fix landed, silently
@@ -31,11 +34,12 @@
   const VERSION_ENDPOINT = '/api/version';
   const LOG_PREFIX = '[version-guard]';
 
-  const pageLoadedVersion = window.__KN_ASSET_VERSION || '';
+  const _meta = document.querySelector('meta[name="kn-asset-version"]');
+  const pageLoadedVersion = _meta?.getAttribute('content') || '';
   if (!pageLoadedVersion) {
     // Nothing to compare against — older HTML or injection failed.
     // Silently do nothing so we don't break those pages.
-    console.warn(`${LOG_PREFIX} __KN_ASSET_VERSION not set; guard disabled`);
+    console.warn(`${LOG_PREFIX} kn-asset-version meta not set; guard disabled`);
     return;
   }
 

@@ -9,8 +9,6 @@ dependencies = [
     "python-socketio>=5.11.0",
     "python-dotenv>=1.0.0",
     "redis[hiredis]>=5.0.0",
-    "playwright>=1.40.0",
-    "Pillow>=10.0.0",
     "aiosqlite==0.20.0",
     "alembic==1.15.2",
     "sqlalchemy>=2.0.0",
@@ -26,7 +24,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "requests>=2.31",
+    # playwright is a dev/build-only dep: tests use it for E2E and
+    # scripts/generate_og_cards.py uses it to prebuild static OG cards.
+    # The runtime server has no browser dependency.
+    "playwright>=1.40.0",
     "pytest-playwright>=0.5",
+    "Pillow>=10.0.0",
     "ruff>=0.8.0",
 ]
 analysis = [

@@ -23,6 +23,14 @@ from . import desync_prompts
 
 router = APIRouter()
 
+
+def is_enabled() -> bool:
+    """Vision postmortems are billable Claude calls. Require BOTH a
+    DESYNC_VISION_ENABLED=1 flag AND an ANTHROPIC_API_KEY — key presence
+    alone shouldn't silently turn on billing."""
+    return os.getenv("DESYNC_VISION_ENABLED") == "1" and bool(os.getenv("ANTHROPIC_API_KEY"))
+
+
 _CACHE: dict[str, dict] = {}
 _CACHE_MAX = 1024
 
@@ -55,9 +63,9 @@ class VisionRequest(BaseModel):
 
 async def _do_vision_call(req: VisionRequest) -> dict[str, Any]:
     """Run the vision call for a request that has 2+ peers."""
+    if not is_enabled():
+        raise HTTPException(503, "vision disabled (set DESYNC_VISION_ENABLED=1 and ANTHROPIC_API_KEY)")
     api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(503, "vision disabled (no ANTHROPIC_API_KEY)")
 
     # Content-hash dedupe.
     h = hashlib.sha256()
@@ -144,8 +152,8 @@ async def _fire_vision(key: tuple) -> dict[str, Any] | None:
 
 @router.post("/desync-vision")
 async def desync_vision(req: VisionRequest) -> dict[str, Any]:
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise HTTPException(503, "vision disabled (no ANTHROPIC_API_KEY)")
+    if not is_enabled():
+        raise HTTPException(503, "vision disabled (set DESYNC_VISION_ENABLED=1 and ANTHROPIC_API_KEY)")
     if not req.peers:
         raise HTTPException(400, "need at least 1 peer screenshot")
 
@@ -193,7 +201,13 @@ async def _load_screenshots(match_id: str, frame: int) -> list[PeerScreenshot]:
 
 async def run_postmortem(match_id: str) -> int:
     """For each unverified desync_event row in this match, load screenshots
-    from the existing screenshots table and fire vision via _do_vision_call."""
+    from the existing screenshots table and fire vision via _do_vision_call.
+
+    No-op if the vision feature flag is off — keeps the signaling caller
+    unconditional while ensuring billable calls only fire when explicitly
+    enabled."""
+    if not is_enabled():
+        return 0
     rows = await db.query(
         """SELECT id, match_id, frame, field, slot, trigger, hashes_json, replay_meta_json
            FROM desync_events

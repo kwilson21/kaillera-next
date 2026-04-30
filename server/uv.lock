@@ -600,8 +600,6 @@ dependencies = [
     { name = "alembic" },
     { name = "anthropic" },
     { name = "fastapi" },
-    { name = "pillow" },
-    { name = "playwright" },
     { name = "polars", extra = ["rtcompat"] },
     { name = "pyarrow" },
     { name = "python-dotenv" },
@@ -617,6 +615,8 @@ analysis = [
     { name = "requests" },
 ]
 dev = [
+    { name = "pillow" },
+    { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-playwright" },
     { name = "requests" },
@@ -630,8 +630,8 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.34" },
     { name = "duckdb", marker = "extra == 'analysis'", specifier = ">=1.0" },
     { name = "fastapi", specifier = ">=0.110.0" },
-    { name = "pillow", specifier = ">=10.0.0" },
-    { name = "playwright", specifier = ">=1.40.0" },
+    { name = "pillow", marker = "extra == 'dev'", specifier = ">=10.0.0" },
+    { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.40.0" },
     { name = "polars", extras = ["rtcompat"], specifier = ">=1.0" },
     { name = "pyarrow", specifier = ">=15.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },

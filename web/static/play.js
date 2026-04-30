@@ -273,8 +273,15 @@
   let _romSignalHandler = null; // pre-game rom-signal Socket.IO listener
   let _currentInputType = _isMobile ? 'gamepad' : 'keyboard';
   let _autoSpectated = false; // true if we auto-joined as spectator due to full room
-  let _uploadToken = _safeGet('localStorage', 'kn-upload-token') || ''; // HMAC token for sync-log/cache-state uploads
-  KNState.uploadToken = _uploadToken; // initialize immediately so KNEvent works before upload-token socket event
+  // HMAC token for sync-log/cache-state uploads. Scoped per-room so a token
+  // cached from room A is never replayed against room B (the server checks
+  // the token's "room" claim against the request's room param and returns
+  // 403 on mismatch). Initialize from cache so KNEvent works before the
+  // socket-issued upload-token event arrives.
+  const _urlRoomCode = new URLSearchParams(window.location.search).get('room') || '';
+  const _uploadTokenKey = _urlRoomCode ? `kn-upload-token:${_urlRoomCode}` : '';
+  let _uploadToken = (_uploadTokenKey && _safeGet('localStorage', _uploadTokenKey)) || '';
+  KNState.uploadToken = _uploadToken;
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -649,7 +656,7 @@
       _uploadToken = data?.token || '';
       KNState.uploadToken = _uploadToken;
       try {
-        _safeSet('localStorage', 'kn-upload-token', _uploadToken);
+        if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
       } catch (_) {}
       fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
         .then((r) => r.json())

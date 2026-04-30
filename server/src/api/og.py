@@ -1,16 +1,16 @@
-"""Open Graph image generation and HTML meta tag injection.
+"""Open Graph cards: HTML template + static-URL meta tag injection.
 
-Generates 1200x630 PNG preview cards by screenshotting HTML templates via Playwright.
+Cards are pre-rendered at build time by `scripts/generate_og_cards.py`
+and served as plain static files from `web/static/og/cards/`. There is
+no runtime browser. `_build_card_html` is exported so the build script
+can reuse the same template.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -55,59 +55,6 @@ def feature_enabled_for_host(raw: str, host: str) -> bool:
 
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
 
-# ── Playwright browser singleton (lazy-start, auto-close on idle) ────────────
-
-_browser = None
-_playwright = None
-_last_used: float = 0.0
-_idle_closer_task: asyncio.Task | None = None
-
-# Close the browser after 5 minutes of no OG image requests.
-_IDLE_TIMEOUT_S = 300
-
-
-async def _get_browser():
-    """Lazy-init a headless Chromium browser, scheduling auto-close on idle."""
-    global _browser, _playwright, _last_used, _idle_closer_task
-    _last_used = time.monotonic()
-    if _browser is None:
-        from playwright.async_api import async_playwright
-
-        _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.launch(headless=True)
-        log.info("OG image renderer: Playwright browser started")
-        # Start idle-close watcher if not already running
-        if _idle_closer_task is None or _idle_closer_task.done():
-            _idle_closer_task = asyncio.create_task(_idle_closer())
-    return _browser
-
-
-async def _idle_closer() -> None:
-    """Background task that closes the browser after _IDLE_TIMEOUT_S of inactivity."""
-    while True:
-        await asyncio.sleep(60)  # check every minute
-        if _browser is None:
-            return  # nothing to close
-        idle = time.monotonic() - _last_used
-        if idle >= _IDLE_TIMEOUT_S:
-            log.info("OG image renderer: closing browser after %ds idle", int(idle))
-            await close_browser()
-            return
-
-
-async def close_browser() -> None:
-    """Close the Playwright browser and stop the Playwright instance."""
-    global _browser, _playwright
-    if _browser is not None:
-        with contextlib.suppress(Exception):
-            await _browser.close()
-        _browser = None
-        log.info("OG image renderer: Playwright browser closed")
-    if _playwright is not None:
-        with contextlib.suppress(Exception):
-            await _playwright.stop()
-        _playwright = None
-
 
 def _html_escape(s: str) -> str:
     """Escape HTML special characters."""
@@ -124,7 +71,13 @@ def _build_card_html(
     """Build a self-contained HTML page for the OG card."""
     game_info = GAME_INFO.get(game_id) if game_id else None
     has_game_bg = game_images_enabled and game_info is not None and (_OG_DIR / game_info["image"]).exists()
-    is_homepage = room_name is None
+    # Three render modes:
+    #   - homepage: room_name=None, game_id=None (generic kaillera-next card)
+    #   - per-game static: room_name=None, game_id=<known> (build-time card per game)
+    #   - per-room: room_name set (legacy dynamic; only used by scripts/generate_og_cards.py
+    #     for fallback cards now that runtime rendering is gone)
+    is_homepage = room_name is None and game_id is None
+    is_per_game_static = room_name is None and game_id is not None
 
     # Background image as base64 data URI for self-contained HTML
     bg_css = ""
@@ -163,6 +116,9 @@ def _build_card_html(
     if is_homepage:
         subtitle = "Play retro games online with friends"
         subtitle_class = "subtitle-default"
+    elif is_per_game_static:
+        subtitle = "Up to 4 players online" if not spectate else "Watch live"
+        subtitle_class = "subtitle-blue"
     elif spectate and player_names and len(player_names) >= 2:
         if len(player_names) == 2:
             subtitle = f"{_html_escape(player_names[0])} vs {_html_escape(player_names[1])}"
@@ -343,35 +299,6 @@ def _build_card_html(
 </html>"""
 
 
-async def generate_og_image(
-    room_name: str | None,
-    game_id: str | None,
-    spectate: bool,
-    player_names: list[str] | None = None,
-    game_images_enabled: bool = True,
-) -> bytes:
-    """Generate a 1200x630 OG card image by screenshotting HTML.
-
-    Args:
-        room_name: Room owner's display name (None for homepage).
-        game_id: Game identifier for background lookup (None for homepage).
-        spectate: True for "WATCH GAME" badge, False for "JOIN GAME".
-        player_names: List of player names in room (for spectate cards).
-        game_images_enabled: When False, renders text-only card with no game art.
-
-    Returns:
-        PNG image as bytes.
-    """
-    html = _build_card_html(room_name, game_id, spectate, player_names, game_images_enabled)
-    browser = await _get_browser()
-    page = await browser.new_page(viewport={"width": 1200, "height": 630})
-    try:
-        await page.set_content(html, wait_until="networkidle")
-        return await page.screenshot(type="png")
-    finally:
-        await page.close()
-
-
 # ── HTML meta tag injection ───────────────────────────────────────────────────
 
 _HEAD_RE = re.compile(r"(<head[^>]*>)", re.IGNORECASE)
@@ -393,20 +320,20 @@ def build_og_tags(
     """
     game_info = GAME_INFO.get(game_id) if game_id else None
 
+    # Card images are now prebuilt static PNGs (see scripts/generate_og_cards.py).
+    # Pick the per-game card if we recognize the game, else fall back to home.png.
+    if game_info:
+        suffix = "watch" if spectate else "play"
+        image_url = f"https://{host}/static/og/cards/{quote(game_id, safe='')}-{suffix}.png"
+    else:
+        image_url = f"https://{host}/static/og/home.png"
+
     if room_id and room_name:
         game_label = game_info["name"] if game_info else (game_id or "")
         title = f"Come watch! {room_name} is playing" if spectate else f"Ready to fight? {room_name} is waiting"
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
-        img_params = []
-        if game_id:
-            img_params.append(f"game={quote(game_id, safe='')}")
-        if spectate:
-            img_params.append("spectate=1")
-        image_url = f"https://{host}/og-image/{quote(room_id, safe='')}.png"
-        if img_params:
-            image_url += "?" + "&amp;".join(img_params)
         page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
         if game_id:
             page_url += f"&amp;game={quote(game_id, safe='')}"
@@ -415,7 +342,6 @@ def build_og_tags(
     else:
         title = "kaillera-next"
         description = "Play retro games online with friends \u2014 no install needed"
-        image_url = f"https://{host}/static/og/home.png"
         page_url = f"https://{host}/"
 
     return (

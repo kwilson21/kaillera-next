@@ -6,7 +6,6 @@ V1 endpoints:
   GET  /list?game_id=...        EmulatorJS-Netplay room listing
   GET  /room/{room_id}          minimal room info (rate-limited)
   GET  /ice-servers             WebRTC ICE server config
-  GET  /og-image/{room_id}.png  dynamic OG card image (Playwright screenshot)
   GET  /play.html               play page with injected OG meta tags
   GET  /                        homepage with injected OG meta tags
   GET  /api/cached-state/{h}    download cached save state
@@ -46,12 +45,10 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from src import db, state, state_cache
 from src.api.og import (
-    _GAME_IMAGES_RAW,
     _ROM_SHARING_RAW,
     _inject_kn_config,
     build_og_tags,
     feature_enabled_for_host,
-    generate_og_image,
     inject_og_tags,
 )
 from src.api.payloads import FeedbackPayload
@@ -197,7 +194,7 @@ class SecurityHeadersMiddleware:
                     (b"cache-control", self._cache_control(path).encode()),
                 ]
                 # COOP/COEP breaks OG image fetches by crawlers
-                if not path.startswith(("/og-image/", "/static/og/")):
+                if not path.startswith("/static/og/"):
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
@@ -395,7 +392,7 @@ class CacheBustMiddleware:
             return
 
         path: str = scope.get("path", "/")
-        if path.startswith(("/static/", "/api/", "/socket.io/", "/admin/api/", "/og-image/")):
+        if path.startswith(("/static/", "/api/", "/socket.io/", "/admin/api/")):
             await self.app(scope, receive, send)
             return
 
@@ -424,16 +421,16 @@ class CacheBustMiddleware:
                             lambda m: m.group(1) + m.group(2) + b"?v=" + version_bytes + m.group(3),
                             body,
                         )
-                        # Inject current asset version as a window global
-                        # into the <head>. The client-side version-mismatch
-                        # guard reads this on page load and polls /api/version
-                        # to detect stale JS sessions across deploys / hot
-                        # edits, force-reloading if they diverge.
-                        version_script = (
-                            b"<script>window.__KN_ASSET_VERSION=" + b'"' + version_bytes + b'"' + b";</script>"
-                        )
+                        # Inject current asset version as a <meta> tag. The
+                        # client-side version-mismatch guard reads this on page
+                        # load and polls /api/version to detect stale JS
+                        # sessions across deploys / hot edits, force-reloading
+                        # if they diverge. Using a meta tag (instead of inline
+                        # <script>) keeps the strict CSP (script-src 'self')
+                        # on non-/play.html routes from blocking the value.
+                        version_meta = b'<meta name="kn-asset-version" content="' + version_bytes + b'">'
                         if b"</head>" in body:
-                            body = body.replace(b"</head>", version_script + b"</head>", 1)
+                            body = body.replace(b"</head>", version_meta + b"</head>", 1)
                         new_headers = [
                             (k, str(len(body)).encode()) if k == b"content-length" else (k, v)
                             for k, v in start_message.get("headers", [])
@@ -455,7 +452,7 @@ class ErrorPageMiddleware:
     are not on API paths. Injects the status code into the HTML template.
     """
 
-    _API_PREFIXES = ("/api/", "/admin/api/", "/socket.io/", "/health", "/list", "/room/", "/ice-servers", "/og-image/")
+    _API_PREFIXES = ("/api/", "/admin/api/", "/socket.io/", "/health", "/list", "/room/", "/ice-servers")
 
     def __init__(self, app, error_html: str) -> None:  # noqa: ANN001
         self.app = app
@@ -526,8 +523,11 @@ def create_app(lifespan=None) -> FastAPI:
     version = _asset_version()
     # Pass the function (not the value) so the middleware re-evaluates
     # per-request — file edits propagate without a server restart.
-    app.add_middleware(GZipMiddleware, minimum_size=500)
+    # CacheBust must wrap the app BEFORE GZip so it sees uncompressed HTML.
+    # add_middleware wraps inside-out: the first add is the innermost layer,
+    # so CacheBust modifies the body first, then GZip compresses the result.
     app.add_middleware(CacheBustMiddleware, version_fn=_asset_version)
+    app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
 
     # Load error page template
@@ -586,6 +586,22 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/api/core-info")
     async def core_info() -> dict:
         return _get_core_info()
+
+    # EmulatorJS fetches /static/ejs/cores/reports/<core>.json on boot to
+    # read a `buildStart` timestamp; if missing, it logs "Could not fetch
+    # core report JSON! Core caching will be disabled!" and falls back to a
+    # random key. We don't rely on EJS's IDB caching — core-redirector.js
+    # invalidates IDB whenever our content-addressed core hash changes — so
+    # all this needs to do is return a truthy, hash-stable buildStart so
+    # the warning stops firing. Derive it from the core hash so it only
+    # changes when the WASM actually changes.
+    @app.get("/static/ejs/cores/reports/{core_name}.json")
+    async def core_report(core_name: str) -> dict:  # noqa: ARG001
+        info = _get_core_info()
+        h = info.get("hash") or ""
+        # 16-char hex prefix → fits in a JS Number safely (52 bits).
+        build_start = int(h[:13], 16) if h else 1
+        return {"buildStart": build_start}
 
     # Asset version endpoint — used by the client-side stale-JS guard.
     # Every page load records `window.__KN_ASSET_VERSION` from a script
@@ -1563,46 +1579,6 @@ def create_app(lifespan=None) -> FastAPI:
             if p.get("socketId") == room.owner:
                 return p.get("playerName", room.room_name)
         return room.room_name
-
-    def _player_names(room) -> list[str]:  # noqa: ANN001
-        """Get list of player display names in the room."""
-        return [p.get("playerName", "?") for p in room.players.values()]
-
-    _fallback_png = _web_dir / "static" / "og" / "fallback.png"
-
-    @app.get("/og-image/{room_id}.png")
-    async def og_image(room_id: str, request: Request) -> Response:
-        try:
-            valid_room = bool(_PUBLIC_ROOM_ID_RE.match(room_id))
-            spectate = request.query_params.get("spectate") == "1"
-            game_hint_raw = request.query_params.get("game")
-            game_hint = game_hint_raw if game_hint_raw and _PUBLIC_GAME_ID_RE.match(game_hint_raw) else None
-            game_images = feature_enabled_for_host(_GAME_IMAGES_RAW, request.headers.get("host", ""))
-            room = rooms.get(room_id) if valid_room else None
-            if room:
-                names = _player_names(room) if spectate else None
-                game_id = room.game_id or game_hint
-                img = await generate_og_image(
-                    _owner_name(room), game_id, spectate, player_names=names, game_images_enabled=game_images
-                )
-            elif valid_room:
-                # Path param passed format check; safe to render as room_name.
-                img = await generate_og_image(room_id, game_hint, spectate, game_images_enabled=game_images)
-            else:
-                # Untrusted/malformed room_id — render generic homepage card.
-                img = await generate_og_image(None, game_hint, False, game_images_enabled=game_images)
-        except Exception:
-            log.warning("OG image generation failed for room %s", room_id, exc_info=True)
-            if _fallback_png.exists():
-                img = _fallback_png.read_bytes()
-            else:
-                log.warning("OG fallback image missing at %s", _fallback_png)
-                raise HTTPException(status_code=500, detail="OG image unavailable") from None
-        return Response(
-            content=img,
-            media_type="image/png",
-            headers={"cache-control": "public, max-age=300"},
-        )
 
     @app.get("/play.html")
     def play_page(request: Request) -> Response:

@@ -672,36 +672,6 @@ async function sampleMatchSetup(page) {
           mod._free(ptrOut);
         }
       };
-      const readRegionHashes = () => {
-        if (!mod._malloc || !mod._free || !mod.HEAPU32 || typeof mod._kn_sync_hash_regions !== 'function') return null;
-        const count = 12;
-        const ptrOut = mod._malloc(count * 4);
-        try {
-          const n = mod._kn_sync_hash_regions(ptrOut, count) >>> 0;
-          const base = ptrOut >> 2;
-          const regions = [
-            '0x0a4000',
-            '0x0ba000',
-            '0x0bf000',
-            '0x0c4000',
-            '0x262000',
-            '0x266000',
-            '0x26a000',
-            '0x290000',
-            '0x2f6000',
-            '0x32b000',
-            '0x330000',
-            '0x335000',
-          ];
-          const out = {};
-          for (let i = 0; i < Math.min(n, count); i++) out[regions[i] || String(i)] = mod.HEAPU32[base + i] >>> 0;
-          return out;
-        } catch {
-          return null;
-        } finally {
-          mod._free(ptrOut);
-        }
-      };
       const out = {
         frame,
         scene: null,
@@ -716,7 +686,6 @@ async function sampleMatchSetup(page) {
           full_state: call('_kn_full_state_hash', -1),
           softfloat: call('_kn_get_softfloat_state'),
           hidden: call('_kn_get_hidden_state_fingerprint'),
-          sync_regions: readRegionHashes(),
           event_queue_dump: readU32Array('_kn_eventqueue_dump', 64),
           rdram_blocks: readU32Array('_kn_rdram_block_hashes', 128),
         },

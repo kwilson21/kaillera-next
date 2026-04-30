@@ -1,9 +1,12 @@
-"""Tests for OG image generation.
+"""Tests for OG card serving.
+
+OG cards are now prebuilt static PNGs in web/static/og/cards/. The runtime
+server has no browser dependency. Generation lives in
+scripts/generate_og_cards.py and runs at build time.
 
 Run: pytest tests/test_og.py -v
 """
 
-import asyncio
 import io
 import sys
 from pathlib import Path
@@ -11,102 +14,54 @@ from pathlib import Path
 # Ensure server src is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "server"))
 
-from PIL import Image  # still used for PNG validation in tests
+from PIL import Image  # validates PNG dimensions of the prebuilt cards
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CARDS_DIR = REPO_ROOT / "web" / "static" / "og" / "cards"
 
 
-_loop = asyncio.new_event_loop()
+def test_static_cards_exist_for_all_games():
+    """Every game in GAME_INFO must have prebuilt play+watch cards on disk."""
+    from src.api.og import GAME_INFO
+
+    for game_id in GAME_INFO:
+        for suffix in ("play", "watch"):
+            card = CARDS_DIR / f"{game_id}-{suffix}.png"
+            assert card.exists(), f"missing OG card: {card}"
+            img = Image.open(card)
+            assert img.size == (1200, 630)
+            assert img.format == "PNG"
 
 
-def _run(coro):
-    """Run an async function in a shared event loop (Playwright browser is loop-bound)."""
-    return _loop.run_until_complete(coro)
-
-
-def test_generate_og_image_with_game():
-    """Generate a play invite card with game background."""
-    from src.api.og import generate_og_image
-
-    img_bytes = _run(generate_og_image(
-        room_name="Agent 21's room",
-        game_id="ssb64",
-        spectate=False,
-    ))
-    assert isinstance(img_bytes, bytes)
-    assert len(img_bytes) > 0
-    img = Image.open(io.BytesIO(img_bytes))
-    assert img.size == (1200, 630)
-    assert img.format == "PNG"
-
-
-def test_generate_og_image_spectate():
-    """Generate a watch invite card."""
-    from src.api.og import generate_og_image
-
-    img_bytes = _run(generate_og_image(
-        room_name="Agent 21",
-        game_id="ssb64",
-        spectate=True,
-    ))
-    assert isinstance(img_bytes, bytes)
-    img = Image.open(io.BytesIO(img_bytes))
+def test_homepage_card_exists():
+    """Homepage card (no game) must exist."""
+    home = REPO_ROOT / "web" / "static" / "og" / "home.png"
+    assert home.exists()
+    img = Image.open(home)
     assert img.size == (1200, 630)
 
 
-def test_generate_og_image_spectate_with_players():
-    """Generate a watch card showing player matchup."""
-    from src.api.og import generate_og_image
+def test_build_og_tags_points_at_static_per_game_card():
+    """Recognized game_id → /static/og/cards/{game}-{play|watch}.png."""
+    from src.api.og import build_og_tags
 
-    img_bytes = _run(generate_og_image(
-        room_name="Agent 21",
-        game_id="ssb64",
-        spectate=True,
-        player_names=["Agent 21", "Player2"],
-    ))
-    assert isinstance(img_bytes, bytes)
-    img = Image.open(io.BytesIO(img_bytes))
-    assert img.size == (1200, 630)
+    tags = build_og_tags("example.com", room_id="ABC123", room_name="Alice", game_id="ssb64", spectate=False)
+    assert "/static/og/cards/ssb64-play.png" in tags
+
+    tags = build_og_tags("example.com", room_id="ABC123", room_name="Alice", game_id="ssb64", spectate=True)
+    assert "/static/og/cards/ssb64-watch.png" in tags
 
 
-def test_generate_og_image_unknown_game():
-    """Generate a generic card for unknown game_id."""
-    from src.api.og import generate_og_image
+def test_build_og_tags_falls_back_to_home_for_unknown_game():
+    """Unknown game_id → home.png fallback (no per-game card)."""
+    from src.api.og import build_og_tags
 
-    img_bytes = _run(generate_og_image(
-        room_name="Test Room",
-        game_id="unknown_game",
-        spectate=False,
-    ))
-    assert isinstance(img_bytes, bytes)
-    img = Image.open(io.BytesIO(img_bytes))
-    assert img.size == (1200, 630)
-
-
-def test_generate_og_image_homepage():
-    """Generate homepage card (no room info)."""
-    from src.api.og import generate_og_image
-
-    img_bytes = _run(generate_og_image(
-        room_name=None,
-        game_id=None,
-        spectate=False,
-    ))
-    assert isinstance(img_bytes, bytes)
-    img = Image.open(io.BytesIO(img_bytes))
-    assert img.size == (1200, 630)
+    tags = build_og_tags("example.com", room_id="ABC123", room_name="Alice", game_id="unknown_game", spectate=False)
+    assert "/static/og/home.png" in tags
+    assert "/static/og/cards/" not in tags
 
 
 # ── Server route tests (require running server) ──────────────────────────
-
-
-def test_og_image_endpoint_no_room(server_url):
-    """OG image endpoint returns a PNG even when room doesn't exist (generic card)."""
-    import requests
-
-    r = requests.get(f"{server_url}/og-image/NONEXIST.png", timeout=10, verify=False)
-    assert r.status_code == 200
-    assert r.headers["content-type"] == "image/png"
-    img = Image.open(io.BytesIO(r.content))
-    assert img.size == (1200, 630)
 
 
 def test_play_html_has_og_tags(server_url):
@@ -115,9 +70,9 @@ def test_play_html_has_og_tags(server_url):
 
     r = requests.get(f"{server_url}/play.html?room=TESTROOM", timeout=5, verify=False)
     assert r.status_code == 200
-    assert 'og:title' in r.text
-    assert 'og:image' in r.text
-    assert 'twitter:card' in r.text
+    assert "og:title" in r.text
+    assert "og:image" in r.text
+    assert "twitter:card" in r.text
 
 
 def test_homepage_has_og_tags(server_url):
@@ -126,13 +81,16 @@ def test_homepage_has_og_tags(server_url):
 
     r = requests.get(f"{server_url}/", timeout=5, verify=False)
     assert r.status_code == 200
-    assert 'og:title' in r.text
-    assert 'kaillera-next' in r.text
+    assert "og:title" in r.text
+    assert "kaillera-next" in r.text
 
 
-def test_og_image_no_coep_header(server_url):
-    """OG image endpoint must not have COEP header (blocks crawler fetches)."""
+def test_static_card_no_coep_header(server_url):
+    """Static OG cards must not have COEP header (blocks crawler fetches)."""
     import requests
 
-    r = requests.get(f"{server_url}/og-image/TEST.png", timeout=10, verify=False)
+    r = requests.get(f"{server_url}/static/og/cards/ssb64-play.png", timeout=10, verify=False)
+    assert r.status_code == 200
     assert "cross-origin-embedder-policy" not in r.headers
+    img = Image.open(io.BytesIO(r.content))
+    assert img.size == (1200, 630)

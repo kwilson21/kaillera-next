@@ -43,8 +43,6 @@ async def lifespan(_app):
     task = asyncio.create_task(_cleanup_empty_rooms())
     log_task = asyncio.create_task(cleanup_old_data())
     rotation_task = match_rotation.start_sweeper()
-    # Playwright browser starts lazily on first OG image request
-    # and auto-closes after 5 minutes idle (see og.py _idle_closer).
     yield
     set_shutting_down()
     task.cancel()
@@ -52,9 +50,6 @@ async def lifespan(_app):
     rotation_task.cancel()
     if rooms:
         log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
-    from src.api.og import close_browser
-
-    await close_browser()
     await db.close_db()
     await state_cache.close()
     await state.close()
@@ -72,8 +67,11 @@ def run() -> None:
     )
 
     _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    if _anthropic_key:
+    _vision_flag = os.getenv("DESYNC_VISION_ENABLED") == "1"
+    if _vision_flag and _anthropic_key:
         print(f"[startup] vision enabled (key {_anthropic_key[:8]}…)")
+    elif _anthropic_key:
+        print("[startup] vision DISABLED (set DESYNC_VISION_ENABLED=1 to enable; key present)")
     else:
         print("[startup] vision DISABLED (no ANTHROPIC_API_KEY env var)")
 

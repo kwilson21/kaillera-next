@@ -35,8 +35,6 @@ async def init_db(db_path: str | None = None) -> None:
 
 def _run_migrations(db_path: str) -> None:
     """Run Alembic upgrade head against the given database path."""
-    import sqlite3
-
     from alembic import command
     from alembic.config import Config
 
@@ -47,25 +45,7 @@ def _run_migrations(db_path: str) -> None:
     cfg.set_main_option("script_location", str(alembic_dir))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 
-    # Guard: if the DB was stamped with a revision that no longer exists
-    # (e.g. a migration was added then removed), fix it by stamping to the
-    # latest known revision before running upgrade.
-    try:
-        command.upgrade(cfg, "head")
-    except Exception as exc:
-        if "No such revision" not in str(exc) and "Can't locate revision" not in str(exc):
-            raise
-        log.warning("Alembic revision mismatch — fixing: %s", exc)
-        from alembic.script import ScriptDirectory
-
-        script = ScriptDirectory.from_config(cfg)
-        head = script.get_current_head()
-        conn = sqlite3.connect(db_path)
-        conn.execute("UPDATE alembic_version SET version_num = ?", (head,))
-        conn.commit()
-        conn.close()
-        log.info("Stamped alembic_version to %s, retrying migrations", head)
-        command.upgrade(cfg, "head")
+    command.upgrade(cfg, "head")
 
 
 async def close_db() -> None:
