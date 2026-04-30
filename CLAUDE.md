@@ -36,10 +36,13 @@ V1 — Browser-based
               - Game data relay (save states, input)
               HTTP/WS :27888
 
-  Lockstep mode: all players run the emulator in sync via WebRTC DataChannels.
-  Rollback mode: GGPO-style input prediction + C-level replay via WebRTC DataChannels.
-  Streaming mode: host runs the emulator and streams video via WebRTC MediaStream.
-  Server is idle after signaling completes (lockstep/rollback) or relays save states (initial sync).
+  Rollback mode: GGPO-style C-level rollback engine. All players run their own
+    emulator and exchange inputs over WebRTC DataChannels; misprediction triggers
+    bit-exact replay via the patched WASM core. Strict lockstep is the silent
+    fallback path inside the same engine when the core does not export kn_pre_tick.
+  Streaming mode: host runs the only emulator and streams video via WebRTC MediaStream.
+  Server is idle once signaling completes (rollback) or relays save states for
+  initial sync and late join.
 ```
 
 ## Repo structure
@@ -68,7 +71,8 @@ kaillera-next/
 │   └── static/
 │       ├── lobby.js             # lobby controller
 │       ├── play.js              # play page orchestrator
-│       ├── netplay-lockstep.js  # deterministic lockstep engine (4P mesh)
+│       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
+│       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
 │       ├── shared.js            # input encoding/decoding, cheats, wire format
 │       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
@@ -100,9 +104,8 @@ kaillera-next/
 | Socket.IO signaling server (rooms + WebRTC relay) | done |
 | Web lobby (create/join/spectate) | done |
 | EmulatorJS embed + ROM drag-and-drop | done |
-| Lockstep netplay (up to 4 players, mesh WebRTC) | done |
-| Streaming netplay (host video → guests) | done |
-| Rollback netcode with input prediction (C-level, amortized replay) | done |
+| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done |
+| Streaming netplay (host video → guests via WebRTC MediaStream) | done |
 | Spectators (canvas video stream from host) | done |
 | Gamepad support (profiles, remapping wizard) | done |
 | Late join (mid-game join with state sync) | done |
@@ -123,7 +126,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
-| `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game |
+| `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
@@ -152,21 +155,23 @@ All events go through the default Socket.IO namespace (`/`).
 
 - **Stack:** Python FastAPI + python-socketio + uvloop. Server latency doesn't affect
   game performance — WebRTC is P2P once the handshake completes.
-- **Lockstep netplay:** Full mesh WebRTC DataChannels. Each player runs their own
-  emulator; inputs are exchanged every frame with configurable delay buffering.
+- **Rollback netplay:** Full mesh WebRTC DataChannels. Each player runs their own
+  emulator; the C-level GGPO-style rollback engine (`build/kn_rollback/kn_rollback.c`)
+  predicts remote inputs, advances locally, and replays via state ring buffer +
+  amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
+  Strict lockstep is the silent stall fallback inside the same engine (boot
+  convergence, menu phase-lock gate) and the path used when the core does not
+  export `kn_pre_tick`. Menu lockstep gate reads `game_status` from RDRAM.
+  Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel.
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
 - **Rooms are ephemeral:** No persistent database. Rooms live in memory (with optional
   Redis persistence for zero-downtime deploys and reconnect survival).
-- **Rollback netcode:** C-level GGPO-style rollback engine (`kn_rollback.c`) with
-  input prediction, save state ring buffer (full serialize every frame), and amortized
-  replay. Cross-platform determinism via SoftFloat FPU. Menu lockstep gate reads
-  `game_status` from RDRAM. Host-authoritative resync remains as fallback for
-  reconnection and late join.
 - **Patched WASM core:** mupen64plus-next compiled with deterministic timing patches
-  (kn_set_deterministic, kn_set_frame_time), SoftFloat FPU, and rollback exports
-  for lockstep sync. Falls back to stock CDN core with JS-level timing shim.
+  (`kn_set_deterministic`, `kn_set_frame_time`), SoftFloat FPU, and rollback engine
+  exports (`kn_pre_tick`, `kn_post_tick`, etc.). Falls back to stock CDN core with
+  JS-level timing shim — in that case the engine takes its strict lockstep path.
 
 ## Netplay invariants
 

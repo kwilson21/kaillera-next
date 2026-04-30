@@ -10,7 +10,8 @@ Thanks for your interest in contributing! This project is open to contributions 
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
 - [just](https://github.com/casey/just) (command runner)
 - Node.js (for Prettier formatting)
-- Optionally: Docker (for Redis), [Tailscale](https://tailscale.com) (for HTTPS dev)
+- Optionally: Docker (for Redis), [lego](https://go-acme.github.io/lego/) + a
+  Cloudflare API token (for HTTPS dev — see `just certs` in the README)
 
 ### Setup
 
@@ -24,7 +25,7 @@ just serve
 ```
 
 This gets you a running server for exploring the lobby, streaming mode, and the
-codebase. See [README.md](README.md) for HTTPS setup (required for lockstep mode)
+codebase. See [README.md](README.md) for HTTPS setup (required for rollback mode)
 and Docker deployment.
 
 ## Ways to contribute
@@ -104,11 +105,11 @@ property documents its writer and readers inline:
 
 ```js
 window.KNState = {
-  remapActive: false,    // play.js → lockstep.js, streaming.js
-  touchInput: {},        // virtual-gamepad.js → lockstep.js, streaming.js
-  peers: {},             // lockstep/streaming.js → play.js
-  frameNum: 0,           // lockstep.js → play.js info overlay
-  delayAutoValue: 2,     // play.js → lockstep.js
+  remapActive: false,    // play.js → rollback.js, streaming.js
+  touchInput: {},        // virtual-gamepad.js → rollback.js, streaming.js
+  peers: {},             // rollback/streaming.js → play.js
+  frameNum: 0,           // rollback.js → play.js info overlay
+  delayAutoValue: 2,     // play.js → rollback.js
   romHash: null,         // play.js → gamepad-manager.js
 };
 ```
@@ -127,12 +128,13 @@ earlier ones to have set up their `window.*` exports:
 5. `gamepad-manager.js` — gamepad profiles and mapping
 6. `shared.js` — input encoding/decoding, cheats, wire format
 7. `virtual-gamepad.js` — touch controls for mobile
-8. `netplay-lockstep.js` — lockstep engine (exposes `window.NetplayLockstep`)
-9. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-10. `controller-settings.js` — in-game controller settings panel
-11. `play.js` — page orchestrator (connects everything)
-12. `version.js` — version display + changelog modal
-13. `feedback.js` — in-app feedback collection
+8. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+9. `netplay-lockstep.js` — deprecated 16-line compat shim that warns once; loaded after rollback so cached `play.html` requests don't 404
+10. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+11. `controller-settings.js` — in-game controller settings panel
+12. `play.js` — page orchestrator (connects everything)
+13. `version.js` — version display + changelog modal
+14. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
@@ -153,20 +155,28 @@ The Python server is small (~3,400 lines across 8 files):
 
 | File | Lines | What it does | Talks to |
 |---|---|---|---|
-| `play.js` | ~4,300 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
-| `netplay-lockstep.js` | ~5,650 | Deterministic lockstep engine (4P mesh WebRTC, frame stepping, desync/resync) | play.js, KNState, shared.js |
-| `netplay-streaming.js` | ~1,100 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
-| `shared.js` | ~670 | Input encoding/decoding, N64 button map, cheat codes, wire format | lockstep, streaming |
+| `play.js` | ~5,330 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
+| `netplay-rollback.js` | ~11,700 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
+| `netplay-lockstep.js` | ~16 | Deprecated compat shim — emits a `console.warn` and exists only so cached `play.html` requests don't 404. Remove in a follow-up deploy. | (none) |
+| `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
+| `shared.js` | ~880 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~420 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~600 | On-screen touch controls for mobile | KNState |
+| `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
+| `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
+| `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
+| `kn-vision-client.js` | — | Claude / GPT-4o vision client for screenshot-diff desync analysis | rollback |
 | `feedback.js` | ~480 | In-app feedback collection UI | play.js |
-| `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | lockstep, core-redirector |
+| `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
 | `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
 | `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
 | `version.js` | ~350 | Version display + changelog modal | play.js |
+| `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
+| `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `lobby.js` | ~175 | Room creation and join form on index.html | — |
+| `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 
 ### Conventions
 
@@ -201,7 +211,7 @@ as a reference for current behavior.
 
 ```bash
 just serve          # HTTP, no Redis — simplest path
-just dev            # HTTPS + Redis — full stack (needs Tailscale certs + Docker)
+just dev            # HTTPS + Redis — full stack (needs lego/Cloudflare certs from `just certs` + Docker)
 just redis          # Start just Redis in background
 just redis-stop     # Stop Redis
 ```

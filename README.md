@@ -14,14 +14,14 @@ kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://
 
 ### Netplay modes
 
-**Lockstep** — All players run the emulator in perfect sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
+**Rollback** — All players run the emulator in sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level GGPO-style rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Strict lockstep is the silent stall fallback inside the same engine (boot convergence, menu phase-lock gate, and stock cores without `kn_pre_tick`). Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
 
-**Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC MediaStream. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator instance exists. SDP is optimized for low-latency gaming (VP9/H264 preference, high bitrate floor, minimal jitter buffer).
+**Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC MediaStream. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator instance exists. SDP is optimized for low-latency gaming (H264/VP9 preference, high bitrate floor, minimal jitter buffer).
 
 Both modes support:
 - Spectators (receive video stream, no input)
 - Late join (mid-game state sync via compressed save state)
-- Desync detection and opt-in resync (lockstep)
+- Desync detection and opt-in resync (rollback)
 - Virtual gamepad for mobile/touch devices
 - Mode switching between games without page reload (WASM module hibernates between sessions)
 
@@ -38,7 +38,7 @@ just serve
 # → http://localhost:27888/
 ```
 
-This is the fastest path to a running server. Over plain HTTP you can explore the lobby, create rooms, and use **streaming mode**. Lockstep mode requires HTTPS — see below.
+This is the fastest path to a running server. Over plain HTTP you can explore the lobby, create rooms, and use **streaming mode**. Rollback mode requires HTTPS — see below.
 
 ### What works without HTTPS
 
@@ -46,7 +46,7 @@ This is the fastest path to a running server. Over plain HTTP you can explore th
 |---|---|---|
 | Lobby, rooms, Socket.IO | works | works |
 | Streaming mode | works | works |
-| Lockstep mode | broken (needs SharedArrayBuffer) | works |
+| Rollback mode | broken (needs SharedArrayBuffer) | works |
 | High-res frame timing | degraded (~1ms vs ~5μs) | works |
 
 Browsers gate `SharedArrayBuffer` and `performance.now()` precision behind
@@ -65,7 +65,7 @@ just dev
 # → https://<your-domain>:27888/
 ```
 
-### HTTPS setup (required for lockstep)
+### HTTPS setup (required for rollback)
 
 HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. `just certs` issues a real Let's Encrypt certificate via [lego](https://go-acme.github.io/lego/) using the Cloudflare DNS-01 challenge, so the cert is trusted by every device (including mobile) without installing a local CA. The subdomain never needs to resolve publicly — point it at your LAN IP via local DNS (AdGuard, Pi-hole, `/etc/hosts`, etc.).
 
@@ -138,7 +138,7 @@ Includes Redis for session persistence (blue-green deploys, reconnect survival) 
            └─────────────────────┘
 ```
 
-The server handles room creation, player coordination, and WebRTC signaling. Once peers are connected, game data flows directly between browsers — the server is idle during lockstep gameplay. Redis persists room state across deploys and reconnects.
+The server handles room creation, player coordination, and WebRTC signaling. Once peers are connected, game data flows directly between browsers — the server is idle during rollback gameplay. Redis persists room state across deploys and reconnects.
 
 All frontend assets are self-hosted (EmulatorJS, Socket.IO) — zero CDN dependencies. The server sends `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers to enable `crossOriginIsolated` on all browsers, unlocking SharedArrayBuffer and high-resolution `performance.now()`.
 
@@ -164,19 +164,27 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     lobby.js           Lobby controller (room creation, invite links)
-    netplay-lockstep.js    Deterministic lockstep engine (4P mesh WebRTC)
+    admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
+    netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
+    netplay-lockstep.js    Deprecated 16-line compat shim (loads window.NetplayLockstep alias for cached pages)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM
-    audio-worklet-processor.js  AudioWorklet ring buffer for lockstep audio
+    kn-audio.js            AudioWorklet pump + rollback audio capture
+    kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
+    kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
+    kn-vision-client.js    Claude / GPT-4o vision client for screenshot-diff desync analysis
+    audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
     storage.js             Safe localStorage/sessionStorage wrapper
     kn-state.js            Shared cross-module state
     feedback.js            In-app feedback collection
     version.js             Version display + changelog modal
+    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
+    ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.3)
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
@@ -287,7 +295,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 V1 is feature-complete and deployment-ready:
 
 - Lobby with room creation, invite links, and spectator support
-- 4-player deterministic lockstep with auto frame delay
+- 4-player deterministic rollback netcode (GGPO-style C-level engine, mobile↔mobile bit-identical)
 - Streaming mode (host video → guests) with SDP optimization
 - Spectators and late join (mid-game state sync)
 - Desync detection with opt-in star-topology resync

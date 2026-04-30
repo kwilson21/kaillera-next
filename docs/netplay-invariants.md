@@ -1,6 +1,6 @@
 # Netplay Invariants
 
-The netplay stack ([web/static/netplay-lockstep.js](../web/static/netplay-lockstep.js))
+The netplay stack ([web/static/netplay-rollback.js](../web/static/netplay-rollback.js))
 enforces two invariants that together eliminate the class of
 DataChannel-death freeze bugs uncovered by the 2026-04-11 audit. This
 document is the canonical reference — inline comments at each stall

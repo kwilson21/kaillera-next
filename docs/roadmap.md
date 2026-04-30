@@ -24,7 +24,7 @@ automatically on all clients when netplay starts -- no host configuration requir
 - `800A4B26 0000` -- Items off group 2 (Hammer, Motion-Sensor Bomb, Bob-omb, Fire Flower)
 - `800A4B27 0000` -- Items off group 3 (Bat, Fan, Ray Gun, Star Rod)
 
-**Files:** `web/static/netplay-lockstep.js`. No server changes.
+**Files:** `web/static/netplay-rollback.js`. No server changes.
 
 ---
 
@@ -36,7 +36,7 @@ both players have received each other's input before applying it.
 
 **Protocol change:** `Int32Array([mask])` 4 bytes -> `Int32Array([frameNum, mask])` 8 bytes.
 
-**Files:** `web/static/netplay-lockstep.js`.
+**Files:** `web/static/netplay-rollback.js`.
 
 ---
 
@@ -50,7 +50,7 @@ Host's only special role is orchestrating WebRTC offers/answers for newcomers vi
 
 **Spectators:** slot = null, receive game feed, no input send. Can claim vacated player slots.
 
-**Files:** `web/static/netplay-lockstep.js` + `server/src/api/signaling.py`.
+**Files:** `web/static/netplay-rollback.js` + `server/src/api/signaling.py`.
 
 ---
 
@@ -64,7 +64,7 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 **Player departure:** Vacated slot zeroed (buttons released), spectators can claim it via
 `claim-slot` Socket.IO event.
 
-**Files:** `web/static/netplay-lockstep.js` + `server/src/api/signaling.py`.
+**Files:** `web/static/netplay-rollback.js` + `server/src/api/signaling.py`.
 
 ---
 
@@ -87,7 +87,7 @@ boundary via `_kn_sync_write()`. No mid-frame stall — gameplay continues durin
 **Diagnostics:** Sync log ring buffer, per-region hash logging on mismatch, drift rate
 tracking, exportable CSV logs via `debug-sync` Socket.IO event.
 
-**Files:** `web/static/netplay-lockstep.js`, `server/src/api/signaling.py` (debug-sync,
+**Files:** `web/static/netplay-rollback.js`, `server/src/api/signaling.py` (debug-sync,
 debug-logs events), `server/src/api/app.py` (POST /api/sync-logs).
 
 ---
@@ -124,7 +124,7 @@ desync. Rollback activates automatically when the WASM core exports `kn_pre_tick
 
 **Files:** `build/kn_rollback/kn_rollback.{c,h}`, `build/patches/mupen64plus-rsp-taint.patch`,
 `build/patches/gliden64-rdram-taint.patch`, `build/patches/mupen64plus-static-save-scratch.patch`,
-`web/static/netplay-lockstep.js` (deferred init, RB-CHECK, input audit, knDiag).
+`web/static/netplay-rollback.js` (deferred init, RB-CHECK, input audit, knDiag).
 
 **Followup:** WebRTC DC reconnect when Socket.IO signaling survives — today a DC drop
 ends the match even though room state is still alive. Tracked separately.
