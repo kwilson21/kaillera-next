@@ -965,6 +965,40 @@
     return null;
   };
 
+  // Slop-padded hit-test for slide-to-press: a thumb has area, not a point,
+  // so during a slide we let neighbors register while the finger straddles
+  // the seam (e.g. A→Z). 8px is enough to bridge typical button gaps without
+  // bleeding across the C-cluster.
+  const SLOP_PX = 8;
+  const hitTestBtnSlop = (btn, x, y, slop) => {
+    const r = btn.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const br = parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0;
+    if (br >= Math.min(r.width, r.height) / 2 - 2) {
+      const rx = r.width / 2 + slop;
+      const ry = r.height / 2 + slop;
+      const dx = x - (r.left + r.width / 2);
+      const dy = y - (r.top + r.height / 2);
+      return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
+    }
+    return x >= r.left - slop && x <= r.right + slop && y >= r.top - slop && y <= r.bottom + slop;
+  };
+
+  const findBtnIdxsAt = (x, y) => {
+    const btns = _cachedBtns || _overlay?.querySelectorAll('.vgp-btn') || [];
+    const out = new Set();
+    for (const btn of btns) {
+      if (btn.dataset.idx === undefined) continue;
+      if (hitTestBtnSlop(btn, x, y, SLOP_PX)) out.add(parseInt(btn.dataset.idx, 10));
+    }
+    return out;
+  };
+
+  const setBtnActive = (idx, active) => {
+    const btns = _overlay.querySelectorAll(`.vgp-btn[data-idx="${idx}"]`);
+    for (const b of btns) b.classList.toggle('active', active);
+  };
+
   const onTouchStart = (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
@@ -990,23 +1024,50 @@
         continue;
       }
 
+      // Touchstart uses exact (non-slop) hit-test so a deliberate tap never
+      // accidentally lights up a neighbor. Slop only kicks in on touchmove.
       const btnEl = findBtnAt(t.clientX, t.clientY);
       if (btnEl && btnEl.dataset.idx !== undefined) {
         const idx = parseInt(btnEl.dataset.idx, 10);
-        _buttonTouches[t.identifier] = idx;
-        btnEl.classList.add('active');
+        const set = new Set([idx]);
+        _buttonTouches[t.identifier] = set;
+        setBtnActive(idx, true);
         const s = _state();
         if (s) s[idx] = 1;
+      } else {
+        // Track the touch even if it didn't land on a button so a slide
+        // onto a button later still picks it up.
+        _buttonTouches[t.identifier] = new Set();
       }
     }
   };
 
   const onTouchMove = (e) => {
     e.preventDefault();
+    const s = _state();
     for (const t of e.changedTouches) {
       if (t.identifier === _stickTouch && _stickCenter) {
         updateStick(t.clientX, t.clientY);
+        continue;
       }
+      const prev = _buttonTouches[t.identifier];
+      if (prev === undefined) continue;
+      const next = findBtnIdxsAt(t.clientX, t.clientY);
+      // Release buttons the finger has slid off.
+      for (const idx of prev) {
+        if (!next.has(idx)) {
+          if (s) s[idx] = 0;
+          setBtnActive(idx, false);
+        }
+      }
+      // Engage buttons the finger has slid onto.
+      for (const idx of next) {
+        if (!prev.has(idx)) {
+          if (s) s[idx] = 1;
+          setBtnActive(idx, true);
+        }
+      }
+      _buttonTouches[t.identifier] = next;
     }
   };
 
@@ -1026,13 +1087,14 @@
         if (_stickEl) _stickEl.style.transform = 'translate(-50%, -50%)';
         continue;
       }
-      const idx = _buttonTouches[t.identifier];
-      if (idx !== undefined) {
+      const set = _buttonTouches[t.identifier];
+      if (set !== undefined) {
         delete _buttonTouches[t.identifier];
         const s = _state();
-        if (s) s[idx] = 0;
-        const btns = _overlay.querySelectorAll(`.vgp-btn[data-idx="${idx}"]`);
-        for (const b of btns) b.classList.remove('active');
+        for (const idx of set) {
+          if (s) s[idx] = 0;
+          setBtnActive(idx, false);
+        }
       }
     }
   };
