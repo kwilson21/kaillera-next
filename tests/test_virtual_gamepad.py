@@ -65,42 +65,6 @@ body {
 </body>
 </html>"""
 
-# Page for testing ROM declaration prompt (lobby view)
-LOBBY_GUEST_PAGE = """<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#111; color:#eee; font-family:sans-serif; padding:20px; }
-.card-section { margin:12px 0; padding:12px; background:#222; border-radius:8px; }
-</style>
-</head>
-<body>
-  <h2>Room Lobby (Guest View)</h2>
-  <div id="rom-declare-prompt" style="display:none" class="card-section">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-      <input type="checkbox" id="rom-declare-cb">
-      <span style="font-size:13px;">I own a legal copy of this game and accept all liability</span>
-    </label>
-  </div>
-  <p id="guest-status">Waiting for host to start...</p>
-  <script>
-    // Simulate play.js updateRomDeclarePrompt for a non-host, non-spectator guest
-    var isHost = false;
-    var isSpectator = false;
-    function updateRomDeclarePrompt() {
-      var prompt = document.getElementById('rom-declare-prompt');
-      if (!prompt) return;
-      var show = !isHost && !isSpectator;
-      prompt.style.display = show ? '' : 'none';
-    }
-    updateRomDeclarePrompt();
-  </script>
-</body>
-</html>"""
-
-
 def _init_page(page, html, server=SERVER):
     """Load a test page and inject the virtual gamepad script."""
     page.goto(server)
@@ -232,69 +196,6 @@ class TestGamepadLayout:
 
     def test_pixel7_portrait(self):
         assert self._test_device(PIXEL_7_PORTRAIT, "gp-pixel7-portrait")
-
-
-# ── ROM Declaration Tests ─────────────────────────────────────────────
-
-class TestRomDeclaration:
-    """ROM ownership declaration prompt works correctly."""
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        self.pw = sync_playwright().start()
-        yield
-        self.pw.stop()
-
-    def test_guest_sees_declaration(self):
-        """Non-host, non-spectator guest sees the declaration checkbox."""
-        browser = self.pw.chromium.launch()
-        ctx = browser.new_context(viewport=IPHONE_14_PORTRAIT, has_touch=True, is_mobile=True)
-        page = ctx.new_page()
-        page.goto(SERVER)
-        page.set_content(LOBBY_GUEST_PAGE)
-        page.wait_for_timeout(200)
-        _screenshot(page, "rom-declare-guest")
-
-        visible = _check_element_visible(page, '#rom-declare-prompt')
-        assert visible, "Declaration prompt should be visible for guest"
-
-        # Checkbox should be unchecked initially
-        checked = page.evaluate("() => document.getElementById('rom-declare-cb').checked")
-        assert not checked, "Checkbox should start unchecked"
-
-        browser.close()
-
-    def test_host_no_declaration(self):
-        """Host should NOT see the declaration prompt."""
-        browser = self.pw.chromium.launch()
-        ctx = browser.new_context(viewport=IPHONE_14_PORTRAIT, has_touch=True, is_mobile=True)
-        page = ctx.new_page()
-        page.goto(SERVER)
-        # Modify the page to simulate host
-        host_page = LOBBY_GUEST_PAGE.replace("var isHost = false;", "var isHost = true;")
-        page.set_content(host_page)
-        page.wait_for_timeout(200)
-        _screenshot(page, "rom-declare-host")
-
-        visible = _check_element_visible(page, '#rom-declare-prompt')
-        assert not visible, "Declaration prompt should be hidden for host"
-
-        browser.close()
-
-    def test_spectator_no_declaration(self):
-        """Spectator should NOT see the declaration prompt."""
-        browser = self.pw.chromium.launch()
-        ctx = browser.new_context(viewport=IPHONE_14_PORTRAIT, has_touch=True, is_mobile=True)
-        page = ctx.new_page()
-        page.goto(SERVER)
-        spec_page = LOBBY_GUEST_PAGE.replace("var isSpectator = false;", "var isSpectator = true;")
-        page.set_content(spec_page)
-        page.wait_for_timeout(200)
-
-        visible = _check_element_visible(page, '#rom-declare-prompt')
-        assert not visible, "Declaration prompt should be hidden for spectator"
-
-        browser.close()
 
 
 # ── Touch State Tests ─────────────────────────────────────────────────

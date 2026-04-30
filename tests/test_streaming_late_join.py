@@ -95,8 +95,6 @@ def test_streaming_third_player_late_join_gets_video_port_and_input(context, ser
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
         _wait_for_socket(guest)
 
-        expect(guest.locator("#rom-declare-cb")).to_be_visible(timeout=10000)
-        guest.locator("#rom-declare-cb").check()
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
 
         host.click("#start-btn")

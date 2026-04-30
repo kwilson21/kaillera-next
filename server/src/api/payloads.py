@@ -149,13 +149,6 @@ class RomReadyPayload(BaseModel):
     size: int | None = Field(default=None, ge=0, le=512 * 1024 * 1024)
 
 
-# ── rom-declare ──────────────────────────────────────────────────────────────
-
-
-class RomDeclarePayload(BaseModel):
-    declared: bool = True
-
-
 # ── input-type ───────────────────────────────────────────────────────────────
 
 

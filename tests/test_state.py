@@ -21,7 +21,6 @@ def test_serialize_roundtrip_basic():
     room.players["pid-1"] = {"socketId": "sid-1", "playerName": "Alice"}
     room.slots[0] = "pid-1"
     room.rom_ready.add("sid-1")
-    room.rom_declared.add("sid-1")
     room.input_types["sid-1"] = "gamepad"
     room.device_types["sid-1"] = "mobile"
     room.status = "playing"
@@ -47,8 +46,6 @@ def test_serialize_roundtrip_basic():
     assert all(isinstance(k, int) for k in restored.slots)
     assert "sid-1" in restored.rom_ready
     assert isinstance(restored.rom_ready, set)
-    assert "sid-1" in restored.rom_declared
-    assert isinstance(restored.rom_declared, set)
     assert restored.input_types["sid-1"] == "gamepad"
     assert restored.device_types["sid-1"] == "mobile"
     assert restored.status == "playing"
@@ -79,7 +76,6 @@ def test_serialize_roundtrip_empty_room():
     assert restored.slots == {}
     assert restored.spectators == {}
     assert restored.rom_ready == set()
-    assert restored.rom_declared == set()
     assert restored.status == "lobby"
     assert restored.mode is None
 

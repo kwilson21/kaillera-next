@@ -91,7 +91,6 @@ class TestPlayersPayload:
         p1 = payload["players"]["pid-1"]
         assert p1["slot"] == 0
         assert p1["romReady"] is True
-        assert p1["romDeclared"] is False
         assert p1["inputType"] == "keyboard"
         assert p1["deviceType"] == "desktop"
 
@@ -175,13 +174,6 @@ class TestSwapSid:
         _swap_sid(room, "pid-1", "old-sid", "new-sid")
         assert "new-sid" in room.rom_ready
         assert "old-sid" not in room.rom_ready
-
-    def test_swaps_rom_declared(self):
-        room = _make_room()
-        room.rom_declared.add("old-sid")
-        _swap_sid(room, "pid-1", "old-sid", "new-sid")
-        assert "new-sid" in room.rom_declared
-        assert "old-sid" not in room.rom_declared
 
     def test_swaps_input_and_device_types(self):
         room = _make_room()
@@ -300,7 +292,6 @@ class TestRomReady:
         room.slots[0] = "pid-host"
         room.slots[1] = "pid-2"
         room.rom_ready.update({"sid-host", "sid-2"})
-        room.rom_declared.add("sid-2")
         rooms["ROOM5"] = room
         _sid_to_room["sid-host"] = ("ROOM5", "pid-host", False)
 
@@ -314,7 +305,6 @@ class TestRomReady:
         assert room.rom_name == "Host Game.z64"
         assert room.rom_size == 4096
         assert room.rom_ready == {"sid-host"}
-        assert room.rom_declared == set()
 
     def test_guest_mismatched_hash_is_not_ready(self):
         room = _make_room(owner="sid-host")

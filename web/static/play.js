@@ -124,7 +124,6 @@
 
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
-  let _romDeclared = false; // true if user declared ROM ownership (streaming, page-lifetime)
   let _romTransferState = 'idle'; // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
   let _romTransferStallTimer = null; // setTimeout ID — resets on each chunk
   let _romTransferResumeTimer = null; // setTimeout ID — 15s resume timeout
@@ -365,16 +364,6 @@
     if (isHost) return;
     if (hadPrevious && toastOnChange) {
       showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
-    }
-    // Server invalidates non-host rom_declared whenever the host ROM identity
-    // changes or clears (signaling.py: _invalidate_non_host_rom_state /
-    // _clear_host_rom). Mirror that locally so streaming-mode guests see the
-    // declare prompt reappear instead of a stale "checked" UI hiding the
-    // action they need to take.
-    if (hadPrevious && _romDeclared) {
-      _romDeclared = false;
-      const cb = document.getElementById('rom-declare-cb');
-      if (cb) cb.checked = false;
     }
     if (!hasNext) {
       resetTransferForHostRomChange();
@@ -1118,7 +1107,6 @@
 
     // Update overlay UI if in pre-game
     if (!gameRunning) {
-      updateRomDeclarePrompt();
       updateStartButton(players);
       updateGamepadSlot();
       // Show/hide host controls after ownership transfer
@@ -1379,7 +1367,7 @@
       mode = incoming;
       const modeSel = document.getElementById('mode-select');
       if (modeSel) modeSel.value = mode;
-      updateRomDeclarePrompt();
+      updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
@@ -1425,6 +1413,16 @@
 
     if (isHost) return;
     if (isSpectator) return;
+
+    // Streaming guests don't load a ROM — host streams video. Hide the drop
+    // zone and any sharing UI; they just wait for the host to start.
+    if (mode === 'streaming') {
+      if (romDrop) romDrop.style.display = 'none';
+      if (prompt) prompt.hidden = true;
+      if (progress) progress.hidden = true;
+      if (retryBtn) retryBtn.hidden = true;
+      return;
+    }
 
     console.log(
       `[play] updateRomSharingUI: enabled=${_romSharingEnabled}` +
@@ -3715,35 +3713,6 @@
     }
   };
 
-  const updateRomDeclarePrompt = () => {
-    const prompt = document.getElementById('rom-declare-prompt');
-    const romDrop = document.getElementById('rom-drop');
-    if (!prompt) return;
-    // Show only in streaming mode for non-host, non-spectator players
-    // when ROM sharing is off. In rollback mode, normal ROM loading applies.
-    const isStreaming = mode === 'streaming';
-    const show = isStreaming && !isHost && !isSpectator && !_romSharingEnabled;
-    prompt.style.display = show ? '' : 'none';
-
-    // Auto-declare if guest already has a ROM loaded (e.g., from a previous
-    // rollback game). They already loaded/owned the ROM — re-asking is friction.
-    if (show && !_romDeclared && (_romBlob || _romBlobUrl)) {
-      _romDeclared = true;
-      const cb = document.getElementById('rom-declare-cb');
-      if (cb) cb.checked = true;
-      if (socket?.connected) {
-        socket.emit('rom-declare', { declared: true });
-      }
-    }
-
-    // Hide ROM drop box when declaration is checked (streaming guests don't need a ROM)
-    if (romDrop && show && _romDeclared) {
-      romDrop.style.display = 'none';
-    } else if (romDrop && !_romDeclared && !_romSharingEnabled) {
-      romDrop.style.display = '';
-    }
-  };
-
   const updateStartButton = (players) => {
     const btn = document.getElementById('start-btn');
     if (!btn || !isHost) return;
@@ -3759,18 +3728,11 @@
       btn.disabled = true;
       btn.textContent = 'Start Game (need 2+)';
     } else if (selectedMode === 'streaming') {
-      // Streaming: check ROM declarations (host is exempt)
-      const guestsReady = entries.every((p) => p.slot === 0 || p.romDeclared);
-      if (!guestsReady) {
-        btn.disabled = true;
-        const declaredCount = entries.filter((p) => p.slot === 0 || p.romDeclared).length;
-        btn.textContent = `Waiting for declarations (${declaredCount}/${playerCount})`;
-      } else {
-        btn.disabled = false;
-        btn.textContent = 'Start Game';
-      }
+      // Streaming: host runs the only emulator; guests don't need a ROM.
+      btn.disabled = false;
+      btn.textContent = 'Start Game';
     } else {
-      // Lockstep: check ROMs loaded
+      // Rollback: check ROMs loaded
       const allReady = entries.every((p) => p.romReady);
       if (!allReady && !_romSharingEnabled) {
         btn.disabled = true;
@@ -5199,9 +5161,9 @@
           socket.emit('rom-sharing-toggle', { enabled: true });
           _romSharingBeforeStreamingMode = false;
         }
-        updateRomDeclarePrompt();
+        updateRomSharingUI();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
-        // Broadcast mode to guests so they can show/hide declaration prompt
+        // Broadcast mode to guests so they can update ROM/sharing UI for the new mode
         if (socket?.connected) {
           socket.emit('data-message', { type: 'mode-select', mode: modeSelect.value });
           // Also set on server for users-updated payload (requires server restart)
@@ -5246,20 +5208,6 @@
     if (romRetryBtn) romRetryBtn.addEventListener('click', retryRomTransfer);
     const romCancelBtn = document.getElementById('rom-transfer-cancel');
     if (romCancelBtn) romCancelBtn.addEventListener('click', cancelRomTransfer);
-
-    // ROM ownership declaration (streaming mode)
-    const romDeclareCb = document.getElementById('rom-declare-cb');
-    if (romDeclareCb) {
-      // Restore cached state
-      if (_romDeclared) romDeclareCb.checked = true;
-      romDeclareCb.addEventListener('change', () => {
-        _romDeclared = romDeclareCb.checked;
-        if (socket?.connected) {
-          socket.emit('rom-declare', { declared: _romDeclared });
-        }
-        updateRomDeclarePrompt();
-      });
-    }
 
     // Delay picker
     const delayAuto = document.getElementById('delay-auto');

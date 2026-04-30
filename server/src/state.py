@@ -43,7 +43,6 @@ def _serialize_room(room) -> str:
     d = asdict(room)
     # Sets are not JSON-serializable — convert to lists
     d["rom_ready"] = list(d["rom_ready"])
-    d["rom_declared"] = list(d["rom_declared"])
     # Slot keys must be strings in JSON; we convert back on load
     d["slots"] = {str(k): v for k, v in d["slots"].items()}
     return json.dumps(d)
@@ -75,7 +74,6 @@ def _deserialize_room(d: dict):
         rom_size=d.get("rom_size"),
         rom_sharing=d.get("rom_sharing", False),
         rom_ready=set(d.get("rom_ready", [])),
-        rom_declared=set(d.get("rom_declared", [])),
         input_types=d.get("input_types", {}),
         device_types=d.get("device_types", {}),
     )

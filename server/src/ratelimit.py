@@ -24,7 +24,6 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "set-mode": (5, 10),
     "rom-sharing-toggle": (5, 10),
     "rom-ready": (10, 10),
-    "rom-declare": (10, 10),
     "input-type": (5, 10),
     "device-type": (5, 10),
     "snapshot": (2, 1),

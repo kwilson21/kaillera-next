@@ -14,7 +14,6 @@ Client → Server events:
   set-mode         — host changes netplay mode (rollback/streaming)
   rom-sharing-toggle — host enables/disables P2P ROM sharing
   rom-ready        — player signals ROM is loaded
-  rom-declare      — player declares ROM ownership (streaming mode)
   input-type       — player reports input type (keyboard/gamepad)
   device-type      — player reports device type (desktop/mobile)
   webrtc-signal    — ICE candidate / SDP offer / answer forwarding
@@ -72,7 +71,6 @@ from src.api.payloads import (
     InputTypePayload,
     JoinRoomPayload,
     OpenRoomPayload,
-    RomDeclarePayload,
     RomReadyPayload,
     RomSharingTogglePayload,
     SessionLogPayload,
@@ -185,7 +183,6 @@ class Room:
     rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
     rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
-    rom_declared: set[str] = field(default_factory=set)  # sids that declared ROM ownership (streaming)
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
@@ -226,7 +223,6 @@ def _players_payload(room: Room) -> dict:
                 "playerName": info.get("playerName", "Player"),
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
-                "romDeclared": info["socketId"] in room.rom_declared,
                 "inputType": room.input_types.get(info["socketId"], "keyboard"),
                 "deviceType": room.device_types.get(info["socketId"], "desktop"),
             }
@@ -266,13 +262,11 @@ def _clear_host_rom(room: Room) -> None:
     room.rom_name = None
     room.rom_size = None
     room.rom_ready.clear()
-    room.rom_declared.clear()
 
 
 def _invalidate_non_host_rom_state(room: Room) -> None:
-    """Keep only the host ready/declaration state after the host changes ROM."""
+    """Keep only the host ready state after the host changes ROM."""
     room.rom_ready = {sid for sid in room.rom_ready if sid == room.owner}
-    room.rom_declared = {sid for sid in room.rom_declared if sid == room.owner}
 
 
 def _rom_hashes_conflict(expected: str | None, actual: str | None) -> bool:
@@ -313,9 +307,6 @@ def _swap_sid(room: Room, persistent_id: str, old_sid: str, new_sid: str) -> Non
     if old_sid in room.rom_ready:
         room.rom_ready.discard(old_sid)
         room.rom_ready.add(new_sid)
-    if old_sid in room.rom_declared:
-        room.rom_declared.discard(old_sid)
-        room.rom_declared.add(new_sid)
     if old_sid in room.input_types:
         room.input_types[new_sid] = room.input_types.pop(old_sid)
     if old_sid in room.device_types:
@@ -380,7 +371,6 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
             del room.slots[rm_slot]
 
     room.rom_ready.discard(sid)
-    room.rom_declared.discard(sid)
     room.input_types.pop(sid, None)
     room.device_types.pop(sid, None)
 
@@ -759,15 +749,9 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
 
     mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
 
-    # Streaming: check all players declared ROM ownership
-    # Rollback: check all players have ROMs (or host is sharing)
-    if mode == "streaming":
-        for info in room.players.values():
-            if info["socketId"] == room.owner:
-                continue  # host has the ROM
-            if info["socketId"] not in room.rom_declared:
-                return "Not all players have declared ROM ownership"
-    elif not room.rom_sharing:
+    # Streaming: host runs the only emulator; guests don't need a ROM.
+    # Rollback: every player must have a ROM loaded (or host is sharing).
+    if mode != "streaming" and not room.rom_sharing:
         for info in room.players.values():
             if info["socketId"] not in room.rom_ready:
                 return "Not all players have a ROM loaded"
@@ -972,27 +956,6 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
             room.rom_ready.add(sid)
         else:
             room.rom_ready.discard(sid)
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
-        await state.save_room(session_id, room)
-    return None
-
-
-@sio.on("rom-declare")
-@validated(RomDeclarePayload)
-async def rom_declare(sid: str, payload: RomDeclarePayload) -> str | None:
-    """Player declares they own a legal copy of the ROM (streaming mode)."""
-    if not check(sid, "rom-declare"):
-        return "Rate limited"
-    async with _room_lock:
-        result = _get_room(sid)
-        if result is None:
-            return "Not in a room"
-        session_id, room = result
-
-        if payload.declared:
-            room.rom_declared.add(sid)
-        else:
-            room.rom_declared.discard(sid)
         await sio.emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
     return None

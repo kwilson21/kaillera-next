@@ -134,7 +134,6 @@ All events go through the default Socket.IO namespace (`/`).
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
 | `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
-| `rom-declare` | client→server | `{...}` | Declare ROM file info to room |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
 | `session-log` | client→server | `{matchId, entries, summary, context}` | Periodic sync log flush |
