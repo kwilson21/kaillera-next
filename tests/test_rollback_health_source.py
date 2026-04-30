@@ -36,17 +36,28 @@ def test_js_calls_sized_c_exports_with_explicit_capacities():
     assert not re.search(r"_kn_get_mispred_breakdown\([^,\n)]*\)", src)
 
 
-def test_rollback_stall_sites_have_wall_clock_recovery_markers():
+def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("PHASE-LOCK-TIMEOUT", "MENU-LOCKSTEP-TIMEOUT", "RB-INPUT-STALL-TIMEOUT"):
+    for marker in ("PHASE-LOCK-WAIT", "MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
         assert marker in src
         assert marker in doc
 
-    assert "stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS" in src
+    assert "stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS" in src
     assert "stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS" in src
     assert "markPeerPhantomForStallTimeout" in src
+
+
+def test_strict_menu_lockstep_never_fabricates_or_phantoms_inputs():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "MENU-LOCKSTEP-TIMEOUT" not in src
+    assert "phase-lock-timeout" not in src
+    assert "menu-lockstep-timeout" not in src
+    assert "MENU-LOCKSTEP-WAIT" in src
+    assert "PHASE-LOCK-WAIT" in src
+    assert "holding strict menu lockstep" in src
 
 
 def test_rollback_delay_inputs_are_clamped_to_engine_window():
@@ -87,7 +98,7 @@ def test_phase_lock_deadline_tracks_intermittent_phase_mismatch():
     assert "phaseMismatchSlots," in src
     assert "const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);" in src
     assert "mismatchPeers=[${phaseLockSlots.join(',')}]" in src
-    assert "else if (phaseWaitSlots.length) {" in src
+    assert "if (phaseWaitSlots.length) {" in src
 
 
 def test_resync_state_load_clears_pending_c_inputs():

@@ -563,10 +563,12 @@
   // with inputs in flight) and we must recover instead of deadlocking.
   let _bootStallFrame = -1;
   let _bootStallStartTime = 0;
+  let _bootStallLastResendAt = 0;
   let _bootStallRecoveryFired = false;
   let _bootStallRecoveryResetTime = 0;
   let _phaseLockStallKey = '';
   let _phaseLockStallStartTime = 0;
+  let _phaseLockLastWaitLogAt = 0;
   let _rbInputStallKey = '';
   let _rbInputStallStartTime = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
@@ -1530,6 +1532,7 @@
 
     _bootStallFrame = -1;
     _bootStallStartTime = 0;
+    _bootStallLastResendAt = 0;
     _bootStallRecoveryFired = false;
     _syncLog(
       `late-join input bootstrap: frames=${startFrame}-${endFrame} slots=[${slots.join(',')}] ` +
@@ -1939,6 +1942,7 @@
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
+  let _stallLastResendAt = 0; // repeated resend cadence for lossless strict menu stalls
   let _resendSent = false; // true once resend request sent for current stall
   // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
   // the game moving, but any real inputs that arrive later are dropped
@@ -4214,11 +4218,13 @@
     if (_bootStallFrame >= 0) {
       _bootStallFrame = -1;
       _bootStallStartTime = 0;
+      _bootStallLastResendAt = 0;
       _bootStallRecoveryFired = false;
     }
     if (_phaseLockStallKey) {
       _phaseLockStallKey = '';
       _phaseLockStallStartTime = 0;
+      _phaseLockLastWaitLogAt = 0;
     }
     if (_rbInputStallKey) {
       _rbInputStallKey = '';
@@ -6990,8 +6996,11 @@
     _inputLateLogTime = {};
     _resumeInputGuardUntil = 0;
     _stallStart = 0;
+    _stallLastResendAt = 0;
+    _resendSent = false;
     _phaseLockStallKey = '';
     _phaseLockStallStartTime = 0;
+    _phaseLockLastWaitLogAt = 0;
     _rbInputStallKey = '';
     _rbInputStallStartTime = 0;
     window._netplayFrameLog = [];
@@ -8602,29 +8611,24 @@
         if (_phaseLockStallKey !== waitKey) {
           _phaseLockStallKey = waitKey;
           _phaseLockStallStartTime = _tickNow;
+          _phaseLockLastWaitLogAt = 0;
         }
         const stallMs = _tickNow - _phaseLockStallStartTime;
-        if (stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-          for (const slot of phaseLockSlots) {
-            markPeerPhantomForStallTimeout(
-              slot,
-              'phase-lock-timeout',
-              `stalledMs=${Math.round(stallMs)} scene=${sceneCurr} gameStatus=${gameStatus}`,
+        if (phaseWaitSlots.length) {
+          if (stallMs >= MAX_STALL_MS && _tickNow - _phaseLockLastWaitLogAt >= RESEND_TIMEOUT_MS) {
+            _phaseLockLastWaitLogAt = _tickNow;
+            _syncLog(
+              `PHASE-LOCK-WAIT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
+                `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
+                `stalledMs=${Math.round(stallMs)} - holding strict menu lockstep`,
             );
           }
-          _syncLog(
-            `PHASE-LOCK-TIMEOUT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
-              `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
-              `stalledMs=${Math.round(stallMs)} — force-releasing phase lock`,
-          );
-          _phaseLockStallKey = '';
-          _phaseLockStallStartTime = 0;
-        } else if (phaseWaitSlots.length) {
           return;
         }
       } else {
         _phaseLockStallKey = '';
         _phaseLockStallStartTime = 0;
+        _phaseLockLastWaitLogAt = 0;
       }
       // Boot sync: legacy savestate startup can still need one host state push
       // after boot grace. kn-sync startup already loaded the host's authoritative
@@ -8722,57 +8726,35 @@
             if (_bootStallFrame !== rbApplyFrame) {
               _bootStallFrame = rbApplyFrame;
               _bootStallStartTime = nowWall;
+              _bootStallLastResendAt = 0;
               _bootStallRecoveryFired = false;
               _resendSent = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
             if (_menuLockstepActive) {
-              if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-                markPeerPhantomForStallTimeout(
-                  missingSlot,
-                  'menu-lockstep-timeout',
-                  `stalledMs=${Math.round(stallDuration)} apply=${rbApplyFrame}`,
-                );
-                if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
-                if (!_remoteInputs[missingSlot][rbApplyFrame]) {
-                  _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
-                  _pendingCInputs.push({
-                    slot: missingSlot,
-                    frame: rbApplyFrame,
-                    buttons: 0,
-                    lx: 0,
-                    ly: 0,
-                    cx: 0,
-                    cy: 0,
-                  });
-                }
+              if (
+                stallDuration >= MAX_STALL_MS &&
+                (!_resendSent || nowWall - _bootStallLastResendAt >= RESEND_TIMEOUT_MS)
+              ) {
+                _resendSent = true;
+                _bootStallLastResendAt = nowWall;
+                const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
+                try {
+                  missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
+                } catch (_) {}
                 _syncLog(
-                  `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot} ` +
-                    `stalledMs=${Math.round(stallDuration)} — force-releasing strict lockstep`,
+                  `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} ` +
+                    `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)}`,
                 );
-                _bootStallFrame = -1;
-                _bootStallStartTime = 0;
-                _bootStallRecoveryFired = false;
-              } else {
-                if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-                  _resendSent = true;
-                  const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
-                  try {
-                    missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
-                  } catch (_) {}
-                  _syncLog(
-                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
-                  );
-                }
-                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                  window._knLastBootStallLogFrame = _frameNum;
-                  _syncLog(
-                    `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
-                  );
-                }
-                return;
               }
+              if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                window._knLastBootStallLogFrame = _frameNum;
+                _syncLog(
+                  `MENU-LOCKSTEP-WAIT f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                    `stalledMs=${Math.round(stallDuration)} slot=${missingSlot} - holding strict menu lockstep`,
+                );
+              }
+              return;
             }
 
             // Boot/pre-menu fallback: stall briefly, then fabricate zero to
@@ -8808,6 +8790,7 @@
           }
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
+          _bootStallLastResendAt = 0;
           _bootStallRecoveryFired = false;
         }
       } else if (_rbBootConverged && rbApplyFrame >= 0) {
@@ -10032,6 +10015,7 @@
         if (menuLockstepPhase.strictInputLockstep) {
           if (_stallStart === 0) {
             _stallStart = now;
+            _stallLastResendAt = 0;
             _resendSent = false;
             _syncLog(
               `MENU-LOCKSTEP start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
@@ -10040,30 +10024,9 @@
             );
           }
           const stallDuration = now - _stallStart;
-          if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-            const repeatInfo = [];
-            for (const s of _missingSlots) {
-              markPeerPhantomForStallTimeout(
-                s,
-                'menu-lockstep-timeout',
-                `stalledMs=${Math.round(stallDuration)} apply=${applyFrame}`,
-              );
-              if (!_remoteInputs[s]) _remoteInputs[s] = {};
-              if (_remoteInputs[s][applyFrame] === undefined) {
-                _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
-                _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
-                repeatInfo.push(`s${s}=0`);
-              }
-            }
-            _syncLog(
-              `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
-                `stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
-            );
-            _stallStart = 0;
-            return;
-          }
-          if (stallDuration >= MAX_STALL_MS && !_resendSent) {
+          if (stallDuration >= MAX_STALL_MS && (!_resendSent || now - _stallLastResendAt >= RESEND_TIMEOUT_MS)) {
             _resendSent = true;
+            _stallLastResendAt = now;
             for (const p of inputPeers) {
               if (_remoteInputs[p.slot]?.[applyFrame] !== undefined) continue;
               try {
@@ -10071,7 +10034,8 @@
               } catch (_) {}
             }
             _syncLog(
-              `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
+              `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} ` +
+                `missing=[${_missingSlots.join(',')}] stalledMs=${stallDuration.toFixed(0)}`,
             );
           }
           return;
@@ -10096,6 +10060,7 @@
             `INPUT-GAP-FILL applyFrame=${applyFrame} slots=[${gapSlots.join(',')}] — peer ahead, immediate fabricate`,
           );
           _stallStart = 0;
+          _stallLastResendAt = 0;
           return; // re-enter next tick with input now present
         }
 
@@ -10126,6 +10091,7 @@
           // STALL -- remote input not here yet (normal path for live peers)
           if (_stallStart === 0) {
             _stallStart = now;
+            _stallLastResendAt = 0;
             _resendSent = false;
             // Log first stall occurrence with full state
             const rBufSizes = {};
@@ -10187,6 +10153,7 @@
               }
             }
             _stallStart = 0;
+            _stallLastResendAt = 0;
           } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
             // Stage 2 — request resend from missing peers (once per stall)
             _resendSent = true;
@@ -10215,6 +10182,8 @@
         } // end normal stall path (else of allMissingArePhantom)
       } else {
         _stallStart = 0;
+        _stallLastResendAt = 0;
+        _resendSent = false;
         // Reset consecutive fabrication counts for peers whose input arrived
         for (const p of inputPeers) {
           if (_consecutiveFabrications[p.slot]) _consecutiveFabrications[p.slot] = 0;
@@ -11168,6 +11137,7 @@
         mod._kn_set_frame(frame);
         _bootStallFrame = -1;
         _bootStallStartTime = 0;
+        _bootStallLastResendAt = 0;
         _bootStallRecoveryFired = false;
         _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
         // Arm post-sync diagnostic burst: log full state hash for 10 frames

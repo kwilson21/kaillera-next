@@ -8,30 +8,37 @@ site point back here. A passive tick watchdog (MF6) surfaces any
 residual deadlock that slips past these invariants, but it does
 **not** take recovery action.
 
-## I1 — No stall without a timeout
+## I1 — No stall without a bounded action
 
 Every `return` in `tick()` that waits on an external event (DC message
 arrival, peer connection state, remote frame progress, state
 decompression) must have:
 
 1. A wall-clock deadline, typically based on `performance.now()`.
-2. A recovery action when the deadline expires.
+2. A bounded action when the deadline expires.
 3. An inline comment stating what is being waited on, the deadline
-   value, and the recovery action.
+   value, and the action.
 
 "Stall" means an early return that depends on external events. Pure
 local-state branches (`if (!_running) return;`) are not stalls.
 
+Controllable menus/CSS are a protocol exception: the bounded action is
+repeated resend/logging, not frame advancement. Fabricating input or
+phantoming a peer there can turn one missed A/Start edge into a
+permanent setup fork, so strict menu stalls intentionally hold the
+simulation until the real input/phase arrives or the room is externally
+recovered.
+
 ### Sites with timeouts
 
-| Stall | Constant | Recovery | Event | Spec |
+| Stall | Constant | Action | Event | Spec |
 |-------|----------|----------|-------|------|
 | `_rbPendingInit` (guest defers rollback init on host's `rb-delay:` broadcast) | `RB_INIT_TIMEOUT_MS = 3000` | Fall back to local delay and init anyway | `RB-INIT-TIMEOUT` | §MF2 |
 | `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |
-| PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer(s), release phase lock | `PHASE-LOCK-TIMEOUT` | rollback health audit 2026-04-27 |
-| MENU-LOCKSTEP stall (strict controllable menu input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom missing peer(s), fabricate ZERO_INPUT for the timed-out frame | `MENU-LOCKSTEP-TIMEOUT` | rollback health audit 2026-04-27 |
+| PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS`, repeat every `RESEND_TIMEOUT_MS` | Keep waiting; phase packets already rebroadcast at `PHASE_BROADCAST_INTERVAL_MS` | `PHASE-LOCK-WAIT` | rollback health audit 2026-04-27, corrected 2026-04-30 |
+| MENU-LOCKSTEP stall (strict controllable menu input missing) | `MAX_STALL_MS`, repeat every `RESEND_TIMEOUT_MS` | Keep waiting and resend missing input request; never fabricate menu input | `MENU-LOCKSTEP-WAIT` / `MENU-LOCKSTEP resend-request` | rollback health audit 2026-04-27, corrected 2026-04-30 |
 | RB-INPUT-STALL (rollback gameplay input missing beyond budget) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiner loads state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Resume, broadcast roster, `hardDisconnectPeer()` the joining peer | `LATE-JOIN-TIMEOUT` | §MF5 |
 | Late-join worker round-trip (joiner decompresses initial state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Abort late-join; host's timeout cleans up the joiner | `WORKER-STALL` | §MF5 |
