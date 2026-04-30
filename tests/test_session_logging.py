@@ -5,8 +5,40 @@ Run: pytest tests/test_session_logging.py -v
 
 import asyncio
 import os
+import threading
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_browser_ssl():
+    """No browser needed; avoids the [chromium] parameterize + event loop that
+    breaks asyncio.run() in these sync tests."""
+    yield
+
+
+def _run_async(coro):
+    """Run a coroutine in a dedicated thread with a fresh event loop. Bypasses
+    any session-level event loop pytest-playwright may have started on the
+    main thread (which would otherwise make asyncio.run() raise)."""
+    result: list = []
+    exc: list = []
+
+    def _target():
+        loop = asyncio.new_event_loop()
+        try:
+            result.append(loop.run_until_complete(coro))
+        except BaseException as e:
+            exc.append(e)
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_target)
+    t.start()
+    t.join()
+    if exc:
+        raise exc[0]
+    return result[0] if result else None
 
 
 @pytest.fixture()
@@ -19,7 +51,7 @@ def tmp_db(tmp_path):
 
 def test_game_end_does_not_overwrite_disconnect(tmp_db):
     """game-end broadcast should NOT overwrite a prior disconnect ended_by."""
-    asyncio.run(_run_ended_by_no_overwrite(tmp_db))
+    _run_async(_run_ended_by_no_overwrite(tmp_db))
 
 
 async def _run_ended_by_no_overwrite(tmp_db):

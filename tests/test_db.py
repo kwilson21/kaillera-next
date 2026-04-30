@@ -5,8 +5,41 @@ Run: pytest tests/test_db.py -v
 
 import asyncio
 import os
+import threading
 
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_browser_ssl():
+    """DB tests don't need the Playwright browser fixture (which would also
+    parameterize them with [chromium] and pull in an event loop that breaks
+    asyncio.run())."""
+    yield
+
+
+def _run_async(coro):
+    """Run a coroutine in a dedicated thread with a fresh event loop. Bypasses
+    any session-level event loop pytest-playwright may have started on the
+    main thread (which would otherwise make asyncio.run() raise)."""
+    result: list = []
+    exc: list = []
+
+    def _target():
+        loop = asyncio.new_event_loop()
+        try:
+            result.append(loop.run_until_complete(coro))
+        except BaseException as e:
+            exc.append(e)
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_target)
+    t.start()
+    t.join()
+    if exc:
+        raise exc[0]
+    return result[0] if result else None
 
 
 @pytest.fixture()
@@ -20,7 +53,7 @@ def tmp_db(tmp_path):
 
 def test_init_creates_tables(tmp_db):
     """init_db creates feedback and session_logs tables."""
-    asyncio.run(_run_init_and_query(tmp_db))
+    _run_async(_run_init_and_query(tmp_db))
 
 
 async def _run_init_and_query(tmp_db):
@@ -38,7 +71,7 @@ async def _run_init_and_query(tmp_db):
 
 def test_insert_feedback(tmp_db):
     """insert_feedback stores a row and returns its ID."""
-    asyncio.run(_run_insert_feedback(tmp_db))
+    _run_async(_run_insert_feedback(tmp_db))
 
 
 async def _run_insert_feedback(tmp_db):
@@ -63,7 +96,7 @@ async def _run_insert_feedback(tmp_db):
 
 def test_query_returns_dicts(tmp_db):
     """query() returns list of dicts with column names as keys."""
-    asyncio.run(_run_query_dicts(tmp_db))
+    _run_async(_run_query_dicts(tmp_db))
 
 
 async def _run_query_dicts(tmp_db):
@@ -87,7 +120,7 @@ async def _run_query_dicts(tmp_db):
 
 def test_upsert_session_log(tmp_db):
     """upsert_session_log inserts then updates on conflict."""
-    asyncio.run(_run_upsert_session_log(tmp_db))
+    _run_async(_run_upsert_session_log(tmp_db))
 
 
 async def _run_upsert_session_log(tmp_db):
@@ -128,7 +161,7 @@ async def _run_upsert_session_log(tmp_db):
 
 def test_insert_client_event(tmp_db):
     """insert_client_event stores a row."""
-    asyncio.run(_run_insert_client_event(tmp_db))
+    _run_async(_run_insert_client_event(tmp_db))
 
 
 async def _run_insert_client_event(tmp_db):
@@ -152,7 +185,7 @@ async def _run_insert_client_event(tmp_db):
 
 def test_set_session_ended(tmp_db):
     """set_session_ended updates the ended_by field."""
-    asyncio.run(_run_set_session_ended(tmp_db))
+    _run_async(_run_set_session_ended(tmp_db))
 
 
 async def _run_set_session_ended(tmp_db):
@@ -186,6 +219,13 @@ async def _run_set_session_ended(tmp_db):
         "ip_hash": "def",
     })
     await set_session_ended("end-test-1", None, "game-end")
-    rows = await query("SELECT ended_by FROM session_logs WHERE match_id='end-test-1'", ())
-    assert all(r["ended_by"] == "game-end" for r in rows)
+    rows = await query(
+        "SELECT slot, ended_by FROM session_logs WHERE match_id='end-test-1' ORDER BY slot",
+        (),
+    )
+    # slot=None broadcast only fills rows without an existing ended_by — it
+    # must not overwrite a prior disconnect/leave (covered separately by
+    # test_session_logging::test_game_end_does_not_overwrite_disconnect).
+    assert rows[0]["ended_by"] == "disconnect"
+    assert rows[1]["ended_by"] == "game-end"
     await close_db()

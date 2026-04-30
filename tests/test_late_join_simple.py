@@ -91,7 +91,7 @@ def test_late_join_pause_is_not_sent_to_joiner():
 
     state_idx = source.find("const handleLateJoinState = async (msg) => {")
     assert state_idx != -1
-    load_window = source[state_idx : state_idx + 7000]
+    load_window = source[state_idx : state_idx + 10000]
     assert "late-join: clearing self pause after state load" in load_window
     assert "_runSubstate = RUN_NORMAL" in load_window
 

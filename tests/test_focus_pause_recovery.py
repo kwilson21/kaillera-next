@@ -215,7 +215,7 @@ def test_lockstep_surfaces_and_recovers_browser_focus_loss():
     assert start_idx != -1
     assert stop_idx != -1
     start_window = source[start_idx : start_idx + 1100]
-    stop_window = source[stop_idx : stop_idx + 4600]
+    stop_window = source[stop_idx : stop_idx + 7000]
 
     assert "event?.target?.closest?.('#virtual-gamepad')" in start_window
     assert "TAB-FOCUS recovered via virtual-gamepad" in start_window
@@ -289,7 +289,7 @@ def test_lockstep_stop_pauses_main_loop_before_restoring_raf():
 
     stop_idx = source.find("const stopSync = () => {")
     assert stop_idx != -1
-    stop_window = source[stop_idx : stop_idx + 4600]
+    stop_window = source[stop_idx : stop_idx + 7000]
 
     pause_idx = stop_window.find("paused EJS main loop before restoring native rAF")
     restore_idx = stop_window.find("APISandbox.restoreAll()")

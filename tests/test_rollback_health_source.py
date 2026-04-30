@@ -75,7 +75,7 @@ def test_solo_delay_does_not_initialize_rollback():
     assert "const soloMode = playerPeerSids.length === 0;" in src
     assert "ownDelay = 0;" in src
     assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
-    assert "detMod?._kn_rollback_init && !_isSmashRemix() && DELAY_FRAMES > 0" in src
+    assert "if (detMod?._kn_rollback_init && DELAY_FRAMES > 0)" in src
     assert "C-ROLLBACK disabled for zero-delay solo play" in src
 
 

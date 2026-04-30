@@ -75,8 +75,8 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     assert "const INITIAL_SMASH_CONFIRM_INPUT = Object.freeze({ buttons: (1 << 0) | (1 << 3)" in source
     assert "Smash Remix initial sync: confirm pulse scene=${scene} coreFrame=${frame}" in source
     assert "Smash Remix initial sync: capturing fallback scene=${scene}" in source
-    assert "C-ROLLBACK disabled for Smash Remix title/menu startup" in source
-    assert "detMod?._kn_rollback_init && !_isSmashRemix()" in source
+    assert "C-ROLLBACK deferred for Smash Remix" in source
+    assert "window._rbDeferredForGameplay = tryInitRollback" in source
     assert "KNShared.clearCheats(false)" in source
 
 
@@ -93,11 +93,11 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
     assert initial_idx != -1
     initial_window = source[initial_idx : initial_idx + 1800]
     remix_log_idx = initial_window.find(
-        "initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup"
+        "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup"
     )
     hidden_idx = initial_window.find("_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')")
     audio_idx = initial_window.find("_restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load')")
-    cleanup_idx = initial_window.find("_postRemixStateLoadCleanup(readyMod, 'initial-sync-load')")
+    cleanup_idx = initial_window.find("_postStateLoadCleanup(readyMod, 'initial-sync-load')")
     assert remix_log_idx != -1
     assert hidden_idx != -1
     assert audio_idx > hidden_idx
@@ -147,20 +147,24 @@ def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
     assert "guest kept local kn-sync state" not in source
     assert "_restoreRemixStartupSidecar" not in source
     assert "await waitForSmashTitleState(gm)" in source
-    assert "initial-sync-load: Remix host kn-sync state loaded with hidden state + C cleanup" in source
-    assert "_postRemixStateLoadCleanup(mod, `${reason}:post-kn-sync`);" not in source
-    assert "Remix post-state cleanup applied" in source
+    assert "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup" in source
+    assert "_postStateLoadCleanup(mod, `${reason}:post-kn-sync`);" not in source
+    assert "post-state cleanup applied" in source
     assert (
         "const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;"
     ) in source
 
+    # Host and guest now run the IDENTICAL restore stack from the same
+    # `loadKnSyncStateAtStartBoundary` call — `hasLocalKnSyncCapture` only
+    # affects the log stagePrefix, not the control flow. See netplay-rollback.js
+    # line ~5202 ("Host runs the IDENTICAL restore stack as guest").
     load_idx = source.find("if (isKnSyncInitialState)")
-    host_local_idx = source.find("if (hasLocalKnSyncCapture)", load_idx)
-    remote_idx = source.find("loadKnSyncStateAtStartBoundary", load_idx)
     assert load_idx != -1
-    assert host_local_idx != -1
-    assert remote_idx > host_local_idx
-    assert "_postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture')" in source
+    load_window = source[load_idx : load_idx + 3000]
+    assert "const stagePrefix = hasLocalKnSyncCapture ? 'host' : 'guest';" in load_window
+    assert "loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')" in load_window
+    assert "host self-restore" in load_window
+    assert "guest from-host" in load_window
 
 
 def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
@@ -301,22 +305,27 @@ def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
     assert "mod.pauseMainLoop?.()" in wait_window
 
 
-def test_host_local_kn_sync_initial_capture_is_not_reloaded():
+def test_host_runs_same_kn_sync_restore_stack_as_guest():
+    """Host now runs the IDENTICAL restore stack as guest (kn_sync_write of its
+    own captured bytes + restoreHiddenState + restoreAudioFifo + cleanup).
+    Skipping the restore on host meant host/guest started lockstep from
+    subtly different states (TLB / JIT / event-queue side effects), surfacing
+    later as different "Random!" character/stage selections in SSB Remix."""
     source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     start_idx = source.find("const hasLocalKnSyncCapture =")
     assert start_idx != -1
-    window = source[start_idx : start_idx + 1800]
+    window = source[start_idx : start_idx + 4000]
 
-    local_idx = window.find("if (hasLocalKnSyncCapture)")
-    load_idx = window.find("loadKnSyncStateAtStartBoundary")
-    assert local_idx != -1
-    assert load_idx != -1
-    assert load_idx > local_idx
-    assert "recaptureManualRunner(readyMod, 'initial-sync-local-capture')" in window
-    assert "_postRemixStateLoadCleanup(readyMod, 'initial-sync-local-capture')" in window
-    assert "initial-sync-load: host kept locally captured kn-sync state" in window
-    assert "initial-sync-load: host reloaded captured kn-sync state" not in source
+    # Single shared load path — no separate "host kept" branch.
+    assert "if (hasLocalKnSyncCapture) {" not in window
+    assert "host kept locally captured kn-sync state" not in source
+
+    # hasLocalKnSyncCapture is only used to label the log stagePrefix.
+    assert "const stagePrefix = hasLocalKnSyncCapture ? 'host' : 'guest';" in window
+    assert "loadKnSyncStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load')" in window
+    assert "'host self-restore'" in window
+    assert "'guest from-host'" in window
 
 
 def test_kn_sync_v4_preserves_r4300_delay_slot_and_skip_jump():
