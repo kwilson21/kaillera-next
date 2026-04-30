@@ -272,6 +272,14 @@ static struct {
     int correct_predictions;
     int max_depth;
     int failed_rollbacks; /* mispredictions that couldn't roll back = silent desync */
+    /* Predictions whose ring slot was reused before the real input arrived.
+     * Caused by long peer freezes that wrap KN_INPUT_RING_SIZE (256) — the
+     * old prediction's slot is overwritten by a newer prediction's frame, so
+     * kn_feed_input's frame check fails and the prediction is never verified.
+     * Without this counter, prediction_count = correct + rollbacks + failed
+     * doesn't balance during stall cascades and a5e6f9a3-style scenarios
+     * look like a counter bug instead of a freeze. */
+    int clobbered_predictions;
     /* Misprediction breakdown (T2) — populated by kn_feed_input on each mispredict */
     int button_mispredictions; /* btn differed, sticks matched */
     int stick_mispredictions;  /* sticks differed, btn matched */
@@ -1048,6 +1056,15 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                 pred_input.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
                 /* Buttons: repeat last (no extrapolation for digital) */
                 pred_input.buttons = rb.last_known[s].buttons;
+                /* Detect ring-wrap: this slot was previously predicted for a
+                 * different (older) frame whose real input never arrived to
+                 * verify it. The old prediction will never be checked once we
+                 * overwrite the slot here. Track it so the books balance:
+                 * prediction_count = correct + rollbacks + failed + clobbered.
+                 * Doesn't change determinism — purely diagnostic. */
+                if (rb.predicted[s][idx] && rb.predicted_values[s][idx].frame != apply_frame) {
+                    rb.clobbered_predictions++;
+                }
                 rb.inputs[s][idx] = pred_input;
                 rb.inputs[s][idx].present = 1;
                 rb.inputs[s][idx].frame = apply_frame;
@@ -1743,6 +1760,11 @@ int kn_get_max_depth(void) { return rb.max_depth; }
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_failed_rollbacks(void) { return rb.failed_rollbacks; }
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_clobbered_predictions(void) { return rb.clobbered_predictions; }
 
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

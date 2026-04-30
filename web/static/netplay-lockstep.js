@@ -1100,6 +1100,7 @@
               correctPredictions: mod._kn_get_correct_predictions?.() ?? null,
               maxDepth: mod._kn_get_max_depth?.() ?? null,
               failedRollbacks: mod._kn_get_failed_rollbacks?.() ?? null,
+              clobberedPredictions: mod._kn_get_clobbered_predictions?.() ?? null,
               softfloatState: mod._kn_get_softfloat_state?.() ?? null,
               hiddenFingerprint: mod._kn_get_hidden_state_fingerprint?.() ?? null,
               gameplayHash: mod._kn_gameplay_hash?.(-1) ?? null,
@@ -2075,6 +2076,10 @@
       correctPredictions: m._kn_get_correct_predictions(),
       maxDepth: m._kn_get_max_depth?.() ?? 0,
       failedRollbacks: m._kn_get_failed_rollbacks?.() ?? 0,
+      // Predictions whose ring slot was reused before the real input arrived.
+      // Books balance: predictions = correct + rollbacks + failed + clobbered.
+      // Spikes here flag a peer-freeze cascade rather than a counter bug.
+      clobberedPredictions: m._kn_get_clobbered_predictions?.() ?? 0,
       // Experiment A: rollbacks absorbed by stick-tolerance window.
       // Rollback count reduction == toleranceHits (approximately).
       toleranceHits: m._kn_get_tolerance_hits?.() ?? 0,
