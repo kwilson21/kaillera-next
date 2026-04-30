@@ -78,7 +78,13 @@ async def _run_ended_by_no_overwrite(tmp_db):
 
 
 def test_reconnect_token_roundtrip():
-    """HMAC reconnect tokens verify correctly; forged tokens are rejected."""
+    """HMAC reconnect tokens verify correctly; forged or wrong-pid tokens are rejected.
+
+    Tokens deliberately do NOT bind to ip_hash — mobile network handoffs
+    (5G↔Wi-Fi) change source IP mid-session and the team has explicit
+    product support for that flow. Signature + expiry + pid binding still
+    cover the practical token-theft threats.
+    """
     from src.api.signaling import make_reconnect_token, verify_reconnect_token
 
     token = make_reconnect_token("pid-123")

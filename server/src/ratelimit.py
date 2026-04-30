@@ -28,7 +28,11 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "device-type": (5, 10),
     "snapshot": (2, 1),
     "data-message": (60, 1),
-    "room-lookup": (10, 60),
+    "room-lookup": (30, 60),
+    # 404s on /room/{id} are tracked separately so an enumerator hitting
+    # unknown room codes burns through the miss budget fast, while
+    # legitimate polling of an existing room stays under "room-lookup".
+    "room-lookup-miss": (5, 60),
     "webrtc-signal": (60, 1),
     "input": (120, 1),
     "rom-signal": (60, 1),

@@ -12,6 +12,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -383,7 +384,13 @@ def build_og_tags(
     game_id: str | None = None,
     spectate: bool = False,
 ) -> str:
-    """Build OG meta tag HTML string for injection into <head>."""
+    """Build OG meta tag HTML string for injection into <head>.
+
+    Every value that lands inside a content="..." attribute is HTML-escaped;
+    every value that lands inside a URL is percent-encoded with quote(safe="").
+    Treat callers as untrusted: room_name in particular flows from query
+    strings on the missing-room fallback path.
+    """
     game_info = GAME_INFO.get(game_id) if game_id else None
 
     if room_id and room_name:
@@ -394,17 +401,17 @@ def build_og_tags(
         description = "kaillera-next \u2014 play retro games online with friends"
         img_params = []
         if game_id:
-            img_params.append(f"game={game_id}")
+            img_params.append(f"game={quote(game_id, safe='')}")
         if spectate:
             img_params.append("spectate=1")
-        image_url = f"https://{host}/og-image/{room_id}.png"
+        image_url = f"https://{host}/og-image/{quote(room_id, safe='')}.png"
         if img_params:
-            image_url += "?" + "&".join(img_params)
-        page_url = f"https://{host}/play.html?room={room_id}"
+            image_url += "?" + "&amp;".join(img_params)
+        page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
         if game_id:
-            page_url += f"&game={game_id}"
+            page_url += f"&amp;game={quote(game_id, safe='')}"
         if spectate:
-            page_url += "&spectate=1"
+            page_url += "&amp;spectate=1"
     else:
         title = "kaillera-next"
         description = "Play retro games online with friends \u2014 no install needed"
@@ -412,12 +419,12 @@ def build_og_tags(
         page_url = f"https://{host}/"
 
     return (
-        f'<meta property="og:title" content="{title}" />\n'
-        f'    <meta property="og:description" content="{description}" />\n'
-        f'    <meta property="og:image" content="{image_url}" />\n'
+        f'<meta property="og:title" content="{_html_escape(title)}" />\n'
+        f'    <meta property="og:description" content="{_html_escape(description)}" />\n'
+        f'    <meta property="og:image" content="{_html_escape(image_url)}" />\n'
         f'    <meta property="og:image:width" content="1200" />\n'
         f'    <meta property="og:image:height" content="630" />\n'
-        f'    <meta property="og:url" content="{page_url}" />\n'
+        f'    <meta property="og:url" content="{_html_escape(page_url)}" />\n'
         f'    <meta property="og:type" content="website" />\n'
         f'    <meta name="twitter:card" content="summary_large_image" />'
     )

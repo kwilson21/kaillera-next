@@ -44,7 +44,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from src import db, state
+from src import db, state, state_cache
 from src.api.og import (
     _GAME_IMAGES_RAW,
     _ROM_SHARING_RAW,
@@ -55,10 +55,20 @@ from src.api.og import (
     inject_og_tags,
 )
 from src.api.payloads import FeedbackPayload
-from src.api.signaling import MAX_ROOMS, rooms, verify_upload_token
+from src.api.signaling import (
+    MAX_ROOMS,
+    _sanitize_log_blob,
+    rooms,
+    verify_upload_token,
+)
 from src.ratelimit import check_ip, extract_ip, ip_hash
 
 log = logging.getLogger(__name__)
+
+# Mirror the signaling layer's room/game ID format. Used to validate
+# untrusted query params before they reach OG renderers / meta tags.
+_PUBLIC_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9]{3,16}$")
+_PUBLIC_GAME_ID_RE = re.compile(r"^[A-Za-z0-9\-]{1,32}$")
 
 _CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
 _VALID_EVENT_TYPES = {
@@ -117,10 +127,6 @@ def _client_ip(request: Request) -> str:
     return extract_ip(request)
 
 
-# In-memory save state cache: rom_hash -> raw state bytes.
-# Eliminates host/guest asymmetry — all players load the same cached state.
-# Persists across games but not server restarts.
-_state_cache: dict[str, bytes] = {}
 _STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 
 
@@ -130,7 +136,10 @@ _STATE_MAX_SIZE = 20 * 1024 * 1024  # 20MB raw save state
 class SecurityHeadersMiddleware:
     """Pure ASGI middleware that injects security and cache-control headers."""
 
-    _CSP = (
+    # Permissive CSP — only used for /play.html. EmulatorJS needs unsafe-eval
+    # for its WASM glue, unsafe-inline for the bootstrap <script> blocks, and
+    # blob: for dynamically generated worker/media URLs.
+    _CSP_PLAY = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -141,10 +150,32 @@ class SecurityHeadersMiddleware:
         "font-src 'self' data: https://fonts.gstatic.com; "
         "object-src 'none'"
     )
+    # Strict CSP — applied to homepage, admin, error page, API routes, etc.
+    # Keeps unsafe-inline on style-src only (error.html has inline <style>);
+    # disallows inline scripts, eval, and blob: URLs entirely.
+    _CSP_STRICT = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "connect-src 'self'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'self'"
+    )
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
         self._allow_cache = allow_cache
+
+    @classmethod
+    def _csp_for(cls, path: str) -> bytes:
+        # play.html runs EmulatorJS which needs eval/inline/blob:. Every
+        # other route gets the strict policy by default.
+        if path == "/play.html":
+            return cls._CSP_PLAY.encode()
+        return cls._CSP_STRICT.encode()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
         if scope["type"] != "http":
@@ -157,7 +188,7 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: dict) -> None:
             if message["type"] == "http.response.start":
                 extra: list[tuple[bytes, bytes]] = [
-                    (b"content-security-policy", self._CSP.encode()),
+                    (b"content-security-policy", self._csp_for(path)),
                     (b"x-frame-options", b"SAMEORIGIN"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
@@ -622,10 +653,19 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/room/{room_id}")
     def get_room(room_id: str, request: Request) -> dict:
-        if not check_ip(_client_ip(request), "room-lookup"):
+        client_ip_val = _client_ip(request)
+        if not check_ip(client_ip_val, "room-lookup"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        # Reject malformed room IDs without consulting the room map — keeps
+        # enumeration probes from looking like cache misses on the table.
+        if not _PUBLIC_ROOM_ID_RE.match(room_id):
+            check_ip(client_ip_val, "room-lookup-miss")
+            raise HTTPException(status_code=404, detail="Room not found")
         room = rooms.get(room_id)
         if not room:
+            # Enumerators accumulate 404s; they hit the tighter miss budget first.
+            if not check_ip(client_ip_val, "room-lookup-miss"):
+                raise HTTPException(status_code=429, detail="Rate limited")
             raise HTTPException(status_code=404, detail="Room not found")
         return {
             "status": room.status,
@@ -673,28 +713,21 @@ def create_app(lifespan=None) -> FastAPI:
         return result
 
     _ROM_HASH_RE = re.compile(r"^[SF]?[0-9a-fA-F]{16,64}$")
-    _MAX_CACHE_ENTRIES = 50
 
     def _validate_rom_hash(rom_hash: str) -> None:
         """Ensure rom_hash is a valid hex string, optionally prefixed with S (SHA-256) or F (FNV)."""
         if not _ROM_HASH_RE.match(rom_hash):
             raise HTTPException(status_code=400, detail="Invalid ROM hash format")
 
-    def _rom_hash_in_active_room(rom_hash: str) -> bool:
-        """Check if any active room references this ROM hash."""
-        return any(r.rom_hash == rom_hash for r in rooms.values())
-
     @app.get("/api/cached-state/{rom_hash}")
     async def get_cached_state(rom_hash: str, request: Request) -> Response:
         if not check_ip(_client_ip(request), "cache-state"):
             raise HTTPException(status_code=429, detail="Rate limited")
         _validate_rom_hash(rom_hash)
-        if rom_hash not in _state_cache:
+        blob = await state_cache.get(rom_hash)
+        if blob is None:
             raise HTTPException(status_code=404, detail="No cached state")
-        return Response(
-            content=_state_cache[rom_hash],
-            media_type="application/octet-stream",
-        )
+        return Response(content=blob, media_type="application/octet-stream")
 
     @app.post("/api/cache-state/{rom_hash}")
     async def cache_state(rom_hash: str, request: Request) -> dict:
@@ -705,8 +738,11 @@ def create_app(lifespan=None) -> FastAPI:
         room_id = request.query_params.get("room", "")
         if not room_id or not verify_upload_token(room_id, token):
             raise HTTPException(status_code=403, detail="Invalid upload token")
-        if not _rom_hash_in_active_room(rom_hash):
-            raise HTTPException(status_code=403, detail="ROM hash not associated with any active room")
+        # Token-bound room must currently advertise the ROM hash being cached;
+        # this prevents a token from room A from overwriting an unrelated rom hash B.
+        room = rooms.get(room_id)
+        if room is None or room.rom_hash != rom_hash:
+            raise HTTPException(status_code=403, detail="ROM hash does not match active room")
         chunks: list[bytes] = []
         total = 0
         async for chunk in request.stream():
@@ -715,11 +751,7 @@ def create_app(lifespan=None) -> FastAPI:
                 raise HTTPException(status_code=413, detail="State too large")
             chunks.append(chunk)
         body = b"".join(chunks)
-        if len(_state_cache) >= _MAX_CACHE_ENTRIES and rom_hash not in _state_cache:
-            log.warning("State cache full (%d entries)", _MAX_CACHE_ENTRIES)
-            raise HTTPException(status_code=507, detail="Cache full")
-        _state_cache[rom_hash] = body
-        log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
+        await state_cache.put(rom_hash, body)
         return {"status": "cached", "size": len(body)}
 
     # ── Auth dependencies ─────────────────────────────────────────────
@@ -775,7 +807,8 @@ def create_app(lifespan=None) -> FastAPI:
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
 
-        entries = data.get("entries", [])
+        entries_raw = data.get("entries", [])
+        entries = _sanitize_log_blob(entries_raw if isinstance(entries_raw, list) else [])
         if not isinstance(entries, list):
             entries = []
         log_data_str = json.dumps(entries)
@@ -783,16 +816,17 @@ def create_app(lifespan=None) -> FastAPI:
             entries = entries[: len(entries) // 2]
             log_data_str = json.dumps(entries)
 
-        summary = data.get("summary", {})
-        context = data.get("context", {})
+        summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
+        context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})
+        context = dict(context_clean) if isinstance(context_clean, dict) else {}
         # kaillera-next: include inputAudit in the context column. The audit
         # is a delta-encoded dict of the local + remote input histories used
         # for cross-peer diffing. See Option G in the rollback diagnostics.
         input_audit = data.get("inputAudit")
-        if isinstance(input_audit, dict) and isinstance(context, dict):
-            context["inputAudit"] = input_audit
+        if isinstance(input_audit, dict):
+            context["inputAudit"] = _sanitize_log_blob(input_audit)
         summary_str = json.dumps(summary) if isinstance(summary, dict) else "{}"
-        context_str = json.dumps(context) if isinstance(context, dict) else "{}"
+        context_str = json.dumps(context)
         if len(summary_str) > 4096:
             summary_str = "{}"
         # context may contain inputAudit (Option G), which can reach up to
@@ -1539,18 +1573,24 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/og-image/{room_id}.png")
     async def og_image(room_id: str, request: Request) -> Response:
         try:
-            room = rooms.get(room_id)
+            valid_room = bool(_PUBLIC_ROOM_ID_RE.match(room_id))
             spectate = request.query_params.get("spectate") == "1"
-            game_hint = request.query_params.get("game")  # fallback from URL param
+            game_hint_raw = request.query_params.get("game")
+            game_hint = game_hint_raw if game_hint_raw and _PUBLIC_GAME_ID_RE.match(game_hint_raw) else None
             game_images = feature_enabled_for_host(_GAME_IMAGES_RAW, request.headers.get("host", ""))
+            room = rooms.get(room_id) if valid_room else None
             if room:
                 names = _player_names(room) if spectate else None
                 game_id = room.game_id or game_hint
                 img = await generate_og_image(
                     _owner_name(room), game_id, spectate, player_names=names, game_images_enabled=game_images
                 )
-            else:
+            elif valid_room:
+                # Path param passed format check; safe to render as room_name.
                 img = await generate_og_image(room_id, game_hint, spectate, game_images_enabled=game_images)
+            else:
+                # Untrusted/malformed room_id — render generic homepage card.
+                img = await generate_og_image(None, game_hint, False, game_images_enabled=game_images)
         except Exception:
             log.warning("OG image generation failed for room %s", room_id, exc_info=True)
             if _fallback_png.exists():
@@ -1570,12 +1610,19 @@ def create_app(lifespan=None) -> FastAPI:
         spectate = request.query_params.get("spectate") == "1"
         host = _validated_host(request)
         game_hint = request.query_params.get("game")
-        room = rooms.get(room_id) if room_id else None
+        # Treat query params as untrusted: only feed room_id/game_id into OG
+        # tag builders if they pass the same alnum format the signaling layer
+        # enforces. Otherwise drop to the generic homepage tags so user-supplied
+        # query text never reaches meta-tag interpolation, even with escaping.
+        valid_room = bool(room_id and _PUBLIC_ROOM_ID_RE.match(room_id))
+        valid_game = bool(game_hint and _PUBLIC_GAME_ID_RE.match(game_hint))
+        safe_game = game_hint if valid_game else None
+        room = rooms.get(room_id) if valid_room else None
         if room:
-            game_id = room.game_id or game_hint
+            game_id = room.game_id or safe_game
             tags = build_og_tags(host, room_id, _owner_name(room), game_id, spectate)
-        elif room_id:
-            tags = build_og_tags(host, room_id, room_id, game_hint, spectate)
+        elif valid_room:
+            tags = build_og_tags(host, room_id, room_id, safe_game, spectate)
         else:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)

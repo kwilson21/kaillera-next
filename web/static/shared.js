@@ -331,6 +331,19 @@
   // buffering, and offer/answer exchange. Used by both lockstep and
   // streaming engines to avoid duplicating identical WebRTC plumbing.
 
+  // Build the RTCConfiguration for a new peer connection. Spectators force
+  // iceTransportPolicy: 'relay' so their public IP isn't exposed to other
+  // peers via ICE candidates — all traffic runs through the TURN server.
+  // Players still rely on STUN-discovered host candidates for the lower-
+  // latency P2P path needed for input exchange.
+  const _buildRtcConfig = (iceServers) => {
+    const cfg = { iceServers };
+    if (window._isSpectator === true) {
+      cfg.iceTransportPolicy = 'relay';
+    }
+    return cfg;
+  };
+
   // Create a base peer object with RTCPeerConnection and ICE candidate relay.
   //   iceServers:  array of ICE server configs
   //   remoteSid:   socket ID of the remote peer
@@ -339,7 +352,7 @@
   //                returns false if the peer has been replaced/removed
   const createBasePeer = (iceServers, remoteSid, socket, peerGuard) => {
     const peer = {
-      pc: new RTCPeerConnection({ iceServers }),
+      pc: new RTCPeerConnection(_buildRtcConfig(iceServers)),
       dc: null,
       slot: null,
       pendingCandidates: [],
@@ -398,7 +411,7 @@
         peer.pc.close();
       } catch (_) {}
     }
-    peer.pc = new RTCPeerConnection({ iceServers });
+    peer.pc = new RTCPeerConnection(_buildRtcConfig(iceServers));
     peer.pendingCandidates = [];
     peer.remoteDescSet = false;
     peer.pc.onicecandidate = (e) => {

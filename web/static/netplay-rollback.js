@@ -2825,11 +2825,28 @@
     }
   };
 
+  // Per-requester cooldown for late-join state captures. Each capture pauses
+  // the host, runs gm.getState() + gzip + base64 encoding (1.5MB+ blob), and
+  // momentarily tanks throughput. A malicious peer join/leave-looping could
+  // pin the main thread without this guard. 8s is well over the legitimate
+  // resync interval; a real reconnect after disconnect already starts fresh.
+  const _LATE_JOIN_COOLDOWN_MS = 8000;
+  const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
+
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
     const requesterSid = msg.requesterSid;
     if (!requesterSid) return;
+    const now = performance.now();
+    const last = _lateJoinLastSentAt.get(requesterSid) || 0;
+    if (now - last < _LATE_JOIN_COOLDOWN_MS) {
+      _syncLog(
+        `late-join request from ${requesterSid} ignored (cooldown ${Math.round(_LATE_JOIN_COOLDOWN_MS - (now - last))}ms)`,
+      );
+      return;
+    }
+    _lateJoinLastSentAt.set(requesterSid, now);
     _syncLog(`received late-join request from ${requesterSid}`);
     const name = _knownPlayers[requesterSid]?.playerName || 'A player';
     _config?.onToast?.(`${name} is joining...`);
@@ -3314,6 +3331,23 @@
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
+    // Bounds-check the remote frame number. A malicious peer could send
+    // frame=-999 or frame=_frameNum+1e6 to poison the rollback ring buffer
+    // or trigger massive memory churn in the input maps. Legitimate frames
+    // sit in roughly [_frameNum - 240, _frameNum + DELAY_FRAMES + 60].
+    // Reject anything wildly outside that range; INPUT-LATE handles the
+    // soft-stale case below.
+    const _INPUT_PAST_WINDOW = 240; // ~4s at 60fps — generous for a stalled peer
+    const _INPUT_FUTURE_MARGIN = 60; // 1s past delay buffer
+    if (
+      !Number.isFinite(recvFrame) ||
+      recvFrame < 0 ||
+      recvFrame < _frameNum - _INPUT_PAST_WINDOW ||
+      recvFrame > _frameNum + DELAY_FRAMES + _INPUT_FUTURE_MARGIN
+    ) {
+      _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
+      return;
+    }
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
     // Track peer's ack — highest frame they've received from us
     if (decoded.ackFrame >= 0) {
@@ -5882,9 +5916,30 @@
         } catch (_) {}
       }
 
+      // Bounds-check the late-join blob before writing into WASM memory.
+      // A malicious host could ship a truncated/oversized state that crashes
+      // the load path or scribbles past expected limits. The legitimate
+      // mupen64plus save state is well under 8MB; reject anything outside
+      // a sane range as malformed.
+      const _LATE_JOIN_STATE_MIN = 1024; // 1KB — anything smaller can't be valid
+      const _LATE_JOIN_STATE_MAX = 8 * 1024 * 1024; // 8MB — server caches up to 20MB but real states are ≤4MB
+      if (
+        !(bytes instanceof Uint8Array) ||
+        bytes.length < _LATE_JOIN_STATE_MIN ||
+        bytes.length > _LATE_JOIN_STATE_MAX
+      ) {
+        _syncLog(
+          `late-join state rejected: invalid blob size ${bytes?.length ?? 'n/a'} (expected ${_LATE_JOIN_STATE_MIN}..${_LATE_JOIN_STATE_MAX})`,
+        );
+        return;
+      }
       // Load state synchronously if available, else async
       if (mod?._kn_load_state_immediate) {
         const statePtr = mod._malloc(bytes.length);
+        if (!statePtr) {
+          _syncLog(`late-join state rejected: _malloc(${bytes.length}) failed`);
+          return;
+        }
         mod.HEAPU8.set(bytes, statePtr);
         mod._kn_load_state_immediate(statePtr, bytes.length);
         mod._free(statePtr);

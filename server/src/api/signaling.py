@@ -50,6 +50,7 @@ Disconnect grace period:
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -57,6 +58,8 @@ import logging
 import os
 import re
 import secrets
+import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 
@@ -99,40 +102,129 @@ _ANGLE_RE = re.compile(r"[<>]")
 _VALID_MODES = {"rollback", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
+_PER_IP_SPECTATOR_CAP = int(os.environ.get("PER_IP_SPECTATOR_CAP", "3"))
 _RELAY_MAX_BYTES = 65_536
 _SIGNAL_MAX_BYTES = 65_536
 _DISCONNECT_GRACE_SECONDS = 30
+# Short grace for lobby OWNER disconnects only — closes the ownership-churn
+# race where a brief network blip transferred host privileges to another
+# player. Mid-game already has the longer grace above; non-owner lobby
+# disconnects still leave immediately so room state stays responsive.
+_LOBBY_OWNER_GRACE_SECONDS = 5
 
-# Per-instance signing key for HMAC upload tokens.
-# Tokens prove the client was in a real room without requiring the room to still exist.
-_UPLOAD_KEY = secrets.token_bytes(32)
+# Per-instance signing key for HMAC tokens (upload + reconnect).
+_TOKEN_KEY = secrets.token_bytes(32)
+
+# Token TTLs. Both cover a normal match + reconnect window; on expiry the
+# client must rejoin to get a fresh token.
+_UPLOAD_TOKEN_TTL_S = 30 * 60
+_RECONNECT_TOKEN_TTL_S = 30 * 60
+
+
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _make_token(payload: dict) -> str:
+    """Sign a payload as <b64-json>.<hmac-sha256-hex>."""
+    body = _b64e(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+    sig = hmac.new(_TOKEN_KEY, body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{sig}"
+
+
+def _verify_token(token: str) -> dict | None:
+    """Verify signature + expiry; return decoded payload or None."""
+    if not token or "." not in token:
+        return None
+    body, sig = token.rsplit(".", 1)
+    expected_sig = hmac.new(_TOKEN_KEY, body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_sig, sig):
+        return None
+    try:
+        payload = json.loads(_b64d(body).decode())
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)) or exp < time.time():
+        return None
+    return payload
 
 
 def make_upload_token(room_id: str) -> str:
-    """HMAC-SHA256 token that authorizes sync-log and cache-state uploads for a room."""
-    return hmac.new(_UPLOAD_KEY, room_id.encode(), hashlib.sha256).hexdigest()
+    """HMAC token that authorizes sync-log + cache-state uploads for a room.
+
+    Bound to (room_id, expiry). The cache-state route additionally checks
+    that the room's actual rom_hash matches the requested one — a token
+    from room A cannot overwrite cache for an unrelated ROM hash.
+    """
+    return _make_token(
+        {
+            "k": "upload",
+            "room": room_id,
+            "exp": int(time.time()) + _UPLOAD_TOKEN_TTL_S,
+        }
+    )
 
 
 def verify_upload_token(room_id: str, token: str) -> bool:
-    """Verify an upload token for a given room_id."""
-    expected = make_upload_token(room_id)
-    return hmac.compare_digest(expected, token)
+    """Verify an upload token: signature, expiry, and room binding."""
+    payload = _verify_token(token)
+    if payload is None or payload.get("k") != "upload":
+        return False
+    return payload.get("room") == room_id
 
 
 def make_reconnect_token(persistent_id: str) -> str:
-    """HMAC-SHA256 token that authorizes reconnection for a specific persistentId."""
-    return hmac.new(_UPLOAD_KEY, f"reconnect:{persistent_id}".encode(), hashlib.sha256).hexdigest()
+    """HMAC token that authorizes reconnect for a persistent_id.
+
+    Bound to (persistent_id, expiry, signature, kind). Intentionally NOT
+    bound to ip_hash: mobile network handoffs (5G↔Wi-Fi), CGNAT rotation,
+    and VPN toggles all change the source IP mid-session, and the team has
+    explicit product support for those handoffs. The realistic token-theft
+    paths (XSS, local device access) already grant the attacker far worse
+    capabilities than reclaiming a slot, so IP binding adds little real
+    protection in exchange for breaking a supported user flow.
+    """
+    return _make_token(
+        {
+            "k": "reconnect",
+            "pid": persistent_id,
+            "exp": int(time.time()) + _RECONNECT_TOKEN_TTL_S,
+        }
+    )
 
 
 def verify_reconnect_token(persistent_id: str, token: str) -> bool:
-    """Verify a reconnect token for a given persistentId."""
-    expected = make_reconnect_token(persistent_id)
-    return hmac.compare_digest(expected, token)
+    """Verify a reconnect token: signature, expiry, persistent_id binding."""
+    payload = _verify_token(token)
+    if payload is None or payload.get("k") != "reconnect":
+        return False
+    return payload.get("pid") == persistent_id
 
 
 def _sanitize_str(value: str, max_len: int) -> str:
-    """Strip angle brackets and truncate."""
-    return _ANGLE_RE.sub("", str(value))[:max_len]
+    """Sanitize a player- or room-supplied display string.
+
+    1. NFKC normalize so visually-equivalent forms collapse together.
+    2. Drop characters in the C category (control/format) — this strips
+       zero-width spaces (U+200B/200C/200D), BOM (U+FEFF), bidi overrides
+       (U+202A-U+202E, U+2066-U+2069), and ASCII control bytes. These are
+       used to spoof other players' display names ("invisibly the same").
+    3. Strip angle brackets as a defense-in-depth against XSS sinks that
+       miss escaping.
+    4. Collapse runs of whitespace and trim, then truncate.
+    """
+    s = unicodedata.normalize("NFKC", str(value))
+    s = "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
+    s = _ANGLE_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:max_len]
 
 
 def configure_cors(origin: str | list[str]) -> None:
@@ -328,10 +420,16 @@ def _cancel_disconnect_grace(persistent_id: str) -> None:
         log.info("Disconnect grace cancelled for %s (reconnected)", persistent_id)
 
 
-async def _disconnect_grace_expiry(sid: str, session_id: str, player_id: str, reason: str) -> None:
+async def _disconnect_grace_expiry(
+    sid: str,
+    session_id: str,
+    player_id: str,
+    reason: str,
+    grace_seconds: float = _DISCONNECT_GRACE_SECONDS,
+) -> None:
     """Called after grace period expires — do the actual _leave cleanup."""
     try:
-        await asyncio.sleep(_DISCONNECT_GRACE_SECONDS)
+        await asyncio.sleep(grace_seconds)
     except asyncio.CancelledError:
         return  # Reconnected in time
     async with _room_lock:
@@ -618,6 +716,13 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     if spectate:
         if len(room.spectators) >= MAX_SPECTATORS:
             return ("Room spectator limit reached", None)
+        # Per-IP-per-room spectator cap: stops a single host from filling
+        # every spectator slot and locking real watchers out. Counted by
+        # ip_hash of each existing spectator's socketId.
+        ip_h = ip_hash_for_sid(sid)
+        same_ip_count = sum(1 for s in room.spectators.values() if ip_hash_for_sid(s.get("socketId", "")) == ip_h)
+        if same_ip_count >= _PER_IP_SPECTATOR_CAP:
+            return ("Spectator limit reached for your network", None)
         room.spectators[persistent_id] = {"socketId": sid, "playerName": player_name}
         _sid_to_room[sid] = (session_id, persistent_id, True)
     else:
@@ -756,11 +861,20 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
             if info["socketId"] not in room.rom_ready:
                 return "Not all players have a ROM loaded"
 
+    # ROM-hash confirmation: the room's rom_hash is established by the host
+    # via rom-ready, and guests have already verified their local hashes
+    # against it before they could mark themselves rom_ready. Reject any
+    # start-game that tries to flip the hash to something else — that path
+    # was the cleanest way to spoof guests into playing under a hash label
+    # they never actually agreed to. An empty payload.romHash is treated as
+    # "no change" so legacy clients keep working.
+    if payload.romHash and len(payload.romHash) >= 16:
+        if room.rom_hash and payload.romHash != room.rom_hash:
+            return "ROM hash changed since rom-ready — refusing to start"
+        room.rom_hash = payload.romHash
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
-    if payload.romHash and len(payload.romHash) >= 16:
-        room.rom_hash = payload.romHash
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
     await sio.emit(
@@ -1059,6 +1173,9 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     if payload_size > max_bytes:
         log.warning("Relay %s dropped: %d bytes exceeds %d limit (sid=%s)", event, payload_size, max_bytes, sid)
         return
+    if not _check_byte_budget(sid, rate_key, payload_size):
+        log.warning("Relay %s throttled: byte budget exhausted (sid=%s, %d bytes)", event, sid, payload_size)
+        return
     result = _get_room(sid)
     if result is None:
         return
@@ -1076,6 +1193,48 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
 
 # Save states are ~1.5MB gzipped; data-message needs a higher cap than input/snapshot.
 _DATA_MSG_MAX_BYTES = 4 * 1024 * 1024  # 4MB (matches Socket.IO max_http_buffer_size)
+
+# Per-sender outbound byte budgets — sit on top of the per-event count limits.
+# A legitimate save-state sync is ~1.5MB and happens at match boundaries; any
+# sender exceeding 8MB/sec sustained on data-message is broadcasting garbage.
+# Stops a single attacker from amplifying via the room broadcast (4MB × 60/sec
+# at the count limit ≈ 240MB/sec/sender × N peers in the room).
+from collections import deque as _deque  # noqa: E402
+
+_BYTE_BUDGETS: dict[str, tuple[int, float]] = {
+    "data-message": (8 * 1024 * 1024, 1.0),  # 8MB / 1s
+    "snapshot": (256 * 1024, 1.0),  # 256KB / 1s
+    "input": (1024 * 1024, 1.0),  # 1MB / 1s
+}
+_byte_history: dict[tuple[str, str], _deque] = {}
+
+
+def _check_byte_budget(sid: str, event: str, byte_count: int) -> bool:
+    """Return False if this send would push the (sid, event) sender over budget."""
+    budget = _BYTE_BUDGETS.get(event)
+    if not budget:
+        return True
+    cap, window = budget
+    now = time.monotonic()
+    key = (sid, event)
+    q = _byte_history.get(key)
+    if q is None:
+        q = _deque()
+        _byte_history[key] = q
+    cutoff = now - window
+    while q and q[0][0] < cutoff:
+        q.popleft()
+    total = sum(b for _, b in q) + byte_count
+    if total > cap:
+        return False
+    q.append((now, byte_count))
+    return True
+
+
+def _drop_byte_history(sid: str) -> None:
+    """Remove sender's byte tracking on disconnect."""
+    for event in list(_BYTE_BUDGETS):
+        _byte_history.pop((sid, event), None)
 
 
 @sio.on("data-message")
@@ -1201,6 +1360,47 @@ _SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data — sized to hold t
 # match's boot/menu/init events survive to the server. The drop-oldest-half
 # fallback below kicks in only on pathologically verbose matches.
 
+_LOG_BLOB_MAX_DEPTH = 6
+_LOG_BLOB_MAX_KEYS = 256
+_LOG_BLOB_MAX_LIST_LEN = 4096
+_LOG_BLOB_MAX_STR = 8192
+
+
+def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
+    """Defensively shape an untrusted JSON-ish blob from session-log payloads.
+
+    The client controls `summary`, `context`, and `inputAudit` contents and
+    we store the JSON serialization in SQLite. Without limits an attacker
+    can inject deeply-nested JSON, megabyte-long string values, or
+    control-character-laden text that pollutes the admin dashboard or
+    primes downstream LLM analysis. We coerce to a known shape rather
+    than reject — legitimate clients should always pass through untouched.
+    """
+    if depth > _LOG_BLOB_MAX_DEPTH:
+        return None
+    if obj is None or isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (int, float)):
+        return obj
+    if isinstance(obj, str):
+        cleaned = "".join(ch for ch in obj if ch == "\n" or ch == "\t" or unicodedata.category(ch)[0] != "C")
+        return cleaned[:_LOG_BLOB_MAX_STR]
+    if isinstance(obj, list):
+        return [_sanitize_log_blob(item, depth + 1) for item in obj[:_LOG_BLOB_MAX_LIST_LEN]]
+    if isinstance(obj, dict):
+        out = {}
+        for i, (k, v) in enumerate(obj.items()):
+            if i >= _LOG_BLOB_MAX_KEYS:
+                break
+            if not isinstance(k, str):
+                continue
+            key = "".join(ch for ch in k if unicodedata.category(ch)[0] != "C")[:128]
+            if not key:
+                continue
+            out[key] = _sanitize_log_blob(v, depth + 1)
+        return out
+    return None
+
 
 @sio.on("session-log")
 @validated(SessionLogPayload)
@@ -1227,13 +1427,15 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
 
     _SUMMARY_MAX = 4096
     _CONTEXT_MAX = 2 * 1024 * 1024
-    summary_str = json.dumps(payload.summary)
+    summary_clean = _sanitize_log_blob(payload.summary if isinstance(payload.summary, dict) else {})
+    summary_str = json.dumps(summary_clean)
     if len(summary_str) > _SUMMARY_MAX:
         summary_str = "{}"
 
-    context = dict(payload.context) if isinstance(payload.context, dict) else {}
+    context_clean = _sanitize_log_blob(payload.context if isinstance(payload.context, dict) else {})
+    context = dict(context_clean) if isinstance(context_clean, dict) else {}
     if isinstance(payload.inputAudit, dict) and payload.inputAudit:
-        context["inputAudit"] = payload.inputAudit
+        context["inputAudit"] = _sanitize_log_blob(payload.inputAudit)
     context_str = json.dumps(context)
     if len(context_str) > _CONTEXT_MAX:
         context.pop("inputAudit", None)
@@ -1241,7 +1443,10 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
         if len(context_str) > _SUMMARY_MAX:
             context_str = "{}"
 
-    entries = payload.entries if isinstance(payload.entries, list) else []
+    entries_raw = payload.entries if isinstance(payload.entries, list) else []
+    entries = _sanitize_log_blob(entries_raw)
+    if not isinstance(entries, list):
+        entries = []
     log_data_str = json.dumps(entries)
     while len(log_data_str) > _SESSION_LOG_MAX and entries:
         # Keep LATEST entries (drop oldest) so reconnect/desync events survive
@@ -1267,6 +1472,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
 async def disconnect(sid: str) -> None:
     log.info("SIO disconnect %s", sid)
     unregister_sid(sid)
+    _drop_byte_history(sid)
     if _shutting_down:
         return
 
@@ -1292,5 +1498,22 @@ async def disconnect(sid: str) -> None:
                 task = asyncio.create_task(_disconnect_grace_expiry(sid, session_id, player_id, "disconnect"))
                 _disconnect_grace_tasks[player_id] = task
                 return  # Don't call _leave yet
+            # Lobby owner grace: serializes ownership transfer through a short
+            # timer so a brief network blip on the host doesn't churn ownership
+            # to the next player.
+            if room and room.status != "playing" and not is_spectator and room.owner == sid:
+                _cancel_disconnect_grace(player_id)
+                log.info(
+                    "SIO %s disconnect (lobby owner) — %ds grace for %s in room %s",
+                    sid,
+                    _LOBBY_OWNER_GRACE_SECONDS,
+                    player_id,
+                    session_id,
+                )
+                task = asyncio.create_task(
+                    _disconnect_grace_expiry(sid, session_id, player_id, "disconnect", _LOBBY_OWNER_GRACE_SECONDS)
+                )
+                _disconnect_grace_tasks[player_id] = task
+                return
 
         await _leave(sid)
