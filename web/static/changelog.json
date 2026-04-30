@@ -1,5 +1,27 @@
 [
   {
+    "version": "0.49.0",
+    "date": "2026-04-30",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "slide-to-press with overlap so A→Z and similar slides register both"
+      },
+      {
+        "type": "fix",
+        "message": "reset guest rom_declared when host swaps ROM"
+      },
+      {
+        "type": "fix",
+        "message": "audit-driven correctness and hardening pass"
+      },
+      {
+        "type": "fix",
+        "message": "server + client hardening pass"
+      }
+    ]
+  },
+  {
     "version": "0.48.10",
     "date": "2026-04-30",
     "changes": [
