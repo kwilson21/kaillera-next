@@ -86,6 +86,9 @@
   let _hostRomHash = null; // host's ROM hash for late-join verification
   let _hostRomName = null; // host's current ROM display name
   let _hostRomSize = null; // host's current ROM byte size
+  let _hostRomIdentityResolved = false; // true once join-room/REST has reported host ROM (or confirmed there is none)
+  let _pendingRomAutoload = null; // {lastHash, savedRom, drop, statusEl} — guest autoload deferred until host ROM is known
+  let _pendingRomAutoloadTimer = null;
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
@@ -395,6 +398,9 @@
     _hostRomHash = next.hash || null;
     _hostRomName = next.name || null;
     _hostRomSize = Number.isFinite(next.size) ? next.size : null;
+    _hostRomIdentityResolved = true;
+    // Flush any deferred autoload now that we know what the host has.
+    if (_flushPendingRomAutoload) _flushPendingRomAutoload('host-rom-resolved');
     if (next.gameId) {
       _gameId = next.gameId;
       KNState.gameId = _gameId;
@@ -2627,44 +2633,88 @@
       if (e.dataTransfer.files.length > 0) handleRomFile(e.dataTransfer.files[0]);
     });
 
-    // Auto-load the most recently used ROM from library
+    // Auto-load the most recently used ROM from library.
+    //
+    // Guest race fix: if we don't yet know the host's ROM hash (the join-room
+    // ack hasn't returned), don't blindly autoload from localStorage — the
+    // cached hash may belong to a different game and we'd briefly load it,
+    // emit rom-ready with the wrong hash, and trigger "ROM does not match
+    // host". Defer the autoload until applyHostRomFromData runs, then evaluate
+    // the cached hash against the host's hash.
     const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
     if (lastHash) {
-      if (!isHost && _hostRomHash && romHashMismatch(_hostRomHash, lastHash)) {
-        console.warn(
-          '[play] cached ROM mismatch - clearing before autoload',
-          'host:',
-          _hostRomHash.substring(0, 16),
-          'cached:',
-          lastHash.substring(0, 16),
-        );
-        clearLoadedRom();
-        if (socket?.connected) socket.emit('rom-ready', { ready: false });
+      if (!isHost && !_hostRomIdentityResolved) {
+        _pendingRomAutoload = { lastHash, savedRom, drop, statusEl };
+        if (statusEl && savedRom) statusEl.textContent = `Waiting for host ROM info before loading ${savedRom}…`;
+        // Failsafe: if no host info ever arrives, fall back to autoload after
+        // 8s so we don't strand the user on a "waiting" message indefinitely
+        // (REST timeout, room not found, network issue).
+        _pendingRomAutoloadTimer = setTimeout(() => {
+          if (_pendingRomAutoload) {
+            console.log('[play] host ROM identity timeout — running deferred autoload anyway');
+            runRomAutoload('timeout-fallback');
+          }
+        }, 8000);
         return;
       }
-      crumb('rom-autoload-start', { hash: lastHash.substring(0, 12) });
-      loadRomFromLibrary(lastHash, (ok, name) => {
-        crumb('rom-autoload-done', {
-          ok,
-          name,
-          pendingLateJoin: _pendingLateJoin,
-          hostHash: _hostRomHash?.substring(0, 12),
-          match: !_hostRomHash || !romHashMismatch(_hostRomHash, lastHash),
-        });
-        if (ok) {
-          drop.classList.add('loaded');
-          if (statusEl) statusEl.textContent = `Loaded: ${name} (drop to change)`;
-          if (_pendingLateJoin) dismissLateJoinPrompt();
-        } else if (savedRom && statusEl) {
-          statusEl.textContent = `Last used: ${savedRom} (file not cached — drop again)`;
-        }
-        // Render library for host after loading
-        if (isHost) renderRomLibrary();
-      });
+      runRomAutoload('immediate');
     } else {
       if (isHost) renderRomLibrary();
     }
+
+    function runRomAutoload(trigger) {
+      if (!_pendingRomAutoload && !lastHash) return;
+      const ctx = _pendingRomAutoload || { lastHash, savedRom, drop, statusEl };
+      _pendingRomAutoload = null;
+      if (_pendingRomAutoloadTimer) {
+        clearTimeout(_pendingRomAutoloadTimer);
+        _pendingRomAutoloadTimer = null;
+      }
+      if (!isHost && _hostRomHash && romHashMismatch(_hostRomHash, ctx.lastHash)) {
+        console.warn(
+          '[play] cached ROM mismatch - skipping autoload',
+          'host:',
+          _hostRomHash.substring(0, 16),
+          'cached:',
+          ctx.lastHash.substring(0, 16),
+          'trigger:',
+          trigger,
+        );
+        // Try to load the host's hash from IDB (autoMatchRom) instead. Don't
+        // emit rom-ready:false yet — we may still find a matching ROM.
+        if (ctx.statusEl) ctx.statusEl.textContent = `Cached ROM doesn't match host — looking for match…`;
+        autoMatchRom(_hostRomHash);
+        return;
+      }
+      crumb('rom-autoload-start', { hash: ctx.lastHash.substring(0, 12), trigger });
+      loadRomFromLibrary(ctx.lastHash, (ok, name) => {
+        crumb('rom-autoload-done', {
+          ok,
+          name,
+          trigger,
+          pendingLateJoin: _pendingLateJoin,
+          hostHash: _hostRomHash?.substring(0, 12),
+          match: !_hostRomHash || !romHashMismatch(_hostRomHash, ctx.lastHash),
+        });
+        if (ok) {
+          ctx.drop.classList.add('loaded');
+          if (ctx.statusEl) ctx.statusEl.textContent = `Loaded: ${name} (drop to change)`;
+          if (_pendingLateJoin) dismissLateJoinPrompt();
+        } else if (ctx.savedRom && ctx.statusEl) {
+          ctx.statusEl.textContent = `Last used: ${ctx.savedRom} (file not cached — drop again)`;
+        }
+        if (isHost) renderRomLibrary();
+      });
+    }
+
+    // Expose to applyHostRomFromData so it can flush the deferred autoload
+    // once host identity arrives.
+    _flushPendingRomAutoload = (trigger) => runRomAutoload(trigger);
   };
+
+  // Set by setupRomDrop; called from applyHostRomFromData when the host's ROM
+  // identity is first known. No-op if no autoload is pending.
+  let _flushPendingRomAutoload = null;
 
   const handleRomFile = (file) => {
     _preloadAudioCtx(); // gesture — unlock audio for mobile guests dropping ROM
@@ -3729,6 +3779,11 @@
       }
     }, 15000);
   };
+
+  // Exposed so the lockstep engine can re-show the overlay when a late-join
+  // state arrives — guarantees the EJS canvas (which may be painting boot
+  // frames) stays fully covered until the host's state is loaded.
+  window.knShowGameLoading = showGameLoading;
 
   const dismissGameLoading = () => {
     if (_loadingTimeoutId) {

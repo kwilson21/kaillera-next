@@ -1660,11 +1660,57 @@
     _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}`);
   };
 
+  // Apply the real player-count mask the *instant* the WASM export is
+  // callable, before EmulatorJS schedules its first retro_run frame. Without
+  // this, the C-side default of 0x0f makes SSB64 see all four pads as
+  // present during the ~150-frame boot sequence — and when we narrow the
+  // mask later (at PHASE_EMU_READY) ports 3+4 visibly toggle off on CSS.
+  // Polled because the WASM module instantiates asynchronously and there is
+  // no synchronous "module ready" hook from EmulatorJS.
+  let _earlyMaskApplied = false;
+  let _earlyMaskPoller = null;
+  const _scheduleEarlyControllerMask = () => {
+    _earlyMaskApplied = false;
+    if (_earlyMaskPoller) {
+      clearInterval(_earlyMaskPoller);
+      _earlyMaskPoller = null;
+    }
+    const start = performance.now();
+    _earlyMaskPoller = setInterval(() => {
+      if (_earlyMaskApplied) {
+        clearInterval(_earlyMaskPoller);
+        _earlyMaskPoller = null;
+        return;
+      }
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (mod?._kn_set_controller_present_mask) {
+        _applyControllerPresentMask('wasm-ready');
+        _earlyMaskApplied = true;
+        clearInterval(_earlyMaskPoller);
+        _earlyMaskPoller = null;
+        _syncLog(`early controller mask applied after ${Math.round(performance.now() - start)}ms`);
+      } else if (performance.now() - start > 30000) {
+        clearInterval(_earlyMaskPoller);
+        _earlyMaskPoller = null;
+        _syncLog('early controller mask: WASM export never appeared within 30s');
+      }
+    }, 16);
+  };
+
+  // _resetControllerPresentMask was previously called on stopSync to write
+  // 0x0f back to the C engine. That left the next emulator boot starting
+  // with all 4 ports "present" until JS narrowed it again — the same toggle
+  // bug we fix above. Don't write a stale default; just clear our local
+  // bookkeeping so the next boot's _applyControllerPresentMask issues a
+  // fresh C call against whatever the new player count is.
   const _resetControllerPresentMask = () => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (mod?._kn_set_controller_present_mask) mod._kn_set_controller_present_mask(0x0f);
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
+    _earlyMaskApplied = false;
+    if (_earlyMaskPoller) {
+      clearInterval(_earlyMaskPoller);
+      _earlyMaskPoller = null;
+    }
   };
 
   // -- Smash Remix RNG state addresses --
@@ -5759,6 +5805,14 @@
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
+    // Ensure the loading overlay is up — the EJS canvas may already be
+    // painting boot frames (N64 logo) and we don't want the joiner to see
+    // them between now and the state restore that follows below.
+    if (typeof window.knShowGameLoading === 'function') {
+      try {
+        window.knShowGameLoading();
+      } catch (_) {}
+    }
     setStatus('Loading late-join state...');
 
     try {
@@ -11185,6 +11239,11 @@
     if (config.initialPlayers) {
       onUsersUpdated(config.initialPlayers);
     }
+
+    // Now that initial roster is populated, start polling for the WASM
+    // controller-mask export so we can write the real mask before retro_run
+    // executes its first frame. Spectators don't run an emulator.
+    if (!_isSpectator) _scheduleEarlyControllerMask();
 
     // Solo mode: no other players — start game sequence directly
     const otherPlayers = config.initialPlayers

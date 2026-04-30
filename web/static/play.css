@@ -1202,11 +1202,14 @@ button:hover {
   padding: 1rem;
 }
 
-/* Game loading overlay */
+/* Game loading overlay.
+ * Opaque (not 0.8) so the EmulatorJS canvas stays fully hidden during boot
+ * and late-join state transfer — otherwise the N64 boot logo / first
+ * pre-state-load frames bleed through and confuse joiners. */
 #game-loading {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: #000;
   display: flex;
   align-items: center;
   justify-content: center;
