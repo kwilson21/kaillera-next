@@ -1,8 +1,20 @@
 diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
-index a626706..e2a4502 100644
+index a626706..468dcfd 100644
 --- a/Makefile.emulatorjs
 +++ b/Makefile.emulatorjs
-@@ -126,7 +126,20 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+@@ -102,7 +102,7 @@ LTO ?= 0
+ PTHREAD_POOL_SIZE ?= 4
+ 
+ ASYNCIFY_ADD ?= dynCall_*,emscripten_mainloop
+-ASYNCIFY_REMOVE ?= threaded_worker
++ASYNCIFY_REMOVE ?= ["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]
+ 
+ STACK_SIZE ?= 4194304
+ INITIAL_HEAP ?= 134217728
+@@ -123,10 +123,32 @@ OBJDIR := obj-emscripten
+ 
+ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+                      _ejs_set_variable,_simulate_input,_shader_enable,_save_state_info,_set_cheat,_cmd_take_screenshot, \
 -                     _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_supports_states,_reset_cheat,_toggleMainLoop, \
 +                     _system_restart,_cmd_savefiles,_get_core_options,_cmd_save_state,_cmd_unpause,_supports_states,_reset_cheat,_toggleMainLoop, \
                       _save_file_path,_get_disk_count,_set_current_disk,_get_current_disk,_refresh_save_files,_toggle_fastforward,_set_ff_ratio, \
@@ -13,19 +25,28 @@ index a626706..e2a4502 100644
 +                     _kn_set_frame_time,_kn_set_deterministic,_kn_get_deterministic,_kn_get_cycle_time_ms, \
 +                     _kn_get_audio_ptr,_kn_get_audio_samples,_kn_reset_audio,_kn_get_audio_rate, \
 +                     _kn_reset_cycle_count,_kn_canon_fpu_regs, \
-+                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_rdram_block_hashes, \
++                     _kn_sync_hash,_kn_sync_read,_kn_sync_write,_kn_rdram_block_hashes,_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset,_kn_get_diag_rb_phase,_kn_get_diag_rb_frame,_kn_get_diag_rb_save_slot,_kn_get_diag_rb_serialize_count,_kn_get_diag_rb_serialize_ret,_kn_get_diag_rb_unserialize_count,_kn_get_diag_rb_unserialize_frame,_kn_get_diag_rb_unserialize_ret, \
 +                     _kn_frame_hash,_kn_set_skip_rsp_audio, \
 +                     _kn_fpu_trace_enable,_kn_fpu_trace_get_count,_kn_fpu_trace_get_buf, \
 +                     _kn_set_headless, \
 +                     _kn_set_native_fpu,_kn_get_native_fpu, \
 +                     _kn_get_rom_ptr,_kn_get_rom_size, \
 +                     _kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \
++                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \
++                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \
++                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \
++                     _kn_get_correct_predictions,_kn_get_max_depth, \
++                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_rollback_slot_reset,_kn_set_rng_sync,_kn_set_num_players, \
++                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller,_kn_set_controller_present_mask, \
++                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \
++                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \
++                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_post_state_load_cleanup,_kn_set_skip_audio_output,_kn_get_skip_audio_output,_kn_dump_audio_state,_kn_diag_reset_audio_counters,_kn_diag_check_invariant, \
 +                     _kn_eventqueue_dump,_kn_eventqueue_hash,_kn_normalize_event_queue, \
 +                     _kn_set_normalize_events,_kn_get_normalize_events
  
  EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
  
-@@ -222,6 +236,9 @@ endif
+@@ -222,6 +244,9 @@ endif
  
  ifeq ($(PROXY_TO_PTHREAD), 1)
  else ifeq ($(ASYNC), 1)
@@ -35,19 +56,6 @@ index a626706..e2a4502 100644
  else
     DEFINES += -DEMSCRIPTEN_AUDIO_EXTERNAL_BLOCK
     ifeq ($(MIN_ASYNC), 1)
-diff --git a/emscripten/library_platform_emscripten.js b/emscripten/library_platform_emscripten.js
-index 4e0d032..9a7b4b1 100644
---- a/emscripten/library_platform_emscripten.js
-+++ b/emscripten/library_platform_emscripten.js
-@@ -64,4 +64,7 @@ mergeInto(LibraryManager.library, {
-    $PlatformEmscriptenOnVisibilityChange__deps: ["platform_emscripten_update_window_hidden_cb"],
-    $PlatformEmscriptenOnVisibilityChange: function() {
--      _platform_emscripten_update_window_hidden_cb(document.visibilityState == "hidden");
-+      var hidden = document.visibilityState == "hidden";
-+      if (hidden && typeof window != "undefined" && window._knPreventRetroArchVisibilityPause)
-+         hidden = false;
-+      _platform_emscripten_update_window_hidden_cb(hidden);
-    },
 diff --git a/audio/audio_driver.c b/audio/audio_driver.c
 index a4a28cf..ae2b9a1 100644
 --- a/audio/audio_driver.c
@@ -194,8 +202,24 @@ index be6c1f6..dcf3fa1 100644
     al_unqueue_buffers(al);
     return al->res_ptr * OPENAL_BUFSIZE;
  }
+diff --git a/emscripten/library_platform_emscripten.js b/emscripten/library_platform_emscripten.js
+index 73ff846..c3db4fe 100644
+--- a/emscripten/library_platform_emscripten.js
++++ b/emscripten/library_platform_emscripten.js
+@@ -63,7 +63,10 @@ var LibraryPlatformEmscripten = {
+ 
+    $PlatformEmscriptenOnVisibilityChange__deps: ["platform_emscripten_update_window_hidden_cb"],
+    $PlatformEmscriptenOnVisibilityChange: function() {
+-      _platform_emscripten_update_window_hidden_cb(document.visibilityState == "hidden");
++      var hidden = document.visibilityState == "hidden";
++      if (hidden && typeof window != "undefined" && window._knPreventRetroArchVisibilityPause)
++         hidden = false;
++      _platform_emscripten_update_window_hidden_cb(hidden);
+    },
+ 
+    PlatformEmscriptenWatchWindowVisibility__deps: ["$PlatformEmscriptenOnVisibilityChange"],
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
-index c9ceed1..9ef5d8b 100644
+index c9ceed1..c494df5 100644
 --- a/frontend/drivers/platform_emulatorjs.c
 +++ b/frontend/drivers/platform_emulatorjs.c
 @@ -15,6 +15,7 @@
@@ -258,7 +282,7 @@ index c9ceed1..9ef5d8b 100644
  /* defined here since implementation is frontend dependent */
  
  void retro_sleep(unsigned msec)
-@@ -328,6 +369,15 @@ bool platform_emscripten_is_window_hidden(void)
+@@ -328,6 +374,15 @@ bool platform_emscripten_is_window_hidden(void)
  
  bool platform_emscripten_should_drop_iter(void)
  {

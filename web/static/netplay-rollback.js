@@ -436,6 +436,7 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
+  const STRICT_MENU_OVERLAY_DELAY_MS = 5000;
   // I1: _rbPendingInit fallback deadline (MF2). If the host's
   // rb-delay DC broadcast never arrives, the guest falls back to a
   // locally-computed delay instead of freezing forever.
@@ -535,6 +536,63 @@
   };
   const _formatInputBrief = (input) =>
     input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
+  const _resetStrictMenuResends = () => {
+    _strictMenuResendState = {};
+  };
+  const _requestStrictMenuResends = (inputPeers, missingSlots, applyFrame, nowMs, source) => {
+    const sentSlots = [];
+    for (const slot of missingSlots) {
+      const resendKey = `${source}:${slot}:${applyFrame}`;
+      const prev = _strictMenuResendState[slot];
+      if (prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS) continue;
+
+      const peer = inputPeers.find((p) => p.slot === slot);
+      try {
+        peer?.dc?.send(`resend:${applyFrame}`);
+      } catch (_) {}
+      _strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };
+      sentSlots.push(slot);
+    }
+    return sentSlots;
+  };
+  const _playerNameForSlot = (slot) => {
+    const numericSlot = Number(slot);
+    for (const info of Object.values(_knownPlayers || {})) {
+      if (Number(info?.slot) === numericSlot && info?.playerName) return info.playerName;
+    }
+    return Number.isFinite(numericSlot) ? `Player ${numericSlot + 1}` : 'Player';
+  };
+  const _emitStrictMenuWait = (missingSlots, applyFrame, stalledMs, scene, gameStatus) => {
+    const slots = [...new Set(missingSlots || [])].sort((a, b) => a - b);
+    if (!slots.length || stalledMs < STRICT_MENU_OVERLAY_DELAY_MS) return;
+    const nowMs = performance.now();
+    const waitKey = `${applyFrame}:${scene}:${gameStatus}:${slots.join(',')}`;
+    if (_strictMenuWaitOverlayKey === waitKey && nowMs - _strictMenuWaitOverlayLastAt < 1000) return;
+    _strictMenuWaitOverlayKey = waitKey;
+    _strictMenuWaitOverlayLastAt = nowMs;
+    try {
+      window.dispatchEvent(
+        new CustomEvent('kn-menu-lockstep-wait', {
+          detail: {
+            slots,
+            peers: slots.map((slot) => ({ slot, name: _playerNameForSlot(slot) })),
+            applyFrame,
+            stalledMs: Math.round(stalledMs),
+            scene,
+            gameStatus,
+          },
+        }),
+      );
+    } catch (_) {}
+  };
+  const _clearStrictMenuWait = () => {
+    if (!_strictMenuWaitOverlayKey) return;
+    _strictMenuWaitOverlayKey = '';
+    _strictMenuWaitOverlayLastAt = 0;
+    try {
+      window.dispatchEvent(new CustomEvent('kn-menu-lockstep-clear'));
+    } catch (_) {}
+  };
   // ── Freeze detection state ─────────────────────────────────────────
   // Lightweight per-frame sampling to detect when display, input, or
   // audio stop working — the "emulator froze" scenario where the tick
@@ -563,7 +621,6 @@
   // with inputs in flight) and we must recover instead of deadlocking.
   let _bootStallFrame = -1;
   let _bootStallStartTime = 0;
-  let _bootStallLastResendAt = 0;
   let _bootStallRecoveryFired = false;
   let _bootStallRecoveryResetTime = 0;
   let _phaseLockStallKey = '';
@@ -571,6 +628,9 @@
   let _phaseLockLastWaitLogAt = 0;
   let _rbInputStallKey = '';
   let _rbInputStallStartTime = 0;
+  let _strictMenuResendState = {}; // slot -> { key, lastAt }
+  let _strictMenuWaitOverlayKey = '';
+  let _strictMenuWaitOverlayLastAt = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -1532,7 +1592,8 @@
 
     _bootStallFrame = -1;
     _bootStallStartTime = 0;
-    _bootStallLastResendAt = 0;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
     _bootStallRecoveryFired = false;
     _syncLog(
       `late-join input bootstrap: frames=${startFrame}-${endFrame} slots=[${slots.join(',')}] ` +
@@ -1942,8 +2003,8 @@
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
-  let _stallLastResendAt = 0; // repeated resend cadence for lossless strict menu stalls
-  let _resendSent = false; // true once resend request sent for current stall
+  let _stallLastResendAt = 0; // normal input-stall resend timestamp
+  let _resendSent = false; // true once normal input-stall resend request sent
   // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
   // the game moving, but any real inputs that arrive later are dropped
   // — creating permanent hash divergence. When hard-timeout fires, we
@@ -4218,7 +4279,8 @@
     if (_bootStallFrame >= 0) {
       _bootStallFrame = -1;
       _bootStallStartTime = 0;
-      _bootStallLastResendAt = 0;
+      _resetStrictMenuResends();
+      _clearStrictMenuWait();
       _bootStallRecoveryFired = false;
     }
     if (_phaseLockStallKey) {
@@ -6998,6 +7060,8 @@
     _stallStart = 0;
     _stallLastResendAt = 0;
     _resendSent = false;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
     _phaseLockStallKey = '';
     _phaseLockStallStartTime = 0;
     _phaseLockLastWaitLogAt = 0;
@@ -7727,6 +7791,8 @@
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
     _lastAppliedSyncHostFrame = -1;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
 
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
@@ -8711,47 +8777,47 @@
         // the resync response is never handled.
         if (rbApplyFrame >= 0) {
           const bootInputPeers = getInputPeers(_menuLockstepActive);
-          let stalled = false;
-          let missingSlot = -1;
+          const missingSlots = [];
           for (const p of bootInputPeers) {
             if (_peerPhantom[p.slot]) continue;
             if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
-              stalled = true;
-              missingSlot = p.slot;
-              break;
+              missingSlots.push(p.slot);
             }
           }
-          if (stalled) {
+          if (missingSlots.length) {
+            const missingSlot = missingSlots[0];
             const nowWall = performance.now();
             if (_bootStallFrame !== rbApplyFrame) {
               _bootStallFrame = rbApplyFrame;
               _bootStallStartTime = nowWall;
-              _bootStallLastResendAt = 0;
+              _resetStrictMenuResends();
               _bootStallRecoveryFired = false;
-              _resendSent = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
             if (_menuLockstepActive) {
-              if (
-                stallDuration >= MAX_STALL_MS &&
-                (!_resendSent || nowWall - _bootStallLastResendAt >= RESEND_TIMEOUT_MS)
-              ) {
-                _resendSent = true;
-                _bootStallLastResendAt = nowWall;
-                const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
-                try {
-                  missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
-                } catch (_) {}
-                _syncLog(
-                  `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} ` +
-                    `missingSlot=${missingSlot} stalledMs=${Math.round(stallDuration)}`,
+              if (stallDuration >= MAX_STALL_MS) {
+                const sentSlots = _requestStrictMenuResends(
+                  bootInputPeers,
+                  missingSlots,
+                  rbApplyFrame,
+                  nowWall,
+                  'c-menu',
                 );
+                if (sentSlots.length) {
+                  _syncLog(
+                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} ` +
+                      `missing=[${missingSlots.join(',')}] sent=[${sentSlots.join(',')}] ` +
+                      `stalledMs=${Math.round(stallDuration)}`,
+                  );
+                }
+                _emitStrictMenuWait(missingSlots, rbApplyFrame, stallDuration, sceneCurr, gameStatus);
               }
               if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
                 window._knLastBootStallLogFrame = _frameNum;
                 _syncLog(
                   `MENU-LOCKSTEP-WAIT f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                    `stalledMs=${Math.round(stallDuration)} slot=${missingSlot} - holding strict menu lockstep`,
+                    `stalledMs=${Math.round(stallDuration)} slots=[${missingSlots.join(',')}] ` +
+                    `- holding strict menu lockstep`,
                 );
               }
               return;
@@ -8790,8 +8856,9 @@
           }
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
-          _bootStallLastResendAt = 0;
+          _resetStrictMenuResends();
           _bootStallRecoveryFired = false;
+          _clearStrictMenuWait();
         }
       } else if (_rbBootConverged && rbApplyFrame >= 0) {
         // Gameplay: stall only when too far ahead for rollback to help
@@ -10015,8 +10082,7 @@
         if (menuLockstepPhase.strictInputLockstep) {
           if (_stallStart === 0) {
             _stallStart = now;
-            _stallLastResendAt = 0;
-            _resendSent = false;
+            _resetStrictMenuResends();
             _syncLog(
               `MENU-LOCKSTEP start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
                 `scene=${menuLockstepPhase.sceneCurr} gameStatus=${menuLockstepPhase.gameStatus} ` +
@@ -10024,18 +10090,29 @@
             );
           }
           const stallDuration = now - _stallStart;
-          if (stallDuration >= MAX_STALL_MS && (!_resendSent || now - _stallLastResendAt >= RESEND_TIMEOUT_MS)) {
-            _resendSent = true;
-            _stallLastResendAt = now;
-            for (const p of inputPeers) {
-              if (_remoteInputs[p.slot]?.[applyFrame] !== undefined) continue;
-              try {
-                p.dc?.send(`resend:${applyFrame}`);
-              } catch (_) {}
+          if (stallDuration >= MAX_STALL_MS) {
+            const sentSlots = _requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu');
+            if (sentSlots.length) {
+              _syncLog(
+                `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} ` +
+                  `missing=[${_missingSlots.join(',')}] sent=[${sentSlots.join(',')}] ` +
+                  `stalledMs=${stallDuration.toFixed(0)}`,
+              );
             }
+            _emitStrictMenuWait(
+              _missingSlots,
+              applyFrame,
+              stallDuration,
+              menuLockstepPhase.sceneCurr,
+              menuLockstepPhase.gameStatus,
+            );
+          }
+          if (_frameNum % 60 === 0 && window._knLastMenuStallLogFrame !== _frameNum) {
+            window._knLastMenuStallLogFrame = _frameNum;
             _syncLog(
-              `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} ` +
-                `missing=[${_missingSlots.join(',')}] stalledMs=${stallDuration.toFixed(0)}`,
+              `MENU-LOCKSTEP-WAIT f=${_frameNum} applyF=${applyFrame} ` +
+                `stalledMs=${stallDuration.toFixed(0)} slots=[${_missingSlots.join(',')}] ` +
+                `- holding strict menu lockstep`,
             );
           }
           return;
@@ -10184,6 +10261,8 @@
         _stallStart = 0;
         _stallLastResendAt = 0;
         _resendSent = false;
+        _resetStrictMenuResends();
+        _clearStrictMenuWait();
         // Reset consecutive fabrication counts for peers whose input arrived
         for (const p of inputPeers) {
           if (_consecutiveFabrications[p.slot]) _consecutiveFabrications[p.slot] = 0;
@@ -11137,7 +11216,8 @@
         mod._kn_set_frame(frame);
         _bootStallFrame = -1;
         _bootStallStartTime = 0;
-        _bootStallLastResendAt = 0;
+        _resetStrictMenuResends();
+        _clearStrictMenuWait();
         _bootStallRecoveryFired = false;
         _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
         // Arm post-sync diagnostic burst: log full state hash for 10 frames

@@ -60,6 +60,28 @@ def test_strict_menu_lockstep_never_fabricates_or_phantoms_inputs():
     assert "holding strict menu lockstep" in src
 
 
+def test_strict_menu_resend_cadence_is_per_slot():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "_bootStallLastResendAt" not in src
+    assert "let _strictMenuResendState = {};" in src
+    assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
+    assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
+    assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
+    assert "_requestStrictMenuResends(\n                  bootInputPeers,\n                  missingSlots," in src
+    assert "_requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu')" in src
+
+
+def test_retroarch_deterministic_patch_is_enforced_by_build():
+    build_src = (ROOT / "build/build.sh").read_text()
+    patch_src = (ROOT / "build/patches/retroarch-deterministic-timing.patch").read_text()
+
+    assert "FATAL: RetroArch deterministic timing patch failed" in build_src
+    assert "_kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick" in patch_src
+    assert "ASYNCIFY_REMOVE ?= [\"retro_run\"" in patch_src
+    assert "window._knPreventRetroArchVisibilityPause" in patch_src
+
+
 def test_rollback_delay_inputs_are_clamped_to_engine_window():
     src = LOCKSTEP_JS.read_text()
 

@@ -856,6 +856,41 @@ button:hover {
   pointer-events: none;
 }
 
+#menu-wait-overlay {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 64px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 180;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 10px 14px;
+  border: 1px solid rgba(115, 170, 255, 0.42);
+  border-radius: 8px;
+  background: rgba(8, 11, 18, 0.9);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+  color: #f4f7fb;
+  text-align: center;
+  pointer-events: none;
+}
+
+#menu-wait-overlay.hidden {
+  display: none;
+}
+
+#menu-wait-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+#menu-wait-detail {
+  margin-top: 3px;
+  color: #bcc8d8;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .toast {
   background: rgba(0, 0, 0, 0.8);
   color: #eee;

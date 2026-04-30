@@ -102,7 +102,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
         git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
-            echo "    RetroArch patch already applied or failed"
+            { echo "FATAL: RetroArch deterministic timing patch failed"; exit 1; }
     fi
 
     # ASYNCIFY_REMOVE: strip Asyncify instrumentation from functions that must
