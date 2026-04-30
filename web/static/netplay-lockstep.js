@@ -2467,16 +2467,24 @@
     return mod._kn_diag_check_invariant(locationId) | 0;
   };
 
-  const _postRemixStateLoadCleanup = (mod, reason) => {
-    if (!_isSmashRemix()) return false;
+  // Generic post-state-load cleanup — runs the C-side kn_post_state_load_cleanup
+  // (event-queue normalize + AI_INT-when-BUSY synthesizer + JIT invalidate) for
+  // any game that loads state at the lockstep start boundary. Originally gated
+  // to Remix because it was added for Remix's kn-sync path, but the underlying
+  // AI controller stuck-state (BUSY=1 with no AI_INT in cp0 queue, captured
+  // when the host snapshots between AI_INT firing and the next DMA scheduling
+  // its successor) reproduces just as well via libretro savestate on SSB64 —
+  // room SS9QA5C3 (2026-04-29) had silent audio on host because the synthesizer
+  // never ran. C function is named without Remix in build/build.sh; matched here.
+  const _postStateLoadCleanup = (mod, reason) => {
     if (mod?._kn_post_state_load_cleanup) {
       mod._kn_post_state_load_cleanup();
-      _syncLog(`${reason}: Remix post-state cleanup applied`);
+      _syncLog(`${reason}: post-state cleanup applied`);
       return true;
     }
     if (mod?._kn_normalize_event_queue) {
       mod._kn_normalize_event_queue();
-      _syncLog(`${reason}: normalized event queue after Remix state load`);
+      _syncLog(`${reason}: normalized event queue after state load`);
       return true;
     }
     return false;
@@ -5101,7 +5109,7 @@
         _logAudioDump(readyMod, `${stagePrefix}:post-fifo-restore`);
         if (_isSmashRemix()) {
           kStage = 'post-state-cleanup';
-          _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+          _postStateLoadCleanup(readyMod, 'initial-sync-load');
           _checkAiInvariant(readyMod, 5);
           kStage = 'post-cleanup-dump';
           _logAudioDump(readyMod, `${stagePrefix}:post-cleanup`);
@@ -5123,7 +5131,7 @@
       loadStateAtStartBoundary(gm, _guestStateBytes, 'initial-sync-load', _isSmashRemix() ? 1 : 2);
       _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
       _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
-      _postRemixStateLoadCleanup(readyMod, 'initial-sync-load');
+      _postStateLoadCleanup(readyMod, 'initial-sync-load');
     }
     _guestStateBytes = null;
     _guestStateKind = 'savestate';
