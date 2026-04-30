@@ -1230,7 +1230,10 @@ async def game_screenshot(sid: str, data: dict) -> None:
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
-_SESSION_LOG_MAX = 2 * 1024 * 1024  # 2MB cap for log_data
+_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data — sized to hold the
+# full client ring (SYNC_LOG_MAX=60000 entries × ~150 B/entry ≈ 9 MB) so a 60-min
+# match's boot/menu/init events survive to the server. The drop-oldest-half
+# fallback below kicks in only on pathologically verbose matches.
 
 
 @sio.on("session-log")

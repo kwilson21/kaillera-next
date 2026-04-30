@@ -1923,7 +1923,12 @@
   };
 
   // -- Sync log ring buffer (downloadable from toolbar) ----------------------
-  const SYNC_LOG_MAX = 10000;
+  // Sized so a 60-minute match at ~17 events/sec/peer fits without dropping
+  // boot/menu entries off the front. The earlier 10K cap rotated out the
+  // first ~5 min of a 10-min match, hiding desync triggers like the
+  // MENU→GAMEPLAY init sequence behind already-discarded entries.
+  // ~150 B/entry ⇒ ~9 MB peak; survivable on iOS Safari.
+  const SYNC_LOG_MAX = 60000;
   const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
   let _startTime = 0;
 
@@ -3777,13 +3782,18 @@
           if (hostDelay > 0) {
             // Cache for guests that haven't reached the init code yet.
             window._rbHostDelay = hostDelay;
-            if (window._rbPendingInit && window._rbDoInit) {
-              // Deferred init was waiting for this. Run it now.
+            // Deferred init now waits for BOTH rb-delay AND rb-init-frame so
+            // guest's rb.frame is set to the host's frame at init. The
+            // rb-init-frame handler below covers the symmetric "fire when
+            // delay was already known" case.
+            if (window._rbPendingInit && window._rbDoInit && window._rbHostInitFrame !== undefined) {
               window._rbPendingInit = false;
               window._rbPendingInitAt = 0;
               DELAY_FRAMES = hostDelay;
-              _syncLog(`rb-delay: deferred init triggered with host delay=${hostDelay}`);
-              window._rbDoInit(hostDelay);
+              _syncLog(
+                `rb-delay: deferred init triggered with host delay=${hostDelay} initFrame=${window._rbHostInitFrame}`,
+              );
+              window._rbDoInit(hostDelay, window._rbHostInitFrame);
             } else if (hostDelay !== DELAY_FRAMES) {
               // Init already ran (e.g. host, or race). C engine can't be
               // updated mid-flight; only the JS variable is changed, which
@@ -3792,6 +3802,36 @@
                 `rb-delay: WARN host set delay=${hostDelay} but JS was ${DELAY_FRAMES}; C engine NOT updated (already inited)`,
               );
               DELAY_FRAMES = hostDelay;
+            }
+          }
+          return;
+        }
+        // Host-authoritative init frame: parallels rb-delay. Sent by host
+        // from inside doRollbackInit so the value reflects the moment of
+        // init (which can land at a different _frameNum than rb-delay's
+        // game-start broadcast for the SR deferred-init path). Guest uses
+        // this value in _kn_set_frame so both engines initialize rb.frame
+        // to the same number; without this, asymmetric pacing during the
+        // menu phase can leave the two engines off by N frames forever,
+        // and exchanged input-frame numbers no longer correspond to the
+        // same simulation point on both sides.
+        if (e.data.startsWith('rb-init-frame:')) {
+          const hostInitFrame = parseInt(e.data.split(':')[1], 10);
+          if (Number.isFinite(hostInitFrame) && hostInitFrame >= 0) {
+            window._rbHostInitFrame = hostInitFrame;
+            if (
+              window._rbPendingInit &&
+              window._rbDoInit &&
+              window._rbHostDelay !== undefined &&
+              window._rbHostDelay > 0
+            ) {
+              window._rbPendingInit = false;
+              window._rbPendingInitAt = 0;
+              DELAY_FRAMES = window._rbHostDelay;
+              _syncLog(
+                `rb-init-frame: deferred init triggered with host delay=${window._rbHostDelay} initFrame=${hostInitFrame}`,
+              );
+              window._rbDoInit(window._rbHostDelay, hostInitFrame);
             }
           }
           return;
@@ -6884,11 +6924,21 @@
       // before initializing — initializing first with locally-computed delay
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
-      const doRollbackInit = (effectiveDelay) => {
+      const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
         if (!detMod?._kn_rollback_init) {
           _useCRollback = false;
           return;
         }
+        // Choose init frame: host-broadcast value (when guest is matching the
+        // host's init point) or local _frameNum. The SR deferred-init path
+        // fires init at the LOCAL MENU→GAMEPLAY transition, which can land on
+        // different _frameNum on each peer if pacing-throttle skipped a tick
+        // on one side during the menu phase. Initializing rb.frame to the
+        // host's frame on guests guarantees both engines label exchanged
+        // input-frame numbers against the same simulation point. Late-join
+        // already sets _frameNum to the host's frame from the loaded state,
+        // so the local fallback is correct there too.
+        const initFrame = initFrameOverride != null ? initFrameOverride : _frameNum;
         // Always 4 (KN_MAX_PLAYERS) — avoids contiguous slot assumption.
         const numPlayers = 4;
         // Ring buffer size = rollbackMax + 1 slots × ~16MB each.
@@ -6899,13 +6949,17 @@
         // while keeping ring buffer at 9 slots × 16MB = 144MB.
         const rollbackMax = Math.max(12, effectiveDelay + 4);
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
-        // Late join: C engine starts at frame 0 (memset), but we need it at
-        // the host's frame. Without this, kn_get_frame() returns 0 and the
-        // JS frame counter is reset from 4574→0, causing permanent stall.
-        if (_frameNum > 0 && detMod._kn_set_frame) {
-          detMod._kn_set_frame(_frameNum);
-          _syncLog(`C-ROLLBACK late-join: set C frame to ${_frameNum}`);
-        } else if (_frameNum > 0) {
+        // Set the C engine's frame counter so kn_get_frame()/exchanged input
+        // frame numbers line up across peers. Late-join: _frameNum was set
+        // to the host's frame from the loaded state. Deferred-init guest:
+        // initFrame is the host's broadcast frame (initFrameOverride).
+        if (initFrame > 0 && detMod._kn_set_frame) {
+          detMod._kn_set_frame(initFrame);
+          _syncLog(
+            `C-ROLLBACK init: set C frame to ${initFrame}` +
+              (initFrameOverride != null ? ` (host-authoritative)` : ` (local)`),
+          );
+        } else if (initFrame > 0) {
           // WASM doesn't have kn_set_frame yet — disable C rollback so the
           // tick loop doesn't sync _frameNum from the C engine's stale 0.
           _syncLog(`C-ROLLBACK late-join: no _kn_set_frame, disabling C rollback`);
@@ -6916,7 +6970,7 @@
         _rbRollbackMax = rollbackMax;
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
-        _rbInitFrame = _frameNum;
+        _rbInitFrame = initFrame;
         _rbConvergedLogged = false;
         // T3: explicit mode marker so the server-side log analyzer knows
         // which netplay mode captured the input audit payload.
@@ -6924,6 +6978,24 @@
         _syncLog(
           `C-ROLLBACK init: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers} heapMB=${heapMB}`,
         );
+
+        // Host broadcasts its init frame so guests can match it. Mirrors the
+        // rb-delay broadcast at line ~5017; deferred-init for SR fires after
+        // that broadcast, so a separate message here is required. Sent over
+        // the same DC as rb-delay (reliable+ordered), so guests receive
+        // rb-delay before rb-init-frame and gate accordingly. Non-host peers
+        // are no-op here because their _peers map is keyed by remote slot
+        // and doesn't include the host (the only guest→guest broadcast in
+        // this codebase is the rb-blocks per-block hash exchange).
+        if (_playerSlot === 0) {
+          for (const p of Object.values(_peers)) {
+            if (p.dc?.readyState === 'open') {
+              try {
+                p.dc.send(`rb-init-frame:${initFrame}`);
+              } catch (_) {}
+            }
+          }
+        }
         _syncLog(`audit: recording enabled mode=rollback transport=${_rbTransport}`);
         // P4: reset the failed_rollbacks baseline at init so any increase
         // during the match is detected fresh.
@@ -6971,24 +7043,38 @@
       };
       window._rbDoInit = doRollbackInit;
 
-      // Common init dispatcher: host inits with the broadcast delay; guest
-      // either inits with the already-received host delay or arms the
-      // rb-delay handler to fire init when the broadcast arrives.
+      // Common init dispatcher: host inits with the broadcast delay (and
+      // broadcasts its init frame from inside doRollbackInit); guest inits
+      // only when both rb-delay AND rb-init-frame have been received, so
+      // guest's rb.frame matches the host's at init time. If either is
+      // missing, arm pending state and let the rb-delay/rb-init-frame
+      // handlers fire init when the broadcast arrives.
       const tryInitRollback = () => {
         if (_playerSlot === 0) {
-          // Host: init immediately with the value we just broadcast.
+          // Host: init immediately at local frame; doRollbackInit broadcasts
+          // rb-init-frame inside so guests can match.
           doRollbackInit(DELAY_FRAMES);
-        } else if (window._rbHostDelay !== undefined && window._rbHostDelay > 0) {
+        } else if (
+          window._rbHostDelay !== undefined &&
+          window._rbHostDelay > 0 &&
+          window._rbHostInitFrame !== undefined
+        ) {
           DELAY_FRAMES = window._rbHostDelay;
-          doRollbackInit(window._rbHostDelay);
+          doRollbackInit(window._rbHostDelay, window._rbHostInitFrame);
         } else {
           // I1 (MF2): record the wall-clock start of the pending
           // state so tick() can fire RB-INIT-TIMEOUT if the host's
-          // rb-delay broadcast never arrives (DC died mid-send,
-          // host crashed, etc).
+          // rb-delay/rb-init-frame broadcast never arrives (DC died
+          // mid-send, host crashed, etc).
           window._rbPendingInit = true;
           window._rbPendingInitAt = performance.now();
-          _syncLog(`C-ROLLBACK deferred: waiting for host rb-delay broadcast (own delay=${DELAY_FRAMES})`);
+          const haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
+          const haveInitFrame = window._rbHostInitFrame !== undefined;
+          _syncLog(
+            `C-ROLLBACK deferred: waiting for host ` +
+              `${haveDelay ? '' : 'rb-delay '}${haveInitFrame ? '' : 'rb-init-frame '}` +
+              `broadcast (own delay=${DELAY_FRAMES})`,
+          );
         }
       };
 
@@ -7549,6 +7635,13 @@
     // subsequent non-SR match's f=0 MENU→GAMEPLAY block fires the stale
     // closure and double-calls _kn_rollback_init, breaking GL/main-loop state.
     window._rbDeferredForGameplay = null;
+    // Clear host-broadcast init params so a back-to-back match doesn't fire
+    // its tryInitRollback with stale values from the previous match's host
+    // before the new rb-delay/rb-init-frame broadcasts arrive.
+    window._rbHostDelay = undefined;
+    window._rbHostInitFrame = undefined;
+    window._rbPendingInit = false;
+    window._rbPendingInitAt = 0;
 
     // Disable FPU trace
     if (_fpuTraceEnabled) {
@@ -7739,14 +7832,20 @@
       const _rbPendingStart = window._rbPendingInitAt || 0;
       if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
         const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+        const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
+        const _haveInitFrame = window._rbHostInitFrame !== undefined;
+        const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
         _syncLog(
           `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
-            `host rb-delay never arrived, falling back to local delay=${_rbFallbackDelay}`,
+            `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
         );
         window._rbPendingInit = false;
         window._rbPendingInitAt = 0;
         if (window._rbDoInit) {
           try {
+            // No initFrameOverride: fall back to local _frameNum. Hash
+            // mismatch + resync below converges both peers if local frames
+            // diverged from host's intended init frame.
             window._rbDoInit(_rbFallbackDelay);
           } catch (e) {
             _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
