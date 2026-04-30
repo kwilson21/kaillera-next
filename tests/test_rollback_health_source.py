@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 ROLLBACK_C = ROOT / "build/kn_rollback/kn_rollback.c"
 ROLLBACK_H = ROOT / "build/kn_rollback/kn_rollback.h"
 INVARIANTS_DOC = ROOT / "docs/netplay-invariants.md"

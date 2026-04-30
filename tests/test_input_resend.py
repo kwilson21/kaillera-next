@@ -41,7 +41,7 @@ def test_input_resend_on_stall(browser, server_url):
     guest.on("console", lambda msg: _log(guest_logs, msg))
 
     try:
-        host.goto(f"{server_url}/play.html?room=RESND1&host=1&name=Host&mode=lockstep")
+        host.goto(f"{server_url}/play.html?room=RESND1&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=RESND1&name=Guest")
@@ -73,7 +73,7 @@ def test_input_resend_on_stall(browser, server_url):
         guest.evaluate("""() => {
             window._inputsBlocked = 0;
             window._resendResponses = 0;
-            var peers = window.NetplayLockstep._getPeers() || {};
+            var peers = window.NetplayRollback._getPeers() || {};
             Object.values(peers).forEach(function(p) {
                 if (!p.dc) return;
                 var origSend = p.dc.send.bind(p.dc);
@@ -141,7 +141,7 @@ def test_hard_timeout_fabricates_zero(browser, server_url):
     host.on("console", lambda msg: _log(host_logs, msg))
 
     try:
-        host.goto(f"{server_url}/play.html?room=HTIME1&host=1&name=Host&mode=lockstep")
+        host.goto(f"{server_url}/play.html?room=HTIME1&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=HTIME1&name=Guest")
@@ -162,7 +162,7 @@ def test_hard_timeout_fabricates_zero(browser, server_url):
         # Block ALL guest DC sends (binary AND string) so resend response
         # never reaches the host — forces hard timeout
         guest.evaluate("""() => {
-            var peers = window.NetplayLockstep._getPeers() || {};
+            var peers = window.NetplayRollback._getPeers() || {};
             Object.values(peers).forEach(function(p) {
                 if (!p.dc) return;
                 var origSend = p.dc.send.bind(p.dc);

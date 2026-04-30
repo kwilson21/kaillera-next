@@ -1771,8 +1771,8 @@ async function samplePageForensics(peer) {
             return { error: err?.message || String(err) };
           }
         };
-        const syncLog = safeCall(() => window.NetplayLockstep?.exportSyncLog?.(), []);
-        const debugLog = safeCall(() => window.NetplayLockstep?.getDebugLog?.(), []);
+        const syncLog = safeCall(() => window.NetplayRollback?.exportSyncLog?.(), []);
+        const debugLog = safeCall(() => window.NetplayRollback?.getDebugLog?.(), []);
         const diagLog = Array.isArray(window.KNDiag?.eventLog) ? window.KNDiag.eventLog.slice(-200) : [];
         return {
           url: location.href,
@@ -1837,9 +1837,9 @@ async function samplePageForensics(peer) {
               }
             : null,
           lockstep: {
-            info: safeCall(() => window.NetplayLockstep?.getInfo?.(), null),
-            debugState: safeCall(() => window.NetplayLockstep?.getDebugState?.(), null),
-            rollbackStats: safeCall(() => window.NetplayLockstep?.getRollbackStats?.(), null),
+            info: safeCall(() => window.NetplayRollback?.getInfo?.(), null),
+            debugState: safeCall(() => window.NetplayRollback?.getDebugState?.(), null),
+            rollbackStats: safeCall(() => window.NetplayRollback?.getRollbackStats?.(), null),
           },
           logs: {
             syncTail: Array.isArray(syncLog) ? syncLog.slice(-350) : syncLog,
@@ -2220,7 +2220,7 @@ async function sampleRollbackStats(page) {
       const mod = window.EJS_emulator?.gameManager?.Module;
       if (!mod?._kn_get_rollback_count) return null;
       return {
-        active: !!window.NetplayLockstep?.isCRollback?.(),
+        active: !!window.NetplayRollback?.isCRollback?.(),
         rollbacks: (mod._kn_get_rollback_count?.() || 0) >>> 0,
         maxDepth: (mod._kn_get_max_depth?.() || 0) >>> 0,
         failed: (mod._kn_get_failed_rollbacks?.() || 0) >>> 0,
@@ -2238,7 +2238,7 @@ async function sampleRuntimeStats(page) {
       const mod = window.EJS_emulator?.gameManager?.Module;
       const rb = mod?._kn_get_rollback_count
         ? {
-            active: !!window.NetplayLockstep?.isCRollback?.(),
+            active: !!window.NetplayRollback?.isCRollback?.(),
             rollbacks: (mod._kn_get_rollback_count?.() || 0) >>> 0,
             maxDepth: (mod._kn_get_max_depth?.() || 0) >>> 0,
             failed: (mod._kn_get_failed_rollbacks?.() || 0) >>> 0,
@@ -3002,7 +3002,7 @@ async function setupPeer(browser, urlSuffix, name) {
 async function debugState(page) {
   return page
     .evaluate(() => {
-      const debug = window.NetplayLockstep?.getDebugState?.() || null;
+      const debug = window.NetplayRollback?.getDebugState?.() || null;
       return {
         slot: debug?.playerSlot ?? window._playerSlot ?? window.KNState?.slot ?? null,
         isSpectator: window._isSpectator ?? null,
@@ -3236,7 +3236,7 @@ async function main() {
       .join(', '),
   );
   console.log(`  Mode options: ${optionCount}`);
-  await modeSelect.selectOption('lockstep');
+  await modeSelect.selectOption('rollback');
   await host.page.waitForTimeout(1000);
   await shot(host.page, '00b-mode-set-host');
 

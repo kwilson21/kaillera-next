@@ -979,9 +979,19 @@ def create_app(lifespan=None) -> FastAPI:
         if match_id:
             conditions.append("match_id = ?")
             params.append(match_id)
-        if mode and mode in ("lockstep", "streaming"):
+        if mode == "rollback":
+            # Include legacy "lockstep" rows as historical synonym — the engine
+            # was renamed without changing semantics, so analytics for "rollback"
+            # should include all sessions whether logged before or after the rename.
+            conditions.append("mode IN (?, ?)")
+            params.extend(["rollback", "lockstep"])
+        elif mode == "streaming":
             conditions.append("mode = ?")
-            params.append(mode)
+            params.append("streaming")
+        elif mode == "lockstep":
+            # Direct legacy filter — return only pre-rename rows.
+            conditions.append("mode = ?")
+            params.append("lockstep")
         if has_desyncs == "true":
             conditions.append("json_extract(summary, '$.desyncs') > 0")
         if player_name:

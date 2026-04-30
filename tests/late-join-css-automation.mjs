@@ -488,7 +488,7 @@ async function selectRandomCharacter(peer, expectedSlot) {
 async function debugState(page) {
   return page
     .evaluate(() => {
-      const debug = window.NetplayLockstep?.getDebugState?.() || null;
+      const debug = window.NetplayRollback?.getDebugState?.() || null;
       return {
         slot: debug?.playerSlot ?? window._playerSlot ?? window.KNState?.slot ?? null,
         isSpectator: window._isSpectator ?? null,
@@ -707,7 +707,7 @@ async function startGame(host, guest) {
   await host.page
     .locator('select')
     .first()
-    .selectOption('lockstep')
+    .selectOption('rollback')
     .catch(() => {});
   await host.page.locator('button:has-text("Start Game")').first().click({ timeout: 30000 });
   await host.page.waitForTimeout(2500);

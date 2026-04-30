@@ -11,7 +11,7 @@ Client → Server events:
   claim-slot       — spectator claims a vacated player slot
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
-  set-mode         — host changes netplay mode (lockstep/streaming)
+  set-mode         — host changes netplay mode (rollback/streaming)
   rom-sharing-toggle — host enables/disables P2P ROM sharing
   rom-ready        — player signals ROM is loaded
   rom-declare      — player declares ROM ownership (streaming mode)
@@ -98,7 +98,7 @@ log = logging.getLogger(__name__)
 _ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 _ALNUM_HYPHEN_RE = re.compile(r"^[A-Za-z0-9\-]+$")
 _ANGLE_RE = re.compile(r"[<>]")
-_VALID_MODES = {"lockstep", "streaming"}
+_VALID_MODES = {"rollback", "streaming"}
 MAX_ROOMS = int(os.environ.get("MAX_ROOMS", "100"))
 MAX_SPECTATORS = int(os.environ.get("MAX_SPECTATORS", "20"))
 _RELAY_MAX_BYTES = 65_536
@@ -179,7 +179,7 @@ class Room:
     spectators: dict[str, dict] = field(default_factory=dict)
     # spectators: playerId -> {"socketId": sid, "playerName": ...}
     status: str = "lobby"  # "lobby" or "playing"
-    mode: str | None = None  # "lockstep" or "streaming", set on start-game
+    mode: str | None = None  # "rollback" or "streaming", set on start-game
     rom_hash: str | None = None  # SHA-256 of ROM, set on start-game
     rom_name: str | None = None  # Host-provided display name for the currently loaded ROM
     rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
@@ -757,10 +757,10 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     if room.owner != sid:
         return "Only the host can start the game"
 
-    mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
+    mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
 
     # Streaming: check all players declared ROM ownership
-    # Lockstep: check all players have ROMs (or host is sharing)
+    # Rollback: check all players have ROMs (or host is sharing)
     if mode == "streaming":
         for info in room.players.values():
             if info["socketId"] == room.owner:
@@ -879,7 +879,7 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
         if room.status != "lobby":
             return "Cannot change mode during game"
 
-        mode = payload.mode if payload.mode in _VALID_MODES else "lockstep"
+        mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
         room.mode = mode
         await sio.emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)

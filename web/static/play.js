@@ -11,7 +11,7 @@
  *   2. Connect Socket.IO → on connect, open-room (host) or join-room (guest)
  *   3. Show pre-game overlay: player list, mode select, ROM drop zone
  *   4. Host clicks "Start Game" → server broadcasts game-started
- *   5. onGameStarted(): boot EmulatorJS, create engine (lockstep or streaming)
+ *   5. onGameStarted(): boot EmulatorJS, create engine (rollback or streaming)
  *   6. Engine runs the game; play.js updates toolbar, info overlay, toasts
  *   7. Host clicks "End Game" → server broadcasts game-ended
  *   8. onGameEnded(): hibernate emulator (keep WASM alive), return to overlay
@@ -52,7 +52,7 @@
  *   Writes: KNState.remapActive, KNState.delayAutoValue, KNState.romHash
  *   Exposes: window.play_notifyPeerStatus, window.play_notifyDesync,
  *            window.play_notifyResync (engine → play.js callbacks for toasts)
- *   Creates: window.NetplayLockstep.init() or window.NetplayStreaming.init()
+ *   Creates: window.NetplayRollback.init() or window.NetplayStreaming.init()
  */
 (function () {
   'use strict';
@@ -66,8 +66,19 @@
   let playerName = null;
   let isHost = false;
   let isSpectator = false;
-  let mode = 'lockstep';
+  let mode = 'rollback';
   let mySlot = null;
+
+  // Coerce legacy/unknown mode strings to the canonical set. Used at every
+  // mode-intake boundary (URL, dropdown, users-updated, game-started, REST,
+  // data-message). The compat alias for the pre-rename "lockstep" value
+  // becomes "rollback" so cached share links and pre-deploy clients keep
+  // working. Removable once cached tabs churn out post-deploy.
+  const normalizeMode = (raw) => {
+    if (raw === 'lockstep') return 'rollback';
+    if (raw === 'rollback' || raw === 'streaming') return raw;
+    return 'rollback';
+  };
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
@@ -448,7 +459,7 @@
     KNState.isLocalHost = isHost;
     playerName = params.get('name') || _safeGet('localStorage', 'kaillera-name') || 'Player';
     _safeSet('localStorage', 'kaillera-name', playerName);
-    mode = params.get('mode') || 'lockstep';
+    mode = normalizeMode(params.get('mode') || 'rollback');
     isSpectator = params.get('spectate') === '1';
     _gameId = _gameIdHintFromUrl();
     KNState.gameId = _gameId;
@@ -790,7 +801,7 @@
           mySlot = 0;
           KNEvent('room_created', '', { mode });
           sendDeviceType();
-          if (mode === 'lockstep' || mode === 'streaming') {
+          if (mode === 'rollback' || mode === 'streaming') {
             socket.emit('data-message', { type: 'mode-select', mode });
             socket.emit('set-mode', { mode });
           }
@@ -1041,14 +1052,14 @@
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
       const prevMode = mode;
-      mode = data.mode;
+      mode = normalizeMode(data.mode);
       // Sync mode-select dropdown if we're the host
       const modeSel = document.getElementById('mode-select');
       if (modeSel && !isHost) modeSel.value = mode;
-      // Re-emit rom-ready when switching to lockstep so the host's "Waiting for ROMs"
+      // Re-emit rom-ready when switching to rollback so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
-      if (prevMode !== 'lockstep' && mode === 'lockstep' && localRomLoaded() && (isHost || !hostRomMismatch())) {
+      if (prevMode !== 'rollback' && mode === 'rollback' && localRomLoaded() && (isHost || !hostRomMismatch())) {
         notifyRomReady();
       }
     }
@@ -1353,8 +1364,9 @@
     if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
-      if (data.mode !== 'lockstep' && data.mode !== 'streaming') return;
-      mode = data.mode;
+      const incoming = normalizeMode(data.mode);
+      if (incoming !== 'rollback' && incoming !== 'streaming') return;
+      mode = incoming;
       const modeSel = document.getElementById('mode-select');
       if (modeSel) modeSel.value = mode;
       updateRomDeclarePrompt();
@@ -2194,7 +2206,7 @@
 
     // If game is running and we were waiting for the ROM (connect-only mode),
     // hide overlay, show toolbar, and boot the emulator
-    if (gameRunning && !window.EJS_emulator && (isHost || mode !== 'lockstep')) {
+    if (gameRunning && !window.EJS_emulator && (isHost || mode !== 'rollback')) {
       hideOverlay();
       showToolbar();
       bootEmulator();
@@ -3228,7 +3240,7 @@
 
     // Spectators and streaming guests receive video via #stream-overlay —
     // keep #game hidden so the EJS canvas doesn't bleed through.
-    // Only show #game when the emulator is needed (lockstep or streaming host).
+    // Only show #game when the emulator is needed (rollback or streaming host).
     // Re-create EmulatorJS if it was destroyed (restart after end-game)
     // Skip boot if no ROM loaded (connect-only mode for ROM sharing)
     const needsEmulator = !isSpectator && !(mode === 'streaming' && !isHost);
@@ -3248,8 +3260,8 @@
         const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (_detected.length > 0) VirtualGamepad.setVisible(false);
       }
-      if (!isHost && mode === 'lockstep') {
-        console.log('[play] initEngine: guest lockstep boot deferred until gesture');
+      if (!isHost && mode === 'rollback') {
+        console.log('[play] initEngine: guest rollback boot deferred until gesture');
       } else {
         ensureEmulatorBooted();
       }
@@ -3257,7 +3269,7 @@
       console.log('[play] initEngine: connect-only mode (spectator or no ROM)');
     }
 
-    const Engine = mode === 'streaming' ? window.NetplayStreaming : window.NetplayLockstep;
+    const Engine = mode === 'streaming' ? window.NetplayStreaming : window.NetplayRollback;
 
     if (!Engine) {
       showError('Netplay engine not loaded');
@@ -3698,13 +3710,13 @@
     const romDrop = document.getElementById('rom-drop');
     if (!prompt) return;
     // Show only in streaming mode for non-host, non-spectator players
-    // when ROM sharing is off. In lockstep mode, normal ROM loading applies.
+    // when ROM sharing is off. In rollback mode, normal ROM loading applies.
     const isStreaming = mode === 'streaming';
     const show = isStreaming && !isHost && !isSpectator && !_romSharingEnabled;
     prompt.style.display = show ? '' : 'none';
 
     // Auto-declare if guest already has a ROM loaded (e.g., from a previous
-    // lockstep game). They already loaded/owned the ROM — re-asking is friction.
+    // rollback game). They already loaded/owned the ROM — re-asking is friction.
     if (show && !_romDeclared && (_romBlob || _romBlobUrl)) {
       _romDeclared = true;
       const cb = document.getElementById('rom-declare-cb');
@@ -3780,7 +3792,7 @@
     }, 15000);
   };
 
-  // Exposed so the lockstep engine can re-show the overlay when a late-join
+  // Exposed so the rollback engine can re-show the overlay when a late-join
   // state arrives — guarantees the EJS canvas (which may be painting boot
   // frames) stays fully covered until the host's state is loaded.
   window.knShowGameLoading = showGameLoading;
@@ -3863,7 +3875,8 @@
 
     // Header: mode + input type
     const inputType = window.GamepadManager?.hasGamepad?.(mySlot) ? 'Gamepad' : 'Keyboard';
-    const modeLabel = info.mode === 'streaming' ? 'Streaming' : info.rollback ? 'Rollback' : 'Lockstep';
+    const engineMode = normalizeMode(info.mode);
+    const modeLabel = engineMode === 'streaming' ? 'Streaming' : 'Rollback';
     if (headerEl) headerEl.textContent = `${modeLabel} | ${inputType}`;
 
     // Stats line
@@ -3872,7 +3885,7 @@
     const pingStr = info.ping !== null && info.ping !== undefined ? `${Math.round(info.ping)}ms` : '--';
     parts.push(`Ping: ${pingStr}`);
 
-    if (info.mode === 'lockstep') {
+    if (engineMode === 'rollback') {
       if (info.rollback) {
         parts.push(`Delay: ${info.frameDelay}f (feels 0f)`);
       } else {
@@ -3895,7 +3908,7 @@
 
     // Peers detail
     const peerLines = [];
-    if (info.mode === 'lockstep' && info.peers) {
+    if (engineMode === 'rollback' && info.peers) {
       for (const p of info.peers) {
         const pRtt = p.rtt !== null ? `${Math.round(p.rtt)}ms` : '--';
         peerLines.push(`P${p.slot + 1}: ${pRtt}`);
@@ -3935,7 +3948,7 @@
   };
 
   // Expose toast/error for cross-module UI surfacing (P1-3). Other modules
-  // (shared.js, netplay-lockstep.js) can call these to show user-visible
+  // (shared.js, netplay-rollback.js) can call these to show user-visible
   // messages instead of failing silently.
   window.knShowToast = showToast;
 
@@ -4827,16 +4840,17 @@
     if (selectEl) selectEl.hidden = !!autoEl?.checked;
   };
 
-  const selectedModeIsLockstep = () => (document.getElementById('mode-select')?.value || mode) === 'lockstep';
+  const selectedModeIsRollback = () =>
+    normalizeMode(document.getElementById('mode-select')?.value || mode) === 'rollback';
 
-  const updatePlayerControlsVisibility = (isLockstepMode = selectedModeIsLockstep()) => {
+  const updatePlayerControlsVisibility = (isRollbackMode = selectedModeIsRollback()) => {
     const playerControls = document.getElementById('player-controls');
-    if (playerControls) playerControls.style.display = !isHost && !isSpectator && isLockstepMode ? '' : 'none';
+    if (playerControls) playerControls.style.display = !isHost && !isSpectator && isRollbackMode ? '' : 'none';
   };
 
-  const updateDelayPickerVisibility = (isLockstepMode = selectedModeIsLockstep()) => {
+  const updateDelayPickerVisibility = (isRollbackMode = selectedModeIsRollback()) => {
     const delayPicker = document.getElementById('delay-picker');
-    if (delayPicker) delayPicker.style.display = !isSpectator && isLockstepMode ? '' : 'none';
+    if (delayPicker) delayPicker.style.display = !isSpectator && isRollbackMode ? '' : 'none';
   };
 
   const getDelaySummaryText = () => {
@@ -4850,7 +4864,7 @@
     return autoEl?.checked ? `Auto · effective ${effective}` : `Fixed ${sanitizeFrameDelay(selectEl?.value)}`;
   };
 
-  const syncDelayPickerPlacement = (isLockstepMode = selectedModeIsLockstep()) => {
+  const syncDelayPickerPlacement = (isRollbackMode = selectedModeIsRollback()) => {
     const hostDetails = document.querySelector('#host-controls .advanced-options');
     const playerDetails = document.querySelector('#player-controls .advanced-options');
     const delayPicker = document.getElementById('delay-picker');
@@ -4858,8 +4872,8 @@
     if (delayPicker && targetDetails && delayPicker.parentElement !== targetDetails) {
       targetDetails.appendChild(delayPicker);
     }
-    updatePlayerControlsVisibility(isLockstepMode);
-    updateDelayPickerVisibility(isLockstepMode);
+    updatePlayerControlsVisibility(isRollbackMode);
+    updateDelayPickerVisibility(isRollbackMode);
     updateDelayEffectiveHintFromPicker();
   };
 
@@ -4892,7 +4906,7 @@
         hostControls.insertBefore(hostDetails, startBtn || null);
       }
       ensureAdvancedSummary(hostDetails);
-      for (const id of ['lockstep-options', 'rom-sharing-options', 'rom-sharing-disclaimer']) {
+      for (const id of ['rollback-options', 'rom-sharing-options', 'rom-sharing-disclaimer']) {
         const el = document.getElementById(id);
         if (el && el.parentElement !== hostDetails) hostDetails.appendChild(el);
       }
@@ -5144,25 +5158,25 @@
     const copyBtn = document.getElementById('copy-link');
     if (copyBtn) copyBtn.addEventListener('click', copyLink);
 
-    // Show/hide lockstep options based on mode selector
+    // Show/hide rollback options based on mode selector
     const modeSelect = document.getElementById('mode-select');
-    const lockstepOpts = document.getElementById('lockstep-options');
-    if (modeSelect && lockstepOpts) {
+    const rollbackOpts = document.getElementById('rollback-options');
+    if (modeSelect && rollbackOpts) {
       // Set mode-select from URL params before running updateOpts
       modeSelect.value = mode;
       let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
-        const isLockstep = modeSelect.value === 'lockstep';
-        mode = modeSelect.value;
-        lockstepOpts.style.display = isLockstep ? '' : 'none';
-        syncDelayPickerPlacement(isLockstep);
+        const isRollback = normalizeMode(modeSelect.value) === 'rollback';
+        mode = normalizeMode(modeSelect.value);
+        rollbackOpts.style.display = isRollback ? '' : 'none';
+        syncDelayPickerPlacement(isRollback);
         // Hide ROM sharing options in streaming mode
         const romSharingRow = document.getElementById('rom-sharing-options');
         const romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
-        if (romSharingRow) romSharingRow.style.display = isLockstep ? '' : 'none';
-        if (!isLockstep && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
+        if (romSharingRow) romSharingRow.style.display = isRollback ? '' : 'none';
+        if (!isRollback && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
         const cb = document.getElementById('opt-rom-sharing');
-        if (!isLockstep) {
+        if (!isRollback) {
           // Switching to streaming — save and disable sharing
           _romSharingBeforeStreamingMode = cb?.checked ?? false;
           if (cb?.checked) {
@@ -5170,7 +5184,7 @@
             socket.emit('rom-sharing-toggle', { enabled: false });
           }
         } else if (_romSharingBeforeStreamingMode && cb && !cb.checked) {
-          // Switching back to lockstep — restore previous sharing state
+          // Switching back to rollback — restore previous sharing state
           cb.checked = true;
           socket.emit('rom-sharing-toggle', { enabled: true });
           _romSharingBeforeStreamingMode = false;

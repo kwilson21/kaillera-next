@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_JS = ROOT / "web/static/shared.js"
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 RETROARCH_PATCH = ROOT / "build/patches/retroarch-deterministic-timing.patch"
 CORE_JS = ROOT / "web/static/ejs/cores/mupen64plus_next_libretro.js"
 

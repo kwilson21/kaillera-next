@@ -10,7 +10,23 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+# ── Mode coercion (back-compat) ──────────────────────────────────────────────
+# Pre-rename clients send mode="lockstep". The product-facing engine is now
+# "rollback" (same engine, renamed). Coerce BEFORE Literal validation so old
+# clients keep working until cached tabs churn out. Removable in a follow-up
+# deploy.
+
+
+class _ModeCompatMixin:
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coerce_legacy_mode(cls, v: Any) -> Any:
+        if v == "lockstep":
+            return "rollback"
+        return v
+
 
 # ── Decorator ────────────────────────────────────────────────────────────────
 
@@ -91,8 +107,8 @@ class SetNamePayload(BaseModel):
 # ── start-game ───────────────────────────────────────────────────────────────
 
 
-class StartGamePayload(BaseModel):
-    mode: Literal["lockstep", "streaming"] = "lockstep"
+class StartGamePayload(_ModeCompatMixin, BaseModel):
+    mode: Literal["rollback", "streaming"] = "rollback"
     resyncEnabled: bool = True
     romHash: str | None = None
     gameId: str | None = Field(default=None, max_length=32)
@@ -108,8 +124,8 @@ class EndGamePayload(BaseModel):
 # ── set-mode ─────────────────────────────────────────────────────────────────
 
 
-class SetModePayload(BaseModel):
-    mode: Literal["lockstep", "streaming"] = "lockstep"
+class SetModePayload(_ModeCompatMixin, BaseModel):
+    mode: Literal["rollback", "streaming"] = "rollback"
 
 
 class SetGameIdPayload(BaseModel):

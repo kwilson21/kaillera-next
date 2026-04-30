@@ -30,7 +30,7 @@ async def _run_ended_by_no_overwrite(tmp_db):
     for slot, name, ip in [(0, "P1", "a"), (1, "P2", "b")]:
         await upsert_session_log({
             "match_id": "m1", "room": "R1", "slot": slot,
-            "player_name": name, "mode": "lockstep",
+            "player_name": name, "mode": "rollback",
             "log_data": "[]", "summary": "{}", "context": "{}", "ip_hash": ip,
         })
 

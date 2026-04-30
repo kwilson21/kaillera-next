@@ -70,7 +70,7 @@ async function clickGesturePrompt(page) {
 async function debugState(page) {
   return page
     .evaluate(() => {
-      const debug = window.NetplayLockstep?.getDebugState?.() || null;
+      const debug = window.NetplayRollback?.getDebugState?.() || null;
       const text = (id) => document.getElementById(id)?.textContent?.trim() || '';
       const mod = window.EJS_emulator?.gameManager?.Module;
       let scene = null;
@@ -119,7 +119,7 @@ async function installRecorder(page) {
       i: 73,
     };
     const snapshot = (event) => {
-      const debug = window.NetplayLockstep?.getDebugState?.() || null;
+      const debug = window.NetplayRollback?.getDebugState?.() || null;
       window.__p3ManualRecording.push({
         type: event.type,
         key: event.key,

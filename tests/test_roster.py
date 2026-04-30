@@ -38,7 +38,7 @@ def _get_roster(page):
     """Extract _activeRoster from the lockstep engine."""
     return page.evaluate("""
         (() => {
-            const engine = window.NetplayLockstep;
+            const engine = window.NetplayRollback;
             if (!engine || !engine.getDebugState) return null;
             const state = engine.getDebugState();
             return state.activeRoster ? [...state.activeRoster] : null;

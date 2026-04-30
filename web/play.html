@@ -132,9 +132,9 @@
             <label for="mode-select" class="mode-label">Mode:</label>
             <select
               id="mode-select"
-              title="Lockstep: all players run the emulator in sync. Streaming: host runs the emulator, guests watch a video stream."
+              title="Rollback: GGPO-style prediction in-game with lockstep stall in menus (recommended). Streaming: host runs the emulator, guests watch a video stream."
             >
-              <option value="lockstep">Lockstep</option>
+              <option value="rollback">Rollback</option>
               <option value="streaming">Streaming</option>
             </select>
           </div>
@@ -143,7 +143,7 @@
               Advanced
               <span class="summary-status"></span>
             </summary>
-            <div id="lockstep-options">
+            <div id="rollback-options">
               <div class="host-options-row">
                 <label
                   title="Keeps players in sync by reloading guests from the host after reconnects, mobile app switches, network changes, or long input dropouts."
@@ -363,7 +363,7 @@
     <!-- Native API reference management (must load before everything) -->
     <script src="/static/api-sandbox.js"></script>
 
-    <!-- Core redirector: overrides EJS_pathtodata for lockstep mode -->
+    <!-- Core redirector: overrides EJS_pathtodata for rollback mode -->
     <script src="/static/core-redirector.js"></script>
 
     <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
@@ -499,6 +499,10 @@
     <script src="/static/kn-diagnostics.js"></script>
     <script src="/static/kn-desync-detector.js"></script>
     <script src="/static/kn-vision-client.js"></script>
+    <script src="/static/netplay-rollback.js"></script>
+    <!-- Deprecation shim: only here so cached play.html requests don't 404.
+         Loads after netplay-rollback.js so the alias is already set. Remove
+         once cached tabs have churned out post-deploy. -->
     <script src="/static/netplay-lockstep.js"></script>
     <script src="/static/netplay-streaming.js"></script>
 

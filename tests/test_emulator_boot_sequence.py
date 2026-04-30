@@ -24,11 +24,11 @@ def test_restarts_reuse_ejs_loader_instead_of_direct_constructor():
     assert "kn-ejs-loader-complete" in loader_source
 
 
-def test_lockstep_guest_boot_is_deferred_until_gesture():
+def test_rollback_guest_boot_is_deferred_until_gesture():
     play_source = (REPO_ROOT / "web/static/play.js").read_text()
-    lockstep_source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    lockstep_source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
-    assert "guest lockstep boot deferred until gesture" in play_source
+    assert "guest rollback boot deferred until gesture" in play_source
     assert "window.KNStartEmulatorBoot = ensureEmulatorBooted" in play_source
 
     boot_idx = lockstep_source.find("window.KNStartEmulatorBoot?.({ forceStartOnLoad: true })")
@@ -63,7 +63,7 @@ def test_non_ssb64_boot_clears_stale_standard_cheats():
 
 
 def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = true" in source
     assert "REMIX_INITIAL_SYNC_USE_KN_SYNC && _isSmashRemix()" in source
@@ -81,7 +81,7 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
 
 
 def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fallback():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
     build_source = (REPO_ROOT / "build/build.sh").read_text()
 
     assert "const _restoreHiddenStateWords = (mod, words, reason) =>" in source
@@ -122,7 +122,7 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
 
 
 def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "let _guestStateUseLocalRemixTitle" not in source
     assert "Smash Remix initial sync: JSC guest aligning local title before lockstep" not in source
@@ -164,7 +164,7 @@ def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
 
 
 def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "const _rngSeedForFrame = (frameNum) => {" not in source
     assert "KN_NETPLAY_RNG_SEED_RDRAM" not in source
@@ -223,7 +223,7 @@ def test_determinism_harness_has_setup_only_css_character_gate():
 
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
     apply_idx = source.find("const _applyControllerPresentMask =")
     reset_idx = source.find("const _resetControllerPresentMask =", apply_idx)
     assert apply_idx != -1
@@ -284,7 +284,7 @@ def test_same_rom_resumes_hibernated_core_and_rom_switch_discards_old_core():
 
 
 def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "const _isSameRomEmulatorResume = () => {" in source
     assert "window.KNEmulatorResumeContext" in source
@@ -302,7 +302,7 @@ def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
 
 
 def test_host_local_kn_sync_initial_capture_is_not_reloaded():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     start_idx = source.find("const hasLocalKnSyncCapture =")
     assert start_idx != -1

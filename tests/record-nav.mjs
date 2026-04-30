@@ -84,7 +84,7 @@ async function main() {
   await host.page
     .locator('select')
     .first()
-    .selectOption('lockstep')
+    .selectOption('rollback')
     .catch(() => {});
   await host.page.waitForTimeout(500);
   await host.page.locator('button:has-text("Start Game")').first().click();

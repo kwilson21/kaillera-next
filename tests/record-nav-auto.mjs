@@ -194,7 +194,7 @@ async function main() {
   await host.page.bringToFront();
   await host.page.waitForTimeout(500);
   const modeSelect = host.page.locator('select').first();
-  await modeSelect.selectOption('lockstep');
+  await modeSelect.selectOption('rollback');
   await host.page.waitForTimeout(1000);
   await host.page.locator('button:has-text("Start Game")').first().click();
   await host.page.waitForTimeout(3000);

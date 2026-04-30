@@ -15,7 +15,7 @@ def _mark_rom_ready(page):
     """)
 
 
-def _start_game_via_socket(page, mode="lockstep"):
+def _start_game_via_socket(page, mode="rollback"):
     """Emit start-game directly via socket, bypassing the client-side ROM check."""
     page.evaluate(f"""
         window.__test_socket.emit('start-game', {{

@@ -86,7 +86,7 @@ def test_rom_declaration_full_flow(browser, server_url):
         expect(host.locator("#start-btn")).to_contain_text("Start Game")
 
         # ── 6. Mode toggle: checkbox stays checked (page-lifetime cache) ──
-        host.select_option("#mode-select", "lockstep")
+        host.select_option("#mode-select", "rollback")
         expect(guest.locator("#rom-declare-prompt")).to_be_hidden(timeout=5000)
 
         host.select_option("#mode-select", "streaming")

@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PLAY_HTML = ROOT / "web/play.html"
 PLAY_JS = ROOT / "web/static/play.js"
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 PAYLOADS_PY = ROOT / "server/src/api/payloads.py"
 
 

@@ -6,7 +6,7 @@
  * and the applyInputToWasm() function that writes decoded input into the
  * WASM core's memory via _simulate_input().
  *
- * Consumed by: netplay-lockstep.js, netplay-streaming.js, play.js
+ * Consumed by: netplay-rollback.js, netplay-streaming.js, play.js
  * Exposes: window.KNShared
  */
 (function () {

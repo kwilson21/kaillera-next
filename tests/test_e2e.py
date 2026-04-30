@@ -29,7 +29,7 @@ def test_lobby_to_play_redirect(page, server_url):
     page.fill("#player-name", "Host")
     page.click("#create-btn")
     expect(page).to_have_url(re.compile(
-        r"play\.html\?room=\w+&host=1&name=Host&mode=lockstep"
+        r"play\.html\?room=\w+&host=1&name=Host&mode=rollback"
     ))
 
 
@@ -369,16 +369,16 @@ def test_info_overlay_toggle_via_js(page, server_url):
     expect(page.locator("#info-stats")).to_contain_text("Delay:")
 
 
-def test_info_overlay_lockstep_getinfo(page, server_url):
-    """Lockstep engine getInfo() returns extended fields: mode, peers, sync."""
+def test_info_overlay_rollback_getinfo(page, server_url):
+    """Rollback engine getInfo() returns extended fields: mode, peers, sync."""
     page.goto(f"{server_url}/play.html?room=INFO03{_R}&host=1&name=Host")
     page.wait_for_function(
-        "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
+        "typeof window.NetplayRollback !== 'undefined'", timeout=10000
     )
 
-    info = page.evaluate("window.NetplayLockstep.getInfo()")
+    info = page.evaluate("window.NetplayRollback.getInfo()")
     assert info is not None
-    assert info["mode"] == "lockstep"
+    assert info["mode"] == "rollback"
     assert "fps" in info
     assert "frameDelay" in info
     assert "ping" in info
@@ -457,9 +457,9 @@ def test_host_delay_hidden_streaming(page, server_url):
     )
     assert delay_visible is False, "delay picker should be hidden in streaming mode"
 
-    # Verify switching to lockstep shows delay inside host Advanced, not a
+    # Verify switching to rollback shows delay inside host Advanced, not a
     # second player-controls disclosure.
-    page.evaluate("document.getElementById('mode-select').value = 'lockstep'")
+    page.evaluate("document.getElementById('mode-select').value = 'rollback'")
     page.evaluate(
         "document.getElementById('mode-select')"
         ".dispatchEvent(new Event('change'))"
@@ -598,23 +598,23 @@ def test_guest_delay_preference_readable(context, server_url):
 
 
 def test_worker_compress_and_encode(page, server_url):
-    """NetplayLockstep module loads and getInfo is callable."""
+    """NetplayRollback module loads and getInfo is callable."""
     page.goto(f"{server_url}/play.html?room=WKRS1{_R}&host=1&name=Host")
     page.wait_for_function(
-        "typeof window.NetplayLockstep !== 'undefined'", timeout=10000
+        "typeof window.NetplayRollback !== 'undefined'", timeout=10000
     )
 
-    # Verify the lockstep module is loaded with getInfo
+    # Verify the rollback module is loaded with getInfo
     result = page.evaluate("""
         (() => {
             try {
-                if (typeof window.NetplayLockstep === 'undefined') {
-                    return { error: 'NetplayLockstep not defined' };
+                if (typeof window.NetplayRollback === 'undefined') {
+                    return { error: 'NetplayRollback not defined' };
                 }
-                var info = window.NetplayLockstep.getInfo();
+                var info = window.NetplayRollback.getInfo();
                 return {
                     ok: true,
-                    hasMode: info.mode === 'lockstep',
+                    hasMode: info.mode === 'rollback',
                     hasPeers: Array.isArray(info.peers),
                 };
             } catch (e) {
@@ -622,8 +622,8 @@ def test_worker_compress_and_encode(page, server_url):
             }
         })()
     """)
-    assert result.get("ok") is True, f"Lockstep module check failed: {result}"
-    assert result.get("hasMode") is True, "getInfo should have mode='lockstep'"
+    assert result.get("ok") is True, f"Rollback module check failed: {result}"
+    assert result.get("hasMode") is True, "getInfo should have mode='rollback'"
     assert result.get("hasPeers") is True, "getInfo should have peers array"
 
 

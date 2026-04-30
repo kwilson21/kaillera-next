@@ -25,7 +25,7 @@ SERVER_URL = "https://localhost:27888"
 def test_rollback_fixes_smoke(page):
     """Load play.html and verify all new APIs from today's session exist."""
     # Use a fresh test room so we don't collide with anything
-    url = f"{SERVER_URL}/play.html?room=SMOKE001&host=1&name=SmokeBot&mode=lockstep"
+    url = f"{SERVER_URL}/play.html?room=SMOKE001&host=1&name=SmokeBot&mode=rollback"
     page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
     # Wait for KNShared + KNState to populate (loadable JS modules)

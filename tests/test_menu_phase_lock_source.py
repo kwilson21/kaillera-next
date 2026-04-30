@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 
 
 def test_menu_phase_lock_allows_scene_transition_grace():

@@ -25,7 +25,7 @@ def test_guest_boots_and_audio_initializes(browser, server_url):
 
     try:
         # Host creates room, loads ROM, enables sharing
-        host.goto(f"{server_url}/play.html?room=AUDIO1&host=1&name=Host&mode=lockstep")
+        host.goto(f"{server_url}/play.html?room=AUDIO1&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
         host.wait_for_timeout(500)

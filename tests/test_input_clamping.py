@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_JS = ROOT / "web/static/shared.js"
 VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 SIGNALING_PY = ROOT / "server/src/api/signaling.py"
 
 

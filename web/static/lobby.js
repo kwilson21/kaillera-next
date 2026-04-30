@@ -47,7 +47,7 @@
     e.currentTarget.disabled = true;
     saveName();
     const code = randomCode();
-    window.location.href = `/play.html?room=${encodeURIComponent(code)}&host=1&name=${encodeURIComponent(getName())}&mode=lockstep`;
+    window.location.href = `/play.html?room=${encodeURIComponent(code)}&host=1&name=${encodeURIComponent(getName())}&mode=rollback`;
   });
 
   document.getElementById('join-btn').addEventListener('click', (e) => {

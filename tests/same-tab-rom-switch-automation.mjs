@@ -67,7 +67,7 @@ async function setupPeer(browser, query, label, logs) {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
   collectLogs(page, label, logs);
-  await page.goto(`${BASE_URL}/play.html?${query}&name=${encodeURIComponent(label)}&mode=lockstep`, {
+  await page.goto(`${BASE_URL}/play.html?${query}&name=${encodeURIComponent(label)}&mode=rollback`, {
     waitUntil: 'domcontentloaded',
   });
   await page.evaluate(() => {
@@ -130,7 +130,7 @@ async function clickBootPrompt(peer) {
 
 async function debugState(peer) {
   return peer.page.evaluate(() => {
-    const debug = window.NetplayLockstep?.getDebugState?.() || {};
+    const debug = window.NetplayRollback?.getDebugState?.() || {};
     const mod = window.EJS_emulator?.gameManager?.Module;
     return {
       frame: debug.frameNum ?? window.KNState?.frameNum ?? 0,
@@ -187,7 +187,7 @@ async function waitForLobby(peers) {
       peer.page.waitForFunction(
         () => {
           const overlayVisible = !document.querySelector('#overlay')?.classList.contains('hidden');
-          const running = window.NetplayLockstep?.getDebugState?.().running === true;
+          const running = window.NetplayRollback?.getDebugState?.().running === true;
           return overlayVisible && !running;
         },
         { timeout: 30000 },
@@ -204,7 +204,7 @@ async function startGame(host) {
     },
     { timeout: 30000 },
   );
-  await host.page.selectOption('#mode-select', 'lockstep').catch(() => {});
+  await host.page.selectOption('#mode-select', 'rollback').catch(() => {});
   await host.page.click('#start-btn');
 }
 

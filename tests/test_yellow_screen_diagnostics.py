@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DETERMINISM_JS = ROOT / "tests/determinism-automation.mjs"
 DIAGNOSTICS_JS = ROOT / "web/static/kn-diagnostics.js"
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 PLAY_JS = ROOT / "web/static/play.js"
 STREAMING_JS = ROOT / "web/static/netplay-streaming.js"
 PLAY_HTML = ROOT / "web/play.html"

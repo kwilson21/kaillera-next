@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIO_JS = ROOT / "web/static/kn-audio.js"
-LOCKSTEP_JS = ROOT / "web/static/netplay-lockstep.js"
+LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 
 
 def test_lockstep_audio_retries_resume_and_keeps_gesture_listener_armed():

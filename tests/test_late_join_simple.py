@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_late_join_state_is_targeted_before_large_payload():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     emit_idx = source.find("type: 'late-join-state'")
     assert emit_idx != -1
@@ -21,7 +21,7 @@ def test_late_join_state_is_targeted_before_large_payload():
 
 
 def test_late_join_receiver_filters_target_before_state_handling():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     handler_idx = source.find("const handleLateJoinState = async (msg) => {")
     assert handler_idx != -1
@@ -39,7 +39,7 @@ def test_late_join_receiver_filters_target_before_state_handling():
 
 
 def test_late_join_ready_waits_for_open_dc_before_roster_activation():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     ready_emit_idx = source.find("type: 'late-join-ready'")
     assert ready_emit_idx != -1
@@ -60,7 +60,7 @@ def test_late_join_ready_waits_for_open_dc_before_roster_activation():
 
 
 def test_late_join_ready_retries_until_resume():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "let _lateJoinReadyRetryTimer = null" in source
     assert "const clearLateJoinReadyRetry = () => {" in source
@@ -80,7 +80,7 @@ def test_late_join_ready_retries_until_resume():
 
 
 def test_late_join_pause_is_not_sent_to_joiner():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     pause_idx = source.find("p.dc.send('late-join-pause')")
     assert pause_idx != -1
@@ -97,14 +97,14 @@ def test_late_join_pause_is_not_sent_to_joiner():
 
 
 def test_late_join_toasts_are_present():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "is joining..." in source
     assert "joined" in source
 
 
 def test_smash_controller_presence_uses_core_mask_not_rdram_poke():
-    source = (REPO_ROOT / "web/static/netplay-lockstep.js").read_text()
+    source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "_forceSmashControllerRoster" not in source
     assert "_kn_set_controller_present_mask" in source

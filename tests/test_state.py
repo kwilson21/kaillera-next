@@ -25,7 +25,7 @@ def test_serialize_roundtrip_basic():
     room.input_types["sid-1"] = "gamepad"
     room.device_types["sid-1"] = "mobile"
     room.status = "playing"
-    room.mode = "lockstep"
+    room.mode = "rollback"
     room.rom_hash = "abc123"
     room.rom_name = "Super Smash Bros.z64"
     room.rom_size = 16 * 1024 * 1024
@@ -52,7 +52,7 @@ def test_serialize_roundtrip_basic():
     assert restored.input_types["sid-1"] == "gamepad"
     assert restored.device_types["sid-1"] == "mobile"
     assert restored.status == "playing"
-    assert restored.mode == "lockstep"
+    assert restored.mode == "rollback"
     assert restored.rom_hash == "abc123"
     assert restored.rom_name == "Super Smash Bros.z64"
     assert restored.rom_size == 16 * 1024 * 1024
@@ -107,3 +107,27 @@ def test_serialize_roundtrip_with_spectators():
     assert restored.spectators["pid-3"]["playerName"] == "Watcher"
     assert restored.slots[0] == "pid-1"
     assert restored.slots[1] == "pid-2"
+
+
+def test_legacy_lockstep_mode_coerced_to_rollback():
+    """Persisted Redis rooms from before the lockstep→rollback rename
+    deserialize to mode='rollback'. The engine name changed without
+    changing semantics, so old state should load on the new wire schema.
+    """
+    legacy_payload = {
+        "owner": "sid-owner",
+        "room_name": "Legacy Room",
+        "game_id": "ssb64",
+        "max_players": 4,
+        "players": {},
+        "slots": {},
+        "spectators": {},
+        "status": "lobby",
+        "mode": "lockstep",  # pre-rename value persisted in Redis
+        "rom_ready": [],
+        "rom_declared": [],
+        "input_types": {},
+        "device_types": {},
+    }
+    restored = _deserialize_room(legacy_payload)
+    assert restored.mode == "rollback"

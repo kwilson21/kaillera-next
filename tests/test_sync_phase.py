@@ -30,7 +30,7 @@ def test_sync_phase_and_barrier_deployed(browser):
 
     try:
         page.goto(
-            f"{SERVER_URL}/play.html?room=SYNKTEST&host=1&name=SyncBot&mode=lockstep",
+            f"{SERVER_URL}/play.html?room=SYNKTEST&host=1&name=SyncBot&mode=rollback",
             wait_until="domcontentloaded",
             timeout=15000,
         )

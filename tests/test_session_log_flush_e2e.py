@@ -65,7 +65,7 @@ def test_session_log_flush_reaches_db(page):
     match_id = f"e2e-test-{secrets.token_hex(4)}"
 
     # Navigate to play.html with our test room
-    url = f"{SERVER_URL}/play.html?room={room}&host=1&name=E2ETest&mode=lockstep"
+    url = f"{SERVER_URL}/play.html?room={room}&host=1&name=E2ETest&mode=rollback"
     page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
     # Wait for the lockstep engine to load and KNState to populate.

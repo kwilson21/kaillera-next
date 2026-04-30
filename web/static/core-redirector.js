@@ -2,8 +2,11 @@
  * core-redirector.js — Redirect EmulatorJS core download to self-hosted patched version.
  *
  * Must be loaded BEFORE EmulatorJS loader.js.
- * In lockstep mode, intercepts fetch/XHR to serve our patched core
- * (CDN WASM + JS glue with deterministic _emscripten_get_now).
+ * In rollback (and legacy lockstep) mode, intercepts fetch/XHR to serve
+ * our patched core (CDN WASM + JS glue with deterministic
+ * _emscripten_get_now and the kn_pre_tick rollback exports). Streaming
+ * mode does not need the patched core because the host is the only
+ * peer running the emulator.
  *
  * Intercepts stay active while EmulatorJS is alive. Call
  * window._knCoreRestore() in destroyEmulator() to restore native APIs.
@@ -14,16 +17,19 @@
   'use strict';
 
   const params = new URLSearchParams(window.location.search);
-  const mode = params.get('mode') || 'lockstep';
+  const rawMode = params.get('mode') || 'rollback';
+  // Legacy "lockstep" is the same engine as "rollback" — coerce here so
+  // cached share links keep loading the patched core.
+  const mode = rawMode === 'lockstep' ? 'rollback' : rawMode;
 
-  if (mode !== 'lockstep') {
+  if (mode === 'streaming') {
     window._knCoreReady = Promise.resolve();
     window._knCoreRestore = () => {};
     return;
   }
 
   window._kn_usePatchedCore = true;
-  console.log('[core-redirector] Lockstep mode: loading patched core');
+  console.log(`[core-redirector] ${mode} mode: loading patched core`);
 
   // EJS on mobile Safari reverses the N64 core list, picking parallel_n64 instead
   // of mupen64plus_next. Match all N64 core filenames to ensure the patched binary.

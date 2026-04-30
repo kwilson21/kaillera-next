@@ -22,7 +22,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url):
 
     try:
         # Host creates room, loads ROM, enables sharing
-        host.goto(f"{server_url}/play.html?room=GESTURE1&host=1&name=Host&mode=lockstep")
+        host.goto(f"{server_url}/play.html?room=GESTURE1&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
         host.wait_for_timeout(500)
@@ -85,7 +85,7 @@ def test_host_does_not_see_gesture_prompt(browser, server_url):
     host.on("console", lambda msg: host_logs.append(msg.text))
 
     try:
-        host.goto(f"{server_url}/play.html?room=GESTURE2&host=1&name=Host&mode=lockstep")
+        host.goto(f"{server_url}/play.html?room=GESTURE2&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
         host.wait_for_timeout(500)
