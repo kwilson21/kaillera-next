@@ -7,7 +7,7 @@
 
 V1 netplay shipped as a browser-based WebRTC platform with lockstep and streaming modes.
 This roadmap captures the features inspired by EmuLinker-K / classic Kaillera, modernized
-for P2P WebRTC + browser. All five phases are done.
+for P2P WebRTC + browser. All six phases are done.
 
 ---
 
