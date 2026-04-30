@@ -366,6 +366,16 @@
     if (hadPrevious && toastOnChange) {
       showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
     }
+    // Server invalidates non-host rom_declared whenever the host ROM identity
+    // changes or clears (signaling.py: _invalidate_non_host_rom_state /
+    // _clear_host_rom). Mirror that locally so streaming-mode guests see the
+    // declare prompt reappear instead of a stale "checked" UI hiding the
+    // action they need to take.
+    if (hadPrevious && _romDeclared) {
+      _romDeclared = false;
+      const cb = document.getElementById('rom-declare-cb');
+      if (cb) cb.checked = false;
+    }
     if (!hasNext) {
       resetTransferForHostRomChange();
       if (socket?.connected) socket.emit('rom-ready', { ready: false });

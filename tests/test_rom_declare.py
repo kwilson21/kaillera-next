@@ -97,6 +97,31 @@ def test_rom_declaration_full_flow(browser, server_url):
         spectator.evaluate("window.__test_socket.emit('claim-slot', { slot: 2 })")
         expect(spectator.locator("#rom-declare-prompt")).to_be_visible(timeout=5000)
 
+        # ── 9. Host swaps ROM: guest declaration resets, drop zone returns ──
+        # Regression: previously the server cleared rom_declared on the host's
+        # ROM identity change (_invalidate_non_host_rom_state) but the guest's
+        # _romDeclared/checkbox stayed stale, hiding the drop zone and leaving
+        # the host stuck on "Waiting for declarations".
+        guest.locator("#rom-declare-cb").check()
+        expect(guest.locator("#rom-declare-cb")).to_be_checked()
+        host.evaluate(
+            "window.__test_socket.emit('rom-ready', "
+            "{ ready: true, hash: '"
+            + ("a" * 64)
+            + "', name: 'rom-a.z64', size: 1000 })"
+        )
+        host.evaluate(
+            "window.__test_socket.emit('rom-ready', "
+            "{ ready: true, hash: '"
+            + ("b" * 64)
+            + "', name: 'rom-b.z64', size: 2000 })"
+        )
+        expect(guest.locator("#rom-declare-cb")).not_to_be_checked(timeout=5000)
+        expect(guest.locator("#rom-drop")).to_be_visible(timeout=5000)
+        expect(host.locator("#start-btn")).to_contain_text(
+            "Waiting for declarations", timeout=5000
+        )
+
     finally:
         for page in ctx.pages:
             try:
