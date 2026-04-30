@@ -76,6 +76,7 @@ def _deserialize_room(d: dict):
         rom_ready=set(d.get("rom_ready", [])),
         input_types=d.get("input_types", {}),
         device_types=d.get("device_types", {}),
+        match_id=d.get("match_id"),
     )
 
 

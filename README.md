@@ -57,54 +57,50 @@ which requires a secure context (HTTPS). The server sends the required
 ### Full setup (HTTPS + Redis)
 
 ```bash
-# One-time: generate HTTPS certs (see Tailscale setup below)
+# One-time: generate HTTPS certs (see HTTPS setup below)
 just certs
 
 # Start dev server (Redis + HTTPS)
 just dev
-# → https://<your-hostname>.ts.net:27888/
+# → https://<your-domain>:27888/
 ```
 
-### Tailscale setup (required for lockstep)
+### HTTPS setup (required for lockstep)
 
-HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. Tailscale provides real Let's Encrypt certificates trusted by all devices including mobile — no CA installation needed.
+HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. `just certs` issues a real Let's Encrypt certificate via [lego](https://go-acme.github.io/lego/) using the Cloudflare DNS-01 challenge, so the cert is trusted by every device (including mobile) without installing a local CA. The subdomain never needs to resolve publicly — point it at your LAN IP via local DNS (AdGuard, Pi-hole, `/etc/hosts`, etc.).
 
-#### 1. Install Tailscale
+#### 1. Install lego
 
-Install on your dev machine and any test devices (phone, tablet). All devices must be on the same Tailnet.
+```bash
+brew install lego  # macOS
+# or download a release: https://github.com/go-acme/lego/releases
+```
 
-- **macOS:** [Mac App Store](https://apps.apple.com/app/tailscale/id1475387142) or `brew install tailscale`
-- **iOS/Android:** Install from your device's app store
-- **Linux:** [tailscale.com/download/linux](https://tailscale.com/download/linux)
+#### 2. Create a Cloudflare API token
 
-#### 2. Enable HTTPS certificates
-
-In the [Tailscale admin console](https://login.tailscale.com/admin/dns), enable **DNS → HTTPS Certificates** for your Tailnet.
+In the [Cloudflare dashboard](https://dash.cloudflare.com/profile/api-tokens), create a token with **Zone:DNS:Edit** scoped to the zone you'll use.
 
 #### 3. Configure and generate certs
 
-Add your Tailscale hostname to `.env` (find it at [login.tailscale.com/admin/machines](https://login.tailscale.com/admin/machines)):
+Add to `server/.env`:
 
 ```bash
-# .env
-TAILSCALE_HOSTNAME=your-machine.tail1234.ts.net
+LEGO_EMAIL=you@example.com
+LEGO_DOMAIN=kn-test.example.com
+CLOUDFLARE_DNS_API_TOKEN=your-scoped-token-here
 ```
 
-Then generate certs:
+Then:
 
 ```bash
 just certs
 ```
 
-This handles the platform-specific cert generation (macOS sandbox, Linux) and copies them to `certs/`. Certs expire every ~90 days — just re-run `just certs` to renew.
-
-#### 4. (Optional) ACL for cross-device access
-
-If testing from a phone, ensure your Tailscale ACL allows traffic to port 27888. The default "allow all" ACL works; if customized, add a rule for `tcp:27888`.
+Certs land in `certs/`. Re-run `just certs` to renew (Let's Encrypt certs expire every ~90 days).
 
 #### Alternative: mkcert (localhost only)
 
-[mkcert](https://github.com/FiloSottile/mkcert) works for localhost but requires installing its CA on every mobile device. Prefer Tailscale for cross-device testing.
+[mkcert](https://github.com/FiloSottile/mkcert) works for localhost but requires installing its CA on every mobile device. Prefer the lego flow for cross-device testing.
 
 ### Docker
 
@@ -250,7 +246,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `TURN_SERVERS` | — | Comma-separated TURN server URLs |
 | `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
-| `DISABLE_RATE_LIMIT` | `1` | Disable per-IP rate limiting (dev only) |
+| `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
 | `DEBUG_MODE` | — | Enable debug endpoints and local log files |
 | `GIT_VERSION` | — | Override version string (set automatically in Docker) |
 

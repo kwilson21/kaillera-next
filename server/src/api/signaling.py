@@ -1140,6 +1140,9 @@ async def debug_logs(sid: str, data: dict) -> None:
     for line in logs[:5000]:
         log.info("[P%s] %s", slot, str(line)[:500])
 
+    if not os.environ.get("DEBUG_MODE"):
+        return
+
     from datetime import datetime
     from pathlib import Path
 
@@ -1147,7 +1150,7 @@ async def debug_logs(sid: str, data: dict) -> None:
     log_dir = Path(__file__).parent.parent.parent.parent / "logs"
     log_dir.mkdir(exist_ok=True)
     out = log_dir / filename
-    with open(out, "w") as f:  # noqa: ASYNC230 — small diagnostic dump
+    with open(out, "w") as f:  # noqa: ASYNC230 — debug-only, gated behind DEBUG_MODE
         f.write(f"Room: {room_id}  SID: {sid}\n")
         f.write(f"Info: {json.dumps(info, indent=2)}\n")
         f.write(f"Entries: {len(logs)}\n---\n")

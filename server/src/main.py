@@ -163,8 +163,11 @@ def run() -> None:
 
     trusted_proxies = os.environ.get("TRUSTED_PROXY_IPS", "").strip()
     if not trusted_proxies:
-        trusted_proxies = "*"
-        log.warning("TRUSTED_PROXY_IPS not set — trusting all proxy headers. Set TRUSTED_PROXY_IPS in production.")
+        trusted_proxies = "127.0.0.1"
+        log.warning(
+            "TRUSTED_PROXY_IPS not set — trusting only loopback. Set to your reverse proxy IP "
+            "(or '*' for dev) so X-Forwarded-For headers are honored."
+        )
 
     uvicorn.run(
         socket_app,

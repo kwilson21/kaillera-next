@@ -1950,6 +1950,7 @@
   let _lastInputStallResyncAt = 0;
   const INPUT_STALL_RESYNC_COOLDOWN_MS = 10000;
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
+  let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
@@ -5813,6 +5814,14 @@
     if (msg.targetSid && msg.targetSid !== socket.id) return;
     if (_isSpectator) return;
     if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
+    // Reject duplicate state packets while a load is in-flight: the body
+    // awaits decompress + multiple HEAPU8 writes, and a concurrent second
+    // pass would race those writes and corrupt joiner memory.
+    if (_isApplyingLateJoinState) {
+      _syncLog('ignoring duplicate late-join state — already applying');
+      return;
+    }
+    _isApplyingLateJoinState = true;
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
@@ -6044,6 +6053,8 @@
       }, 500);
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
+    } finally {
+      _isApplyingLateJoinState = false;
     }
   };
 
@@ -11388,6 +11399,7 @@
     window._knPreventRetroArchVisibilityPause = false;
     if (window._knSyncLog === _syncLog) window._knSyncLog = null;
     _awaitingLateJoinState = false;
+    _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
