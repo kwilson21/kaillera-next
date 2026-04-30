@@ -477,6 +477,10 @@
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
   let _rbFatalBuf = 0; // RF7 (R3): WASM heap pointer for kn_get_fatal_stale out params (3 × int32)
   let _rbLiveMismatchBuf = 0; // 3 × uint32: frame, ring hash, live hash
+  // Reference to startLockstep's tryInitRollback closure, captured at startup
+  // so the GAMEPLAY→MENU shutdown can re-arm window._rbDeferredForGameplay
+  // for the next match without needing a full engine restart.
+  let _rbReinitClosure = null;
   // P2/T4: host-negotiated transport mode for rollback input packets.
   //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
   //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
@@ -2895,6 +2899,9 @@
             } catch (_) {}
             if (oldPeer._reconnectTimeout) clearTimeout(oldPeer._reconnectTimeout);
             if (oldPeer._disconnectTimer) clearTimeout(oldPeer._disconnectTimer);
+            // I2: route per-peer cleanup through resetPeerState before
+            // dropping the _peers entry.
+            resetPeerState(oldPeer.slot, 'zombie-eviction', { peer: oldPeer, sid: oldSid });
             delete _peers[oldSid];
             delete _lockstepReadyPeers[oldSid];
           }
@@ -4255,6 +4262,14 @@
     // frame, clear tracking so the stall clock restarts cleanly once a
     // new peer fills the slot.
     clearPeerStallTimers();
+
+    // C-side: clear the rollback engine's per-slot state. Without this,
+    // slot_active stays sticky once kn_feed_input has ever seen the
+    // slot, polluting prediction and stats across roster changes.
+    if (_useCRollback) {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
+    }
 
     _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
   };
@@ -5891,6 +5906,13 @@
       if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null && DELAY_FRAMES > 0) {
         window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);
       }
+      // The joiner's _frameNum was set to msg.frame above. Set the
+      // matching host init frame so tryInitRollback fires immediately
+      // instead of waiting RB_INIT_TIMEOUT_MS (3s) for the timeout
+      // fallback. doRollbackInit's _kn_set_frame(initFrame) keeps the
+      // joiner's C engine aligned with the host on the same simulation
+      // frame for input exchange.
+      window._rbHostInitFrame = msg.frame;
       if (msg.rbTransport) {
         _rbTransport = msg.rbTransport === 'unreliable' ? 'unreliable' : 'reliable';
       }
@@ -5919,6 +5941,9 @@
           try {
             existing.pc.close();
           } catch (_) {}
+          // I2: route per-peer cleanup through resetPeerState before
+          // dropping the _peers entry.
+          resetPeerState(existing.slot, 'late-join-reconnect-replace', { peer: existing, sid });
           delete _peers[sid];
         } else {
           _syncLog(`late-join reconnect: creating peer ${sid} slot=${info.slot}`);
@@ -7097,6 +7122,10 @@
           // competitively. Fired from the MENU→GAMEPLAY transition handler
           // in tick().
           window._rbDeferredForGameplay = tryInitRollback;
+          // Stash the closure so GAMEPLAY→MENU teardown can re-arm it for
+          // subsequent matches in the same session without restarting the
+          // engine.
+          _rbReinitClosure = tryInitRollback;
           _syncLog(
             `C-ROLLBACK deferred for Smash Remix: will init at MENU→GAMEPLAY transition ` +
               `(own delay=${DELAY_FRAMES} slot=${_playerSlot})`,
@@ -7635,11 +7664,46 @@
       _useCRollback = false;
       _inGameplay = false;
     }
+    // Free auxiliary WASM scratch buffers regardless of _useCRollback —
+    // they may have been allocated lazily during prior rollback ticks.
+    // Without this, EmulatorJS destroy/recreate leaves stale offsets
+    // pointing into a freshly initialized WASM heap.
+    if (stopMod?._free) {
+      if (_rbFatalBuf) {
+        stopMod._free(_rbFatalBuf);
+        _rbFatalBuf = 0;
+      }
+      if (_rbLiveMismatchBuf) {
+        stopMod._free(_rbLiveMismatchBuf);
+        _rbLiveMismatchBuf = 0;
+      }
+      if (_rbHashBufPtr) {
+        stopMod._free(_rbHashBufPtr);
+        _rbHashBufPtr = 0;
+      }
+      if (_rbTaintBufPtr) {
+        stopMod._free(_rbTaintBufPtr);
+        _rbTaintBufPtr = 0;
+      }
+      if (window._rbMispredBuf) {
+        stopMod._free(window._rbMispredBuf);
+        window._rbMispredBuf = 0;
+      }
+    } else {
+      // No WASM module available (already destroyed) — drop the JS-side
+      // offsets so we don't reuse them against a future fresh heap.
+      _rbFatalBuf = 0;
+      _rbLiveMismatchBuf = 0;
+      _rbHashBufPtr = 0;
+      _rbTaintBufPtr = 0;
+      window._rbMispredBuf = 0;
+    }
     // Always clear the SR-deferred init closure, even when _useCRollback was
     // never set (SR match ended before MENU→GAMEPLAY fired). Without this, a
     // subsequent non-SR match's f=0 MENU→GAMEPLAY block fires the stale
     // closure and double-calls _kn_rollback_init, breaking GL/main-loop state.
     window._rbDeferredForGameplay = null;
+    _rbReinitClosure = null;
     // Clear host-broadcast init params so a back-to-back match doesn't fire
     // its tryInitRollback with stale values from the previous match's host
     // before the new rb-delay/rb-init-frame broadcasts arrive.
@@ -8399,6 +8463,34 @@
         if (_frameNum - _inGameplayLoggedAt > 60) {
           _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
           _inGameplayLoggedAt = _frameNum;
+        }
+        // Tear down C rollback when leaving gameplay so menu state isn't
+        // serialized — Smash Remix specifically defers init to avoid this
+        // (see line ~7099). Without teardown, the engine keeps running
+        // through every subsequent menu in the session, making the second
+        // match's first MENU→GAMEPLAY transition behave differently from
+        // the first (no fresh init, polluted prediction/stat state).
+        // Re-arm the deferred-init closure so the next gameplay transition
+        // re-fires init cleanly.
+        if (_useCRollback && _rbReinitClosure) {
+          const tickMod = window.EJS_emulator?.gameManager?.Module;
+          if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
+          if (_rbInputPtr && tickMod?._free) {
+            tickMod._free(_rbInputPtr);
+            _rbInputPtr = 0;
+          }
+          if (_rbRegionsBufPtr && tickMod?._free) {
+            tickMod._free(_rbRegionsBufPtr);
+            _rbRegionsBufPtr = 0;
+          }
+          _useCRollback = false;
+          _rbInitFrame = -1;
+          // Guests must wait for the host's fresh rb-init-frame broadcast
+          // for the next match. Host's delay is unchanged across matches,
+          // but the init frame is per-match.
+          if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
+          window._rbDeferredForGameplay = _rbReinitClosure;
+          _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
         }
       }
       // Menu lockstep arming: once a real controllable menu is visible, never
@@ -10150,6 +10242,9 @@
             try {
               p.pc.close();
             } catch (_) {}
+            // I2: route per-peer cleanup through resetPeerState before
+            // dropping the _peers entry.
+            resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
             delete _peers[sid];
           }
           createPeer(sid, info.slot, true);

@@ -651,11 +651,17 @@ void kn_rollback_shutdown(void) {
     free(rb.ring_frames);
     free(rb.ring_sf_state);
     free(rb.ring_hidden_state);
+    /* The 8MB RDRAM-preserve buffer is allocated by kn_set_rdram_preserve
+     * and lives across rollback init/shutdown cycles. Free it here so the
+     * subsequent kn_rollback_init's memset(&rb, 0, ...) doesn't orphan it
+     * — without this, every match in a session leaks 8MB. */
+    free(rb.saved_rdram);
     rb.ring_bufs = NULL;
     rb.ring_hle_state = NULL;
     rb.ring_frames = NULL;
     rb.ring_sf_state = NULL;
     rb.ring_hidden_state = NULL;
+    rb.saved_rdram = NULL;
     rb.initialized = 0;
     rb_log("kn_rollback_shutdown");
 }
@@ -667,6 +673,31 @@ EMSCRIPTEN_KEEPALIVE
 void kn_set_num_players(int num_players) {
     rb.num_players = num_players > KN_MAX_PLAYERS ? KN_MAX_PLAYERS : num_players;
     rb_log("num_players updated to %d", rb.num_players);
+}
+
+/* ── Reset per-slot state on peer disconnect / roster change ───────────
+ * slot_active is sticky once kn_feed_input has ever seen a slot, so a
+ * disconnected peer keeps polluting prediction and stats forever
+ * without an explicit reset. JS resetPeerState clears its slot-indexed
+ * maps; this is the C-side counterpart so the rollback engine forgets
+ * the slot too. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_rollback_slot_reset(int slot) {
+    int i;
+    if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return;
+    rb.slot_active[slot] = 0;
+    rb.confirmed_frame[slot] = 0;
+    memset(&rb.last_known[slot], 0, sizeof(rb.last_known[slot]));
+    memset(&rb.prev_known[slot], 0, sizeof(rb.prev_known[slot]));
+    memset(&rb.prev_applied[slot], 0, sizeof(rb.prev_applied[slot]));
+    for (i = 0; i < KN_INPUT_RING_SIZE; i++) {
+        rb.inputs[slot][i].present = 0;
+        rb.predicted[slot][i] = 0;
+        memset(&rb.predicted_values[slot][i], 0, sizeof(rb.predicted_values[slot][i]));
+    }
+    rb_log("slot_reset: slot=%d", slot);
 }
 
 /* ── Feed remote input ─────────────────────────────────────────────── */
