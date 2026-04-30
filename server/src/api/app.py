@@ -767,7 +767,8 @@ def create_app(lifespan=None) -> FastAPI:
                 raise HTTPException(status_code=413, detail="State too large")
             chunks.append(chunk)
         body = b"".join(chunks)
-        await state_cache.put(rom_hash, body)
+        if not await state_cache.put(rom_hash, body):
+            raise HTTPException(status_code=503, detail="State cache unavailable")
         return {"status": "cached", "size": len(body)}
 
     # ── Auth dependencies ─────────────────────────────────────────────

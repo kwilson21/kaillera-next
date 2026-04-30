@@ -73,8 +73,12 @@ async def get(rom_hash: str) -> bytes | None:
     return _local[rom_hash]
 
 
-async def put(rom_hash: str, body: bytes) -> None:
-    """Cache a save state blob with TTL + LRU cap."""
+async def put(rom_hash: str, body: bytes) -> bool:
+    """Cache a save state blob with TTL + LRU cap.
+
+    Returns False when Redis was configured but the write failed, so callers
+    can avoid telling clients a late-join state was cached when it was not.
+    """
     if _redis:
         try:
             now = time.time()
@@ -93,10 +97,10 @@ async def put(rom_hash: str, body: bytes) -> None:
                     await _redis.zrem(_LRU_KEY, *stale)
                     log.info("Save state cache: evicted %d entries", len(stale))
             log.info("Cached save state for ROM %s (%d KB)", rom_hash[:16], len(body) // 1024)
-            return
+            return True
         except Exception:
             log.exception("Save state cache: Redis put failed for %s", rom_hash[:16])
-            return
+            return False
     if rom_hash in _local:
         _local.move_to_end(rom_hash)
         _local[rom_hash] = body
@@ -106,3 +110,4 @@ async def put(rom_hash: str, body: bytes) -> None:
             log.info("Save state cache (local): evicted %s", evicted[:16])
         _local[rom_hash] = body
     log.info("Cached save state for ROM %s (%d KB, local)", rom_hash[:16], len(body) // 1024)
+    return True

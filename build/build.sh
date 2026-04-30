@@ -221,6 +221,18 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    WARN: audio backend skip-output patch failed"
     fi
 
+    # NOTE: glsm-unbind-pixel-pack.patch is DELIBERATELY not wired here.
+    # The naive `glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)` in glsm_state_unbind
+    # bypasses GLideN64's CachedBindBuffer JS-side cache, leaving GLideN64
+    # convinced its PBO is still bound while the real binding has been
+    # reset. The next CachedBindBuffer.bind() is a no-op (cache thinks
+    # nothing changed), so GLideN64's readback path operates on a null
+    # binding and corrupts the guest's framebuffer — observed as the
+    # guest freezing the moment the match countdown ends. The warning is
+    # silenced by the JS-side guard in kn-diagnostics.js (skip readPixels
+    # when a PBO is bound) which avoids touching GL state entirely. The
+    # patch file is kept under build/patches/ for reference but unused.
+
     # 2026-04-29 audio-diag: counters in ai_controller.c and audio_backend
     # plus kn_dump_audio_state in main.c. Idempotent; runs after both
     # kn-all and audio-backend-skip-output patches so anchors line up.
@@ -618,6 +630,15 @@ KNHLE_EOF
         git apply "${PATCHES_DIR}/gliden64-rdram-taint.patch" && \
             echo "    Applied GLideN64 taint patch" || \
             echo "    WARN: GLideN64 taint patch failed"
+    fi
+
+    # WebGL2 PBO hygiene: keep GLideN64's GL_PIXEL_PACK_BUFFER binding scoped
+    # to its own readback calls. This leaves the shared WebGL context readable
+    # by frontend diagnostics without bypassing CachedBindBuffer.
+    if [ -f "${PATCHES_DIR}/gliden64-pbo-scope.patch" ]; then
+        git apply "${PATCHES_DIR}/gliden64-pbo-scope.patch" && \
+            echo "    Applied GLideN64 PBO scope patch" || \
+            echo "    WARN: GLideN64 PBO scope patch failed"
     fi
 
     # C-level rollback engine: copy kn_rollback.c/h into the source tree
