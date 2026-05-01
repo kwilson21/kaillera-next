@@ -2020,9 +2020,37 @@
 
   const _isLocalDev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   const SYNC_LOG_FLUSH_MS = _isLocalDev && _knLiveFlush ? 1000 : 5000;
+  const _knVerboseSyncConsole = (() => {
+    try {
+      return _urlParams.get('verbose') === '1' || _urlParams.has('debug') || localStorage.getItem('kn-debug') === '1';
+    } catch (_) {
+      return _urlParams.get('verbose') === '1' || _urlParams.has('debug');
+    }
+  })();
+  const _isConsoleCriticalSyncLog = (msg) => {
+    const text = String(msg);
+    return (
+      text.includes('MISMATCH') ||
+      text.includes('STATE-DRIFT') ||
+      text.includes('FATAL') ||
+      text.includes('RB-INVARIANT') ||
+      text.includes('REPLAY-NORUN') ||
+      text.includes('RB-LIVE-MISMATCH') ||
+      text.includes('AUDIO-DEATH') ||
+      text.includes('DESYNC') ||
+      text.includes('GP-D') ||
+      text.includes('REGION-DIFF') ||
+      text.includes('BOOT-SYNC') ||
+      text.includes('reconnect') ||
+      text.includes('RECOVERY') ||
+      text.includes('STUCK')
+    );
+  };
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
-    console.log(`[lockstep] ${msg}`);
+    if (_knVerboseSyncConsole || _isConsoleCriticalSyncLog(msg)) {
+      console.log(`[lockstep] ${msg}`);
+    }
     // Flush on critical events only; periodic flushing is installed at
     // startLockstep(). Flushing every local-dev log entry serializes the full
     // growing input audit and can stall the game loop for seconds during
