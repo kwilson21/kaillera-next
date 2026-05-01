@@ -478,6 +478,17 @@
   let _predictionsPaused = false; // demo-only: pause C prediction generation without tearing down rollback state
   let _demoMode = false; // demo-only: disable C pacing-throttle so the engine runs full speed, predicts, and rolls back visibly under simulated lag (instead of pacing to match the slow peer, which feels identical to lockstep)
   let _rbReplayLogged = false; // prevents log spam during amortized replay
+  let _rbVisualFreezeOverlay = null; // canvas copy shown while replay frames render underneath
+  let _rbVisualFreezeCtx = null;
+  let _rbVisualFreezeActive = false;
+  let _rbVisualFreezeFailures = 0;
+  const _rbVisualFreezeEnabled = (() => {
+    try {
+      if (_urlParams.get('replayVisualFreeze') === '0') return false;
+      if (localStorage.getItem('kn-replay-visual-freeze') === '0') return false;
+    } catch (_) {}
+    return true;
+  })();
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
   let _hudEventTimestamps = []; // timestamps for events-per-second window
@@ -542,6 +553,93 @@
   };
   const _formatInputBrief = (input) =>
     input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
+  const _findRollbackVisualCanvas = () => {
+    const visibleCanvas = (canvas) => {
+      if (!canvas || canvas.id === 'kn-rollback-visual-freeze') return false;
+      const rect = canvas.getBoundingClientRect?.();
+      return !!rect && rect.width > 1 && rect.height > 1;
+    };
+    const inGame = document.getElementById('game')?.querySelectorAll?.('canvas') || [];
+    for (const canvas of inGame) {
+      if (visibleCanvas(canvas)) return canvas;
+    }
+    const canvases = document.querySelectorAll?.('canvas') || [];
+    for (const canvas of canvases) {
+      if (visibleCanvas(canvas)) return canvas;
+    }
+    return null;
+  };
+
+  const _showRollbackVisualFreeze = (depth = 0) => {
+    if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return _rbVisualFreezeActive;
+    const source = _findRollbackVisualCanvas();
+    const rect = source?.getBoundingClientRect?.();
+    if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
+    try {
+      if (!_rbVisualFreezeOverlay) {
+        const overlay = document.createElement('canvas');
+        overlay.id = 'kn-rollback-visual-freeze';
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.style.cssText = [
+          'position:fixed',
+          'display:none',
+          'pointer-events:none',
+          'z-index:54',
+          'margin:0',
+          'padding:0',
+          'border:0',
+          'background:#000',
+          'image-rendering:pixelated',
+          'image-rendering:crisp-edges',
+          'contain:strict',
+        ].join(';');
+        _rbVisualFreezeOverlay = overlay;
+        _rbVisualFreezeCtx = overlay.getContext('2d', { alpha: false });
+        if (_rbVisualFreezeCtx) _rbVisualFreezeCtx.imageSmoothingEnabled = false;
+      }
+      const overlay = _rbVisualFreezeOverlay;
+      const root = document.fullscreenElement || document.body || document.documentElement;
+      if (overlay.parentNode !== root) root.appendChild(overlay);
+      const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      const width = Math.max(1, source.width || Math.round(rect.width * scale));
+      const height = Math.max(1, source.height || Math.round(rect.height * scale));
+      if (overlay.width !== width) overlay.width = width;
+      if (overlay.height !== height) overlay.height = height;
+      if (!_rbVisualFreezeCtx) _rbVisualFreezeCtx = overlay.getContext('2d', { alpha: false });
+      if (!_rbVisualFreezeCtx) return false;
+      _rbVisualFreezeCtx.imageSmoothingEnabled = false;
+      _rbVisualFreezeCtx.drawImage(source, 0, 0, width, height);
+      overlay.style.left = `${Math.round(rect.left)}px`;
+      overlay.style.top = `${Math.round(rect.top)}px`;
+      overlay.style.width = `${Math.round(rect.width)}px`;
+      overlay.style.height = `${Math.round(rect.height)}px`;
+      overlay.style.display = 'block';
+      overlay.dataset.depth = String(depth);
+      _rbVisualFreezeActive = true;
+      return true;
+    } catch (e) {
+      _rbVisualFreezeFailures++;
+      if (_rbVisualFreezeOverlay) _rbVisualFreezeOverlay.style.display = 'none';
+      _rbVisualFreezeActive = false;
+      if (_rbVisualFreezeFailures <= 3) {
+        _syncLog(`VISUAL-FREEZE failed count=${_rbVisualFreezeFailures} ${e?.name || 'Error'}: ${e?.message || e}`);
+      }
+      return false;
+    }
+  };
+
+  const _hideRollbackVisualFreeze = () => {
+    if (_rbVisualFreezeOverlay) _rbVisualFreezeOverlay.style.display = 'none';
+    _rbVisualFreezeActive = false;
+  };
+
+  const _destroyRollbackVisualFreeze = () => {
+    _hideRollbackVisualFreeze();
+    if (_rbVisualFreezeOverlay?.parentNode) _rbVisualFreezeOverlay.parentNode.removeChild(_rbVisualFreezeOverlay);
+    _rbVisualFreezeOverlay = null;
+    _rbVisualFreezeCtx = null;
+  };
+
   // ── Freeze detection state ─────────────────────────────────────────
   // Lightweight per-frame sampling to detect when display, input, or
   // audio stop working — the "emulator froze" scenario where the tick
@@ -7959,6 +8057,7 @@
     }
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
     _resetControllerPresentMask();
+    _destroyRollbackVisualFreeze();
 
     // Shutdown C-level rollback
     if (_useCRollback) {
@@ -9251,6 +9350,7 @@
         _hudRollbackDepthSamples.push(replayDepth);
         if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
+        _showRollbackVisualFreeze(replayDepth);
         _rbReplayLogged = true;
         // Replay must execute the same RSP/audio task as the original forward
         // frame so rollback advances emulator-side audio state faithfully.
@@ -9260,6 +9360,7 @@
         _syncLog(`REPLAY-AUDIO-MUTE: RSP audio stays mode=0; WebAudio feed muted for replay depth=${replayDepth}`);
       }
       if (_rbReplayLogged && catchingUp !== 2) {
+        _hideRollbackVisualFreeze();
         // Replay finished — broadcast the gameplay hash so the peer can
         // verify the rollback restoration produced identical game state.
         // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
