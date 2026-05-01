@@ -515,10 +515,11 @@
   })();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
-      if (_urlParams.get('replayVisualFadeDuring') === '0') return false;
-      if (localStorage.getItem('kn-replay-visual-fade-during') === '0') return false;
+      const raw = _urlParams.get('replayVisualFadeDuring') ?? localStorage.getItem('kn-replay-visual-fade-during');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return false;
   })();
   const RB_VISUAL_FADE_MS = (() => {
     try {
