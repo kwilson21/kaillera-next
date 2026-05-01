@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Input Lag Visualizer | kaillera-next</title>
+    <meta
+      name="description"
+      content="See exactly how rollback netplay hides network lag — no emulator required. Press SPACE, watch the gap."
+    />
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      :focus-visible {
+        outline: 2px solid #6af;
+        outline-offset: 2px;
+      }
+
+      body {
+        background: #111;
+        color: #eee;
+        font-family: sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 24px 16px 48px;
+      }
+
+      .shell {
+        width: 100%;
+        max-width: 720px;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+        letter-spacing: 0.1em;
+        color: #6af;
+        margin-bottom: 0.5rem;
+        text-align: center;
+      }
+
+      .tagline {
+        text-align: center;
+        color: #8a8a8a;
+        font-size: 14px;
+        margin-bottom: 2rem;
+      }
+
+      .stage {
+        background: #1a1a2e;
+        border: 1px solid #2a2a40;
+        border-radius: 12px;
+        padding: 2rem 1.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 90px 1fr 80px;
+        align-items: center;
+        gap: 16px;
+        padding: 18px 0;
+        border-bottom: 1px solid #2a2a40;
+      }
+
+      .row:last-child {
+        border-bottom: 0;
+      }
+
+      .row-label {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        color: #8a8a8a;
+        text-transform: uppercase;
+      }
+
+      .row-track {
+        position: relative;
+        height: 36px;
+        background: #0d0d1a;
+        border-radius: 18px;
+        overflow: hidden;
+      }
+
+      .pulse {
+        position: absolute;
+        top: 50%;
+        left: 16px;
+        transform: translateY(-50%);
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: #6af;
+        opacity: 0;
+        transition: opacity 0.15s ease-out;
+        box-shadow: 0 0 24px rgba(102, 170, 255, 0.6);
+      }
+
+      .pulse.lit {
+        opacity: 1;
+        animation: pulseFade 0.6s ease-out forwards;
+      }
+
+      .pulse.delayed {
+        background: #ff6262;
+        box-shadow: 0 0 24px rgba(255, 98, 98, 0.6);
+      }
+
+      @keyframes pulseFade {
+        0% {
+          transform: translateY(-50%) scale(0.5);
+          opacity: 1;
+        }
+        50% {
+          transform: translateY(-50%) scale(1.4);
+          opacity: 0.8;
+        }
+        100% {
+          transform: translateY(-50%) scale(1);
+          opacity: 0.2;
+        }
+      }
+
+      .row-value {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        font-size: 18px;
+        font-weight: 700;
+        color: #eee;
+      }
+
+      .row-value.idle {
+        color: #5a5a5a;
+        font-weight: 400;
+      }
+
+      .controls {
+        background: #1a1a2e;
+        border: 1px solid #2a2a40;
+        border-radius: 12px;
+        padding: 1.5rem;
+      }
+
+      .control-row {
+        display: grid;
+        grid-template-columns: 100px 1fr 70px;
+        align-items: center;
+        gap: 14px;
+        padding: 10px 0;
+      }
+
+      .control-row:not(:last-child) {
+        border-bottom: 1px solid #2a2a40;
+        padding-bottom: 18px;
+        margin-bottom: 8px;
+      }
+
+      .control-label {
+        color: #8a8a8a;
+        font-size: 14px;
+      }
+
+      input[type='range'] {
+        width: 100%;
+        accent-color: #6af;
+      }
+
+      .control-value {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #eee;
+        font-weight: 700;
+      }
+
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .toggle-switch {
+        width: 50px;
+        height: 28px;
+        background: #333;
+        border-radius: 14px;
+        position: relative;
+        transition: background 0.2s;
+      }
+
+      .toggle-switch::after {
+        content: '';
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: #eee;
+        transition: transform 0.2s;
+      }
+
+      .toggle input {
+        display: none;
+      }
+
+      .toggle input:checked + .toggle-switch {
+        background: #3a5a8a;
+      }
+
+      .toggle input:checked + .toggle-switch::after {
+        transform: translateX(22px);
+      }
+
+      .toggle-label {
+        font-weight: 700;
+        font-size: 15px;
+        min-width: 100px;
+      }
+
+      .verdict {
+        margin-top: 1.5rem;
+        padding: 1.25rem;
+        border-radius: 8px;
+        background: #0d0d1a;
+        border: 1px solid #2a2a40;
+        text-align: center;
+      }
+
+      .verdict-headline {
+        font-size: 1.5rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+      }
+
+      .verdict-headline.smooth {
+        color: #4fd1a5;
+      }
+
+      .verdict-headline.laggy {
+        color: #ff6262;
+      }
+
+      .verdict-detail {
+        margin-top: 6px;
+        color: #8a8a8a;
+        font-size: 13px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-top: 1.5rem;
+      }
+
+      button {
+        padding: 12px 20px;
+        border: none;
+        border-radius: 6px;
+        background: #3a5a8a;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 700;
+        cursor: pointer;
+        min-height: 44px;
+      }
+
+      button:hover {
+        background: #4a6fa5;
+      }
+
+      button.secondary {
+        background: #1a1a2e;
+        border: 1px solid #2a2a40;
+      }
+
+      button.secondary:hover {
+        background: #20203a;
+      }
+
+      .stats {
+        text-align: center;
+        margin-top: 1rem;
+        color: #5a5a5a;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .footer {
+        margin-top: 2rem;
+        text-align: center;
+        font-size: 13px;
+        color: #5a5a5a;
+      }
+
+      .footer a {
+        color: #6af;
+        text-decoration: none;
+      }
+
+      .footer a:hover {
+        text-decoration: underline;
+      }
+
+      .explainer {
+        background: #1a1a2e;
+        border: 1px solid #2a2a40;
+        border-radius: 12px;
+        padding: 1.25rem 1.5rem;
+        margin-top: 1rem;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #b0b0c0;
+      }
+
+      .explainer strong {
+        color: #eee;
+      }
+
+      .keyboard-hint {
+        display: inline-block;
+        padding: 2px 10px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        font-size: 12px;
+        background: #0d0d1a;
+        color: #6af;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <h1>INPUT LAG VISUALIZER</h1>
+      <p class="tagline">
+        Press <span class="keyboard-hint">SPACE</span> or tap below. Watch the gap between your input and the response.
+      </p>
+
+      <section class="stage" aria-label="Input lag visualization" id="stage">
+        <div class="row">
+          <div class="row-label">Input</div>
+          <div class="row-track">
+            <div class="pulse" id="pulse-input"></div>
+          </div>
+          <div class="row-value" id="input-value">--</div>
+        </div>
+        <div class="row">
+          <div class="row-label">Response</div>
+          <div class="row-track">
+            <div class="pulse" id="pulse-response"></div>
+          </div>
+          <div class="row-value idle" id="response-value">--</div>
+        </div>
+
+        <div class="verdict" id="verdict">
+          <div class="verdict-headline smooth" id="verdict-headline">READY</div>
+          <div class="verdict-detail" id="verdict-detail">Press SPACE to begin.</div>
+        </div>
+
+        <div class="actions">
+          <button id="single-btn" type="button">Single press</button>
+          <button id="repeat-btn" class="secondary" type="button">Auto-press (5/sec)</button>
+        </div>
+        <div class="stats" id="stats">Presses: 0 &middot; Avg gap: 0 ms</div>
+      </section>
+
+      <section class="controls" aria-label="Network controls">
+        <div class="control-row">
+          <span class="control-label">Network lag</span>
+          <input id="lag" type="range" min="0" max="300" step="5" value="0" aria-label="Network lag in milliseconds" />
+          <span id="lag-value" class="control-value">0 ms</span>
+        </div>
+        <div class="control-row">
+          <span class="control-label">Mode</span>
+          <label class="toggle">
+            <input id="rollback" type="checkbox" checked />
+            <span class="toggle-switch"></span>
+            <span class="toggle-label" id="rollback-label">Rollback ON</span>
+          </label>
+          <span></span>
+        </div>
+      </section>
+
+      <div class="explainer">
+        <p>
+          With <strong>lockstep</strong>, every frame waits for the opponent's input before advancing. You feel the full
+          round-trip every time you press a button.
+        </p>
+        <p style="margin-top: 8px">
+          With <strong>rollback</strong>, the engine predicts the opponent locally and runs immediately. When the real
+          input arrives and disagrees with the prediction, the engine quietly rewinds and replays. The round-trip is
+          still on the wire &mdash; rollback hides it from you.
+        </p>
+        <p style="margin-top: 8px; color: #5a5a5a; font-size: 12px">
+          Real games add 1&ndash;3 frames of input buffer (~17&ndash;50 ms) regardless of mode &mdash; that's the small
+          fixed delay that gives the network a head start. The contrast above isolates what the netcode itself adds on
+          top: nothing for rollback, the full round-trip for lockstep. Mechanic, not opinion.
+        </p>
+      </div>
+
+      <div class="footer">
+        Want to feel it inside an actual N64 game?
+        <a href="/demo.html">Try the rollback demo &rarr;</a>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        'use strict';
+
+        const $ = (id) => document.getElementById(id);
+
+        const _state = {
+          lagMs: 0,
+          rollback: true,
+          presses: 0,
+          totalGapMs: 0,
+          repeating: false,
+          repeatTimer: 0,
+        };
+
+        const _flashPulse = (el, delayed) => {
+          el.classList.remove('lit', 'delayed');
+          // force reflow so re-adding triggers the animation
+          // eslint-disable-next-line no-unused-expressions
+          el.offsetHeight;
+          if (delayed) el.classList.add('delayed');
+          el.classList.add('lit');
+        };
+
+        const _updateVerdict = () => {
+          const headline = $('verdict-headline');
+          const detail = $('verdict-detail');
+          if (_state.lagMs === 0) {
+            headline.textContent = 'NO NETWORK LAG';
+            headline.className = 'verdict-headline smooth';
+            detail.textContent = 'No network lag to hide. Crank the slider to see the difference.';
+            return;
+          }
+          if (_state.rollback) {
+            headline.textContent = 'ROUND-TRIP HIDDEN';
+            headline.className = 'verdict-headline smooth';
+            detail.textContent = `${_state.lagMs} ms each way is still on the wire — rollback predicts past it locally so you don't wait.`;
+          } else {
+            const felt = _state.lagMs * 2;
+            headline.textContent = `${felt} ms WAIT PER INPUT`;
+            headline.className = 'verdict-headline laggy';
+            detail.textContent = `Lockstep waits a full round-trip every input. ${_state.lagMs} ms each way = ${felt} ms before you see the response.`;
+          }
+        };
+
+        const _press = () => {
+          const t0 = performance.now();
+          _flashPulse($('pulse-input'), false);
+          $('input-value').textContent = '0 ms';
+          $('input-value').classList.remove('idle');
+
+          const responseValue = $('response-value');
+          const responsePulse = $('pulse-response');
+
+          const responseDelayMs = _state.rollback ? 0 : _state.lagMs * 2;
+          const isLaggy = responseDelayMs > 50;
+
+          if (responseDelayMs === 0) {
+            _flashPulse(responsePulse, false);
+            responseValue.textContent = '0 ms';
+            responseValue.classList.remove('idle');
+          } else {
+            responseValue.textContent = `wait ${responseDelayMs} ms…`;
+            responseValue.classList.add('idle');
+            setTimeout(() => {
+              _flashPulse(responsePulse, isLaggy);
+              const actualMs = Math.round(performance.now() - t0);
+              responseValue.textContent = `+${actualMs} ms`;
+              responseValue.classList.remove('idle');
+            }, responseDelayMs);
+          }
+
+          _state.presses += 1;
+          _state.totalGapMs += responseDelayMs;
+          const avg = Math.round(_state.totalGapMs / _state.presses);
+          $('stats').textContent = `Presses: ${_state.presses} · Avg gap: ${avg} ms`;
+        };
+
+        const _setRepeat = (on) => {
+          if (on === _state.repeating) return;
+          _state.repeating = on;
+          const btn = $('repeat-btn');
+          if (on) {
+            btn.textContent = 'Stop auto-press';
+            btn.classList.remove('secondary');
+            _state.repeatTimer = setInterval(_press, 200);
+          } else {
+            btn.textContent = 'Auto-press (5/sec)';
+            btn.classList.add('secondary');
+            clearInterval(_state.repeatTimer);
+            _state.repeatTimer = 0;
+          }
+        };
+
+        $('lag').addEventListener('input', (event) => {
+          _state.lagMs = Number(event.currentTarget.value) || 0;
+          $('lag-value').textContent = `${_state.lagMs} ms`;
+          _updateVerdict();
+        });
+
+        $('rollback').addEventListener('change', (event) => {
+          _state.rollback = !!event.currentTarget.checked;
+          $('rollback-label').textContent = _state.rollback ? 'Rollback ON' : 'Rollback OFF';
+          _updateVerdict();
+        });
+
+        $('single-btn').addEventListener('click', _press);
+
+        $('repeat-btn').addEventListener('click', () => _setRepeat(!_state.repeating));
+
+        $('stage').addEventListener('click', (event) => {
+          // Click anywhere in the stage (except the buttons themselves) to register a press.
+          if (event.target.tagName === 'BUTTON' || event.target.tagName === 'INPUT') return;
+          _press();
+        });
+
+        document.addEventListener('keydown', (event) => {
+          if (event.code === 'Space' && !event.repeat && event.target.tagName !== 'INPUT') {
+            event.preventDefault();
+            _press();
+          }
+        });
+
+        _updateVerdict();
+      })();
+    </script>
+  </body>
+</html>
