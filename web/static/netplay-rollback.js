@@ -512,10 +512,16 @@
   const RB_VISUAL_BLEND_MAX_OFFSET_PX = 8;
   const RB_VISUAL_MOTION_PROBE_W = 32;
   const RB_VISUAL_MOTION_PROBE_H = 18;
+  const RB_REPLAY_BURST_RAW = (() => {
+    try {
+      return _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
+    } catch (_) {
+      return null;
+    }
+  })();
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
-      const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
-      const parsed = raw === null ? 4 : parseInt(raw, 10);
+      const parsed = RB_REPLAY_BURST_RAW === null ? 4 : parseInt(RB_REPLAY_BURST_RAW, 10);
       if (!Number.isFinite(parsed)) return 4;
       return Math.max(1, Math.min(8, parsed));
     } catch (_) {
@@ -531,6 +537,14 @@
     } catch (_) {
       return 10;
     }
+  })();
+  const RB_ADAPTIVE_REPLAY_BURST = (() => {
+    try {
+      const raw = _urlParams.get('replayAdaptiveBurst') ?? localStorage.getItem('kn-replay-adaptive-burst');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return RB_REPLAY_BURST_RAW === null;
   })();
   const RB_SKIP_RDP_DURING_REPLAY = (() => {
     try {
@@ -584,6 +598,12 @@
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
   let _hudEventTimestamps = []; // timestamps for events-per-second window
+  let _recentTickEwma = 4;
+  let _typicalReplayStepEwma = 3.5;
+  let _rbReplayEffectiveBurst = RB_REPLAY_BURST_MAX_FRAMES;
+  const _rbReplayEffectiveBurstCounts = {};
+  const RB_REPLAY_EWMA_ALPHA = 0.12;
+  const RB_REPLAY_TICK_BUDGET_MS = 16.6;
   const HUD_DEPTH_WINDOW = 60;
   const HUD_EVENT_WINDOW_MS = 5000;
   let rb_numPlayers = 2; // set during C-rollback init
@@ -7549,7 +7569,25 @@
     }
   };
 
+  const _updateReplayEwma = (current, sample) => {
+    if (!Number.isFinite(sample) || sample <= 0 || sample > 100) return current;
+    return current ? current * (1 - RB_REPLAY_EWMA_ALPHA) + sample * RB_REPLAY_EWMA_ALPHA : sample;
+  };
+
+  const _computeReplayBurst = () => {
+    if (!RB_ADAPTIVE_REPLAY_BURST) {
+      _rbReplayEffectiveBurst = RB_REPLAY_BURST_MAX_FRAMES;
+      return _rbReplayEffectiveBurst;
+    }
+    const replayStepMs = Math.max(0.5, _typicalReplayStepEwma || 3.5);
+    const headroomMs = RB_REPLAY_TICK_BUDGET_MS - (_recentTickEwma || 4);
+    const computed = Math.floor(headroomMs / replayStepMs);
+    _rbReplayEffectiveBurst = Math.max(2, Math.min(6, computed));
+    return _rbReplayEffectiveBurst;
+  };
+
   const _runCReplayFrame = (tickMod) => {
+    const replayStepStart = performance.now();
     // C wrote inputs + saved state for the replay frame. JS now steps
     // the emulator via stepOneFrame() — the SAME code path as normal play.
     // Pre-frame setup (reset audio, RNG sync) must match the normal path
@@ -7594,6 +7632,7 @@
     _frameNum = newFrame;
     KNState.frameNum = _frameNum;
     if (window.KNDesync) KNDesync.tick(_frameNum);
+    _typicalReplayStepEwma = _updateReplayEwma(_typicalReplayStepEwma, performance.now() - replayStepStart);
   };
 
   const _setReplayRdpSkip = (tickMod, enable, reason = '') => {
@@ -9943,6 +9982,8 @@
         const burstStart = performance.now();
         let burstSteps = 0;
         let replayDone = false;
+        const effectiveBurst = _computeReplayBurst();
+        _rbReplayEffectiveBurstCounts[effectiveBurst] = (_rbReplayEffectiveBurstCounts[effectiveBurst] || 0) + 1;
         while (catchingUp === 2) {
           _runCReplayFrame(tickMod);
           burstSteps++;
@@ -9952,7 +9993,7 @@
             break;
           }
           const burstMs = performance.now() - burstStart;
-          if (burstSteps >= RB_REPLAY_BURST_MAX_FRAMES || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
+          if (burstSteps >= effectiveBurst || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
           catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
         }
         if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
@@ -10045,6 +10086,7 @@
       KNState.frameNum = _frameNum;
       if (window.KNDesync) KNDesync.tick(_frameNum);
       const _tTotal = performance.now();
+      _recentTickEwma = _updateReplayEwma(_recentTickEwma, _tTotal - _t0);
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
       if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
@@ -12563,6 +12605,11 @@
         isCRollback: _useCRollback,
         replayMaskBlend: RB_VISUAL_BLEND,
         rollbackBlendFramesDrawn: _rbVisualBlendFramesDrawn,
+        replayAdaptiveBurst: RB_ADAPTIVE_REPLAY_BURST,
+        replayEffectiveBurst: _rbReplayEffectiveBurst,
+        replayEffectiveBurstCounts: { ..._rbReplayEffectiveBurstCounts },
+        recentTickEwma: _recentTickEwma,
+        typicalReplayStepEwma: _typicalReplayStepEwma,
       };
     },
     getInfo: () => {
