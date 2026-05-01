@@ -498,6 +498,7 @@
   let _rbVisualFreezeFailures = 0;
   let _rbVisualFreezeSerial = 0;
   let _rbRdpSkipActive = false;
+  let _rbFullHeadlessActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
@@ -527,6 +528,14 @@
       if (raw === '1') return true;
     } catch (_) {}
     return true;
+  })();
+  const RB_FULL_HEADLESS_DURING_REPLAY = (() => {
+    try {
+      const raw = _urlParams.get('fullHeadless') ?? localStorage.getItem('kn-full-headless');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
   })();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
@@ -7331,8 +7340,9 @@
       }
     }
 
-    // Force GL composite via real rAF no-op
-    APISandbox.nativeRAF(() => {});
+    // Force GL composite via real rAF no-op. Full-headless replay deliberately
+    // defers this to replay end so rollback frames avoid repeated composites.
+    if (!_rbFullHeadlessActive) APISandbox.nativeRAF(() => {});
     _wasmStepActive = false;
     return true;
   };
@@ -7349,12 +7359,17 @@
     if (!tickMod?._kn_rollback_did_restore?.()) return;
     const gm = window.EJS_emulator?.gameManager;
     if (gm?.Module) {
+      const t0 = performance.now();
       gm.Module.pauseMainLoop();
       gm.Module.resumeMainLoop();
       if (gm.Module.updateMemoryViews) {
         gm.Module.updateMemoryViews();
       } else if (gm.Module._emscripten_notify_memory_growth) {
         gm.Module._emscripten_notify_memory_growth(0);
+      }
+      const dt = performance.now() - t0;
+      if (RB_FULL_HEADLESS_DURING_REPLAY || dt >= 2) {
+        _syncLog(`RB-RUNNER-REFRESH ms=${dt.toFixed(3)} headless=${_rbFullHeadlessActive ? 1 : 0}`);
       }
     }
   };
@@ -7419,11 +7434,40 @@
     }
   };
 
+  const _forceReplayEndComposite = (reason = '') => {
+    const t0 = performance.now();
+    try {
+      APISandbox.nativeRAF(() => {});
+      const dt = performance.now() - t0;
+      if (RB_FULL_HEADLESS_DURING_REPLAY) {
+        _syncLog(`REPLAY-END-COMPOSITE scheduleMs=${dt.toFixed(3)}${reason ? ` ${reason}` : ''}`);
+      }
+    } catch (e) {
+      _syncLog(`REPLAY-END-COMPOSITE failed: ${e?.message || e}`);
+    }
+  };
+
+  const _setReplayFullHeadless = (tickMod, enable, reason = '') => {
+    if (!tickMod?._kn_set_headless) return;
+    const next = !!enable && RB_FULL_HEADLESS_DURING_REPLAY;
+    if (_rbFullHeadlessActive === next) return;
+    try {
+      tickMod._kn_set_headless(next ? 1 : 0);
+      _rbFullHeadlessActive = next;
+      _syncLog(`REPLAY-FULL-HEADLESS ${next ? 'on' : 'off'}${reason ? ` ${reason}` : ''}`);
+      if (!next) _forceReplayEndComposite(reason || 'headless-off');
+    } catch (e) {
+      _syncLog(`REPLAY-FULL-HEADLESS failed: ${e?.message || e}`);
+    }
+  };
+
   const _finishCReplay = (tickMod) => {
     if (!_rbReplayLogged) {
+      _setReplayFullHeadless(tickMod, false, 'finish-noop');
       _setReplayRdpSkip(tickMod, false, 'finish-noop');
       return;
     }
+    _setReplayFullHeadless(tickMod, false, 'finish');
     _setReplayRdpSkip(tickMod, false, 'finish');
     _hideRollbackVisualFreeze();
     // Replay finished — broadcast the gameplay hash so the peer can
@@ -7602,6 +7646,11 @@
         lsMod._kn_set_skip_rdp_replay(0);
         _rbRdpSkipActive = false;
         _syncLog(`replay RDP skip ${RB_SKIP_RDP_DURING_REPLAY ? 'available' : 'disabled by flag'}`);
+      }
+      if (lsMod?._kn_set_headless) {
+        lsMod._kn_set_headless(0);
+        _rbFullHeadlessActive = false;
+        _syncLog(`replay full headless ${RB_FULL_HEADLESS_DURING_REPLAY ? 'available by flag' : 'disabled'}`);
       }
     } else {
       _syncLog('stock core — JS-level timing patch (fallback)');
@@ -8422,6 +8471,14 @@
       } catch (e) {
         _syncLog(`pause before rAF restore failed: ${e?.message || e}`);
       }
+    }
+    if (stopMod?._kn_set_headless) {
+      stopMod._kn_set_headless(0);
+      _rbFullHeadlessActive = false;
+    }
+    if (stopMod?._kn_set_skip_rdp_replay) {
+      stopMod._kn_set_skip_rdp_replay(0);
+      _rbRdpSkipActive = false;
     }
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
     _resetControllerPresentMask();
@@ -9706,6 +9763,7 @@
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _showRollbackVisualFreeze(replayDepth);
         _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
+        _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
         _rbReplayLogged = true;
         // Replay must execute the same RSP/audio task as the original forward
         // frame so rollback advances emulator-side audio state faithfully.
