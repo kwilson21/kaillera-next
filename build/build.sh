@@ -366,6 +366,14 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
             echo "    WARN: headless tick patch failed"
     fi
+
+    # Replay RDP skip: keep RSP/core/GL cadence alive, but skip GLideN64
+    # raster submission and framebuffer/depth copybacks while replay is masked.
+    if [ -f "${PATCHES_DIR}/mupen64plus-rdp-replay-skip.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-rdp-replay-skip.patch" && \
+            echo "    Applied GLideN64 replay RDP-skip patch" || \
+            echo "    WARN: GLideN64 replay RDP-skip patch failed"
+    fi
     if grep -q "kn_apply_controller_present" libretro/libretro.c && \
         ! grep -q "kn_controller_present_mask" libretro/libretro.c; then
         python3 -c "

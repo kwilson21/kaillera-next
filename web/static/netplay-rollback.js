@@ -416,12 +416,18 @@
     }
   };
 
+  const _localRollbackCaps = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    return { rdpReplaySkip: !!mod?._kn_set_skip_rdp_replay && RB_SKIP_RDP_DURING_REPLAY };
+  };
+
   const broadcastLockstepReady = () => {
     const dl = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
+    const caps = _localRollbackCaps();
     for (const p of Object.values(_peers)) {
       if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
         try {
-          p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl }));
+          p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl, caps }));
         } catch (_) {}
       }
     }
@@ -491,6 +497,7 @@
   let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
   let _rbVisualFreezeSerial = 0;
+  let _rbRdpSkipActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
@@ -512,6 +519,14 @@
     } catch (_) {
       return 10;
     }
+  })();
+  const RB_SKIP_RDP_DURING_REPLAY = (() => {
+    try {
+      const raw = _urlParams.get('replaySkipRdp') ?? localStorage.getItem('kn-replay-skip-rdp');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
   })();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
@@ -4528,6 +4543,7 @@
               handleDelayPong(msg.ts, peer);
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
+              peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
             } else if (msg.type === 'digest') {
@@ -5466,6 +5482,23 @@
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
 
     if (readyCount < playerPeerSids.length) return;
+
+    const localCaps = _localRollbackCaps();
+    for (const sid of playerPeerSids) {
+      const p = _peers[sid];
+      if (p?.synthetic === true) continue;
+      const peerCaps = p?.rollbackCaps || {};
+      const peerRdpReplaySkip = !!peerCaps.rdpReplaySkip;
+      if (peerRdpReplaySkip !== localCaps.rdpReplaySkip) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localRdpReplaySkip=${localCaps.rdpReplaySkip ? 1 : 0} ` +
+            `peerRdpReplaySkip=${peerRdpReplaySkip ? 1 : 0} — refusing rollback start`,
+        );
+        setStatus('Core version mismatch -- reload both players');
+        _config?.onToast?.('Core version mismatch -- reload both players');
+        return;
+      }
+    }
 
     // Negotiate delay: ceiling of all players.
     // Rollback mode: both players independently compute from RTT/2, then take max.
@@ -7373,8 +7406,25 @@
     if (window.KNDesync) KNDesync.tick(_frameNum);
   };
 
+  const _setReplayRdpSkip = (tickMod, enable, reason = '') => {
+    if (!tickMod?._kn_set_skip_rdp_replay) return;
+    const next = !!enable && RB_SKIP_RDP_DURING_REPLAY;
+    if (_rbRdpSkipActive === next) return;
+    try {
+      tickMod._kn_set_skip_rdp_replay(next ? 1 : 0);
+      _rbRdpSkipActive = next;
+      _syncLog(`REPLAY-RDP-SKIP ${next ? 'on' : 'off'}${reason ? ` ${reason}` : ''}`);
+    } catch (e) {
+      _syncLog(`REPLAY-RDP-SKIP failed: ${e?.message || e}`);
+    }
+  };
+
   const _finishCReplay = (tickMod) => {
-    if (!_rbReplayLogged) return;
+    if (!_rbReplayLogged) {
+      _setReplayRdpSkip(tickMod, false, 'finish-noop');
+      return;
+    }
+    _setReplayRdpSkip(tickMod, false, 'finish');
     _hideRollbackVisualFreeze();
     // Replay finished — broadcast the gameplay hash so the peer can
     // verify the rollback restoration produced identical game state.
@@ -7548,6 +7598,11 @@
     _hasForkedCore = !!(lsMod?._kn_set_deterministic && lsMod._kn_set_frame_time);
     if (_hasForkedCore) {
       _syncLog('forked core detected — C-level deterministic timing');
+      if (lsMod?._kn_set_skip_rdp_replay) {
+        lsMod._kn_set_skip_rdp_replay(0);
+        _rbRdpSkipActive = false;
+        _syncLog(`replay RDP skip ${RB_SKIP_RDP_DURING_REPLAY ? 'available' : 'disabled by flag'}`);
+      }
     } else {
       _syncLog('stock core — JS-level timing patch (fallback)');
     }
@@ -9650,6 +9705,7 @@
         if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _showRollbackVisualFreeze(replayDepth);
+        _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
         _rbReplayLogged = true;
         // Replay must execute the same RSP/audio task as the original forward
         // frame so rollback advances emulator-side audio state faithfully.
