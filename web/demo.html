@@ -3,90 +3,107 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rollback Demo | kaillera-next</title>
+    <title>Demo | kaillera-next</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #111318;
-        --panel: #191d24;
-        --panel-2: #20252d;
-        --border: #343b46;
-        --text: #f4f6f8;
-        --muted: #a8b0bc;
-        --accent: #4fd1a5;
-        --accent-2: #f5c84b;
-        --danger: #ff6262;
+        --bg: #111;
+        --panel: #1a1a2e;
+        --panel-2: #0d0d1a;
+        --border: #2a2a40;
+        --input-border: #333;
+        --text: #eee;
+        --muted: #8a8a8a;
+        --accent: #6af;
+        --button: #3a5a8a;
+        --button-hover: #4a6fa5;
+        --success: #7ddc8a;
+        --danger: #f66;
       }
 
       * {
         box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
       }
 
       body {
-        margin: 0;
         min-height: 100vh;
         background: var(--bg);
         color: var(--text);
-        font-family:
-          Inter,
-          ui-sans-serif,
-          system-ui,
-          -apple-system,
-          BlinkMacSystemFont,
-          'Segoe UI',
-          sans-serif;
+        font-family: sans-serif;
       }
 
       .shell {
-        width: min(1180px, calc(100vw - 32px));
+        width: min(1280px, calc(100vw - 24px));
         margin: 0 auto;
-        padding: 24px 0 28px;
+        padding: 16px 0 24px;
       }
 
       header {
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 24px;
-        padding-bottom: 18px;
-        border-bottom: 1px solid var(--border);
+        margin-bottom: 12px;
+      }
+
+      h1,
+      h2 {
+        color: var(--accent);
+        letter-spacing: 0.1em;
       }
 
       h1 {
-        margin: 0;
-        font-size: clamp(1.45rem, 2.5vw, 2.3rem);
-        line-height: 1.05;
-        letter-spacing: 0;
+        font-size: clamp(1.2rem, 2vw, 1.6rem);
+        line-height: 1.1;
+        text-transform: uppercase;
+      }
+
+      h2 {
+        font-size: 0.78rem;
+        margin-bottom: 8px;
+        text-transform: uppercase;
       }
 
       .lede {
-        max-width: 620px;
-        margin: 8px 0 0;
+        margin-top: 6px;
         color: var(--muted);
-        font-size: 0.98rem;
-        line-height: 1.45;
+        font-size: 0.9rem;
+        line-height: 1.4;
       }
 
-      .rom-status {
-        color: var(--accent);
-        font-size: 0.85rem;
-        text-align: right;
-        min-width: 180px;
+      .status-line {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.8rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-height: 1.2em;
+      }
+
+      .stage-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 340px;
+        gap: 16px;
+        align-items: start;
       }
 
       .stage {
         position: relative;
-        margin-top: 18px;
-        min-height: min(58vw, 560px);
         border: 1px solid var(--border);
+        border-radius: 12px;
         background: #050607;
         overflow: hidden;
+        aspect-ratio: 4 / 3;
+        max-height: calc(100vh - 200px);
       }
 
       #game {
         width: 100%;
-        height: min(58vw, 560px);
-        min-height: 360px;
+        height: 100%;
         display: block;
       }
 
@@ -104,13 +121,19 @@
         display: block;
       }
 
-      #rom-drop {
+      #rom-drop,
+      .game-loading,
+      #game-loading,
+      #gesture-prompt {
         position: absolute;
         inset: 0;
         display: grid;
         place-items: center;
-        background: rgba(10, 12, 16, 0.94);
         z-index: 5;
+      }
+
+      #rom-drop {
+        background: rgba(13, 13, 26, 0.94);
       }
 
       #rom-drop.dragover {
@@ -119,39 +142,50 @@
       }
 
       .drop-inner {
-        width: min(520px, calc(100% - 32px));
-        padding: 28px;
-        border: 1px dashed #607080;
-        border-radius: 8px;
+        width: min(440px, calc(100% - 32px));
+        padding: 1.5rem;
+        border: 1px dashed var(--border);
+        border-radius: 12px;
         background: var(--panel);
         text-align: center;
       }
 
       .drop-title {
         display: block;
-        font-size: 1.15rem;
+        margin-bottom: 8px;
+        color: var(--accent);
+        font-size: 1.05rem;
         font-weight: 700;
-        margin-bottom: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
       }
 
       .drop-copy {
-        margin: 0 0 18px;
+        margin-bottom: 14px;
         color: var(--muted);
-        line-height: 1.45;
+        font-size: 0.85rem;
       }
 
+      button,
       .file-button {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        min-height: 40px;
-        padding: 0 16px;
-        border: 1px solid #5bdab0;
-        border-radius: 8px;
-        background: #18352e;
-        color: var(--text);
-        font-weight: 700;
+        min-height: 44px;
+        padding: 12px 20px;
+        border: 0;
+        border-radius: 6px;
+        background: var(--button);
+        color: #fff;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
         cursor: pointer;
+      }
+
+      button:hover,
+      .file-button:hover {
+        background: var(--button-hover);
       }
 
       .file-button input {
@@ -162,67 +196,35 @@
         pointer-events: none;
       }
 
-      .rom-kind {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-wrap: wrap;
-        gap: 14px;
-        margin-top: 18px;
-        border: 0;
-        padding: 0;
-        color: var(--muted);
-      }
-
-      .rom-kind legend {
-        width: 100%;
-        margin-bottom: 2px;
-        color: var(--muted);
-        font-size: 0.8rem;
-      }
-
-      .rom-kind label {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        color: var(--text);
-        font-size: 0.92rem;
-      }
-
-      .game-loading,
-      #game-loading,
-      #gesture-prompt {
-        position: absolute;
-        inset: 0;
-        display: grid;
-        place-items: center;
+      #game-loading {
         background: rgba(5, 6, 7, 0.82);
         z-index: 4;
       }
 
-      .game-loading-content,
-      .gesture-prompt-content {
+      #gesture-prompt {
+        background: rgba(5, 6, 7, 0.92);
+        z-index: 6;
+        cursor: pointer;
+      }
+
+      .game-loading-content {
         display: inline-flex;
         align-items: center;
         gap: 12px;
         padding: 14px 18px;
         border: 1px solid var(--border);
-        border-radius: 8px;
+        border-radius: 12px;
         background: var(--panel);
         color: var(--text);
         font-weight: 700;
       }
 
-      .game-loading-spinner,
-      .gesture-prompt-icon {
+      .game-loading-spinner {
         width: 18px;
         height: 18px;
         border-radius: 50%;
         border: 2px solid rgba(255, 255, 255, 0.22);
         border-top-color: var(--accent);
-      }
-
-      .game-loading-spinner {
         animation: spin 0.8s linear infinite;
       }
 
@@ -232,143 +234,295 @@
         }
       }
 
-      .controls-grid {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(340px, 0.9fr);
-        gap: 16px;
-        margin-top: 16px;
+      .gesture-button {
+        padding: 22px 36px;
+        font-size: 1.2rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border: 0;
+        border-radius: 14px;
+        background: var(--button);
+        color: #fff;
+        cursor: pointer;
+        animation: gestureBreath 1.6s ease-in-out infinite;
+        box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.5);
       }
 
-      .panel {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--panel);
-        padding: 16px;
+      .gesture-button:hover {
+        background: var(--button-hover);
       }
 
-      .panel h2 {
-        margin: 0 0 14px;
-        font-size: 1rem;
-        letter-spacing: 0;
+      @keyframes gestureBreath {
+        0%,
+        100% {
+          transform: scale(1);
+          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.4);
+        }
+        50% {
+          transform: scale(1.06);
+          box-shadow: 0 0 0 18px rgba(102, 170, 255, 0);
+        }
       }
 
-      .slider-row {
-        display: grid;
-        grid-template-columns: 150px minmax(120px, 1fr) 68px;
-        align-items: center;
+      .sidebar {
+        display: flex;
+        flex-direction: column;
         gap: 12px;
-        padding: 10px 0;
-        border-top: 1px solid rgba(255, 255, 255, 0.07);
       }
 
-      .slider-row:first-of-type {
-        border-top: 0;
+      .panel-card {
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
       }
 
-      .slider-row label {
-        color: var(--muted);
-        font-size: 0.92rem;
+      .slider-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .slider-heading label {
+        color: var(--text);
+        font-weight: 700;
+        font-size: 0.95rem;
+      }
+
+      .value {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        white-space: nowrap;
       }
 
       input[type='range'] {
         width: 100%;
         accent-color: var(--accent);
+        cursor: pointer;
       }
 
-      .value {
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-      }
-
-      .toggle-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        margin-top: 12px;
-        padding-top: 14px;
-        border-top: 1px solid rgba(255, 255, 255, 0.07);
-      }
-
-      .toggle-row label {
+      .slider-hint {
+        margin-top: 6px;
         color: var(--muted);
+        font-size: 0.75rem;
       }
 
-      .toggle-row input {
-        width: 44px;
-        height: 24px;
-        accent-color: var(--accent-2);
-      }
-
-      .hud {
-        display: grid;
-        gap: 8px;
-      }
-
-      .hud-row {
-        display: grid;
-        grid-template-columns: 80px 1fr;
-        align-items: baseline;
-        gap: 12px;
-        min-height: 34px;
-        padding: 7px 10px;
-        border-radius: 6px;
-        background: var(--panel-2);
-      }
-
-      .hud-label {
-        color: var(--muted);
-        font-size: 0.78rem;
-        font-weight: 800;
+      .mode-toggle {
+        width: 100%;
+        min-height: 56px;
+        font-size: 1.05rem;
+        font-weight: 700;
         letter-spacing: 0.04em;
       }
 
-      .hud-value {
-        font-size: 1.05rem;
+      .mode-toggle.is-off {
+        background: #5a3140;
+      }
+
+      .mode-toggle.is-off:hover {
+        background: #724052;
+      }
+
+      .emu-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .emu-controls button {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        font-weight: 600;
+        min-height: 40px;
+        font-size: 0.95rem;
+      }
+
+      .emu-controls button:hover:not(:disabled) {
+        background: #14142a;
+      }
+
+      .emu-controls button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .emu-controls button.is-paused {
+        background: #2a3550;
+        border-color: var(--accent);
+      }
+
+      .auto-compare {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .auto-compare button {
+        width: 100%;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        font-weight: 600;
+      }
+
+      .auto-compare button:hover {
+        background: #14142a;
+      }
+
+      .auto-compare.is-running button {
+        background: #2a3550;
+        border-color: var(--accent);
+      }
+
+      .progress-track {
+        height: 4px;
+        margin-top: 8px;
+        background: var(--panel-2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 100ms linear;
+      }
+
+      .hud-card {
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+
+      .input-feel {
+        padding: 14px 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #111125;
+        text-align: center;
+        font-size: clamp(1.1rem, 2.4vw, 1.6rem);
         font-weight: 800;
+        letter-spacing: 0.02em;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+
+      .input-feel.is-instant {
+        color: var(--success);
+      }
+
+      .input-feel.is-late {
+        color: var(--danger);
+      }
+
+      .input-feel-sub {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-align: center;
+        line-height: 1.4;
+        min-height: 1.4em;
+      }
+
+      .hud-details {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.5;
         font-variant-numeric: tabular-nums;
       }
 
-      .hud-row.warn .hud-value {
-        color: var(--danger);
+      .play-cta {
+        display: block;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        color: var(--text);
+        text-decoration: none;
+        text-align: center;
+        transition:
+          border-color 0.3s ease,
+          background 0.3s ease,
+          transform 0.3s ease;
       }
 
-      .hud-row.pred-lock .hud-value {
-        color: var(--danger);
+      .play-cta:hover {
+        border-color: var(--accent);
+        background: #1d2138;
       }
 
-      .hud-note {
-        margin-top: 10px;
-        min-height: 20px;
-        color: var(--accent-2);
+      .play-cta.is-convinced {
+        border-color: var(--accent);
+        background: linear-gradient(135deg, #2a3550, var(--panel));
+        animation: convincePulse 2.4s ease-in-out infinite;
+      }
+
+      @keyframes convincePulse {
+        0%,
+        100% {
+          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.45);
+        }
+        50% {
+          box-shadow: 0 0 0 14px rgba(102, 170, 255, 0);
+        }
+      }
+
+      .play-cta-headline {
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+      }
+
+      .play-cta-sub {
+        color: var(--muted);
+        font-size: 0.78rem;
+        margin-bottom: 10px;
+      }
+
+      .play-cta-button {
+        display: inline-block;
+        padding: 10px 18px;
+        border-radius: 6px;
+        background: var(--button);
+        color: #fff;
+        font-weight: 700;
+        font-size: 0.92rem;
+      }
+
+      .play-cta:hover .play-cta-button {
+        background: var(--button-hover);
+      }
+
+      .explainer {
+        max-width: 920px;
+        margin-top: 16px;
+        color: var(--muted);
         font-size: 0.9rem;
+        line-height: 1.45;
       }
 
       .hidden {
         display: none !important;
       }
 
-      @media (max-width: 820px) {
-        header {
-          display: block;
-        }
-
-        .rom-status {
-          margin-top: 10px;
-          text-align: left;
-        }
-
-        .controls-grid {
+      @media (max-width: 920px) {
+        .stage-row {
           grid-template-columns: 1fr;
         }
 
-        .slider-row {
-          grid-template-columns: 1fr;
-          gap: 6px;
-        }
-
-        .value {
-          text-align: left;
+        .stage {
+          aspect-ratio: 4 / 3;
+          max-height: 60vh;
         }
       }
     </style>
@@ -382,7 +536,6 @@
     <script src="/static/shared.js"></script>
     <script src="/static/kn-audio.js"></script>
     <script src="/static/kn-diagnostics.js"></script>
-    <script src="/static/kn-desync-detector.js"></script>
     <script src="/static/netplay-rollback.js"></script>
     <script src="/static/fake-peer.js"></script>
     <script src="/static/demo.js"></script>
@@ -390,107 +543,83 @@
   <body>
     <main class="shell">
       <header>
-        <div>
-          <h1>1P rollback demo</h1>
-          <p class="lede">
-            Drop an SSB64 or Smash Remix ROM. A synthetic second peer feeds slot 2 while live controls change latency,
-            jitter, loss, and prediction behavior.
-          </p>
-        </div>
-        <div id="demo-status" class="rom-status">Waiting for ROM</div>
+        <h1>Rollback demo</h1>
+        <p class="lede">Drop a ROM. Crank the lag. Toggle rollback off. Feel the difference.</p>
+        <p id="demo-status" class="status-line">Waiting for ROM</p>
       </header>
 
-      <section class="stage" aria-label="Emulator">
-        <div id="game"></div>
-        <div id="rom-drop">
-          <div class="drop-inner">
-            <span class="drop-title">Drop ROM here</span>
-            <p class="drop-copy">Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.</p>
-            <label class="file-button">
-              Choose ROM
-              <input id="rom-file" type="file" accept=".z64,.n64,.v64" />
-            </label>
-            <fieldset class="rom-kind">
-              <legend>Game label</legend>
-              <label><input type="radio" name="rom-kind" value="ssb64" checked /> SSB64</label>
-              <label><input type="radio" name="rom-kind" value="remix" /> Smash Remix</label>
-            </fieldset>
+      <div class="stage-row">
+        <section class="stage" aria-label="Emulator">
+          <div id="game"></div>
+          <div id="rom-drop">
+            <div class="drop-inner">
+              <span class="drop-title">Drop ROM here</span>
+              <p class="drop-copy">Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.</p>
+              <label class="file-button">
+                Choose ROM
+                <input id="rom-file" type="file" accept=".z64,.n64,.v64" />
+              </label>
+            </div>
           </div>
-        </div>
-        <div id="game-loading" class="hidden">
-          <div class="game-loading-content">
-            <div class="game-loading-spinner"></div>
-            <span id="game-loading-text">Loading...</span>
+          <div id="game-loading" class="hidden">
+            <div class="game-loading-content">
+              <div class="game-loading-spinner"></div>
+              <span id="game-loading-text">Loading...</span>
+            </div>
           </div>
-        </div>
-        <div id="gesture-prompt" class="hidden">
-          <div class="gesture-prompt-content">
-            <div class="gesture-prompt-icon"></div>
-            <span class="gesture-prompt-text">Tap to start</span>
+          <div id="gesture-prompt" class="hidden">
+            <button id="gesture-button" class="gesture-button" type="button">▶ Tap to start</button>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="controls-grid" aria-label="Rollback controls">
-        <div class="panel">
-          <h2>Network</h2>
-          <div class="slider-row">
-            <label for="latency">Latency</label>
-            <input id="latency" type="range" min="0" max="300" step="5" value="80" />
-            <span id="latency-value" class="value">80 ms</span>
+        <aside class="sidebar" aria-label="Demo controls">
+          <div class="panel-card">
+            <div class="slider-heading">
+              <label for="lag">Network lag</label>
+              <span id="lag-value" class="value">0 ms</span>
+            </div>
+            <input id="lag" type="range" min="0" max="300" step="5" value="120" />
+            <p class="slider-hint">Higher lag = more predictions/sec (the engine running ahead of slot 1's input)</p>
           </div>
-          <div class="slider-row">
-            <label for="jitter">Jitter</label>
-            <input id="jitter" type="range" min="0" max="100" step="1" value="8" />
-            <span id="jitter-value" class="value">8 ms</span>
-          </div>
-          <div class="slider-row">
-            <label for="loss">Packet loss</label>
-            <input id="loss" type="range" min="0" max="30" step="1" value="2" />
-            <span id="loss-value" class="value">2%</span>
-          </div>
-          <div class="slider-row">
-            <label for="mispredict">Mispredict rate</label>
-            <input id="mispredict" type="range" min="0" max="50" step="1" value="8" />
-            <span id="mispredict-value" class="value">8%</span>
-          </div>
-          <div class="toggle-row">
-            <label for="force-lockstep">Force lockstep</label>
-            <input id="force-lockstep" type="checkbox" />
-          </div>
-        </div>
 
-        <div class="panel">
-          <h2>HUD</h2>
-          <div class="hud">
-            <div class="hud-row" id="hud-ping-row">
-              <span class="hud-label">PING</span>
-              <span id="hud-ping" class="hud-value">-- ms</span>
-            </div>
-            <div class="hud-row" id="hud-roll-row">
-              <span class="hud-label">ROLL</span>
-              <span id="hud-roll" class="hud-value">--/s avg --</span>
-            </div>
-            <div class="hud-row" id="hud-stall-row">
-              <span class="hud-label">STALL</span>
-              <span id="hud-stall" class="hud-value">0 ms</span>
-            </div>
-            <div class="hud-row" id="hud-pred-row">
-              <span class="hud-label">PRED</span>
-              <span id="hud-pred" class="hud-value">PREDICT</span>
-            </div>
-            <div class="hud-row" id="hud-frame-row">
-              <span class="hud-label">FRAME</span>
-              <span id="hud-frame" class="hud-value">0</span>
-            </div>
-            <div class="hud-row" id="hud-delay-row">
-              <span class="hud-label">DELAY</span>
-              <span id="hud-delay" class="hud-value">--</span>
+          <button id="rollback-toggle" class="mode-toggle" type="button" aria-pressed="true">Rollback: ON</button>
+
+          <div class="emu-controls">
+            <button id="emu-pause" type="button" disabled>⏸ Pause</button>
+            <button id="emu-stop" type="button" disabled>⏹ Stop</button>
+          </div>
+
+          <div id="auto-compare" class="auto-compare">
+            <button id="auto-compare-btn" type="button">▶ Auto-compare every 6s</button>
+            <div class="progress-track"><div id="auto-progress" class="progress-fill"></div></div>
+          </div>
+
+          <div class="hud-card">
+            <h2>Result</h2>
+            <div id="hud-feel" class="input-feel">CRANK THE LAG →</div>
+            <div id="hud-feel-sub" class="input-feel-sub">No lag — both modes feel the same.</div>
+            <div id="hud-details" class="hud-details">
+              Mode: ROLLBACK · Network: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
             </div>
           </div>
-          <div id="hud-note" class="hud-note">Waiting for ROM.</div>
-        </div>
-      </section>
+
+          <a id="play-cta" class="play-cta" href="/">
+            <div id="play-cta-headline" class="play-cta-headline">Play with friends</div>
+            <div id="play-cta-sub" class="play-cta-sub">No installs. Free. Share a link.</div>
+            <span id="play-cta-button" class="play-cta-button">Open the lobby →</span>
+          </a>
+        </aside>
+      </div>
+
+      <p class="explainer">
+        Rollback netplay predicts the opponent's inputs and runs your game locally without waiting. When predictions
+        miss, the engine rewinds and replays. The round-trip is still on the wire — rollback hides it from you. Lockstep
+        waits the full round-trip every frame, so all latency is felt directly. The Predictions counter ticks every
+        frame the engine ran without waiting for slot 1's input — that IS the rollback engine doing its job. In
+        production, real network jitter occasionally makes those predictions wrong, which fires the rollbacks; this
+        synthetic-peer demo can't reproduce jitter authentically without disrupting your local input, so it shows the
+        prediction load directly instead.
+      </p>
     </main>
   </body>
 </html>

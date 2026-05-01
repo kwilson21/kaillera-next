@@ -476,6 +476,7 @@
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
   let _predictionsPaused = false; // demo-only: pause C prediction generation without tearing down rollback state
+  let _demoMode = false; // demo-only: disable C pacing-throttle so the engine runs full speed, predicts, and rolls back visibly under simulated lag (instead of pacing to match the slow peer, which feels identical to lockstep)
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
@@ -1777,7 +1778,7 @@
   //   gated on _isSmashRemix elsewhere). Defined so future SSB64-base
   //   callers use the right address and don't accidentally pull the
   //   Remix one.
-  const KN_SSB64_GAME_STATUS_WORD_RDRAM = 0x000a4f08; // eslint-disable-line no-unused-vars
+  const KN_SSB64_GAME_STATUS_WORD_RDRAM = 0x000a4f08;
   let _rngPatched = false;
   let _rngSeed = 0;
   let _rdramBase = 0; // WASM heap byte offset of RDRAM
@@ -1967,6 +1968,7 @@
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
+  let _externalTickPaused = false; // demo/UI pause: gates the tick callback without tearing down state
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
   const TICK_PUMP_INTERVAL_MS = 6;
@@ -7883,6 +7885,7 @@
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
+      if (_externalTickPaused) return;
       const now = performance.now();
       if (now + 0.25 < _tickNextAt) return;
       tick();
@@ -9098,7 +9101,10 @@
       // C currently throttles at frame_adv >= delay + 2. Bias the value so
       // the actual cap is frame_adv >= delay: once the fast peer has consumed
       // the whole input buffer, wait instead of creating a guaranteed rollback.
-      const _frameAdvForC = _rbBootConverged ? _frameAdvRaw + 2 : -1;
+      // Demo mode forces -1 (no throttle) so the engine runs full speed and
+      // predicts whenever inputs are missing — only the demo's synthetic peer
+      // setup tolerates the unbounded prediction, real matches still throttle.
+      const _frameAdvForC = _demoMode ? -1 : _rbBootConverged ? _frameAdvRaw + 2 : -1;
       let catchingUp = tickMod._kn_pre_tick(
         localInput.buttons,
         localInput.lx,
@@ -11876,6 +11882,35 @@
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
+    // Demo/UI pause: gates the per-frame tick callback without unwinding any
+    // engine state. While paused the setInterval keeps firing but tick() is
+    // skipped, so the emulator does not advance. Resume picks up cleanly.
+    pauseTick: () => {
+      if (!_externalTickPaused) {
+        _externalTickPaused = true;
+        // Reset the deadline so we don't try to "catch up" on the lost time.
+        _tickNextAt = performance.now() + TICK_TARGET_MS;
+        _syncLog('external tick paused');
+      }
+      return _externalTickPaused;
+    },
+    resumeTick: () => {
+      if (_externalTickPaused) {
+        _externalTickPaused = false;
+        _tickNextAt = performance.now() + TICK_TARGET_MS;
+        _syncLog('external tick resumed');
+      }
+      return _externalTickPaused;
+    },
+    isTickPaused: () => _externalTickPaused,
+    setDemoMode: (on) => {
+      const next = !!on;
+      if (_demoMode !== next)
+        _syncLog(`demo mode ${next ? 'enabled' : 'disabled'} (pacing throttle ${next ? 'OFF' : 'ON'})`);
+      _demoMode = next;
+      return _demoMode;
+    },
+    isDemoMode: () => _demoMode,
     getHudCounters: () => {
       const now = performance.now();
       _pruneHudEvents(now);
@@ -12020,6 +12055,34 @@
       };
     },
     isCRollback: () => _useCRollback,
+    isInGameplay: () => _inGameplay,
+    // Raw scene + game_status from RDRAM, for both SSB64 and Smash Remix.
+    // The existing _readSceneCurr / _readGameStatus helpers early-return for
+    // non-Remix; this bypasses those gates so the demo can show the true
+    // values for any game and we can verify SSB64's scene enum empirically.
+    getSceneStatus: () => {
+      const out = { scene: -1, status: -1, ready: false, remix: false };
+      try {
+        out.remix = !!_isSmashRemix?.();
+        if (!_rdramBase) return out;
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        if (!mod?.HEAPU8 || !mod?.HEAPU32) return out;
+        out.ready = true;
+        out.scene = mod.HEAPU8[_rdramBase + (KN_SCENE_CURR_RDRAM ^ 3)] & 0xff;
+        const statusAddr = out.remix ? KN_REMIX_GAME_STATUS_WORD_RDRAM : KN_SSB64_GAME_STATUS_WORD_RDRAM;
+        const word = mod.HEAPU32[(_rdramBase + statusAddr) >> 2];
+        out.status = (word >> 16) & 0xff;
+      } catch (_) {}
+      return out;
+    },
+    // Precise in-match check. Currently uses the well-known Smash Remix
+    // semantics (scene 22 + status 1). For SSB64 this is unverified — the
+    // demo's HUD now shows raw scene/status so we can confirm the actual
+    // in-match values empirically.
+    isInMatch: () => {
+      const s = NetplayRollbackApi.getSceneStatus();
+      return s.ready && s.scene === 22 && s.status === 1;
+    },
   };
 
   // The product-facing engine name is NetplayRollback. NetplayLockstep is a
