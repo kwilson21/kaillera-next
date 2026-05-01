@@ -497,6 +497,8 @@
   let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
   let _rbVisualFreezeSerial = 0;
+  let _rbVisualFlashStyleInjected = false;
+  let _rbVisualFlashFlip = false;
   let _rbRdpSkipActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
@@ -550,6 +552,14 @@
     try {
       if (_urlParams.get('replayVisualFreeze') === '0') return false;
       if (localStorage.getItem('kn-replay-visual-freeze') === '0') return false;
+    } catch (_) {}
+    return true;
+  })();
+  const RB_VISUAL_MASK_FLASH = (() => {
+    try {
+      const raw = _urlParams.get('replayMaskFlash') ?? localStorage.getItem('kn-replay-mask-flash');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
     } catch (_) {}
     return true;
   })();
@@ -672,6 +682,27 @@
     }
   };
 
+  const _ensureRollbackVisualFlashStyle = () => {
+    if (!RB_VISUAL_MASK_FLASH || _rbVisualFlashStyleInjected) return;
+    try {
+      const style = document.createElement('style');
+      style.id = 'kn-rollback-flash-style';
+      style.textContent =
+        '@keyframes kn-rollback-flash-a {' +
+        '0% { filter: blur(0) saturate(1); }' +
+        '35% { filter: blur(2px) saturate(1.15); }' +
+        '100% { filter: blur(0) saturate(1); }' +
+        '}' +
+        '@keyframes kn-rollback-flash-b {' +
+        '0% { filter: blur(0) saturate(1); }' +
+        '35% { filter: blur(2px) saturate(1.15); }' +
+        '100% { filter: blur(0) saturate(1); }' +
+        '}';
+      (document.head || document.documentElement).appendChild(style);
+      _rbVisualFlashStyleInjected = true;
+    } catch (_) {}
+  };
+
   const _captureRollbackVisualSnapshot = () => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return false;
     const source = _findRollbackVisualCanvas();
@@ -732,7 +763,7 @@
           'background:transparent',
           'image-rendering:pixelated',
           'image-rendering:crisp-edges',
-          'will-change:opacity',
+          'will-change:opacity,filter',
           'contain:strict',
         ].join(';');
         _rbVisualFreezeOverlay = overlay;
@@ -761,7 +792,14 @@
       }
       overlay.style.transition = 'none';
       overlay.style.opacity = '1';
+      overlay.style.animation = 'none';
       overlay.style.display = 'block';
+      if (RB_VISUAL_MASK_FLASH) {
+        _ensureRollbackVisualFlashStyle();
+        // Alternate names so repeat masks restart the animation without forcing layout.
+        _rbVisualFlashFlip = !_rbVisualFlashFlip;
+        overlay.style.animation = `${_rbVisualFlashFlip ? 'kn-rollback-flash-a' : 'kn-rollback-flash-b'} 32ms ease-in-out`;
+      }
       overlay.dataset.depth = String(depth);
       const serial = ++_rbVisualFreezeSerial;
       overlay.dataset.serial = String(serial);
@@ -801,16 +839,19 @@
     if (overlay.style.display === 'none' || RB_VISUAL_FADE_MS <= 0) {
       overlay.style.display = 'none';
       overlay.style.transition = 'none';
+      overlay.style.animation = 'none';
       overlay.style.opacity = '1';
       _rbVisualFreezeHideTimer = 0;
       return;
     }
+    overlay.style.animation = 'none';
     overlay.style.transition = `opacity ${RB_VISUAL_FADE_MS}ms ease-out`;
     overlay.style.opacity = '0';
     _rbVisualFreezeHideTimer = setTimeout(() => {
       if (overlay !== _rbVisualFreezeOverlay) return;
       overlay.style.display = 'none';
       overlay.style.transition = 'none';
+      overlay.style.animation = 'none';
       overlay.style.opacity = '1';
       _rbVisualFreezeHideTimer = 0;
     }, RB_VISUAL_FADE_MS + 20);
