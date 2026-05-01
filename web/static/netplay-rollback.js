@@ -503,11 +503,11 @@
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
       const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
-      const parsed = raw === null ? 1 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 1;
+      const parsed = raw === null ? 4 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 4;
       return Math.max(1, Math.min(8, parsed));
     } catch (_) {
-      return 1;
+      return 4;
     }
   })();
   const RB_REPLAY_BURST_BUDGET_MS = (() => {
@@ -539,11 +539,11 @@
   const RB_VISUAL_FADE_MS = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeMs') ?? localStorage.getItem('kn-replay-visual-fade-ms');
-      const parsed = raw === null ? 80 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 80;
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
       return Math.max(0, Math.min(160, parsed));
     } catch (_) {
-      return 80;
+      return 0;
     }
   })();
   const _rbVisualFreezeEnabled = (() => {
