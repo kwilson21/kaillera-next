@@ -3944,13 +3944,10 @@
             // rb-init-frame handler below covers the symmetric "fire when
             // delay was already known" case.
             if (window._rbPendingInit && window._rbDoInit && window._rbHostInitFrame !== undefined) {
-              window._rbPendingInit = false;
-              window._rbPendingInitAt = 0;
-              DELAY_FRAMES = hostDelay;
               _syncLog(
                 `rb-delay: deferred init triggered with host delay=${hostDelay} initFrame=${window._rbHostInitFrame}`,
               );
-              window._rbDoInit(hostDelay, window._rbHostInitFrame);
+              _requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');
             } else if (hostDelay !== DELAY_FRAMES) {
               // Init already ran (e.g. host, or race). C engine can't be
               // updated mid-flight; only the JS variable is changed, which
@@ -3982,13 +3979,10 @@
               window._rbHostDelay !== undefined &&
               window._rbHostDelay > 0
             ) {
-              window._rbPendingInit = false;
-              window._rbPendingInitAt = 0;
-              DELAY_FRAMES = window._rbHostDelay;
               _syncLog(
                 `rb-init-frame: deferred init triggered with host delay=${window._rbHostDelay} initFrame=${hostInitFrame}`,
               );
-              window._rbDoInit(window._rbHostDelay, hostInitFrame);
+              _requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');
             }
           }
           return;
@@ -6965,6 +6959,148 @@
   let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
   const RAPID_FABRICATION_THRESHOLD = 2; // after N consecutive fabrications, skip stall wait
   let _inputLateLogTime = {}; // slot -> last time INPUT-LATE was logged (rate-limiting)
+  let _pendingMatchInputResetReason = '';
+  let _rbPendingInputLastLogAt = 0;
+  let _rbPendingInitCatchup = null;
+
+  const _resetMatchInputState = (reason) => {
+    const localBuffered = Object.keys(_localInputs || {}).length;
+    const remoteSlots = Object.keys(_remoteInputs || {}).sort((a, b) => Number(a) - Number(b));
+    let remoteBuffered = 0;
+    for (const slot of remoteSlots) remoteBuffered += Object.keys(_remoteInputs[slot] || {}).length;
+
+    _localInputs = {};
+    _remoteInputs = {};
+    _peerInputStarted = {};
+    _lastRemoteFramePerSlot = {};
+    _peerLastAdvanceTime = {};
+    _peerPhantom = {};
+    _consecutiveFabrications = {};
+    _inputLateLogTime = {};
+    for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];
+    _rbLocalHistory.length = 0;
+    _clearPendingCInputs(`${reason}:match-reset`);
+
+    _remoteReceived = 0;
+    _remoteMissed = 0;
+    _remoteApplied = 0;
+    _lastRemoteFrame = -1;
+    _stallStart = 0;
+    _resendSent = false;
+    _bootStallFrame = -1;
+    _bootStallStartTime = 0;
+    _bootStallRecoveryFired = false;
+    _bootStallRecoveryResetTime = 0;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
+    _phaseLockStallKey = '';
+    _phaseLockStallStartTime = 0;
+    _phaseLockLastWaitLogAt = 0;
+    _rbInputStallKey = '';
+    _rbInputStallStartTime = 0;
+    if (_runSubstate === RUN_RB_STALL || _runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
+    _rollbackStallStart = 0;
+    _lateJoinInputBootstrapUntilFrame = -1;
+    _lateJoinSeededInputFrames = {};
+
+    for (const peer of Object.values(_peers || {})) {
+      peer.lastAckFromPeer = -1;
+      peer.lastFrameFromPeer = -1;
+      peer.lastAckAdvanceTime = 0;
+    }
+    clearPeerStallTimers();
+    _syncLog(
+      `MATCH-INPUT-RESET reason=${reason} local=${localBuffered} remote=${remoteBuffered} ` +
+        `slots=[${remoteSlots.join(',') || 'none'}]`,
+    );
+  };
+
+  const _scheduleMatchInputReset = (reason) => {
+    if (!_pendingMatchInputResetReason) _pendingMatchInputResetReason = reason;
+  };
+
+  const _flushPendingMatchInputReset = (context) => {
+    if (!_pendingMatchInputResetReason) return;
+    const reason = `${_pendingMatchInputResetReason}:${context}`;
+    _pendingMatchInputResetReason = '';
+    _resetMatchInputState(reason);
+  };
+
+  const _sendPendingRollbackInitInput = () => {
+    const activePeers = getActivePeers();
+    if (!activePeers.length) return;
+
+    const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
+    const suppressEjsPausedInput = !!window.EJS_emulator?.paused;
+    const suppressResumeGuardInput = performance.now() < _resumeInputGuardUntil || _lifecycleResyncPending;
+    const localInput = hadLocalInputForFrame
+      ? _localInputs[_frameNum]
+      : _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput());
+    if (!hadLocalInputForFrame) {
+      _localInputs[_frameNum] = localInput;
+      _auditRecordLocal(_frameNum, localInput);
+      _rbLocalHistory.push({
+        frame: _frameNum,
+        buttons: localInput.buttons,
+        lx: localInput.lx,
+        ly: localInput.ly,
+        cx: localInput.cx,
+        cy: localInput.cy,
+      });
+    }
+
+    let sent = 0;
+    let sendFails = 0;
+    const now = performance.now();
+    for (const peer of activePeers) {
+      try {
+        const ackFrame = peer.lastFrameFromPeer ?? -1;
+        peer.dc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, null).buffer);
+        _rbTransportPacketsSent++;
+        sent++;
+        if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = now;
+      } catch (_) {
+        sendFails++;
+      }
+    }
+    if (now - _rbPendingInputLastLogAt >= 1000) {
+      _rbPendingInputLastLogAt = now;
+      _syncLog(
+        `RB-PENDING-INIT input f=${_frameNum} sent=${sent} sendFails=${sendFails} ` +
+          `local=${_formatInputBrief(localInput)}`,
+      );
+    }
+  };
+
+  const _requestRollbackInit = (delay, initFrame, source) => {
+    if (!window._rbDoInit) return false;
+    const effectiveDelay = clampRollbackDelay(delay, ROLLBACK_MIN_DELAY_FRAMES);
+    const targetFrame = Number.isFinite(initFrame) && initFrame >= 0 ? initFrame : _frameNum;
+    DELAY_FRAMES = effectiveDelay;
+
+    if (_playerSlot !== 0 && targetFrame > _frameNum) {
+      window._rbPendingInit = true;
+      if (!window._rbPendingInitAt) window._rbPendingInitAt = performance.now();
+      _rbPendingInitCatchup = { delay: effectiveDelay, initFrame: targetFrame, source };
+      _syncLog(
+        `RB-INIT-CATCHUP armed source=${source} localF=${_frameNum} ` + `hostF=${targetFrame} delay=${effectiveDelay}`,
+      );
+      return false;
+    }
+
+    window._rbPendingInit = false;
+    window._rbPendingInitAt = 0;
+    _rbPendingInitCatchup = null;
+    const alignedFrame = _playerSlot !== 0 && targetFrame < _frameNum ? _frameNum : targetFrame;
+    if (alignedFrame !== targetFrame) {
+      _syncLog(
+        `RB-INIT-CATCHUP overshot source=${source} localF=${_frameNum} ` +
+          `hostF=${targetFrame}; init uses local frame`,
+      );
+    }
+    window._rbDoInit(effectiveDelay, alignedFrame);
+    return true;
+  };
 
   const startLockstep = () => {
     if (_phase === PHASE_RUNNING) return;
@@ -7017,6 +7153,7 @@
       _localInputs = {};
       _remoteInputs = {};
       _peerInputStarted = {};
+      _pendingMatchInputResetReason = '';
       _activeRoster = null;
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
@@ -7065,6 +7202,7 @@
     _phaseLockLastWaitLogAt = 0;
     _rbInputStallKey = '';
     _rbInputStallStartTime = 0;
+    _rbPendingInputLastLogAt = 0;
     window._netplayFrameLog = [];
 
     // Always frozen time — audio plays via bypass, not OpenAL
@@ -7254,8 +7392,7 @@
           window._rbHostDelay > 0 &&
           window._rbHostInitFrame !== undefined
         ) {
-          DELAY_FRAMES = window._rbHostDelay;
-          doRollbackInit(window._rbHostDelay, window._rbHostInitFrame);
+          _requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');
         } else {
           // I1 (MF2): record the wall-clock start of the pending
           // state so tick() can fire RB-INIT-TIMEOUT if the host's
@@ -7870,6 +8007,7 @@
     window._rbHostInitFrame = undefined;
     window._rbPendingInit = false;
     window._rbPendingInitAt = 0;
+    _rbPendingInitCatchup = null;
 
     // Disable FPU trace
     if (_fpuTraceEnabled) {
@@ -8002,12 +8140,15 @@
     _pacingLastLogAt = 0;
     _pacingSuppressedLogs = 0;
     _lastPacingStateLogAt = 0;
+    _rbPendingInputLastLogAt = 0;
+    _rbPendingInitCatchup = null;
     // Remove diagnostic hooks (delegated to kn-diagnostics.js)
     _diag?.cleanup();
   };
 
   const tick = () => {
     if (_phase !== PHASE_RUNNING) return;
+    if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');
     _checkStateTransition();
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
@@ -8052,30 +8193,66 @@
     // delay differs from what the host would have broadcast.
     // See docs/netplay-invariants.md §I1 and spec §MF2.
     if (window._rbPendingInit) {
-      const _rbPendingStart = window._rbPendingInitAt || 0;
-      if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
-        const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
-        const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
-        const _haveInitFrame = window._rbHostInitFrame !== undefined;
-        const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
-        _syncLog(
-          `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
-            `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
-        );
-        window._rbPendingInit = false;
-        window._rbPendingInitAt = 0;
-        if (window._rbDoInit) {
-          try {
-            // No initFrameOverride: fall back to local _frameNum. Hash
-            // mismatch + resync below converges both peers if local frames
-            // diverged from host's intended init frame.
-            window._rbDoInit(_rbFallbackDelay);
-          } catch (e) {
-            _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
+      // Keep the reliable input stream alive while the guest is frozen
+      // waiting for the host's authoritative rb-init-frame. Otherwise the
+      // host can stall in pre-gameplay lockstep waiting for this guest's
+      // next frame, never reach its own deferred init, and force the guest
+      // into a local RB-INIT-TIMEOUT with a different init frame.
+      _sendPendingRollbackInitInput();
+      if (_rbPendingInitCatchup) {
+        const { delay, initFrame, source } = _rbPendingInitCatchup;
+        if (_frameNum >= initFrame) {
+          const alignedFrame = _frameNum > initFrame ? _frameNum : initFrame;
+          _syncLog(
+            `RB-INIT-CATCHUP complete source=${source} localF=${_frameNum} ` +
+              `hostF=${initFrame} initF=${alignedFrame} delay=${delay}`,
+          );
+          window._rbPendingInit = false;
+          window._rbPendingInitAt = 0;
+          _rbPendingInitCatchup = null;
+          if (window._rbDoInit) {
+            try {
+              window._rbDoInit(delay, alignedFrame);
+            } catch (e) {
+              _syncLog(`RB-INIT-CATCHUP init failed: ${e}`);
+            }
           }
+        } else {
+          if (_frameNum % 30 === 0 && window._knLastRbInitCatchupLogFrame !== _frameNum) {
+            window._knLastRbInitCatchupLogFrame = _frameNum;
+            _syncLog(
+              `RB-INIT-CATCHUP advance localF=${_frameNum} hostF=${initFrame} ` + `remaining=${initFrame - _frameNum}`,
+            );
+          }
+          // Fall through to the JS lockstep path so the emulator state
+          // advances to the host's init frame before C rollback is armed.
         }
       } else {
-        return;
+        const _rbPendingStart = window._rbPendingInitAt || 0;
+        if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
+          const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+          const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
+          const _haveInitFrame = window._rbHostInitFrame !== undefined;
+          const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
+          _syncLog(
+            `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
+              `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
+          );
+          window._rbPendingInit = false;
+          window._rbPendingInitAt = 0;
+          if (window._rbDoInit) {
+            try {
+              // No initFrameOverride: fall back to local _frameNum. Hash
+              // mismatch + resync below converges both peers if local frames
+              // diverged from host's intended init frame.
+              window._rbDoInit(_rbFallbackDelay);
+            } catch (e) {
+              _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
+            }
+          }
+        } else {
+          return;
+        }
       }
     }
 
@@ -8618,6 +8795,7 @@
           _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
           _inGameplayLoggedAt = _frameNum;
         }
+        _scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);
         // Tear down C rollback when leaving gameplay so menu state isn't
         // serialized — Smash Remix specifically defers init to avoid this
         // (see line ~7099). Without teardown, the engine keeps running
@@ -8953,12 +9131,27 @@
       // the actual cap is frame_adv >= delay: once the fast peer has consumed
       // the whole input buffer, wait instead of creating a guaranteed rollback.
       const _frameAdvForC = _rbBootConverged ? _frameAdvRaw + 2 : -1;
+      // _kn_pre_tick stores the supplied local input under the C engine's
+      // rb.frame. Host-authoritative deferred init can set rb.frame behind
+      // the JS tick frame for one tick, so use the input captured for the C
+      // frame when they differ.
+      const cFrameBeforePreTick = tickMod._kn_get_frame?.() ?? _frameNum;
+      const cFrameLocalInput = _localInputs[cFrameBeforePreTick];
+      const preTickLocalInput = cFrameLocalInput || localInput;
+      if (cFrameBeforePreTick !== _frameNum && window._knLastCInputAlignFrame !== _frameNum) {
+        window._knLastCInputAlignFrame = _frameNum;
+        _syncLog(
+          `C-INPUT-ALIGN jsF=${_frameNum} cF=${cFrameBeforePreTick} ` +
+            `using=${cFrameLocalInput ? 'c-frame' : 'js-current'} ` +
+            `input=${_formatInputBrief(preTickLocalInput)}`,
+        );
+      }
       let catchingUp = tickMod._kn_pre_tick(
-        localInput.buttons,
-        localInput.lx,
-        localInput.ly,
-        localInput.cx,
-        localInput.cy,
+        preTickLocalInput.buttons,
+        preTickLocalInput.lx,
+        preTickLocalInput.ly,
+        preTickLocalInput.cx,
+        preTickLocalInput.cy,
         _frameAdvForC,
       );
       // ── R1: runner continuity across rollback restore ─────────────────
@@ -9181,6 +9374,7 @@
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
+        _flushPendingMatchInputReset('post-c-replay-tick');
         // Overlay
         if (_frameNum % 15 === 0) {
           const dbg = document.getElementById('np-debug');
@@ -9266,6 +9460,7 @@
       _frameNum = newFrame;
       KNState.frameNum = _frameNum;
       if (window.KNDesync) KNDesync.tick(_frameNum);
+      _flushPendingMatchInputReset('post-c-tick');
       const _tTotal = performance.now();
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
@@ -11445,6 +11640,7 @@
     // Reset lockstep state
     _remoteInputs = {};
     _peerInputStarted = {};
+    _pendingMatchInputResetReason = '';
     _activeRoster = null;
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
