@@ -37,9 +37,10 @@
   const _meta = document.querySelector('meta[name="kn-asset-version"]');
   const pageLoadedVersion = _meta?.getAttribute('content') || '';
   if (!pageLoadedVersion) {
-    // Nothing to compare against — older HTML or injection failed.
-    // Silently do nothing so we don't break those pages.
-    console.warn(`${LOG_PREFIX} kn-asset-version meta not set; guard disabled`);
+    // Nothing to compare against — older HTML, static-served pages, or
+    // injection failed. The guard is a deploy-staleness detector, not a
+    // correctness check; silently no-op rather than spam console.warn on
+    // every page load where the meta isn't present.
     return;
   }
 

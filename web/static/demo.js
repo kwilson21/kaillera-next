@@ -756,11 +756,6 @@
     const inMatch = !!window.NetplayRollback?.isInMatch?.();
     if (inMatch !== _wasInMatch) {
       _wasInMatch = inMatch;
-      // eslint-disable-next-line no-console
-      console.log(
-        `%cisInMatch transition: ${inMatch}`,
-        `color:${inMatch ? '#7ddc8a' : '#f5c84b'};font-weight:bold;font-size:13px`,
-      );
       if (inMatch) {
         // Stop recording (in record mode) or end autopilot (in replay mode)
         // exactly when the player crosses into the match. Real input takes
