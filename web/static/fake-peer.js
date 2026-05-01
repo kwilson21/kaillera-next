@@ -4,7 +4,13 @@
   const STATS_WINDOW_MS = 5000;
   const LAST_SEC_MS = 1000;
   const REDUNDANT_FRAMES = 5;
-  const BUTTON_BITS = [0, 1, 3, 4, 5, 6, 7, 10, 11, 12];
+  // RetroArch joypad bits we may pick when generating P2's in-match random
+  // inputs. Excludes:
+  //   bit 3 (START) — pauses the game / opens the pause menu, derails the demo
+  //   bit 10 (L)    — Smash Remix has L-bound special actions (taunt panel /
+  //                   menu) that disrupt match pacing
+  // See reference_n64_button_map for full mapping.
+  const BUTTON_BITS = [0, 1, 4, 5, 6, 7, 11, 12];
   const _nativeNow = window.APISandbox?.nativePerfNow || performance.now.bind(performance);
   const _nativeRAF = window.APISandbox?.nativeRAF || window.requestAnimationFrame.bind(window);
   const _nativeCancelRAF = window.APISandbox?.nativeCancelRAF || window.cancelAnimationFrame.bind(window);
@@ -112,11 +118,16 @@
       // In an actual match, P2 plays held random inputs — drives authentic
       // mispredictions because the engine predicts "same as last frame" and
       // gets surprised every time P2 picks a new input. Outside a match
-      // (title/CSS/menus) P2 stays inert so the user's autopilot isn't
-      // fighting an invisible opponent jamming buttons on menu screens.
+      // (title/CSS/menus) the demo provides a baked P2 menu-autopilot via
+      // _getMirroredInput so the synthetic peer makes its CSS character
+      // selection. Falls through to zero / mispredict-prob when the
+      // recording has no entry for this frame.
       const inMatch = !!window.NetplayRollback?.isInMatch?.();
       if (inMatch) {
         input = _matchInputForFrame(frame);
+      } else if (_getMirroredInput) {
+        const mirrored = _getMirroredInput(frame);
+        input = mirrored || _zeroInput();
       } else {
         const mispredict = Math.random() < _network.mispredictProb;
         input = mispredict ? _randomInput() : _zeroInput();
