@@ -109,7 +109,16 @@
   // The replay path suppresses real keyboard/touch during autopilot so the
   // user's first sensation of input is on match start.
   const _urlParams = new URLSearchParams(window.location.search || '');
-  let _recordMode = _urlParams.get('record') === '1';
+  // Record modes:
+  //   ?record=1  → user controls P1, capture P1's inputs to bake as
+  //                MENU_AUTOPILOT_INPUTS (the existing autopilot script).
+  //   ?record=p2 → P1 autopilot runs as normal, user's input is captured
+  //                as P2's input AND routed to fake-peer so the user can
+  //                steer P2's CSS cursor in real time. The captured stream
+  //                gets baked as MENU_AUTOPILOT_P2_INPUTS for the playback
+  //                fake-peer to mirror onto slot 1.
+  const _recordParam = _urlParams.get('record');
+  let _recordMode = _recordParam === '1' ? 'p1' : _recordParam === 'p2' ? 'p2' : false;
   const _recordedInputs = [];
   let _recordingActive = false;
   let _recordingDone = false;
@@ -320,7 +329,7 @@
     const original = window.KNShared.readLocalInput.bind(window.KNShared);
     window.KNShared.readLocalInput = (playerSlot, keyMap, heldKeys) => {
       const realInput = original(playerSlot, keyMap, heldKeys);
-      if (_recordMode) {
+      if (_recordMode === 'p1') {
         if (_recordingActive && !_recordingDone) {
           const frame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
           _recordedInputs.push({
@@ -333,6 +342,44 @@
           });
         }
         return realInput;
+      }
+      if (_recordMode === 'p2') {
+        // P2 record: P1 follows the baked autopilot, user's keyboard becomes
+        // P2's input. Capture for the recording AND publish on a global slot
+        // for fake-peer to read this frame.
+        const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
+        if (_recordingActive && !_recordingDone) {
+          _recordedInputs.push({
+            f: currentFrame,
+            b: realInput.buttons | 0,
+            lx: realInput.lx | 0,
+            ly: realInput.ly | 0,
+            cx: realInput.cx | 0,
+            cy: realInput.cy | 0,
+          });
+        }
+        // Publish live input so fake-peer's _scheduleFrame consumes it as
+        // P2's input this frame instead of zero / random.
+        window.__knDemoP2LiveInput = {
+          buttons: realInput.buttons | 0,
+          lx: realInput.lx | 0,
+          ly: realInput.ly | 0,
+          cx: realInput.cx | 0,
+          cy: realInput.cy | 0,
+        };
+        // Return autopilot's scripted P1 input for slot 0.
+        const idx = currentFrame - MENU_AUTOPILOT_FIRST_FRAME;
+        if (idx >= 0 && idx < MENU_AUTOPILOT_INPUTS.length) {
+          const scripted = MENU_AUTOPILOT_INPUTS[idx];
+          return {
+            buttons: scripted.b | 0,
+            lx: scripted.lx | 0,
+            ly: scripted.ly | 0,
+            cx: scripted.cx | 0,
+            cy: scripted.cy | 0,
+          };
+        }
+        return _zeroLocalInput();
       }
       // Replay path: while autopilot is active, ignore real input and feed
       // the scripted sequence. Lookup is keyed on the engine's currentFrame
@@ -358,7 +405,8 @@
     _wrappedReadLocalInput = true;
     if (_recordMode) {
       _recordingActive = true;
-      _setStatus('REC mode — play through to a match. Recording stops automatically.');
+      const label = _recordMode === 'p2' ? 'P2' : 'P1';
+      _setStatus(`REC mode (${label}) — play through to a match. Recording stops automatically.`);
     } else if (MENU_AUTOPILOT_INPUTS.length > 0) {
       _autopilotActive = true;
       _setStatus('Setting up your match…');
@@ -394,7 +442,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'kn-demo-autopilot.json';
+      a.download = _recordMode === 'p2' ? 'kn-demo-autopilot-p2.json' : 'kn-demo-autopilot.json';
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -961,13 +1009,13 @@
       'font-family:sans-serif;font-weight:800;font-size:13px;letter-spacing:0.08em;' +
       'pointer-events:none;text-transform:uppercase;will-change:opacity;';
     if (state === 'disabled') {
-      el.textContent = '🤖 Autopilot — your inputs disabled';
+      el.textContent = 'Setting up demo, inputs disabled';
       el.style.background = '#f5c84b';
       el.style.animation = 'inputFadeIn 200ms ease-out, inputPulse 1.6s ease-in-out 200ms infinite';
     } else if (state === 'enabled') {
-      el.textContent = "🎮 You're in control";
+      el.textContent = 'Setup finished, inputs enabled';
       el.style.background = '#7ddc8a';
-      el.style.animation = 'inputFadeOut 2.4s ease-out forwards';
+      el.style.animation = 'inputFadeIn 200ms ease-out, inputFadeOut 2.2s ease-out 200ms forwards';
       _inputIndicatorTimer = setTimeout(() => {
         const cur = document.getElementById('input-indicator');
         if (cur) cur.remove();

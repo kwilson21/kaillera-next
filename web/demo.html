@@ -614,11 +614,11 @@
       <p class="explainer">
         Rollback netplay predicts the opponent's inputs and runs your game locally without waiting. When predictions
         miss, the engine rewinds and replays. The round-trip is still on the wire — rollback hides it from you. Lockstep
-        waits the full round-trip every frame, so all latency is felt directly. The Predictions counter ticks every
-        frame the engine ran without waiting for slot 1's input — that IS the rollback engine doing its job. In
-        production, real network jitter occasionally makes those predictions wrong, which fires the rollbacks; this
-        synthetic-peer demo can't reproduce jitter authentically without disrupting your local input, so it shows the
-        prediction load directly instead.
+        waits the full round-trip every frame, so all latency is felt directly. In this demo, P2 is a synthetic peer
+        running in the same tab. During menus it stays inert so you can navigate freely. Once the match starts, P2 plays
+        random inputs at human cadence — every change is a misprediction the engine has to roll back through, which is
+        what fills the Rollbacks counter. Predictions counts every frame the engine ran ahead of P2's input regardless
+        of whether the prediction was correct.
       </p>
     </main>
   </body>

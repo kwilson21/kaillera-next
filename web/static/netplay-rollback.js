@@ -1647,6 +1647,12 @@
       if (Number.isInteger(slot) && slot >= 0 && slot < 4) slots.add(slot);
     };
 
+    // Demo mode: count synthetic peers as real controllers so SSB64 sees
+    // them as "plugged in" and processes their inputs (CSS cursor, in-game
+    // movement). In normal multiplayer, synthetic peers are excluded
+    // because they don't represent a physical opponent.
+    const includeSynthetic = _demoMode === true;
+
     if (_activeRoster) {
       const syntheticSlots = new Set(
         Object.values(_peers)
@@ -1654,16 +1660,16 @@
           .map((peer) => peer.slot),
       );
       for (const slot of _activeRoster) {
-        if (!syntheticSlots.has(slot)) addSlot(slot);
+        if (includeSynthetic || !syntheticSlots.has(slot)) addSlot(slot);
       }
     } else {
       addSlot(_playerSlot);
       for (const [sid, info] of Object.entries(_knownPlayers)) {
-        if (_peers[sid]?.synthetic === true) continue;
+        if (!includeSynthetic && _peers[sid]?.synthetic === true) continue;
         if (!_isPeerPendingLateJoin(sid)) addSlot(info?.slot);
       }
       for (const [sid, peer] of Object.entries(_peers)) {
-        if (peer?.synthetic === true) continue;
+        if (!includeSynthetic && peer?.synthetic === true) continue;
         if (_isPeerPendingLateJoin(sid, peer)) continue;
         if (!peer?._intentionalLeave) addSlot(peer?.slot);
       }
@@ -11905,9 +11911,17 @@
     isTickPaused: () => _externalTickPaused,
     setDemoMode: (on) => {
       const next = !!on;
-      if (_demoMode !== next)
-        _syncLog(`demo mode ${next ? 'enabled' : 'disabled'} (pacing throttle ${next ? 'OFF' : 'ON'})`);
+      const changed = _demoMode !== next;
+      if (changed) _syncLog(`demo mode ${next ? 'enabled' : 'disabled'} (pacing throttle ${next ? 'OFF' : 'ON'})`);
       _demoMode = next;
+      // Recompute the controller-present mask immediately. Demo mode flips
+      // whether synthetic peers count as "plugged in" controllers, so the
+      // mask must be re-applied or P2's port stays disconnected.
+      if (changed) {
+        // Bust the cache so _applyControllerPresentMask doesn't early-return.
+        _lastControllerPresentMask = -1;
+        _applyControllerPresentMask('demo-mode-toggle');
+      }
       return _demoMode;
     },
     isDemoMode: () => _demoMode,

@@ -13,6 +13,13 @@
   let _rafId = 0;
   let _slot = 1;
   let _getCurrentFrame = () => 0;
+  // Optional callback supplied by demo.js: given an engine frame, return the
+  // local-player input recorded at that frame (or null if out of range).
+  // We replay it as P2 input during controllable menu scenes so P2's cursor
+  // navigates CSS/stage-select alongside P1's — same delta-based D-pad
+  // movements applied to P2's starting position effectively pick a random
+  // character without us having to script CSS-specific inputs.
+  let _getMirroredInput = null;
   let _lastSeenFrame = -1;
   let _lastEngineFrameSeen = -1;
   let _queue = [];
@@ -47,6 +54,24 @@
     return { buttons: 0, lx: 0, ly: 0, cx: _randomAxis(), cy: _randomAxis() };
   };
 
+  // In-match P2 behavior: hold each random input for several frames before
+  // changing, so P2 acts more like a player making decisions than a key
+  // masher. Every change is a fresh "decision" the engine predicted as the
+  // previous-frame input — when the new input arrives, the prediction
+  // misses and rollback fires. That's what produces the visible Rollbacks
+  // counter (vs. Predictions, which counts every frame the engine ran
+  // ahead regardless of whether the prediction was right).
+  let _heldRandomInput = null;
+  let _heldUntilFrame = -1;
+  const _matchInputForFrame = (frame) => {
+    if (frame > _heldUntilFrame || !_heldRandomInput) {
+      _heldRandomInput = _randomInput();
+      // Hold 3-15 frames (~50-250 ms) — roughly human reaction-cadence.
+      _heldUntilFrame = frame + 3 + Math.floor(Math.random() * 12);
+    }
+    return _heldRandomInput;
+  };
+
   const _pruneEvents = (now) => {
     while (_events.length > 0 && now - _events[0].t > STATS_WINDOW_MS) _events.shift();
   };
@@ -69,11 +94,36 @@
       .map((entry) => ({ frame: entry.frame, ...entry.input }));
 
   const _scheduleFrame = (frame, now) => {
-    const mispredict = Math.random() < _network.mispredictProb;
-    const input = mispredict ? _randomInput() : _zeroInput();
+    // ?record=p2 mode: demo.js publishes the user's live keyboard input on
+    // window.__knDemoP2LiveInput each frame. Use that as P2's input so the
+    // user steers P2's CSS cursor while P1 follows the baked autopilot.
+    // Takes precedence over both in-match random and out-of-match zero.
+    const liveP2 = window.__knDemoP2LiveInput;
+    let input;
+    if (liveP2) {
+      input = {
+        buttons: liveP2.buttons | 0,
+        lx: liveP2.lx | 0,
+        ly: liveP2.ly | 0,
+        cx: liveP2.cx | 0,
+        cy: liveP2.cy | 0,
+      };
+    } else {
+      // In an actual match, P2 plays held random inputs — drives authentic
+      // mispredictions because the engine predicts "same as last frame" and
+      // gets surprised every time P2 picks a new input. Outside a match
+      // (title/CSS/menus) P2 stays inert so the user's autopilot isn't
+      // fighting an invisible opponent jamming buttons on menu screens.
+      const inMatch = !!window.NetplayRollback?.isInMatch?.();
+      if (inMatch) {
+        input = _matchInputForFrame(frame);
+      } else {
+        const mispredict = Math.random() < _network.mispredictProb;
+        input = mispredict ? _randomInput() : _zeroInput();
+        if (mispredict) _recordEvent({ mispredict: true });
+      }
+    }
     _recordGeneratedInput(frame, input);
-
-    if (mispredict) _recordEvent({ mispredict: true });
 
     if (Math.random() < _network.lossProb) {
       _recordEvent({ loss: true });
@@ -149,10 +199,11 @@
     _rafId = _nativeRAF(_tick);
   };
 
-  const start = ({ slot = 1, getCurrentFrame } = {}) => {
+  const start = ({ slot = 1, getCurrentFrame, getMirroredInput } = {}) => {
     stop();
     _slot = Number.isInteger(slot) ? slot : 1;
     _getCurrentFrame = typeof getCurrentFrame === 'function' ? getCurrentFrame : () => 0;
+    _getMirroredInput = typeof getMirroredInput === 'function' ? getMirroredInput : null;
     const currentFrame = Math.max(0, Math.trunc(Number(_getCurrentFrame()) || 0));
     _lastEngineFrameSeen = currentFrame;
     _lastSeenFrame = -1;
@@ -167,6 +218,9 @@
     _queue = [];
     _inputHistory = [];
     _events = [];
+    _getMirroredInput = null;
+    _heldRandomInput = null;
+    _heldUntilFrame = -1;
   };
 
   const setNetwork = ({ latencyMs, jitterMs, lossProb, mispredictProb } = {}) => {
