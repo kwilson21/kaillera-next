@@ -488,40 +488,22 @@
   let _rbVisualFreezeCtx = null;
   let _rbVisualSnapshotCanvas = null; // last live pre-rollback frame, captured before state restore
   let _rbVisualSnapshotCtx = null;
-  let _rbVisualPrevSnapshotCanvas = null; // previous live snapshot, reused as the next capture target
-  let _rbVisualPrevSnapshotCtx = null;
+  let _rbVisualCandidateCanvas = null;
+  let _rbVisualCandidateCtx = null;
   let _rbVisualProbeCanvas = null;
   let _rbVisualProbeCtx = null;
   let _rbVisualSnapshotFrame = -1;
-  let _rbVisualPrevSnapshotFrame = -1;
   let _rbVisualFreezeActive = false;
   let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
   let _rbVisualFreezeSerial = 0;
-  let _rbVisualFlashStyleInjected = false;
-  let _rbVisualFlashFlip = false;
-  let _rbVisualBlendRaf = 0;
-  let _rbVisualBlendStart = 0;
-  let _rbVisualBlendDx = 0;
-  let _rbVisualBlendDy = 0;
-  let _rbVisualBlendFramesDrawn = 0;
   let _rbRdpSkipActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
-  const RB_VISUAL_BLEND_MS = 32;
-  const RB_VISUAL_BLEND_MAX_OFFSET_PX = 8;
-  const RB_VISUAL_MOTION_PROBE_W = 32;
-  const RB_VISUAL_MOTION_PROBE_H = 18;
-  const RB_REPLAY_BURST_RAW = (() => {
-    try {
-      return _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
-    } catch (_) {
-      return null;
-    }
-  })();
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
-      const parsed = RB_REPLAY_BURST_RAW === null ? 4 : parseInt(RB_REPLAY_BURST_RAW, 10);
+      const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
+      const parsed = raw === null ? 4 : parseInt(raw, 10);
       if (!Number.isFinite(parsed)) return 4;
       return Math.max(1, Math.min(8, parsed));
     } catch (_) {
@@ -537,14 +519,6 @@
     } catch (_) {
       return 10;
     }
-  })();
-  const RB_ADAPTIVE_REPLAY_BURST = (() => {
-    try {
-      const raw = _urlParams.get('replayAdaptiveBurst') ?? localStorage.getItem('kn-replay-adaptive-burst');
-      if (raw === '0') return false;
-      if (raw === '1') return true;
-    } catch (_) {}
-    return RB_REPLAY_BURST_RAW === null;
   })();
   const RB_SKIP_RDP_DURING_REPLAY = (() => {
     try {
@@ -579,31 +553,9 @@
     } catch (_) {}
     return true;
   })();
-  const RB_VISUAL_MASK_FLASH = (() => {
-    try {
-      const raw = _urlParams.get('replayMaskFlash') ?? localStorage.getItem('kn-replay-mask-flash');
-      if (raw === '0') return false;
-      if (raw === '1') return true;
-    } catch (_) {}
-    return true;
-  })();
-  const RB_VISUAL_BLEND = (() => {
-    try {
-      const raw = _urlParams.get('replayMaskBlend') ?? localStorage.getItem('kn-replay-mask-blend');
-      if (raw === '0') return false;
-      if (raw === '1') return true;
-    } catch (_) {}
-    return true;
-  })();
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
   let _hudEventTimestamps = []; // timestamps for events-per-second window
-  let _recentTickEwma = 4;
-  let _typicalReplayStepEwma = 3.5;
-  let _rbReplayEffectiveBurst = RB_REPLAY_BURST_MAX_FRAMES;
-  const _rbReplayEffectiveBurstCounts = {};
-  const RB_REPLAY_EWMA_ALPHA = 0.12;
-  const RB_REPLAY_TICK_BUDGET_MS = 16.6;
   const HUD_DEPTH_WINDOW = 60;
   const HUD_EVENT_WINDOW_MS = 5000;
   let rb_numPlayers = 2; // set during C-rollback init
@@ -720,151 +672,6 @@
     }
   };
 
-  const _measureRollbackSnapshotCenter = (source) => {
-    if (!source || !RB_VISUAL_BLEND) return null;
-    try {
-      if (!_rbVisualProbeCanvas) {
-        _rbVisualProbeCanvas = document.createElement('canvas');
-        _rbVisualProbeCanvas.width = RB_VISUAL_MOTION_PROBE_W;
-        _rbVisualProbeCanvas.height = RB_VISUAL_MOTION_PROBE_H;
-        _rbVisualProbeCtx = _rbVisualProbeCanvas.getContext('2d', { willReadFrequently: true });
-      }
-      if (!_rbVisualProbeCtx) return null;
-      if (_rbVisualProbeCanvas.width !== RB_VISUAL_MOTION_PROBE_W)
-        _rbVisualProbeCanvas.width = RB_VISUAL_MOTION_PROBE_W;
-      if (_rbVisualProbeCanvas.height !== RB_VISUAL_MOTION_PROBE_H)
-        _rbVisualProbeCanvas.height = RB_VISUAL_MOTION_PROBE_H;
-      _rbVisualProbeCtx.clearRect(0, 0, RB_VISUAL_MOTION_PROBE_W, RB_VISUAL_MOTION_PROBE_H);
-      _rbVisualProbeCtx.drawImage(source, 0, 0, RB_VISUAL_MOTION_PROBE_W, RB_VISUAL_MOTION_PROBE_H);
-      const data = _rbVisualProbeCtx.getImageData(0, 0, RB_VISUAL_MOTION_PROBE_W, RB_VISUAL_MOTION_PROBE_H).data;
-      let weightSum = 0;
-      let xSum = 0;
-      let ySum = 0;
-      for (let y = 0; y < RB_VISUAL_MOTION_PROBE_H; y++) {
-        for (let x = 0; x < RB_VISUAL_MOTION_PROBE_W; x++) {
-          const i = (y * RB_VISUAL_MOTION_PROBE_W + x) * 4;
-          const weight = Math.max(0, (data[i] || 0) + (data[i + 1] || 0) + (data[i + 2] || 0) - 24);
-          if (weight <= 0) continue;
-          weightSum += weight;
-          xSum += x * weight;
-          ySum += y * weight;
-        }
-      }
-      if (weightSum <= 0) return null;
-      return { x: xSum / weightSum, y: ySum / weightSum };
-    } catch (_) {
-      return null;
-    }
-  };
-
-  const _updateRollbackVisualMotion = (prev, curr, width, height) => {
-    _rbVisualBlendDx = 0;
-    _rbVisualBlendDy = 0;
-    if (!RB_VISUAL_BLEND || !prev || !curr || prev.width !== curr.width || prev.height !== curr.height) return;
-    const prevCenter = _measureRollbackSnapshotCenter(prev);
-    const currCenter = _measureRollbackSnapshotCenter(curr);
-    if (!prevCenter || !currCenter) return;
-    const scaleX = width / RB_VISUAL_MOTION_PROBE_W;
-    const scaleY = height / RB_VISUAL_MOTION_PROBE_H;
-    const dx = (currCenter.x - prevCenter.x) * scaleX;
-    const dy = (currCenter.y - prevCenter.y) * scaleY;
-    _rbVisualBlendDx = Math.max(-RB_VISUAL_BLEND_MAX_OFFSET_PX, Math.min(RB_VISUAL_BLEND_MAX_OFFSET_PX, dx));
-    _rbVisualBlendDy = Math.max(-RB_VISUAL_BLEND_MAX_OFFSET_PX, Math.min(RB_VISUAL_BLEND_MAX_OFFSET_PX, dy));
-    if (Math.abs(_rbVisualBlendDx) < 0.25) _rbVisualBlendDx = 0;
-    if (Math.abs(_rbVisualBlendDy) < 0.25) _rbVisualBlendDy = 0;
-  };
-
-  const _stopRollbackVisualBlend = () => {
-    if (_rbVisualBlendRaf) {
-      try {
-        (window.APISandbox?.nativeCancelRAF || window.cancelAnimationFrame)?.(_rbVisualBlendRaf);
-      } catch (_) {}
-      _rbVisualBlendRaf = 0;
-    }
-  };
-
-  const _runRollbackVisualBlend = (overlay, width, height, serial) => {
-    _rbVisualBlendRaf = 0;
-    if (
-      !RB_VISUAL_BLEND ||
-      !_rbVisualFreezeActive ||
-      _rbVisualFreezeOverlay !== overlay ||
-      overlay.dataset.serial !== String(serial) ||
-      !_rbVisualFreezeCtx ||
-      !_rbVisualSnapshotCanvas ||
-      !_rbVisualPrevSnapshotCanvas ||
-      _rbVisualPrevSnapshotFrame < 0
-    ) {
-      return;
-    }
-    const now = window.APISandbox?.nativePerfNow?.() ?? performance.now();
-    const t = Math.max(0, Math.min(1, (now - _rbVisualBlendStart) / RB_VISUAL_BLEND_MS));
-    try {
-      _rbVisualFreezeCtx.save();
-      _rbVisualFreezeCtx.imageSmoothingEnabled = false;
-      _rbVisualFreezeCtx.clearRect(0, 0, width, height);
-      _rbVisualFreezeCtx.globalAlpha = 1;
-      _rbVisualFreezeCtx.drawImage(_rbVisualSnapshotCanvas, 0, 0, width, height);
-      if (_rbVisualBlendDx || _rbVisualBlendDy) {
-        _rbVisualFreezeCtx.globalAlpha = t * 0.5;
-        _rbVisualFreezeCtx.drawImage(
-          _rbVisualSnapshotCanvas,
-          _rbVisualBlendDx * t,
-          _rbVisualBlendDy * t,
-          width,
-          height,
-        );
-      }
-      _rbVisualFreezeCtx.restore();
-      _rbVisualBlendFramesDrawn++;
-    } catch (_) {
-      try {
-        _rbVisualFreezeCtx.restore();
-      } catch (_) {}
-      return;
-    }
-    const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 16));
-    _rbVisualBlendRaf = raf(() => _runRollbackVisualBlend(overlay, width, height, serial));
-  };
-
-  const _startRollbackVisualBlend = (overlay, width, height, serial) => {
-    _stopRollbackVisualBlend();
-    if (
-      !RB_VISUAL_BLEND ||
-      !_rbVisualSnapshotCanvas ||
-      !_rbVisualPrevSnapshotCanvas ||
-      _rbVisualPrevSnapshotFrame < 0 ||
-      _rbVisualSnapshotCanvas.width !== _rbVisualPrevSnapshotCanvas.width ||
-      _rbVisualSnapshotCanvas.height !== _rbVisualPrevSnapshotCanvas.height
-    ) {
-      return;
-    }
-    _rbVisualBlendStart = window.APISandbox?.nativePerfNow?.() ?? performance.now();
-    const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 16));
-    _rbVisualBlendRaf = raf(() => _runRollbackVisualBlend(overlay, width, height, serial));
-  };
-
-  const _ensureRollbackVisualFlashStyle = () => {
-    if (!RB_VISUAL_MASK_FLASH || _rbVisualFlashStyleInjected) return;
-    try {
-      const style = document.createElement('style');
-      style.id = 'kn-rollback-flash-style';
-      style.textContent =
-        '@keyframes kn-rollback-flash-a {' +
-        '0% { filter: blur(0) saturate(1); }' +
-        '35% { filter: blur(2px) saturate(1.15); }' +
-        '100% { filter: blur(0) saturate(1); }' +
-        '}' +
-        '@keyframes kn-rollback-flash-b {' +
-        '0% { filter: blur(0) saturate(1); }' +
-        '35% { filter: blur(2px) saturate(1.15); }' +
-        '100% { filter: blur(0) saturate(1); }' +
-        '}';
-      (document.head || document.documentElement).appendChild(style);
-      _rbVisualFlashStyleInjected = true;
-    } catch (_) {}
-  };
-
   const _captureRollbackVisualSnapshot = () => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return false;
     const source = _findRollbackVisualCanvas();
@@ -875,28 +682,24 @@
       const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
       const width = Math.max(1, source.width || Math.round(rect.width * scale));
       const height = Math.max(1, source.height || Math.round(rect.height * scale));
-      if (!_rbVisualPrevSnapshotCanvas) {
-        _rbVisualPrevSnapshotCanvas = document.createElement('canvas');
-        _rbVisualPrevSnapshotCtx = _rbVisualPrevSnapshotCanvas.getContext('2d', { willReadFrequently: true });
+      if (!_rbVisualCandidateCanvas) {
+        _rbVisualCandidateCanvas = document.createElement('canvas');
+        _rbVisualCandidateCtx = _rbVisualCandidateCanvas.getContext('2d', { willReadFrequently: true });
       }
-      const candidate = _rbVisualPrevSnapshotCanvas;
+      const candidate = _rbVisualCandidateCanvas;
       if (candidate.width !== width) candidate.width = width;
       if (candidate.height !== height) candidate.height = height;
-      if (!_rbVisualPrevSnapshotCtx)
-        _rbVisualPrevSnapshotCtx = candidate.getContext('2d', { willReadFrequently: true });
-      if (!_rbVisualPrevSnapshotCtx) return false;
-      _rbVisualPrevSnapshotCtx.imageSmoothingEnabled = false;
-      _rbVisualPrevSnapshotCtx.clearRect(0, 0, width, height);
-      _rbVisualPrevSnapshotCtx.drawImage(source, 0, 0, width, height);
+      if (!_rbVisualCandidateCtx) _rbVisualCandidateCtx = candidate.getContext('2d', { willReadFrequently: true });
+      if (!_rbVisualCandidateCtx) return false;
+      _rbVisualCandidateCtx.imageSmoothingEnabled = false;
+      _rbVisualCandidateCtx.clearRect(0, 0, width, height);
+      _rbVisualCandidateCtx.drawImage(source, 0, 0, width, height);
       const oldCanvas = _rbVisualSnapshotCanvas;
       const oldCtx = _rbVisualSnapshotCtx;
-      const oldFrame = _rbVisualSnapshotFrame;
-      _updateRollbackVisualMotion(oldCanvas, candidate, width, height);
-      _rbVisualSnapshotCanvas = candidate;
-      _rbVisualSnapshotCtx = _rbVisualPrevSnapshotCtx;
-      _rbVisualPrevSnapshotCanvas = oldCanvas;
-      _rbVisualPrevSnapshotCtx = oldCtx;
-      _rbVisualPrevSnapshotFrame = oldFrame;
+      _rbVisualSnapshotCanvas = _rbVisualCandidateCanvas;
+      _rbVisualSnapshotCtx = _rbVisualCandidateCtx;
+      _rbVisualCandidateCanvas = oldCanvas;
+      _rbVisualCandidateCtx = oldCtx;
       _rbVisualSnapshotFrame = _frameNum;
       return true;
     } catch (_) {
@@ -929,7 +732,7 @@
           'background:transparent',
           'image-rendering:pixelated',
           'image-rendering:crisp-edges',
-          'will-change:opacity,filter',
+          'will-change:opacity',
           'contain:strict',
         ].join(';');
         _rbVisualFreezeOverlay = overlay;
@@ -958,19 +761,11 @@
       }
       overlay.style.transition = 'none';
       overlay.style.opacity = '1';
-      overlay.style.animation = 'none';
       overlay.style.display = 'block';
-      if (RB_VISUAL_MASK_FLASH) {
-        _ensureRollbackVisualFlashStyle();
-        // Alternate names so repeat masks restart the animation without forcing layout.
-        _rbVisualFlashFlip = !_rbVisualFlashFlip;
-        overlay.style.animation = `${_rbVisualFlashFlip ? 'kn-rollback-flash-a' : 'kn-rollback-flash-b'} 32ms ease-in-out`;
-      }
       overlay.dataset.depth = String(depth);
       const serial = ++_rbVisualFreezeSerial;
       overlay.dataset.serial = String(serial);
       _rbVisualFreezeActive = true;
-      _startRollbackVisualBlend(overlay, width, height, serial);
       if (RB_VISUAL_FADE_DURING_REPLAY && RB_VISUAL_FADE_MS > 0) {
         const replayFadeMs = Math.max(45, Math.min(140, Math.max(RB_VISUAL_FADE_MS, depth * 14)));
         const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
@@ -1000,26 +795,22 @@
 
   const _hideRollbackVisualFreeze = () => {
     _rbVisualFreezeActive = false;
-    _stopRollbackVisualBlend();
     const overlay = _rbVisualFreezeOverlay;
     if (!overlay) return;
     if (_rbVisualFreezeHideTimer) clearTimeout(_rbVisualFreezeHideTimer);
     if (overlay.style.display === 'none' || RB_VISUAL_FADE_MS <= 0) {
       overlay.style.display = 'none';
       overlay.style.transition = 'none';
-      overlay.style.animation = 'none';
       overlay.style.opacity = '1';
       _rbVisualFreezeHideTimer = 0;
       return;
     }
-    overlay.style.animation = 'none';
     overlay.style.transition = `opacity ${RB_VISUAL_FADE_MS}ms ease-out`;
     overlay.style.opacity = '0';
     _rbVisualFreezeHideTimer = setTimeout(() => {
       if (overlay !== _rbVisualFreezeOverlay) return;
       overlay.style.display = 'none';
       overlay.style.transition = 'none';
-      overlay.style.animation = 'none';
       overlay.style.opacity = '1';
       _rbVisualFreezeHideTimer = 0;
     }, RB_VISUAL_FADE_MS + 20);
@@ -1036,12 +827,11 @@
     _rbVisualFreezeCtx = null;
     _rbVisualSnapshotCanvas = null;
     _rbVisualSnapshotCtx = null;
-    _rbVisualPrevSnapshotCanvas = null;
-    _rbVisualPrevSnapshotCtx = null;
+    _rbVisualCandidateCanvas = null;
+    _rbVisualCandidateCtx = null;
     _rbVisualProbeCanvas = null;
     _rbVisualProbeCtx = null;
     _rbVisualSnapshotFrame = -1;
-    _rbVisualPrevSnapshotFrame = -1;
   };
 
   // ── Freeze detection state ─────────────────────────────────────────
@@ -7569,25 +7359,7 @@
     }
   };
 
-  const _updateReplayEwma = (current, sample) => {
-    if (!Number.isFinite(sample) || sample <= 0 || sample > 100) return current;
-    return current ? current * (1 - RB_REPLAY_EWMA_ALPHA) + sample * RB_REPLAY_EWMA_ALPHA : sample;
-  };
-
-  const _computeReplayBurst = () => {
-    if (!RB_ADAPTIVE_REPLAY_BURST) {
-      _rbReplayEffectiveBurst = RB_REPLAY_BURST_MAX_FRAMES;
-      return _rbReplayEffectiveBurst;
-    }
-    const replayStepMs = Math.max(0.5, _typicalReplayStepEwma || 3.5);
-    const headroomMs = RB_REPLAY_TICK_BUDGET_MS - (_recentTickEwma || 4);
-    const computed = Math.floor(headroomMs / replayStepMs);
-    _rbReplayEffectiveBurst = Math.max(2, Math.min(6, computed));
-    return _rbReplayEffectiveBurst;
-  };
-
   const _runCReplayFrame = (tickMod) => {
-    const replayStepStart = performance.now();
     // C wrote inputs + saved state for the replay frame. JS now steps
     // the emulator via stepOneFrame() — the SAME code path as normal play.
     // Pre-frame setup (reset audio, RNG sync) must match the normal path
@@ -7632,7 +7404,6 @@
     _frameNum = newFrame;
     KNState.frameNum = _frameNum;
     if (window.KNDesync) KNDesync.tick(_frameNum);
-    _typicalReplayStepEwma = _updateReplayEwma(_typicalReplayStepEwma, performance.now() - replayStepStart);
   };
 
   const _setReplayRdpSkip = (tickMod, enable, reason = '') => {
@@ -9982,8 +9753,6 @@
         const burstStart = performance.now();
         let burstSteps = 0;
         let replayDone = false;
-        const effectiveBurst = _computeReplayBurst();
-        _rbReplayEffectiveBurstCounts[effectiveBurst] = (_rbReplayEffectiveBurstCounts[effectiveBurst] || 0) + 1;
         while (catchingUp === 2) {
           _runCReplayFrame(tickMod);
           burstSteps++;
@@ -9993,7 +9762,7 @@
             break;
           }
           const burstMs = performance.now() - burstStart;
-          if (burstSteps >= effectiveBurst || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
+          if (burstSteps >= RB_REPLAY_BURST_MAX_FRAMES || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
           catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
         }
         if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
@@ -10086,7 +9855,6 @@
       KNState.frameNum = _frameNum;
       if (window.KNDesync) KNDesync.tick(_frameNum);
       const _tTotal = performance.now();
-      _recentTickEwma = _updateReplayEwma(_recentTickEwma, _tTotal - _t0);
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
       if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
@@ -12603,13 +12371,6 @@
         currentFrame: _frameNum,
         delay: DELAY_FRAMES,
         isCRollback: _useCRollback,
-        replayMaskBlend: RB_VISUAL_BLEND,
-        rollbackBlendFramesDrawn: _rbVisualBlendFramesDrawn,
-        replayAdaptiveBurst: RB_ADAPTIVE_REPLAY_BURST,
-        replayEffectiveBurst: _rbReplayEffectiveBurst,
-        replayEffectiveBurstCounts: { ..._rbReplayEffectiveBurstCounts },
-        recentTickEwma: _recentTickEwma,
-        typicalReplayStepEwma: _typicalReplayStepEwma,
       };
     },
     getInfo: () => {
