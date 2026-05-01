@@ -480,8 +480,28 @@
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   let _rbVisualFreezeOverlay = null; // canvas copy shown while replay frames render underneath
   let _rbVisualFreezeCtx = null;
+  let _rbVisualSnapshotCanvas = null; // last live pre-rollback frame, captured before state restore
+  let _rbVisualSnapshotCtx = null;
+  let _rbVisualCandidateCanvas = null;
+  let _rbVisualCandidateCtx = null;
+  let _rbVisualProbeCanvas = null;
+  let _rbVisualProbeCtx = null;
+  let _rbVisualSnapshotFrame = -1;
   let _rbVisualFreezeActive = false;
+  let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
+  const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
+  const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
+  const RB_VISUAL_FADE_MS = (() => {
+    try {
+      const raw = _urlParams.get('replayVisualFadeMs') ?? localStorage.getItem('kn-replay-visual-fade-ms');
+      const parsed = raw === null ? 80 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 80;
+      return Math.max(0, Math.min(160, parsed));
+    } catch (_) {
+      return 80;
+    }
+  })();
   const _rbVisualFreezeEnabled = (() => {
     try {
       if (_urlParams.get('replayVisualFreeze') === '0') return false;
@@ -570,11 +590,88 @@
     return null;
   };
 
+  const _snapshotLooksBlack = (ctx, width, height) => {
+    if (!ctx || width <= 0 || height <= 0) return true;
+    try {
+      const sample = ctx.getImageData(0, 0, width, height).data;
+      let bright = 0;
+      let total = 0;
+      const stride = Math.max(4, Math.floor(sample.length / 256) & ~3);
+      for (let i = 0; i < sample.length; i += stride) {
+        const r = sample[i] || 0;
+        const g = sample[i + 1] || 0;
+        const b = sample[i + 2] || 0;
+        if (r + g + b > 24) bright++;
+        total++;
+      }
+      return total > 0 && bright / total < 0.02;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const _sourceLooksBlack = (source) => {
+    if (!source) return true;
+    try {
+      if (!_rbVisualProbeCanvas) {
+        _rbVisualProbeCanvas = document.createElement('canvas');
+        _rbVisualProbeCanvas.width = 32;
+        _rbVisualProbeCanvas.height = 18;
+        _rbVisualProbeCtx = _rbVisualProbeCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      if (!_rbVisualProbeCtx) return false;
+      _rbVisualProbeCtx.clearRect(0, 0, _rbVisualProbeCanvas.width, _rbVisualProbeCanvas.height);
+      _rbVisualProbeCtx.drawImage(source, 0, 0, _rbVisualProbeCanvas.width, _rbVisualProbeCanvas.height);
+      return _snapshotLooksBlack(_rbVisualProbeCtx, _rbVisualProbeCanvas.width, _rbVisualProbeCanvas.height);
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const _captureRollbackVisualSnapshot = () => {
+    if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return false;
+    const source = _findRollbackVisualCanvas();
+    const rect = source?.getBoundingClientRect?.();
+    if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
+    if (_sourceLooksBlack(source)) return false;
+    try {
+      const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      const width = Math.max(1, source.width || Math.round(rect.width * scale));
+      const height = Math.max(1, source.height || Math.round(rect.height * scale));
+      if (!_rbVisualCandidateCanvas) {
+        _rbVisualCandidateCanvas = document.createElement('canvas');
+        _rbVisualCandidateCtx = _rbVisualCandidateCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      const candidate = _rbVisualCandidateCanvas;
+      if (candidate.width !== width) candidate.width = width;
+      if (candidate.height !== height) candidate.height = height;
+      if (!_rbVisualCandidateCtx) _rbVisualCandidateCtx = candidate.getContext('2d', { willReadFrequently: true });
+      if (!_rbVisualCandidateCtx) return false;
+      _rbVisualCandidateCtx.imageSmoothingEnabled = false;
+      _rbVisualCandidateCtx.clearRect(0, 0, width, height);
+      _rbVisualCandidateCtx.drawImage(source, 0, 0, width, height);
+      const oldCanvas = _rbVisualSnapshotCanvas;
+      const oldCtx = _rbVisualSnapshotCtx;
+      _rbVisualSnapshotCanvas = _rbVisualCandidateCanvas;
+      _rbVisualSnapshotCtx = _rbVisualCandidateCtx;
+      _rbVisualCandidateCanvas = oldCanvas;
+      _rbVisualCandidateCtx = oldCtx;
+      _rbVisualSnapshotFrame = _frameNum;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
   const _showRollbackVisualFreeze = (depth = 0) => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return _rbVisualFreezeActive;
     const source = _findRollbackVisualCanvas();
     const rect = source?.getBoundingClientRect?.();
     if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
+    const snapshotAge = _rbVisualSnapshotFrame >= 0 ? Math.abs(_frameNum - _rbVisualSnapshotFrame) : Infinity;
+    if (!_rbVisualSnapshotCanvas || snapshotAge > RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES) {
+      if (!_captureRollbackVisualSnapshot()) return false;
+    }
     try {
       if (!_rbVisualFreezeOverlay) {
         const overlay = document.createElement('canvas');
@@ -588,31 +685,38 @@
           'margin:0',
           'padding:0',
           'border:0',
-          'background:#000',
+          'background:transparent',
           'image-rendering:pixelated',
           'image-rendering:crisp-edges',
+          'will-change:opacity',
           'contain:strict',
         ].join(';');
         _rbVisualFreezeOverlay = overlay;
-        _rbVisualFreezeCtx = overlay.getContext('2d', { alpha: false });
+        _rbVisualFreezeCtx = overlay.getContext('2d');
         if (_rbVisualFreezeCtx) _rbVisualFreezeCtx.imageSmoothingEnabled = false;
       }
       const overlay = _rbVisualFreezeOverlay;
       const root = document.fullscreenElement || document.body || document.documentElement;
       if (overlay.parentNode !== root) root.appendChild(overlay);
-      const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-      const width = Math.max(1, source.width || Math.round(rect.width * scale));
-      const height = Math.max(1, source.height || Math.round(rect.height * scale));
+      const width = Math.max(1, _rbVisualSnapshotCanvas.width);
+      const height = Math.max(1, _rbVisualSnapshotCanvas.height);
       if (overlay.width !== width) overlay.width = width;
       if (overlay.height !== height) overlay.height = height;
-      if (!_rbVisualFreezeCtx) _rbVisualFreezeCtx = overlay.getContext('2d', { alpha: false });
+      if (!_rbVisualFreezeCtx) _rbVisualFreezeCtx = overlay.getContext('2d');
       if (!_rbVisualFreezeCtx) return false;
       _rbVisualFreezeCtx.imageSmoothingEnabled = false;
-      _rbVisualFreezeCtx.drawImage(source, 0, 0, width, height);
+      _rbVisualFreezeCtx.clearRect(0, 0, width, height);
+      _rbVisualFreezeCtx.drawImage(_rbVisualSnapshotCanvas, 0, 0, width, height);
       overlay.style.left = `${Math.round(rect.left)}px`;
       overlay.style.top = `${Math.round(rect.top)}px`;
       overlay.style.width = `${Math.round(rect.width)}px`;
       overlay.style.height = `${Math.round(rect.height)}px`;
+      if (_rbVisualFreezeHideTimer) {
+        clearTimeout(_rbVisualFreezeHideTimer);
+        _rbVisualFreezeHideTimer = 0;
+      }
+      overlay.style.transition = 'none';
+      overlay.style.opacity = '1';
       overlay.style.display = 'block';
       overlay.dataset.depth = String(depth);
       _rbVisualFreezeActive = true;
@@ -629,15 +733,44 @@
   };
 
   const _hideRollbackVisualFreeze = () => {
-    if (_rbVisualFreezeOverlay) _rbVisualFreezeOverlay.style.display = 'none';
     _rbVisualFreezeActive = false;
+    const overlay = _rbVisualFreezeOverlay;
+    if (!overlay) return;
+    if (_rbVisualFreezeHideTimer) clearTimeout(_rbVisualFreezeHideTimer);
+    if (overlay.style.display === 'none' || RB_VISUAL_FADE_MS <= 0) {
+      overlay.style.display = 'none';
+      overlay.style.transition = 'none';
+      overlay.style.opacity = '1';
+      _rbVisualFreezeHideTimer = 0;
+      return;
+    }
+    overlay.style.transition = `opacity ${RB_VISUAL_FADE_MS}ms ease-out`;
+    overlay.style.opacity = '0';
+    _rbVisualFreezeHideTimer = setTimeout(() => {
+      if (overlay !== _rbVisualFreezeOverlay) return;
+      overlay.style.display = 'none';
+      overlay.style.transition = 'none';
+      overlay.style.opacity = '1';
+      _rbVisualFreezeHideTimer = 0;
+    }, RB_VISUAL_FADE_MS + 20);
   };
 
   const _destroyRollbackVisualFreeze = () => {
     _hideRollbackVisualFreeze();
+    if (_rbVisualFreezeHideTimer) {
+      clearTimeout(_rbVisualFreezeHideTimer);
+      _rbVisualFreezeHideTimer = 0;
+    }
     if (_rbVisualFreezeOverlay?.parentNode) _rbVisualFreezeOverlay.parentNode.removeChild(_rbVisualFreezeOverlay);
     _rbVisualFreezeOverlay = null;
     _rbVisualFreezeCtx = null;
+    _rbVisualSnapshotCanvas = null;
+    _rbVisualSnapshotCtx = null;
+    _rbVisualCandidateCanvas = null;
+    _rbVisualCandidateCtx = null;
+    _rbVisualProbeCanvas = null;
+    _rbVisualProbeCtx = null;
+    _rbVisualSnapshotFrame = -1;
   };
 
   // ── Freeze detection state ─────────────────────────────────────────
@@ -1976,6 +2109,7 @@
       const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;
       const nowMs = performance.now();
       for (const p of getActivePeers()) {
+        if (p.synthetic === true) continue;
         if (p.reconnecting || p.slot === null || p.slot === undefined || _peerPhantom[p.slot]) continue;
         if (_isLateJoinActivationGrace(p.slot)) continue;
         const peerPhase = _peerPhases[p.slot];
@@ -2023,6 +2157,7 @@
 
     return {
       ...phase,
+      localActive: phase.active,
       waitingPeerSlots,
       phaseMismatchSlots,
       active: phase.active || waitingPeerSlots.length > 0,
@@ -8842,6 +8977,8 @@
       // irreversible menu edges are never predicted.
       const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
       const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
+      const localGameplay = !_isSmashRemix() || menuPhase.gameplay;
+      const localInMenu = !!menuPhase.localActive;
       // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
       // Status 0 is dangerous only in controllable menus; scene=22/status=0
       // is battle loading and uses rollback/pacing instead of no-timeout lockstep.
@@ -8850,7 +8987,7 @@
       // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
       // input and split one peer into 1P while the other remains in Mode Select.
       const inMenu = menuPhase.active;
-      if (!_inGameplay && !inMenu && _bootDone) {
+      if (!_inGameplay && localGameplay && _bootDone) {
         _inGameplay = true;
         _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
         // Smash Remix defers rollback init until here — see line ~6900.
@@ -8863,7 +9000,7 @@
           _syncLog(`C-ROLLBACK firing deferred init at f=${_frameNum}`);
           fn();
         }
-      } else if (_inGameplay && inMenu) {
+      } else if (_inGameplay && localInMenu) {
         _inGameplay = false;
         if (_frameNum - _inGameplayLoggedAt > 60) {
           _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
@@ -9231,6 +9368,9 @@
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
       const _t0 = performance.now();
+      if (!_rbVisualFreezeActive && (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0) {
+        _captureRollbackVisualSnapshot();
+      }
       // C currently throttles at frame_adv >= delay + 2. Bias the value so
       // the actual cap is frame_adv >= delay: once the fast peer has consumed
       // the whole input buffer, wait instead of creating a guaranteed rollback.
@@ -9547,6 +9687,9 @@
       // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
       _checkAiInvariant(tickMod, 3);
       const _tStep = performance.now();
+      if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
+        _captureRollbackVisualSnapshot();
+      }
       // Post-step RNG reseed: the game advances RNG during the frame a
       // different number of times on each peer (from interrupt timing
       // differences). Re-seeding AFTER the step ensures the stored RNG
