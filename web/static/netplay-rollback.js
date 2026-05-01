@@ -2003,7 +2003,6 @@
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
-  let _stallLastResendAt = 0; // normal input-stall resend timestamp
   let _resendSent = false; // true once normal input-stall resend request sent
   // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
   // the game moving, but any real inputs that arrive later are dropped
@@ -7058,7 +7057,6 @@
     _inputLateLogTime = {};
     _resumeInputGuardUntil = 0;
     _stallStart = 0;
-    _stallLastResendAt = 0;
     _resendSent = false;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
@@ -8689,6 +8687,14 @@
                 `stalledMs=${Math.round(stallMs)} - holding strict menu lockstep`,
             );
           }
+          // Surface the wait visually after the same 5s delay the other
+          // strict-menu paths use. Self-throttled inside _emitStrictMenuWait
+          // (returns early on stalledMs<5000 and on duplicate waitKey within
+          // 1s) so calling every tick is fine. Without this, a phase-lock
+          // stall can sit indefinitely with no UI feedback while the
+          // boot-sync and JS-menu paths show the overlay — that asymmetry
+          // is exactly what Greptile flagged as inconsistent.
+          _emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);
           return;
         }
       } else {
@@ -10137,7 +10143,6 @@
             `INPUT-GAP-FILL applyFrame=${applyFrame} slots=[${gapSlots.join(',')}] — peer ahead, immediate fabricate`,
           );
           _stallStart = 0;
-          _stallLastResendAt = 0;
           return; // re-enter next tick with input now present
         }
 
@@ -10168,7 +10173,6 @@
           // STALL -- remote input not here yet (normal path for live peers)
           if (_stallStart === 0) {
             _stallStart = now;
-            _stallLastResendAt = 0;
             _resendSent = false;
             // Log first stall occurrence with full state
             const rBufSizes = {};
@@ -10230,7 +10234,6 @@
               }
             }
             _stallStart = 0;
-            _stallLastResendAt = 0;
           } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
             // Stage 2 — request resend from missing peers (once per stall)
             _resendSent = true;
@@ -10259,7 +10262,6 @@
         } // end normal stall path (else of allMissingArePhantom)
       } else {
         _stallStart = 0;
-        _stallLastResendAt = 0;
         _resendSent = false;
         _resetStrictMenuResends();
         _clearStrictMenuWait();

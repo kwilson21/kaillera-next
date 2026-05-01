@@ -62,9 +62,11 @@ def _run_migrations(db_path: str) -> None:
         script = ScriptDirectory.from_config(cfg)
         head = script.get_current_head()
         conn = sqlite3.connect(db_path)
-        conn.execute("UPDATE alembic_version SET version_num = ?", (head,))
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("UPDATE alembic_version SET version_num = ?", (head,))
+            conn.commit()
+        finally:
+            conn.close()
         log.info("Stamped alembic_version to %s, retrying migrations", head)
         command.upgrade(cfg, "head")
 
