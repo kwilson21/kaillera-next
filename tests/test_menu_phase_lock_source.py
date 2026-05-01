@@ -62,8 +62,9 @@ def test_phase_lock_resolution_clears_strict_menu_wait():
     """
     src = LOCKSTEP_JS.read_text()
 
-    # The resolution branch resets these three pieces of state in order.
-    # Locate it and require _clearStrictMenuWait inside the same block.
+    # The full-resolution branch resets these three pieces of state in
+    # order. Locate it and require _clearStrictMenuWait inside the same
+    # block.
     needle = (
         "        _phaseLockStallKey = '';\n"
         "        _phaseLockStallStartTime = 0;\n"
@@ -75,6 +76,33 @@ def test_phase_lock_resolution_clears_strict_menu_wait():
     assert "_clearStrictMenuWait()" in block, (
         "phase-lock resolution must clear the strict-menu overlay "
         "(mirror the boot-sync/JS-menu paths)"
+    )
+
+
+def test_phase_lock_middle_case_clears_strict_menu_wait():
+    """Regression guard for codex follow-up (commit after b54d1be):
+    in addition to the full-resolution `else` branch, the inner
+    fallthrough — phaseLockSlots > 0 but phaseWaitSlots === 0 — must
+    also clear the overlay. Otherwise transitioning from "waiting on
+    Player X" to "mismatch still present, no one currently blocking"
+    leaves the overlay stuck.
+    """
+    src = LOCKSTEP_JS.read_text()
+
+    # The wait branch ends with `_emitStrictMenuWait(...); return; }` and
+    # the middle case falls through right after that closing brace. The
+    # _clearStrictMenuWait call must appear between the wait-branch's
+    # closing `}` and the outer `else {` that handles full resolution.
+    emit_idx = src.find(
+        "_emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);"
+    )
+    assert emit_idx >= 0, "phase-lock wait emit not found"
+    outer_else_idx = src.find("} else {", emit_idx)
+    assert outer_else_idx >= 0, "phase-lock outer else not found"
+    middle_block = src[emit_idx:outer_else_idx]
+    assert "_clearStrictMenuWait()" in middle_block, (
+        "phase-lock middle case (mismatch present, no one waiting) must "
+        "clear the overlay so it doesn't stick on transition"
     )
 
 

@@ -8697,6 +8697,14 @@
           _emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);
           return;
         }
+        // Middle case (codex follow-up): phaseLockSlots > 0 (mismatch still
+        // present) but phaseWaitSlots === 0 (nobody is currently blocking
+        // input) — the function falls through past this block. If we just
+        // emitted the wait overlay on a prior tick, transitioning into this
+        // state would leave the overlay stuck because the outer `else` only
+        // fires when phaseLockSlots itself empties. Clear here too so the
+        // overlay matches "is anyone actually waited on right now?".
+        _clearStrictMenuWait();
       } else {
         _phaseLockStallKey = '';
         _phaseLockStallStartTime = 0;
