@@ -475,6 +475,12 @@
 
   const _stopEmu = () => {
     if (!window.EJS_emulator && !_loaderInjected) return;
+    // eslint-disable-next-line no-console
+    console.log('[demo] _stopEmu: tearing down', {
+      hasEmu: !!window.EJS_emulator,
+      loaderInjected: _loaderInjected,
+      engineStarted: _engineStarted,
+    });
     // Stop auto-compare first — its setInterval would otherwise keep flipping
     // the rollback toggle on a torn-down engine.
     _stopAutoCompare();
@@ -637,6 +643,12 @@
       return;
     }
     try {
+      // eslint-disable-next-line no-console
+      console.log('[demo] _loadRomFile:', file.name, {
+        engineStarted: _engineStarted,
+        hasEmu: !!window.EJS_emulator,
+        loaderInjected: _loaderInjected,
+      });
       _showLoading(true);
       _setStatus(`Reading ${file.name}`);
       const bytes = await _readFile(file);
@@ -651,6 +663,19 @@
       _showLoading(false);
       _setStatus('ROM loaded');
       _startEngine();
+      // Diagnostics for the post-stop reload path.
+      setTimeout(() => {
+        const gp = document.getElementById('gesture-prompt');
+        // eslint-disable-next-line no-console
+        console.log('[demo] post-load 1s state', {
+          engineStarted: _engineStarted,
+          hasEmu: !!window.EJS_emulator,
+          loaderInjected: _loaderInjected,
+          bootInFlight: _emulatorBootInFlight,
+          gestureVisible: gp ? !gp.classList.contains('hidden') : 'no-element',
+          phase: window.NetplayRollback?.getHudCounters?.()?.phase ?? 'unknown',
+        });
+      }, 1000);
     } catch (err) {
       _showLoading(false);
       _setStatus(err?.message || 'ROM load failed');
