@@ -53,6 +53,31 @@ def test_match_loading_transition_is_not_strict_menu_lockstep():
     assert "if (menuLockstepPhase.strictInputLockstep)" in src
 
 
+def test_phase_lock_resolution_clears_strict_menu_wait():
+    """Regression guard for Greptile P1 (commit after 582a479): the
+    phase-lock-wait branch emits _emitStrictMenuWait, so the symmetric
+    resolution branch (the `else` next to `if (phaseLockSlots.length)`)
+    must call _clearStrictMenuWait — otherwise the overlay sticks for
+    the rest of the session once the phase mismatch resolves.
+    """
+    src = LOCKSTEP_JS.read_text()
+
+    # The resolution branch resets these three pieces of state in order.
+    # Locate it and require _clearStrictMenuWait inside the same block.
+    needle = (
+        "        _phaseLockStallKey = '';\n"
+        "        _phaseLockStallStartTime = 0;\n"
+        "        _phaseLockLastWaitLogAt = 0;\n"
+    )
+    idx = src.find(needle)
+    assert idx >= 0, "phase-lock resolution branch not found in expected shape"
+    block = src[idx : idx + 600]
+    assert "_clearStrictMenuWait()" in block, (
+        "phase-lock resolution must clear the strict-menu overlay "
+        "(mirror the boot-sync/JS-menu paths)"
+    )
+
+
 def test_strict_menu_wait_has_visible_overlay():
     rollback_src = LOCKSTEP_JS.read_text()
     play_src = PLAY_JS.read_text()

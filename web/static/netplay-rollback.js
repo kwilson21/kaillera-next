@@ -8701,6 +8701,11 @@
         _phaseLockStallKey = '';
         _phaseLockStallStartTime = 0;
         _phaseLockLastWaitLogAt = 0;
+        // Mirror the boot-sync and JS-menu paths: when the stall resolves
+        // naturally, drop the "Waiting on PlayerName" overlay. Without this
+        // the overlay sticks for the rest of the session because the only
+        // other clear sites are reset/teardown paths, not natural resolution.
+        _clearStrictMenuWait();
       }
       // Boot sync: legacy savestate startup can still need one host state push
       // after boot grace. kn-sync startup already loaded the host's authoritative
