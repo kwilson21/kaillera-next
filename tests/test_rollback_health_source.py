@@ -78,7 +78,7 @@ def test_retroarch_deterministic_patch_is_enforced_by_build():
 
     assert "FATAL: RetroArch deterministic timing patch failed" in build_src
     assert "_kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick" in patch_src
-    assert "ASYNCIFY_REMOVE ?= [\"retro_run\"" in patch_src
+    assert 'ASYNCIFY_REMOVE ?= ["retro_serialize","retro_unserialize","kn_pre_tick","kn_post_tick"' in patch_src
     assert "window._knPreventRetroArchVisibilityPause" in patch_src
 
 
@@ -235,6 +235,39 @@ def test_host_authoritative_rb_init_catches_guest_state_up_before_init():
     assert "_requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');" in src
     assert "_requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');" in src
     assert "_requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');" in src
+
+
+def test_failed_frame_step_does_not_advance_bookkeeping():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "const _runStepOneFrame = (branch) => {" in src
+    assert "const stepped = stepOneFrame();" in src
+    assert "STEP-NORUN f=${_frameNum} branch=${branch}" in src
+    assert "_syncLog(_formatStepThrew(branch, e));" in src
+
+    assert "if (!_runStepOneFrame('replay')) return;" in src
+    assert "if (!_runStepOneFrame('normal')) return;" in src
+    assert "if (!_runStepOneFrame('fallback')) return;" in src
+
+    fallback_idx = src.index("if (!_runStepOneFrame('fallback')) return;")
+    increment_idx = src.index("_frameNum++;", fallback_idx)
+    assert fallback_idx < increment_idx
+
+    assert "const consumedRemoteInputSlots = [];" in src
+    assert "consumedRemoteInputSlots.push(peerSlot);" in src
+    delete_idx = src.index("delete _remoteInputs[peerSlot][applyFrame];", fallback_idx)
+    assert fallback_idx < delete_idx < increment_idx
+
+
+def test_asyncify_remove_preserves_normal_frame_fiber_stack():
+    build_src = (ROOT / "build/build.sh").read_text()
+    match = re.search(r"KN_ASYNCIFY_REMOVE='\[(.*?)\]'", build_src)
+    assert match, "KN_ASYNCIFY_REMOVE assignment not found"
+    removed = set(re.findall(r'"([^"]+)"', match.group(1)))
+
+    assert {"retro_serialize", "retro_unserialize", "kn_pre_tick", "kn_post_tick"} <= removed
+    assert not {"retro_run", "runloop_iterate", "core_run", "emscripten_mainloop"} & removed
+    assert "loading-frame fiber switch into a WASM" in build_src
 
 
 def test_stall_and_input_logs_use_cheap_slot_formatting():

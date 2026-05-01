@@ -106,6 +106,19 @@ def test_phase_lock_middle_case_clears_strict_menu_wait():
     )
 
 
+def test_phase_lock_wait_does_not_drive_gameplay_lifecycle():
+    """A peer phase wait is a stall condition, not proof we left gameplay."""
+    src = LOCKSTEP_JS.read_text()
+
+    assert "lifecycleActive: phase.active," in src
+    assert "active: phase.active || waitingPeerSlots.length > 0," in src
+    assert "const inMenu = menuPhase.lifecycleActive;" in src
+
+    in_menu_idx = src.index("const inMenu = menuPhase.lifecycleActive;")
+    transition_idx = src.index("MENU→GAMEPLAY transition", in_menu_idx)
+    assert in_menu_idx < transition_idx
+
+
 def test_strict_menu_wait_has_visible_overlay():
     rollback_src = LOCKSTEP_JS.read_text()
     play_src = PLAY_JS.read_text()

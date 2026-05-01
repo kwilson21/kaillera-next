@@ -105,12 +105,14 @@ if [ -d "${PATCHES_DIR}" ]; then
             { echo "FATAL: RetroArch deterministic timing patch failed"; exit 1; }
     fi
 
-    # ASYNCIFY_REMOVE: strip Asyncify instrumentation from functions that must
-    # run synchronously. Without this, Asyncify save/restore bookkeeping in
-    # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
-    # video callback to silently fail (canvas freeze).
+    # ASYNCIFY_REMOVE: strip Asyncify instrumentation from rollback/state helper
+    # functions that must run synchronously. Keep the normal frame path
+    # (retro_run/runloop_iterate/core_run/emscripten_mainloop) instrumented:
+    # the mupen64plus core uses Emscripten fibers there, and removing Asyncify
+    # from that stack can turn a normal loading-frame fiber switch into a WASM
+    # `unreachable` abort.
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
+    KN_ASYNCIFY_REMOVE='["retro_serialize","retro_unserialize","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 

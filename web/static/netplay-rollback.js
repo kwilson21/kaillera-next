@@ -1967,6 +1967,7 @@
       ...phase,
       waitingPeerSlots,
       phaseMismatchSlots,
+      lifecycleActive: phase.active,
       active: phase.active || waitingPeerSlots.length > 0,
     };
   };
@@ -6877,6 +6878,40 @@
     return true;
   };
 
+  let _stepNoRunLastLogAt = 0;
+  const _runStepOneFrame = (branch) => {
+    _inDeterministicStep = true;
+    try {
+      const stepped = stepOneFrame();
+      if (!stepped) {
+        const nowMs = window.APISandbox?.nativePerfNow ? window.APISandbox.nativePerfNow() : performance.now();
+        if (nowMs - _stepNoRunLastLogAt >= 1000) {
+          _stepNoRunLastLogAt = nowMs;
+          _syncLog(
+            `STEP-NORUN f=${_frameNum} branch=${branch} ` +
+              `manual=${_manualMode} pending=${!!_pendingRunner} wasmActive=${_wasmStepActive}`,
+          );
+        }
+      }
+      return stepped;
+    } catch (e) {
+      _wasmStepActive = false;
+      _syncLog(_formatStepThrew(branch, e));
+      console.error(`[lockstep] stepOneFrame threw (${branch}):`, e);
+
+      // A non-abort throw can be a stale Emscripten runner after heap growth
+      // or state load. Try to recapture it, but do not pretend a frame ran.
+      const msg = `${e?.message || e}`;
+      if (!msg.includes('Aborted(')) {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        if (mod) recaptureManualRunner(mod, `stepOneFrame:${branch}:throw`);
+      }
+      return false;
+    } finally {
+      _inDeterministicStep = false;
+    }
+  };
+
   // -- True lockstep tick loop -----------------------------------------------
   //
   // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
@@ -8775,7 +8810,7 @@
       // scene_curr lets us enter strict lockstep at Title/Mode Select/1P/VS
       // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
       // input and split one peer into 1P while the other remains in Mode Select.
-      const inMenu = menuPhase.active;
+      const inMenu = menuPhase.lifecycleActive;
       if (!_inGameplay && !inMenu && _bootDone) {
         _inGameplay = true;
         _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
@@ -9350,19 +9385,7 @@
           _resetAudioCallsSinceRb++;
         }
         _syncRNGSeed(tickMod, _frameNum);
-        // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-        // performance.now() override stays armed and returns frozen WASM
-        // cycle time, which freezes the setInterval tick scheduler and the
-        // entire game loop. See netplay-lockstep.js:6873.
-        _inDeterministicStep = true;
-        try {
-          stepOneFrame();
-        } catch (e) {
-          _syncLog(_formatStepThrew('replay', e));
-          console.error('[lockstep] stepOneFrame threw (replay):', e);
-        } finally {
-          _inDeterministicStep = false;
-        }
+        if (!_runStepOneFrame('replay')) return;
         _syncRNGSeed(tickMod, _frameNum);
         // Replay audio was generated to keep emulator state faithful, but it
         // is intentionally not fed to WebAudio from the replay branch. The
@@ -9429,19 +9452,7 @@
       }
       _syncRNGSeed(tickMod, _frameNum);
       const _tStep0 = performance.now();
-      // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-      // performance.now() override stays armed and returns frozen WASM
-      // cycle time, which freezes the setInterval tick scheduler and the
-      // entire game loop. See netplay-lockstep.js:6873.
-      _inDeterministicStep = true;
-      try {
-        stepOneFrame();
-      } catch (e) {
-        _syncLog(_formatStepThrew('normal', e));
-        console.error('[lockstep] stepOneFrame threw (normal):', e);
-      } finally {
-        _inDeterministicStep = false;
-      }
+      if (!_runStepOneFrame('normal')) return;
       // 2026-04-29 audio-diag: invariant check post-step. Counters tick
       // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
       _checkAiInvariant(tickMod, 3);
@@ -10281,6 +10292,7 @@
     const menuLockstepPhase = _readStrictPhaseLock(_frameNum > BOOT_GRACE_FRAMES);
     const inputPeers = getInputPeers(menuLockstepPhase.strictInputLockstep);
     const applyFrame = _frameNum - DELAY_FRAMES;
+    const consumedRemoteInputSlots = [];
     if (applyFrame >= 0) {
       let allArrived = true;
       const _missingSlots = [];
@@ -10496,7 +10508,7 @@
         const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
         writeInputToMemory(peerSlot, remoteInput);
         _consumeLateJoinSeededInput(peerSlot, applyFrame);
-        if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+        if (_remoteInputs[peerSlot]) consumedRemoteInputSlots.push(peerSlot);
       }
 
       // Also write input for roster slots that have no peer object yet
@@ -10624,18 +10636,9 @@
       _resetAudioCallsSinceRb++;
     }
     _syncRNGSeed(tickMod, _frameNum);
-    // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-    // performance.now() override stays armed and returns frozen WASM
-    // cycle time, which freezes the setInterval tick scheduler and the
-    // entire game loop. See netplay-lockstep.js:6873.
-    _inDeterministicStep = true;
-    try {
-      stepOneFrame();
-    } catch (e) {
-      _syncLog(_formatStepThrew('fallback', e));
-      console.error('[lockstep] stepOneFrame threw (fallback):', e);
-    } finally {
-      _inDeterministicStep = false;
+    if (!_runStepOneFrame('fallback')) return;
+    for (const peerSlot of consumedRemoteInputSlots) {
+      if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
     }
     feedAudio();
 
