@@ -104,8 +104,8 @@
  *     5. kn_pre_tick(): C engine saves state to ring buffer, stores local
  *        input, predicts missing remote input (last-known). If a pending
  *        misprediction was detected by the drain above, restores state and
- *        replays 1 frame via C retro_run (amortized — catches up over
- *        multiple ticks instead of burst-replaying all at once).
+ *        replays through the same JS stepOneFrame path, optionally using a
+ *        bounded mini-burst so catch-up can finish faster when budget allows.
  *        Returns 2 if catching up (JS steps emulator), 0 for normal.
  *     6. Read inputs from C ring buffer via kn_get_input(), write to WASM
  *        via writeInputToMemory (same path as Classic)
@@ -490,8 +490,36 @@
   let _rbVisualFreezeActive = false;
   let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
+  let _rbVisualFreezeSerial = 0;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
+  const RB_REPLAY_BURST_MAX_FRAMES = (() => {
+    try {
+      const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
+      const parsed = raw === null ? 1 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 1;
+      return Math.max(1, Math.min(8, parsed));
+    } catch (_) {
+      return 1;
+    }
+  })();
+  const RB_REPLAY_BURST_BUDGET_MS = (() => {
+    try {
+      const raw = _urlParams.get('replayBurstBudgetMs') ?? localStorage.getItem('kn-replay-burst-budget-ms');
+      const parsed = raw === null ? 10 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 10;
+      return Math.max(1, Math.min(16, parsed));
+    } catch (_) {
+      return 10;
+    }
+  })();
+  const RB_VISUAL_FADE_DURING_REPLAY = (() => {
+    try {
+      if (_urlParams.get('replayVisualFadeDuring') === '0') return false;
+      if (localStorage.getItem('kn-replay-visual-fade-during') === '0') return false;
+    } catch (_) {}
+    return true;
+  })();
   const RB_VISUAL_FADE_MS = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeMs') ?? localStorage.getItem('kn-replay-visual-fade-ms');
@@ -719,7 +747,24 @@
       overlay.style.opacity = '1';
       overlay.style.display = 'block';
       overlay.dataset.depth = String(depth);
+      const serial = ++_rbVisualFreezeSerial;
+      overlay.dataset.serial = String(serial);
       _rbVisualFreezeActive = true;
+      if (RB_VISUAL_FADE_DURING_REPLAY && RB_VISUAL_FADE_MS > 0) {
+        const replayFadeMs = Math.max(45, Math.min(140, Math.max(RB_VISUAL_FADE_MS, depth * 14)));
+        const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
+        raf(() => {
+          if (
+            !_rbVisualFreezeActive ||
+            _rbVisualFreezeOverlay !== overlay ||
+            overlay.dataset.serial !== String(serial)
+          ) {
+            return;
+          }
+          overlay.style.transition = `opacity ${replayFadeMs}ms linear`;
+          overlay.style.opacity = '0';
+        });
+      }
       return true;
     } catch (e) {
       _rbVisualFreezeFailures++;
@@ -7258,6 +7303,138 @@
     return true;
   };
 
+  const _refreshRunnerAfterRollbackRestore = (tickMod) => {
+    // ── R1: runner continuity across rollback restore ─────────────────
+    // kn_pre_tick's rollback branch calls retro_unserialize directly,
+    // which invalidates the Emscripten rAF runner captured by JS's
+    // overrideRAF interceptor. Without re-capture, stepOneFrame in replay
+    // is a silent no-op and the replay never runs.
+    // The loadState path at line ~8221 already does this; we mirror
+    // here for the C-level rollback path.
+    // See docs/netplay-invariants.md §R1.
+    if (!tickMod?._kn_rollback_did_restore?.()) return;
+    const gm = window.EJS_emulator?.gameManager;
+    if (gm?.Module) {
+      gm.Module.pauseMainLoop();
+      gm.Module.resumeMainLoop();
+      if (gm.Module.updateMemoryViews) {
+        gm.Module.updateMemoryViews();
+      } else if (gm.Module._emscripten_notify_memory_growth) {
+        gm.Module._emscripten_notify_memory_growth(0);
+      }
+    }
+  };
+
+  const _runCReplayFrame = (tickMod) => {
+    // C wrote inputs + saved state for the replay frame. JS now steps
+    // the emulator via stepOneFrame() — the SAME code path as normal play.
+    // Pre-frame setup (reset audio, RNG sync) must match the normal path
+    // exactly — setup_frame() was removed from C to avoid double-calling
+    // normalize/reset which caused progressive state divergence.
+    //
+    // CRITICAL: sync _frameNum with C's rb.frame BEFORE stepOneFrame().
+    // On the first replay frame of a rollback, _frameNum is still the
+    // pre-rollback value while C has already rewound rb.frame to the
+    // rollback target. stepOneFrame() uses _frameNum for frame time
+    // and event queue normalization. If _frameNum is wrong, each peer
+    // applies a DIFFERENT wrong frame time to the same logical frame
+    // (because each detects the misprediction at a different absolute
+    // frame), causing event queue divergence that never recovers.
+    _frameNum = tickMod._kn_get_frame();
+    KNState.frameNum = _frameNum;
+    if (tickMod._kn_reset_audio) {
+      tickMod._kn_reset_audio();
+      _resetAudioCallsSinceRb++;
+    }
+    _syncRNGSeed(tickMod, _frameNum);
+    // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
+    // performance.now() override stays armed and returns frozen WASM
+    // cycle time, which freezes the setInterval tick scheduler and the
+    // entire game loop. See netplay-lockstep.js:6873.
+    _inDeterministicStep = true;
+    try {
+      stepOneFrame();
+    } catch (e) {
+      _syncLog(_formatStepThrew('replay', e));
+      console.error('[lockstep] stepOneFrame threw (replay):', e);
+    } finally {
+      _inDeterministicStep = false;
+    }
+    _syncRNGSeed(tickMod, _frameNum);
+    // Replay audio was generated to keep emulator state faithful, but it
+    // is intentionally not fed to WebAudio from the replay branch. The
+    // next normal frame reset drops any leftover replay PCM without
+    // making final-frame diagnostics look like the core never produced
+    // samples.
+    const newFrame = tickMod._kn_post_tick();
+    _frameNum = newFrame;
+    KNState.frameNum = _frameNum;
+    if (window.KNDesync) KNDesync.tick(_frameNum);
+  };
+
+  const _finishCReplay = (tickMod) => {
+    if (!_rbReplayLogged) return;
+    _hideRollbackVisualFreeze();
+    // Replay finished — broadcast the gameplay hash so the peer can
+    // verify the rollback restoration produced identical game state.
+    // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
+    // stocks, timer, RNG) — immune to audio/video/heap noise.
+    const hashFrame = _frameNum;
+    const checkFrame = hashFrame;
+    const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
+    const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
+    const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
+    const hiddenFpDone = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
+    const sfStateDone = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
+    const taintedCountDone = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
+    const rbCheckGameplay = _isRbCheckGameplayPhase();
+    _syncLog(
+      `C-REPLAY done: caught up at f=${_frameNum} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
+    );
+    if (rbCheckGameplay) {
+      for (const p of getActivePeers()) {
+        if (p.dc?.readyState === 'open') {
+          try {
+            p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
+          } catch (_) {}
+        }
+      }
+    }
+    // Schedule one more hash broadcast on the NEXT tick so we capture
+    // the state of the FIRST frame after replay completes — that's the
+    // frame most likely to expose "rollback restoration was lossy"
+    // bugs because it's the first divergence point.
+    _rbPendingPostRollbackHash = rbCheckGameplay;
+    _rbReplayLogged = false;
+    _lastRollbackDoneFrame = _frameNum;
+    _resetAudioCallsSinceRb = 0;
+    if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(0);
+  };
+
+  const _prepareCReplayFrame = (tickMod, localInput, frameAdvForC) => {
+    let next = tickMod._kn_pre_tick(
+      localInput.buttons,
+      localInput.lx,
+      localInput.ly,
+      localInput.cx,
+      localInput.cy,
+      frameAdvForC,
+    );
+    _refreshRunnerAfterRollbackRestore(tickMod);
+    _frameNum = tickMod._kn_get_frame();
+    KNState.frameNum = _frameNum;
+    const depth = tickMod._kn_get_replay_depth?.() ?? 0;
+    if (depth > 0 && next !== 2) {
+      const rbFrame = tickMod._kn_get_frame?.() ?? -1;
+      _syncLog(
+        `RB-INVARIANT-FIXUP f=${_frameNum} replayDepth=${depth} ` +
+          `catchingUp=${next} rbFrame=${rbFrame} tick=${performance.now().toFixed(1)} — forcing replay step`,
+      );
+      next = 2;
+    }
+    return next;
+  };
+
   // -- True lockstep tick loop -----------------------------------------------
   //
   // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
@@ -9386,26 +9563,7 @@
         localInput.cy,
         _frameAdvForC,
       );
-      // ── R1: runner continuity across rollback restore ─────────────────
-      // kn_pre_tick's rollback branch calls retro_unserialize directly,
-      // which invalidates the Emscripten rAF runner captured by JS's
-      // overrideRAF interceptor. Without re-capture, stepOneFrame in the
-      // catchingUp==2 branch is a silent no-op and the replay never runs.
-      // The loadState path at line ~8221 already does this; we mirror
-      // here for the C-level rollback path.
-      // See docs/netplay-invariants.md §R1.
-      if (tickMod._kn_rollback_did_restore?.()) {
-        const gm = window.EJS_emulator?.gameManager;
-        if (gm?.Module) {
-          gm.Module.pauseMainLoop();
-          gm.Module.resumeMainLoop();
-          if (gm.Module.updateMemoryViews) {
-            gm.Module.updateMemoryViews();
-          } else if (gm.Module._emscripten_notify_memory_growth) {
-            gm.Module._emscripten_notify_memory_growth(0);
-          }
-        }
-      }
+      _refreshRunnerAfterRollbackRestore(tickMod);
       // ── R3: Fatal stale-ring poll ────────────────────────────────────
       // If kn_feed_input just detected a misprediction for a frame
       // whose ring slot was overwritten, log FATAL-RING-STALE with full
@@ -9499,43 +9657,7 @@
         if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(0);
         _syncLog(`REPLAY-AUDIO-MUTE: RSP audio stays mode=0; WebAudio feed muted for replay depth=${replayDepth}`);
       }
-      if (_rbReplayLogged && catchingUp !== 2) {
-        _hideRollbackVisualFreeze();
-        // Replay finished — broadcast the gameplay hash so the peer can
-        // verify the rollback restoration produced identical game state.
-        // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
-        // stocks, timer, RNG) — immune to audio/video/heap noise.
-        const hashFrame = _frameNum;
-        const checkFrame = hashFrame;
-        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-        const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
-        const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
-        const hiddenFpDone = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
-        const sfStateDone = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
-        const taintedCountDone = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
-        const rbCheckGameplay = _isRbCheckGameplayPhase();
-        _syncLog(
-          `C-REPLAY done: caught up at f=${_frameNum} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
-        );
-        if (rbCheckGameplay) {
-          for (const p of getActivePeers()) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-              } catch (_) {}
-            }
-          }
-        }
-        // Schedule one more hash broadcast on the NEXT tick so we capture
-        // the state of the FIRST frame after replay completes — that's the
-        // frame most likely to expose "rollback restoration was lossy"
-        // bugs because it's the first divergence point.
-        _rbPendingPostRollbackHash = rbCheckGameplay;
-        _rbReplayLogged = false;
-        _lastRollbackDoneFrame = _frameNum;
-        _resetAudioCallsSinceRb = 0;
-        if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(0);
-      }
+      if (_rbReplayLogged && catchingUp !== 2) _finishCReplay(tickMod);
 
       if (catchingUp === 3) {
         // Check if all peers are phantom — if so, ignore C-level throttle
@@ -9571,51 +9693,22 @@
       }
 
       if (catchingUp === 2) {
-        // C wrote inputs + saved state for the replay frame. JS now steps
-        // the emulator via stepOneFrame() — the SAME code path as normal play.
-        // Pre-frame setup (reset audio, RNG sync) must match the normal path
-        // exactly — setup_frame() was removed from C to avoid double-calling
-        // normalize/reset which caused progressive state divergence.
-        //
-        // CRITICAL: sync _frameNum with C's rb.frame BEFORE stepOneFrame().
-        // On the first replay frame of a rollback, _frameNum is still the
-        // pre-rollback value while C has already rewound rb.frame to the
-        // rollback target. stepOneFrame() uses _frameNum for frame time
-        // and event queue normalization. If _frameNum is wrong, each peer
-        // applies a DIFFERENT wrong frame time to the same logical frame
-        // (because each detects the misprediction at a different absolute
-        // frame), causing event queue divergence that never recovers.
-        _frameNum = tickMod._kn_get_frame();
-        KNState.frameNum = _frameNum;
-        if (tickMod._kn_reset_audio) {
-          tickMod._kn_reset_audio();
-          _resetAudioCallsSinceRb++;
+        const burstStart = performance.now();
+        let burstSteps = 0;
+        let replayDone = false;
+        while (catchingUp === 2) {
+          _runCReplayFrame(tickMod);
+          burstSteps++;
+          const replayRemaining = tickMod._kn_get_replay_depth?.() ?? 0;
+          if (replayRemaining <= 0) {
+            replayDone = true;
+            break;
+          }
+          const burstMs = performance.now() - burstStart;
+          if (burstSteps >= RB_REPLAY_BURST_MAX_FRAMES || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
+          catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
         }
-        _syncRNGSeed(tickMod, _frameNum);
-        // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-        // performance.now() override stays armed and returns frozen WASM
-        // cycle time, which freezes the setInterval tick scheduler and the
-        // entire game loop. See netplay-lockstep.js:6873.
-        _inDeterministicStep = true;
-        try {
-          stepOneFrame();
-        } catch (e) {
-          _syncLog(_formatStepThrew('replay', e));
-          console.error('[lockstep] stepOneFrame threw (replay):', e);
-        } finally {
-          _inDeterministicStep = false;
-        }
-        _syncRNGSeed(tickMod, _frameNum);
-        // Replay audio was generated to keep emulator state faithful, but it
-        // is intentionally not fed to WebAudio from the replay branch. The
-        // next normal frame reset drops any leftover replay PCM without
-        // making final-frame diagnostics look like the core never produced
-        // samples.
-        // Advance C frame counter
-        const newFrame = tickMod._kn_post_tick();
-        _frameNum = newFrame;
-        KNState.frameNum = _frameNum;
-        if (window.KNDesync) KNDesync.tick(_frameNum);
+        if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
         // Overlay
         if (_frameNum % 15 === 0) {
           const dbg = document.getElementById('np-debug');
