@@ -102,15 +102,17 @@ if [ -d "${PATCHES_DIR}" ]; then
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
         git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
-            echo "    RetroArch patch already applied or failed"
+            { echo "FATAL: RetroArch deterministic timing patch failed"; exit 1; }
     fi
 
-    # ASYNCIFY_REMOVE: strip Asyncify instrumentation from functions that must
-    # run synchronously. Without this, Asyncify save/restore bookkeeping in
-    # kn_pre_tick corrupts the Emscripten runner state, causing retro_run's
-    # video callback to silently fail (canvas freeze).
+    # ASYNCIFY_REMOVE: strip Asyncify instrumentation from rollback/state helper
+    # functions that must run synchronously. Keep the normal frame path
+    # (retro_run/runloop_iterate/core_run/emscripten_mainloop) instrumented:
+    # the mupen64plus core uses Emscripten fibers there, and removing Asyncify
+    # from that stack can turn a normal loading-frame fiber switch into a WASM
+    # `unreachable` abort.
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_run","retro_serialize","retro_unserialize","runloop_iterate","core_run","emscripten_mainloop","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
+    KN_ASYNCIFY_REMOVE='["retro_serialize","retro_unserialize","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
@@ -220,6 +222,18 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Applied audio backend skip-output patch" || \
             echo "    WARN: audio backend skip-output patch failed"
     fi
+
+    # NOTE: glsm-unbind-pixel-pack.patch is DELIBERATELY not wired here.
+    # The naive `glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)` in glsm_state_unbind
+    # bypasses GLideN64's CachedBindBuffer JS-side cache, leaving GLideN64
+    # convinced its PBO is still bound while the real binding has been
+    # reset. The next CachedBindBuffer.bind() is a no-op (cache thinks
+    # nothing changed), so GLideN64's readback path operates on a null
+    # binding and corrupts the guest's framebuffer — observed as the
+    # guest freezing the moment the match countdown ends. The warning is
+    # silenced by the JS-side guard in kn-diagnostics.js (skip readPixels
+    # when a PBO is bound) which avoids touching GL state entirely. The
+    # patch file is kept under build/patches/ for reference but unused.
 
     # 2026-04-29 audio-diag: counters in ai_controller.c and audio_backend
     # plus kn_dump_audio_state in main.c. Idempotent; runs after both
@@ -618,6 +632,15 @@ KNHLE_EOF
         git apply "${PATCHES_DIR}/gliden64-rdram-taint.patch" && \
             echo "    Applied GLideN64 taint patch" || \
             echo "    WARN: GLideN64 taint patch failed"
+    fi
+
+    # WebGL2 PBO hygiene: keep GLideN64's GL_PIXEL_PACK_BUFFER binding scoped
+    # to its own readback calls. This leaves the shared WebGL context readable
+    # by frontend diagnostics without bypassing CachedBindBuffer.
+    if [ -f "${PATCHES_DIR}/gliden64-pbo-scope.patch" ]; then
+        git apply "${PATCHES_DIR}/gliden64-pbo-scope.patch" && \
+            echo "    Applied GLideN64 PBO scope patch" || \
+            echo "    WARN: GLideN64 PBO scope patch failed"
     fi
 
     # C-level rollback engine: copy kn_rollback.c/h into the source tree

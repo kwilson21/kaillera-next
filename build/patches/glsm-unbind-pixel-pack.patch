@@ -1,0 +1,21 @@
+diff --git a/libretro-common/glsm/glsm.c b/libretro-common/glsm/glsm.c
+index a626894..4d424e9 100644
+--- a/libretro-common/glsm/glsm.c
++++ b/libretro-common/glsm/glsm.c
+@@ -3280,6 +3280,16 @@ static void glsm_state_unbind(void)
+     }
+ 
+    glBindFramebuffer(RARCH_GL_FRAMEBUFFER, 0);
++
++   /* kaillera-next: unbind GL_PIXEL_PACK_BUFFER at frame boundary.
++    * GLideN64's color-buffer-to-RDRAM readback path leaves a PBO bound
++    * after retro_run yields back to the Emscripten event loop, which
++    * makes any host-side gl.readPixels(..., Uint8Array) call (used by
++    * the netplay desync hash) spam INVALID_OPERATION because WebGL2
++    * forbids the typed-array overload while a pack buffer is bound.
++    * GLSM resets every other piece of state at frame boundary; the
++    * pixel-pack binding was the only omission. */
++   glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+ }
+ 
+ static bool glsm_state_ctx_destroy(void *data)

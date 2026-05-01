@@ -1,0 +1,119 @@
+diff --git a/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp b/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
+index 66c8f62..b1b20b0 100644
+--- a/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
++++ b/GLideN64/src/BufferCopy/ColorBufferToRDRAM.cpp
+@@ -203,8 +203,10 @@ void ColorBufferToRDRAM::_copy(u32 _startAddress, u32 _endAddress, bool _sync)
+ 
+ 	const u8* pPixels = m_pCurFrameBuffer->readPixels(x0, y0, width, height, m_pCurFrameBuffer->m_size, _sync);
+ 	frameBufferList().setCurrentDrawBuffer();
+-	if (pPixels == nullptr)
++	if (pPixels == nullptr) {
++		m_pCurFrameBuffer->cleanUp();
+ 		return;
++	}
+ 
+ 	if (m_pCurFrameBuffer->m_size == G_IM_SIZ_32b) {
+ 		u32 *ptr_src = (u32*)pPixels;
+diff --git a/GLideN64/src/Graphics/OpenGLContext/opengl_BufferManipulationObjectFactory.cpp b/GLideN64/src/Graphics/OpenGLContext/opengl_BufferManipulationObjectFactory.cpp
+index ffbcde6..b3c1050 100644
+--- a/GLideN64/src/Graphics/OpenGLContext/opengl_BufferManipulationObjectFactory.cpp
++++ b/GLideN64/src/Graphics/OpenGLContext/opengl_BufferManipulationObjectFactory.cpp
+@@ -146,19 +146,27 @@ public:
+ 
+ 	void readPixels(s32 _x,s32 _y, u32 _width, u32 _height, graphics::Parameter _format, graphics::Parameter _type) override
+ 	{
++		bind();
+ 		glReadPixels(_x, _y, _width, _height, GLenum(_format), GLenum(_type), 0);
++		unbind();
+ 	}
+ 
+ 	void * getDataRange(u32 _offset, u32 _range) override
+ 	{
+ 		if (_range > m_size)
+ 			_range = static_cast<u32>(m_size);
+-		return glMapBufferRange(GL_PIXEL_PACK_BUFFER, _offset, _range, GL_MAP_READ_BIT);
++		bind();
++		void * data = glMapBufferRange(GL_PIXEL_PACK_BUFFER, _offset, _range, GL_MAP_READ_BIT);
++		// Keep the PBO scoped to the readback call even if the frontend regains control.
++		unbind();
++		return data;
+ 	}
+ 
+ 	void closeReadBuffer() override
+ 	{
++		bind();
+ 		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
++		unbind();
+ 	}
+ 
+ 	void bind() override {
+diff --git a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp
+index a09a330..42c459c 100644
+--- a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp
++++ b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp
+@@ -61,6 +61,8 @@ const u8 * ColorBufferReaderWithBufferStorage::_readPixels(const ReadColorBuffer
+ 	} else {
+ 		glFinish();
+ 	}
++	// Persistent mapped pointers remain valid after the PBO is unbound.
++	m_bindBuffer->bind(Parameter(GL_PIXEL_PACK_BUFFER), ObjectHandle::null);
+ 
+ 	_heightOffset = 0;
+ 	_stride = m_pTexture->width;
+diff --git a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp
+index ac825de..f981768 100644
+--- a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp
++++ b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp
+@@ -7,7 +7,7 @@ using namespace opengl;
+ 
+ ColorBufferReaderWithPixelBuffer::ColorBufferReaderWithPixelBuffer(CachedTexture *_pTexture,
+ 																   CachedBindBuffer *_bindBuffer)
+-	: ColorBufferReader(_pTexture), m_bindBuffer(_bindBuffer)
++	: ColorBufferReader(_pTexture), m_bindBuffer(_bindBuffer), m_mappedPBO(0)
+ {
+ 	_initBuffers();
+ }
+@@ -15,6 +15,7 @@ ColorBufferReaderWithPixelBuffer::ColorBufferReaderWithPixelBuffer(CachedTexture
+ 
+ ColorBufferReaderWithPixelBuffer::~ColorBufferReaderWithPixelBuffer()
+ {
++	cleanUp();
+ 	_destroyBuffers();
+ }
+ 
+@@ -62,12 +63,21 @@ const u8 * ColorBufferReaderWithPixelBuffer::_readPixels(const ReadColorBufferPa
+ 	_heightOffset = 0;
+ 	_stride = m_pTexture->width;
+ 
+-	return reinterpret_cast<u8*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
++	GLuint mappedPBO = m_PBO[m_curIndex];
++	u8 * data = reinterpret_cast<u8*>(glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
+ 		m_pTexture->width * _params.height * _params.colorFormatBytes, GL_MAP_READ_BIT));
++	// Do not leave the pack buffer bound across frontend-visible yields.
++	m_bindBuffer->bind(Parameter(GL_PIXEL_PACK_BUFFER), ObjectHandle::null);
++	m_mappedPBO = data != nullptr ? mappedPBO : 0;
++	return data;
+ }
+ 
+ void ColorBufferReaderWithPixelBuffer::cleanUp()
+ {
+-	glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
++	if (m_mappedPBO != 0) {
++		m_bindBuffer->bind(Parameter(GL_PIXEL_PACK_BUFFER), ObjectHandle(m_mappedPBO));
++		glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
++		m_mappedPBO = 0;
++	}
+ 	m_bindBuffer->bind(Parameter(GL_PIXEL_PACK_BUFFER), ObjectHandle::null);
+ }
+diff --git a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.h b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.h
+index f2508cd..dc31a16 100644
+--- a/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.h
++++ b/GLideN64/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.h
+@@ -24,6 +24,7 @@ private:
+ 	u32 m_numPBO;
+ 	static const int _maxPBO = 3;
+ 	GLuint m_PBO[_maxPBO];
++	GLuint m_mappedPBO;
+ 	u32 m_curIndex;
+ };
+ 

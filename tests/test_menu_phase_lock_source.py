@@ -3,6 +3,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
+PLAY_JS = ROOT / "web/static/play.js"
+PLAY_HTML = ROOT / "web/play.html"
+PLAY_CSS = ROOT / "web/static/play.css"
 
 
 def test_menu_phase_lock_allows_scene_transition_grace():
@@ -48,3 +51,85 @@ def test_match_loading_transition_is_not_strict_menu_lockstep():
     assert "const _menuLockstepActive = strictInputLockstep;" in src
     assert "getInputPeers(menuLockstepPhase.strictInputLockstep)" in src
     assert "if (menuLockstepPhase.strictInputLockstep)" in src
+
+
+def test_phase_lock_resolution_clears_strict_menu_wait():
+    """Regression guard for Greptile P1 (commit after 582a479): the
+    phase-lock-wait branch emits _emitStrictMenuWait, so the symmetric
+    resolution branch (the `else` next to `if (phaseLockSlots.length)`)
+    must call _clearStrictMenuWait — otherwise the overlay sticks for
+    the rest of the session once the phase mismatch resolves.
+    """
+    src = LOCKSTEP_JS.read_text()
+
+    # The full-resolution branch resets these three pieces of state in
+    # order. Locate it and require _clearStrictMenuWait inside the same
+    # block.
+    needle = (
+        "        _phaseLockStallKey = '';\n"
+        "        _phaseLockStallStartTime = 0;\n"
+        "        _phaseLockLastWaitLogAt = 0;\n"
+    )
+    idx = src.find(needle)
+    assert idx >= 0, "phase-lock resolution branch not found in expected shape"
+    block = src[idx : idx + 600]
+    assert "_clearStrictMenuWait()" in block, (
+        "phase-lock resolution must clear the strict-menu overlay "
+        "(mirror the boot-sync/JS-menu paths)"
+    )
+
+
+def test_phase_lock_middle_case_clears_strict_menu_wait():
+    """Regression guard for codex follow-up (commit after b54d1be):
+    in addition to the full-resolution `else` branch, the inner
+    fallthrough — phaseLockSlots > 0 but phaseWaitSlots === 0 — must
+    also clear the overlay. Otherwise transitioning from "waiting on
+    Player X" to "mismatch still present, no one currently blocking"
+    leaves the overlay stuck.
+    """
+    src = LOCKSTEP_JS.read_text()
+
+    # The wait branch ends with `_emitStrictMenuWait(...); return; }` and
+    # the middle case falls through right after that closing brace. The
+    # _clearStrictMenuWait call must appear between the wait-branch's
+    # closing `}` and the outer `else {` that handles full resolution.
+    emit_idx = src.find(
+        "_emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);"
+    )
+    assert emit_idx >= 0, "phase-lock wait emit not found"
+    outer_else_idx = src.find("} else {", emit_idx)
+    assert outer_else_idx >= 0, "phase-lock outer else not found"
+    middle_block = src[emit_idx:outer_else_idx]
+    assert "_clearStrictMenuWait()" in middle_block, (
+        "phase-lock middle case (mismatch present, no one waiting) must "
+        "clear the overlay so it doesn't stick on transition"
+    )
+
+
+def test_phase_lock_wait_does_not_drive_gameplay_lifecycle():
+    """A peer phase wait is a stall condition, not proof we left gameplay."""
+    src = LOCKSTEP_JS.read_text()
+
+    assert "lifecycleActive: phase.active," in src
+    assert "active: phase.active || waitingPeerSlots.length > 0," in src
+    assert "const inMenu = menuPhase.lifecycleActive;" in src
+
+    in_menu_idx = src.index("const inMenu = menuPhase.lifecycleActive;")
+    transition_idx = src.index("MENU→GAMEPLAY transition", in_menu_idx)
+    assert in_menu_idx < transition_idx
+
+
+def test_strict_menu_wait_has_visible_overlay():
+    rollback_src = LOCKSTEP_JS.read_text()
+    play_src = PLAY_JS.read_text()
+    html_src = PLAY_HTML.read_text()
+    css_src = PLAY_CSS.read_text()
+
+    assert "const STRICT_MENU_OVERLAY_DELAY_MS = 5000;" in rollback_src
+    assert "stalledMs < STRICT_MENU_OVERLAY_DELAY_MS" in rollback_src
+    assert "kn-menu-lockstep-wait" in rollback_src
+    assert "kn-menu-lockstep-clear" in rollback_src
+    assert "showMenuLockstepWait" in play_src
+    assert "hideMenuLockstepWait" in play_src
+    assert 'id="menu-wait-overlay"' in html_src
+    assert "#menu-wait-overlay" in css_src

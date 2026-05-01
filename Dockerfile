@@ -10,10 +10,6 @@ WORKDIR /app
 COPY server/pyproject.toml server/
 RUN pip install --no-cache-dir server/
 
-# Install Playwright Chromium + system deps (must run as root for apt)
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-RUN playwright install chromium --with-deps
-
 # Copy application code
 COPY server/ server/
 COPY web/ web/

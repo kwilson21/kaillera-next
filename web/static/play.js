@@ -691,6 +691,12 @@
       const slot = e.detail?.slot;
       removePeerStatusEntry(slot);
     });
+    window.addEventListener('kn-menu-lockstep-wait', (e) => {
+      showMenuLockstepWait(e.detail || {});
+    });
+    window.addEventListener('kn-menu-lockstep-clear', () => {
+      hideMenuLockstepWait();
+    });
   };
 
   // ── Peer status indicator (P1-6) ───────────────────────────────────────
@@ -741,6 +747,32 @@
   const removePeerStatusEntry = (slot) => {
     _peerStatusEntries.delete(slot);
     _renderPeerStatus();
+  };
+  const formatMenuWaitNames = (detail) => {
+    const peers = Array.isArray(detail?.peers) ? detail.peers : [];
+    const names = peers
+      .map((peer) => {
+        const raw = String(peer?.name || '').trim();
+        if (raw) return raw;
+        const slot = Number(peer?.slot);
+        return Number.isFinite(slot) ? `Player ${slot + 1}` : 'Player';
+      })
+      .filter(Boolean);
+    if (names.length <= 1) return names[0] || 'peer';
+    return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  };
+  const showMenuLockstepWait = (detail) => {
+    const overlay = document.getElementById('menu-wait-overlay');
+    if (!overlay) return;
+    const title = document.getElementById('menu-wait-title');
+    const detailEl = document.getElementById('menu-wait-detail');
+    if (title) title.textContent = `Waiting on ${formatMenuWaitNames(detail)}`;
+    if (detailEl) detailEl.textContent = 'Character select is paused to stay in sync.';
+    overlay.classList.remove('hidden');
+  };
+  const hideMenuLockstepWait = () => {
+    const overlay = document.getElementById('menu-wait-overlay');
+    if (overlay) overlay.classList.add('hidden');
   };
 
   const sendDeviceType = () => {

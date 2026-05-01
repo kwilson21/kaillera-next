@@ -436,6 +436,7 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
+  const STRICT_MENU_OVERLAY_DELAY_MS = 5000;
   // I1: _rbPendingInit fallback deadline (MF2). If the host's
   // rb-delay DC broadcast never arrives, the guest falls back to a
   // locally-computed delay instead of freezing forever.
@@ -535,6 +536,63 @@
   };
   const _formatInputBrief = (input) =>
     input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
+  const _resetStrictMenuResends = () => {
+    _strictMenuResendState = {};
+  };
+  const _requestStrictMenuResends = (inputPeers, missingSlots, applyFrame, nowMs, source) => {
+    const sentSlots = [];
+    for (const slot of missingSlots) {
+      const resendKey = `${source}:${slot}:${applyFrame}`;
+      const prev = _strictMenuResendState[slot];
+      if (prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS) continue;
+
+      const peer = inputPeers.find((p) => p.slot === slot);
+      try {
+        peer?.dc?.send(`resend:${applyFrame}`);
+      } catch (_) {}
+      _strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };
+      sentSlots.push(slot);
+    }
+    return sentSlots;
+  };
+  const _playerNameForSlot = (slot) => {
+    const numericSlot = Number(slot);
+    for (const info of Object.values(_knownPlayers || {})) {
+      if (Number(info?.slot) === numericSlot && info?.playerName) return info.playerName;
+    }
+    return Number.isFinite(numericSlot) ? `Player ${numericSlot + 1}` : 'Player';
+  };
+  const _emitStrictMenuWait = (missingSlots, applyFrame, stalledMs, scene, gameStatus) => {
+    const slots = [...new Set(missingSlots || [])].sort((a, b) => a - b);
+    if (!slots.length || stalledMs < STRICT_MENU_OVERLAY_DELAY_MS) return;
+    const nowMs = performance.now();
+    const waitKey = `${applyFrame}:${scene}:${gameStatus}:${slots.join(',')}`;
+    if (_strictMenuWaitOverlayKey === waitKey && nowMs - _strictMenuWaitOverlayLastAt < 1000) return;
+    _strictMenuWaitOverlayKey = waitKey;
+    _strictMenuWaitOverlayLastAt = nowMs;
+    try {
+      window.dispatchEvent(
+        new CustomEvent('kn-menu-lockstep-wait', {
+          detail: {
+            slots,
+            peers: slots.map((slot) => ({ slot, name: _playerNameForSlot(slot) })),
+            applyFrame,
+            stalledMs: Math.round(stalledMs),
+            scene,
+            gameStatus,
+          },
+        }),
+      );
+    } catch (_) {}
+  };
+  const _clearStrictMenuWait = () => {
+    if (!_strictMenuWaitOverlayKey) return;
+    _strictMenuWaitOverlayKey = '';
+    _strictMenuWaitOverlayLastAt = 0;
+    try {
+      window.dispatchEvent(new CustomEvent('kn-menu-lockstep-clear'));
+    } catch (_) {}
+  };
   // ── Freeze detection state ─────────────────────────────────────────
   // Lightweight per-frame sampling to detect when display, input, or
   // audio stop working — the "emulator froze" scenario where the tick
@@ -567,8 +625,12 @@
   let _bootStallRecoveryResetTime = 0;
   let _phaseLockStallKey = '';
   let _phaseLockStallStartTime = 0;
+  let _phaseLockLastWaitLogAt = 0;
   let _rbInputStallKey = '';
   let _rbInputStallStartTime = 0;
+  let _strictMenuResendState = {}; // slot -> { key, lastAt }
+  let _strictMenuWaitOverlayKey = '';
+  let _strictMenuWaitOverlayLastAt = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -1530,6 +1592,8 @@
 
     _bootStallFrame = -1;
     _bootStallStartTime = 0;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
     _bootStallRecoveryFired = false;
     _syncLog(
       `late-join input bootstrap: frames=${startFrame}-${endFrame} slots=[${slots.join(',')}] ` +
@@ -1903,6 +1967,7 @@
       ...phase,
       waitingPeerSlots,
       phaseMismatchSlots,
+      lifecycleActive: phase.active,
       active: phase.active || waitingPeerSlots.length > 0,
     };
   };
@@ -1939,7 +2004,7 @@
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
-  let _resendSent = false; // true once resend request sent for current stall
+  let _resendSent = false; // true once normal input-stall resend request sent
   // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
   // the game moving, but any real inputs that arrive later are dropped
   // — creating permanent hash divergence. When hard-timeout fires, we
@@ -3880,13 +3945,10 @@
             // rb-init-frame handler below covers the symmetric "fire when
             // delay was already known" case.
             if (window._rbPendingInit && window._rbDoInit && window._rbHostInitFrame !== undefined) {
-              window._rbPendingInit = false;
-              window._rbPendingInitAt = 0;
-              DELAY_FRAMES = hostDelay;
               _syncLog(
                 `rb-delay: deferred init triggered with host delay=${hostDelay} initFrame=${window._rbHostInitFrame}`,
               );
-              window._rbDoInit(hostDelay, window._rbHostInitFrame);
+              _requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');
             } else if (hostDelay !== DELAY_FRAMES) {
               // Init already ran (e.g. host, or race). C engine can't be
               // updated mid-flight; only the JS variable is changed, which
@@ -3918,13 +3980,10 @@
               window._rbHostDelay !== undefined &&
               window._rbHostDelay > 0
             ) {
-              window._rbPendingInit = false;
-              window._rbPendingInitAt = 0;
-              DELAY_FRAMES = window._rbHostDelay;
               _syncLog(
                 `rb-init-frame: deferred init triggered with host delay=${window._rbHostDelay} initFrame=${hostInitFrame}`,
               );
-              window._rbDoInit(window._rbHostDelay, hostInitFrame);
+              _requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');
             }
           }
           return;
@@ -4214,11 +4273,14 @@
     if (_bootStallFrame >= 0) {
       _bootStallFrame = -1;
       _bootStallStartTime = 0;
+      _resetStrictMenuResends();
+      _clearStrictMenuWait();
       _bootStallRecoveryFired = false;
     }
     if (_phaseLockStallKey) {
       _phaseLockStallKey = '';
       _phaseLockStallStartTime = 0;
+      _phaseLockLastWaitLogAt = 0;
     }
     if (_rbInputStallKey) {
       _rbInputStallKey = '';
@@ -6816,6 +6878,40 @@
     return true;
   };
 
+  let _stepNoRunLastLogAt = 0;
+  const _runStepOneFrame = (branch) => {
+    _inDeterministicStep = true;
+    try {
+      const stepped = stepOneFrame();
+      if (!stepped) {
+        const nowMs = window.APISandbox?.nativePerfNow ? window.APISandbox.nativePerfNow() : performance.now();
+        if (nowMs - _stepNoRunLastLogAt >= 1000) {
+          _stepNoRunLastLogAt = nowMs;
+          _syncLog(
+            `STEP-NORUN f=${_frameNum} branch=${branch} ` +
+              `manual=${_manualMode} pending=${!!_pendingRunner} wasmActive=${_wasmStepActive}`,
+          );
+        }
+      }
+      return stepped;
+    } catch (e) {
+      _wasmStepActive = false;
+      _syncLog(_formatStepThrew(branch, e));
+      console.error(`[lockstep] stepOneFrame threw (${branch}):`, e);
+
+      // A non-abort throw can be a stale Emscripten runner after heap growth
+      // or state load. Try to recapture it, but do not pretend a frame ran.
+      const msg = `${e?.message || e}`;
+      if (!msg.includes('Aborted(')) {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        if (mod) recaptureManualRunner(mod, `stepOneFrame:${branch}:throw`);
+      }
+      return false;
+    } finally {
+      _inDeterministicStep = false;
+    }
+  };
+
   // -- True lockstep tick loop -----------------------------------------------
   //
   // Strategy: setInterval(tick, 16) for ~60fps. We never use rAF for the
@@ -6898,6 +6994,148 @@
   let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
   const RAPID_FABRICATION_THRESHOLD = 2; // after N consecutive fabrications, skip stall wait
   let _inputLateLogTime = {}; // slot -> last time INPUT-LATE was logged (rate-limiting)
+  let _pendingMatchInputResetReason = '';
+  let _rbPendingInputLastLogAt = 0;
+  let _rbPendingInitCatchup = null;
+
+  const _resetMatchInputState = (reason) => {
+    const localBuffered = Object.keys(_localInputs || {}).length;
+    const remoteSlots = Object.keys(_remoteInputs || {}).sort((a, b) => Number(a) - Number(b));
+    let remoteBuffered = 0;
+    for (const slot of remoteSlots) remoteBuffered += Object.keys(_remoteInputs[slot] || {}).length;
+
+    _localInputs = {};
+    _remoteInputs = {};
+    _peerInputStarted = {};
+    _lastRemoteFramePerSlot = {};
+    _peerLastAdvanceTime = {};
+    _peerPhantom = {};
+    _consecutiveFabrications = {};
+    _inputLateLogTime = {};
+    for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];
+    _rbLocalHistory.length = 0;
+    _clearPendingCInputs(`${reason}:match-reset`);
+
+    _remoteReceived = 0;
+    _remoteMissed = 0;
+    _remoteApplied = 0;
+    _lastRemoteFrame = -1;
+    _stallStart = 0;
+    _resendSent = false;
+    _bootStallFrame = -1;
+    _bootStallStartTime = 0;
+    _bootStallRecoveryFired = false;
+    _bootStallRecoveryResetTime = 0;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
+    _phaseLockStallKey = '';
+    _phaseLockStallStartTime = 0;
+    _phaseLockLastWaitLogAt = 0;
+    _rbInputStallKey = '';
+    _rbInputStallStartTime = 0;
+    if (_runSubstate === RUN_RB_STALL || _runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
+    _rollbackStallStart = 0;
+    _lateJoinInputBootstrapUntilFrame = -1;
+    _lateJoinSeededInputFrames = {};
+
+    for (const peer of Object.values(_peers || {})) {
+      peer.lastAckFromPeer = -1;
+      peer.lastFrameFromPeer = -1;
+      peer.lastAckAdvanceTime = 0;
+    }
+    clearPeerStallTimers();
+    _syncLog(
+      `MATCH-INPUT-RESET reason=${reason} local=${localBuffered} remote=${remoteBuffered} ` +
+        `slots=[${remoteSlots.join(',') || 'none'}]`,
+    );
+  };
+
+  const _scheduleMatchInputReset = (reason) => {
+    if (!_pendingMatchInputResetReason) _pendingMatchInputResetReason = reason;
+  };
+
+  const _flushPendingMatchInputReset = (context) => {
+    if (!_pendingMatchInputResetReason) return;
+    const reason = `${_pendingMatchInputResetReason}:${context}`;
+    _pendingMatchInputResetReason = '';
+    _resetMatchInputState(reason);
+  };
+
+  const _sendPendingRollbackInitInput = () => {
+    const activePeers = getActivePeers();
+    if (!activePeers.length) return;
+
+    const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
+    const suppressEjsPausedInput = !!window.EJS_emulator?.paused;
+    const suppressResumeGuardInput = performance.now() < _resumeInputGuardUntil || _lifecycleResyncPending;
+    const localInput = hadLocalInputForFrame
+      ? _localInputs[_frameNum]
+      : _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput());
+    if (!hadLocalInputForFrame) {
+      _localInputs[_frameNum] = localInput;
+      _auditRecordLocal(_frameNum, localInput);
+      _rbLocalHistory.push({
+        frame: _frameNum,
+        buttons: localInput.buttons,
+        lx: localInput.lx,
+        ly: localInput.ly,
+        cx: localInput.cx,
+        cy: localInput.cy,
+      });
+    }
+
+    let sent = 0;
+    let sendFails = 0;
+    const now = performance.now();
+    for (const peer of activePeers) {
+      try {
+        const ackFrame = peer.lastFrameFromPeer ?? -1;
+        peer.dc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, null).buffer);
+        _rbTransportPacketsSent++;
+        sent++;
+        if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = now;
+      } catch (_) {
+        sendFails++;
+      }
+    }
+    if (now - _rbPendingInputLastLogAt >= 1000) {
+      _rbPendingInputLastLogAt = now;
+      _syncLog(
+        `RB-PENDING-INIT input f=${_frameNum} sent=${sent} sendFails=${sendFails} ` +
+          `local=${_formatInputBrief(localInput)}`,
+      );
+    }
+  };
+
+  const _requestRollbackInit = (delay, initFrame, source) => {
+    if (!window._rbDoInit) return false;
+    const effectiveDelay = clampRollbackDelay(delay, ROLLBACK_MIN_DELAY_FRAMES);
+    const targetFrame = Number.isFinite(initFrame) && initFrame >= 0 ? initFrame : _frameNum;
+    DELAY_FRAMES = effectiveDelay;
+
+    if (_playerSlot !== 0 && targetFrame > _frameNum) {
+      window._rbPendingInit = true;
+      if (!window._rbPendingInitAt) window._rbPendingInitAt = performance.now();
+      _rbPendingInitCatchup = { delay: effectiveDelay, initFrame: targetFrame, source };
+      _syncLog(
+        `RB-INIT-CATCHUP armed source=${source} localF=${_frameNum} ` + `hostF=${targetFrame} delay=${effectiveDelay}`,
+      );
+      return false;
+    }
+
+    window._rbPendingInit = false;
+    window._rbPendingInitAt = 0;
+    _rbPendingInitCatchup = null;
+    const alignedFrame = _playerSlot !== 0 && targetFrame < _frameNum ? _frameNum : targetFrame;
+    if (alignedFrame !== targetFrame) {
+      _syncLog(
+        `RB-INIT-CATCHUP overshot source=${source} localF=${_frameNum} ` +
+          `hostF=${targetFrame}; init uses local frame`,
+      );
+    }
+    window._rbDoInit(effectiveDelay, alignedFrame);
+    return true;
+  };
 
   const startLockstep = () => {
     if (_phase === PHASE_RUNNING) return;
@@ -6950,6 +7188,7 @@
       _localInputs = {};
       _remoteInputs = {};
       _peerInputStarted = {};
+      _pendingMatchInputResetReason = '';
       _activeRoster = null;
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
@@ -6990,10 +7229,15 @@
     _inputLateLogTime = {};
     _resumeInputGuardUntil = 0;
     _stallStart = 0;
+    _resendSent = false;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
     _phaseLockStallKey = '';
     _phaseLockStallStartTime = 0;
+    _phaseLockLastWaitLogAt = 0;
     _rbInputStallKey = '';
     _rbInputStallStartTime = 0;
+    _rbPendingInputLastLogAt = 0;
     window._netplayFrameLog = [];
 
     // Always frozen time — audio plays via bypass, not OpenAL
@@ -7183,8 +7427,7 @@
           window._rbHostDelay > 0 &&
           window._rbHostInitFrame !== undefined
         ) {
-          DELAY_FRAMES = window._rbHostDelay;
-          doRollbackInit(window._rbHostDelay, window._rbHostInitFrame);
+          _requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');
         } else {
           // I1 (MF2): record the wall-clock start of the pending
           // state so tick() can fire RB-INIT-TIMEOUT if the host's
@@ -7718,6 +7961,8 @@
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
     _lastAppliedSyncHostFrame = -1;
+    _resetStrictMenuResends();
+    _clearStrictMenuWait();
 
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
@@ -7797,6 +8042,7 @@
     window._rbHostInitFrame = undefined;
     window._rbPendingInit = false;
     window._rbPendingInitAt = 0;
+    _rbPendingInitCatchup = null;
 
     // Disable FPU trace
     if (_fpuTraceEnabled) {
@@ -7929,12 +8175,15 @@
     _pacingLastLogAt = 0;
     _pacingSuppressedLogs = 0;
     _lastPacingStateLogAt = 0;
+    _rbPendingInputLastLogAt = 0;
+    _rbPendingInitCatchup = null;
     // Remove diagnostic hooks (delegated to kn-diagnostics.js)
     _diag?.cleanup();
   };
 
   const tick = () => {
     if (_phase !== PHASE_RUNNING) return;
+    if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');
     _checkStateTransition();
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
@@ -7979,30 +8228,66 @@
     // delay differs from what the host would have broadcast.
     // See docs/netplay-invariants.md §I1 and spec §MF2.
     if (window._rbPendingInit) {
-      const _rbPendingStart = window._rbPendingInitAt || 0;
-      if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
-        const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
-        const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
-        const _haveInitFrame = window._rbHostInitFrame !== undefined;
-        const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
-        _syncLog(
-          `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
-            `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
-        );
-        window._rbPendingInit = false;
-        window._rbPendingInitAt = 0;
-        if (window._rbDoInit) {
-          try {
-            // No initFrameOverride: fall back to local _frameNum. Hash
-            // mismatch + resync below converges both peers if local frames
-            // diverged from host's intended init frame.
-            window._rbDoInit(_rbFallbackDelay);
-          } catch (e) {
-            _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
+      // Keep the reliable input stream alive while the guest is frozen
+      // waiting for the host's authoritative rb-init-frame. Otherwise the
+      // host can stall in pre-gameplay lockstep waiting for this guest's
+      // next frame, never reach its own deferred init, and force the guest
+      // into a local RB-INIT-TIMEOUT with a different init frame.
+      _sendPendingRollbackInitInput();
+      if (_rbPendingInitCatchup) {
+        const { delay, initFrame, source } = _rbPendingInitCatchup;
+        if (_frameNum >= initFrame) {
+          const alignedFrame = _frameNum > initFrame ? _frameNum : initFrame;
+          _syncLog(
+            `RB-INIT-CATCHUP complete source=${source} localF=${_frameNum} ` +
+              `hostF=${initFrame} initF=${alignedFrame} delay=${delay}`,
+          );
+          window._rbPendingInit = false;
+          window._rbPendingInitAt = 0;
+          _rbPendingInitCatchup = null;
+          if (window._rbDoInit) {
+            try {
+              window._rbDoInit(delay, alignedFrame);
+            } catch (e) {
+              _syncLog(`RB-INIT-CATCHUP init failed: ${e}`);
+            }
           }
+        } else {
+          if (_frameNum % 30 === 0 && window._knLastRbInitCatchupLogFrame !== _frameNum) {
+            window._knLastRbInitCatchupLogFrame = _frameNum;
+            _syncLog(
+              `RB-INIT-CATCHUP advance localF=${_frameNum} hostF=${initFrame} ` + `remaining=${initFrame - _frameNum}`,
+            );
+          }
+          // Fall through to the JS lockstep path so the emulator state
+          // advances to the host's init frame before C rollback is armed.
         }
       } else {
-        return;
+        const _rbPendingStart = window._rbPendingInitAt || 0;
+        if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
+          const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+          const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
+          const _haveInitFrame = window._rbHostInitFrame !== undefined;
+          const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
+          _syncLog(
+            `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
+              `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
+          );
+          window._rbPendingInit = false;
+          window._rbPendingInitAt = 0;
+          if (window._rbDoInit) {
+            try {
+              // No initFrameOverride: fall back to local _frameNum. Hash
+              // mismatch + resync below converges both peers if local frames
+              // diverged from host's intended init frame.
+              window._rbDoInit(_rbFallbackDelay);
+            } catch (e) {
+              _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
+            }
+          }
+        } else {
+          return;
+        }
       }
     }
 
@@ -8525,7 +8810,7 @@
       // scene_curr lets us enter strict lockstep at Title/Mode Select/1P/VS
       // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
       // input and split one peer into 1P while the other remains in Mode Select.
-      const inMenu = menuPhase.active;
+      const inMenu = menuPhase.lifecycleActive;
       if (!_inGameplay && !inMenu && _bootDone) {
         _inGameplay = true;
         _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
@@ -8545,6 +8830,7 @@
           _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
           _inGameplayLoggedAt = _frameNum;
         }
+        _scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);
         // Tear down C rollback when leaving gameplay so menu state isn't
         // serialized — Smash Remix specifically defers init to avoid this
         // (see line ~7099). Without teardown, the engine keeps running
@@ -8602,29 +8888,45 @@
         if (_phaseLockStallKey !== waitKey) {
           _phaseLockStallKey = waitKey;
           _phaseLockStallStartTime = _tickNow;
+          _phaseLockLastWaitLogAt = 0;
         }
         const stallMs = _tickNow - _phaseLockStallStartTime;
-        if (stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-          for (const slot of phaseLockSlots) {
-            markPeerPhantomForStallTimeout(
-              slot,
-              'phase-lock-timeout',
-              `stalledMs=${Math.round(stallMs)} scene=${sceneCurr} gameStatus=${gameStatus}`,
+        if (phaseWaitSlots.length) {
+          if (stallMs >= MAX_STALL_MS && _tickNow - _phaseLockLastWaitLogAt >= RESEND_TIMEOUT_MS) {
+            _phaseLockLastWaitLogAt = _tickNow;
+            _syncLog(
+              `PHASE-LOCK-WAIT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
+                `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
+                `stalledMs=${Math.round(stallMs)} - holding strict menu lockstep`,
             );
           }
-          _syncLog(
-            `PHASE-LOCK-TIMEOUT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
-              `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
-              `stalledMs=${Math.round(stallMs)} — force-releasing phase lock`,
-          );
-          _phaseLockStallKey = '';
-          _phaseLockStallStartTime = 0;
-        } else if (phaseWaitSlots.length) {
+          // Surface the wait visually after the same 5s delay the other
+          // strict-menu paths use. Self-throttled inside _emitStrictMenuWait
+          // (returns early on stalledMs<5000 and on duplicate waitKey within
+          // 1s) so calling every tick is fine. Without this, a phase-lock
+          // stall can sit indefinitely with no UI feedback while the
+          // boot-sync and JS-menu paths show the overlay — that asymmetry
+          // is exactly what Greptile flagged as inconsistent.
+          _emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);
           return;
         }
+        // Middle case (codex follow-up): phaseLockSlots > 0 (mismatch still
+        // present) but phaseWaitSlots === 0 (nobody is currently blocking
+        // input) — the function falls through past this block. If we just
+        // emitted the wait overlay on a prior tick, transitioning into this
+        // state would leave the overlay stuck because the outer `else` only
+        // fires when phaseLockSlots itself empties. Clear here too so the
+        // overlay matches "is anyone actually waited on right now?".
+        _clearStrictMenuWait();
       } else {
         _phaseLockStallKey = '';
         _phaseLockStallStartTime = 0;
+        _phaseLockLastWaitLogAt = 0;
+        // Mirror the boot-sync and JS-menu paths: when the stall resolves
+        // naturally, drop the "Waiting on PlayerName" overlay. Without this
+        // the overlay sticks for the rest of the session because the only
+        // other clear sites are reset/teardown paths, not natural resolution.
+        _clearStrictMenuWait();
       }
       // Boot sync: legacy savestate startup can still need one host state push
       // after boot grace. kn-sync startup already loaded the host's authoritative
@@ -8707,72 +9009,50 @@
         // the resync response is never handled.
         if (rbApplyFrame >= 0) {
           const bootInputPeers = getInputPeers(_menuLockstepActive);
-          let stalled = false;
-          let missingSlot = -1;
+          const missingSlots = [];
           for (const p of bootInputPeers) {
             if (_peerPhantom[p.slot]) continue;
             if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
-              stalled = true;
-              missingSlot = p.slot;
-              break;
+              missingSlots.push(p.slot);
             }
           }
-          if (stalled) {
+          if (missingSlots.length) {
+            const missingSlot = missingSlots[0];
             const nowWall = performance.now();
             if (_bootStallFrame !== rbApplyFrame) {
               _bootStallFrame = rbApplyFrame;
               _bootStallStartTime = nowWall;
+              _resetStrictMenuResends();
               _bootStallRecoveryFired = false;
-              _resendSent = false;
             }
             const stallDuration = nowWall - _bootStallStartTime;
             if (_menuLockstepActive) {
-              if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-                markPeerPhantomForStallTimeout(
-                  missingSlot,
-                  'menu-lockstep-timeout',
-                  `stalledMs=${Math.round(stallDuration)} apply=${rbApplyFrame}`,
+              if (stallDuration >= MAX_STALL_MS) {
+                const sentSlots = _requestStrictMenuResends(
+                  bootInputPeers,
+                  missingSlots,
+                  rbApplyFrame,
+                  nowWall,
+                  'c-menu',
                 );
-                if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
-                if (!_remoteInputs[missingSlot][rbApplyFrame]) {
-                  _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
-                  _pendingCInputs.push({
-                    slot: missingSlot,
-                    frame: rbApplyFrame,
-                    buttons: 0,
-                    lx: 0,
-                    ly: 0,
-                    cx: 0,
-                    cy: 0,
-                  });
-                }
-                _syncLog(
-                  `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot} ` +
-                    `stalledMs=${Math.round(stallDuration)} — force-releasing strict lockstep`,
-                );
-                _bootStallFrame = -1;
-                _bootStallStartTime = 0;
-                _bootStallRecoveryFired = false;
-              } else {
-                if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-                  _resendSent = true;
-                  const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
-                  try {
-                    missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
-                  } catch (_) {}
+                if (sentSlots.length) {
                   _syncLog(
-                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
+                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} ` +
+                      `missing=[${missingSlots.join(',')}] sent=[${sentSlots.join(',')}] ` +
+                      `stalledMs=${Math.round(stallDuration)}`,
                   );
                 }
-                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                  window._knLastBootStallLogFrame = _frameNum;
-                  _syncLog(
-                    `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
-                  );
-                }
-                return;
+                _emitStrictMenuWait(missingSlots, rbApplyFrame, stallDuration, sceneCurr, gameStatus);
               }
+              if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                window._knLastBootStallLogFrame = _frameNum;
+                _syncLog(
+                  `MENU-LOCKSTEP-WAIT f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                    `stalledMs=${Math.round(stallDuration)} slots=[${missingSlots.join(',')}] ` +
+                    `- holding strict menu lockstep`,
+                );
+              }
+              return;
             }
 
             // Boot/pre-menu fallback: stall briefly, then fabricate zero to
@@ -8808,7 +9088,9 @@
           }
           _bootStallFrame = -1;
           _bootStallStartTime = 0;
+          _resetStrictMenuResends();
           _bootStallRecoveryFired = false;
+          _clearStrictMenuWait();
         }
       } else if (_rbBootConverged && rbApplyFrame >= 0) {
         // Gameplay: stall only when too far ahead for rollback to help
@@ -8884,12 +9166,27 @@
       // the actual cap is frame_adv >= delay: once the fast peer has consumed
       // the whole input buffer, wait instead of creating a guaranteed rollback.
       const _frameAdvForC = _rbBootConverged ? _frameAdvRaw + 2 : -1;
+      // _kn_pre_tick stores the supplied local input under the C engine's
+      // rb.frame. Host-authoritative deferred init can set rb.frame behind
+      // the JS tick frame for one tick, so use the input captured for the C
+      // frame when they differ.
+      const cFrameBeforePreTick = tickMod._kn_get_frame?.() ?? _frameNum;
+      const cFrameLocalInput = _localInputs[cFrameBeforePreTick];
+      const preTickLocalInput = cFrameLocalInput || localInput;
+      if (cFrameBeforePreTick !== _frameNum && window._knLastCInputAlignFrame !== _frameNum) {
+        window._knLastCInputAlignFrame = _frameNum;
+        _syncLog(
+          `C-INPUT-ALIGN jsF=${_frameNum} cF=${cFrameBeforePreTick} ` +
+            `using=${cFrameLocalInput ? 'c-frame' : 'js-current'} ` +
+            `input=${_formatInputBrief(preTickLocalInput)}`,
+        );
+      }
       let catchingUp = tickMod._kn_pre_tick(
-        localInput.buttons,
-        localInput.lx,
-        localInput.ly,
-        localInput.cx,
-        localInput.cy,
+        preTickLocalInput.buttons,
+        preTickLocalInput.lx,
+        preTickLocalInput.ly,
+        preTickLocalInput.cx,
+        preTickLocalInput.cy,
         _frameAdvForC,
       );
       // ── R1: runner continuity across rollback restore ─────────────────
@@ -9088,19 +9385,7 @@
           _resetAudioCallsSinceRb++;
         }
         _syncRNGSeed(tickMod, _frameNum);
-        // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-        // performance.now() override stays armed and returns frozen WASM
-        // cycle time, which freezes the setInterval tick scheduler and the
-        // entire game loop. See netplay-lockstep.js:6873.
-        _inDeterministicStep = true;
-        try {
-          stepOneFrame();
-        } catch (e) {
-          _syncLog(_formatStepThrew('replay', e));
-          console.error('[lockstep] stepOneFrame threw (replay):', e);
-        } finally {
-          _inDeterministicStep = false;
-        }
+        if (!_runStepOneFrame('replay')) return;
         _syncRNGSeed(tickMod, _frameNum);
         // Replay audio was generated to keep emulator state faithful, but it
         // is intentionally not fed to WebAudio from the replay branch. The
@@ -9112,6 +9397,7 @@
         _frameNum = newFrame;
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
+        _flushPendingMatchInputReset('post-c-replay-tick');
         // Overlay
         if (_frameNum % 15 === 0) {
           const dbg = document.getElementById('np-debug');
@@ -9166,19 +9452,7 @@
       }
       _syncRNGSeed(tickMod, _frameNum);
       const _tStep0 = performance.now();
-      // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-      // performance.now() override stays armed and returns frozen WASM
-      // cycle time, which freezes the setInterval tick scheduler and the
-      // entire game loop. See netplay-lockstep.js:6873.
-      _inDeterministicStep = true;
-      try {
-        stepOneFrame();
-      } catch (e) {
-        _syncLog(_formatStepThrew('normal', e));
-        console.error('[lockstep] stepOneFrame threw (normal):', e);
-      } finally {
-        _inDeterministicStep = false;
-      }
+      if (!_runStepOneFrame('normal')) return;
       // 2026-04-29 audio-diag: invariant check post-step. Counters tick
       // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
       _checkAiInvariant(tickMod, 3);
@@ -9197,6 +9471,7 @@
       _frameNum = newFrame;
       KNState.frameNum = _frameNum;
       if (window.KNDesync) KNDesync.tick(_frameNum);
+      _flushPendingMatchInputReset('post-c-tick');
       const _tTotal = performance.now();
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
@@ -10017,6 +10292,7 @@
     const menuLockstepPhase = _readStrictPhaseLock(_frameNum > BOOT_GRACE_FRAMES);
     const inputPeers = getInputPeers(menuLockstepPhase.strictInputLockstep);
     const applyFrame = _frameNum - DELAY_FRAMES;
+    const consumedRemoteInputSlots = [];
     if (applyFrame >= 0) {
       let allArrived = true;
       const _missingSlots = [];
@@ -10032,7 +10308,7 @@
         if (menuLockstepPhase.strictInputLockstep) {
           if (_stallStart === 0) {
             _stallStart = now;
-            _resendSent = false;
+            _resetStrictMenuResends();
             _syncLog(
               `MENU-LOCKSTEP start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
                 `scene=${menuLockstepPhase.sceneCurr} gameStatus=${menuLockstepPhase.gameStatus} ` +
@@ -10040,38 +10316,29 @@
             );
           }
           const stallDuration = now - _stallStart;
-          if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-            const repeatInfo = [];
-            for (const s of _missingSlots) {
-              markPeerPhantomForStallTimeout(
-                s,
-                'menu-lockstep-timeout',
-                `stalledMs=${Math.round(stallDuration)} apply=${applyFrame}`,
+          if (stallDuration >= MAX_STALL_MS) {
+            const sentSlots = _requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu');
+            if (sentSlots.length) {
+              _syncLog(
+                `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} ` +
+                  `missing=[${_missingSlots.join(',')}] sent=[${sentSlots.join(',')}] ` +
+                  `stalledMs=${stallDuration.toFixed(0)}`,
               );
-              if (!_remoteInputs[s]) _remoteInputs[s] = {};
-              if (_remoteInputs[s][applyFrame] === undefined) {
-                _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
-                _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
-                repeatInfo.push(`s${s}=0`);
-              }
             }
-            _syncLog(
-              `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
-                `stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
+            _emitStrictMenuWait(
+              _missingSlots,
+              applyFrame,
+              stallDuration,
+              menuLockstepPhase.sceneCurr,
+              menuLockstepPhase.gameStatus,
             );
-            _stallStart = 0;
-            return;
           }
-          if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-            _resendSent = true;
-            for (const p of inputPeers) {
-              if (_remoteInputs[p.slot]?.[applyFrame] !== undefined) continue;
-              try {
-                p.dc?.send(`resend:${applyFrame}`);
-              } catch (_) {}
-            }
+          if (_frameNum % 60 === 0 && window._knLastMenuStallLogFrame !== _frameNum) {
+            window._knLastMenuStallLogFrame = _frameNum;
             _syncLog(
-              `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
+              `MENU-LOCKSTEP-WAIT f=${_frameNum} applyF=${applyFrame} ` +
+                `stalledMs=${stallDuration.toFixed(0)} slots=[${_missingSlots.join(',')}] ` +
+                `- holding strict menu lockstep`,
             );
           }
           return;
@@ -10215,6 +10482,9 @@
         } // end normal stall path (else of allMissingArePhantom)
       } else {
         _stallStart = 0;
+        _resendSent = false;
+        _resetStrictMenuResends();
+        _clearStrictMenuWait();
         // Reset consecutive fabrication counts for peers whose input arrived
         for (const p of inputPeers) {
           if (_consecutiveFabrications[p.slot]) _consecutiveFabrications[p.slot] = 0;
@@ -10238,7 +10508,7 @@
         const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
         writeInputToMemory(peerSlot, remoteInput);
         _consumeLateJoinSeededInput(peerSlot, applyFrame);
-        if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
+        if (_remoteInputs[peerSlot]) consumedRemoteInputSlots.push(peerSlot);
       }
 
       // Also write input for roster slots that have no peer object yet
@@ -10366,18 +10636,9 @@
       _resetAudioCallsSinceRb++;
     }
     _syncRNGSeed(tickMod, _frameNum);
-    // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-    // performance.now() override stays armed and returns frozen WASM
-    // cycle time, which freezes the setInterval tick scheduler and the
-    // entire game loop. See netplay-lockstep.js:6873.
-    _inDeterministicStep = true;
-    try {
-      stepOneFrame();
-    } catch (e) {
-      _syncLog(_formatStepThrew('fallback', e));
-      console.error('[lockstep] stepOneFrame threw (fallback):', e);
-    } finally {
-      _inDeterministicStep = false;
+    if (!_runStepOneFrame('fallback')) return;
+    for (const peerSlot of consumedRemoteInputSlots) {
+      if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
     }
     feedAudio();
 
@@ -11168,6 +11429,8 @@
         mod._kn_set_frame(frame);
         _bootStallFrame = -1;
         _bootStallStartTime = 0;
+        _resetStrictMenuResends();
+        _clearStrictMenuWait();
         _bootStallRecoveryFired = false;
         _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
         // Arm post-sync diagnostic burst: log full state hash for 10 frames
@@ -11380,6 +11643,7 @@
     // Reset lockstep state
     _remoteInputs = {};
     _peerInputStarted = {};
+    _pendingMatchInputResetReason = '';
     _activeRoster = null;
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
