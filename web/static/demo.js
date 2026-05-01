@@ -219,27 +219,61 @@
       reader.readAsArrayBuffer(file);
     });
 
+  // Default lag the slider animates up to when the first match starts.
+  const DEFAULT_MATCH_LAG_MS = 120;
+  // Animation handle for the slider's 0 → target transition.
+  let _lagAnimRaf = 0;
+
   const _readLag = () => {
-    const lag = Number($('lag')?.value ?? 120);
-    return Number.isFinite(lag) ? Math.max(0, Math.min(300, lag)) : 120;
+    const lag = Number($('lag')?.value ?? 0);
+    return Number.isFinite(lag) ? Math.max(0, Math.min(300, lag)) : 0;
   };
 
   const _networkFromControls = () => {
+    // Slider value IS the actual lag now — no per-frame menu suppression.
+    // The slider sits at 0 in menus and animates up to DEFAULT_MATCH_LAG_MS
+    // (or the user's saved preference) when the match starts, so what the
+    // user sees on the slider matches what the synthetic peer experiences.
     const lag = _readLag();
-    // Suppress lag entirely during menus. Smash Remix's menu phase uses a
-    // strict input lockstep that stalls every frame waiting for slot 1's
-    // input — at 120 ms latency this slows menu navigation to ~1/8 speed
-    // and makes it nearly impossible to record a clean menu run. We're not
-    // demoing rollback during the menu phase anyway; the slider only matters
-    // once the user is in an actual match.
-    const inMatch = !!window.NetplayRollback?.isInMatch?.();
-    const effectiveLag = inMatch ? lag : 0;
     return {
-      latencyMs: effectiveLag,
-      jitterMs: effectiveLag * 0.1,
+      latencyMs: lag,
+      jitterMs: lag * 0.1,
       lossProb: 0,
       mispredictProb: 0,
     };
+  };
+
+  // Smoothly animate the slider value from its current position to `target`
+  // over `durationMs`, easing out, applying _applyNetwork() each frame so
+  // the synthetic peer's latency tracks the visible slider position.
+  const _animateLagTo = (target, durationMs = 800) => {
+    const slider = $('lag');
+    if (!slider) return;
+    if (_lagAnimRaf) {
+      cancelAnimationFrame(_lagAnimRaf);
+      _lagAnimRaf = 0;
+    }
+    const start = Number(slider.value) || 0;
+    const delta = target - start;
+    if (Math.abs(delta) < 1) {
+      slider.value = String(target);
+      _applyNetwork();
+      return;
+    }
+    const t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / durationMs);
+      // Cubic ease-out: 1 - (1 - t)^3 — fast start, soft landing.
+      const eased = 1 - Math.pow(1 - t, 3);
+      slider.value = String(Math.round(start + delta * eased));
+      _applyNetwork();
+      if (t < 1) {
+        _lagAnimRaf = _nativeRAF(step);
+      } else {
+        _lagAnimRaf = 0;
+      }
+    };
+    _lagAnimRaf = _nativeRAF(step);
   };
 
   const _updateSliderLabels = () => {
@@ -328,7 +362,10 @@
     } else if (MENU_AUTOPILOT_INPUTS.length > 0) {
       _autopilotActive = true;
       _setStatus('Setting up your match…');
-      _showInputIndicator('disabled');
+      // Indicator deferred to the gesture click — the user hasn't even seen
+      // the emulator yet, so showing "your inputs disabled" before they tap
+      // is confusing. _showInputIndicator('disabled') fires from the
+      // gesture-button handler in _bindDom.
     }
   };
 
@@ -482,8 +519,11 @@
   const _stopEmu = () => {
     if (!window.EJS_emulator && !_loaderInjected) return;
     try {
-      const lag = $('lag')?.value;
-      if (lag != null) localStorage.setItem('kn-demo-lag', String(lag));
+      // Persist only the user's manually-chosen preference, not the
+      // currently-animated slider position (which may be mid-animation).
+      if (_savedLagPreference != null) {
+        localStorage.setItem('kn-demo-lag', String(_savedLagPreference));
+      }
     } catch (_) {}
     _setStatus('Stopping…');
     // Stop the engine + audio synchronously so the user doesn't hear lingering
@@ -500,13 +540,17 @@
     location.reload();
   };
 
-  // Restore the lag slider value from localStorage on page load.
+  // User's preferred lag value, if they manually moved the slider in a
+  // previous session. The slider itself starts at 0; this number is only
+  // used as the animation target when a match begins. null means "use
+  // DEFAULT_MATCH_LAG_MS" (i.e., user hasn't expressed a preference).
+  let _savedLagPreference = null;
   const _restoreSavedLag = () => {
     try {
       const saved = localStorage.getItem('kn-demo-lag');
       if (saved != null) {
-        const slider = $('lag');
-        if (slider) slider.value = saved;
+        const n = Number(saved);
+        if (Number.isFinite(n) && n >= 0 && n <= 300) _savedLagPreference = n;
       }
     } catch (_) {}
   };
@@ -723,9 +767,12 @@
         // over from here.
         _finishRecording();
         _finishAutopilot();
-        // Re-apply network so the synthetic peer picks up the slider's lag
-        // value now that we're in a match (it was forced to 0 during menus).
-        _applyNetwork();
+        // Animate the lag slider from 0 (its menu-time value) up to the
+        // user's saved preference (or DEFAULT_MATCH_LAG_MS). The animation
+        // calls _applyNetwork() each frame, so the synthetic peer's
+        // latency tracks the visible slider position smoothly.
+        const target = _savedLagPreference != null ? _savedLagPreference : DEFAULT_MATCH_LAG_MS;
+        _animateLagTo(target, 800);
         // Entering a vs match — re-arm interaction tracking and auto-start
         // auto-compare for this match. Each new match gets its own chance to
         // demo hands-free even if the user took control in a previous one.
@@ -739,8 +786,9 @@
         // next match (or the menus the user is now navigating) start clean.
         _stopAutoCompare();
         if (!_rollbackEnabled) _setRollbackEnabled(true);
-        // Drop synthetic-peer lag back to 0 so menu navigation is responsive.
-        _applyNetwork();
+        // Animate the slider back down to 0 so menu navigation is responsive
+        // and the visible position matches the actual lag.
+        _animateLagTo(0, 500);
         _setStatus('Back in menu — rollback ON. Start another match to auto-compare again.');
       }
     }
@@ -831,6 +879,13 @@
 
     $('lag')?.addEventListener('input', () => {
       _markUserInteracted();
+      // Cancel any in-flight slider animation — user is taking control.
+      if (_lagAnimRaf) {
+        cancelAnimationFrame(_lagAnimRaf);
+        _lagAnimRaf = 0;
+      }
+      // Remember this as the user's preference for future match starts.
+      _savedLagPreference = _readLag();
       _applyNetwork();
     });
     $('rollback-toggle')?.addEventListener('click', () => {
@@ -858,6 +913,10 @@
     // browser.
     $('gesture-button')?.addEventListener('click', () => {
       window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
+      // Now that the user has tapped to start, the autopilot is about to
+      // actually drive the game. Show the "inputs disabled" badge here
+      // (deferred from _installInputHook) so the warning matches reality.
+      if (_autopilotActive) _showInputIndicator('disabled');
     });
 
     _restoreSavedLag();

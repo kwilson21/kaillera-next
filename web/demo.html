@@ -573,12 +573,18 @@
         </section>
 
         <aside class="sidebar" aria-label="Demo controls">
+          <a id="play-cta" class="play-cta" href="/">
+            <div id="play-cta-headline" class="play-cta-headline">Play with friends</div>
+            <div id="play-cta-sub" class="play-cta-sub">No installs. Free. Share a link.</div>
+            <span id="play-cta-button" class="play-cta-button">Open the lobby →</span>
+          </a>
+
           <div class="panel-card">
             <div class="slider-heading">
               <label for="lag">Network lag</label>
               <span id="lag-value" class="value">0 ms</span>
             </div>
-            <input id="lag" type="range" min="0" max="300" step="5" value="120" />
+            <input id="lag" type="range" min="0" max="300" step="5" value="0" />
             <p class="slider-hint">Higher lag = more predictions/sec (the engine running ahead of slot 1's input)</p>
           </div>
 
@@ -602,12 +608,6 @@
               Mode: ROLLBACK · Network: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
             </div>
           </div>
-
-          <a id="play-cta" class="play-cta" href="/">
-            <div id="play-cta-headline" class="play-cta-headline">Play with friends</div>
-            <div id="play-cta-sub" class="play-cta-sub">No installs. Free. Share a link.</div>
-            <span id="play-cta-button" class="play-cta-button">Open the lobby →</span>
-          </a>
         </aside>
       </div>
 
