@@ -473,75 +473,42 @@
     }
   };
 
+  // Stop = full page reload. EmulatorJS, the rollback engine, the WASM core,
+  // EJS-bound window/document handlers, captured AudioContexts, the
+  // intercepted rAF, and the synthetic-peer scheduler each leave behind state
+  // that's brittle to unwind cleanly between sessions. A reload is the only
+  // truly reliable reset. We persist the lag slider value first so the user
+  // doesn't lose their setting across the reload.
   const _stopEmu = () => {
     if (!window.EJS_emulator && !_loaderInjected) return;
-    // eslint-disable-next-line no-console
-    console.log('[demo] _stopEmu: tearing down', {
-      hasEmu: !!window.EJS_emulator,
-      loaderInjected: _loaderInjected,
-      engineStarted: _engineStarted,
-    });
-    // Stop auto-compare first — its setInterval would otherwise keep flipping
-    // the rollback toggle on a torn-down engine.
-    _stopAutoCompare();
-    // Stop the engine + synthetic peer first so they don't race the teardown.
     try {
-      window.NetplayRollback?.stop?.();
+      const lag = $('lag')?.value;
+      if (lag != null) localStorage.setItem('kn-demo-lag', String(lag));
+    } catch (_) {}
+    _setStatus('Stopping…');
+    // Stop the engine + audio synchronously so the user doesn't hear lingering
+    // sound during the reload's tab-flicker window.
+    try {
+      window.NetplayRollback?.pauseTick?.();
     } catch (_) {}
     try {
-      window.KNFakePeer?.stop?.();
+      window.EJS_emulator?.gameManager?.Module?.pauseMainLoop?.();
     } catch (_) {}
-    // Pause the Emscripten main loop, close audio, wipe the #game element.
-    const emu = window.EJS_emulator;
-    if (emu) {
-      try {
-        emu.gameManager?.Module?.pauseMainLoop?.();
-      } catch (_) {}
-      try {
-        const sdl = emu.gameManager?.Module?.SDL2?.audioContext;
-        if (sdl) sdl.close();
-      } catch (_) {}
-    }
-    const gameEl = document.getElementById('game');
-    if (gameEl) gameEl.innerHTML = '';
     try {
-      delete window.EJS_emulator;
-    } catch (_) {
-      window.EJS_emulator = undefined;
-    }
-    if (_romBlobUrl) {
-      try {
-        URL.revokeObjectURL(_romBlobUrl);
-      } catch (_) {}
-      _romBlobUrl = null;
-    }
-    _loaderInjected = false;
-    _emulatorBootInFlight = false;
-    _emuPaused = false;
-    _autopilotActive = false;
-    _wasInMatch = false;
-    // Engine reset: the next _loadRomFile() must be able to re-init from
-    // scratch. Clearing _engineStarted alone is not enough — the input hook
-    // wraps KNShared.readLocalInput once, and KNShared survives the engine
-    // teardown, so we have to allow _installInputHook to re-wrap the (now
-    // re-bound) function on the next engine init.
-    _engineStarted = false;
-    _wrappedReadLocalInput = false;
-    _smoothedPredsPerSec = 0;
-    _lastTotalPreds = 0;
-    _lastPredSampleAt = 0;
-    _showInputIndicator(null);
-    const pauseBtn = $('emu-pause');
-    if (pauseBtn) {
-      pauseBtn.textContent = '⏸ Pause';
-      pauseBtn.classList.remove('is-paused');
-    }
-    _setEmuButtonsEnabled(false);
-    // Bring back the drop zone so the user can load a different ROM.
-    const drop = document.getElementById('rom-drop');
-    if (drop) drop.classList.remove('hidden');
-    $('game')?.classList.remove('kn-playing');
-    _setStatus('Stopped — drop a ROM to start again');
+      window.EJS_emulator?.gameManager?.Module?.SDL2?.audioContext?.close();
+    } catch (_) {}
+    location.reload();
+  };
+
+  // Restore the lag slider value from localStorage on page load.
+  const _restoreSavedLag = () => {
+    try {
+      const saved = localStorage.getItem('kn-demo-lag');
+      if (saved != null) {
+        const slider = $('lag');
+        if (slider) slider.value = saved;
+      }
+    } catch (_) {}
   };
 
   const _startEngine = () => {
@@ -643,12 +610,6 @@
       return;
     }
     try {
-      // eslint-disable-next-line no-console
-      console.log('[demo] _loadRomFile:', file.name, {
-        engineStarted: _engineStarted,
-        hasEmu: !!window.EJS_emulator,
-        loaderInjected: _loaderInjected,
-      });
       _showLoading(true);
       _setStatus(`Reading ${file.name}`);
       const bytes = await _readFile(file);
@@ -663,19 +624,6 @@
       _showLoading(false);
       _setStatus('ROM loaded');
       _startEngine();
-      // Diagnostics for the post-stop reload path.
-      setTimeout(() => {
-        const gp = document.getElementById('gesture-prompt');
-        // eslint-disable-next-line no-console
-        console.log('[demo] post-load 1s state', {
-          engineStarted: _engineStarted,
-          hasEmu: !!window.EJS_emulator,
-          loaderInjected: _loaderInjected,
-          bootInFlight: _emulatorBootInFlight,
-          gestureVisible: gp ? !gp.classList.contains('hidden') : 'no-element',
-          phase: window.NetplayRollback?.getHudCounters?.()?.phase ?? 'unknown',
-        });
-      }, 1000);
     } catch (err) {
       _showLoading(false);
       _setStatus(err?.message || 'ROM load failed');
@@ -912,6 +860,7 @@
       window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
     });
 
+    _restoreSavedLag();
     _applyNetwork();
     _updateRollbackToggle();
     _nativeRAF(_updateHud);
