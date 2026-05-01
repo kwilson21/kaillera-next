@@ -475,7 +475,13 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
+  let _predictionsPaused = false; // demo-only: pause C prediction generation without tearing down rollback state
   let _rbReplayLogged = false; // prevents log spam during amortized replay
+  let _hudRollbackEvents = 0; // monotonic counter
+  let _hudRollbackDepthSamples = []; // rolling window of replay depths
+  let _hudEventTimestamps = []; // timestamps for events-per-second window
+  const HUD_DEPTH_WINDOW = 60;
+  const HUD_EVENT_WINDOW_MS = 5000;
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
   let _rbInitFrame = -1; // frame at which C-rollback was initialized (convergence guard)
@@ -1539,7 +1545,9 @@
   };
 
   const _isPeerPendingLateJoin = (sid, peer = null) => {
-    const slot = peer?.slot ?? (sid ? _knownPlayers[sid]?.slot : null);
+    const resolvedPeer = peer || (sid ? _peers[sid] : null);
+    if (resolvedPeer?.synthetic === true) return false;
+    const slot = resolvedPeer?.slot ?? (sid ? _knownPlayers[sid]?.slot : null);
     return (
       (sid && _pendingLateJoinPeerSids.has(sid)) || (_isValidPlayerSlot(slot) && _pendingLateJoinPeerSlots.has(slot))
     );
@@ -1639,13 +1647,22 @@
     };
 
     if (_activeRoster) {
-      for (const slot of _activeRoster) addSlot(slot);
+      const syntheticSlots = new Set(
+        Object.values(_peers)
+          .filter((peer) => peer?.synthetic === true)
+          .map((peer) => peer.slot),
+      );
+      for (const slot of _activeRoster) {
+        if (!syntheticSlots.has(slot)) addSlot(slot);
+      }
     } else {
       addSlot(_playerSlot);
       for (const [sid, info] of Object.entries(_knownPlayers)) {
+        if (_peers[sid]?.synthetic === true) continue;
         if (!_isPeerPendingLateJoin(sid)) addSlot(info?.slot);
       }
       for (const [sid, peer] of Object.entries(_peers)) {
+        if (peer?.synthetic === true) continue;
         if (_isPeerPendingLateJoin(sid, peer)) continue;
         if (!peer?._intentionalLeave) addSlot(peer?.slot);
       }
@@ -2896,6 +2913,107 @@
     }
   };
 
+  const _syntheticSidForSlot = (slot) => `synth-${slot}`;
+
+  const _registerSyntheticKnownPlayer = (sid, slot) => {
+    _knownPlayers[sid] = { playerName: `Demo P${slot + 1}`, slot };
+  };
+
+  const _makeSyntheticDataChannel = () => ({
+    readyState: 'open',
+    send: () => {},
+    close: () => {},
+  });
+
+  const _makeSyntheticPeerConnection = () => ({
+    connectionState: 'connected',
+    close: () => {},
+  });
+
+  const createSyntheticPeer = (slot) => {
+    const numericSlot = Number(slot);
+    if (!_isValidPlayerSlot(numericSlot)) return null;
+    const sid = _syntheticSidForSlot(numericSlot);
+    const existing = _peers[sid];
+    if (existing && existing.synthetic !== true) {
+      _syncLog(`synthetic peer collision sid=${sid} slot=${numericSlot}`);
+      return null;
+    }
+    if (existing?.synthetic === true) {
+      existing.slot = numericSlot;
+      existing.ready = true;
+      existing.emuReady = true;
+      existing.reconnecting = false;
+      existing.startupReconnecting = false;
+      existing.dc = existing.dc || _makeSyntheticDataChannel();
+      existing.pc = existing.pc || _makeSyntheticPeerConnection();
+      _registerSyntheticKnownPlayer(sid, numericSlot);
+      _lockstepReadyPeers[sid] = true;
+      return existing;
+    }
+
+    const peer = {
+      slot: numericSlot,
+      synthetic: true,
+      ready: true,
+      emuReady: true,
+      reconnecting: false,
+      startupReconnecting: false,
+      isInitiator: false,
+      lastAckFromPeer: -1,
+      lastFrameFromPeer: -1,
+      lastAckAdvanceTime: 0,
+      rttSamples: [],
+      _rttSamples: [],
+      delayValue: 0,
+      rbDc: null,
+      syncDc: null,
+      dc: _makeSyntheticDataChannel(),
+      pc: _makeSyntheticPeerConnection(),
+    };
+    _peers[sid] = peer;
+    KNState.peers = _peers;
+    _registerSyntheticKnownPlayer(sid, numericSlot);
+    _lockstepReadyPeers[sid] = true;
+    _syncLog(`synthetic peer created sid=${sid} slot=${numericSlot}`);
+    return peer;
+  };
+
+  const ensureSyntheticPeer = (slot) => {
+    const numericSlot = Number(slot);
+    if (!_isValidPlayerSlot(numericSlot)) return null;
+    const sid = _syntheticSidForSlot(numericSlot);
+    const existing = _peers[sid];
+    if (existing?.synthetic === true) {
+      _registerSyntheticKnownPlayer(sid, numericSlot);
+      _lockstepReadyPeers[sid] = true;
+      return existing;
+    }
+    return createSyntheticPeer(numericSlot);
+  };
+
+  const _isSyntheticOnlyInitialSyncSkip = () =>
+    _config?.skipInitialStateSync === true &&
+    _playerSlot === 0 &&
+    Object.keys(_peers).length > 0 &&
+    Object.values(_peers).every((peer) => peer?.synthetic === true);
+
+  const _restoreSyntheticKnownPlayers = () => {
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer?.synthetic === true && _isValidPlayerSlot(peer.slot)) {
+        _registerSyntheticKnownPlayer(sid, peer.slot);
+      }
+    }
+  };
+
+  const _recordSyntheticRtt = (peer, observedRttMs) => {
+    if (!peer?.synthetic || !(observedRttMs > 0)) return;
+    if (!peer._rttSamples) peer._rttSamples = [];
+    peer._rttSamples.push(observedRttMs);
+    while (peer._rttSamples.length > 20) peer._rttSamples.shift();
+    peer.rttSamples = peer._rttSamples.slice().sort((a, b) => a - b);
+  };
+
   // -- users-updated ---------------------------------------------------------
 
   const onUsersUpdated = (data) => {
@@ -2906,6 +3024,7 @@
     for (const p of Object.values(players)) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     }
+    _restoreSyntheticKnownPlayers();
     _dropPendingLateJoinPeersMissingFromRoster(players);
 
     // Update my slot from server (handles spectator -> player transition)
@@ -3310,13 +3429,13 @@
   // Shared by setupDataChannel (reliable DC) and setupRollbackInputDataChannel
   // (unordered DC, used when host broadcasts rb-transport:unreliable).
   const _processInputPacket = (remoteSid, peer, data) => {
-    if (peer.slot === null || peer.slot === undefined) return; // spectators don't send input
+    if (peer.slot === null || peer.slot === undefined) return false; // spectators don't send input
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
       if (!peer._pendingLateJoinInputDroppedLogged) {
         peer._pendingLateJoinInputDroppedLogged = true;
         _syncLog(`dropping input from pending late-join peer slot=${peer.slot} sid=${remoteSid}`);
       }
-      return;
+      return false;
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
@@ -3335,7 +3454,7 @@
       recvFrame > _frameNum + DELAY_FRAMES + _INPUT_FUTURE_MARGIN
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
-      return;
+      return false;
     }
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
     // Track peer's ack — highest frame they've received from us
@@ -3462,6 +3581,7 @@
         }
       }
     }
+    return true;
   };
 
   // Unordered input DC for rollback mode — set up alongside the lockstep DC.
@@ -4725,8 +4845,18 @@
           // Guests defer fresh EJS construction until here so a second ROM in
           // the same tab follows the same boot path as the first ROM.
           window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
-          // Start emulator within gesture context so audio works
-          KNShared.bootWithCheats('lockstep');
+          // Start emulator within gesture context so audio works. The local
+          // 1P demo keeps ROMs hashless/in-memory, so don't infer vanilla SSB64
+          // and apply standard GameShark codes to an unknown ROM.
+          if (_config?.disableStandardCheats === true) {
+            KNShared.waitForEmulator?.()?.catch?.((err) => {
+              _syncLog(`demo boot wait failed: ${err?.message || err}`);
+            });
+            KNShared.clearCheats?.(false);
+            KNShared.disableEJSInput?.('lockstep');
+          } else {
+            KNShared.bootWithCheats('lockstep');
+          }
           setStatus('Loading emulator...');
           _syncLog('gesture received — emulator starting');
           if (_bootGestureAbort) {
@@ -4973,6 +5103,14 @@
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
 
+    if (_isSyntheticOnlyInitialSyncSkip()) {
+      _syncLog('synthetic demo: skipping initial state sync');
+      _phase = PHASE_LOCKSTEP_READY;
+      if (_rttComplete) broadcastLockstepReady();
+      checkAllLockstepReady();
+      return;
+    }
+
     // Try cached state first — eliminates host/guest asymmetry.
     // All players (including host) fetch the same cached state.
     const romHash = _config?.romHash;
@@ -5145,6 +5283,24 @@
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
 
+    if (_isSyntheticOnlyInitialSyncSkip()) {
+      enterManualMode();
+      _lockstepStartStateKind = 'live';
+      _guestStateBytes = null;
+      _guestStateKind = 'savestate';
+      _guestStateHiddenWords = null;
+      _guestStateAudioFifo = null;
+      _guestStateCapturedLocally = false;
+      _syncLog('synthetic demo: starting from live boot state (no state capture/load)');
+      if (_config?.disableStandardCheats === true) {
+        KNShared.clearCheats(false);
+        _syncLog('standard cheats disabled by config');
+      }
+      _frameNum = 0;
+      startLockstep();
+      return;
+    }
+
     // If no state bytes (host fallback), host uses its own state.
     // Guests MUST have received the host's state — using their own would cause
     // RNG divergence (different boot timing → different CP0_COUNT → different random).
@@ -5257,8 +5413,11 @@
 
     // Re-apply cheats after state load. _retro_reset() and loadState() can
     // clear the cheat table, so cheats applied during boot may be lost.
-    // Only for vanilla SSB64 — Smash Remix has different memory layout.
-    if (!_isSmashRemix()) {
+    // Only for vanilla SSB64 — Smash Remix and hashless demos opt out.
+    if (_config?.disableStandardCheats === true) {
+      KNShared.clearCheats(false);
+      _syncLog('standard cheats disabled by config');
+    } else if (!_isSmashRemix()) {
       KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
     } else {
       // Clear any stale cheats from a previous game in the same tab.
@@ -5318,6 +5477,13 @@
     if (!_isSmashRemix()) return;
     const mod = gm?.Module;
     if (!mod) return;
+
+    if (_config?.skipSmashTitleWait === true) {
+      mod.pauseMainLoop?.();
+      const frame = mod._get_current_frame_count?.() ?? '?';
+      _syncLog(`Smash Remix initial sync: title wait skipped by config at coreFrame=${frame}`);
+      return;
+    }
 
     if (_isSameRomEmulatorResume()) {
       mod.pauseMainLoop?.();
@@ -5925,7 +6091,9 @@
 
       // Re-apply cheats after state load — loadState can clear the cheat
       // table, losing cheats applied during boot. Only for vanilla SSB64.
-      if (!_isSmashRemix()) {
+      if (_config?.disableStandardCheats === true) {
+        KNShared.clearCheats(false);
+      } else if (!_isSmashRemix()) {
         KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
       }
 
@@ -6314,7 +6482,12 @@
     }
 
     const expectedPeers = activePeers.filter(
-      (p) => p.slot !== null && p.slot !== undefined && !p.reconnecting && !_isLateJoinActivationGrace(p.slot),
+      (p) =>
+        p.slot !== null &&
+        p.slot !== undefined &&
+        p.synthetic !== true &&
+        !p.reconnecting &&
+        !_isLateJoinActivationGrace(p.slot),
     );
     const allPeersReady = expectedPeers.every((p) => _menuStartReadyPeers[p.slot]?.scene === sceneCurr);
     const allReady = _menuStartLocalReady && allPeersReady;
@@ -6947,9 +7120,23 @@
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
     if (_frameNum === 0) {
+      // Preserve synthetic peers' input state across this wipe. The wipe is
+      // designed for real WebRTC peers that re-populate state continuously by
+      // sending packets each frame; synthetic peers (1P demo mode) are created
+      // once at init and have no equivalent recovery path. Without preservation,
+      // the lockstep input-application path stalls at _frameNum=DELAY_FRAMES
+      // because _remoteInputs[syntheticSlot][0] is undefined and never refilled.
+      const preservedRemoteInputs = {};
+      const preservedPeerStarted = {};
+      for (const [, peer] of Object.entries(_peers)) {
+        if (peer?.synthetic === true && _isValidPlayerSlot(peer.slot)) {
+          if (_remoteInputs[peer.slot]) preservedRemoteInputs[peer.slot] = _remoteInputs[peer.slot];
+          if (_peerInputStarted[peer.slot]) preservedPeerStarted[peer.slot] = true;
+        }
+      }
       _localInputs = {};
-      _remoteInputs = {};
-      _peerInputStarted = {};
+      _remoteInputs = preservedRemoteInputs;
+      _peerInputStarted = preservedPeerStarted;
       _activeRoster = null;
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
@@ -8356,8 +8543,9 @@
     let redundantTail = null;
     let _sendFails = 0;
     for (let i = 0; i < activePeers.length; i++) {
+      const peer = activePeers[i];
+      if (peer.synthetic === true) continue;
       try {
-        const peer = activePeers[i];
         const ackFrame = peer.lastFrameFromPeer ?? -1;
         const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
         if (needsRedundancy && redundantTail === null) {
@@ -8876,6 +9064,33 @@
         _pendingCInputs.length = 0;
       }
 
+      // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
+      // When the demo orchestrator pauses predictions to simulate lockstep
+      // behavior under jitter, stall like BOOT/STRICT-MENU do — but only if
+      // no replay is queued and not all input peers have the apply frame.
+      // Use the non-clearing peek; the clearing variant would swallow the
+      // replay before kn_pre_tick consumes it (kn_rollback.c:933-948).
+      if (_predictionsPaused) {
+        const pendingReplay = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+        if (!pendingReplay) {
+          const applyFrame = _frameNum - DELAY_FRAMES;
+          let allInputsPresent = true;
+          for (const p of activePeers) {
+            if (p.slot === _playerSlot) continue;
+            if (_peerPhantom[p.slot]) continue;
+            if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
+              allInputsPresent = false;
+              break;
+            }
+          }
+          if (!allInputsPresent) {
+            if (_stallStart === 0) _stallStart = performance.now();
+            return; // stall — same shape as BOOT/STRICT-MENU early returns
+          }
+        }
+        _stallStart = 0;
+      }
+
       // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
       // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
       // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
@@ -8987,6 +9202,14 @@
         catchingUp = 2;
       }
       if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
+        const hudNow = performance.now();
+        _hudRollbackEvents++;
+        _hudEventTimestamps.push(hudNow);
+        while (_hudEventTimestamps.length > 0 && hudNow - _hudEventTimestamps[0] > HUD_EVENT_WINDOW_MS) {
+          _hudEventTimestamps.shift();
+        }
+        _hudRollbackDepthSamples.push(replayDepth);
+        if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
         _rbReplayLogged = true;
         // Replay must execute the same RSP/audio task as the original forward
@@ -11267,6 +11490,9 @@
       onUsersUpdated(config.initialPlayers);
     }
 
+    const syntheticSlots = Array.isArray(config.syntheticSlots) ? config.syntheticSlots : [];
+    for (const slot of syntheticSlots) ensureSyntheticPeer(slot);
+
     // Now that initial roster is populated, start polling for the WASM
     // controller-mask export so we can write the real mask before retro_run
     // executes its first frame. Spectators don't run an emulator.
@@ -11331,6 +11557,10 @@
     }
     _startTime = 0;
     DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
+    _predictionsPaused = false;
+    _hudRollbackEvents = 0;
+    _hudRollbackDepthSamples = [];
+    _hudEventTimestamps = [];
     _rttSamples = [];
     _rttComplete = false;
     _rttPeersComplete = 0;
@@ -11565,6 +11795,37 @@
     _config = null;
   };
 
+  const _medianSample = (samples) => {
+    const sorted = (samples || []).filter((s) => Number.isFinite(s)).sort((a, b) => a - b);
+    return sorted.length > 0 ? sorted[Math.floor(sorted.length / 2)] : null;
+  };
+
+  const _hudPingMs = () => {
+    const peers = getActivePeers();
+    const syntheticPeer = peers.find((p) => p.synthetic === true && p.rttSamples?.length > 0);
+    if (syntheticPeer) return _medianSample(syntheticPeer.rttSamples);
+    return _medianSample(peers.flatMap((p) => p.rttSamples ?? []));
+  };
+
+  const _currentStallMs = (now) => {
+    const starts = [
+      _stallStart,
+      _bootStallStartTime,
+      _phaseLockStallStartTime,
+      _rbInputStallStartTime,
+      _rollbackStallStart,
+      _pacingThrottleStartAt,
+      _awaitingResyncAt,
+    ].filter((t) => Number.isFinite(t) && t > 0);
+    return starts.length > 0 ? Math.max(0, now - Math.min(...starts)) : 0;
+  };
+
+  const _pruneHudEvents = (now) => {
+    while (_hudEventTimestamps.length > 0 && now - _hudEventTimestamps[0] > HUD_EVENT_WINDOW_MS) {
+      _hudEventTimestamps.shift();
+    }
+  };
+
   const NetplayRollbackApi = {
     init,
     stop,
@@ -11587,6 +11848,59 @@
     isSyncEnabled: () => _syncEnabled,
     setSyncInterval: (frames) => {
       _syncBaseInterval = _syncCheckInterval = Math.max(10, frames);
+    },
+    injectRemoteInput: ({ slot, frame, input, ackFrame = -1, redundantFrames = null, observedRttMs = 0 } = {}) => {
+      const peer = ensureSyntheticPeer(slot);
+      if (!peer) return false;
+      const inputFrame = Number(frame);
+      if (!Number.isFinite(inputFrame)) return false;
+      const syntheticInput = {
+        buttons: input?.buttons ?? 0,
+        lx: input?.lx ?? 0,
+        ly: input?.ly ?? 0,
+        cx: input?.cx ?? 0,
+        cy: input?.cy ?? 0,
+      };
+      const sid = _syntheticSidForSlot(peer.slot);
+      const packet = KNShared.encodeInput(inputFrame, syntheticInput, ackFrame, redundantFrames).buffer;
+      // The fake-peer scheduler must keep inputFrame near _frameNum so the
+      // real seam's OOR guard accepts it and the C engine sees normal packets.
+      const injected = _processInputPacket(sid, peer, packet);
+      _recordSyntheticRtt(peer, observedRttMs);
+      return !!injected;
+    },
+    setPredictionsPaused: (on) => {
+      const next = !!on;
+      if (_predictionsPaused !== next) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
+      _predictionsPaused = next;
+      return _predictionsPaused;
+    },
+    isPredictionsPaused: () => _predictionsPaused,
+    getHudCounters: () => {
+      const now = performance.now();
+      _pruneHudEvents(now);
+      const eventsPerSec = _hudEventTimestamps.length / (HUD_EVENT_WINDOW_MS / 1000);
+      const avgDepth =
+        _hudRollbackDepthSamples.length === 0
+          ? 0
+          : _hudRollbackDepthSamples.reduce((a, b) => a + b, 0) / _hudRollbackDepthSamples.length;
+      const tickMod = window.EJS_emulator?.gameManager?.Module;
+      return {
+        pingMs: _hudPingMs(),
+        predictionsPaused: _predictionsPaused,
+        predictionState: _predictionsPaused ? 'LOCKSTEP' : 'PREDICT',
+        stallMs: _currentStallMs(now),
+        rollbackEventsPerSec: eventsPerSec,
+        rollbackEventsTotal: _hudRollbackEvents,
+        avgRollbackDepth: avgDepth,
+        totalMispredicts: tickMod?._kn_get_prediction_count?.() ?? 0,
+        correctPredictions: tickMod?._kn_get_correct_predictions?.() ?? 0,
+        maxDepth: tickMod?._kn_get_max_depth?.() ?? 0,
+        failedRollbacks: tickMod?._kn_get_failed_rollbacks?.() ?? 0,
+        currentFrame: _frameNum,
+        delay: DELAY_FRAMES,
+        isCRollback: _useCRollback,
+      };
     },
     getInfo: () => {
       const peers = getActivePeers();

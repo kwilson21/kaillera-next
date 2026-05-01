@@ -32,6 +32,10 @@ int kn_post_tick(void);
  */
 int kn_get_pending_rollback(void);
 
+/* Non-clearing peek: returns rb.pending_rollback without resetting it.
+ * Use this for read-only checks; use kn_get_pending_rollback to consume. */
+int kn_peek_pending_rollback(void);
+
 /* Get pointer to saved state for a given frame.
  * Returns NULL if frame not in ring buffer.
  */

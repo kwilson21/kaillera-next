@@ -1396,6 +1396,19 @@ int kn_get_pending_rollback(void) {
     return f;
 }
 
+/* ── Query: pending rollback frame (non-clearing peek) ─────────────────
+ * Mirrors kn_get_pending_rollback but does NOT clear rb.pending_rollback.
+ * Used by JS prediction-pause gate to decide whether to stall before
+ * kn_pre_tick — the clearing variant would swallow the replay before
+ * pre_tick's consumer at line 933 can see it.
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_peek_pending_rollback(void) {
+    return rb.pending_rollback;
+}
+
 /* ── Query: replay depth after kn_pre_tick ─────────────────────────── */
 /* Returns number of frames to replay (0 = none). Clears the flag. */
 #ifdef __EMSCRIPTEN__
