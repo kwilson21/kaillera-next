@@ -508,10 +508,16 @@
   let _rbVisualFreezeHideTimer = 0;
   let _rbVisualFreezeFailures = 0;
   let _rbVisualFreezeSerial = 0;
+  let _rbMotionSmoothingRaf = 0;
+  let _rbMotionSmoothingSerial = 0;
+  let _rbMotionSmoothingDx = 0;
+  let _rbMotionSmoothingDy = 0;
   let _rbRdpSkipActive = false;
   let _rbFullHeadlessActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
+  const RB_MOTION_SMOOTHING_MAX_PX = 3;
+  const RB_MOTION_SMOOTHING_BASE_SCALE = 1.012;
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
       const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
@@ -585,6 +591,14 @@
     try {
       if (_urlParams.get('replayVisualFreeze') === '0') return false;
       if (localStorage.getItem('kn-replay-visual-freeze') === '0') return false;
+    } catch (_) {}
+    return true;
+  })();
+  const RB_REPLAY_MOTION_SMOOTHING = (() => {
+    try {
+      const raw = _urlParams.get('replayMotionSmoothing') ?? localStorage.getItem('kn-replay-motion-smoothing');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
     } catch (_) {}
     return true;
   })();
@@ -707,6 +721,116 @@
     }
   };
 
+  // During replay the freeze overlay is the visible surface. Nudge that
+  // snapshot, not the emulator canvas underneath, so state and layout stay
+  // untouched while the player still sees local-input-responsive motion.
+  const _cancelRollbackMotionSmoothing = () => {
+    if (_rbMotionSmoothingRaf) {
+      try {
+        if (window.APISandbox?.nativeCancelRAF) {
+          window.APISandbox.nativeCancelRAF(_rbMotionSmoothingRaf);
+        } else if (window.cancelAnimationFrame) {
+          window.cancelAnimationFrame(_rbMotionSmoothingRaf);
+        } else {
+          clearTimeout(_rbMotionSmoothingRaf);
+        }
+      } catch (_) {}
+      _rbMotionSmoothingRaf = 0;
+    }
+  };
+
+  const _requestRollbackMotionFrame = (cb) => {
+    if (window.APISandbox?.nativeRAF) return window.APISandbox.nativeRAF(cb);
+    if (window.requestAnimationFrame) return window.requestAnimationFrame.call(window, cb);
+    return setTimeout(cb, 16);
+  };
+
+  const _getRollbackMotionStats = () => {
+    if (!window._knReplayMotionSmoothingStats) {
+      window._knReplayMotionSmoothingStats = { starts: 0, frames: 0, lastDx: 0, lastDy: 0 };
+    }
+    return window._knReplayMotionSmoothingStats;
+  };
+
+  const _resetRollbackMotionSmoothing = () => {
+    _cancelRollbackMotionSmoothing();
+    _rbMotionSmoothingSerial++;
+    _rbMotionSmoothingDx = 0;
+    _rbMotionSmoothingDy = 0;
+    const overlay = _rbVisualFreezeOverlay;
+    if (overlay) {
+      overlay.style.transform = 'none';
+      overlay.style.transformOrigin = '50% 50%';
+    }
+  };
+
+  const _readRollbackMotionInput = () => {
+    try {
+      return readLocalInput();
+    } catch (_) {
+      return _localInputs[_frameNum] || KNShared.ZERO_INPUT;
+    }
+  };
+
+  const _inputToRollbackMotion = (input) => {
+    const maxAxis = 32767;
+    const leftMag = Math.hypot(input?.lx || 0, input?.ly || 0);
+    const cMag = Math.hypot(input?.cx || 0, input?.cy || 0);
+    const useC = leftMag < 2500 && cMag >= 2500;
+    const ax = useC ? input?.cx || 0 : input?.lx || 0;
+    const ay = useC ? input?.cy || 0 : input?.ly || 0;
+    const deadzone = 2200;
+    const mag = Math.hypot(ax, ay);
+    const hasDirection = mag >= deadzone;
+    const buttons = input?.buttons || 0;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    return {
+      dx: hasDirection
+        ? clamp((ax / maxAxis) * RB_MOTION_SMOOTHING_MAX_PX, -RB_MOTION_SMOOTHING_MAX_PX, RB_MOTION_SMOOTHING_MAX_PX)
+        : 0,
+      dy: hasDirection
+        ? clamp((ay / maxAxis) * RB_MOTION_SMOOTHING_MAX_PX, -RB_MOTION_SMOOTHING_MAX_PX, RB_MOTION_SMOOTHING_MAX_PX)
+        : 0,
+      scale: RB_MOTION_SMOOTHING_BASE_SCALE + (buttons ? 0.004 : 0),
+    };
+  };
+
+  const _applyRollbackMotionTransform = (overlay, motion) => {
+    _rbMotionSmoothingDx = _rbMotionSmoothingDx * 0.45 + motion.dx * 0.55;
+    _rbMotionSmoothingDy = _rbMotionSmoothingDy * 0.45 + motion.dy * 0.55;
+    const dx = Math.abs(_rbMotionSmoothingDx) < 0.05 ? 0 : _rbMotionSmoothingDx;
+    const dy = Math.abs(_rbMotionSmoothingDy) < 0.05 ? 0 : _rbMotionSmoothingDy;
+    overlay.style.transformOrigin = '50% 50%';
+    overlay.style.transform = `translate3d(${dx.toFixed(2)}px, ${dy.toFixed(2)}px, 0) scale(${motion.scale.toFixed(3)})`;
+    const stats = _getRollbackMotionStats();
+    stats.frames++;
+    stats.lastDx = Number(dx.toFixed(2));
+    stats.lastDy = Number(dy.toFixed(2));
+  };
+
+  const _startRollbackMotionSmoothing = (overlay, serial) => {
+    if (!RB_REPLAY_MOTION_SMOOTHING || !overlay) return;
+    _cancelRollbackMotionSmoothing();
+    _rbMotionSmoothingSerial++;
+    const motionSerial = _rbMotionSmoothingSerial;
+    const stats = _getRollbackMotionStats();
+    stats.starts++;
+    const step = () => {
+      if (
+        !_rbVisualFreezeActive ||
+        _rbVisualFreezeOverlay !== overlay ||
+        overlay.dataset.serial !== String(serial) ||
+        motionSerial !== _rbMotionSmoothingSerial
+      ) {
+        return;
+      }
+      _applyRollbackMotionTransform(overlay, _inputToRollbackMotion(_readRollbackMotionInput()));
+      _rbMotionSmoothingRaf = _requestRollbackMotionFrame(step);
+    };
+    _applyRollbackMotionTransform(overlay, _inputToRollbackMotion(_readRollbackMotionInput()));
+    _rbMotionSmoothingRaf = _requestRollbackMotionFrame(step);
+  };
+
   const _captureRollbackVisualSnapshot = () => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return false;
     const source = _findRollbackVisualCanvas();
@@ -767,7 +891,7 @@
           'background:transparent',
           'image-rendering:pixelated',
           'image-rendering:crisp-edges',
-          'will-change:opacity',
+          'will-change:opacity,transform',
           'contain:strict',
         ].join(';');
         _rbVisualFreezeOverlay = overlay;
@@ -796,11 +920,16 @@
       }
       overlay.style.transition = 'none';
       overlay.style.opacity = '1';
+      overlay.style.transform = RB_REPLAY_MOTION_SMOOTHING
+        ? `translate3d(0, 0, 0) scale(${RB_MOTION_SMOOTHING_BASE_SCALE})`
+        : 'none';
+      overlay.style.transformOrigin = '50% 50%';
       overlay.style.display = 'block';
       overlay.dataset.depth = String(depth);
       const serial = ++_rbVisualFreezeSerial;
       overlay.dataset.serial = String(serial);
       _rbVisualFreezeActive = true;
+      _startRollbackMotionSmoothing(overlay, serial);
       if (RB_VISUAL_FADE_DURING_REPLAY && RB_VISUAL_FADE_MS > 0) {
         const replayFadeMs = Math.max(45, Math.min(140, Math.max(RB_VISUAL_FADE_MS, depth * 14)));
         const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
@@ -819,6 +948,7 @@
       return true;
     } catch (e) {
       _rbVisualFreezeFailures++;
+      _resetRollbackMotionSmoothing();
       if (_rbVisualFreezeOverlay) _rbVisualFreezeOverlay.style.display = 'none';
       _rbVisualFreezeActive = false;
       if (_rbVisualFreezeFailures <= 3) {
@@ -830,6 +960,7 @@
 
   const _hideRollbackVisualFreeze = () => {
     _rbVisualFreezeActive = false;
+    _resetRollbackMotionSmoothing();
     const overlay = _rbVisualFreezeOverlay;
     if (!overlay) return;
     if (_rbVisualFreezeHideTimer) clearTimeout(_rbVisualFreezeHideTimer);
