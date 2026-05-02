@@ -929,9 +929,30 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
     /* ── Pacing gate: if JS says we're too far ahead, maintain ring and skip ──
      * frame_adv >= 0 means JS computed a valid frame advantage.
-     * If frame_adv >= delay_frames + 2, we're ahead enough to skip — but
-     * first check if the ring needs a save to prevent FATAL-RING-STALE. */
-    if (frame_adv >= 0 && frame_adv >= rb.delay_frames + 2 &&
+     * Threshold is sized to keep a 2-frame margin below visible_rb_max so
+     * a misprediction arriving right at the throttle boundary still has
+     * room to roll back without DEEP-MISPREDICT-SKIP firing.
+     *
+     * Legacy (rb.true_rollback=0): visible_rb_max=delay+4, pacing=delay+2.
+     * True rollback: visible_rb_max=min(delay+10, 12) per the misprediction
+     *   handler; pacing=min(delay+8, 10). Lowering the pacing threshold to
+     *   delay+2 under true rollback would force the engine to throttle on
+     *   typical RTT/2 frame depths (5-7 frames at 80ms RTT), which defeats
+     *   the entire point of true rollback netcode — the local engine is
+     *   supposed to run ahead with predictions and the misprediction handler
+     *   is supposed to absorb the depth, not the pacing throttle. */
+    int pacing_threshold;
+    if (rb.true_rollback) {
+        #ifndef KN_MAX_VISIBLE_ROLLBACK_DEPTH
+        #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 12
+        #endif
+        int proposed = rb.delay_frames + 8;
+        int cap = KN_MAX_VISIBLE_ROLLBACK_DEPTH - 2; /* keep 2-frame margin below max */
+        pacing_threshold = (proposed < cap) ? proposed : cap;
+    } else {
+        pacing_threshold = rb.delay_frames + 2;
+    }
+    if (frame_adv >= 0 && frame_adv >= pacing_threshold &&
         rb.pending_rollback < 0 && rb.replay_remaining == 0) {
         int ring_needs_save = 0;
         if (rb.last_save_frame < 0 ||
