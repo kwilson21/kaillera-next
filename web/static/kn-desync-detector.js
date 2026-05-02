@@ -480,6 +480,28 @@
         if (!_enabled) return;
       }
       _localFrameTick = frame;
+      // Skip the expensive digest build when there is no real peer to
+      // detect divergence with. _buildLocalDigest does 21 field hashes plus
+      // _buildReplayMeta's 42 pre/post hashes plus up to 64×21×2 trajectory
+      // hashes — ~3-9 ms per tick on mobile, every tick. In the demo with a
+      // synthetic peer (in-process, no DataChannel) and in solo / spectator
+      // modes, all of that work is wasted: synthetic peers never broadcast
+      // digests back, _compareAtFrame has nothing to compare against, and
+      // _broadcastDigest's loop sees no open DataChannels.
+      // This skip is safe: when a real peer joins later, _peerDigests is
+      // empty (we never received any) and _localDigests is empty (we never
+      // built any) — same starting state as a fresh connection.
+      const peers = window._peers || (window.KNState && window.KNState.peers) || {};
+      let _hasRealPeer = false;
+      for (const sid of Object.keys(peers)) {
+        const p = peers[sid];
+        if (!p || p.synthetic === true) continue;
+        if (p.dc && p.dc.readyState === 'open') {
+          _hasRealPeer = true;
+          break;
+        }
+      }
+      if (!_hasRealPeer) return;
       const localDigest = _buildLocalDigest(frame);
       if (!localDigest) return;
       const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
