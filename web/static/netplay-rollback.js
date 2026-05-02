@@ -7418,7 +7418,15 @@
     const newFrame = tickMod._kn_post_tick();
     _frameNum = newFrame;
     KNState.frameNum = _frameNum;
-    if (window.KNDesync) KNDesync.tick(_frameNum);
+    // KNDesync.tick is intentionally skipped on replay frames. Each
+    // invocation does ~63 WASM hash calls (21 field hashes for the
+    // current digest + 42 pre/post replay-meta hashes) plus up to a
+    // 64×21×2 trajectory-divergence scan. Measured at ~5ms/step on the
+    // demo path — enough to push burst≥2 replay ticks past the 16.6ms
+    // vsync budget and produce the visible stutter at rollback frequency.
+    // The trajectory analysis only needs to fire once after replay
+    // completes; the next normal tick's KNDesync.tick picks up the new
+    // last-replay frame via _kn_get_last_replay_*.
   };
 
   const _setReplayRdpSkip = (tickMod, enable, reason = '') => {
