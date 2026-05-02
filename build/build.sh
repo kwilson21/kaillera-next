@@ -147,6 +147,14 @@ if [ -d "${PATCHES_DIR}" ]; then
         echo "    Added kn_sync_write probe diagnostic exports"
     fi
 
+    # True rollback netcode exports. Capability bit + flag setter; gates the
+    # split-input replay path in kn_pre_tick (LOCAL at rb.frame, REMOTE at
+    # replay_apply). JS uses the capability for cross-peer handshake.
+    if grep -q "_kn_get_tolerance_hits" Makefile.emulatorjs && ! grep -q "_kn_get_true_rollback_capability" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_tolerance_hits|_kn_get_tolerance_hits,_kn_get_true_rollback_capability,_kn_set_true_rollback|' Makefile.emulatorjs
+        echo "    Added true-rollback netcode WASM exports"
+    fi
+
     # 2026-04-29 rollback-engine OOB-throw localization probes. Exports the
     # last rollback phase/frame/slot/serialize counters so JS can dump them
     # in the STEP-THREW handler. Remove once root cause is found.

@@ -231,6 +231,17 @@ static struct {
     int replay_depth;     /* number of frames JS must replay (0 = none) */
     int replay_start;     /* frame to start replay from */
 
+    /* True rollback netcode flag.
+     * 0 = legacy "lockstep with rollback recovery": replay path writes ALL
+     *     slots from replay_apply (frame - delay), matching the JS forward
+     *     path that also writes all slots from applyFrame.
+     * 1 = true rollback: replay path writes LOCAL at rb.frame (current) and
+     *     REMOTE at replay_apply, matching the JS forward path's split.
+     * Set via kn_set_true_rollback() at game-start by JS based on the
+     * capability handshake. Both peers must agree (cross-peer determinism)
+     * and the JS forward path must agree (local determinism). */
+    int true_rollback;
+
     /* Amortized replay: replay 1 extra frame per tick instead of all at once */
     int replay_remaining; /* frames still to replay (0 = not replaying) */
     int replay_target;    /* frame to catch up to */
@@ -819,8 +830,27 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
             /* Dynamic cap: delay_frames + 4 ensures rollback can always
              * correct mispredictions at the apply frame. With delay=11,
              * a misprediction has depth=11 at minimum — the old hardcoded
-             * cap of 7 silently dropped every single rollback. */
-            int visible_rb_max = rb.delay_frames + 4;
+             * cap of 7 silently dropped every single rollback.
+             *
+             * True rollback netcode (rb.true_rollback=1): rollback depth is
+             * determined by network RTT/2 + jitter, NOT by delay_frames any
+             * more. With delay=1 and 80ms RTT, depth still runs 5-7 frames
+             * per the demo's measured distribution. The +4 margin was sized
+             * for delay≥4; under true rollback we bump to +10 (capped at
+             * KN_MAX_VISIBLE_ROLLBACK_DEPTH=12) so the same headroom exists
+             * across the new low-delay range without dropping mispredicts. */
+            #ifndef KN_MAX_VISIBLE_ROLLBACK_DEPTH
+            #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 12
+            #endif
+            int visible_rb_max;
+            if (rb.true_rollback) {
+                int proposed = rb.delay_frames + 10;
+                visible_rb_max = (proposed < KN_MAX_VISIBLE_ROLLBACK_DEPTH)
+                               ? proposed
+                               : KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+            } else {
+                visible_rb_max = rb.delay_frames + 4;
+            }
             int depth = rb.frame - frame;
             if (depth > visible_rb_max) {
                 /* Too deep to rewind invisibly — accept drift */
@@ -1011,8 +1041,67 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             rb.frame, rb.replay_remaining, replay_apply, save_idx);
         rb_save_slot(save_idx, rb.frame, 0);
 
-        /* Write inputs for this replay frame (logged for divergence detection) */
-        if (replay_apply >= 0) {
+        /* Write inputs for this replay frame (logged for divergence detection).
+         *
+         * True rollback (rb.true_rollback=1): mirror the JS forward-tick split
+         * in netplay-rollback.js. LOCAL is applied at rb.frame (current);
+         * REMOTE is applied at replay_apply (delayed, from C ring or predicted).
+         * If we wrote ALL slots from replay_apply during replay while the
+         * forward path wrote local-at-current, replay would simulate with a
+         * stale local input the original frame never used → R4 LIVE-MISMATCH
+         * fires every replay frame → silent state divergence.
+         *
+         * Legacy (rb.true_rollback=0): all slots from replay_apply, matching
+         * the legacy JS forward path that also writes all slots from applyFrame.
+         */
+        if (rb.true_rollback) {
+            int s;
+            int local_idx = rb.frame % KN_INPUT_RING_SIZE;
+            char inputs_str[256];
+            int pos = 0;
+            /* LOCAL at rb.frame */
+            kn_input_t *li = &rb.inputs[rb.local_slot][local_idx];
+            int li_present = (li->present && li->frame == rb.frame);
+            if (li_present) {
+                kn_write_controller(rb.local_slot, li->buttons, li->lx, li->ly, li->cx, li->cy);
+            } else {
+                kn_write_controller(rb.local_slot, 0, 0, 0, 0, 0);
+            }
+            if (pos < (int)sizeof(inputs_str) - 32) {
+                pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
+                    "L%d@%d[%d,%d,%d,%c] ", rb.local_slot, rb.frame,
+                    li_present ? li->buttons : 0,
+                    li_present ? li->lx : 0,
+                    li_present ? li->ly : 0,
+                    li_present ? 'L' : 'Z');
+            }
+            /* REMOTE at replay_apply */
+            for (s = 0; s < KN_MAX_PLAYERS; s++) {
+                if (s == rb.local_slot) continue;
+                int btn = 0, lx = 0, ly = 0, cx = 0, cy = 0;
+                char origin = '?';
+                if (s < rb.num_players && replay_apply >= 0) {
+                    int idx = replay_apply % KN_INPUT_RING_SIZE;
+                    kn_input_t *inp = &rb.inputs[s][idx];
+                    if (inp->present && inp->frame == replay_apply) {
+                        btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
+                        origin = rb.predicted[s][idx] ? 'P' : 'R';
+                        kn_write_controller(s, btn, lx, ly, cx, cy);
+                    } else {
+                        origin = 'Z';
+                        kn_write_controller(s, 0, 0, 0, 0, 0);
+                    }
+                } else {
+                    origin = (s < rb.num_players) ? 'Z' : 'X';
+                    kn_write_controller(s, 0, 0, 0, 0, 0);
+                }
+                if (pos < (int)sizeof(inputs_str) - 32) {
+                    pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
+                        "R%d@%d[%d,%d,%d,%c] ", s, replay_apply, btn, lx, ly, origin);
+                }
+            }
+            rb_log("REPLAY-INPUT-TR f=%d %s", rb.frame, inputs_str);
+        } else if (replay_apply >= 0) {
             write_frame_inputs_logged(replay_apply, 1);
         } else {
             int s;
@@ -1834,6 +1923,28 @@ int kn_get_mispred_breakdown(int *out, int out_count) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_tolerance_hits(void) { return rb.tolerance_hits; }
+
+/* True rollback netcode capability. Always 1 in builds shipped with the
+ * split-input replay path (kn_pre_tick replay branch reads rb.true_rollback
+ * to decide whether to write local at rb.frame vs replay_apply). JS reads
+ * this to fill the cross-peer capability handshake; old cores without this
+ * export report undefined → treated as 0 → cross-peer mismatch refusal. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_true_rollback_capability(void) { return 1; }
+
+/* Set the true-rollback flag at game-start. JS pushes the negotiated value
+ * (capability bit AND'd with the URL/localStorage opt-out flag) so the C
+ * replay path matches the JS forward path. Mismatched modes between JS and
+ * C produce silent state divergence on every replay. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_true_rollback(int enable) {
+    rb.true_rollback = enable ? 1 : 0;
+    rb_log("kn_set_true_rollback %d", rb.true_rollback);
+}
 
 /* Get SoftFloat globals packed: high byte = roundingMode, low byte = exceptionFlags */
 #ifdef __EMSCRIPTEN__

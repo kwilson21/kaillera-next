@@ -341,7 +341,14 @@
   // of time to deliver their input before we need it.
   const DEFAULT_DELAY_FRAMES = 2;
   let DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
-  const ROLLBACK_MIN_DELAY_FRAMES = 4;
+  // True-rollback model: DELAY_FRAMES is just the remote-input prediction
+  // window (jitter buffer). It does NOT govern local input lag any more,
+  // so we can safely sit at 1 frame. Legacy "lockstep with rollback recovery"
+  // model (?trueRollback=0 / pre-update peers) still observes this clamp,
+  // but ROLLBACK_MIN_DELAY_FRAMES=1 is fine there too because the delay
+  // negotiation falls through to the auto-formula's natural floor (~RTT/2 + jitter
+  // for legacy, just jitter for true-rollback).
+  const ROLLBACK_MIN_DELAY_FRAMES = 1;
   const ROLLBACK_MAX_DELAY_FRAMES = 7;
   const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES) => {
     const parsed = parseInt(value, 10);
@@ -418,7 +425,11 @@
 
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
-    return { rdpReplaySkip: !!mod?._kn_set_skip_rdp_replay && RB_SKIP_RDP_DURING_REPLAY };
+    const trueRollbackCore = !!mod?._kn_get_true_rollback_capability && mod._kn_get_true_rollback_capability() === 1;
+    return {
+      rdpReplaySkip: !!mod?._kn_set_skip_rdp_replay && RB_SKIP_RDP_DURING_REPLAY,
+      trueRollback: trueRollbackCore && RB_TRUE_ROLLBACK,
+    };
   };
 
   const broadcastLockstepReady = () => {
@@ -536,6 +547,21 @@
       if (raw === '0') return false;
     } catch (_) {}
     return false;
+  })();
+  // True rollback netcode: apply LOCAL input at the current frame for instant
+  // input feel; predict + apply REMOTE inputs at applyFrame as before.
+  // Without this flag, all slots (including local) are applied at applyFrame —
+  // "lockstep with rollback recovery" — and local input feels like RTT-scaled
+  // lockstep delay instead of real rollback netcode.
+  // Both peers must agree (kn_get_true_rollback_capability + RB_TRUE_ROLLBACK)
+  // before rollback can start; mismatch falls back to legacy behavior.
+  const RB_TRUE_ROLLBACK = (() => {
+    try {
+      const raw = _urlParams.get('trueRollback') ?? localStorage.getItem('kn-true-rollback');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
   })();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
@@ -5507,6 +5533,16 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      const peerTrueRollback = !!peerCaps.trueRollback;
+      if (peerTrueRollback !== localCaps.trueRollback) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localTrueRollback=${localCaps.trueRollback ? 1 : 0} ` +
+            `peerTrueRollback=${peerTrueRollback ? 1 : 0} — refusing rollback start`,
+        );
+        setStatus('Core version mismatch -- reload both players');
+        _config?.onToast?.('Core version mismatch -- reload both players');
+        return;
+      }
     }
 
     // Negotiate delay: ceiling of all players.
@@ -5557,7 +5593,14 @@
       const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
       const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
       const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
-      const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67; // +1 frame safety
+      // True-rollback model: delay is the REMOTE prediction jitter buffer.
+      // Local input is applied at the current frame, so RTT/2 does NOT
+      // contribute to local input lag — RTT only sets rollback depth.
+      // Legacy model: delay also inflates local input application, so RTT/2
+      // must be folded in or the negotiated delay can't keep up at high RTT.
+      const effectiveMs = RB_TRUE_ROLLBACK
+        ? jitterMargin + 16.67 // 1-frame safety on top of measured jitter
+        : filteredMedian / 2 + jitterMargin + 16.67;
       ownDelay = Math.min(
         ROLLBACK_MAX_DELAY_FRAMES,
         Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)),
@@ -5565,6 +5608,7 @@
       _syncLog(
         `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +
           `IQR=[${q1.toFixed(1)},${q3.toFixed(1)}] samples=${sorted.length} ` +
+          `mode=${RB_TRUE_ROLLBACK ? 'true' : 'legacy'} ` +
           `effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
       );
     } else {
@@ -7817,8 +7861,19 @@
         // Too large (20) wastes 320MB on mobile.
         // 8 gives enough pacing headroom (safety freeze at fAdv>=6)
         // while keeping ring buffer at 9 slots × 16MB = 144MB.
-        const rollbackMax = Math.max(12, effectiveDelay + 4);
+        // True-rollback expands visible rollback depth from delay+4 to delay+10
+        // (capped at 12 by the C engine), so size the ring buffer to match.
+        const rollbackMax = Math.max(12, effectiveDelay + 10);
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        // Push the input-application mode down to the C engine so the replay
+        // path mirrors the JS forward-tick split (local at current frame,
+        // remote at applyFrame). Mismatched modes between JS and C produce
+        // silent state divergence on every replay.
+        const localCaps = _localRollbackCaps();
+        if (detMod._kn_set_true_rollback) {
+          detMod._kn_set_true_rollback(localCaps.trueRollback ? 1 : 0);
+          _syncLog(`C-ROLLBACK trueRollback=${localCaps.trueRollback ? 1 : 0}`);
+        }
         // Set the C engine's frame counter so kn_get_frame()/exchanged input
         // frame numbers line up across peers. Late-join: _frameNum was set
         // to the host's frame from the loaded state. Deferred-init guest:
@@ -9865,15 +9920,38 @@
         }
       }
       for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-      if (applyFrame >= 0) {
-        // Log what we write for each slot — to compare with REPLAY-INPUT logs
+      // True-rollback netcode: local input applied at the CURRENT frame for
+      // instant input feel; remote inputs applied at applyFrame (predicted by
+      // C engine if not yet confirmed). The C replay path mirrors this split
+      // so replay reproduces the same input application as the original
+      // forward frame — see kn_pre_tick replay branch in build/kn_rollback/
+      // kn_rollback.c (gated by kn_set_true_rollback flag pushed down at game
+      // start). Mismatched peers are blocked by the capability handshake.
+      // Legacy "lockstep with rollback recovery": all slots applied at
+      // applyFrame, including local — local input lag scales with negotiated
+      // delay (which itself scales with RTT), so input feels like lockstep.
+      if (RB_TRUE_ROLLBACK) {
+        writeInputToMemory(_playerSlot, localInput);
+        const inputParts = [`L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`];
+        if (applyFrame >= 0) {
+          for (let s = 0; s < rb_numPlayers; s++) {
+            if (s === _playerSlot) continue;
+            const inp = _rbGetInput(tickMod, s, applyFrame);
+            writeInputToMemory(s, inp);
+            inputParts.push(`R${s}@${applyFrame}[${inp.buttons},${inp.lx},${inp.ly}]`);
+          }
+        }
+        const anyNonZero = inputParts.some((p) => !/\[0,0,0\]$/.test(p));
+        if (anyNonZero || _frameNum % 60 === 0) {
+          _syncLog(`NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} ${inputParts.join(' ')}`);
+        }
+      } else if (applyFrame >= 0) {
         const inputParts = [];
         for (let s = 0; s < rb_numPlayers; s++) {
           const inp = _rbGetInput(tickMod, s, applyFrame);
           writeInputToMemory(s, inp);
           inputParts.push(`s${s}[${inp.buttons},${inp.lx},${inp.ly}]`);
         }
-        // Only log sporadically to avoid flood — every 60 frames, or any frame with non-zero input
         const anyNonZero = inputParts.some((p) => !p.includes('[0,0,0]'));
         if (anyNonZero || _frameNum % 60 === 0) {
           _syncLog(`NORMAL-INPUT f=${applyFrame} ${inputParts.join(' ')}`);

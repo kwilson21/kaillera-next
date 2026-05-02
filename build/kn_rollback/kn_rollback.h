@@ -101,6 +101,10 @@ int kn_get_mispred_breakdown(int *out, int out_count);
  * stick tolerance window). Returns cumulative count since rollback init. */
 int kn_get_tolerance_hits(void);
 
+/* True rollback netcode capability + flag. See kn_rollback.c. */
+int kn_get_true_rollback_capability(void);
+void kn_set_true_rollback(int enable);
+
 /* Region hashes for a specific frame's saved state (RB-CHECK divergence
  * diagnosis). Like kn_state_region_hashes but operates on the ring slot
  * for `frame` instead of the most recent. Returns count on success, 0 if
