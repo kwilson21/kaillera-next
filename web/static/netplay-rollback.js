@@ -9627,13 +9627,21 @@
       } else if (_rbBootConverged && rbApplyFrame >= 0) {
         // Gameplay: stall only when too far ahead for rollback to help
         const rbInputPeers = getInputPeers();
+        // Stall threshold: must match the C engine's visible_rb_max so we
+        // don't bail before rollback can absorb the gap. Legacy model uses
+        // delay+4 (kn_rollback.c). True rollback expands this to delay+10
+        // (capped at 12 by KN_MAX_VISIBLE_ROLLBACK_DEPTH); keeping the JS
+        // stall at the old delay+4 produces continuous lockstep-like stalls
+        // at typical RTT/2 frame depths because peer naturally sits 5-7
+        // frames behind on 80ms RTT.
+        const stallThreshold = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
         for (const p of rbInputPeers) {
           if (_peerPhantom[p.slot]) continue;
           if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
             // Input missing — check how far ahead we are
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
-            if (adv >= DELAY_FRAMES + 4) {
+            if (adv >= stallThreshold) {
               const nowRbInputStall = performance.now();
               const rbStallKey = `${p.slot}:${rbApplyFrame}`;
               if (_rbInputStallKey !== rbStallKey) {
@@ -10377,7 +10385,12 @@
         for (const fStr of Object.keys(window._rbPendingChecks)) {
           const f = parseInt(fStr);
           const checkAge = _frameNum - f;
-          const minCheckAge = Math.min(Math.max(DELAY_FRAMES + 4, 4), Math.max(_rbRollbackMax - 1, 4));
+          // Match the stall threshold's depth budget so we wait long enough
+          // for rollback-driven hash corrections to finalize before treating
+          // a peer's rb-check as authoritative. True-rollback widens this
+          // window to delay+10 (cap 12); legacy stays at delay+4.
+          const _checkAgeBudget = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
+          const minCheckAge = Math.min(Math.max(_checkAgeBudget, 4), Math.max(_rbRollbackMax - 1, 4));
           if (checkAge > _rbRollbackMax) {
             delete window._rbPendingChecks[fStr];
             delete window._rbPendingGameChecks?.[fStr];
