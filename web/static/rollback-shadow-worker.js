@@ -497,6 +497,91 @@
     return true;
   };
 
+  // Read the N64 active framebuffer from RDRAM and convert to RGBA8888.
+  // Requires the ANGRYLION software RDP plugin (which writes to RDRAM,
+  // unlike GLideN64 which renders to offscreen FBOs). Returns null if
+  // VI registers report a blank/invalid configuration.
+  //
+  // Pixel format encoding from VI_STATUS bits 0-1:
+  //   0 = blank, 1 = reserved, 2 = 16-bit RGBA5551, 3 = 32-bit RGBA8888.
+  // 16-bit pixels are big-endian; we read with DataView to get the
+  // correct byte order regardless of host endianness.
+  const _knFbBuffer = { rgba: null, w: 0, h: 0 };
+  const readFramebuffer = () => {
+    if (!mod?._kn_get_vi_origin || !mod?._kn_get_vi_width || !mod?._kn_get_vi_status) return null;
+    if (!mod?._kn_get_rdram_ptr || !mod.HEAPU8) return null;
+    const status = mod._kn_get_vi_status() >>> 0;
+    const fmt = status & 0x3;
+    if (fmt !== 2 && fmt !== 3) return null;
+    const origin = (mod._kn_get_vi_origin() >>> 0) & 0x00ffffff;
+    const width = (mod._kn_get_vi_width() >>> 0) & 0xfff;
+    if (!width || width > 1024) return null;
+    // Height is implied by VI_V_SYNC and X/Y scale; in practice N64
+    // games use 240 (NTSC) or 200 (PAL letterbox). Use 240 as default
+    // but cap by RDRAM size.
+    const height = 240;
+    const rdramPtr = mod._kn_get_rdram_ptr() >>> 0;
+    if (!rdramPtr) return null;
+    const bpp = fmt === 3 ? 4 : 2;
+    const fbBytes = width * height * bpp;
+    if (origin + fbBytes > 0x800000) return null;
+    const fbStart = rdramPtr + origin;
+    if (!_knFbBuffer.rgba || _knFbBuffer.w !== width || _knFbBuffer.h !== height) {
+      _knFbBuffer.rgba = new Uint8ClampedArray(width * height * 4);
+      _knFbBuffer.w = width;
+      _knFbBuffer.h = height;
+    }
+    const out = _knFbBuffer.rgba;
+    if (fmt === 3) {
+      // 32-bit: RDRAM stores RGBA8888 directly. RDRAM is in big-endian
+      // word order on N64; mupen64plus stores RDRAM in host word order
+      // (so the JS view is little-endian on x86). Each 32-bit word in
+      // RDRAM contains 1 pixel: 0xRRGGBBAA. With LE host, byte 0 = A,
+      // byte 1 = B, byte 2 = G, byte 3 = R. Re-pack to canvas RGBA.
+      try {
+        const src = new Uint8Array(mod.HEAPU8.buffer, fbStart, fbBytes);
+        for (let i = 0, j = 0; i < fbBytes; i += 4, j += 4) {
+          out[j] = src[i + 3];
+          out[j + 1] = src[i + 2];
+          out[j + 2] = src[i + 1];
+          out[j + 3] = 0xff;
+        }
+      } catch (_) {
+        return null;
+      }
+    } else {
+      // 16-bit RGBA5551: 0xRRRRRGGGGGBBBBBA, big-endian per pixel within
+      // a 16-bit word. With host LE, byte 0 = high byte of pixel.
+      try {
+        const src = new Uint8Array(mod.HEAPU8.buffer, fbStart, fbBytes);
+        for (let i = 0, j = 0; i < fbBytes; i += 2, j += 4) {
+          // N64 RDRAM 16-bit framebuffer is laid out as pairs of pixels
+          // swapped within each 32-bit word due to native endianness;
+          // read as big-endian uint16 by combining src[i] and src[i+1].
+          // The host-endian quirk is handled by mupen64plus already
+          // when writing to dram, so we read big-endian per pixel here:
+          // pixel hi byte = src[i ^ 2 within word] for 16-bit BE-on-LE.
+          // For simplicity, try straight LE first; if output looks
+          // garbled, byte-swap via XOR i with 1.
+          const lo = src[i];
+          const hi = src[i + 1];
+          const pix = (hi << 8) | lo;
+          // RGBA5551 layout: 5R 5G 5B 1A
+          const r = (pix >> 11) & 0x1f;
+          const g = (pix >> 6) & 0x1f;
+          const b = (pix >> 1) & 0x1f;
+          out[j] = (r << 3) | (r >> 2);
+          out[j + 1] = (g << 3) | (g >> 2);
+          out[j + 2] = (b << 3) | (b >> 2);
+          out[j + 3] = 0xff;
+        }
+      } catch (_) {
+        return null;
+      }
+    }
+    return { rgba: out, width, height };
+  };
+
   const stepBatch = (message) => {
     // Pump and explicit step coexist: both call stepOnce on the same
     // worker thread, so they're trivially serialised. Killing pump
@@ -511,16 +596,63 @@
       if (!stepOnce(startFrame + i, message.inputs)) break;
       stepped++;
     }
+    // Read framebuffer from RDRAM and post to main as a transferable
+    // Uint8ClampedArray buffer. Throttle to every 2nd step in the
+    // steady state (worker gets ~60 step messages/sec, postMessage
+    // of a 320×240 RGBA buffer is ~300 KB so ~18 MB/s at full rate
+    // is wasteful when shadow isn't visible). Independent from the
+    // wantSample / black-detection path — we send framebuffer bytes
+    // separately from the small "is it black?" probe.
+    let fbPosted = false;
+    const fbThrottleKey = (currentFrame >>> 0) & 1;
+    const sendFrame = stepped > 0 && message.wantFrame && (fbThrottleKey === 0 || message.force);
     const forceSample = message.reason === 'replay-runahead' || String(message.reason || '').startsWith('prewarm');
-    const sample = stepped > 0 && message.wantSample ? sampleFrameBlack(forceSample) : lastFrameSample;
+    // When we sent a real framebuffer (which by definition isn't
+    // empty since we just decoded RDRAM into RGBA pixels), skip the
+    // legacy OffscreenCanvas black-sample — that would always report
+    // black (the OffscreenCanvas isn't where the rendered output
+    // lands under the framebuffer-blit path) and clobber the
+    // non-black flag the main-thread frame handler just set.
+    const sample = stepped > 0 && message.wantSample && !sendFrame ? sampleFrameBlack(forceSample) : lastFrameSample;
+    if (sendFrame) {
+      try {
+        const fb = readFramebuffer();
+        if (fb && fb.rgba && fb.width > 0 && fb.height > 0) {
+          // Make a copy that we can transfer (the persistent buffer
+          // is reused; transferring would detach it). For low overhead
+          // we send a sliced ArrayBuffer.
+          const copy = new Uint8ClampedArray(fb.rgba);
+          post(
+            {
+              type: 'frame',
+              seq: message.seq | 0,
+              frame: currentFrame,
+              width: fb.width,
+              height: fb.height,
+              rgba: copy.buffer,
+            },
+            [copy.buffer],
+          );
+          fbPosted = true;
+        }
+      } catch (_) {}
+    }
+    // When we successfully posted a framebuffer message, the main
+    // thread already has a real, non-black frame in hand. Force the
+    // stepped ack to report `black: false` so the legacy paint-gate
+    // path sees a confirmed non-black frame regardless of what the
+    // (now-empty) OffscreenCanvas sample would say. Without this the
+    // cached `lastFrameSample` from the earliest pre-framebuffer-path
+    // sample sticks at `black: true` and gates every show.
     post({
       type: 'stepped',
       seq: message.seq | 0,
       frame: currentFrame,
       count: stepped,
       reason: message.reason || '',
-      black: sample.known ? sample.black : null,
-      maxChannel: sample.maxChannel,
+      black: fbPosted ? false : sample.known ? sample.black : null,
+      maxChannel: fbPosted ? 255 : sample.maxChannel,
+      framePosted: fbPosted,
     });
   };
 

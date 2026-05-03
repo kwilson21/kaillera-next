@@ -526,6 +526,12 @@
   let _rbCanvasNudgePrevWillChange = '';
   let _rbShadowWorker = null;
   let _rbShadowOverlay = null;
+  // Sibling 2D canvas used for the framebuffer-blit path (#7). Worker
+  // posts raw RGBA bytes; main paints them here. Distinct from the
+  // OffscreenCanvas-transferred shadow canvas because once an
+  // OffscreenCanvas is transferred we can't call getContext on it
+  // from the main thread.
+  let _rbShadowFrameCanvas = null;
   let _rbShadowTransferred = false;
   let _rbShadowBooting = false;
   let _rbShadowReady = false;
@@ -557,8 +563,17 @@
   let _rbFullHeadlessActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
-  const RB_MOTION_SMOOTHING_MAX_PX = 3;
+  // Motion smoothing tuning: prior values (3 px / deadzone 2200) were
+  // above the perceptual wobble threshold even when the user wasn't
+  // actively pressing the stick (controller noise / digital N64 sticks
+  // hovering above the deadzone). 1.5 px / deadzone 8000 keeps the
+  // motion subtle enough to mask the static-frame feel without
+  // reading as "the screen is wobbling." Used by both the legacy
+  // stick-driven path (#4) and the RDRAM-velocity path (#1) below
+  // as the cap on translate magnitude.
+  const RB_MOTION_SMOOTHING_MAX_PX = 1.5;
   const RB_MOTION_SMOOTHING_BASE_SCALE = 1.012;
+  const RB_MOTION_SMOOTHING_DEADZONE = 8000;
   const RB_SHADOW_STATUS = {
     BOOTING: 1,
     READY: 2,
@@ -792,6 +807,65 @@
     } catch (_) {}
     return true;
   })();
+  // Tail fade — start fading the freeze overlay out a few ms BEFORE
+  // replay completes so by the time the live canvas catches up there
+  // is already a partial blend instead of an abrupt cut. Triggered
+  // late enough in the replay window that the live canvas is already
+  // close to its post-replay state, so the fade overlap reads as
+  // motion blur rather than the "scrub" artifact that fading from
+  // the start produces. 0 = disabled.
+  const RB_REPLAY_TAIL_FADE_MS = (() => {
+    try {
+      const raw = _urlParams.get('replayTailFadeMs') ?? localStorage.getItem('kn-replay-tail-fade-ms');
+      const parsed = raw === null ? 8 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 8;
+      return Math.max(0, Math.min(40, parsed));
+    } catch (_) {
+      return 8;
+    }
+  })();
+  // Subtle "micro-zoom" on the freeze overlay during display: animate
+  // scale(1.0) → scale(1.008) over the freeze duration so the eye
+  // registers continuous animation instead of a paused frame. 0.8 %
+  // is below most viewers' perception threshold for "the screen is
+  // zooming," but enough to break the static-frame feel that the
+  // pure snapshot-freeze (with motion smoothing off) produces. Pure
+  // CSS transition, no input dependency, no per-rollback variance —
+  // can't desync from on-screen motion the way the stick-driven
+  // motion nudge could.
+  const RB_REPLAY_MICRO_ZOOM = (() => {
+    try {
+      const raw = _urlParams.get('replayMicroZoom') ?? localStorage.getItem('kn-replay-micro-zoom');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
+  })();
+  const RB_REPLAY_MICRO_ZOOM_PCT = (() => {
+    try {
+      const raw = _urlParams.get('replayMicroZoomPct') ?? localStorage.getItem('kn-replay-micro-zoom-pct');
+      const parsed = raw === null ? 0.8 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 0.8;
+      return Math.max(0, Math.min(3, parsed));
+    } catch (_) {
+      return 0.8;
+    }
+  })();
+  // Minimum rollback depth before the snapshot-freeze fallback fires.
+  // Default 3 — depth 1-2 rollbacks (≤32 ms scrub at 60 Hz) read as a
+  // tiny stutter and the freeze overlay actively makes them feel
+  // longer. Set to 0 to freeze every rollback (legacy behavior).
+  const RB_VISUAL_FREEZE_MIN_DEPTH = (() => {
+    try {
+      const raw =
+        _urlParams.get('replayVisualFreezeMinDepth') ?? localStorage.getItem('kn-replay-visual-freeze-min-depth');
+      const parsed = raw === null ? 3 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 3;
+      return Math.max(0, Math.min(8, parsed));
+    } catch (_) {
+      return 3;
+    }
+  })();
   // Motion smoothing applies a stick-magnitude-driven translate (up to
   // RB_MOTION_SMOOTHING_MAX_PX = 3px) to the snapshot-freeze overlay
   // for the ~30 ms of each rollback. Same fundamental hack as the
@@ -803,13 +877,37 @@
   // even when they think the character is "standing still". Default
   // off; the proper smoothness path is the shadow worker showing
   // real authoritative-state frames. Opt-in flag preserved for A/B.
+  // Motion smoothing — default-on again with tighter parameters AND
+  // a canvas-velocity-driven primary path. The wobble that drove this
+  // off in the prior pass was a side-effect of (a) too-large translate
+  // (3 px), (b) too-loose deadzone (2200, triggered by stick noise),
+  // and (c) using STICK input as the motion proxy when stick magnitude
+  // doesn't reliably match on-screen motion. The new defaults clamp
+  // translate to RB_MOTION_SMOOTHING_MAX_PX = 1.5 px and tighten the
+  // stick deadzone to RB_MOTION_SMOOTHING_DEADZONE = 8000, and the
+  // canvas-velocity sampler (RB_REPLAY_RDRAM_MOTION default-on)
+  // takes priority — so motion only triggers when the actual visible
+  // canvas is moving, fixing the "wobble while standing still" bug
+  // by definition.
   const RB_REPLAY_MOTION_SMOOTHING = (() => {
     try {
       const raw = _urlParams.get('replayMotionSmoothing') ?? localStorage.getItem('kn-replay-motion-smoothing');
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return false;
+    return true;
+  })();
+  // Canvas-velocity-driven motion. When on, the motion path samples
+  // the live canvas each frame, computes a center-of-brightness
+  // motion vector, and uses that for the freeze translate instead of
+  // stick magnitude. Generic — works for any ROM.
+  const RB_REPLAY_RDRAM_MOTION = (() => {
+    try {
+      const raw = _urlParams.get('replayRdramMotion') ?? localStorage.getItem('kn-replay-rdram-motion');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
   })();
   const RB_REPLAY_MOTION_SCALE = (() => {
     try {
@@ -1054,16 +1152,108 @@
     }
   };
 
+  // Track on-screen motion by sampling the live canvas's center of
+  // brightness over recent frames. The shift between samples is a
+  // crude proxy for "where the action is moving" — works without any
+  // game-specific RDRAM offsets, so it generalizes to any ROM. Cheap
+  // because we sample a tiny 32×24 downsample.
+  const _kn_canvasMotion = {
+    canvas: null,
+    ctx: null,
+    history: [], // recent (cogX, cogY, t) samples
+    lastSampledFrame: -1,
+    veloX: 0,
+    veloY: 0,
+  };
+  const _sampleLiveCanvasMotion = () => {
+    // Only sample every few frames — the readback is a sync GPU
+    // operation (~3-4 ms in V8) and we don't need per-frame
+    // resolution for a 30 ms freeze window. Sampling every 3 frames
+    // gives 5 samples / 80 ms which is plenty for velocity estimation
+    // while keeping per-tick cost amortized.
+    if (_kn_canvasMotion.lastSampledFrame >= 0 && _frameNum - _kn_canvasMotion.lastSampledFrame < 3) return;
+    _kn_canvasMotion.lastSampledFrame = _frameNum;
+    const live = _findRollbackVisualCanvas?.();
+    if (!live) return;
+    if (!_kn_canvasMotion.canvas) {
+      _kn_canvasMotion.canvas = document.createElement('canvas');
+      _kn_canvasMotion.canvas.width = 32;
+      _kn_canvasMotion.canvas.height = 24;
+      _kn_canvasMotion.ctx = _kn_canvasMotion.canvas.getContext('2d', { willReadFrequently: true });
+    }
+    const ctx = _kn_canvasMotion.ctx;
+    if (!ctx) return;
+    try {
+      ctx.drawImage(live, 0, 0, 32, 24);
+      const data = ctx.getImageData(0, 0, 32, 24).data;
+      let sumX = 0,
+        sumY = 0,
+        sumW = 0;
+      for (let y = 0; y < 24; y++) {
+        for (let x = 0; x < 32; x++) {
+          const i = (y * 32 + x) * 4;
+          const lum = data[i] + data[i + 1] + data[i + 2];
+          sumX += x * lum;
+          sumY += y * lum;
+          sumW += lum;
+        }
+      }
+      if (sumW > 0) {
+        const cogX = sumX / sumW;
+        const cogY = sumY / sumW;
+        const now = performance.now();
+        const hist = _kn_canvasMotion.history;
+        hist.push({ x: cogX, y: cogY, t: now });
+        if (hist.length > 6) hist.shift();
+        if (hist.length >= 2) {
+          // velocity from first → last in history (px per ms in 32×24 space)
+          const first = hist[0];
+          const last = hist[hist.length - 1];
+          const dt = last.t - first.t;
+          if (dt > 0) {
+            _kn_canvasMotion.veloX = (last.x - first.x) / dt;
+            _kn_canvasMotion.veloY = (last.y - first.y) / dt;
+          }
+        }
+      }
+    } catch (_) {}
+  };
+  const _gameVelocityToRollbackMotion = () => {
+    if (!RB_REPLAY_RDRAM_MOTION) return null;
+    const cm = _kn_canvasMotion;
+    if (cm.history.length < 2) return null;
+    // velocity is in (32×24) units per ms — scale to pixels for the
+    // freeze duration (~30 ms). Cap at RB_MOTION_SMOOTHING_MAX_PX so
+    // it can't wobble more than the legacy nudge.
+    const dwellMs = 30;
+    const downsampleScaleX = 32; // 1 cog pixel ≈ this many overlay px
+    const downsampleScaleY = 24;
+    const dx = cm.veloX * dwellMs * downsampleScaleX * 0.05;
+    const dy = cm.veloY * dwellMs * downsampleScaleY * 0.05;
+    const cap = RB_MOTION_SMOOTHING_MAX_PX;
+    const clamp = (v) => Math.max(-cap, Math.min(cap, v));
+    return {
+      dx: clamp(dx),
+      dy: clamp(dy),
+      scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
+    };
+  };
+
   const _inputToRollbackMotion = (input) => {
+    // Canvas-velocity-driven motion takes priority when enabled (see
+    // _sampleLiveCanvasMotion). Falls back to stick-driven motion
+    // (#4) when canvas sampling is disabled or hasn't built up
+    // enough history yet.
+    const rdramMotion = _gameVelocityToRollbackMotion();
+    if (rdramMotion) return rdramMotion;
     const maxAxis = 32767;
     const leftMag = Math.hypot(input?.lx || 0, input?.ly || 0);
     const cMag = Math.hypot(input?.cx || 0, input?.cy || 0);
     const useC = leftMag < 2500 && cMag >= 2500;
     const ax = useC ? input?.cx || 0 : input?.lx || 0;
     const ay = useC ? input?.cy || 0 : input?.ly || 0;
-    const deadzone = 2200;
     const mag = Math.hypot(ax, ay);
-    const hasDirection = mag >= deadzone;
+    const hasDirection = mag >= RB_MOTION_SMOOTHING_DEADZONE;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     return {
       dx: hasDirection
@@ -1389,6 +1579,11 @@
       _rbShadowOverlay.style.opacity = '0';
       _rbShadowOverlay.style.visibility = 'hidden';
     }
+    if (_rbShadowFrameCanvas) {
+      _rbShadowFrameCanvas.style.transition = 'none';
+      _rbShadowFrameCanvas.style.opacity = '0';
+      _rbShadowFrameCanvas.style.display = 'none';
+    }
     if (RB_SHADOW_HIDE_LIVE) _restoreLiveCanvasAfterOverlay();
     if (_rbShadowPendingResyncReason) {
       const reason = _rbShadowPendingResyncReason;
@@ -1603,6 +1798,14 @@
     overlay.style.top = `${Math.round(rect.top)}px`;
     overlay.style.width = `${Math.round(rect.width)}px`;
     overlay.style.height = `${Math.round(rect.height)}px`;
+    // Mirror geometry onto the 2D framebuffer-blit overlay so it
+    // overlays the live canvas at the same screen rect.
+    if (_rbShadowFrameCanvas) {
+      _rbShadowFrameCanvas.style.left = `${Math.round(rect.left)}px`;
+      _rbShadowFrameCanvas.style.top = `${Math.round(rect.top)}px`;
+      _rbShadowFrameCanvas.style.width = `${Math.round(rect.width)}px`;
+      _rbShadowFrameCanvas.style.height = `${Math.round(rect.height)}px`;
+    }
     const key = `${width}x${height}`;
     if (_rbShadowWorker && key !== _rbShadowLastResizeKey) {
       _rbShadowLastResizeKey = key;
@@ -1762,6 +1965,73 @@
       if (msg.split && _rbShadowReady && !_rbShadowFailed && _rbShadowWorker) {
         _shadowPostRetroState(stats, `${msg.reason || 'resync'}-retro-fallback`, msg.frame);
       }
+    } else if (msg.type === 'frame') {
+      // Worker has read its emulator's RDRAM framebuffer and sent us
+      // raw RGBA bytes. Paint into the 2D shadow overlay so the next
+      // composite shows real authoritative-state content (no longer
+      // depending on GLideN64-on-OffscreenCanvas to blit to default
+      // framebuffer, which doesn't work in worker context).
+      try {
+        if (!msg.rgba || !msg.width || !msg.height) return;
+        const bytes = new Uint8ClampedArray(msg.rgba);
+        if (bytes.length !== msg.width * msg.height * 4) return;
+        const overlay = _shadowEnsureOverlay();
+        if (!overlay) return;
+        if (!overlay.__kn2dCtx) {
+          // OffscreenCanvas was previously transferred. We can no
+          // longer call getContext on it from this thread. Instead,
+          // create a sibling 2D canvas that lives over the same
+          // bounding box and paint into that. Lazy-init on first
+          // frame so we don't allocate when shadow is disabled.
+          if (!_rbShadowFrameCanvas) {
+            const fc = document.createElement('canvas');
+            fc.id = 'kn-rollback-shadow-frame';
+            fc.setAttribute('aria-hidden', 'true');
+            fc.style.cssText = [
+              'position:fixed',
+              'display:none',
+              'pointer-events:none',
+              'z-index:55',
+              'margin:0',
+              'padding:0',
+              'border:0',
+              'background:transparent',
+              'image-rendering:pixelated',
+              'image-rendering:crisp-edges',
+              'will-change:opacity',
+              'contain:strict',
+            ].join(';');
+            _rbShadowFrameCanvas = fc;
+            const root = document.fullscreenElement || document.body || document.documentElement;
+            if (root) root.appendChild(fc);
+          }
+          // Mark the OffscreenCanvas overlay as “has a 2D sibling” so
+          // the show path knows to use the sibling instead of the OC.
+          overlay.__kn2dCtx = true;
+        }
+        const fc = _rbShadowFrameCanvas;
+        if (!fc) return;
+        if (fc.width !== msg.width) fc.width = msg.width;
+        if (fc.height !== msg.height) fc.height = msg.height;
+        const ctx = fc.__ctx || (fc.__ctx = fc.getContext('2d'));
+        if (!ctx) return;
+        const imageData = new ImageData(bytes, msg.width, msg.height);
+        ctx.putImageData(imageData, 0, 0);
+        const stats2 = _getShadowStats();
+        stats2.frameMessagesReceived = (stats2.frameMessagesReceived || 0) + 1;
+        stats2.lastFramePaintAt = performance.now();
+        stats2.lastFrameWidth = msg.width;
+        stats2.lastFrameHeight = msg.height;
+        // Treat a successful framebuffer paint as "fresh + non-black"
+        // so the paint gate stops blocking. The bytes themselves are
+        // by definition non-black (we just painted them).
+        _rbShadowLastLooksBlack = false;
+        _rbShadowNeedsFreshPaint = false;
+        _rbShadowLastGoodPaintAt = performance.now();
+        _rbShadowLastPaintFrame = msg.frame ?? _rbShadowLastPaintFrame;
+      } catch (e) {
+        _shadowLog(`frame-paint failed: ${e?.message || e}`);
+      }
     } else if (msg.type === 'error') {
       _shadowDisable(`${msg.stage || 'worker'} ${msg.name || 'Error'}`, msg.message || '');
     } else if (msg.type === 'stderr') {
@@ -1812,12 +2082,27 @@
         const romBuffer = _shadowTransferBuffer(romBytes);
         const stateBuffer = _shadowTransferBuffer(stateBytes);
         const ejs = window.EJS_emulator;
-        const coreSettings =
+        let coreSettings =
           typeof ejs?.getCoreSettings === 'function'
             ? ejs.getCoreSettings()
             : typeof ejs?.gameManager?.EJS?.getCoreSettings === 'function'
               ? ejs.gameManager.EJS.getCoreSettings()
               : '';
+        // Force ANGRYLION (software RDP) in the shadow worker so the
+        // rendered framebuffer lives in RDRAM (where we can read it
+        // via _kn_get_vi_origin / _kn_get_rdram_ptr) rather than in
+        // GLideN64's offscreen FBOs (where it can't be reached
+        // through OffscreenCanvas under the current build). The
+        // worker's emulator is presentation-only — it never feeds
+        // back to authoritative state, and it doesn't need
+        // GLideN64's HD textures or shader effects, so the visual
+        // downgrade is acceptable for the few-ms-per-rollback window.
+        // ?shadowRdp=gliden64 forces back to GLideN64 for A/B.
+        const rdpOverride = _urlParams.get('shadowRdp');
+        const desiredRdp = rdpOverride && rdpOverride !== '1' ? rdpOverride : 'angrylion';
+        if (!coreSettings.includes('mupen64plus-Next-rdp-plugin')) {
+          coreSettings = `mupen64plus-Next-rdp-plugin = "${desiredRdp}"\n` + coreSettings;
+        }
         worker.postMessage(
           {
             type: 'init',
@@ -1892,6 +2177,11 @@
         reason,
         count: batch,
         wantSample: RB_SHADOW_PAINT_GATE,
+        // Always request a framebuffer back. The worker reads RDRAM
+        // (cheap when ANGRYLION wrote there during retro_run) and
+        // sends pixel bytes via postMessage. Main paints them onto
+        // the 2D shadow overlay so the user sees real frames.
+        wantFrame: true,
       });
       if (reason === 'replay-runahead') stats.runAheadSent += batch;
       else if (reason === 'normal-lead') stats.leadStepsSent += batch;
@@ -1947,6 +2237,15 @@
     overlay.dataset.depth = String(depth);
     const serial = ++_rbVisualFreezeSerial;
     overlay.dataset.serial = String(serial);
+    // Show the framebuffer-blit canvas if it exists — that's where
+    // the worker's actual rendered frame lives. It sits at z-index 55
+    // (over the OffscreenCanvas at the same z-index, but stacked
+    // later) so users see the painted bytes, not the empty OC.
+    if (_rbShadowFrameCanvas) {
+      _rbShadowFrameCanvas.style.transition = 'none';
+      _rbShadowFrameCanvas.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
+      _rbShadowFrameCanvas.style.display = 'block';
+    }
     if (RB_SHADOW_HIDE_LIVE) _hideLiveCanvasUnderOverlay();
     _rbShadowVisible = true;
     _rbShadowHoldUntil = performance.now() + RB_SHADOW_OVERLAY_HOLD_MS;
@@ -2199,6 +2498,17 @@
 
   const _showRollbackVisualFreeze = (depth = 0, localInput = null) => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return _rbVisualFreezeActive;
+    // Skip freeze for shallow rollbacks. depth ≤ 2 = at most ~32 ms
+    // of replay scrub at 60 Hz, which reads as a tiny stutter rather
+    // than a freeze; showing the snapshot for that long actually adds
+    // a more noticeable pause than just letting the live canvas show
+    // the replay frames. Only mask depth ≥ 3 where the discontinuity
+    // becomes visible. Reports as a "skip" so the no-op caller can
+    // still see something happened (currently it just returns false
+    // and the C engine continues; no fallback nudge fires for these).
+    if (RB_VISUAL_FREEZE_MIN_DEPTH > 0 && depth < RB_VISUAL_FREEZE_MIN_DEPTH) {
+      return false;
+    }
     const source = _findRollbackVisualCanvas();
     const rect = source?.getBoundingClientRect?.();
     if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
@@ -2262,6 +2572,28 @@
       overlay.dataset.serial = String(serial);
       _rbVisualFreezeActive = true;
       _startRollbackMotionSmoothing(overlay, serial);
+      // Micro-zoom: animate scale during the freeze window so the
+      // overlay looks like it's gently moving instead of frozen.
+      // Skipped if motion smoothing is on (it owns transform), and
+      // skipped under shadow-overlay-active (shadow path uses real
+      // motion). Triggered on next rAF so the initial transform is
+      // committed first; otherwise the transition no-ops.
+      if (RB_REPLAY_MICRO_ZOOM && !RB_REPLAY_MOTION_SMOOTHING && !_rbShadowVisible) {
+        const targetScale = 1 + RB_REPLAY_MICRO_ZOOM_PCT / 100;
+        const zoomDurationMs = Math.max(48, Math.min(140, Math.max(48, depth * 8)));
+        const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
+        raf(() => {
+          if (
+            !_rbVisualFreezeActive ||
+            _rbVisualFreezeOverlay !== overlay ||
+            overlay.dataset.serial !== String(serial)
+          ) {
+            return;
+          }
+          overlay.style.transition = `transform ${zoomDurationMs}ms ease-out`;
+          overlay.style.transform = `scale(${targetScale.toFixed(4)})`;
+        });
+      }
       if (RB_VISUAL_FADE_DURING_REPLAY && RB_VISUAL_FADE_MS > 0) {
         const replayFadeMs = Math.max(45, Math.min(140, Math.max(RB_VISUAL_FADE_MS, depth * 14)));
         const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame || ((cb) => setTimeout(cb, 0));
@@ -2276,6 +2608,35 @@
           overlay.style.transition = `opacity ${replayFadeMs}ms linear`;
           overlay.style.opacity = '0';
         });
+      }
+      // Tail fade: start fading the overlay out near the end of the
+      // estimated replay window. ~5 ms per replay frame is the
+      // typical wall-clock cost; the tail fade kicks in
+      // RB_REPLAY_TAIL_FADE_MS before the projected end so the cross-
+      // over with the live canvas (now near its post-replay state)
+      // reads as motion blur rather than a hard cut. If replay takes
+      // longer than expected, the fade still completes in time; if
+      // shorter, _hideRollbackVisualFreeze catches it and finalizes.
+      if (RB_REPLAY_TAIL_FADE_MS > 0 && !RB_VISUAL_FADE_DURING_REPLAY) {
+        const expectedReplayMs = Math.max(8, depth * 5);
+        const startFadeAtMs = Math.max(0, expectedReplayMs - RB_REPLAY_TAIL_FADE_MS);
+        setTimeout(() => {
+          if (
+            !_rbVisualFreezeActive ||
+            _rbVisualFreezeOverlay !== overlay ||
+            overlay.dataset.serial !== String(serial)
+          ) {
+            return;
+          }
+          // Preserve any in-flight transform transition (motion or
+          // micro-zoom) by appending the opacity transition rather
+          // than overwriting.
+          const existing = overlay.style.transition || '';
+          overlay.style.transition =
+            (existing && !existing.includes('opacity') ? `${existing}, ` : '') +
+            `opacity ${RB_REPLAY_TAIL_FADE_MS}ms linear`;
+          overlay.style.opacity = '0';
+        }, startFadeAtMs);
       }
       return true;
     } catch (e) {
@@ -11537,6 +11898,15 @@
       const _tStep = performance.now();
       if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
         _captureRollbackVisualSnapshot();
+      }
+      // Sample on-screen motion for the canvas-velocity-driven motion
+      // smoothing path (see _gameVelocityToRollbackMotion). Runs once
+      // per tick after stepOneFrame so the live canvas has the new
+      // frame; cheap (32×24 downsample readback). Skipped while a
+      // freeze overlay is up — sampling the overlay would zero the
+      // velocity since the snapshot is static.
+      if (RB_REPLAY_RDRAM_MOTION && !_rbVisualFreezeActive) {
+        _sampleLiveCanvasMotion();
       }
       // Post-step RNG reseed: the game advances RNG during the frame a
       // different number of times on each peer (from interrupt timing
