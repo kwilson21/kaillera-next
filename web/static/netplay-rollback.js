@@ -532,6 +532,20 @@
   // OffscreenCanvas is transferred we can't call getContext on it
   // from the main thread.
   let _rbShadowFrameCanvas = null;
+  // Worker-frame center-of-brightness tracker. Each 'frame' message
+  // we compute COG (cogX, cogY in pixel units) and append to
+  // _knWorkerCog.history. _knWorkerCog.baseline is set on rollback
+  // start and is the COG at frame 0 of the current rollback;
+  // motion delta during the rollback = current COG − baseline,
+  // expressed in screen-pixel units after scaling. This drives a
+  // CSS translate on the snapshot-freeze overlay so the
+  // (live-canvas-style) snapshot moves in sync with what the worker
+  // predicts.
+  const _knWorkerCog = {
+    history: [], // { frame, cogX, cogY, t }
+    baseline: null, // { cogX, cogY, frame }
+    lastFrame: -1,
+  };
   let _rbShadowTransferred = false;
   let _rbShadowBooting = false;
   let _rbShadowReady = false;
@@ -909,6 +923,37 @@
     } catch (_) {}
     return true;
   })();
+  // Show the worker's ANGRYLION-rendered framebuffer directly during
+  // rollback. Default OFF because raw ANGRYLION output (320×240, no
+  // shaders, no HD textures) looks visually different from the live
+  // canvas's GLideN64-rendered output, and cutting between the two
+  // creates a plugin-style flicker. Kept behind this flag for A/B and
+  // future visual-style-matching work. When OFF, the worker still
+  // runs and we use its frames as a motion oracle (see
+  // _knWorkerCog and _shadowComputeWorkerMotion).
+  const RB_SHADOW_FRAME_BLIT = (() => {
+    try {
+      const raw = _urlParams.get('shadowFrameBlit') ?? localStorage.getItem('kn-shadow-frame-blit');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+  // Use the worker's framebuffer as a "motion oracle" — sample its
+  // center of brightness each tick, snapshot the baseline at
+  // rollback start, and translate the snapshot-freeze overlay by the
+  // worker's predicted motion delta during the freeze window.
+  // The displayed pixels are the LIVE canvas (matching GLideN64
+  // style), so there's no plugin mismatch; the worker only contributes
+  // a 2D motion vector via its actual forward simulation.
+  const RB_SHADOW_MOTION_ORACLE = (() => {
+    try {
+      const raw = _urlParams.get('shadowMotionOracle') ?? localStorage.getItem('kn-shadow-motion-oracle');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
+  })();
   const RB_REPLAY_MOTION_SCALE = (() => {
     try {
       const raw = _urlParams.get('replayMotionScale') ?? localStorage.getItem('kn-replay-motion-scale');
@@ -1218,7 +1263,56 @@
       }
     } catch (_) {}
   };
+  // Worker-oracle motion: shadow worker is forward-simulating, so its
+  // most recent framebuffer's center-of-brightness vs the baseline
+  // (captured when the freeze started) tells us EXACTLY where the
+  // game's "action center" has moved during the rollback window. Map
+  // that directly to a translation on the live-canvas snapshot. No
+  // stick-input guesswork, no live-canvas optical flow — just the
+  // worker's actual prediction.
+  const _workerOracleMotion = () => {
+    if (!RB_SHADOW_MOTION_ORACLE) return null;
+    const cog = _knWorkerCog;
+    const baseline = cog.baseline;
+    const last = cog.history[cog.history.length - 1];
+    if (!baseline || !last) return null;
+    if (last.frame === baseline.frame) return null;
+    // Worker frame is 320×240 by default. The live canvas is whatever
+    // resolution GLideN64 outputs at — typically also rendered at
+    // 320×240 internal then upscaled by CSS. We translate by the
+    // delta in the worker's pixel space, scaled by the live canvas's
+    // CSS box / worker box ratio so the motion lines up with what
+    // users see. The cap is RB_MOTION_SMOOTHING_MAX_PX so this can't
+    // overshoot the live canvas's true motion by more than a few px.
+    const live = _findRollbackVisualCanvas?.();
+    const liveBox = live?.getBoundingClientRect?.();
+    const liveW = liveBox?.width || 320;
+    const liveH = liveBox?.height || 240;
+    const workerW = 320;
+    const workerH = 240;
+    const scaleX = liveW / workerW;
+    const scaleY = liveH / workerH;
+    // Damp by 0.5 — the worker COG delta tends to overstate motion
+    // because it includes character + background + UI, all weighted
+    // by brightness. Half it so the snapshot moves visibly but not
+    // disorientingly.
+    const dx = (last.cogX - baseline.cogX) * scaleX * 0.5;
+    const dy = (last.cogY - baseline.cogY) * scaleY * 0.5;
+    const cap = RB_MOTION_SMOOTHING_MAX_PX;
+    const clamp = (v) => Math.max(-cap, Math.min(cap, v));
+    return {
+      dx: clamp(dx),
+      dy: clamp(dy),
+      scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
+    };
+  };
+
   const _gameVelocityToRollbackMotion = () => {
+    // Priority 1: worker oracle if a fresh COG history is available.
+    // Falls through to the canvas-motion path on any failure (no
+    // worker, no baseline yet, no recent samples).
+    const oracle = _workerOracleMotion();
+    if (oracle) return oracle;
     if (!RB_REPLAY_RDRAM_MOTION) return null;
     const cm = _kn_canvasMotion;
     if (cm.history.length < 2) return null;
@@ -1967,14 +2061,47 @@
       }
     } else if (msg.type === 'frame') {
       // Worker has read its emulator's RDRAM framebuffer and sent us
-      // raw RGBA bytes. Paint into the 2D shadow overlay so the next
-      // composite shows real authoritative-state content (no longer
-      // depending on GLideN64-on-OffscreenCanvas to blit to default
-      // framebuffer, which doesn't work in worker context).
+      // raw RGBA bytes. Two uses:
+      //   1. (default-off) paint into _rbShadowFrameCanvas for direct
+      //      blit. Visually mismatched vs the GLideN64 live canvas,
+      //      so off by default — see RB_SHADOW_FRAME_BLIT.
+      //   2. (default-on) compute center-of-brightness motion vector
+      //      and feed it into the snapshot-freeze translate. The
+      //      worker's emulator is forward-predicting where things
+      //      will be on screen, so its COG delta tells us which
+      //      direction the live canvas's pixels would have moved if
+      //      it weren't paused for replay.
       try {
         if (!msg.rgba || !msg.width || !msg.height) return;
         const bytes = new Uint8ClampedArray(msg.rgba);
         if (bytes.length !== msg.width * msg.height * 4) return;
+        // Compute COG over a coarse 32×24 grid for cheap motion
+        // estimation. Only every-other frame already arrives, so
+        // this samples ~30 Hz — plenty for a 30 ms freeze window.
+        if (RB_SHADOW_MOTION_ORACLE && msg.frame !== _knWorkerCog.lastFrame) {
+          _knWorkerCog.lastFrame = msg.frame;
+          let sumX = 0,
+            sumY = 0,
+            sumW = 0;
+          const stepX = Math.max(1, (msg.width / 32) | 0);
+          const stepY = Math.max(1, (msg.height / 24) | 0);
+          for (let y = 0; y < msg.height; y += stepY) {
+            for (let x = 0; x < msg.width; x += stepX) {
+              const i = (y * msg.width + x) * 4;
+              const lum = bytes[i] + bytes[i + 1] + bytes[i + 2];
+              sumX += x * lum;
+              sumY += y * lum;
+              sumW += lum;
+            }
+          }
+          if (sumW > 0) {
+            const cogX = sumX / sumW;
+            const cogY = sumY / sumW;
+            const hist = _knWorkerCog.history;
+            hist.push({ frame: msg.frame, cogX, cogY, t: performance.now() });
+            if (hist.length > 60) hist.shift();
+          }
+        }
         const overlay = _shadowEnsureOverlay();
         if (!overlay) return;
         if (!overlay.__kn2dCtx) {
@@ -2237,11 +2364,16 @@
     overlay.dataset.depth = String(depth);
     const serial = ++_rbVisualFreezeSerial;
     overlay.dataset.serial = String(serial);
-    // Show the framebuffer-blit canvas if it exists — that's where
-    // the worker's actual rendered frame lives. It sits at z-index 55
-    // (over the OffscreenCanvas at the same z-index, but stacked
-    // later) so users see the painted bytes, not the empty OC.
-    if (_rbShadowFrameCanvas) {
+    // ANGRYLION worker pixels (in _rbShadowFrameCanvas) are NOT
+    // displayed by default — see RB_SHADOW_FRAME_BLIT below. The
+    // raw 320×240 ANGRYLION output looks visually different from
+    // GLideN64's HD-upscaled live canvas, and cutting between the
+    // two at show/hide creates a plugin-style flicker that's worse
+    // than the freeze it replaces. Keep this code path behind a
+    // ?shadowFrameBlit=1 flag for future iteration; meanwhile we use
+    // the worker frames as a motion ORACLE (see _knWorkerCog)
+    // rather than a pixel source.
+    if (RB_SHADOW_FRAME_BLIT && _rbShadowFrameCanvas) {
       _rbShadowFrameCanvas.style.transition = 'none';
       _rbShadowFrameCanvas.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
       _rbShadowFrameCanvas.style.display = 'block';
@@ -2571,6 +2703,15 @@
       const serial = ++_rbVisualFreezeSerial;
       overlay.dataset.serial = String(serial);
       _rbVisualFreezeActive = true;
+      // Pin the worker COG baseline so motion-oracle deltas during
+      // this rollback are measured against the moment the freeze
+      // started. Use the most recent worker COG sample as baseline;
+      // the worker is running ~30 fps so it's at most ~33 ms stale.
+      if (RB_SHADOW_MOTION_ORACLE) {
+        const hist = _knWorkerCog.history;
+        const last = hist[hist.length - 1];
+        _knWorkerCog.baseline = last ? { cogX: last.cogX, cogY: last.cogY, frame: last.frame } : null;
+      }
       _startRollbackMotionSmoothing(overlay, serial);
       // Micro-zoom: animate scale during the freeze window so the
       // overlay looks like it's gently moving instead of frozen.
@@ -2653,6 +2794,11 @@
 
   const _hideRollbackVisualFreeze = () => {
     _rbVisualFreezeActive = false;
+    // Clear the worker-COG baseline so the next rollback measures
+    // delta from a fresh baseline, not from the previous freeze's
+    // start. Otherwise consecutive rollbacks compose translates
+    // unboundedly.
+    if (RB_SHADOW_MOTION_ORACLE) _knWorkerCog.baseline = null;
     const keepShadowNudge = RB_REPLAY_MOTION_NUDGE && _rbShadowVisible && _rbShadowOverlay && !RB_SHADOW_PERSISTENT;
     if (keepShadowNudge) _cancelRollbackMotionSmoothing();
     else _resetRollbackMotionSmoothing();
