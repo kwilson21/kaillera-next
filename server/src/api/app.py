@@ -138,7 +138,7 @@ class SecurityHeadersMiddleware:
     # script blocks, and blob: for dynamically generated worker/media URLs.
     _CSP_PLAY = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval' 'unsafe-inline' blob:; "
+        "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' 'unsafe-inline' blob:; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "connect-src 'self' blob:; "
         "img-src 'self' data: blob:; "
@@ -170,7 +170,9 @@ class SecurityHeadersMiddleware:
     def _csp_for(cls, path: str) -> bytes:
         # EmulatorJS pages need eval/inline/blob:. Every other route gets the
         # strict policy by default.
-        if path in {"/play.html", "/demo.html"}:
+        if path in {"/play.html", "/demo.html", "/static/rollback-shadow-worker.js"}:
+            return cls._CSP_PLAY.encode()
+        if path.startswith("/static/ejs/cores/"):
             return cls._CSP_PLAY.encode()
         return cls._CSP_STRICT.encode()
 

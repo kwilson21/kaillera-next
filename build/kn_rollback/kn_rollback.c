@@ -60,6 +60,10 @@ extern void emscripten_mainloop(void);
  * causing WASM heap growth and non-deterministic behavior on mobile. */
 extern uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size);
 extern int kn_sync_write(const uint8_t *buf, uint32_t size);
+extern uint32_t kn_sync_read_cpu(uint8_t *buf, uint32_t max_size);
+extern int kn_sync_write_cpu(const uint8_t *buf, uint32_t size);
+extern void *kn_get_rdram_ptr(void);
+extern uint32_t kn_get_rdram_size(void);
 
 /* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
@@ -122,6 +126,15 @@ size_t kn_rdram_offset_in_state = 0;
  * across peers even when game logic is identical. Set by kn_rollback_init
  * once the rollback engine is in use. Never cleared. */
 int kn_skip_post_rdram_in_hash = 0;
+
+#define KN_STATE_BACKEND_RETRO 0
+#define KN_STATE_BACKEND_SPLIT_RDRAM 1
+#define KN_SPLIT_CPU_STATE_CAPACITY (64 * 1024)
+
+/* Experimental #9-adjacent backend. Default remains retro_serialize. JS may
+ * request split-RDRAM before kn_rollback_init; the request survives
+ * kn_rollback_shutdown because init memset() clears rb. */
+static int kn_requested_state_backend = KN_STATE_BACKEND_RETRO;
 
 static uint32_t kn_fnv1a_stride(uint32_t hash, const uint8_t *data, size_t len, size_t stride) {
     if (!data || stride == 0) return hash;
@@ -206,6 +219,17 @@ static struct {
     uint8_t **ring_hle_state;
     int hle_state_size;
     size_t state_size;    /* retro_serialize_size() */
+    int state_backend;    /* KN_STATE_BACKEND_* */
+    uint8_t **ring_cpu_bufs;    /* split-RDRAM: CPU/RCP snapshot ring */
+    uint8_t **ring_rdram_bufs;  /* split-RDRAM: raw 8MB RDRAM ring */
+    uint32_t *ring_cpu_sizes;
+    uint32_t split_cpu_capacity;
+    uint32_t split_rdram_size;
+    uint32_t split_last_cpu_size;
+    uint32_t split_save_count;
+    uint32_t split_restore_count;
+    uint32_t split_save_failures;
+    uint32_t split_restore_failures;
 
     /* Input ring: per-player, per-frame */
     kn_input_t inputs[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
@@ -347,8 +371,90 @@ static inline void sf_restore(int packed) {
     softfloat_exceptionFlags = packed & 0xFF;
 }
 
+static void rb_restore_slot_aux(int idx);
+
+static inline int rb_using_split_state(void) {
+    return rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM;
+}
+
+static int rb_ensure_rdram_base(void) {
+    if (!rb.rdram_base) rb.rdram_base = (uint8_t *)kn_get_rdram_ptr();
+    return rb.rdram_base != NULL;
+}
+
+static size_t rb_split_logical_size_for_idx(int idx) {
+    if (!rb_using_split_state()) return rb.state_size;
+    if (idx >= 0 && rb.ring_cpu_sizes && rb.ring_cpu_sizes[idx] > 0) {
+        return (size_t)rb.split_rdram_size + rb.ring_cpu_sizes[idx];
+    }
+    return (size_t)rb.split_rdram_size + rb.split_last_cpu_size;
+}
+
+static uint32_t kn_fnv1a_split_range(uint32_t hash, int idx, size_t start, size_t len, size_t stride) {
+    if (!rb_using_split_state() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+        !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || stride == 0) {
+        return hash;
+    }
+    size_t end = start + len;
+    size_t logical_size = rb_split_logical_size_for_idx(idx);
+    if (end > logical_size) end = logical_size;
+    for (size_t off = start; off < end; off += stride) {
+        uint8_t byte = 0;
+        if (off < rb.split_rdram_size) {
+            byte = rb.ring_rdram_bufs[idx][off];
+        } else {
+            size_t cpu_off = off - rb.split_rdram_size;
+            uint32_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
+            if (cpu_off < cpu_size) byte = rb.ring_cpu_bufs[idx][cpu_off];
+        }
+        hash ^= byte;
+        hash *= KN_FNV1A_PRIME;
+    }
+    return hash;
+}
+
+static int rb_restore_slot_state(int idx) {
+    if (!rb_using_split_state()) {
+        if (!retro_unserialize(rb.ring_bufs[idx], rb.state_size)) return 0;
+        rb_restore_slot_aux(idx);
+        return 1;
+    }
+    if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+        !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] ||
+        rb.ring_cpu_sizes[idx] == 0) {
+        rb.split_restore_failures++;
+        return 0;
+    }
+    memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+    if (kn_sync_write_cpu(rb.ring_cpu_bufs[idx], rb.ring_cpu_sizes[idx]) != 0) {
+        rb.split_restore_failures++;
+        return 0;
+    }
+    rb_restore_slot_aux(idx);
+    rb.split_restore_count++;
+    return 1;
+}
+
 static int rb_save_slot(int idx, int frame, int mark_last) {
-    if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) return 0;
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+    } else if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) {
+        return 0;
+    }
     rb.ring_sf_state[idx] = sf_pack();
     if (rb.ring_hidden_state) kn_pack_hidden_state_impl(rb.ring_hidden_state[idx]);
     if (rb.ring_hle_state && rb.ring_hle_state[idx]) kn_hle_save_to(rb.ring_hle_state[idx]);
@@ -465,27 +571,54 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
      * 16MB malloc per call). Same code path used by gm.getState() and resync. */
     rb.state_size = retro_serialize_size();
     rb.ring_size = max_frames + 1;
+    rb.state_backend = kn_requested_state_backend;
+    if (rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM) {
+        rb.split_cpu_capacity = KN_SPLIT_CPU_STATE_CAPACITY;
+        rb.split_rdram_size = kn_get_rdram_size();
+        if (rb.split_rdram_size == 0) rb.split_rdram_size = 0x800000u;
+        rb.rdram_base = (uint8_t *)kn_get_rdram_ptr();
+        if (!rb.rdram_base) {
+            rb_log("split-rdram backend requested but RDRAM base is unavailable; falling back to retro_serialize");
+            rb.state_backend = KN_STATE_BACKEND_RETRO;
+        }
+    }
 
     /* Allocate state ring */
-    rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+    if (rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM) {
+        rb.ring_cpu_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+        rb.ring_rdram_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+        rb.ring_cpu_sizes = (uint32_t *)calloc(rb.ring_size, sizeof(uint32_t));
+    } else {
+        rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+    }
     rb.ring_frames = (int *)calloc(rb.ring_size, sizeof(int));
     rb.ring_sf_state = (int *)calloc(rb.ring_size, sizeof(int));
     rb.ring_hidden_state = calloc(rb.ring_size, sizeof(*rb.ring_hidden_state));
     rb.hle_state_size = kn_hle_state_size();
     rb.ring_hle_state = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
-    if (!rb.ring_bufs || !rb.ring_frames || !rb.ring_sf_state ||
+    if ((!rb_using_split_state() && !rb.ring_bufs) ||
+        (rb_using_split_state() && (!rb.ring_cpu_bufs || !rb.ring_rdram_bufs || !rb.ring_cpu_sizes)) ||
+        !rb.ring_frames || !rb.ring_sf_state ||
         !rb.ring_hidden_state || !rb.ring_hle_state || rb.hle_state_size <= 0) {
         rb_log("FATAL: failed to allocate rollback ring metadata (hle=%d)",
             rb.hle_state_size);
         return;
     }
     for (i = 0; i < rb.ring_size; i++) {
-        rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
+        if (rb_using_split_state()) {
+            rb.ring_cpu_bufs[i] = (uint8_t *)malloc(rb.split_cpu_capacity);
+            rb.ring_rdram_bufs[i] = (uint8_t *)malloc(rb.split_rdram_size);
+        } else {
+            rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
+        }
         rb.ring_hle_state[i] = (uint8_t *)malloc(rb.hle_state_size);
         rb.ring_frames[i] = -1;
-        if (!rb.ring_bufs[i] || !rb.ring_hle_state[i]) {
-            rb_log("FATAL: failed to allocate ring slot %d (state=%zu hle=%d)",
-                i, rb.state_size, rb.hle_state_size);
+        if ((!rb_using_split_state() && !rb.ring_bufs[i]) ||
+            (rb_using_split_state() && (!rb.ring_cpu_bufs[i] || !rb.ring_rdram_bufs[i])) ||
+            !rb.ring_hle_state[i]) {
+            rb_log("FATAL: failed to allocate ring slot %d (backend=%d state=%zu rdram=%u cpuCap=%u hle=%d)",
+                i, rb.state_backend, rb.state_size, rb.split_rdram_size,
+                rb.split_cpu_capacity, rb.hle_state_size);
             return;
         }
     }
@@ -497,6 +630,9 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.initialized = 1;
     rb_log("kn_rollback_init: max=%d delay=%d slot=%d players=%d stateSize=%zu ringSlots=%d",
         max_frames, delay_frames, local_slot, num_players, rb.state_size, rb.ring_size);
+    rb_log("kn_rollback_init: state_backend=%s rdram=%u cpuCap=%u",
+        rb_using_split_state() ? "split-rdram" : "retro_serialize",
+        rb.split_rdram_size, rb.split_cpu_capacity);
     rb_log("kn_rollback_init: hle_state_size=%d total_hle_ring=%d bytes",
         rb.hle_state_size, rb.hle_state_size * rb.ring_size);
 
@@ -653,6 +789,19 @@ void kn_rollback_shutdown(void) {
         }
         free(rb.ring_bufs);
     }
+    if (rb.ring_cpu_bufs) {
+        for (i = 0; i < rb.ring_size; i++) {
+            free(rb.ring_cpu_bufs[i]);
+        }
+        free(rb.ring_cpu_bufs);
+    }
+    if (rb.ring_rdram_bufs) {
+        for (i = 0; i < rb.ring_size; i++) {
+            free(rb.ring_rdram_bufs[i]);
+        }
+        free(rb.ring_rdram_bufs);
+    }
+    free(rb.ring_cpu_sizes);
     if (rb.ring_hle_state) {
         for (i = 0; i < rb.ring_size; i++) {
             free(rb.ring_hle_state[i]);
@@ -668,6 +817,9 @@ void kn_rollback_shutdown(void) {
      * — without this, every match in a session leaks 8MB. */
     free(rb.saved_rdram);
     rb.ring_bufs = NULL;
+    rb.ring_cpu_bufs = NULL;
+    rb.ring_rdram_bufs = NULL;
+    rb.ring_cpu_sizes = NULL;
     rb.ring_hle_state = NULL;
     rb.ring_frames = NULL;
     rb.ring_sf_state = NULL;
@@ -1005,14 +1157,21 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             if (rb.rdram_base && rb.saved_rdram)
                 memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);
 
-            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
-            rb_restore_slot_aux(ring_idx);
+            if (!rb_restore_slot_state(ring_idx)) {
+                rb.failed_rollbacks++;
+                rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)",
+                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,
+                    rb.state_backend, rb.failed_rollbacks);
+                return 0;
+            }
             /* R1: retro_unserialize invalidates the Emscripten rAF runner
              * captured by JS's overrideRAF interceptor. JS must re-capture
              * it via pauseMainLoop/resumeMainLoop before the next
              * stepOneFrame call, or the replay runs as silent no-ops.
+             * The split-RDRAM backend does not call retro_unserialize, so it
+             * deliberately skips the runner refresh.
              * See docs/netplay-invariants.md §R1. */
-            rb.did_restore = 1;
+            rb.did_restore = rb_using_split_state() ? 0 : 1;
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -1590,6 +1749,7 @@ uint8_t* kn_get_state_for_frame(int frame) {
     if (!rb.initialized) return NULL;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return NULL;
+    if (rb_using_split_state()) return NULL;
     return rb.ring_bufs[ring_idx];
 }
 
@@ -1601,9 +1761,7 @@ int kn_restore_frame(int frame) {
     if (!rb.initialized) return 0;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
-    if (!retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size)) return 0;
-    rb_restore_slot_aux(ring_idx);
-    return 1;
+    return rb_restore_slot_state(ring_idx);
 }
 
 /* ── Query: get state size ─────────────────────────────────────────── */
@@ -1645,6 +1803,10 @@ uint32_t kn_full_state_hash(int frame) {
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
     uint32_t hash = KN_FNV1A_OFFSET;
+    if (rb_using_split_state()) {
+        hash = kn_fnv1a_split_range(hash, idx, 0, rb_split_logical_size_for_idx(idx), 64);
+        return hash;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     hash = kn_fnv1a_stride(hash, p, rb.state_size, 64);
     return hash;
@@ -1667,6 +1829,23 @@ uint32_t kn_game_state_hash(int frame) {
     int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
+    if (rb_using_split_state()) {
+        uint32_t hash = KN_FNV1A_OFFSET;
+        if (!rb.ring_rdram_bufs || !rb.ring_rdram_bufs[idx]) return 0;
+        for (uint32_t block = 0; block < KN_TAINT_BLOCKS; block++) {
+            size_t block_start = ((size_t)block << KN_TAINT_BLOCK_SHIFT);
+            if (block_start >= rb.split_rdram_size) break;
+            if (kn_rdram_taint[block]) continue;
+            size_t block_end = block_start + ((size_t)1 << KN_TAINT_BLOCK_SHIFT);
+            if (block_end > rb.split_rdram_size) block_end = rb.split_rdram_size;
+            hash = kn_fnv1a_stride(hash, rb.ring_rdram_bufs[idx] + block_start, block_end - block_start, 16);
+        }
+        if (!kn_skip_post_rdram_in_hash) {
+            size_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
+            hash = kn_fnv1a_stride(hash, rb.ring_cpu_bufs[idx], cpu_size, 16);
+        }
+        return hash;
+    }
     if (kn_rdram_offset_in_state == 0) return kn_full_state_hash(frame);
 
     const uint8_t *p = rb.ring_bufs[idx];
@@ -1723,18 +1902,21 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 uint32_t kn_gameplay_hash(int frame) {
     if (!rb.initialized || rb.frame == 0) return 0;
-    if (kn_rdram_offset_in_state == 0) return 0;
+    if (!rb_using_split_state() && kn_rdram_offset_in_state == 0) return 0;
     int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
 
-    const uint8_t *state = rb.ring_bufs[idx];
+    const uint8_t *state = rb_using_split_state() ? rb.ring_rdram_bufs[idx] : rb.ring_bufs[idx];
+    size_t state_base = rb_using_split_state() ? 0 : kn_rdram_offset_in_state;
+    size_t state_limit = rb_using_split_state() ? rb.split_rdram_size : rb.state_size;
+    if (!state) return 0;
     uint32_t hash = KN_FNV1A_OFFSET;
 
     for (size_t a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = state_base + kn_gameplay_addrs[a].rdram_offset;
         uint32_t sz = kn_gameplay_addrs[a].size;
-        if (off + sz > rb.state_size) continue; /* bounds check */
+        if (off + sz > state_limit) continue; /* bounds check */
         hash = kn_fnv1a_stride(hash, state + off, sz, 1);
     }
     return hash;
@@ -1760,6 +1942,17 @@ uint32_t kn_live_gameplay_hash(void) {
     static size_t scratch_capacity = 0;
 
     if (!rb.initialized) return 0;
+    if (rb_using_split_state()) {
+        if (!rb_ensure_rdram_base()) return 0;
+        uint32_t hash = KN_FNV1A_OFFSET;
+        for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
+            size_t off = kn_gameplay_addrs[a].rdram_offset;
+            uint32_t sz = kn_gameplay_addrs[a].size;
+            if (off + sz > rb.split_rdram_size) continue;
+            hash = kn_fnv1a_stride(hash, rb.rdram_base + off, sz, 1);
+        }
+        return hash;
+    }
     if (kn_rdram_offset_in_state == 0) return 0;
 
     size_t state_size = rb.state_size;
@@ -1795,6 +1988,7 @@ uint8_t* kn_get_last_state(void) {
     int target = rb.frame - 1;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return NULL;
+    if (rb_using_split_state()) return NULL;
     return rb.ring_bufs[idx];
 }
 
@@ -1810,6 +2004,17 @@ int kn_state_region_hashes(uint32_t *out_hashes, int count) {
     int target = rb.frame - 1;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
+    if (rb_using_split_state()) {
+        size_t logical_size = rb_split_logical_size_for_idx(idx);
+        size_t region_size = logical_size / count;
+        for (int r = 0; r < count; r++) {
+            size_t start = r * region_size;
+            size_t end = (r == count - 1) ? logical_size : (r + 1) * region_size;
+            uint32_t hash = kn_fnv1a_split_range(KN_FNV1A_OFFSET, idx, start, end - start, 16);
+            out_hashes[r] = hash;
+        }
+        return count;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
@@ -1838,6 +2043,17 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count) {
     if (!rb.initialized || !out_hashes || count <= 0) return 0;
     int idx = frame % rb.ring_size;
     if (rb.ring_frames[idx] != frame) return 0;
+    if (rb_using_split_state()) {
+        size_t logical_size = rb_split_logical_size_for_idx(idx);
+        size_t region_size = logical_size / count;
+        for (int r = 0; r < count; r++) {
+            size_t start = r * region_size;
+            size_t end = (r == count - 1) ? logical_size : (r + 1) * region_size;
+            uint32_t hash = kn_fnv1a_split_range(KN_FNV1A_OFFSET, idx, start, end - start, 16);
+            out_hashes[r] = hash;
+        }
+        return count;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
@@ -1867,7 +2083,70 @@ int kn_get_rdram_offset_in_state(void) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_state_buffer_size(void) {
+    if (rb_using_split_state()) return (int)rb_split_logical_size_for_idx(-1);
     return (int)rb.state_size;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_state_backend(int backend) {
+    if (rb.initialized) {
+        rb_log("kn_set_state_backend ignored after init: requested=%d active=%d",
+            backend, rb.state_backend);
+        return;
+    }
+    kn_requested_state_backend = (backend == KN_STATE_BACKEND_SPLIT_RDRAM)
+        ? KN_STATE_BACKEND_SPLIT_RDRAM
+        : KN_STATE_BACKEND_RETRO;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_state_backend(void) {
+    return rb.initialized ? rb.state_backend : kn_requested_state_backend;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_split_state_stats(uint32_t *out, int count) {
+    if (!out || count < 8) return 0;
+    out[0] = (uint32_t)(rb.initialized ? rb.state_backend : kn_requested_state_backend);
+    out[1] = rb.split_save_count;
+    out[2] = rb.split_restore_count;
+    out[3] = rb.split_save_failures;
+    out[4] = rb.split_restore_failures;
+    out[5] = rb.split_last_cpu_size;
+    out[6] = rb.split_rdram_size;
+    out[7] = rb.split_cpu_capacity;
+    return 8;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
+    if (!rb.initialized || !rb_using_split_state() || !out || count < 9) return 0;
+    int target = (frame < 0) ? (rb.frame - 1) : frame;
+    if (target < 0 || rb.ring_size <= 0) return 0;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
+    if (!rb.ring_rdram_bufs || !rb.ring_cpu_bufs || !rb.ring_cpu_sizes ||
+        !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || rb.ring_cpu_sizes[idx] == 0) {
+        return 0;
+    }
+    out[0] = (uint32_t)(uintptr_t)rb.ring_rdram_bufs[idx];
+    out[1] = rb.split_rdram_size;
+    out[2] = (uint32_t)(uintptr_t)rb.ring_cpu_bufs[idx];
+    out[3] = rb.ring_cpu_sizes[idx];
+    out[4] = (uint32_t)(uintptr_t)(rb.ring_hidden_state ? rb.ring_hidden_state[idx] : NULL);
+    out[5] = rb.ring_hidden_state ? (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t)) : 0;
+    out[6] = (uint32_t)(uintptr_t)((rb.ring_hle_state && rb.ring_hle_state[idx]) ? rb.ring_hle_state[idx] : NULL);
+    out[7] = (rb.ring_hle_state && rb.ring_hle_state[idx] && rb.hle_state_size > 0) ? (uint32_t)rb.hle_state_size : 0;
+    out[8] = (uint32_t)target;
+    return 9;
 }
 
 /* ── Stat getters ──────────────────────────────────────────────────── */

@@ -87,6 +87,66 @@ SAVE_SLOT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, int mark
     if (!_ksz_ret) return 0;
     rb.ring_sf_state[idx] = sf_pack();"""
 
+SAVE_SLOT_SPLIT_ORIGINAL = """static int rb_save_slot(int idx, int frame, int mark_last) {
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+    } else if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) {
+        return 0;
+    }
+    rb.ring_sf_state[idx] = sf_pack();"""
+
+SAVE_SLOT_SPLIT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, int mark_last) {
+    KN_RB_PROBE_SLOT(100, idx);
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            kn_diag_rb_serialize_count++;
+            kn_diag_rb_serialize_ret = 0;
+            KN_RB_PROBE_SLOT(101, idx);
+            return 0;
+        }
+        memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            kn_diag_rb_serialize_count++;
+            kn_diag_rb_serialize_ret = 0;
+            KN_RB_PROBE_SLOT(101, idx);
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+        kn_diag_rb_serialize_ret = 1;
+    } else {
+        int _ksz_ret = retro_serialize(rb.ring_bufs[idx], rb.state_size) ? 1 : 0;
+        kn_diag_rb_serialize_ret = _ksz_ret;
+        if (!_ksz_ret) {
+            kn_diag_rb_serialize_count++;
+            KN_RB_PROBE_SLOT(101, idx);
+            return 0;
+        }
+    }
+    kn_diag_rb_serialize_count++;
+    KN_RB_PROBE_SLOT(101, idx);
+    rb.ring_sf_state[idx] = sf_pack();"""
+
 # ---------------------------------------------------------------------------
 # Per-call-site probe wrappers in kn_pre_tick. The replacements include the
 # original line plus surrounding context so each substitution is unique.
@@ -132,13 +192,18 @@ PROBE_PATCHES = [
         "        return 3; /* ring maintained, skip frame advance */\n"
         "    }\n",
     ),
-    # Rollback restore (line 918) — retro_unserialize.
+    # Rollback restore — state-backend restore wrapper.
     (
         "            if (rb.rdram_base && rb.saved_rdram)\n"
         "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
         "\n"
-        "            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);\n"
-        "            rb_restore_slot_aux(ring_idx);\n",
+        "            if (!rb_restore_slot_state(ring_idx)) {\n"
+        "                rb.failed_rollbacks++;\n"
+        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
+        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
+        "                    rb.state_backend, rb.failed_rollbacks);\n"
+        "                return 0;\n"
+        "            }\n",
 
         "            if (rb.rdram_base && rb.saved_rdram)\n"
         "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
@@ -146,9 +211,16 @@ PROBE_PATCHES = [
         "            KN_RB_PROBE_SLOT(40, ring_idx);\n"
         "            kn_diag_rb_unserialize_count++;\n"
         "            kn_diag_rb_unserialize_frame = (int32_t)rb_frame;\n"
-        "            kn_diag_rb_unserialize_ret = retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;\n"
+        "            int _krb_restore_ret = rb_restore_slot_state(ring_idx);\n"
+        "            kn_diag_rb_unserialize_ret = _krb_restore_ret;\n"
         "            KN_RB_PROBE_SLOT(41, ring_idx);\n"
-        "            rb_restore_slot_aux(ring_idx);\n",
+        "            if (!_krb_restore_ret) {\n"
+        "                rb.failed_rollbacks++;\n"
+        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
+        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
+        "                    rb.state_backend, rb.failed_rollbacks);\n"
+        "                return 0;\n"
+        "            }\n",
     ),
     # Replay save + return 2 (line 973 + line 993).
     (
@@ -231,10 +303,13 @@ def main():
         sys.exit(1)
     text = text.replace(GLOBALS_ANCHOR, GLOBALS_INSERT, 1)
 
-    if SAVE_SLOT_ORIGINAL not in text:
+    if SAVE_SLOT_ORIGINAL in text:
+        text = text.replace(SAVE_SLOT_ORIGINAL, SAVE_SLOT_INSTRUMENTED, 1)
+    elif SAVE_SLOT_SPLIT_ORIGINAL in text:
+        text = text.replace(SAVE_SLOT_SPLIT_ORIGINAL, SAVE_SLOT_SPLIT_INSTRUMENTED, 1)
+    else:
         print("    inject-rb-probes.py: rb_save_slot baseline did not match", file=sys.stderr)
         sys.exit(1)
-    text = text.replace(SAVE_SLOT_ORIGINAL, SAVE_SLOT_INSTRUMENTED, 1)
 
     for orig, new in PROBE_PATCHES:
         if orig not in text:

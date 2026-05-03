@@ -107,6 +107,10 @@ def test_rollback_fixes_smoke(page):
                 hasStateRegionHashesFrame: typeof m._kn_state_region_hashes_frame === 'function',
                 hasGetStateBufferSize: typeof m._kn_get_state_buffer_size === 'function',
                 hasGetRdramOffsetInState: typeof m._kn_get_rdram_offset_in_state === 'function',
+                hasSetStateBackend: typeof m._kn_set_state_backend === 'function',
+                hasGetStateBackend: typeof m._kn_get_state_backend === 'function',
+                hasGetSplitStateStats: typeof m._kn_get_split_state_stats === 'function',
+                hasGetSplitStateForShadow: typeof m._kn_get_split_state_for_shadow === 'function',
             };
         }"""
     )
@@ -120,5 +124,9 @@ def test_rollback_fixes_smoke(page):
         assert module_check["hasStateRegionHashesFrame"]
         assert module_check["hasGetStateBufferSize"]
         assert module_check["hasGetRdramOffsetInState"]
+        assert module_check["hasSetStateBackend"]
+        assert module_check["hasGetStateBackend"]
+        assert module_check["hasGetSplitStateStats"]
+        assert module_check["hasGetSplitStateForShadow"]
 
     print("[smoke] ✓ all rollback hardening APIs present")

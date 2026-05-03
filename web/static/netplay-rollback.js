@@ -426,9 +426,12 @@
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     const trueRollbackCore = !!mod?._kn_get_true_rollback_capability && mod._kn_get_true_rollback_capability() === 1;
+    const stateBackend =
+      RB_ROLLBACK_STATE_BACKEND === 'split-rdram' && !!mod?._kn_set_state_backend ? 'split-rdram' : 'retro';
     return {
       rdpReplaySkip: !!mod?._kn_set_skip_rdp_replay && RB_SKIP_RDP_DURING_REPLAY,
       trueRollback: trueRollbackCore && RB_TRUE_ROLLBACK,
+      stateBackend,
     };
   };
 
@@ -512,12 +515,199 @@
   let _rbMotionSmoothingSerial = 0;
   let _rbMotionSmoothingDx = 0;
   let _rbMotionSmoothingDy = 0;
+  let _rbCanvasNudgeRaf = 0;
+  let _rbCanvasNudgeTimer = 0;
+  let _rbCanvasNudgeSerial = 0;
+  let _rbCanvasNudgeDx = 0;
+  let _rbCanvasNudgeDy = 0;
+  let _rbCanvasNudgeTarget = null;
+  let _rbCanvasNudgePrevTransform = '';
+  let _rbCanvasNudgePrevTransformOrigin = '';
+  let _rbCanvasNudgePrevWillChange = '';
+  let _rbShadowWorker = null;
+  let _rbShadowOverlay = null;
+  let _rbShadowTransferred = false;
+  let _rbShadowBooting = false;
+  let _rbShadowReady = false;
+  let _rbShadowFailed = false;
+  let _rbShadowVisible = false;
+  let _rbShadowStatusSab = null;
+  let _rbShadowStatus = null;
+  let _rbShadowBootPromise = null;
+  let _rbShadowStepSeq = 0;
+  let _rbShadowInFlight = 0;
+  let _rbShadowLastInputs = null;
+  let _rbShadowLastResizeKey = '';
+  let _rbShadowLastResyncAt = 0;
+  let _rbShadowResyncTimer = 0;
+  let _rbShadowHideTimer = 0;
+  let _rbShadowHoldUntil = 0;
+  let _rbShadowPendingResyncReason = '';
+  let _rbShadowNeedsFreshPaint = true;
+  let _rbShadowLastGoodPaintAt = 0;
+  let _rbShadowLastPaintFrame = -1;
+  let _rbShadowLastLooksBlack = false;
+  let _rbShadowPersistentActive = false;
+  let _rbShadowRafId = 0;
+  let _rbShadowRafInFlight = false;
+  let _rbShadowPrewarm = null;
+  let _rbShadowVisibleStepBase = 0;
+  let _rbShadowVisibleCommits = 0;
   let _rbRdpSkipActive = false;
   let _rbFullHeadlessActive = false;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
   const RB_MOTION_SMOOTHING_MAX_PX = 3;
   const RB_MOTION_SMOOTHING_BASE_SCALE = 1.012;
+  const RB_SHADOW_STATUS = {
+    BOOTING: 1,
+    READY: 2,
+    FAILED: 3,
+  };
+  const RB_SHADOW_STATUS_IDX = {
+    status: 0,
+    frame: 1,
+    steps: 2,
+    errors: 3,
+    resyncs: 4,
+  };
+  const RB_SHADOW_MAX_IN_FLIGHT = 2;
+  const RB_SHADOW_MAX_BATCH_FRAMES = 8;
+  const RB_SHADOW_PREWARM_BUDGET_MS = (() => {
+    try {
+      const raw = _urlParams.get('shadowPrewarmBudgetMs') ?? localStorage.getItem('kn-shadow-prewarm-budget-ms');
+      const parsed = raw === null ? 6 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 6;
+      return Math.max(1, Math.min(20, parsed));
+    } catch (_) {
+      return 6;
+    }
+  })();
+  const RB_SHADOW_LEAD_FRAMES = (() => {
+    try {
+      const raw = _urlParams.get('shadowLead') ?? localStorage.getItem('kn-shadow-lead');
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(8, parsed));
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const RB_SHADOW_REPLAY_LEAD_FRAMES = (() => {
+    try {
+      const raw = _urlParams.get('shadowReplayLead') ?? localStorage.getItem('kn-shadow-replay-lead');
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(12, parsed));
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const RB_SHADOW_RESYNC_DELAY_MS = (() => {
+    try {
+      const raw = _urlParams.get('shadowResyncDelayMs') ?? localStorage.getItem('kn-shadow-resync-delay-ms');
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(1000, parsed));
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const RB_SHADOW_RESYNC_MIN_MS = (() => {
+    try {
+      const raw = _urlParams.get('shadowResyncMinMs') ?? localStorage.getItem('kn-shadow-resync-min-ms');
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(5000, parsed));
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const RB_SHADOW_OVERLAY_HOLD_MS = (() => {
+    try {
+      const raw = _urlParams.get('shadowHoldMs') ?? localStorage.getItem('kn-shadow-hold-ms');
+      const parsed = raw === null ? 35 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 35;
+      return Math.max(0, Math.min(220, parsed));
+    } catch (_) {
+      return 35;
+    }
+  })();
+  const RB_SHADOW_OVERLAY_FADE_MS = (() => {
+    try {
+      const raw = _urlParams.get('shadowFadeMs') ?? localStorage.getItem('kn-shadow-fade-ms');
+      const parsed = raw === null ? 0 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 0;
+      return Math.max(0, Math.min(160, parsed));
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const RB_SHADOW_OVERLAY_OPACITY = (() => {
+    try {
+      const raw = _urlParams.get('shadowOpacity') ?? localStorage.getItem('kn-shadow-opacity');
+      // 0.86 is the empirical safe ceiling. Higher values surface the
+      // worker's occasional black/transitional frames (especially the
+      // first stepOnce after a resync, when RDRAM is fresh but the
+      // framebuffer hasn't been regenerated yet). Lower bleed-through
+      // covers those bad frames at the cost of letting the rewinding
+      // live canvas tinge through during replay. Tried 0.97; black
+      // flicker visible. If you want zero bleed-through, the live
+      // canvas needs to be hidden under the overlay (RB_SHADOW_HIDE_LIVE
+      // below), not the opacity bumped further.
+      const parsed = raw === null ? 0.86 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 0.86;
+      return Math.max(0.45, Math.min(1, parsed));
+    } catch (_) {
+      return 0.86;
+    }
+  })();
+  // Stop-Showing-Rewound: hide the live ejs_canvas while the shadow
+  // overlay is up so there's literally no rewind frame underneath to
+  // bleed through. The shadow overlay (z-index:55) becomes the only
+  // visible canvas during the replay window. Restored on hide.
+  //
+  // Tradeoff: when overlay shows a bad worker frame, the user sees a
+  // pure worker frame with no live-canvas bleed-through fallback.
+  // Worse than the opacity bleed for transitional frames; better than
+  // the opacity bleed for steady-state. Default ON; opt-out via
+  // ?shadowHideLive=0.
+  const RB_SHADOW_HIDE_LIVE = (() => {
+    try {
+      const raw = _urlParams.get('shadowHideLive') ?? localStorage.getItem('kn-shadow-hide-live');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
+  })();
+  // Legacy worker self-pump experiment. The default smooth path is the
+  // main-rAF-driven pump below; this flag only keeps the old setTimeout
+  // pump available for explicit A/B via ?shadowPump=legacy.
+  const RB_SHADOW_PUMP = (() => {
+    try {
+      const raw = _urlParams.get('shadowPump') ?? localStorage.getItem('kn-shadow-pump');
+      if (raw === 'legacy') return true;
+    } catch (_) {}
+    return false;
+  })();
+  const RB_SHADOW_PAINT_GATE = (() => {
+    try {
+      const raw = _urlParams.get('shadowPaintGate') ?? localStorage.getItem('kn-shadow-paint-gate');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {
+      return true;
+    }
+    return true;
+  })();
+  const RB_SHADOW_PERSISTENT = (() => {
+    try {
+      const raw = _urlParams.get('shadowPersistent') ?? localStorage.getItem('kn-shadow-persistent');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
       const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
@@ -569,6 +759,14 @@
     } catch (_) {}
     return true;
   })();
+  const RB_ROLLBACK_STATE_BACKEND = (() => {
+    try {
+      const raw = _urlParams.get('rollbackStateBackend') ?? localStorage.getItem('kn-rollback-state-backend');
+      if (raw === 'split-rdram' || raw === 'splitRdram' || raw === '1') return 'split-rdram';
+      if (raw === 'retro' || raw === 'retro_serialize' || raw === '0') return 'retro';
+    } catch (_) {}
+    return 'split-rdram';
+  })();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeDuring') ?? localStorage.getItem('kn-replay-visual-fade-during');
@@ -594,11 +792,78 @@
     } catch (_) {}
     return true;
   })();
+  // Motion smoothing applies a stick-magnitude-driven translate (up to
+  // RB_MOTION_SMOOTHING_MAX_PX = 3px) to the snapshot-freeze overlay
+  // for the ~30 ms of each rollback. Same fundamental hack as the
+  // motion nudge that iter3 Change 4 disabled: stick magnitude does
+  // not match on-screen character motion (digital N64 inputs, neutral
+  // states, attack frames where character is stationary), so the
+  // overlay translates 2-3 px in the stick direction and snaps back
+  // when the overlay hides — which the user perceives as a wobble
+  // even when they think the character is "standing still". Default
+  // off; the proper smoothness path is the shadow worker showing
+  // real authoritative-state frames. Opt-in flag preserved for A/B.
   const RB_REPLAY_MOTION_SMOOTHING = (() => {
     try {
       const raw = _urlParams.get('replayMotionSmoothing') ?? localStorage.getItem('kn-replay-motion-smoothing');
       if (raw === '0') return false;
       if (raw === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
+  const RB_REPLAY_MOTION_SCALE = (() => {
+    try {
+      const raw = _urlParams.get('replayMotionScale') ?? localStorage.getItem('kn-replay-motion-scale');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+  const RB_REPLAY_MOTION_NUDGE = (() => {
+    try {
+      const raw =
+        _urlParams.get('replayMotionNudge') ??
+        _urlParams.get('replayCanvasNudge') ??
+        localStorage.getItem('kn-replay-motion-nudge') ??
+        localStorage.getItem('kn-replay-canvas-nudge');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+  const RB_REPLAY_MOTION_NUDGE_PX = (() => {
+    try {
+      const raw =
+        _urlParams.get('replayMotionNudgePx') ??
+        _urlParams.get('replayCanvasNudgePx') ??
+        localStorage.getItem('kn-replay-motion-nudge-px') ??
+        localStorage.getItem('kn-replay-canvas-nudge-px');
+      const parsed = raw === null ? 2.25 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 2.25;
+      return Math.max(0.25, Math.min(6, parsed));
+    } catch (_) {
+      return 2.25;
+    }
+  })();
+  const RB_REPLAY_MOTION_NUDGE_MS = (() => {
+    try {
+      const raw =
+        _urlParams.get('replayMotionNudgeMs') ??
+        _urlParams.get('replayCanvasNudgeMs') ??
+        localStorage.getItem('kn-replay-motion-nudge-ms') ??
+        localStorage.getItem('kn-replay-canvas-nudge-ms');
+      const parsed = raw === null ? 48 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 48;
+      return Math.max(16, Math.min(140, parsed));
+    } catch (_) {
+      return 48;
+    }
+  })();
+  const RB_SHADOW_EMU = (() => {
+    try {
+      const raw = _urlParams.get('shadowEmu') ?? localStorage.getItem('kn-shadow-emu');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
     } catch (_) {}
     return true;
   })();
@@ -668,7 +933,9 @@
     input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
   const _findRollbackVisualCanvas = () => {
     const visibleCanvas = (canvas) => {
-      if (!canvas || canvas.id === 'kn-rollback-visual-freeze') return false;
+      if (!canvas || canvas.id === 'kn-rollback-visual-freeze' || canvas.id === 'kn-rollback-shadow-emulator') {
+        return false;
+      }
       const rect = canvas.getBoundingClientRect?.();
       return !!rect && rect.width > 1 && rect.height > 1;
     };
@@ -752,13 +1019,28 @@
     return window._knReplayMotionSmoothingStats;
   };
 
+  const _getRollbackMotionNudgeStats = () => {
+    if (!window._knReplayMotionNudgeStats) {
+      window._knReplayMotionNudgeStats = {
+        starts: 0,
+        frames: 0,
+        overlayStarts: 0,
+        liveStarts: 0,
+        lastDx: 0,
+        lastDy: 0,
+      };
+    }
+    return window._knReplayMotionNudgeStats;
+  };
+
   const _resetRollbackMotionSmoothing = () => {
     _cancelRollbackMotionSmoothing();
     _rbMotionSmoothingSerial++;
     _rbMotionSmoothingDx = 0;
     _rbMotionSmoothingDy = 0;
-    const overlay = _rbVisualFreezeOverlay;
-    if (overlay) {
+    const overlays = [_rbVisualFreezeOverlay, _rbShadowOverlay];
+    for (const overlay of overlays) {
+      if (!overlay?.style) continue;
       overlay.style.transform = 'none';
       overlay.style.transformOrigin = '50% 50%';
     }
@@ -782,7 +1064,6 @@
     const deadzone = 2200;
     const mag = Math.hypot(ax, ay);
     const hasDirection = mag >= deadzone;
-    const buttons = input?.buttons || 0;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     return {
       dx: hasDirection
@@ -791,7 +1072,7 @@
       dy: hasDirection
         ? clamp((ay / maxAxis) * RB_MOTION_SMOOTHING_MAX_PX, -RB_MOTION_SMOOTHING_MAX_PX, RB_MOTION_SMOOTHING_MAX_PX)
         : 0,
-      scale: RB_MOTION_SMOOTHING_BASE_SCALE + (buttons ? 0.004 : 0),
+      scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
     };
   };
 
@@ -808,17 +1089,19 @@
     stats.lastDy = Number(dy.toFixed(2));
   };
 
-  const _startRollbackMotionSmoothing = (overlay, serial) => {
-    if (!RB_REPLAY_MOTION_SMOOTHING || !overlay) return;
+  const _startRollbackMotionSmoothing = (overlay, serial, options = {}) => {
+    if ((!RB_REPLAY_MOTION_SMOOTHING && !options.force) || !overlay) return;
     _cancelRollbackMotionSmoothing();
     _rbMotionSmoothingSerial++;
     const motionSerial = _rbMotionSmoothingSerial;
     const stats = _getRollbackMotionStats();
     stats.starts++;
+    if (options.force) _getRollbackMotionNudgeStats().overlayStarts++;
     const step = () => {
+      const activeOverlay = overlay === _rbVisualFreezeOverlay || overlay === _rbShadowOverlay;
       if (
         !_rbVisualFreezeActive ||
-        _rbVisualFreezeOverlay !== overlay ||
+        !activeOverlay ||
         overlay.dataset.serial !== String(serial) ||
         motionSerial !== _rbMotionSmoothingSerial
       ) {
@@ -829,6 +1112,1054 @@
     };
     _applyRollbackMotionTransform(overlay, _inputToRollbackMotion(_readRollbackMotionInput()));
     _rbMotionSmoothingRaf = _requestRollbackMotionFrame(step);
+  };
+
+  const _cancelRollbackCanvasNudge = () => {
+    if (_rbCanvasNudgeRaf) {
+      try {
+        if (window.APISandbox?.nativeCancelRAF) {
+          window.APISandbox.nativeCancelRAF(_rbCanvasNudgeRaf);
+        } else if (window.cancelAnimationFrame) {
+          window.cancelAnimationFrame(_rbCanvasNudgeRaf);
+        } else {
+          clearTimeout(_rbCanvasNudgeRaf);
+        }
+      } catch (_) {}
+      _rbCanvasNudgeRaf = 0;
+    }
+    if (_rbCanvasNudgeTimer) {
+      clearTimeout(_rbCanvasNudgeTimer);
+      _rbCanvasNudgeTimer = 0;
+    }
+  };
+
+  const _resetRollbackCanvasNudge = () => {
+    _cancelRollbackCanvasNudge();
+    _rbCanvasNudgeSerial++;
+    _rbCanvasNudgeDx = 0;
+    _rbCanvasNudgeDy = 0;
+    const target = _rbCanvasNudgeTarget;
+    if (target?.style) {
+      target.style.transform = _rbCanvasNudgePrevTransform || '';
+      target.style.transformOrigin = _rbCanvasNudgePrevTransformOrigin || '';
+      target.style.willChange = _rbCanvasNudgePrevWillChange || '';
+    }
+    _rbCanvasNudgeTarget = null;
+    _rbCanvasNudgePrevTransform = '';
+    _rbCanvasNudgePrevTransformOrigin = '';
+    _rbCanvasNudgePrevWillChange = '';
+  };
+
+  const _inputToRollbackCanvasNudge = (input) => {
+    const base = _inputToRollbackMotion(input);
+    const ratio = RB_MOTION_SMOOTHING_MAX_PX > 0 ? RB_REPLAY_MOTION_NUDGE_PX / RB_MOTION_SMOOTHING_MAX_PX : 1;
+    return {
+      dx: base.dx * ratio,
+      dy: base.dy * ratio,
+      scale: RB_REPLAY_MOTION_SCALE && (base.dx || base.dy) ? 1.006 : 1,
+    };
+  };
+
+  const _applyRollbackCanvasNudgeTransform = (target, motion) => {
+    _rbCanvasNudgeDx = _rbCanvasNudgeDx * 0.35 + motion.dx * 0.65;
+    _rbCanvasNudgeDy = _rbCanvasNudgeDy * 0.35 + motion.dy * 0.65;
+    const dx = Math.abs(_rbCanvasNudgeDx) < 0.04 ? 0 : _rbCanvasNudgeDx;
+    const dy = Math.abs(_rbCanvasNudgeDy) < 0.04 ? 0 : _rbCanvasNudgeDy;
+    const base =
+      _rbCanvasNudgePrevTransform && _rbCanvasNudgePrevTransform !== 'none' ? `${_rbCanvasNudgePrevTransform} ` : '';
+    target.style.transformOrigin = '50% 50%';
+    target.style.transform = `${base}translate3d(${dx.toFixed(2)}px, ${dy.toFixed(2)}px, 0) scale(${motion.scale.toFixed(3)})`;
+    const stats = _getRollbackMotionNudgeStats();
+    stats.frames++;
+    stats.lastDx = Number(dx.toFixed(2));
+    stats.lastDy = Number(dy.toFixed(2));
+  };
+
+  const _startRollbackCanvasNudge = (input, depth = 0) => {
+    if (!RB_REPLAY_MOTION_NUDGE) return false;
+    const target = _findRollbackVisualCanvas();
+    if (!target?.style) return false;
+    if (target === _rbVisualFreezeOverlay || target === _rbShadowOverlay) return false;
+    if (_rbCanvasNudgeTarget !== target) _resetRollbackCanvasNudge();
+    if (!_rbCanvasNudgeTarget) {
+      _rbCanvasNudgeTarget = target;
+      _rbCanvasNudgePrevTransform = target.style.transform || '';
+      _rbCanvasNudgePrevTransformOrigin = target.style.transformOrigin || '';
+      _rbCanvasNudgePrevWillChange = target.style.willChange || '';
+    }
+    _cancelRollbackCanvasNudge();
+    _rbCanvasNudgeSerial++;
+    const nudgeSerial = _rbCanvasNudgeSerial;
+    const holdMs = Math.max(RB_REPLAY_MOTION_NUDGE_MS, Math.min(120, 16 + (depth | 0) * 8));
+    const stats = _getRollbackMotionNudgeStats();
+    stats.starts++;
+    stats.liveStarts++;
+    target.style.willChange = 'transform';
+    const step = () => {
+      if (_rbCanvasNudgeTarget !== target || nudgeSerial !== _rbCanvasNudgeSerial) return;
+      _applyRollbackCanvasNudgeTransform(target, _inputToRollbackCanvasNudge(_readRollbackMotionInput() || input));
+      _rbCanvasNudgeRaf = _requestRollbackMotionFrame(step);
+    };
+    _applyRollbackCanvasNudgeTransform(target, _inputToRollbackCanvasNudge(input || _readRollbackMotionInput()));
+    _rbCanvasNudgeRaf = _requestRollbackMotionFrame(step);
+    _rbCanvasNudgeTimer = setTimeout(() => {
+      if (_rbCanvasNudgeTarget === target && nudgeSerial === _rbCanvasNudgeSerial) _resetRollbackCanvasNudge();
+    }, holdMs);
+    return true;
+  };
+
+  const _getShadowStats = () => {
+    if (!window._knShadowEmuStats) {
+      window._knShadowEmuStats = {
+        bootAttempts: 0,
+        ready: 0,
+        failures: 0,
+        shows: 0,
+        normalStepsSent: 0,
+        runAheadSent: 0,
+        leadStepsSent: 0,
+        stepAcks: 0,
+        droppedSteps: 0,
+        lastLeadDelta: 0,
+        resyncsSent: 0,
+        resyncAcks: 0,
+        hideRequests: 0,
+        heldHides: 0,
+        hideFades: 0,
+        persistentShows: 0,
+        persistentHideSkips: 0,
+        coldShowsSkipped: 0,
+        deferredResyncs: 0,
+        freshShowsSkipped: 0,
+        blackShowsSkipped: 0,
+        blackStepAcks: 0,
+        unknownPaintAcks: 0,
+        pumpStarts: 0,
+        pumpStops: 0,
+        rafPumpStarts: 0,
+        rafPumpStops: 0,
+        rafStepsSent: 0,
+        rafStepAcks: 0,
+        workerLagged: 0,
+        workerCommitsPerShow: 0,
+        workerShowsWithCommits: 0,
+        lastWorkerCommitsPerShow: 0,
+        preWarmRequests: 0,
+        preWarmAcksInBudget: 0,
+        preWarmAcksLate: 0,
+        preWarmBlack: 0,
+        preWarmCanceled: 0,
+        resyncViaSplit: 0,
+        resyncViaRetro: 0,
+        resyncSplitUnavailable: 0,
+        resyncSplitRejected: 0,
+        resyncPostMessageMs: 0,
+        lastResyncPostMessageMs: 0,
+        resyncLoadImmediateMs: 0,
+        lastResyncLoadImmediateMs: 0,
+        lastPumpUntil: -1,
+        lastPaintMax: -1,
+        lastFrame: -1,
+        lastError: '',
+        lastBootMs: 0,
+      };
+    }
+    return window._knShadowEmuStats;
+  };
+
+  const _shadowStatsSnapshot = () => {
+    const stats = { ..._getShadowStats() };
+    stats.avgWorkerCommitsPerShow =
+      stats.workerShowsWithCommits > 0 ? stats.workerCommitsPerShow / stats.workerShowsWithCommits : 0;
+    stats.enabled = {
+      shadowEmu: RB_SHADOW_EMU,
+      shadowPaintGate: RB_SHADOW_PAINT_GATE,
+      shadowPump: RB_SHADOW_PUMP ? 'legacy' : 'raf',
+      rollbackStateBackend: RB_ROLLBACK_STATE_BACKEND,
+      replayMotionNudge: RB_REPLAY_MOTION_NUDGE,
+    };
+    return stats;
+  };
+
+  const _shadowLog = (message) => {
+    try {
+      _syncLog(`SHADOW-EMU ${message}`);
+    } catch (_) {
+      console.log(`[lockstep] SHADOW-EMU ${message}`);
+    }
+  };
+
+  const _shadowTransferBuffer = (bytes) => {
+    if (!bytes) return null;
+    const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+  };
+
+  const _shadowRequestFrame = (cb) => {
+    const raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame;
+    if (typeof raf === 'function') {
+      try {
+        return raf.call(window.APISandbox?.nativeRAF ? window.APISandbox : window, cb);
+      } catch (_) {}
+    }
+    return setTimeout(() => cb(performance.now()), 16);
+  };
+
+  const _shadowCancelFrame = (id) => {
+    if (!id) return;
+    const cancel = window.APISandbox?.nativeCancelRAF || window.cancelAnimationFrame;
+    try {
+      if (typeof cancel === 'function')
+        cancel.call(window.APISandbox?.nativeCancelRAF ? window.APISandbox : window, id);
+      else clearTimeout(id);
+    } catch (_) {
+      clearTimeout(id);
+    }
+  };
+
+  const _shadowCancelPrewarm = (countCancel = false) => {
+    if (!_rbShadowPrewarm) return;
+    if (_rbShadowPrewarm.timer) clearTimeout(_rbShadowPrewarm.timer);
+    if (countCancel) _getShadowStats().preWarmCanceled++;
+    _rbShadowPrewarm = null;
+  };
+
+  const _shadowFinishVisibleCommitWindow = () => {
+    if (_rbShadowVisibleStepBase <= 0 && _rbShadowVisibleCommits <= 0) return;
+    const stats = _getShadowStats();
+    stats.lastWorkerCommitsPerShow = _rbShadowVisibleCommits;
+    stats.workerCommitsPerShow += _rbShadowVisibleCommits;
+    stats.workerShowsWithCommits++;
+    _rbShadowVisibleStepBase = 0;
+    _rbShadowVisibleCommits = 0;
+  };
+
+  const _shadowStopRafPump = (reason = '') => {
+    if (_rbShadowRafId) {
+      _shadowCancelFrame(_rbShadowRafId);
+      _rbShadowRafId = 0;
+    }
+    if (_rbShadowRafInFlight) _rbShadowRafInFlight = false;
+    const stats = _getShadowStats();
+    if (reason) stats.rafPumpStops++;
+  };
+
+  const _shadowRafPumpTick = () => {
+    _rbShadowRafId = 0;
+    if (!_rbShadowVisible || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) {
+      _shadowStopRafPump();
+      return;
+    }
+    if (_rbShadowRafInFlight) {
+      _getShadowStats().workerLagged++;
+      _rbShadowRafId = _shadowRequestFrame(_shadowRafPumpTick);
+      return;
+    }
+    const workerFrame = _shadowReadWorkerFrame();
+    const frame = Math.max(_frameNum | 0, workerFrame >= 0 ? workerFrame | 0 : _frameNum | 0);
+    _rbShadowRafInFlight = true;
+    if (!_shadowPostStep(frame, _rbShadowLastInputs || [], 'raf-pump', 1, true)) {
+      _rbShadowRafInFlight = false;
+    }
+    _rbShadowRafId = _shadowRequestFrame(_shadowRafPumpTick);
+  };
+
+  const _shadowStartRafPump = (reason = 'show') => {
+    if (!RB_SHADOW_EMU || !_rbShadowVisible || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    if (_rbShadowRafId) return true;
+    _getShadowStats().rafPumpStarts++;
+    _rbShadowRafId = _shadowRequestFrame(_shadowRafPumpTick);
+    return true;
+  };
+
+  const _shadowDoHideOverlay = () => {
+    if (_rbShadowHideTimer) {
+      clearTimeout(_rbShadowHideTimer);
+      _rbShadowHideTimer = 0;
+    }
+    _shadowCancelPrewarm(true);
+    _shadowFinishVisibleCommitWindow();
+    _shadowStopRafPump('hide');
+    _shadowStopPump('hide');
+    _rbShadowVisible = false;
+    _rbShadowHoldUntil = 0;
+    _resetRollbackMotionSmoothing();
+    if (_rbShadowOverlay) {
+      _rbShadowOverlay.style.transition = 'none';
+      _rbShadowOverlay.style.opacity = '0';
+      _rbShadowOverlay.style.visibility = 'hidden';
+    }
+    if (RB_SHADOW_HIDE_LIVE) _restoreLiveCanvasAfterOverlay();
+    if (_rbShadowPendingResyncReason) {
+      const reason = _rbShadowPendingResyncReason;
+      _rbShadowPendingResyncReason = '';
+      _shadowScheduleResync(reason);
+    }
+  };
+
+  const _shadowBeginHideFade = () => {
+    if (_rbShadowHideTimer) {
+      clearTimeout(_rbShadowHideTimer);
+      _rbShadowHideTimer = 0;
+    }
+    if (!_rbShadowOverlay || RB_SHADOW_OVERLAY_FADE_MS <= 0) {
+      _shadowDoHideOverlay();
+      return;
+    }
+    _getShadowStats().hideFades++;
+    _rbShadowHoldUntil = performance.now() + RB_SHADOW_OVERLAY_FADE_MS;
+    _rbShadowOverlay.style.transition = `opacity ${RB_SHADOW_OVERLAY_FADE_MS}ms linear`;
+    _rbShadowOverlay.style.opacity = '0';
+    _rbShadowHideTimer = setTimeout(_shadowDoHideOverlay, RB_SHADOW_OVERLAY_FADE_MS + 20);
+  };
+
+  const _shadowHideOverlay = (immediate = false) => {
+    const stats = _getShadowStats();
+    stats.hideRequests++;
+    if (!immediate && RB_SHADOW_PERSISTENT && _rbShadowPersistentActive) {
+      stats.persistentHideSkips++;
+      return;
+    }
+    if (!_rbShadowVisible || !_rbShadowOverlay) {
+      if (immediate) _shadowDoHideOverlay();
+      return;
+    }
+    if (immediate || RB_SHADOW_OVERLAY_HOLD_MS <= 0) {
+      _shadowDoHideOverlay();
+      return;
+    }
+    const delay = Math.max(0, _rbShadowHoldUntil - performance.now());
+    stats.heldHides++;
+    if (_rbShadowHideTimer) clearTimeout(_rbShadowHideTimer);
+    _rbShadowHideTimer = setTimeout(_shadowBeginHideFade, delay);
+    _rbShadowOverlay.style.transition = 'none';
+    _rbShadowOverlay.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
+    if (delay <= 0) _shadowBeginHideFade();
+  };
+
+  const _shadowIsOverlayCovering = () => {
+    if (!_rbShadowOverlay || !_rbShadowVisible) return false;
+    if (_rbShadowOverlay.style.visibility === 'hidden') return false;
+    if (_rbShadowHideTimer && performance.now() >= _rbShadowHoldUntil) return false;
+    return true;
+  };
+
+  const _shadowPaintGate = () => {
+    if (!RB_SHADOW_PAINT_GATE) return '';
+    if (_rbShadowNeedsFreshPaint) return 'fresh';
+    if (_rbShadowLastLooksBlack) return 'black';
+    if (_rbShadowLastPaintFrame < _frameNum - 1) return 'fresh';
+    if (_rbShadowLastGoodPaintAt > 0 && performance.now() - _rbShadowLastGoodPaintAt > 750) return 'stale';
+    return '';
+  };
+
+  const _shadowResetOverlayTimers = () => {
+    if (_rbShadowHideTimer) {
+      clearTimeout(_rbShadowHideTimer);
+      _rbShadowHideTimer = 0;
+    }
+    _rbShadowHoldUntil = 0;
+    _rbShadowPendingResyncReason = '';
+  };
+
+  const _shadowMarkNeedsFreshPaint = () => {
+    _rbShadowNeedsFreshPaint = true;
+    _rbShadowLastLooksBlack = false;
+  };
+
+  const _shadowStop = (reason = 'stop') => {
+    if (_rbShadowResyncTimer) {
+      clearTimeout(_rbShadowResyncTimer);
+      _rbShadowResyncTimer = 0;
+    }
+    _shadowResetOverlayTimers();
+    _shadowHideOverlay(true);
+    if (_rbShadowWorker) {
+      try {
+        _rbShadowWorker.postMessage({ type: 'stop' });
+      } catch (_) {}
+      try {
+        _rbShadowWorker.terminate();
+      } catch (_) {}
+    }
+    if (_rbShadowOverlay?.parentNode) {
+      try {
+        _rbShadowOverlay.parentNode.removeChild(_rbShadowOverlay);
+      } catch (_) {}
+    }
+    _rbShadowWorker = null;
+    _rbShadowOverlay = null;
+    _rbShadowTransferred = false;
+    _rbShadowBooting = false;
+    _rbShadowReady = false;
+    _rbShadowFailed = false;
+    _rbShadowStatusSab = null;
+    _rbShadowStatus = null;
+    _rbShadowBootPromise = null;
+    _rbShadowInFlight = 0;
+    _rbShadowLastInputs = null;
+    _rbShadowLastResizeKey = '';
+    _shadowCancelPrewarm(false);
+    _shadowStopRafPump();
+    _rbShadowRafInFlight = false;
+    _rbShadowNeedsFreshPaint = true;
+    _rbShadowLastGoodPaintAt = 0;
+    _rbShadowLastPaintFrame = -1;
+    _rbShadowLastLooksBlack = false;
+    _rbShadowPersistentActive = false;
+    _rbShadowVisibleStepBase = 0;
+    _rbShadowVisibleCommits = 0;
+    if (reason !== 'stop') _shadowLog(`stopped reason=${reason}`);
+  };
+
+  const _shadowDisable = (reason, error) => {
+    const stats = _getShadowStats();
+    stats.failures++;
+    stats.lastError = `${reason}${error ? `: ${error?.message || error}` : ''}`;
+    _shadowLog(`disabled reason=${stats.lastError}`);
+    _shadowStop(`disabled:${reason}`);
+    _rbShadowFailed = true;
+  };
+
+  // Stop-Showing-Rewound helpers. Hide the live ejs_canvas while the
+  // shadow overlay is up so there is literally no rewinding live frame
+  // to bleed through under the overlay. Restored on hide.
+  //
+  // Implementation: visibility:hidden (NOT display:none) so layout is
+  // preserved — the canvas keeps its space, only its pixels are
+  // suppressed. The shadow overlay is positioned over the canvas via
+  // _shadowSyncOverlayGeometry which mirrors the canvas's bounding
+  // rect, so the overlay continues to occupy the same on-screen area.
+  //
+  // Tradeoff under hide-live: when the overlay shows a transient/black
+  // worker frame (e.g., the first stepOnce after a resync), there is
+  // no bleed-through fallback so that bad frame is fully visible as a
+  // brief flicker. The mode-switching alternative (bleed-through only
+  // post-resync) tested *worse* — switching between "clean hide" and
+  // "tingy bleed" mid-rollback-stream is more jarring than uniform
+  // hide. If the flicker becomes noticeable, bump
+  // RB_SHADOW_RESYNC_MIN_MS (?shadowResyncMinMs=2500 etc) to fire
+  // resyncs less often, which directly reduces the bad-frame events.
+  let _rbLiveCanvasHiddenSerial = 0;
+  let _rbLiveCanvasPrevVisibility = '';
+  const _hideLiveCanvasUnderOverlay = () => {
+    const live = _findRollbackVisualCanvas?.();
+    if (!live || !live.style) return;
+    if (live.style.visibility === 'hidden') return;
+    _rbLiveCanvasPrevVisibility = live.style.visibility || '';
+    live.style.visibility = 'hidden';
+    _rbLiveCanvasHiddenSerial++;
+  };
+  const _restoreLiveCanvasAfterOverlay = () => {
+    const live = _findRollbackVisualCanvas?.();
+    if (!live || !live.style) return;
+    if (live.style.visibility !== 'hidden') return;
+    live.style.visibility = _rbLiveCanvasPrevVisibility || '';
+  };
+
+  const _shadowEnsureOverlay = () => {
+    if (_rbShadowOverlay) return _rbShadowOverlay;
+    if (!document?.createElement) return null;
+    const overlay = document.createElement('canvas');
+    overlay.id = 'kn-rollback-shadow-emulator';
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.style.cssText = [
+      'position:fixed',
+      'display:block',
+      'visibility:hidden',
+      'opacity:0',
+      'pointer-events:none',
+      'z-index:55',
+      'margin:0',
+      'padding:0',
+      'border:0',
+      'background:transparent',
+      'image-rendering:pixelated',
+      'image-rendering:crisp-edges',
+      'will-change:opacity',
+      'transform:translateZ(0)',
+      'backface-visibility:hidden',
+      'contain:strict',
+    ].join(';');
+    _rbShadowOverlay = overlay;
+    return overlay;
+  };
+
+  const _shadowSyncOverlayGeometry = (source = null, rect = null) => {
+    const overlay = _shadowEnsureOverlay();
+    source = source || _findRollbackVisualCanvas();
+    rect = rect || source?.getBoundingClientRect?.();
+    if (!overlay || !source || !rect || rect.width <= 1 || rect.height <= 1) return null;
+    const root = document.fullscreenElement || document.body || document.documentElement;
+    if (root && overlay.parentNode !== root) root.appendChild(overlay);
+    const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const width = Math.max(1, source.width || Math.round(rect.width * scale));
+    const height = Math.max(1, source.height || Math.round(rect.height * scale));
+    if (!_rbShadowTransferred) {
+      if (overlay.width !== width) overlay.width = width;
+      if (overlay.height !== height) overlay.height = height;
+    }
+    overlay.style.left = `${Math.round(rect.left)}px`;
+    overlay.style.top = `${Math.round(rect.top)}px`;
+    overlay.style.width = `${Math.round(rect.width)}px`;
+    overlay.style.height = `${Math.round(rect.height)}px`;
+    const key = `${width}x${height}`;
+    if (_rbShadowWorker && key !== _rbShadowLastResizeKey) {
+      _rbShadowLastResizeKey = key;
+      try {
+        _rbShadowWorker.postMessage({ type: 'resize', width, height });
+      } catch (_) {}
+    }
+    return { overlay, width, height };
+  };
+
+  const _shadowReadRomBytes = () => {
+    const ejs = window.EJS_emulator;
+    const gm = ejs?.gameManager;
+    const fs = gm?.FS;
+    if (!fs?.readFile) return null;
+    const fileName = ejs?.fileName || gm?.EJS?.fileName;
+    if (!fileName) return null;
+    const path = String(fileName).startsWith('/') ? String(fileName) : `/${fileName}`;
+    try {
+      const bytes = fs.readFile(path);
+      return bytes?.byteLength ? new Uint8Array(bytes) : null;
+    } catch (e) {
+      _shadowLog(`rom-read failed path=${path} ${e?.message || e}`);
+      return null;
+    }
+  };
+
+  const _shadowReadStateBytes = () => {
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm?.getState) return null;
+    try {
+      const bytes = gm.getState();
+      return bytes?.byteLength ? new Uint8Array(bytes) : null;
+    } catch (e) {
+      _shadowLog(`state-read failed ${e?.message || e}`);
+      return null;
+    }
+  };
+
+  const _shadowReadSplitStateBytes = (frame = _frameNum) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (RB_ROLLBACK_STATE_BACKEND !== 'split-rdram') return null;
+    if (!mod?._kn_get_state_backend || mod._kn_get_state_backend() !== 1) return null;
+    if (!mod?._kn_get_split_state_for_shadow || !mod?._malloc || !mod?._free || !mod.HEAPU8 || !mod.HEAPU32) {
+      return null;
+    }
+    const ptr = mod._malloc(9 * 4);
+    if (!ptr) return null;
+    try {
+      const n = mod._kn_get_split_state_for_shadow(frame | 0, ptr, 9);
+      if (n < 9) return null;
+      const out = new Uint32Array(mod.HEAPU32.buffer, ptr, 9);
+      const rdramPtr = out[0] >>> 0;
+      const rdramBytes = out[1] >>> 0;
+      const cpuPtr = out[2] >>> 0;
+      const cpuBytes = out[3] >>> 0;
+      const hiddenPtr = out[4] >>> 0;
+      const hiddenBytes = out[5] >>> 0;
+      const hlePtr = out[6] >>> 0;
+      const hleBytes = out[7] >>> 0;
+      const snapshotFrame = out[8] | 0;
+      if (!rdramPtr || !rdramBytes || !cpuPtr || !cpuBytes) return null;
+      const readSlice = (base, len) =>
+        base && len ? new Uint8Array(mod.HEAPU8.buffer, base, len).slice() : new Uint8Array(0);
+      return {
+        frame: snapshotFrame,
+        rdram: readSlice(rdramPtr, rdramBytes),
+        cpu: readSlice(cpuPtr, cpuBytes),
+        hidden: readSlice(hiddenPtr, hiddenBytes),
+        hle: readSlice(hlePtr, hleBytes),
+      };
+    } catch (e) {
+      _shadowLog(`split-state-read failed ${e?.message || e}`);
+      return null;
+    } finally {
+      mod._free(ptr);
+    }
+  };
+
+  const _shadowControllerMask = () => {
+    let mask = 0;
+    const players = Math.max(1, Math.min(4, rb_numPlayers || 2));
+    for (let i = 0; i < players; i++) mask |= 1 << i;
+    return mask || 3;
+  };
+
+  const _shadowOnMessage = (event) => {
+    const msg = event.data || {};
+    const stats = _getShadowStats();
+    if (msg.type === 'ready') {
+      _rbShadowBooting = false;
+      _rbShadowReady = true;
+      _rbShadowFailed = false;
+      _rbShadowInFlight = 0;
+      stats.ready++;
+      stats.lastFrame = msg.frame ?? -1;
+      stats.lastBootMs = performance.now() - (stats._bootStartedAt || performance.now());
+      _shadowMarkNeedsFreshPaint();
+      _shadowLog(`ready frame=${stats.lastFrame} bootMs=${stats.lastBootMs.toFixed(1)} sab=${msg.sab ? 1 : 0}`);
+    } else if (msg.type === 'stepped') {
+      _rbShadowInFlight = Math.max(0, _rbShadowInFlight - 1);
+      stats.stepAcks++;
+      if (msg.reason === 'raf-pump') {
+        _rbShadowRafInFlight = false;
+        stats.rafStepAcks++;
+      }
+      stats.lastFrame = msg.frame ?? stats.lastFrame;
+      stats.lastPaintMax = typeof msg.maxChannel === 'number' ? msg.maxChannel : stats.lastPaintMax;
+      if (_rbShadowVisible && (msg.count | 0) > 0) _rbShadowVisibleCommits += msg.count | 0;
+      if (msg.black === true) {
+        stats.blackStepAcks++;
+        _rbShadowLastLooksBlack = true;
+      } else if (msg.black === false) {
+        _rbShadowLastLooksBlack = false;
+        _rbShadowNeedsFreshPaint = false;
+        _rbShadowLastGoodPaintAt = performance.now();
+        _rbShadowLastPaintFrame = msg.frame ?? stats.lastFrame;
+      } else if ((msg.count | 0) > 0) {
+        stats.unknownPaintAcks++;
+        _rbShadowLastLooksBlack = false;
+        _rbShadowNeedsFreshPaint = false;
+        _rbShadowLastGoodPaintAt = performance.now();
+        _rbShadowLastPaintFrame = msg.frame ?? stats.lastFrame;
+      }
+      const prewarm = _rbShadowPrewarm;
+      if (prewarm && msg.seq === prewarm.seq) {
+        if (prewarm.timer) clearTimeout(prewarm.timer);
+        _rbShadowPrewarm = null;
+        const inBudget = performance.now() <= prewarm.deadline;
+        const freshEnough = (msg.frame ?? -1) >= prewarm.minFrame;
+        if (inBudget && msg.black === false && freshEnough) {
+          stats.preWarmAcksInBudget++;
+          _shadowRevealOverlay(prewarm.depth, prewarm.source, prewarm.rect, 'prewarm');
+        } else if (msg.black === true) {
+          stats.preWarmBlack++;
+        } else {
+          stats.preWarmAcksLate++;
+        }
+      }
+    } else if (msg.type === 'resynced') {
+      stats.resyncAcks++;
+      stats.lastFrame = msg.frame ?? stats.lastFrame;
+      if (typeof msg.loadMs === 'number') {
+        stats.lastResyncLoadImmediateMs = msg.loadMs;
+        stats.resyncLoadImmediateMs += msg.loadMs;
+      }
+      _shadowMarkNeedsFreshPaint();
+      _shadowLog(`resynced frame=${stats.lastFrame} result=${msg.result} reason=${msg.reason || ''}`);
+    } else if (msg.type === 'resync-rejected') {
+      stats.resyncSplitRejected++;
+      const detail =
+        msg.rdramPtr !== undefined
+          ? ` ptr=${msg.rdramPtr} rdram=${msg.rdramBytes ?? '?'} cpu=${msg.cpuBytes ?? '?'}`
+          : '';
+      stats.lastError = `${msg.reason || 'resync'} rejected: ${msg.message || 'unknown'}${detail}`;
+      _shadowLog(stats.lastError);
+      if (msg.split && _rbShadowReady && !_rbShadowFailed && _rbShadowWorker) {
+        _shadowPostRetroState(stats, `${msg.reason || 'resync'}-retro-fallback`, msg.frame);
+      }
+    } else if (msg.type === 'error') {
+      _shadowDisable(`${msg.stage || 'worker'} ${msg.name || 'Error'}`, msg.message || '');
+    } else if (msg.type === 'stderr') {
+      const line = String(msg.line || '');
+      if (line && line.length < 220) _shadowLog(`stderr ${line}`);
+    }
+  };
+
+  const _shadowMaybeStart = (reason = 'unknown') => {
+    if (!RB_SHADOW_EMU || _isSpectator || _rbShadowReady || _rbShadowBooting || _rbShadowFailed) return false;
+    if (typeof Worker !== 'function') return false;
+    if (typeof SharedArrayBuffer !== 'function' || !window.crossOriginIsolated) {
+      _shadowDisable('sab-unavailable', 'SharedArrayBuffer requires cross-origin isolation');
+      return false;
+    }
+    const overlay = _shadowEnsureOverlay();
+    if (!overlay || typeof overlay.transferControlToOffscreen !== 'function') {
+      _shadowDisable('offscreen-unavailable', 'transferControlToOffscreen unavailable');
+      return false;
+    }
+    const geometry = _shadowSyncOverlayGeometry();
+    if (!geometry) return false;
+
+    const romBytes = _shadowReadRomBytes();
+    const stateBytes = _shadowReadStateBytes();
+    if (!romBytes || !stateBytes) {
+      _shadowLog(`start deferred reason=${reason} rom=${!!romBytes} state=${!!stateBytes}`);
+      return false;
+    }
+
+    _rbShadowBooting = true;
+    const stats = _getShadowStats();
+    stats.bootAttempts++;
+    stats._bootStartedAt = performance.now();
+    _rbShadowBootPromise = (async () => {
+      try {
+        const offscreen = overlay.transferControlToOffscreen();
+        _rbShadowTransferred = true;
+        _rbShadowStatusSab = new SharedArrayBuffer(16 * Int32Array.BYTES_PER_ELEMENT);
+        _rbShadowStatus = new Int32Array(_rbShadowStatusSab);
+        Atomics.store(_rbShadowStatus, RB_SHADOW_STATUS_IDX.status, RB_SHADOW_STATUS.BOOTING);
+        const worker = new Worker('/static/rollback-shadow-worker.js', { name: 'kn-rollback-shadow' });
+        _rbShadowWorker = worker;
+        worker.onmessage = _shadowOnMessage;
+        worker.onerror = (event) => {
+          _shadowDisable('worker-error', event?.message || 'worker error');
+        };
+        const romBuffer = _shadowTransferBuffer(romBytes);
+        const stateBuffer = _shadowTransferBuffer(stateBytes);
+        const ejs = window.EJS_emulator;
+        const coreSettings =
+          typeof ejs?.getCoreSettings === 'function'
+            ? ejs.getCoreSettings()
+            : typeof ejs?.gameManager?.EJS?.getCoreSettings === 'function'
+              ? ejs.gameManager.EJS.getCoreSettings()
+              : '';
+        worker.postMessage(
+          {
+            type: 'init',
+            canvas: offscreen,
+            width: geometry.width,
+            height: geometry.height,
+            rom: romBuffer,
+            state: stateBuffer,
+            frame: _frameNum,
+            statusSab: _rbShadowStatusSab,
+            coreBase: '/static/ejs/cores/',
+            coreScript: '/static/ejs/cores/mupen64plus_next_libretro.js',
+            coreSettings,
+            controllerMask: _shadowControllerMask(),
+            verbose: _urlParams.get('shadowVerbose') === '1',
+          },
+          [offscreen, romBuffer, stateBuffer],
+        );
+        _shadowLog(
+          `boot posted reason=${reason} romKB=${Math.round(romBytes.byteLength / 1024)} stateKB=${Math.round(
+            stateBytes.byteLength / 1024,
+          )} frame=${_frameNum}`,
+        );
+      } catch (e) {
+        _rbShadowBooting = false;
+        _shadowDisable('boot-post', e);
+      }
+    })();
+    return true;
+  };
+
+  const _shadowBuildInputs = (tickMod, localInput, applyFrame) => {
+    const inputs = [];
+    const players = Math.max(1, Math.min(4, rb_numPlayers || 2));
+    for (let s = 0; s < players; s++) {
+      let inp = KNShared.ZERO_INPUT;
+      if (s === _playerSlot) {
+        inp = RB_TRUE_ROLLBACK ? localInput : _localInputs[applyFrame] || localInput || KNShared.ZERO_INPUT;
+      } else {
+        const remoteFrame = applyFrame >= 0 ? applyFrame : _frameNum;
+        inp = _rbGetInput(tickMod, s, remoteFrame) || _remoteInputs[s]?.[remoteFrame] || KNShared.ZERO_INPUT;
+      }
+      inputs.push({
+        slot: s,
+        buttons: inp?.buttons | 0,
+        lx: inp?.lx | 0,
+        ly: inp?.ly | 0,
+        cx: inp?.cx | 0,
+        cy: inp?.cy | 0,
+      });
+    }
+    _rbShadowLastInputs = inputs;
+    return inputs;
+  };
+
+  const _shadowPostStep = (frame, inputs, reason = 'normal', count = 1, force = false) => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    if (!force && _rbShadowInFlight >= RB_SHADOW_MAX_IN_FLIGHT) {
+      _getShadowStats().droppedSteps++;
+      return false;
+    }
+    const stats = _getShadowStats();
+    const seq = ++_rbShadowStepSeq;
+    const batch = Math.max(1, Math.min(RB_SHADOW_MAX_BATCH_FRAMES, count | 0 || 1));
+    try {
+      _rbShadowInFlight++;
+      _rbShadowWorker.postMessage({
+        type: 'step',
+        seq,
+        frame: frame | 0,
+        inputs: inputs || _rbShadowLastInputs || [],
+        reason,
+        count: batch,
+        wantSample: RB_SHADOW_PAINT_GATE,
+      });
+      if (reason === 'replay-runahead') stats.runAheadSent += batch;
+      else if (reason === 'normal-lead') stats.leadStepsSent += batch;
+      else if (reason === 'raf-pump') stats.rafStepsSent += batch;
+      else stats.normalStepsSent += batch;
+      return seq;
+    } catch (e) {
+      _rbShadowInFlight = Math.max(0, _rbShadowInFlight - 1);
+      _shadowDisable('step-post', e);
+      return false;
+    }
+  };
+
+  const _shadowReadWorkerFrame = () => {
+    if (_rbShadowStatus) {
+      try {
+        const f = Atomics.load(_rbShadowStatus, RB_SHADOW_STATUS_IDX.frame);
+        if (Number.isFinite(f) && f > 0) return f | 0;
+      } catch (_) {}
+    }
+    const f = _getShadowStats().lastFrame;
+    return Number.isFinite(f) ? f | 0 : -1;
+  };
+
+  const _shadowPostLead = (targetFrame, inputs, reason = 'normal-lead', maxBatch = 6, force = false) => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    const workerFrame = _shadowReadWorkerFrame();
+    const startFrame = workerFrame >= 0 ? workerFrame : _frameNum;
+    const delta = Math.max(0, (targetFrame | 0) - startFrame);
+    _getShadowStats().lastLeadDelta = delta;
+    if (delta <= 0) return false;
+    const batch = Math.max(1, Math.min(RB_SHADOW_MAX_BATCH_FRAMES, maxBatch | 0 || 1, delta));
+    return _shadowPostStep(startFrame, inputs || _rbShadowLastInputs || [], reason, batch, force);
+  };
+
+  const _shadowRevealOverlay = (depth = 0, source = null, rect = null, reason = 'fresh') => {
+    const stats = _getShadowStats();
+    const geometry = _shadowSyncOverlayGeometry(source, rect);
+    const overlay = geometry?.overlay;
+    if (!overlay) return false;
+    if (_rbVisualFreezeHideTimer) {
+      clearTimeout(_rbVisualFreezeHideTimer);
+      _rbVisualFreezeHideTimer = 0;
+    }
+    if (_rbShadowHideTimer) {
+      clearTimeout(_rbShadowHideTimer);
+      _rbShadowHideTimer = 0;
+    }
+    overlay.style.transition = 'none';
+    overlay.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
+    overlay.style.visibility = 'visible';
+    overlay.style.display = 'block';
+    overlay.dataset.depth = String(depth);
+    const serial = ++_rbVisualFreezeSerial;
+    overlay.dataset.serial = String(serial);
+    if (RB_SHADOW_HIDE_LIVE) _hideLiveCanvasUnderOverlay();
+    _rbShadowVisible = true;
+    _rbShadowHoldUntil = performance.now() + RB_SHADOW_OVERLAY_HOLD_MS;
+    _rbVisualFreezeActive = true;
+    _rbShadowVisibleStepBase = stats.stepAcks;
+    _rbShadowVisibleCommits = 0;
+    if (RB_REPLAY_MOTION_NUDGE) _startRollbackMotionSmoothing(overlay, serial, { force: true });
+    stats.shows++;
+    if (RB_SHADOW_PUMP) {
+      const pumpFrames = Math.max(2, depth + 2);
+      _shadowStartPump(_frameNum + pumpFrames, 'replay-show');
+    } else {
+      _shadowStartRafPump(reason);
+    }
+    return true;
+  };
+
+  const _shadowRequestPrewarm = (depth = 0, source = null, rect = null, reason = 'prewarm') => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    _shadowCancelPrewarm(true);
+    const stats = _getShadowStats();
+    stats.preWarmRequests++;
+    const seq = _shadowPostStep(_frameNum, _rbShadowLastInputs || [], `prewarm:${reason}`, 1, true);
+    if (!seq) return false;
+    const pending = {
+      seq,
+      depth,
+      source,
+      rect,
+      minFrame: _frameNum - 1,
+      deadline: performance.now() + RB_SHADOW_PREWARM_BUDGET_MS,
+      timer: 0,
+    };
+    pending.timer = setTimeout(() => {
+      if (_rbShadowPrewarm !== pending) return;
+      _rbShadowPrewarm = null;
+      stats.preWarmAcksLate++;
+    }, RB_SHADOW_PREWARM_BUDGET_MS);
+    _rbShadowPrewarm = pending;
+    return true;
+  };
+
+  const _shadowShowOverlay = (depth = 0, source = null, rect = null) => {
+    if (!RB_SHADOW_EMU) return false;
+    if (!_rbShadowReady) {
+      _shadowMaybeStart('replay-start');
+      return false;
+    }
+    const stats = _getShadowStats();
+    if (stats.stepAcks <= 0) {
+      stats.coldShowsSkipped++;
+      _shadowRequestPrewarm(depth, source, rect, 'cold');
+      return false;
+    }
+    const paintBlocked = _shadowPaintGate();
+    if (paintBlocked) {
+      if (paintBlocked === 'black') stats.blackShowsSkipped++;
+      else stats.freshShowsSkipped++;
+      _shadowRequestPrewarm(depth, source, rect, paintBlocked);
+      return false;
+    }
+    return _shadowRevealOverlay(depth, source, rect, 'fresh');
+  };
+
+  const _shadowShowPersistentOverlay = () => {
+    if (!RB_SHADOW_EMU || !RB_SHADOW_PERSISTENT || !_rbShadowReady || _rbShadowFailed) return false;
+    const stats = _getShadowStats();
+    if (stats.stepAcks <= 0) return false;
+    const geometry = _shadowSyncOverlayGeometry();
+    const overlay = geometry?.overlay;
+    if (!overlay) return false;
+    if (_rbShadowHideTimer) {
+      clearTimeout(_rbShadowHideTimer);
+      _rbShadowHideTimer = 0;
+    }
+    overlay.style.transition = 'none';
+    overlay.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
+    overlay.style.visibility = 'visible';
+    overlay.style.display = 'block';
+    _rbShadowVisible = true;
+    if (!_rbShadowPersistentActive) stats.persistentShows++;
+    _rbShadowPersistentActive = true;
+    return true;
+  };
+
+  // Legacy worker self-pump during the rollback overlay window.
+  //
+  // Why: the old replay-runahead path posted ONE batched step message
+  // with count=depth+2. The worker processed those N stepOnce calls in
+  // a single synchronous task; the OffscreenCanvas only commits the
+  // last GL output of that task to the placeholder. The user therefore
+  // saw the same single pre-replay frame for the entire overlay window
+  // (~50-65ms) — that "feels paused" hitch at rollback frequency.
+  //
+  // The main-rAF pump is the default now. This setTimeout pump is kept
+  // only for explicit ?shadowPump=legacy A/B while diagnosing browser
+  // compositor behavior.
+  //
+  // Bounded by untilFrame so the worker can't run away. Stopped on
+  // _finishCReplay, hard hide, or worker resync. Worker pump steps do
+  // NOT post 'stepped' acks, so _rbShadowInFlight accounting is
+  // untouched — main's normal-tick stepping resumes cleanly afterward.
+  const _shadowStartPump = (untilFrame, reason = 'replay-pump') => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    const inputs = _rbShadowLastInputs || [];
+    try {
+      _rbShadowWorker.postMessage({
+        type: 'start-pump',
+        untilFrame: untilFrame | 0,
+        inputs,
+        reason,
+      });
+      const stats = _getShadowStats();
+      stats.pumpStarts++;
+      stats.lastPumpUntil = untilFrame | 0;
+      return true;
+    } catch (e) {
+      _shadowDisable('pump-start-post', e);
+      return false;
+    }
+  };
+
+  const _shadowStopPump = (reason = '') => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    try {
+      _rbShadowWorker.postMessage({ type: 'stop-pump', reason });
+      _getShadowStats().pumpStops++;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const _shadowPostRetroState = (stats, reason = 'resync', frame = _frameNum, t0 = performance.now()) => {
+    const stateBytes = _shadowReadStateBytes();
+    if (!stateBytes) return false;
+    const buffer = _shadowTransferBuffer(stateBytes);
+    try {
+      _rbShadowWorker.postMessage({ type: 'resync', state: buffer, frame, reason }, [buffer]);
+      stats.resyncViaRetro++;
+      stats.resyncsSent++;
+      _rbShadowLastResyncAt = performance.now();
+      const dt = _rbShadowLastResyncAt - t0;
+      stats.lastResyncPostMessageMs = dt;
+      stats.resyncPostMessageMs += dt;
+      return true;
+    } catch (e) {
+      _shadowDisable('resync-post', e);
+      return false;
+    }
+  };
+
+  const _shadowSendState = (reason = 'resync', options = {}) => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    const stats = _getShadowStats();
+    const t0 = performance.now();
+    const split = options.allowSplit === false ? null : _shadowReadSplitStateBytes(_frameNum);
+    try {
+      if (split?.rdram?.byteLength && split?.cpu?.byteLength) {
+        const rdram = _shadowTransferBuffer(split.rdram);
+        const cpu = _shadowTransferBuffer(split.cpu);
+        const hidden = _shadowTransferBuffer(split.hidden);
+        const hle = _shadowTransferBuffer(split.hle);
+        const transfer = [rdram, cpu];
+        if (hidden?.byteLength) transfer.push(hidden);
+        if (hle?.byteLength) transfer.push(hle);
+        _rbShadowWorker.postMessage(
+          {
+            type: 'resync-split',
+            rdram,
+            cpu,
+            hidden,
+            hle,
+            frame: split.frame,
+            reason,
+          },
+          transfer,
+        );
+        stats.resyncViaSplit++;
+      } else {
+        stats.resyncSplitUnavailable++;
+        return _shadowPostRetroState(stats, reason, _frameNum, t0);
+      }
+      _rbShadowLastResyncAt = performance.now();
+      const dt = _rbShadowLastResyncAt - t0;
+      stats.lastResyncPostMessageMs = dt;
+      stats.resyncPostMessageMs += dt;
+      stats.resyncsSent++;
+      return true;
+    } catch (e) {
+      _shadowDisable('resync-post', e);
+      return false;
+    }
+  };
+
+  const _shadowScheduleResync = (reason = 'resync') => {
+    if (!RB_SHADOW_EMU || !_rbShadowReady || _rbShadowFailed) return;
+    if (!_rbShadowPersistentActive && _shadowIsOverlayCovering()) {
+      _rbShadowPendingResyncReason = reason;
+      _getShadowStats().deferredResyncs++;
+      return;
+    }
+    const now = performance.now();
+    if (now - _rbShadowLastResyncAt < RB_SHADOW_RESYNC_MIN_MS) return;
+    if (_rbShadowResyncTimer) return;
+    if (RB_SHADOW_RESYNC_DELAY_MS <= 0) {
+      _shadowSendState(reason);
+      return;
+    }
+    _rbShadowResyncTimer = setTimeout(() => {
+      _rbShadowResyncTimer = 0;
+      _shadowSendState(reason);
+    }, RB_SHADOW_RESYNC_DELAY_MS);
   };
 
   const _captureRollbackVisualSnapshot = () => {
@@ -866,11 +2197,12 @@
     }
   };
 
-  const _showRollbackVisualFreeze = (depth = 0) => {
+  const _showRollbackVisualFreeze = (depth = 0, localInput = null) => {
     if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return _rbVisualFreezeActive;
     const source = _findRollbackVisualCanvas();
     const rect = source?.getBoundingClientRect?.();
     if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
+    if (_shadowShowOverlay(depth, source, rect)) return true;
     const snapshotAge = _rbVisualSnapshotFrame >= 0 ? Math.abs(_frameNum - _rbVisualSnapshotFrame) : Infinity;
     if (!_rbVisualSnapshotCanvas || snapshotAge > RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES) {
       if (!_captureRollbackVisualSnapshot()) return false;
@@ -921,7 +2253,7 @@
       overlay.style.transition = 'none';
       overlay.style.opacity = '1';
       overlay.style.transform = RB_REPLAY_MOTION_SMOOTHING
-        ? `translate3d(0, 0, 0) scale(${RB_MOTION_SMOOTHING_BASE_SCALE})`
+        ? `translate3d(0, 0, 0) scale(${RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1})`
         : 'none';
       overlay.style.transformOrigin = '50% 50%';
       overlay.style.display = 'block';
@@ -960,7 +2292,10 @@
 
   const _hideRollbackVisualFreeze = () => {
     _rbVisualFreezeActive = false;
-    _resetRollbackMotionSmoothing();
+    const keepShadowNudge = RB_REPLAY_MOTION_NUDGE && _rbShadowVisible && _rbShadowOverlay && !RB_SHADOW_PERSISTENT;
+    if (keepShadowNudge) _cancelRollbackMotionSmoothing();
+    else _resetRollbackMotionSmoothing();
+    _shadowHideOverlay();
     const overlay = _rbVisualFreezeOverlay;
     if (!overlay) return;
     if (_rbVisualFreezeHideTimer) clearTimeout(_rbVisualFreezeHideTimer);
@@ -984,6 +2319,8 @@
 
   const _destroyRollbackVisualFreeze = () => {
     _hideRollbackVisualFreeze();
+    _shadowStop('visual-destroy');
+    _resetRollbackCanvasNudge();
     if (_rbVisualFreezeHideTimer) {
       clearTimeout(_rbVisualFreezeHideTimer);
       _rbVisualFreezeHideTimer = 0;
@@ -1617,6 +2954,39 @@
           frame() {
             const mod = getMod();
             return mod?._kn_get_frame?.() ?? null;
+          },
+          splitStateStats() {
+            const mod = getMod();
+            if (!mod?._kn_get_split_state_stats || !mod?._malloc || !mod.HEAPU32) {
+              console.error('knDiag.splitStateStats: split state exports missing — rebuild WASM core.');
+              return null;
+            }
+            const ptr = mod._malloc(8 * 4);
+            if (!ptr) return null;
+            try {
+              const n = mod._kn_get_split_state_stats(ptr, 8);
+              if (n <= 0) return null;
+              const v = new Uint32Array(mod.HEAPU32.buffer, ptr, 8);
+              const out = {
+                backend: v[0] === 1 ? 'split-rdram' : 'retro',
+                saves: v[1],
+                restores: v[2],
+                saveFailures: v[3],
+                restoreFailures: v[4],
+                lastCpuBytes: v[5],
+                rdramBytes: v[6],
+                cpuCapacity: v[7],
+              };
+              console.log('knDiag.splitStateStats:', out);
+              return out;
+            } finally {
+              mod._free?.(ptr);
+            }
+          },
+          shadowStats() {
+            const stats = _shadowStatsSnapshot();
+            console.log('knDiag.shadowStats:', stats);
+            return stats;
           },
           // Helper: are we even running with the rollback core? Useful sanity check.
           ready() {
@@ -5674,6 +7044,16 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      const peerStateBackend = peerCaps.stateBackend || 'retro';
+      if (peerStateBackend !== localCaps.stateBackend) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localStateBackend=${localCaps.stateBackend} ` +
+            `peerStateBackend=${peerStateBackend} — refusing rollback start`,
+        );
+        setStatus('Core version mismatch -- reload both players');
+        _config?.onToast?.('Core version mismatch -- reload both players');
+        return;
+      }
     }
 
     // Negotiate delay: ceiling of all players.
@@ -7125,6 +8505,7 @@
 
     _manualMode = true;
     _syncLog('entered manual mode');
+    _shadowMaybeStart('manual-mode');
   };
 
   const recaptureManualRunner = (mod, reason) => {
@@ -7652,7 +9033,12 @@
     }
     _setReplayFullHeadless(tickMod, false, 'finish');
     _setReplayRdpSkip(tickMod, false, 'finish');
+    // Let the shadow overlay remain alive through its hold window. The
+    // main-rAF pump keeps producing visible worker frames while replay
+    // finishes, and the post-replay resync below is deferred until hide
+    // when the overlay is still covering the live canvas.
     _hideRollbackVisualFreeze();
+    _shadowScheduleResync('post-replay');
     // Replay finished — broadcast the gameplay hash so the peer can
     // verify the rollback restoration produced identical game state.
     // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
@@ -7995,7 +9381,20 @@
         // True-rollback expands visible rollback depth from delay+4 to delay+10
         // (capped at 12 by the C engine), so size the ring buffer to match.
         const rollbackMax = Math.max(12, effectiveDelay + 10);
+        if (detMod._kn_set_state_backend) {
+          const backendId = RB_ROLLBACK_STATE_BACKEND === 'split-rdram' ? 1 : 0;
+          detMod._kn_set_state_backend(backendId);
+          _syncLog(`C-ROLLBACK state backend requested=${RB_ROLLBACK_STATE_BACKEND}`);
+        } else if (RB_ROLLBACK_STATE_BACKEND === 'split-rdram') {
+          _syncLog(
+            'C-ROLLBACK split-rdram requested but _kn_set_state_backend export is missing; using retro_serialize',
+          );
+        }
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        if (detMod._kn_get_state_backend) {
+          const activeBackend = detMod._kn_get_state_backend() === 1 ? 'split-rdram' : 'retro';
+          _syncLog(`C-ROLLBACK state backend active=${activeBackend}`);
+        }
         // Push the input-application mode down to the C engine so the replay
         // path mirrors the JS forward-tick split (local at current frame,
         // remote at applyFrame). Mismatched modes between JS and C produce
@@ -9963,7 +11362,7 @@
         _hudRollbackDepthSamples.push(replayDepth);
         if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
         _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
-        _showRollbackVisualFreeze(replayDepth);
+        if (!_showRollbackVisualFreeze(replayDepth, localInput)) _startRollbackCanvasNudge(localInput, replayDepth);
         _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
         _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
         _rbReplayLogged = true;
@@ -10094,6 +11493,22 @@
         const anyNonZero = inputParts.some((p) => !p.includes('[0,0,0]'));
         if (anyNonZero || _frameNum % 60 === 0) {
           _syncLog(`NORMAL-INPUT f=${applyFrame} ${inputParts.join(' ')}`);
+        }
+      }
+
+      if (RB_SHADOW_EMU) {
+        if (!_rbShadowReady && !_rbShadowBooting && !_rbShadowFailed) _shadowMaybeStart('normal-tick');
+        if (_rbShadowReady) {
+          const shadowInputs = _shadowBuildInputs(tickMod, localInput, applyFrame);
+          if (_rbShadowVisible) {
+            _shadowShowPersistentOverlay();
+          } else if (RB_SHADOW_LEAD_FRAMES > 0) {
+            const targetFrame = _frameNum + RB_SHADOW_LEAD_FRAMES;
+            _shadowPostLead(targetFrame, shadowInputs, 'normal-lead', 2, false);
+          } else {
+            _shadowPostStep(_frameNum, shadowInputs, 'normal', 1);
+            _shadowShowPersistentOverlay();
+          }
         }
       }
 
@@ -12177,6 +13592,7 @@
     _clearLifecycleResyncGuard('sync apply');
     const syncMsg = `sync #${_resyncCount} applied (frame ${frame} -> ${_frameNum}, next in ${_syncCheckInterval}f)`;
     _syncLog(syncMsg);
+    _shadowScheduleResync('sync-apply');
     if (now - _lastResyncToastTime > 5000) {
       _lastResyncToastTime = now;
       _config?.onSyncStatus?.('Desync corrected');
@@ -12778,6 +14194,18 @@
         debugLog: m._kn_get_debug_log ? window.UTF8ToString(m._kn_get_debug_log()) : null,
       };
     },
+    getReplayMotionStats: () => ({
+      overlaySmoothing: _getRollbackMotionStats(),
+      motionNudge: _getRollbackMotionNudgeStats(),
+      enabled: {
+        replayMotionSmoothing: RB_REPLAY_MOTION_SMOOTHING,
+        replayMotionScale: RB_REPLAY_MOTION_SCALE,
+        replayMotionNudge: RB_REPLAY_MOTION_NUDGE,
+        replayMotionNudgePx: RB_REPLAY_MOTION_NUDGE_PX,
+        replayMotionNudgeMs: RB_REPLAY_MOTION_NUDGE_MS,
+      },
+    }),
+    getShadowStats: () => _shadowStatsSnapshot(),
     isCRollback: () => _useCRollback,
     isInGameplay: () => _inGameplay,
     // Raw scene + game_status from RDRAM, for both SSB64 and Smash Remix.

@@ -115,6 +115,7 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count);
  * total state buffer size. Lets JS map region indices back to subsystems. */
 int kn_get_rdram_offset_in_state(void);
 int kn_get_state_buffer_size(void);
+int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count);
 
 /* Full state hash — hashes the saved state for a specific frame from the
  * ring buffer. Pass -1 to hash the most recent saved state. */
