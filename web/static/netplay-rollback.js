@@ -524,6 +524,12 @@
   let _rbCanvasNudgePrevTransform = '';
   let _rbCanvasNudgePrevTransformOrigin = '';
   let _rbCanvasNudgePrevWillChange = '';
+  const _rbReplayMotionDiag = {
+    cogSamples: [],
+    oracle: [],
+    transforms: [],
+    lifecycle: [],
+  };
   let _rbShadowWorker = null;
   let _rbShadowOverlay = null;
   // Sibling 2D canvas used for the framebuffer-blit path (#7). Worker
@@ -891,30 +897,11 @@
       return 3;
     }
   })();
-  // Motion smoothing applies a stick-magnitude-driven translate (up to
-  // RB_MOTION_SMOOTHING_MAX_PX = 3px) to the snapshot-freeze overlay
-  // for the ~30 ms of each rollback. Same fundamental hack as the
-  // motion nudge that iter3 Change 4 disabled: stick magnitude does
-  // not match on-screen character motion (digital N64 inputs, neutral
-  // states, attack frames where character is stationary), so the
-  // overlay translates 2-3 px in the stick direction and snaps back
-  // when the overlay hides — which the user perceives as a wobble
-  // even when they think the character is "standing still". Default
-  // off; the proper smoothness path is the shadow worker showing
-  // real authoritative-state frames. Opt-in flag preserved for A/B.
-  // Motion smoothing — default-on again with tighter parameters AND
-  // a canvas-velocity-driven primary path. The wobble that drove this
-  // off in the prior pass was a side-effect of (a) too-large translate
-  // (3 px), (b) too-loose deadzone (2200, triggered by stick noise),
-  // and (c) using STICK input as the motion proxy when stick magnitude
-  // doesn't reliably match on-screen motion. The new defaults clamp
-  // translate to RB_MOTION_SMOOTHING_MAX_PX = 1.5 px and tighten the
-  // stick deadzone to RB_MOTION_SMOOTHING_DEADZONE = 8000, and the
-  // canvas-velocity sampler (RB_REPLAY_RDRAM_MOTION default-on)
-  // takes priority — so motion only triggers when the actual visible
-  // canvas is moving, fixing the "wobble while standing still" bug
-  // by definition.
-  // Default OFF — measured headless oracle output stayed ≤ 0.07 px in
+  // Motion smoothing stays opt-in. The stick, canvas-velocity, RDRAM
+  // velocity, and worker-COG variants all translate a static snapshot
+  // during the ~30 ms replay window, and each proxy has diverged from
+  // the scene motion players perceive during actual matches.
+  // Default OFF — measured headless oracle output stayed <= 0.07 px in
   // 50 windows over 25 s of in-match testing with random P1 input, vs.
   // ~1-3 px of actual scene-motion-during-replay we'd need to bridge.
   // Three iterations (stick / RDRAM-velocity / worker-COG-oracle) all
@@ -923,7 +910,10 @@
   // motion within the ~30 ms freeze. The cross-fade at hide
   // (RB_VISUAL_FADE_MS) is the better mitigation — it lets the
   // discontinuity read as motion blur rather than a snap. Re-enable for
-  // A/B via ?replayMotionSmoothing=1.
+  // A/B via ?replayMotionSmoothing=1. In this pass, worker-oracle
+  // diagnostics also showed it usually degenerated to generic canvas
+  // COG when ANGRYLION framebuffer samples were black/unavailable, so
+  // it was not a trustworthy motion source.
   const RB_REPLAY_MOTION_SMOOTHING = (() => {
     try {
       const raw = _urlParams.get('replayMotionSmoothing') ?? localStorage.getItem('kn-replay-motion-smoothing');
@@ -942,7 +932,7 @@
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return true;
+    return false;
   })();
   // Show the worker's ANGRYLION-rendered framebuffer directly during
   // rollback. Default OFF because raw ANGRYLION output (320×240, no
@@ -973,7 +963,18 @@
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return true;
+    return false;
+  })();
+  const RB_REPLAY_MOTION_DIAG = (() => {
+    try {
+      const raw =
+        _urlParams.get('replayMotionDiag') ??
+        _urlParams.get('rollbackMotionDiag') ??
+        localStorage.getItem('kn-replay-motion-diag');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
   })();
   const RB_REPLAY_MOTION_SCALE = (() => {
     try {
@@ -1029,7 +1030,7 @@
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return RB_SHADOW_FRAME_BLIT || RB_SHADOW_MOTION_ORACLE;
   })();
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
@@ -1183,6 +1184,18 @@
     return window._knReplayMotionSmoothingStats;
   };
 
+  const _pushReplayMotionDiag = (bucket, entry) => {
+    if (!RB_REPLAY_MOTION_DIAG) return;
+    const list = _rbReplayMotionDiag[bucket];
+    if (!Array.isArray(list)) return;
+    list.push({
+      t: Number((performance.now?.() || 0).toFixed(2)),
+      f: _frameNum | 0,
+      ...entry,
+    });
+    while (list.length > 900) list.shift();
+  };
+
   const _getRollbackMotionNudgeStats = () => {
     if (!window._knReplayMotionNudgeStats) {
       window._knReplayMotionNudgeStats = {
@@ -1200,6 +1213,14 @@
   const _resetRollbackMotionSmoothing = () => {
     _cancelRollbackMotionSmoothing();
     _rbMotionSmoothingSerial++;
+    _pushReplayMotionDiag('lifecycle', {
+      event: 'reset',
+      prevDx: Number(_rbMotionSmoothingDx.toFixed(3)),
+      prevDy: Number(_rbMotionSmoothingDy.toFixed(3)),
+      serial: _rbMotionSmoothingSerial,
+      freezeActive: !!_rbVisualFreezeActive,
+      shadowVisible: !!_rbShadowVisible,
+    });
     _rbMotionSmoothingDx = 0;
     _rbMotionSmoothingDy = 0;
     const overlays = [_rbVisualFreezeOverlay, _rbShadowOverlay];
@@ -1317,13 +1338,29 @@
     // because it includes character + background + UI, all weighted
     // by brightness. Half it so the snapshot moves visibly but not
     // disorientingly.
-    const dx = (last.cogX - baseline.cogX) * scaleX * 0.5;
-    const dy = (last.cogY - baseline.cogY) * scaleY * 0.5;
+    const rawDx = (last.cogX - baseline.cogX) * scaleX * 0.5;
+    const rawDy = (last.cogY - baseline.cogY) * scaleY * 0.5;
     const cap = RB_MOTION_SMOOTHING_MAX_PX;
     const clamp = (v) => Math.max(-cap, Math.min(cap, v));
+    const dx = clamp(rawDx);
+    const dy = clamp(rawDy);
+    _pushReplayMotionDiag('oracle', {
+      source: 'worker-oracle',
+      baselineFrame: baseline.frame | 0,
+      sampleFrame: last.frame | 0,
+      baselineCogX: Number(baseline.cogX.toFixed(3)),
+      baselineCogY: Number(baseline.cogY.toFixed(3)),
+      cogX: Number(last.cogX.toFixed(3)),
+      cogY: Number(last.cogY.toFixed(3)),
+      rawDx: Number(rawDx.toFixed(3)),
+      rawDy: Number(rawDy.toFixed(3)),
+      dx: Number(dx.toFixed(3)),
+      dy: Number(dy.toFixed(3)),
+    });
     return {
-      dx: clamp(dx),
-      dy: clamp(dy),
+      source: 'worker-oracle',
+      dx,
+      dy,
       scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
     };
   };
@@ -1348,6 +1385,7 @@
     const cap = RB_MOTION_SMOOTHING_MAX_PX;
     const clamp = (v) => Math.max(-cap, Math.min(cap, v));
     return {
+      source: 'canvas-cog',
       dx: clamp(dx),
       dy: clamp(dy),
       scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
@@ -1371,6 +1409,7 @@
     const hasDirection = mag >= RB_MOTION_SMOOTHING_DEADZONE;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
     return {
+      source: 'stick',
       dx: hasDirection
         ? clamp((ax / maxAxis) * RB_MOTION_SMOOTHING_MAX_PX, -RB_MOTION_SMOOTHING_MAX_PX, RB_MOTION_SMOOTHING_MAX_PX)
         : 0,
@@ -1388,6 +1427,15 @@
     const dy = Math.abs(_rbMotionSmoothingDy) < 0.05 ? 0 : _rbMotionSmoothingDy;
     overlay.style.transformOrigin = '50% 50%';
     overlay.style.transform = `translate3d(${dx.toFixed(2)}px, ${dy.toFixed(2)}px, 0) scale(${motion.scale.toFixed(3)})`;
+    _pushReplayMotionDiag('transforms', {
+      source: motion.source || 'unknown',
+      targetDx: Number((motion.dx || 0).toFixed(3)),
+      targetDy: Number((motion.dy || 0).toFixed(3)),
+      dx: Number(dx.toFixed(3)),
+      dy: Number(dy.toFixed(3)),
+      overlay: overlay?.id || '',
+      serial: overlay?.dataset?.serial || '',
+    });
     const stats = _getRollbackMotionStats();
     stats.frames++;
     stats.lastDx = Number(dx.toFixed(2));
@@ -2121,6 +2169,13 @@
             const hist = _knWorkerCog.history;
             hist.push({ frame: msg.frame, cogX, cogY, t: performance.now() });
             if (hist.length > 60) hist.shift();
+            _pushReplayMotionDiag('cogSamples', {
+              frame: msg.frame | 0,
+              cogX: Number(cogX.toFixed(3)),
+              cogY: Number(cogY.toFixed(3)),
+              width: msg.width | 0,
+              height: msg.height | 0,
+            });
           }
         }
         const overlay = _shadowEnsureOverlay();
@@ -2407,6 +2462,14 @@
     _rbShadowVisibleCommits = 0;
     if (RB_REPLAY_MOTION_NUDGE) _startRollbackMotionSmoothing(overlay, serial, { force: true });
     stats.shows++;
+    _pushReplayMotionDiag('lifecycle', {
+      event: 'shadow-show',
+      depth: depth | 0,
+      serial,
+      reason,
+      paintFrame: _rbShadowLastPaintFrame | 0,
+      cogBaselineFrame: _knWorkerCog.baseline?.frame ?? -1,
+    });
     if (RB_SHADOW_PUMP) {
       const pumpFrames = Math.max(2, depth + 2);
       _shadowStartPump(_frameNum + pumpFrames, 'replay-show');
@@ -2665,7 +2728,12 @@
     const source = _findRollbackVisualCanvas();
     const rect = source?.getBoundingClientRect?.();
     if (!source || !rect || rect.width <= 1 || rect.height <= 1) return false;
-    if (_shadowShowOverlay(depth, source, rect)) return true;
+    // Only reveal the shadow canvas when the explicit direct-blit A/B path
+    // is enabled. In the motion-oracle mode the worker is data-only; showing
+    // its OffscreenCanvas here can expose black/transitional ANGRYLION frames
+    // and creates the same perceptual twitch/flicker the oracle was meant to
+    // avoid.
+    if (RB_SHADOW_FRAME_BLIT && _shadowShowOverlay(depth, source, rect)) return true;
     const snapshotAge = _rbVisualSnapshotFrame >= 0 ? Math.abs(_frameNum - _rbVisualSnapshotFrame) : Infinity;
     if (!_rbVisualSnapshotCanvas || snapshotAge > RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES) {
       if (!_captureRollbackVisualSnapshot()) return false;
@@ -2733,6 +2801,14 @@
         const last = hist[hist.length - 1];
         _knWorkerCog.baseline = last ? { cogX: last.cogX, cogY: last.cogY, frame: last.frame } : null;
       }
+      _pushReplayMotionDiag('lifecycle', {
+        event: 'freeze-show',
+        depth: depth | 0,
+        serial,
+        snapshotFrame: _rbVisualSnapshotFrame | 0,
+        cogBaselineFrame: _knWorkerCog.baseline?.frame ?? -1,
+        snapshotAge: _rbVisualSnapshotFrame >= 0 ? Math.abs(_frameNum - _rbVisualSnapshotFrame) : -1,
+      });
       _startRollbackMotionSmoothing(overlay, serial);
       // Micro-zoom: animate scale during the freeze window so the
       // overlay looks like it's gently moving instead of frozen.
@@ -2815,6 +2891,13 @@
 
   const _hideRollbackVisualFreeze = () => {
     _rbVisualFreezeActive = false;
+    _pushReplayMotionDiag('lifecycle', {
+      event: 'freeze-hide',
+      prevDx: Number(_rbMotionSmoothingDx.toFixed(3)),
+      prevDy: Number(_rbMotionSmoothingDy.toFixed(3)),
+      shadowVisible: !!_rbShadowVisible,
+      baselineFrame: _knWorkerCog.baseline?.frame ?? -1,
+    });
     // Clear the worker-COG baseline so the next rollback measures
     // delta from a fresh baseline, not from the previous freeze's
     // start. Otherwise consecutive rollbacks compose translates
@@ -14740,7 +14823,16 @@
         replayMotionNudge: RB_REPLAY_MOTION_NUDGE,
         replayMotionNudgePx: RB_REPLAY_MOTION_NUDGE_PX,
         replayMotionNudgeMs: RB_REPLAY_MOTION_NUDGE_MS,
+        replayMotionDiag: RB_REPLAY_MOTION_DIAG,
       },
+      diag: RB_REPLAY_MOTION_DIAG
+        ? {
+            cogSamples: _rbReplayMotionDiag.cogSamples.slice(),
+            oracle: _rbReplayMotionDiag.oracle.slice(),
+            transforms: _rbReplayMotionDiag.transforms.slice(),
+            lifecycle: _rbReplayMotionDiag.lifecycle.slice(),
+          }
+        : null,
     }),
     getShadowStats: () => _shadowStatsSnapshot(),
     isCRollback: () => _useCRollback,

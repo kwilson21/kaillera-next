@@ -113,12 +113,39 @@
   // user's first sensation of input is on match start.
   const _urlParams = new URLSearchParams(window.location.search || '');
   const _recordParam = _urlParams.get('record');
+  const _randomP1InMatch =
+    _urlParams.get('randomP1') === '1' || _urlParams.get('demoRandomP1') === '1' || _urlParams.get('p1Random') === '1';
   let _recordMode = _recordParam === '1' ? 'p1' : _recordParam === 'p2' ? 'p2' : false;
   const _recordedInputs = [];
   let _recordingActive = false;
   let _recordingDone = false;
   let _autopilotActive = false;
   let _wrappedReadLocalInput = false;
+  let _heldRandomP1Input = null;
+  let _heldRandomP1UntilFrame = -1;
+  const RANDOM_P1_BUTTON_BITS = [0, 1, 4, 5, 6, 7, 11, 12];
+  const _randomP1Axis = () => {
+    const max = window.KNShared?.N64_MAX ?? 83;
+    const mag = Math.max(18, Math.round((0.35 + Math.random() * 0.65) * max));
+    return Math.random() < 0.5 ? -mag : mag;
+  };
+  const _randomP1Input = () => {
+    if (Math.random() < 0.65) {
+      const bit = RANDOM_P1_BUTTON_BITS[Math.floor(Math.random() * RANDOM_P1_BUTTON_BITS.length)];
+      return { buttons: 1 << bit, lx: 0, ly: 0, cx: 0, cy: 0 };
+    }
+    if (Math.random() < 0.5) {
+      return { buttons: 0, lx: _randomP1Axis(), ly: _randomP1Axis(), cx: 0, cy: 0 };
+    }
+    return { buttons: 0, lx: 0, ly: 0, cx: _randomP1Axis(), cy: _randomP1Axis() };
+  };
+  const _randomP1InputForFrame = (frame) => {
+    if (frame > _heldRandomP1UntilFrame || !_heldRandomP1Input) {
+      _heldRandomP1Input = _randomP1Input();
+      _heldRandomP1UntilFrame = frame + 3 + Math.floor(Math.random() * 12);
+    }
+    return _heldRandomP1Input;
+  };
   // P2 menu autopilot — sparse list of input transitions for the synthetic
   // opponent so it picks a CSS character without us scripting per-frame
   // inputs. Format: [frame, buttons, lx, ly, cx, cy] sorted by frame. Replay
@@ -451,6 +478,10 @@
         const scripted = _p1InputAtFrame(currentFrame);
         if (scripted) return scripted;
         return _zeroLocalInput();
+      }
+      if (_randomP1InMatch && window.NetplayRollback?.isInMatch?.()) {
+        const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
+        return _randomP1InputForFrame(currentFrame);
       }
       return realInput;
     };
