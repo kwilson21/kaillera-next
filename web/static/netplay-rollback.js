@@ -804,14 +804,22 @@
     } catch (_) {}
     return false;
   })();
+  // Default 24 ms cross-fade on hide — softens the position discontinuity
+  // between the static snapshot (frozen at rollback-start position) and
+  // the live canvas (now at post-replay position). Without the fade, the
+  // snapshot snap-cuts to display:none and the live canvas appears at its
+  // actual post-replay position, exposing the full scene-motion delta as
+  // a visible jump (~1-3 px at typical 60 px/s gameplay × 23 ms median
+  // replay). 24 ms is below the median 80 ms inter-rollback interval so
+  // adjacent rollbacks don't overlap; opt-out via ?replayVisualFadeMs=0.
   const RB_VISUAL_FADE_MS = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeMs') ?? localStorage.getItem('kn-replay-visual-fade-ms');
-      const parsed = raw === null ? 0 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 0;
+      const parsed = raw === null ? 24 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 24;
       return Math.max(0, Math.min(160, parsed));
     } catch (_) {
-      return 0;
+      return 24;
     }
   })();
   const _rbVisualFreezeEnabled = (() => {
@@ -853,7 +861,10 @@
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return true;
+    // Default OFF when motion smoothing is off — the cross-fade at hide
+    // does the perceptual work, and a scale animation on a static
+    // snapshot is itself "fake motion" the user explicitly rejected.
+    return false;
   })();
   const RB_REPLAY_MICRO_ZOOM_PCT = (() => {
     try {
@@ -903,13 +914,23 @@
   // takes priority — so motion only triggers when the actual visible
   // canvas is moving, fixing the "wobble while standing still" bug
   // by definition.
+  // Default OFF — measured headless oracle output stayed ≤ 0.07 px in
+  // 50 windows over 25 s of in-match testing with random P1 input, vs.
+  // ~1-3 px of actual scene-motion-during-replay we'd need to bridge.
+  // Three iterations (stick / RDRAM-velocity / worker-COG-oracle) all
+  // produced their own perceptual artifacts (wobble / flicker / twitch)
+  // because no motion source on a static snapshot can match real scene
+  // motion within the ~30 ms freeze. The cross-fade at hide
+  // (RB_VISUAL_FADE_MS) is the better mitigation — it lets the
+  // discontinuity read as motion blur rather than a snap. Re-enable for
+  // A/B via ?replayMotionSmoothing=1.
   const RB_REPLAY_MOTION_SMOOTHING = (() => {
     try {
       const raw = _urlParams.get('replayMotionSmoothing') ?? localStorage.getItem('kn-replay-motion-smoothing');
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return true;
+    return false;
   })();
   // Canvas-velocity-driven motion. When on, the motion path samples
   // the live canvas each frame, computes a center-of-brightness
