@@ -14801,6 +14801,18 @@
       return _externalTickPaused;
     },
     isTickPaused: () => _externalTickPaused,
+    // Force the keymap to be re-read from localStorage / EJS controls /
+    // DEFAULT_N64_KEYMAP. Call after ControllerSettings saves a new
+    // mapping (or clears it) — the engine caches _p1KeyMap after the
+    // first setupKeyTracking call at emulator-ready, so without this
+    // refresh in-place remap edits don't reach readLocalInput.
+    refreshKeyMap: () => {
+      _p1KeyMap = null;
+      try {
+        setupKeyTracking();
+      } catch (_) {}
+      return !!_p1KeyMap;
+    },
     setDemoMode: (on) => {
       const next = !!on;
       const changed = _demoMode !== next;
