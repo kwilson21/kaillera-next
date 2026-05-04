@@ -880,6 +880,23 @@
     }
   };
 
+  // Kaillera-style frame-delay tier. Match the labels real netplay clients
+  // (Kaillera, Fightcade, Slippi) put on their netcode quality readouts.
+  // Boundaries chosen so 60 Hz fighters cluster like this:
+  //   1-2 frames = LAN / same-city, you can't feel it
+  //   3 frames   = good regional internet, feels fine
+  //   4 frames   = playable but you can feel it
+  //   5+ frames  = tournament-illegal territory in classic netcode
+  const _connectionTier = (delayFrames) => {
+    if (delayFrames <= 0) return { label: 'No connection', tone: 'idle' };
+    if (delayFrames <= 2) return { label: 'Excellent', tone: 'great' };
+    if (delayFrames === 3) return { label: 'Good', tone: 'great' };
+    if (delayFrames === 4) return { label: 'Fair', tone: 'okay' };
+    if (delayFrames === 5) return { label: 'Poor', tone: 'bad' };
+    if (delayFrames === 6) return { label: 'Bad', tone: 'bad' };
+    return { label: 'Terrible', tone: 'bad' };
+  };
+
   const _inputFeel = (isCRollback, delayFrames) => {
     const rtt = _readRtt();
     const delay = Number.isFinite(delayFrames) ? Math.max(0, delayFrames | 0) : 0;
@@ -904,7 +921,7 @@
     if (_rollbackEnabled) {
       return {
         text: 'INSTANT',
-        sub: `Rollback predicts through ${delay} frames of delay (${delayMs.toFixed(0)} ms) — local input applies at the current frame.`,
+        sub: `Rollback hides the network. Without it, every press would feel ${delayMs.toFixed(0)} ms late.`,
         state: 'instant',
         delayFrames: delay,
         delayMs: 0,
@@ -912,7 +929,7 @@
     }
     return {
       text: `${delayMs.toFixed(0)} ms LATE`,
-      sub: `Lockstep waits ${delay} frames before applying any input — what every keypress is delayed by.`,
+      sub: `Without rollback, every press waits ${delay} frame${delay === 1 ? '' : 's'} for the peer to acknowledge.`,
       state: 'late',
       delayFrames: delay,
       delayMs,
@@ -933,40 +950,43 @@
     const subEl = $('hud-feel-sub');
     if (subEl) subEl.textContent = feel.sub;
 
-    // Frame-delay readout — the headline metric for rollback vs lockstep.
-    // Shows the engine-locked DELAY_FRAMES and the input lag each mode
-    // produces from it. Rollback mode says "0 ms (instant)" because true
-    // rollback applies local input at the current frame; lockstep mode
-    // shows the full delay × 16.67 ms input lag the user actually feels.
+    // Connection-quality readout — Kaillera-style tier (Excellent / Good /
+    // Fair / Poor / Bad) based on the engine-locked frame delay. Same
+    // delay number for both modes; what differs is whether rollback hides
+    // it. Match the format real netplay clients show so the user has a
+    // mental model that translates: "Frame delay: 3 (Good)" means the same
+    // here as it would in Fightcade or Kaillera.
     const delayEl = $('hud-frame-delay');
     if (delayEl) {
-      const lockstepMs = delay * 16.67;
-      const rollbackText = `<strong>${delay}f</strong> network buffer · <strong>0 ms</strong> input lag (predicted)`;
-      const lockstepText = `<strong>${delay}f</strong> network buffer · <strong>${lockstepMs.toFixed(0)} ms</strong> input lag`;
-      delayEl.innerHTML = _rollbackEnabled ? rollbackText : lockstepText;
-      delayEl.classList.toggle('is-instant', _rollbackEnabled);
-      delayEl.classList.toggle('is-late', !_rollbackEnabled && delay > 0);
+      const tier = _connectionTier(delay);
+      delayEl.innerHTML = `Connection: <strong>${tier.label}</strong> &middot; Frame delay: <strong>${delay}</strong>`;
+      delayEl.classList.toggle('is-great', tier.tone === 'great');
+      delayEl.classList.toggle('is-okay', tier.tone === 'okay');
+      delayEl.classList.toggle('is-bad', tier.tone === 'bad');
     }
 
     const details = $('hud-details');
     if (!details) return;
-    const mode = _rollbackEnabled ? 'ROLLBACK' : 'LOCKSTEP';
+    const mode = _rollbackEnabled ? 'Rollback' : 'Lockstep';
     const frame = counters?.currentFrame ?? 0;
     // C engine engagement state. For Smash Remix this is FALSE in the menu
-    // and only flips TRUE after the user starts a match. Without this, the
-    // user can crank lag and see no rollback events because the C engine
-    // isn't predicting yet.
-    const cEngine = counters?.isCRollback ? 'ACTIVE' : 'WAITING (start a match)';
-    const correctPreds = counters?.correctPredictions ?? 0;
-    // Show raw scene/status from RDRAM so we can verify the in-match detector
-    // is reading the right values for the current ROM.
-    const ss = window.NetplayRollback?.getSceneStatus?.() || { scene: -1, status: -1, remix: false };
-    const gameTag = ss.remix ? 'remix' : 'ssb64';
+    // and only flips TRUE after the user starts a match.
+    const cEngine = counters?.isCRollback ? 'Active' : 'Waiting (start a match)';
+    // Rollback activity — what the user actually wants to see. Total
+    // count + recent rate (smoothed by the engine's 5 s window). Drops
+    // the prediction-vs-correct ratio + scene/status diagnostic noise
+    // from the prior version.
+    const rollbacks = counters?.rollbackEventsTotal ?? 0;
+    const rollbacksPerSec = counters?.rollbackEventsPerSec ?? 0;
+    const rollbackText =
+      rollbacksPerSec > 0
+        ? `${rollbacks} (${rollbacksPerSec.toFixed(1)}/s)`
+        : rollbacks > 0
+          ? `${rollbacks} (idle)`
+          : 'none yet';
     details.textContent =
-      `Engine: ${cEngine} · Mode: ${mode} · RTT: ${rtt.toFixed(0)} ms · Frame: ${frame} · ` +
-      `Predictions: ${totalPreds} (${_formatNumber(_smoothedPredsPerSec, 0)}/s · ` +
-      `${correctPreds}/${totalPreds || 1} correct) · ` +
-      `${gameTag} scene=${ss.scene} status=${ss.status}`;
+      `Engine: ${cEngine} · Mode: ${mode} · RTT: ${rtt.toFixed(0)} ms · ` +
+      `Frame: ${frame} · Rollbacks: ${rollbackText}`;
   };
 
   const _updateHud = () => {

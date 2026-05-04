@@ -443,12 +443,17 @@
           background 200ms;
       }
 
-      .frame-delay.is-instant {
+      .frame-delay.is-great {
         color: var(--success);
         background: rgba(125, 220, 138, 0.08);
       }
 
-      .frame-delay.is-late {
+      .frame-delay.is-okay {
+        color: #f4b84a;
+        background: rgba(244, 184, 74, 0.08);
+      }
+
+      .frame-delay.is-bad {
         color: var(--danger);
         background: rgba(255, 102, 102, 0.08);
       }
@@ -614,7 +619,7 @@
             <div id="hud-feel" class="input-feel">CRANK THE LAG →</div>
             <div id="hud-feel-sub" class="input-feel-sub">No lag — both modes feel the same.</div>
             <div id="hud-frame-delay" class="frame-delay">
-              <strong>0f</strong> network buffer · <strong>0 ms</strong> input lag
+              Connection: <strong>—</strong> &middot; Frame delay: <strong>0</strong>
             </div>
             <div id="hud-details" class="hud-details">
               Mode: ROLLBACK · RTT: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
