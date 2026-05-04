@@ -358,7 +358,15 @@
   //   bursts on misprediction get visibly painful.
   const ROLLBACK_MIN_DELAY_FRAMES = 1;
   const LOCKSTEP_MAX_DELAY_FRAMES = 9;
-  const ROLLBACK_MAX_DELAY_FRAMES = 12;
+  // Bumped from 12 to 16 to cover RTT envelopes up to ~480 ms (which the
+  // demo's slider can reach). At delay=12 a 370 ms RTT match misses peer
+  // inputs by 1-2 frames per input change → rollbacks fire constantly →
+  // visible pauses. The C engine accepts up to 16 (kn_set_delay_frames
+  // clamps there), and the ring is pre-allocated below at delay+10
+  // headroom so apply_frame = current - 16 still resolves to a valid
+  // history slot. Memory cost: ~8.5MB per slot × (16+10+1)=27 slots ≈
+  // 230MB total, vs ~190MB at the old 12+10 sizing.
+  const ROLLBACK_MAX_DELAY_FRAMES = 16;
   const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);
   const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES) => {
     const parsed = parseInt(value, 10);
@@ -10189,15 +10197,13 @@
         const initFrame = initFrameOverride != null ? initFrameOverride : _frameNum;
         // Always 4 (KN_MAX_PLAYERS) — avoids contiguous slot assumption.
         const numPlayers = 4;
-        // Ring buffer size = rollbackMax + 1 slots × ~16MB each.
-        // Balance between memory pressure and pacing headroom.
-        // Too small (delay+2=4) causes safety-freeze to strangle FPS.
-        // Too large (20) wastes 320MB on mobile.
-        // 8 gives enough pacing headroom (safety freeze at fAdv>=6)
-        // while keeping ring buffer at 9 slots × 16MB = 144MB.
-        // True-rollback expands visible rollback depth from delay+4 to delay+10
-        // (capped at 12 by the C engine), so size the ring buffer to match.
-        const rollbackMax = Math.max(12, effectiveDelay + 10);
+        // Ring buffer size = rollbackMax + 1 slots × ~8.5MB each (split-rdram).
+        // Pre-size for the worst-case ROLLBACK_MAX_DELAY_FRAMES=16 so
+        // kn_set_delay_frames can bump delay live without overflowing the
+        // ring's apply_frame=current-delay history. Floor at 12 covers the
+        // legacy default. Memory: 26 slots × ~8.5MB ≈ 220MB (vs ~190MB at
+        // the old 12+10 cap).
+        const rollbackMax = Math.max(12, ROLLBACK_MAX_DELAY_FRAMES + 10, effectiveDelay + 10);
         if (detMod._kn_set_state_backend) {
           const backendId = RB_ROLLBACK_STATE_BACKEND === 'split-rdram' ? 1 : 0;
           detMod._kn_set_state_backend(backendId);
