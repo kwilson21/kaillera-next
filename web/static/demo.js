@@ -90,6 +90,97 @@
 
   _installEjsGlobals();
 
+  // ROM cache — IDB so Reset can re-init the engine without making the
+  // user re-drop the ROM. Stop clears it so the next visit hits the
+  // drop-ROM screen normally. Bytes-only persistence; no metadata
+  // beyond filename so we can rebuild the File object on auto-restore.
+  const _ROM_DB_NAME = 'kn-demo-rom';
+  const _ROM_DB_STORE = 'rom';
+  const _ROM_DB_KEY = 'current';
+  const _idbRomSave = (bytes, name) =>
+    new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(_ROM_DB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
+            tx.objectStore(_ROM_DB_STORE).put({ bytes, name }, _ROM_DB_KEY);
+            tx.oncomplete = () => {
+              db.close();
+              resolve();
+            };
+            tx.onerror = () => {
+              db.close();
+              resolve();
+            };
+          } catch (_) {
+            db.close();
+            resolve();
+          }
+        };
+        req.onerror = () => resolve();
+      } catch (_) {
+        resolve();
+      }
+    });
+  const _idbRomLoad = () =>
+    new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(_ROM_DB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const tx = db.transaction(_ROM_DB_STORE, 'readonly');
+            const get = tx.objectStore(_ROM_DB_STORE).get(_ROM_DB_KEY);
+            get.onsuccess = () => {
+              db.close();
+              resolve(get.result || null);
+            };
+            get.onerror = () => {
+              db.close();
+              resolve(null);
+            };
+          } catch (_) {
+            db.close();
+            resolve(null);
+          }
+        };
+        req.onerror = () => resolve(null);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  const _idbRomClear = () =>
+    new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(_ROM_DB_NAME, 1);
+        req.onsuccess = () => {
+          const db = req.result;
+          try {
+            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
+            tx.objectStore(_ROM_DB_STORE).delete(_ROM_DB_KEY);
+            tx.oncomplete = () => {
+              db.close();
+              resolve();
+            };
+            tx.onerror = () => {
+              db.close();
+              resolve();
+            };
+          } catch (_) {
+            db.close();
+            resolve();
+          }
+        };
+        req.onerror = () => resolve();
+      } catch (_) {
+        resolve();
+      }
+    });
+
   let _romBlobUrl = null;
   let _romHash = null;
   let _engineStarted = false;
@@ -653,10 +744,11 @@
   };
 
   // Hard reset: reloads the page so the demo restarts from the autopilot
-  // boot path. Cleaner than trying to rewind engine state mid-session
-  // (state ring, Emscripten thread, audio worklet all need fresh init
-  // anyway — see _stopEmu's comments). Persists user's RTT preference
-  // first so a refresh doesn't lose their slider tuning.
+  // boot path. Cleaner than rewinding engine state mid-session (state
+  // ring, Emscripten thread, audio worklet all need fresh init anyway).
+  // The ROM stays cached in IDB so the boot path auto-restores it
+  // without re-prompting the user for a file drop. Persists RTT
+  // preference too so a reset doesn't lose slider tuning.
   const _resetDemo = () => {
     try {
       if (_savedRttPreference != null) {
@@ -724,7 +816,10 @@
     try {
       window.EJS_emulator?.gameManager?.Module?.SDL2?.audioContext?.close();
     } catch (_) {}
-    location.reload();
+    // Stop is the user's "fully quit and forget the ROM" path — clear
+    // the IDB cache so the next visit hits the drop-ROM screen rather
+    // than auto-restoring. Reset preserves the cache (its whole point).
+    _idbRomClear().finally(() => location.reload());
   };
 
   // User's preferred RTT value (round-trip ms), if they manually moved
@@ -924,6 +1019,10 @@
       $('rom-drop')?.classList.add('hidden');
       _showLoading(false);
       _setStatus('ROM loaded');
+      // Cache the bytes so Reset (and any future page reload) can
+      // restore the ROM without prompting the user to drop it again.
+      // Best-effort; failure to cache doesn't block the load.
+      _idbRomSave(new Uint8Array(bytes), file.name).catch(() => {});
       _startEngine();
     } catch (err) {
       _showLoading(false);
@@ -1281,7 +1380,22 @@
     _nativeRAF(_updateHud);
   };
 
-  document.addEventListener('DOMContentLoaded', _bindDom);
+  document.addEventListener('DOMContentLoaded', () => {
+    _bindDom();
+    // Auto-restore a cached ROM if one exists. Lets Reset (location.reload)
+    // come back into a running engine instead of dumping the user back at
+    // the drop-ROM screen. Stop explicitly clears the cache so it still
+    // works as a hard quit.
+    _idbRomLoad()
+      .then((cached) => {
+        if (!cached?.bytes || !cached?.name) return;
+        const blob = new Blob([cached.bytes], { type: 'application/octet-stream' });
+        const file = new File([blob], cached.name, { type: 'application/octet-stream' });
+        _setStatus(`Restoring ${cached.name}…`);
+        return _loadRomFile(file);
+      })
+      .catch(() => {});
+  });
 
   // Show a clear visual indicator of whether the user's inputs are being
   // ignored (autopilot is driving the menus) or whether they're in control.

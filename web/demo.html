@@ -88,7 +88,9 @@
         display: grid;
         grid-template-columns: minmax(0, 1fr) 340px;
         gap: 16px;
-        align-items: start;
+        /* Default `align-items: stretch` so the stage fills the grid row
+         * to match the sidebar's height. Was `start` which left empty
+         * space below the stage when the sidebar was taller. */
       }
 
       .stage {
@@ -97,7 +99,13 @@
         border-radius: 12px;
         background: #050607;
         overflow: hidden;
-        aspect-ratio: 4 / 3;
+        /* Stretch to match the sidebar's height instead of forcing a fixed
+         * 4:3 aspect ratio. The canvas inside uses object-fit: contain so
+         * it preserves the game's native ratio at whatever height the row
+         * settles on; without this, the stage was always 4:3 and the row
+         * picked up the sidebar's full height, leaving a tall empty band
+         * between the bottom of the stage and the explainer text below. */
+        min-height: 480px;
         max-height: calc(100vh - 200px);
       }
 
