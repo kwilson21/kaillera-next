@@ -348,13 +348,23 @@
   // but ROLLBACK_MIN_DELAY_FRAMES=1 is fine there too because the delay
   // negotiation falls through to the auto-formula's natural floor (~RTT/2 + jitter
   // for legacy, just jitter for true-rollback).
+  //
+  // Two ceilings, picked at clamp time by the active mode:
+  // - Lockstep (predictions paused): DELAY_FRAMES IS input lag the player feels.
+  //   Cap at 9 frames, matching Kaillera's de-facto SSB64 max-playable ceiling.
+  // - True rollback (predictions live): DELAY_FRAMES is the prediction-window
+  //   depth — no input-lag cost. Cap at 12, the engine's natural ceiling
+  //   (ring is delay+10, safety freeze fires at delay+8). Past 12 the replay
+  //   bursts on misprediction get visibly painful.
   const ROLLBACK_MIN_DELAY_FRAMES = 1;
-  const ROLLBACK_MAX_DELAY_FRAMES = 7;
+  const LOCKSTEP_MAX_DELAY_FRAMES = 9;
+  const ROLLBACK_MAX_DELAY_FRAMES = 12;
+  const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);
   const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES) => {
     const parsed = parseInt(value, 10);
     if (!Number.isFinite(parsed)) return fallback;
     if (parsed <= 0) return fallback;
-    return Math.min(ROLLBACK_MAX_DELAY_FRAMES, Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
+    return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
   };
 
   let _onExtraDataChannel = null;
@@ -7803,10 +7813,7 @@
       const effectiveMs = RB_TRUE_ROLLBACK
         ? jitterMargin + 16.67 // 1-frame safety on top of measured jitter
         : filteredMedian / 2 + jitterMargin + 16.67;
-      ownDelay = Math.min(
-        ROLLBACK_MAX_DELAY_FRAMES,
-        Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)),
-      );
+      ownDelay = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
       _syncLog(
         `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +
           `IQR=[${q1.toFixed(1)},${q3.toFixed(1)}] samples=${sorted.length} ` +
@@ -7834,10 +7841,7 @@
           const fMax = pFiltered[pFiltered.length - 1] || pSorted[pSorted.length - 1];
           const pJitter = Math.max(fMax - fMedian, 0);
           const peerMs = fMedian / 2 + pJitter + 16.67;
-          const peerDelay = Math.min(
-            ROLLBACK_MAX_DELAY_FRAMES,
-            Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(peerMs / 16.67)),
-          );
+          const peerDelay = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(peerMs / 16.67)));
           if (peerDelay > maxDelay) maxDelay = peerDelay;
         }
       }
@@ -14777,6 +14781,20 @@
       const next = !!on;
       if (_predictionsPaused !== next) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
+      // Mode flip changes the delay ceiling — lockstep caps at 9 (Kaillera-style
+      // input-lag ceiling), rollback caps at 12 (engine ring/replay ceiling).
+      // If the previously negotiated DELAY_FRAMES exceeds the new ceiling
+      // (typical when user toggles rollback→lockstep at high RTT), clamp it
+      // down so the player doesn't sit on >9 frames of felt input lag.
+      // We only clamp DOWN — toggling lockstep→rollback leaves the value alone
+      // (it's already within both ceilings).
+      const ceiling = _delayCeiling();
+      if (DELAY_FRAMES > ceiling) {
+        const prev = DELAY_FRAMES;
+        DELAY_FRAMES = ceiling;
+        _syncLog(`delay clamped on mode flip: ${prev} -> ${DELAY_FRAMES} (ceiling=${ceiling})`);
+        if (window.showEffectiveDelay) window.showEffectiveDelay(DELAY_FRAMES, DELAY_FRAMES);
+      }
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
