@@ -14869,12 +14869,17 @@
       const next = !!on;
       if (_predictionsPaused !== next) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
-      // Mode flip changes the delay ceiling (lockstep 9 vs rollback 12) AND
-      // changes whether RTT/2 should fold into the formula. Re-run the RTT
-      // negotiation against current samples so the delay reflects the new
-      // mode — at low RTT this drops the delay back down out of the ceiling
-      // pin; at high RTT it picks the right value for the active mode.
-      _recomputeDelay();
+      // Mode flip used to call _recomputeDelay() so lockstep would settle
+      // at a higher number than rollback. Removed: the C engine's
+      // delay_frames is baked at kn_rollback_init time, so JS-side delay
+      // changes don't reach C. They DO shift the JS-level lockstep stall's
+      // applyFrame check though, which in auto-compare's 6s flip cadence
+      // produced cyclical pauses while the engine waited for remote
+      // inputs at the new deeper apply frame.
+      // The mode-difference UX comes from demo.js _maybeLockstepDelay
+      // buffering local input by DELAY_FRAMES in lockstep mode (rollback
+      // pass-through). Same DELAY_FRAMES in both modes still gives the
+      // right contrast — instant input vs DELAY_FRAMES of input lag.
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
