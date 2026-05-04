@@ -122,8 +122,12 @@
   const _matchInputForFrame = (frame) => {
     if (frame > _heldUntilFrame || !_heldRandomInput) {
       _heldRandomInput = _randomInput();
-      // Hold 3-15 frames (~50-250 ms) — roughly human reaction-cadence.
-      _heldUntilFrame = frame + 3 + Math.floor(Math.random() * 12);
+      // Hold 30-90 frames (~500ms-1.5s) — closer to real human button-hold
+      // cadence (run, charge, neutral). Old 3-15 churned every ~150ms which
+      // made prediction miss on practically every press edge — at 200ms RTT
+      // each miss cost a 12-frame replay (one game frame per JS tick) read
+      // as a visible 200ms pause every ~0.5s.
+      _heldUntilFrame = frame + 30 + Math.floor(Math.random() * 60);
     }
     return _applyJitter(_heldRandomInput);
   };

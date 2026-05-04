@@ -233,7 +233,9 @@
   const _randomP1InputForFrame = (frame) => {
     if (frame > _heldRandomP1UntilFrame || !_heldRandomP1Input) {
       _heldRandomP1Input = _randomP1Input();
-      _heldRandomP1UntilFrame = frame + 3 + Math.floor(Math.random() * 12);
+      // Match the fake peer's 30-90 frame hold so prediction misses align
+      // with real human-cadence input changes, not per-150ms churn.
+      _heldRandomP1UntilFrame = frame + 30 + Math.floor(Math.random() * 60);
     }
     return _heldRandomP1Input;
   };

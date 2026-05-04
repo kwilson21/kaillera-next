@@ -836,14 +836,23 @@
     } catch (_) {}
     return false;
   })();
+  // Max replay frames per JS tick during catch-up. Burst=1 means at most one
+  // game frame replayed per tick — bounds each tick's blocking time to one
+  // sim step (~5-8 ms) and spreads a 12-frame deep replay across 12 ticks
+  // (200 ms) instead of compressing 4 frames into a single tick that visibly
+  // overruns the 16.67 ms frame budget.
+  // Measured at 200 ms simulated RTT: dropping from 4 → 1 cuts visible
+  // sub-20 fps pauses from ~36/20 s to 1/20 s and lifts p10 fps from 19 → 54
+  // — nearly eliminating the cyclical "freezing" without changing avg fps.
+  // Override via ?replayBurst=N to test other values.
   const RB_REPLAY_BURST_MAX_FRAMES = (() => {
     try {
       const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
-      const parsed = raw === null ? 4 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 4;
+      const parsed = raw === null ? 1 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 1;
       return Math.max(1, Math.min(8, parsed));
     } catch (_) {
-      return 4;
+      return 1;
     }
   })();
   // Diagnostic-only: ?tickProfile=1 records per-tick phase costs to a
@@ -927,8 +936,13 @@
   const RB_REPLAY_BURST_BUDGET_MS = (() => {
     try {
       const raw = _urlParams.get('replayBurstBudgetMs') ?? localStorage.getItem('kn-replay-burst-budget-ms');
-      const parsed = raw === null ? 10 : parseFloat(raw);
-      if (!Number.isFinite(parsed)) return 10;
+      // 8 ms keeps the burst under half the frame budget — a single replayed
+      // game frame fits in one JS tick without overflowing the next render.
+      // Was 10 ms (lets a 2-frame replay land per tick) which read as a
+      // brief stutter every rollback. With burst=1 default this is a
+      // belt-and-suspenders cap; the burst-frame limit usually trips first.
+      const parsed = raw === null ? 8 : parseFloat(raw);
+      if (!Number.isFinite(parsed)) return 8;
       return Math.max(1, Math.min(16, parsed));
     } catch (_) {
       return 10;
