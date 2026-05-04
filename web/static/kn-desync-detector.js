@@ -25,6 +25,17 @@
     visionConfidenceMin: 'med',
   };
 
+  /* Diagnostic-only URL flag: ?forceDesyncTick=1 forces the per-tick
+   * digest build to run even with a synthetic peer, so the demo can
+   * measure the build cost under simulated network conditions. Real
+   * production sessions never set this; it's just a perf-measurement
+   * hatch. The flag is read once at module load and stored on window
+   * so kn-desync-detector's tick() can check it without reparsing. */
+  try {
+    const params = new URLSearchParams(window.location?.search || '');
+    if (params.get('forceDesyncTick') === '1') window.__knForceDesyncTick = true;
+  } catch (_) {}
+
   /* ── KN_FIELD_* enum (mirror of kn_hash_registry.h) ──────────── */
   const FIELD = Object.freeze({
     STOCKS_P0: 0,
@@ -501,7 +512,13 @@
           break;
         }
       }
-      if (!_hasRealPeer) return;
+      // Diagnostic: ?forceDesyncTick=1 forces the digest-build path to run
+      // even with a synthetic peer, so the demo can measure the per-tick
+      // build cost (with simulated RTT via KNFakePeer.setNetwork) without
+      // needing a two-tab real-WebRTC harness. Broadcasts go to a
+      // no-op DC and comparisons run against an empty peer-digest map;
+      // the work is what we're measuring.
+      if (!_hasRealPeer && !window.__knForceDesyncTick) return;
       // Rate-limit digest BUILD to broadcast cadence + replay-active
       // frames. Per-frame build was the dominant main-thread cost
       // (~3-9 ms × 60 Hz on mobile = up to 540 ms/sec at default mode B).

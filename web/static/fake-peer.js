@@ -4,6 +4,22 @@
   const STATS_WINDOW_MS = 5000;
   const LAST_SEC_MS = 1000;
   const REDUNDANT_FRAMES = 5;
+  // Diagnostic flag: ?fakePeerJitter=1 adds per-frame ±2 unit noise to the
+  // held stick value, simulating the analog-stick ADC noise + hand tremor
+  // a real human peer produces. Without it the synthetic peer holds an
+  // exact stick value across a held-period (3-15 frames), which means the
+  // C engine's linear-extrapolation predictor is exact at every match
+  // frame — no mispredict-tolerance boundary case ever fires. With it
+  // enabled, the held value drifts ±2 units around the base, so when the
+  // base is near a zone boundary (every 12 stick units) some predictions
+  // miss by 1-3 units across a boundary — exactly what the boundary
+  // hysteresis (commit 5f402ef) is designed to absorb. Demo-only knob;
+  // does not affect production peer behavior.
+  let _jitterEnabled = false;
+  try {
+    const params = new URLSearchParams(window.location?.search || '');
+    if (params.get('fakePeerJitter') === '1') _jitterEnabled = true;
+  } catch (_) {}
   // RetroArch joypad bits we may pick when generating P2's in-match random
   // inputs. Excludes:
   //   bit 3 (START) — pauses the game / opens the pause menu, derails the demo
@@ -69,13 +85,40 @@
   // ahead regardless of whether the prediction was right).
   let _heldRandomInput = null;
   let _heldUntilFrame = -1;
+  // ±2-unit ADC-style noise for jitter mode. Returns a fresh integer in
+  // [-2, +2] each call. Bias toward 0 (no jitter ~50% of frames) so the
+  // boundary-hysteresis case fires on a fraction of frames matching the
+  // real-hardware tremor cadence rather than every single frame.
+  const _adcJitter = () => {
+    const r = Math.random();
+    if (r < 0.5) return 0;
+    if (r < 0.75) return 1;
+    if (r < 0.9) return -1;
+    if (r < 0.97) return 2;
+    return -2;
+  };
+  const _applyJitter = (input) => {
+    if (!_jitterEnabled) return input;
+    // Don't jitter pure button-only frames (lx/ly/cx/cy all zero) — that's
+    // a "stick centered, no input" frame and adding noise there would
+    // actually CREATE divergence we don't want to model. Real ADC noise
+    // is only present when the stick is being pushed off-center.
+    if (input.lx === 0 && input.ly === 0 && input.cx === 0 && input.cy === 0) return input;
+    return {
+      buttons: input.buttons,
+      lx: input.lx ? input.lx + _adcJitter() : 0,
+      ly: input.ly ? input.ly + _adcJitter() : 0,
+      cx: input.cx ? input.cx + _adcJitter() : 0,
+      cy: input.cy ? input.cy + _adcJitter() : 0,
+    };
+  };
   const _matchInputForFrame = (frame) => {
     if (frame > _heldUntilFrame || !_heldRandomInput) {
       _heldRandomInput = _randomInput();
       // Hold 3-15 frames (~50-250 ms) — roughly human reaction-cadence.
       _heldUntilFrame = frame + 3 + Math.floor(Math.random() * 12);
     }
-    return _heldRandomInput;
+    return _applyJitter(_heldRandomInput);
   };
 
   const _pruneEvents = (now) => {
