@@ -168,6 +168,15 @@ if [ -d "${PATCHES_DIR}" ]; then
         echo "    Added true-rollback netcode WASM exports"
     fi
 
+    # Runtime delay update — JS sizes DELAY_FRAMES to RTT/2 + jitter live so
+    # peer inputs land in front of the apply-frame deadline; no mispredict,
+    # no rollback, no replay pause. Without these exports the C engine ignores
+    # JS-side delay changes after kn_rollback_init.
+    if grep -q "_kn_set_true_rollback" Makefile.emulatorjs && ! grep -q "_kn_set_delay_frames" Makefile.emulatorjs; then
+        sed -i 's|_kn_set_true_rollback|_kn_set_true_rollback,_kn_set_delay_frames,_kn_get_delay_frames|' Makefile.emulatorjs
+        echo "    Added runtime delay-frames update WASM exports"
+    fi
+
     # 2026-04-29 rollback-engine OOB-throw localization probes. Exports the
     # last rollback phase/frame/slot/serialize counters so JS can dump them
     # in the STEP-THREW handler. Remove once root cause is found.

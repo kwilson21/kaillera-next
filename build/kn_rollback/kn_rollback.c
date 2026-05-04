@@ -2269,6 +2269,49 @@ void kn_set_true_rollback(int enable) {
     rb_log("kn_set_true_rollback %d", rb.true_rollback);
 }
 
+/* Update rb.delay_frames at runtime so JS can size the prediction window
+ * to RTT/2 + jitter when the network slider moves mid-match. When delay
+ * covers the actual round-trip lag, peer inputs always arrive in front of
+ * the apply frame and the engine never has to roll back — eliminating
+ * the visible replay pauses at high RTT.
+ *
+ * Safety: refuse during an active replay (rb.replay_remaining > 0). The
+ * apply_frame = rb.frame - rb.delay_frames calculation is in flight and
+ * shifting delay would corrupt the replay's frame math. JS callers should
+ * gate on kn_get_replay_depth() == 0 before invoking. Returns the actual
+ * delay that took effect (old value if rejected, new value on success).
+ *
+ * Range: clamped to [1, 16]. The ring buffer was sized at init for
+ * delay+10, so this update path doesn't reallocate the ring — values
+ * higher than init_delay+ring_max may push apply_frame outside the
+ * available history. We still cap so callers can't accidentally request
+ * absurd delays; the JS-level cap (LOCKSTEP_MAX_DELAY=9 / ROLLBACK_MAX=12)
+ * is the user-facing limit. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_set_delay_frames(int new_delay) {
+    if (rb.replay_remaining > 0) {
+        rb_log("kn_set_delay_frames %d rejected (replay in progress, remaining=%d)",
+            new_delay, rb.replay_remaining);
+        return rb.delay_frames;
+    }
+    if (new_delay < 1) new_delay = 1;
+    if (new_delay > 16) new_delay = 16;
+    if (new_delay == rb.delay_frames) return rb.delay_frames;
+    int old_delay = rb.delay_frames;
+    rb.delay_frames = new_delay;
+    rb_log("kn_set_delay_frames %d -> %d (frame=%d)", old_delay, new_delay, rb.frame);
+    return rb.delay_frames;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delay_frames(void) {
+    return rb.delay_frames;
+}
+
 /* Get SoftFloat globals packed: high byte = roundingMode, low byte = exceptionFlags */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

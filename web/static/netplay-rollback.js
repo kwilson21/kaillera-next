@@ -423,7 +423,10 @@
     for (const p of players) if (p.rttSamples?.length) liveSamples.push(...p.rttSamples);
     if (liveSamples.length === 0) return;
     liveSamples.sort((a, b) => a - b);
-    const useHalfRtt = _predictionsPaused || !RB_TRUE_ROLLBACK;
+    // Cover RTT/2 + jitter in both modes (see initial-negotiation comment
+    // for rationale). Pushed live to C below if kn_set_delay_frames is
+    // available so the engine's prediction window matches JS-side delay.
+    const useHalfRtt = true;
     const ownDelay = _delayFromRttSamples(liveSamples, useHalfRtt);
     if (ownDelay == null) return;
     let maxDelay = ownDelay;
@@ -442,6 +445,18 @@
       const prev = DELAY_FRAMES;
       DELAY_FRAMES = maxDelay;
       if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
+      // Push the new delay to the C engine so its apply_frame math reflects
+      // the same prediction window. Without this, JS thinks delay=8 but C
+      // still uses the value baked at kn_rollback_init time → peer inputs
+      // arrive past C's apply deadline → rollback fires → replay pauses.
+      // The setter no-ops if a replay is currently in flight.
+      const cMod = window.EJS_emulator?.gameManager?.Module;
+      if (cMod?._kn_set_delay_frames) {
+        const accepted = cMod._kn_set_delay_frames(maxDelay);
+        if (accepted !== maxDelay) {
+          _syncLog(`kn_set_delay_frames(${maxDelay}) returned ${accepted} (replay in flight, retry next tune)`);
+        }
+      }
       _syncLog(
         `delay re-tuned: ${prev} -> ${maxDelay} (own=${ownDelay} ceiling=${_delayCeiling()} ` +
           `mode=${_predictionsPaused ? 'lockstep' : 'rollback'} samples=${liveSamples.length})`,
@@ -7902,18 +7917,19 @@
       const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
       const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
       const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
-      // True-rollback model: delay is the REMOTE prediction jitter buffer.
-      // Local input is applied at the current frame, so RTT/2 does NOT
-      // contribute to local input lag — RTT only sets rollback depth.
-      // Legacy model: delay also inflates local input application, so RTT/2
-      // must be folded in or the negotiated delay can't keep up at high RTT.
-      // (Tried bumping delay to cover RTT/2 in true rollback to eliminate
-      // mispredicts — but C engine bakes delay_frames at kn_rollback_init,
-      // so JS-side increases don't propagate. Reverted; burst=1 cuts pauses
-      // by spreading replay work instead of avoiding it.)
-      const effectiveMs = RB_TRUE_ROLLBACK
-        ? jitterMargin + 16.67 // 1-frame safety on top of measured jitter
-        : filteredMedian / 2 + jitterMargin + 16.67;
+      // Size DELAY_FRAMES to cover RTT/2 + jitter + 1f safety in BOTH
+      // modes. Original true-rollback formula was jitter-only on the
+      // theory that delay was just a prediction-window buffer and RTT/2
+      // would inflate input lag — but in true rollback local input
+      // applies at currentFrame regardless of delay, so there's no input-
+      // lag cost from a larger window. What jitter-only DOES cost: every
+      // peer input change arrives ~RTT/2 frames past the apply deadline,
+      // triggering a rollback at depth ~RTT/2. At 200ms RTT that's a
+      // ~10-frame rollback every input change → visible replay pauses.
+      // Sizing delay to actually cover RTT/2 keeps peer inputs in front
+      // of the deadline → no mispredict → no rollback → no pause.
+      // Pushed live to C via kn_set_delay_frames after this fires.
+      const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67;
       ownDelay = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
       _syncLog(
         `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +

@@ -105,6 +105,14 @@ int kn_get_tolerance_hits(void);
 int kn_get_true_rollback_capability(void);
 void kn_set_true_rollback(int enable);
 
+/* Runtime delay update so JS can size DELAY_FRAMES to RTT/2 + jitter as
+ * the network changes. Eliminates rollback pauses at high RTT by keeping
+ * peer inputs in front of the apply-frame deadline. Refused mid-replay
+ * (apply_frame math would corrupt). Clamped to [1, 16]. Returns the
+ * delay that took effect. See kn_rollback.c for safety details. */
+int kn_set_delay_frames(int new_delay);
+int kn_get_delay_frames(void);
+
 /* Region hashes for a specific frame's saved state (RB-CHECK divergence
  * diagnosis). Like kn_state_region_hashes but operates on the ring slot
  * for `frame` instead of the most recent. Returns count on success, 0 if
