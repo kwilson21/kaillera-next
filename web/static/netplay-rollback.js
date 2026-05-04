@@ -611,6 +611,13 @@
   let _predictionsPaused = false; // demo-only: pause C prediction generation without tearing down rollback state
   let _demoMode = false; // demo-only: disable C pacing-throttle so the engine runs full speed, predicts, and rolls back visibly under simulated lag (instead of pacing to match the slow peer, which feels identical to lockstep)
   let _rbReplayLogged = false; // prevents log spam during amortized replay
+  // Tracks step count within the current rollback's replay catch-up.
+  // Reset at rollback start; incremented at each replay step. Used to
+  // detect "this step is the last one" so we can flip kn_headless=0
+  // before it runs and let the canvas paint the corrected frame F at
+  // end of that tick instead of deferring to the next forward tick.
+  let _replayStepsThisRollback = 0;
+  let _replayOriginalDepth = 0;
   let _rbVisualFreezeOverlay = null; // canvas copy shown while replay frames render underneath
   let _rbVisualFreezeCtx = null;
   let _rbVisualSnapshotCanvas = null; // last live pre-rollback frame, captured before state restore
@@ -865,16 +872,145 @@
   // sub-20 fps pauses from ~36/20 s to 1/20 s and lifts p10 fps from 19 → 54
   // — nearly eliminating the cyclical "freezing" without changing avg fps.
   // Override via ?replayBurst=N to test other values.
-  const RB_REPLAY_BURST_MAX_FRAMES = (() => {
+  // ── Adaptive replay burst sizing (measurement-driven) ────────────
+  // Self-tunes the per-replay-tick frame count from observed wall-clock
+  // tick durations. Avoids the trap of estimate-driven sizing (median
+  // step cost) which can't tell whether the next tick will spike past
+  // vsync on a slow machine.
+  //
+  // Algorithm: start at the SAFE baseline (burst=2). After each replay
+  // tick, observe its wall-clock duration:
+  //   - duration > VSYNC_LIMIT (16.67 ms) → browser dropped a paint;
+  //     IMMEDIATELY decrement cap and reset probation.
+  //   - duration ≤ PROBE_SAFE_MS (13.5 ms) → real headroom. Count
+  //     consecutive safe ticks; after PROBE_THRESHOLD of them, AND
+  //     only if the median estimate also says cap+1 fits, tentatively
+  //     increment cap. If that increment overshoots, immediately
+  //     decrement back.
+  //   - duration in mid-band → reset probation counter (no commitment).
+  //
+  // Net effect: cap settles at the highest value that this specific
+  // machine's per-step cost can sustain without ever overshooting
+  // vsync. Slower machines stay at burst=2; faster machines climb to
+  // burst=3 or higher after sustained safe operation.
+  //
+  // ?replayBurst=N (1-8) forces a static value (disables adaptation).
+  const RB_VSYNC_USABLE_MS = 14;
+  const RB_BURST_PROBE_VSYNC_LIMIT_MS = 16.67;
+  const RB_BURST_PROBE_SAFE_MS = 13.5;
+  const RB_BURST_PROBE_THRESHOLD = 8;
+  const RB_REPLAY_BURST_HARD_CAP = 8;
+  const RB_REPLAY_BURST_STATIC = (() => {
     try {
       const raw = _urlParams.get('replayBurst') ?? localStorage.getItem('kn-replay-burst');
-      const parsed = raw === null ? 1 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 1;
-      return Math.max(1, Math.min(8, parsed));
+      if (raw === null) return 0; // 0 = adaptive
+      const parsed = parseInt(raw, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+      return Math.max(1, Math.min(RB_REPLAY_BURST_HARD_CAP, parsed));
     } catch (_) {
-      return 1;
+      return 0;
     }
   })();
+  // Per-step cost sliding window. Tracks both median (typical cost)
+  // and p90 (tail-risk estimate). Median used for diagnostics; p90
+  // used for the adaptive sizer's "should we climb" check, because
+  // the burst cap has to survive worst-case ticks, not just typical
+  // ones. Using median here was the bug that caused vsync overruns
+  // when the long tail spiked the actual tick over the budget.
+  const STEP_COST_WINDOW = 60; // ~1 s at 60 Hz
+  const _stepCostHistory = [];
+  let _stepCostMedianMs = 4.5;
+  let _stepCostP90Ms = 5.5;
+  let _stepCostStatsDirty = false;
+  const _recomputeStepCostStats = () => {
+    if (!_stepCostHistory.length) {
+      _stepCostMedianMs = 4.5;
+      _stepCostP90Ms = 5.5;
+      return;
+    }
+    const sorted = _stepCostHistory.slice().sort((a, b) => a - b);
+    _stepCostMedianMs = sorted[Math.floor(sorted.length / 2)];
+    _stepCostP90Ms = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  };
+  // Measurement-driven burst cap. Starts at 2 (the safe baseline).
+  // After each replay tick we observe its wall-clock duration:
+  //   - If a tick exceeded vsync (>16.67 ms) the browser dropped a
+  //     paint and the user perceives a worse freeze than burst=2 — so
+  //     we IMMEDIATELY drop the cap one step and require a fresh
+  //     probation window before climbing back.
+  //   - If RB_BURST_PROBE_THRESHOLD consecutive replay ticks landed
+  //     comfortably under vsync (≤ RB_BURST_PROBE_SAFE_MS) AND the
+  //     step-cost median estimate still suggests headroom, we tentatively
+  //     try cap+1 on the next rollback. If that overshoots vsync we
+  //     immediately back off; otherwise the new cap sticks.
+  // Net effect: the demo defaults to safe burst=2, then probes upward
+  // and stays at the highest cap that doesn't overshoot vsync on this
+  // specific machine. No estimate-based commitments, just feedback.
+  // Conservative adaptive cap. Starts at the SAFE baseline (burst=2),
+  // climbs only after the PROBE_THRESHOLD consecutive replay ticks all
+  // landed comfortably under vsync AND the p90 step-cost estimate
+  // suggests cap+1 still fits. p90 (not median) for the sizing check
+  // because what matters is whether the long-tail tick survives the
+  // budget, not the typical one. Cap-blacklist remembers caps that
+  // overshot at any point this session — never tries them again.
+  let _adaptiveBurstCap = 2;
+  let _adaptiveBurstCeiling = RB_REPLAY_BURST_HARD_CAP; // shrinks when an overshoot is observed
+  let _consecutiveSafeReplayTicks = 0;
+  const _observeReplayTick = (tickMs) => {
+    if (RB_REPLAY_BURST_STATIC > 0) return; // user override; don't adapt
+    if (tickMs > RB_BURST_PROBE_VSYNC_LIMIT_MS) {
+      // Overshoot — browser dropped a paint. Permanently lower the
+      // ceiling so we don't try this cap again, then back off.
+      _adaptiveBurstCeiling = Math.max(1, _adaptiveBurstCap - 1);
+      _adaptiveBurstCap = _adaptiveBurstCeiling;
+      _consecutiveSafeReplayTicks = 0;
+      return;
+    }
+    if (tickMs <= RB_BURST_PROBE_SAFE_MS) {
+      _consecutiveSafeReplayTicks++;
+      if (_consecutiveSafeReplayTicks >= RB_BURST_PROBE_THRESHOLD) {
+        const target = _adaptiveBurstCap + 1;
+        const wouldFit = target * Math.max(1.5, _stepCostP90Ms) <= RB_VSYNC_USABLE_MS;
+        if (wouldFit && target <= _adaptiveBurstCeiling) {
+          _adaptiveBurstCap = target;
+          _consecutiveSafeReplayTicks = 0;
+        }
+      }
+    } else {
+      _consecutiveSafeReplayTicks = 0;
+    }
+  };
+  const _adaptiveReplayBurst = () => {
+    if (RB_REPLAY_BURST_STATIC > 0) return RB_REPLAY_BURST_STATIC;
+    if (_stepCostStatsDirty) {
+      _recomputeStepCostStats();
+      _stepCostStatsDirty = false;
+    }
+    return Math.max(1, Math.min(RB_REPLAY_BURST_HARD_CAP, _adaptiveBurstCap));
+  };
+  // Diagnostic accessor — call window.knAdaptiveDebug() in the console
+  // to inspect what the adaptive sizer is currently computing.
+  if (typeof window !== 'undefined') {
+    window.knAdaptiveDebug = () => {
+      if (_stepCostStatsDirty) _recomputeStepCostStats();
+      const burst = _adaptiveReplayBurst();
+      return {
+        stepCostMedianMs: +_stepCostMedianMs.toFixed(2),
+        stepCostHistorySize: _stepCostHistory.length,
+        vsyncUsableMs: RB_VSYNC_USABLE_MS,
+        hardCap: RB_REPLAY_BURST_HARD_CAP,
+        staticOverride: RB_REPLAY_BURST_STATIC,
+        adaptiveBurst: burst,
+        adaptiveBudgetMs: +(burst * Math.max(1.5, _stepCostMedianMs)).toFixed(2),
+        consecutiveSafeReplayTicks: _consecutiveSafeReplayTicks,
+      };
+    };
+  }
+  // Legacy alias used by the existing code paths and the tail-fade
+  // timing. Kept as a getter-style constant so call sites stay
+  // unchanged. Reads adaptiveBurst at access time (eval's lazy enough
+  // because the call sites are inside hot loops, not module init).
+  const RB_REPLAY_BURST_MAX_FRAMES = RB_REPLAY_BURST_STATIC > 0 ? RB_REPLAY_BURST_STATIC : 4;
   // Diagnostic-only: ?tickProfile=1 records per-tick phase costs to a
   // circular buffer at window.__knTickProfile so a probe can identify
   // which phase dominates tick time. Off by default; recording costs
@@ -894,6 +1030,131 @@
     buf.push(rec);
     if (buf.length > 1200) buf.splice(0, buf.length - 1200);
   };
+
+  // ── Rollback root-cause probe (?rbProbe=1) ────────────────────
+  // Records per-tick: wall-clock time, engine sim frame, replay
+  // depth remaining, tick path, and a cheap canvas-pixel hash.
+  // Discriminates between three competing hypotheses for visible
+  // pause:
+  //   (a) Engine sim freezes — rb_frame doesn't advance for N ticks.
+  //   (b) Sim runs but RDP doesn't paint — rb_frame advances, hash
+  //       stays constant.
+  //   (c) Single corrupted frame — hash flips to a wrong value for
+  //       one tick, then back.
+  // Call window.knProbeRollback() in console for an analysis around
+  // the most recent rollback boundary.
+  const RB_PROBE = (() => {
+    try {
+      const raw = _urlParams.get('rbProbe') ?? localStorage.getItem('kn-rb-probe');
+      if (raw === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
+  if (RB_PROBE) window.__knRbProbe = [];
+  let _probeHashCanvas = null;
+  let _probeHashCtx = null;
+  const _probeCanvasHash = () => {
+    if (!RB_PROBE) return 0;
+    try {
+      const src = _findRollbackVisualCanvas?.();
+      if (!src) return 0;
+      if (!_probeHashCanvas) {
+        _probeHashCanvas = document.createElement('canvas');
+        _probeHashCanvas.width = 8;
+        _probeHashCanvas.height = 6;
+        _probeHashCtx = _probeHashCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      _probeHashCtx.clearRect(0, 0, 8, 6);
+      _probeHashCtx.drawImage(src, 0, 0, 8, 6);
+      const d = _probeHashCtx.getImageData(0, 0, 8, 6).data;
+      let h = 0x811c9dc5;
+      for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 16777619);
+      return h | 0;
+    } catch (_) {
+      return 0;
+    }
+  };
+  const _pushRbProbe = (path) => {
+    if (!RB_PROBE) return;
+    const buf = window.__knRbProbe;
+    if (!buf) return;
+    const tickMod = window.EJS_emulator?.gameManager?.Module;
+    buf.push({
+      t: performance.now(),
+      jsF: _frameNum | 0,
+      rbF: tickMod?._kn_get_frame?.() ?? -1,
+      rep: tickMod?._kn_get_replay_depth?.() ?? 0,
+      path,
+      hash: _probeCanvasHash(),
+    });
+    if (buf.length > 1200) buf.splice(0, buf.length - 1200);
+  };
+  if (typeof window !== 'undefined') {
+    window.knProbeRollback = (lookbackTicks = 60, lookaheadTicks = 60) => {
+      const buf = window.__knRbProbe || [];
+      if (!buf.length) return { error: 'no samples — load with ?rbProbe=1 and play through a rollback first' };
+      // Find the most recent rollback boundary: a tick where path === 'replay'
+      // or where rep transitions from 0 to >0.
+      let rbIdx = -1;
+      for (let i = buf.length - 1; i >= 0; i--) {
+        if (buf[i].path === 'replay') {
+          rbIdx = i;
+          break;
+        }
+      }
+      if (rbIdx < 0) return { error: 'no rollback found in last 1200 ticks' };
+      // Walk back to the FIRST replay tick of this rollback streak.
+      while (rbIdx > 0 && buf[rbIdx - 1].path === 'replay') rbIdx--;
+      const start = Math.max(0, rbIdx - lookbackTicks);
+      const end = Math.min(buf.length, rbIdx + lookaheadTicks);
+      const window_ = buf.slice(start, end);
+      const rbStart = window_.findIndex((r) => r.path === 'replay');
+      // Compute deltas between consecutive ticks
+      const out = window_.map((r, i) => {
+        const prev = i > 0 ? window_[i - 1] : null;
+        return {
+          ...r,
+          dt: prev ? +(r.t - prev.t).toFixed(1) : 0,
+          d_jsF: prev ? r.jsF - prev.jsF : 0,
+          d_rbF: prev ? r.rbF - prev.rbF : 0,
+          hashChanged: prev ? r.hash !== prev.hash : false,
+          relTick: i - rbStart,
+        };
+      });
+      // Summary: during the replay streak, did hash change? did rbF advance?
+      const replayTicks = out.filter((r) => r.path === 'replay');
+      const replayDuration = replayTicks.length ? replayTicks[replayTicks.length - 1].t - replayTicks[0].t : 0;
+      const replayHashChanges = replayTicks.filter((r) => r.hashChanged).length;
+      const replayRbAdvance = replayTicks.reduce((s, r) => s + (r.d_rbF || 0), 0);
+      // Post-replay: track when canvas finally paints a fresh frame.
+      const postReplay = out.filter((r) => r.relTick >= replayTicks.length && r.relTick < replayTicks.length + 10);
+      const firstPostHashChange = postReplay.find((r) => r.hashChanged);
+      return {
+        rollbackBoundary: { tickIdx: rbIdx, depth: replayTicks.length },
+        replayWindow: {
+          ticks: replayTicks.length,
+          wallClockMs: +replayDuration.toFixed(1),
+          gameFrameAdvance: replayRbAdvance,
+          canvasHashChanges: replayHashChanges,
+          interpretation:
+            replayHashChanges === 0 && replayRbAdvance > 0
+              ? 'Sim advanced but canvas frozen — RDP/headless path is suppressing paint'
+              : replayHashChanges === 0 && replayRbAdvance === 0
+                ? 'Sim stalled AND canvas frozen — engine pacing or stall'
+                : replayHashChanges > 0
+                  ? 'Canvas painted ' + replayHashChanges + ' fresh frames during replay — visible rewind'
+                  : '?',
+        },
+        postReplay: {
+          firstPaintAfterRelTick: firstPostHashChange ? firstPostHashChange.relTick - replayTicks.length : -1,
+          firstPaintAfterMs: firstPostHashChange
+            ? +(firstPostHashChange.t - (replayTicks[replayTicks.length - 1]?.t ?? 0)).toFixed(1)
+            : -1,
+        },
+        timeline: out,
+      };
+    };
+  }
   // Console helper: window.knTickProfileSummary() returns a digest of the
   // last N ticks (default 600 = 10 s at 60 Hz). Use after enabling
   // ?tickProfile=1 and playing through the stuttery period.
@@ -974,7 +1235,21 @@
       if (raw === '0') return false;
       if (raw === '1') return true;
     } catch (_) {}
-    return true;
+    // Defaulted OFF. The full-headless flag (RB_FULL_HEADLESS_DURING_REPLAY)
+    // already suspends the presentation pipeline (GLSM bind/unbind,
+    // libretro_swap_buffer, video_cb) so the canvas stays frozen on the
+    // last drawn frame during replay — that's all we actually need to
+    // hide the rewind. The rdp-skip layer additionally short-circuits
+    // GLideN64 draw calls (drawTriangles / drawScreenSpaceTriangle /
+    // drawDMATriangles), which leaves CPU-side draw bookkeeping
+    // half-updated relative to the GPU. When the flag flips off after
+    // replay, the renderer has to reconcile the stale state on the
+    // first post-replay paint — measurable perf hit on rollback exit
+    // for no visual benefit (presentation is already suspended by
+    // headless). Opt back in via ?replaySkipRdp=1 if you specifically
+    // want to test that path; the demo's old default of `true` was
+    // along for the ride from a previous tuning iteration.
+    return false;
   })();
   const RB_FULL_HEADLESS_DURING_REPLAY = (() => {
     try {
@@ -3055,15 +3330,23 @@
         });
       }
       // Tail fade: start fading the overlay out near the end of the
-      // estimated replay window. ~5 ms per replay frame is the
-      // typical wall-clock cost; the tail fade kicks in
-      // RB_REPLAY_TAIL_FADE_MS before the projected end so the cross-
-      // over with the live canvas (now near its post-replay state)
-      // reads as motion blur rather than a hard cut. If replay takes
-      // longer than expected, the fade still completes in time; if
-      // shorter, _hideRollbackVisualFreeze catches it and finalizes.
+      // estimated replay window. With burst=N the engine consumes at
+      // most N replay frames per JS tick (one per rAF), so wall-clock
+      // duration is `ceil(depth / burst) * 16.67 ms` regardless of how
+      // fast the sim itself is — the rAF cadence is the floor. The
+      // tail fade kicks in RB_REPLAY_TAIL_FADE_MS before the projected
+      // end so the cross-over with the live canvas (now near its post-
+      // replay state) reads as motion blur rather than a hard cut. If
+      // replay takes longer than expected, the fade still completes
+      // in time; if shorter, _hideRollbackVisualFreeze catches it and
+      // finalizes. The previous estimate (depth * 5) was correct only
+      // for the burst-of-many path that was retired in 5504158; under
+      // burst=1 it fired the fade ~3× too early, exposing the live
+      // canvas mid-replay before it had caught up to F.
       if (RB_REPLAY_TAIL_FADE_MS > 0 && !RB_VISUAL_FADE_DURING_REPLAY) {
-        const expectedReplayMs = Math.max(8, depth * 5);
+        const burst = Math.max(1, _adaptiveReplayBurst() | 0);
+        const ticks = Math.max(1, Math.ceil(depth / burst));
+        const expectedReplayMs = Math.max(8, ticks * 16.67);
         const startFadeAtMs = Math.max(0, expectedReplayMs - RB_REPLAY_TAIL_FADE_MS);
         setTimeout(() => {
           if (
@@ -12201,12 +12484,37 @@
         _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
         _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
         _rbReplayLogged = true;
+        // Reset paint-last-replay-frame counters at rollback start.
+        // _replayOriginalDepth is the # of frames the replay needs to
+        // execute; we'll flip headless OFF before the final one of
+        // these so the canvas paints the corrected state at end of
+        // that step instead of waiting for the next forward tick.
+        _replayOriginalDepth = replayDepth;
+        _replayStepsThisRollback = 0;
         // Replay must execute the same RSP/audio task as the original forward
         // frame so rollback advances emulator-side audio state faithfully.
         // We mute at the JS playback boundary in the catchingUp===2 path
         // instead of skipping the task in WASM.
-        if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(0);
-        _syncLog(`REPLAY-AUDIO-MUTE: RSP audio stays mode=0; WebAudio feed muted for replay depth=${replayDepth}`);
+        //
+        // Profiling override: ?replayAudioMode=N lets us measure whether
+        // skipping RSP audio (mode 1: skip outright; mode 2: snapshot+restore
+        // around the alist call) saves measurable per-step cost during replay.
+        // Mode 0 (current default) is the only deterministic option; modes 1/2
+        // are PROBE-ONLY and not safe for real netplay.
+        const _replayAudioMode = (() => {
+          try {
+            const raw = _urlParams.get('replayAudioMode');
+            if (raw === null) return 0;
+            const n = parseInt(raw, 10);
+            return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0;
+          } catch (_) {
+            return 0;
+          }
+        })();
+        if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(_replayAudioMode);
+        _syncLog(
+          `REPLAY-AUDIO-MUTE: RSP audio mode=${_replayAudioMode}; WebAudio feed muted for replay depth=${replayDepth}`,
+        );
       }
       if (_rbReplayLogged && catchingUp !== 2) _finishCReplay(tickMod);
 
@@ -12235,6 +12543,7 @@
             );
           }
           _pushTickProfile({ f: _frameNum, path: 'pacing', total: performance.now() - _t0, preTick: _tPreTick - _t0 });
+          _pushRbProbe('pacing');
           return;
         }
       }
@@ -12248,8 +12557,33 @@
         const burstStart = performance.now();
         let burstSteps = 0;
         let replayDone = false;
+        // Read the current adaptive burst cap (set by the feedback
+        // loop in _observeReplayTick — starts at 2, climbs only after
+        // sustained safe ticks). budget gates the loop in case actual
+        // step cost spikes mid-burst beyond what the median estimated.
+        const burstCap = _adaptiveReplayBurst();
+        const budgetMs = burstCap * Math.max(1.5, _stepCostMedianMs);
         while (catchingUp === 2) {
+          // Paint-last-replay-frame: if THIS step will be the final one
+          // of the entire replay, turn OFF headless so the emulator's
+          // swap_buffer + video_cb run. The canvas paints the corrected
+          // state at frame F immediately at end of this tick instead of
+          // waiting for the next forward tick (~17 ms later). Cuts
+          // perceived freeze duration without changing tick count.
+          //
+          // Step count is tracked in JS (_replayStepsThisRollback) —
+          // _kn_get_replay_depth returns the ORIGINAL depth (constant),
+          // not the remaining count, so we can't query it from C. We
+          // only flip on the LAST replay frame; earlier frames stay
+          // headless because painting them would expose the rewind +
+          // intermediate-replay states (the "ghost" jolt the user saw
+          // when full RDP was enabled during replay).
+          const isLastReplayStep = _replayOriginalDepth > 0 && _replayStepsThisRollback + 1 >= _replayOriginalDepth;
+          if (isLastReplayStep) {
+            _setReplayFullHeadless(tickMod, false, 'last-replay-frame-paint');
+          }
           _runCReplayFrame(tickMod);
+          _replayStepsThisRollback++;
           burstSteps++;
           const replayRemaining = tickMod._kn_get_replay_depth?.() ?? 0;
           if (replayRemaining <= 0) {
@@ -12257,9 +12591,14 @@
             break;
           }
           const burstMs = performance.now() - burstStart;
-          if (burstSteps >= RB_REPLAY_BURST_MAX_FRAMES || burstMs >= RB_REPLAY_BURST_BUDGET_MS) break;
+          if (burstSteps >= burstCap || burstMs >= budgetMs) break;
           catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
         }
+        // Feed the measurement-driven sizer with this tick's actual
+        // wall-clock duration. Decides whether to keep, decrement,
+        // or (after sustained safe operation) increment the cap for
+        // the next rollback.
+        _observeReplayTick(performance.now() - burstStart);
         if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
         // Overlay
         if (_frameNum % 15 === 0) {
@@ -12279,6 +12618,7 @@
           burstMs: performance.now() - burstStart,
           burstSteps,
         });
+        _pushRbProbe('replay');
         return;
       }
 
@@ -12396,6 +12736,20 @@
       // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
       _checkAiInvariant(tickMod, 3);
       const _tStep = performance.now();
+      // Update the per-step cost sliding window used by the adaptive
+      // replay-burst sizer. Only sampled from normal-path forward ticks
+      // (skip the first 30 frames to avoid boot-time noise). The
+      // replay path reads the median of this window via
+      // _adaptiveReplayBurst() to size how many frames to fit per
+      // replay tick — see RB_VSYNC_USABLE_MS.
+      if (_frameNum > 30) {
+        const stepDt = _tStep - _tStep0;
+        if (stepDt > 0 && stepDt < 50) {
+          _stepCostHistory.push(stepDt);
+          if (_stepCostHistory.length > STEP_COST_WINDOW) _stepCostHistory.shift();
+          _stepCostStatsDirty = true;
+        }
+      }
       if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
         _captureRollbackVisualSnapshot();
       }
@@ -12432,6 +12786,7 @@
         step: _tStep - _tStep0,
         postStep: _tTotal - _tStep,
       });
+      _pushRbProbe('normal');
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
       if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
@@ -15195,6 +15550,20 @@
     isInMatch: () => {
       const s = NetplayRollbackApi.getSceneStatus();
       return s.ready && s.scene === 22 && s.status === 1;
+    },
+    // Inclusive: true when in the battle scene including the in-game pause
+    // menu (status 2) and unpause animation (status 3). Demo UI uses this
+    // so a player pressing START doesn't trip the match-end transition
+    // (RTT slider sweeps to 0, "Match ended" status, post-match overlay,
+    // auto-compare stop) — pause is still the same match. Strict isInMatch
+    // is the right gate for fake-peer's random-input injection: during
+    // status=2 the pause menu accepts any controller's buttons, so P2
+    // random presses navigate the menu and immediately unpause. SSB64
+    // status enum: 0=Wait, 1=Go, 2=Pause, 3=Unpause, 5=End. See
+    // lib/ssb-decomp-re/src/sc/scdef.h SCBattleGameStatus.
+    isInMatchOrPaused: () => {
+      const s = NetplayRollbackApi.getSceneStatus();
+      return s.ready && s.scene === 22 && (s.status === 1 || s.status === 2 || s.status === 3);
     },
   };
 

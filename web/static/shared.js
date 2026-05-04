@@ -81,15 +81,29 @@
   let _keyupHandler = null;
   let _blurHandler = null;
   let _visibilityHandler = null;
+  // Sticky press-since-last-read tracking: keydown adds, keyup does NOT
+  // remove. readLocalInput merges this into the held set on each call
+  // then clears it. Prevents quick press+release from being dropped
+  // when the gap between two forward-tick reads is longer than the
+  // press itself. The gap is normally one rAF (~16 ms) but during a
+  // rollback replay window it stretches to depth*16 ms — JS skips
+  // readLocalInput on replay ticks (uses historical _localInputs[F]),
+  // so a press that happens entirely within a 100-180 ms replay window
+  // would otherwise never reach the engine. This also helps any case
+  // where a press is shorter than one frame (e.g. very-fast taps,
+  // gamepad-to-keyboard bridging at >60 Hz).
+  const _recentlyPressedKeys = new Set();
 
   function clearHeldKeysOnFocusLoss() {
     if (_activeHeldKeys) _activeHeldKeys.clear();
+    _recentlyPressedKeys.clear();
   }
 
   function ensureKeyTrackingListeners() {
     if (!_listenersAdded) {
       _keydownHandler = (e) => {
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
+        _recentlyPressedKeys.add(e['keyCode']);
       };
       _keyupHandler = (e) => {
         if (_activeHeldKeys) _activeHeldKeys.delete(e['keyCode']);
@@ -500,7 +514,26 @@
     if (keyMap) {
       if (!pageFocused) {
         heldKeys?.clear?.();
+        _recentlyPressedKeys.clear();
       } else {
+        // Merge any key that was pressed since the previous read into
+        // the held set for the duration of THIS read. _recentlyPressedKeys
+        // is sticky on keydown / non-sticky on keyup, so a press+release
+        // that landed entirely within a rollback replay window (where
+        // readLocalInput was skipped) still surfaces here as one held
+        // frame. After consumption it's cleared so the very next read
+        // sees the actual current state. See _recentlyPressedKeys def.
+        let stickyAdded = null;
+        if (_recentlyPressedKeys.size > 0) {
+          _recentlyPressedKeys.forEach((kc) => {
+            if (!heldKeys.has(kc)) {
+              if (!stickyAdded) stickyAdded = [];
+              stickyAdded.push(kc);
+              heldKeys.add(kc);
+            }
+          });
+          _recentlyPressedKeys.clear();
+        }
         heldKeys.forEach((kc) => {
           const btnIdx = keyMap[kc];
           if (btnIdx !== undefined && btnIdx < 16) input.buttons |= 1 << btnIdx;
@@ -513,6 +546,14 @@
         if (input.cx === 0 && input.cy === 0) {
           input.cx = kb.cx;
           input.cy = kb.cy;
+        }
+        // Remove sticky-only keys after sampling so the NEXT read sees
+        // genuinely-held keys only. Without this, a sticky-pressed key
+        // that the user already released would appear to stay held on
+        // every subsequent read until another keyup arrives — which
+        // never does because the actual physical keyup already fired.
+        if (stickyAdded) {
+          for (let i = 0; i < stickyAdded.length; i++) heldKeys.delete(stickyAdded[i]);
         }
       }
     }

@@ -381,7 +381,17 @@
   //   touched the controls in the current match (respect their choice).
   // - true → false (leaving the match / back to menu): stop auto-compare and
   //   reset rollback to ON so the next match starts clean.
+  // _wasInMatch tracks the inclusive predicate (in-match including in-game
+  // pause/unpause): true throughout a battle session even when P1 has the
+  // pause menu open. The strict isInMatch (status=1 only) is reserved for
+  // fake-peer's random-input gate — see _lastFakePeerMatchActive below.
   let _wasInMatch = false;
+  // Strict-mode edge tracker for fake-peer: status=1 only. During in-game
+  // pause (status=2) the SSB64 pause menu accepts any controller's buttons,
+  // so P2 random presses navigate the menu and immediately unpause. We flip
+  // fake-peer's match-active to false the moment P1 pauses so its next
+  // injected input is a clean zero, and back to true on unpause.
+  let _lastFakePeerMatchActive = false;
   let _userInteractedThisMatch = false;
   const _markUserInteracted = () => {
     _userInteractedThisMatch = true;
@@ -421,12 +431,20 @@
   // Slider represents RTT (round-trip time, what real ping shows). The
   // synthetic peer's per-packet delivery delay is rtt/2 (one-way).
   // DEFAULT_MATCH_RTT_MS = 100 ms is roughly cross-country LAN-ish.
-  // RTT_SLIDER_MAX = 150 ms covers the realistic envelope for
-  // competitive netplay. Past 150 ms the gameplay degrades for reasons
-  // unrelated to rollback (block windows, reaction time, etc.) so
-  // higher numbers wouldn't be a useful demo.
+  // RTT_SLIDER_MAX = 110 ms is the upper bound where the engine's
+  // visible-rollback-depth cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH=7 in
+  // build/kn_rollback/kn_rollback.c) still fits spike-driven rollbacks
+  // — depth ≈ (latency + spike) / 16.67. With spike=60 ms, depth lands
+  // at ~5-7 frames across 0-110 ms RTT. Past 110 ms, depth crosses 7
+  // and the engine starts silently dropping mispredictions via
+  // DEEP-MISPREDICT-SKIP, which would visually present as "the
+  // rollback counter stops ticking at high RTT" — confusing for a
+  // demo. 110 ms is also realistically the upper bound at which
+  // shipping fighters consider a connection viable for tournament
+  // play (Skullgirls / MK11 max-prediction is also 7 frames),
+  // making this a truthful framing rather than an artificial limit.
   const DEFAULT_MATCH_RTT_MS = 100;
-  const RTT_SLIDER_MAX = 150;
+  const RTT_SLIDER_MAX = 110;
   // Animation handle for the slider's 0 → target transition.
   let _lagAnimRaf = 0;
 
@@ -436,18 +454,31 @@
   };
 
   const _networkFromControls = () => {
-    // Slider value is RTT (ms). Convert to one-way for fake-peer's
-    // internal `latencyMs` (which is added once to delivery time per
-    // packet — that's the one-way travel cost). Jitter scales with RTT
-    // at 5 % so a 200 ms RTT picks up ±10 ms jitter, matching real WAN
-    // behaviour. Default loss rate 0.005 (0.5 %) — real WebRTC is in
-    // the 0.1-1 % range on good links and the demo should exercise the
-    // redundant-frame recovery path it would actually rely on.
+    // Slider value is RTT (ms) and acts as a single "how rough is your
+    // network" dial — every knob below scales with it so cranking the
+    // slider drives more rollbacks, not just more latency. Latency is
+    // the one-way travel cost (rtt/2) added once per packet by
+    // fake-peer. The remaining knobs each provide an independent path
+    // for inputs to miss the C engine's prediction window:
+    //   - jitter: ramps from 10 % of RTT at the low end to ~15 % near
+    //     the slider max. Real WAN is in this range; under-modeling it
+    //     (the old 5 %) made even 150 ms RTT look smoother than reality.
+    //   - lossProb: superlinear (rtt/150)^1.5 ramp, capped at 2 %.
+    //     Forces the redundant-frames recovery path; when redundancy
+    //     fails to bridge a gap the engine has to predict longer and
+    //     occasionally rolls back deeper.
+    //   - reorderProb: same ramp shape as loss, exercises the C
+    //     engine's out-of-order input handling.
+    // mispredictProb stays 0 — fake-peer's pre-match path uses it to
+    // inject random divergence outside a match, which would derail the
+    // baked menu autopilot before the user reaches gameplay.
     const rtt = _readRtt();
+    const ramp = rtt > 0 ? Math.pow(rtt / RTT_SLIDER_MAX, 1.5) : 0;
     return {
       latencyMs: rtt / 2,
-      jitterMs: rtt * 0.05,
-      lossProb: rtt > 0 ? 0.005 : 0,
+      jitterMs: rtt * (0.1 + rtt * 0.0003),
+      lossProb: Math.min(0.02, ramp * 0.02),
+      reorderProb: Math.min(0.02, ramp * 0.02),
       mispredictProb: 0,
     };
   };
@@ -782,7 +813,12 @@
     const pause = $('emu-pause');
     const stop = $('emu-stop');
     const reset = $('emu-reset');
-    const inMatch = !!window.NetplayRollback?.isInMatch?.();
+    // Use the pause-inclusive predicate so the demo's UI Pause/Stop stay
+    // enabled when P1 has the SSB64 in-game pause menu open. Strict
+    // isInMatch flips false on status=2 and would disable both buttons
+    // mid-pause, leaving the user with no way to stop the demo without
+    // first unpausing the game.
+    const inMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
     const interactiveOk = _engineRunning && inMatch;
     if (pause) pause.disabled = !interactiveOk;
     if (stop) stop.disabled = !interactiveOk;
@@ -1153,7 +1189,10 @@
   const _renderHudText = (counters, totalPreds) => {
     const rtt = _readRtt();
     const delay = counters?.delay ?? 0;
-    const isInMatch = !!window.NetplayRollback?.isInMatch?.();
+    // Pause-inclusive: keep the result panel showing the current mode's
+    // feel (INSTANT INPUT / X ms LATE) while the player has the SSB64
+    // pause menu open, instead of flipping to WAITING the moment status=2.
+    const isInMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
     const feel = _inputFeel(counters?.isCRollback, isInMatch, delay);
     const feelEl = $('hud-feel');
     if (feelEl) {
@@ -1244,10 +1283,36 @@
       _renderHudText(counters, totalPreds);
     }
 
-    // Drive auto-compare from the precise in-match scene transition.
-    // isInMatch() returns true only when scene=22 + gameStatus=1 — the
-    // actual vs battle, not menus, CSS, stage select, or load screens.
-    const inMatch = !!window.NetplayRollback?.isInMatch?.();
+    // Two predicates drive different parts of the demo's match transition:
+    //
+    //   isInMatch()        — strict (scene=22 + status=1). Flips false the
+    //                        moment P1 presses START and the SSB64 pause
+    //                        menu opens. Used to gate fake-peer's random
+    //                        input injection: during pause, P2's random
+    //                        button presses navigate the pause menu and
+    //                        instantly select Continue (or Quit), undoing
+    //                        P1's pause from the player's POV.
+    //
+    //   isInMatchOrPaused()— inclusive (scene=22 + status in {1,2,3} =
+    //                        Go/Pause/Unpause). True throughout the battle
+    //                        session, including the pause-menu interlude.
+    //                        Used to gate the demo's match-start /
+    //                        match-end UX (RTT slider sweep, "Match ended"
+    //                        status, post-match overlay, auto-compare
+    //                        start/stop). Without this split, P1 pressing
+    //                        START fired the full match-end transition,
+    //                        and the unpause fired match-start — UI churned
+    //                        every pause cycle.
+    const inMatchStrict = !!window.NetplayRollback?.isInMatch?.();
+    const inMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
+    // Edge-detect strict transitions for fake-peer independent of the UI
+    // edge below — the strict edge fires on every pause/unpause so fake-peer
+    // silences immediately, while the UI edge only fires on real match
+    // boundaries (battle entry / battle exit).
+    if (inMatchStrict !== _lastFakePeerMatchActive) {
+      _lastFakePeerMatchActive = inMatchStrict;
+      window.KNFakePeer?.setMatchActive?.(inMatchStrict);
+    }
     if (inMatch !== _wasInMatch) {
       _wasInMatch = inMatch;
       // Pause/Stop track inMatch; recompute now that it changed.

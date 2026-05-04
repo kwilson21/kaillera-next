@@ -645,8 +645,9 @@
             press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
             latency. Either way your input still lands at the current frame, which is the point: rollback hides the
             network from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the
-            opponent's input every frame, so every keypress carries the round-trip delay directly. The round-trip is on
-            the wire either way; the two modes just choose where to pay the cost.
+            opponent's input every frame, so every keypress is delayed by the time it takes the peer's input to arrive —
+            about half the round-trip plus a jitter cushion. The wire delay is the same either way; the two modes just
+            choose where to pay the cost.
           </p>
           <p class="explainer">
             The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
@@ -678,7 +679,7 @@
               Connection: <strong>—</strong> &middot; Frame delay: <strong>0</strong>
             </div>
             <div id="hud-details" class="hud-details">
-              Mode: ROLLBACK · RTT: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
+              Engine: Waiting (start a match) · Mode: Rollback · RTT: 0 ms · — fps · Frame: 0 · Rollbacks: none yet
             </div>
           </div>
 
@@ -687,7 +688,7 @@
               <label for="lag">Network RTT</label>
               <span id="lag-value" class="value">0 ms RTT</span>
             </div>
-            <input id="lag" type="range" min="0" max="150" step="5" value="0" />
+            <input id="lag" type="range" min="0" max="110" step="5" value="0" />
             <p class="slider-hint">
               Round-trip time, like a real ping reading. Higher RTT = more predictions/sec (the engine running ahead of
               slot 1's input). Typical real-world: ~30 ms LAN, ~60 ms regional, ~150 ms cross-country.

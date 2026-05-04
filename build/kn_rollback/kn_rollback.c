@@ -1015,7 +1015,17 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
              * KN_MAX_VISIBLE_ROLLBACK_DEPTH=12) so the same headroom exists
              * across the new low-delay range without dropping mispredicts. */
             #ifndef KN_MAX_VISIBLE_ROLLBACK_DEPTH
-            #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 12
+            /* 7 = matches Skullgirls / Mortal Kombat 11; one frame
+             * tighter than GGPO's default of 8. Capping deeper means
+             * shorter perceptible freeze windows during replay (depth
+             * × 16.67ms / burst), at the cost of silently dropping
+             * mispredictions deeper than 7 (DEEP-MISPREDICT-SKIP).
+             * The demo pairs this with an RTT slider capped at 110 ms
+             * (see RTT_SLIDER_MAX in demo.js) so spike-driven depth
+             * stays under the cap across the entire slider range —
+             * past ~110 ms RTT the depth math (latency_frames + spike
+             * frames) crosses 7 and rollbacks would silently drop. */
+            #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 7
             #endif
             int visible_rb_max;
             if (rb.true_rollback) {
@@ -1104,26 +1114,30 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
     /* ── Pacing gate: if JS says we're too far ahead, maintain ring and skip ──
      * frame_adv >= 0 means JS computed a valid frame advantage.
-     * Threshold is sized to keep a 2-frame margin below visible_rb_max so
-     * a misprediction arriving right at the throttle boundary still has
-     * room to roll back without DEEP-MISPREDICT-SKIP firing.
      *
      * Legacy (rb.true_rollback=0): visible_rb_max=delay+4, pacing=delay+2.
-     * True rollback: visible_rb_max=min(delay+10, 12) per the misprediction
-     *   handler; pacing=min(delay+8, 10). Lowering the pacing threshold to
-     *   delay+2 under true rollback would force the engine to throttle on
-     *   typical RTT/2 frame depths (5-7 frames at 80ms RTT), which defeats
-     *   the entire point of true rollback netcode — the local engine is
-     *   supposed to run ahead with predictions and the misprediction handler
-     *   is supposed to absorb the depth, not the pacing throttle. */
+     *   The +2 margin keeps the throttle slightly ahead of the rollback
+     *   tolerance so a late misprediction can still rewind cleanly.
+     * True rollback: pacing=delay+8 — purely a safety net for runaway
+     *   frame advantage (e.g. peer disconnected). NOT margin-coupled to
+     *   the misprediction-handler cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH=7),
+     *   because the cap is intentionally tight and the natural RTT/2
+     *   frame_adv at 100+ ms RTT routinely exceeds it. Rollbacks deeper
+     *   than the cap are silently dropped (DEEP-MISPREDICT-SKIP) instead
+     *   of forcing a throttle. */
     int pacing_threshold;
     if (rb.true_rollback) {
-        #ifndef KN_MAX_VISIBLE_ROLLBACK_DEPTH
-        #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 12
-        #endif
-        int proposed = rb.delay_frames + 8;
-        int cap = KN_MAX_VISIBLE_ROLLBACK_DEPTH - 2; /* keep 2-frame margin below max */
-        pacing_threshold = (proposed < cap) ? proposed : cap;
+        /* True rollback: pacing only fires as a safety net for runaway
+         * frame advantage — it's NOT tied to the visible-rollback cap.
+         * The previous formula min(delay+8, KN_MAX_VISIBLE_ROLLBACK_DEPTH-2)
+         * was a margin-below-cap safeguard, but with the cap tightened to
+         * 7 to match Skullgirls/MK11, that margin collapses to 5 — which
+         * is below the natural RTT/2 frame_adv at 100+ ms RTT. Keeping
+         * them coupled would make the engine throttle constantly on any
+         * cross-state network. Decouple: pacing fires at delay+8 (a
+         * generous safety net), rollbacks beyond cap silently drop into
+         * DEEP-MISPREDICT-SKIP as documented. */
+        pacing_threshold = rb.delay_frames + 8;
     } else {
         pacing_threshold = rb.delay_frames + 2;
     }

@@ -42,6 +42,19 @@
   // movements applied to P2's starting position effectively pick a random
   // character without us having to script CSS-specific inputs.
   let _getMirroredInput = null;
+  // Override for the "is the demo currently in an active match" decision.
+  // null  → fall back to NetplayRollback.isInMatch() (scene+status read).
+  // bool  → demo.js has explicit knowledge that overrides the scene/status
+  //         heuristic. SSB64's status value during the GAME!/results
+  //         animation isn't verified to flip away from 1, so without this
+  //         override fake-peer can keep firing random P2 inputs after the
+  //         user perceives match end.
+  let _matchActiveOverride = null;
+  // Tracks the previous inMatch decision so we can reset held random-input
+  // state on the true→false edge — otherwise stale held buttons / stick
+  // values can leak into the next match's first 30-90 frames before the
+  // hold timer expires and a fresh random input is generated.
+  let _lastInMatch = false;
   let _lastSeenFrame = -1;
   let _lastEngineFrameSeen = -1;
   let _queue = [];
@@ -119,30 +132,50 @@
       cy: input.cy ? input.cy + _adcJitter() : 0,
     };
   };
-  // Marks a window of frames where ALL packets get a delivery spike.
-  // Single-packet spikes don't trigger rollback because the redundancy
-  // buffer (REDUNDANT_FRAMES=5 frames in each on-time packet) carries
-  // older inputs forward and pre-empts the spike. Spiking a CONTIGUOUS
-  // window > REDUNDANT_FRAMES blocks the redundancy bypass — both the
-  // primary packet AND its 5-deep redundancy carriers are all delayed
-  // together, so the engine genuinely has nothing to apply at the
-  // apply-frame deadline → predicts → mispredicts when the burst
-  // eventually arrives → rollback.
-  // 6-frame window matches the real-network behavior of brief
-  // congestion: a queue stalls for ~100 ms, all packets release together.
+  // Spike window: a contiguous burst of frames where ALL packets get
+  // delivery delay. Must be > REDUNDANT_FRAMES=5 to block the
+  // redundancy bypass — single-packet spikes get pre-empted by
+  // redundant copies in the next on-time packet. Real-world analog:
+  // brief network congestion (~100 ms queue stall, packets release
+  // together).
+  //
+  // Triggered on a fixed wall-clock cadence (every ~750 ms) rather
+  // than on P2 input transitions. Transitions varied with the random
+  // hold timing, so spike rate drifted with RTT. Fixed cadence keeps
+  // the rollback counter incrementing predictably as the user moves
+  // the slider.
   let _spikeWindowEnd = -1;
+  let _nextSpikeAtFrame = -1;
   const SPIKE_BURST_FRAMES = 6;
+  const SPIKE_INTERVAL_FRAMES_MIN = 30; // ~500 ms at 60fps
+  const SPIKE_INTERVAL_FRAMES_MAX = 60; // ~1 s at 60fps
   const _matchInputForFrame = (frame) => {
     if (frame > _heldUntilFrame || !_heldRandomInput) {
       _heldRandomInput = _randomInput();
       // Hold 30-90 frames (~500ms-1.5s) — closer to real human button-hold
       // cadence (run, charge, neutral).
       _heldUntilFrame = frame + 30 + Math.floor(Math.random() * 60);
-      // Open a 6-frame spike window that includes this transition + the
-      // next 5 packets, blocking redundancy bypass.
-      _spikeWindowEnd = frame + SPIKE_BURST_FRAMES - 1;
     }
     return _applyJitter(_heldRandomInput);
+  };
+  // Open a new spike window when due. The burst always includes a
+  // transition window — but TIMING of spikes is detached from transitions,
+  // so the rollback rate is stable as the user moves the RTT slider.
+  const _maybeOpenSpikeWindow = (frame) => {
+    if (_nextSpikeAtFrame < 0) {
+      _nextSpikeAtFrame =
+        frame +
+        SPIKE_INTERVAL_FRAMES_MIN +
+        Math.floor(Math.random() * (SPIKE_INTERVAL_FRAMES_MAX - SPIKE_INTERVAL_FRAMES_MIN));
+      return;
+    }
+    if (frame >= _nextSpikeAtFrame && frame > _spikeWindowEnd) {
+      _spikeWindowEnd = frame + SPIKE_BURST_FRAMES - 1;
+      _nextSpikeAtFrame =
+        frame +
+        SPIKE_INTERVAL_FRAMES_MIN +
+        Math.floor(Math.random() * (SPIKE_INTERVAL_FRAMES_MAX - SPIKE_INTERVAL_FRAMES_MIN));
+    }
   };
 
   const _pruneEvents = (now) => {
@@ -185,13 +218,37 @@
       // In an actual match, P2 plays held random inputs — drives authentic
       // mispredictions because the engine predicts "same as last frame" and
       // gets surprised every time P2 picks a new input. Outside a match
-      // (title/CSS/menus) the demo provides a baked P2 menu-autopilot via
-      // _getMirroredInput so the synthetic peer makes its CSS character
-      // selection. Falls through to zero / mispredict-prob when the
-      // recording has no entry for this frame.
-      const inMatch = !!window.NetplayRollback?.isInMatch?.();
+      // (title/CSS/menus, post-match results, between matches) the demo
+      // provides a baked P2 menu-autopilot via _getMirroredInput so the
+      // synthetic peer makes its CSS character selection. Falls through to
+      // zero / mispredict-prob when the recording has no entry for this
+      // frame.
+      //
+      // The "are we in a match" decision prefers _matchActiveOverride when
+      // demo.js has set it explicitly; otherwise it falls back to the
+      // engine's scene+status read. The override exists because SSB64's
+      // status value during the GAME!/results animation isn't verified to
+      // flip away from 1, so the scene+status check can return true
+      // longer than the user perceives "match has ended" — fake-peer
+      // would keep firing random inputs into the post-match animation.
+      const inMatch = _matchActiveOverride !== null ? !!_matchActiveOverride : !!window.NetplayRollback?.isInMatch?.();
+      if (inMatch !== _lastInMatch) {
+        // Edge transition: drop any held random input so the next match
+        // starts fresh and post-match frames don't carry forward a stale
+        // button-hold past the inMatch=false boundary.
+        _heldRandomInput = null;
+        _heldUntilFrame = -1;
+        _lastInMatch = inMatch;
+      }
       if (inMatch) {
         input = _matchInputForFrame(frame);
+        // Open a 6-frame spike burst window on a fixed cadence (~500ms-1s).
+        // Without this, the natural-jitter network simulation never pushes
+        // peer arrival past the apply-frame deadline (delay covers RTT/2 +
+        // jitter cleanly) so rollbacks never fire. Spikes simulate the
+        // real-world brief network congestion that GGPO-style rollback is
+        // designed to recover from.
+        _maybeOpenSpikeWindow(frame);
       } else if (_getMirroredInput) {
         const mirrored = _getMirroredInput(frame);
         input = mirrored || _zeroInput();
@@ -209,16 +266,35 @@
     }
 
     const jitter = _network.jitterMs > 0 ? (Math.random() * 2 - 1) * _network.jitterMs : 0;
-    // Spike all packets in the 6-frame burst window after a transition.
+    // Spike all packets in the burst window after a transition.
     // Single-packet spikes don't trigger rollback (redundancy bypass);
     // spiking the whole burst blocks both primary AND redundant copies,
     // so the engine genuinely has to predict → mispredicts when the
-    // delayed burst arrives → visible rollback.
-    // 100 ms spike at 100 ms RTT (delay≈5) puts arrival at engine-frame
-    // F+9 ≈ depth 4 past apply, well within visible_rb_max=12.
+    // delayed burst arrives → visible rollback in the counter.
+    // 50 ms spike at 100 ms RTT (delay≈5) puts arrival at engine-frame
+    // F+8 ≈ depth 3 past apply. With burst=1 spreading replay, that's
+    // 3 ticks of catch-up — finishes inside one render-frame budget on
+    // most occurrences, so the rollback counter visibly increments
+    // without a perceptible hitch most of the time. 100 ms produced
+    // depth 6-9 which read as a brief stutter ~12% of the time.
     let spikeMs = 0;
     if (_network.latencyMs > 0 && frame <= _spikeWindowEnd) {
-      spikeMs = 100;
+      // 60 ms spike = "Wi-Fi interference" / "cable peak-hour micro-burst"
+      // — solidly in the realistic-real-network range. Sized so rollback
+      // depth lands in shipping-fighter territory (3-7 frames):
+      //   slider 0 ms RTT:    depth ~3.6  (under cap=7)
+      //   slider 50 ms RTT:   depth ~5.1  (under cap)
+      //   slider 100 ms RTT:  depth ~6.6  (under cap, matches GGPO worst-case)
+      //   slider 130+ ms RTT: depth ~8+  (exceeds cap, silently drops)
+      // The 130+ silent-drop region is the truthful equivalent of "a
+      // 150 ms RTT match where rollback can't keep up" — same thing
+      // happens in real GGPO games on a bad day. Demo's HUD shows rollback
+      // counter ticking strongly across slider 0-120 ms, taper at the very
+      // top — no fake "we recovered" signal where real netplay couldn't.
+      // Earlier values: 100 ms (baseline) overshot cap; latencyMs+60
+      // (uncommitted) overshot it more. Both produced 167-200 ms freezes
+      // out of the engine's burst-1 reply path.
+      spikeMs = 60;
       if (frame === _spikeWindowEnd) {
         _recordEvent({ spike: true, spikeMs: Math.round(spikeMs) });
       }
@@ -317,6 +393,8 @@
     const currentFrame = Math.max(0, Math.trunc(Number(_getCurrentFrame()) || 0));
     _lastEngineFrameSeen = currentFrame;
     _lastSeenFrame = -1;
+    _matchActiveOverride = null;
+    _lastInMatch = false;
     _running = true;
     _rafId = _nativeRAF(_tick);
   };
@@ -331,6 +409,8 @@
     _getMirroredInput = null;
     _heldRandomInput = null;
     _heldUntilFrame = -1;
+    _matchActiveOverride = null;
+    _lastInMatch = false;
   };
 
   const setNetwork = ({ latencyMs, jitterMs, lossProb, mispredictProb, reorderProb } = {}) => {
@@ -383,10 +463,36 @@
     };
   };
 
+  // Demo.js calls this to authoritatively gate match-style random inputs.
+  // Pass true at the inMatch=true edge in _updateHud, false at the
+  // inMatch=false edge. Pass null to fall back to the engine's
+  // isInMatch() scene+status read (default behavior). Demo.js's higher
+  // level state machine is more reliable than the unverified SSB64
+  // status-during-results-screen value, so the override is preferred
+  // once the demo has explicit knowledge of match phase.
+  const setMatchActive = (active) => {
+    _matchActiveOverride = active === null || active === undefined ? null : !!active;
+    // On the demo→inactive edge, fully tear down match-style state:
+    //   - clear the held random-input timer so a stale button-hold
+    //     can't replay if match starts again,
+    //   - drop the in-flight _queue so any random inputs scheduled
+    //     during the match (still latency-delayed at delivery) don't
+    //     leak into the engine's input ring after the match has
+    //     visibly ended. _injectNow on stale frames is mostly a no-op
+    //     (out-of-window guard) but flushing keeps the contract clean.
+    if (_matchActiveOverride === false) {
+      _heldRandomInput = null;
+      _heldUntilFrame = -1;
+      _lastInMatch = false;
+      _queue = [];
+    }
+  };
+
   window.KNFakePeer = {
     start,
     stop,
     setNetwork,
+    setMatchActive,
     getStats,
   };
 })();
