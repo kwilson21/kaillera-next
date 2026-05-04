@@ -389,39 +389,54 @@
     return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
   };
 
-  // Re-runs delay negotiation against the current RTT samples and ceiling.
-  // Safe to call any time after the engine is past PHASE_LOCKSTEP_READY.
-  // Used by:
-  //   1. seedSyntheticRtt — demo slider updates synthetic peer RTT, this
-  //      re-tunes DELAY_FRAMES so lockstep mode reflects the new RTT
-  //      instead of staying pinned at whatever was negotiated at game start.
-  //   2. setPredictionsPaused — toggling rollback↔lockstep changes the
-  //      ceiling, so the negotiated delay should re-tune (a higher delay
-  //      is fine in rollback's prediction window but unplayable as lockstep
-  //      input lag).
+  // Re-runs delay negotiation against the CURRENT per-peer RTT samples and
+  // ceiling. The global _rttSamples is frozen at game start so reading it
+  // mid-match returns stale samples — for live re-tuning we aggregate
+  // peer.rttSamples (which seedSyntheticRtt and the production WebRTC ping
+  // path both keep fresh).
+  //
+  // useHalfRtt picks the formula:
+  // - True rollback w/ predictions live: jitterMargin only — local input
+  //   applies at current frame, RTT/2 doesn't show up as input lag.
+  // - True rollback w/ predictions paused (demo lockstep) OR legacy mode:
+  //   RTT/2 + jitterMargin — engine waits for remote input, so half the
+  //   round-trip IS the input lag the player feels. At 40ms RTT, low
+  //   jitter, this gives delay=3 (lockstep) vs delay=1 (rollback).
   const _recomputeDelay = () => {
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     if (!hasRollback) return;
-    const playerPeerSids = Object.keys(_peers).filter((sid) => {
-      const p = _peers[sid];
-      return p.slot !== null && p.slot !== undefined;
-    });
-    if (playerPeerSids.length === 0) return; // solo mode: no negotiation
-    const useHalfRtt = !RB_TRUE_ROLLBACK;
-    let ownDelay = _delayFromRttSamples(_rttSamples, useHalfRtt);
-    if (ownDelay == null) ownDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+    const players = Object.values(_peers).filter((p) => p?.slot !== null && p?.slot !== undefined);
+    if (players.length === 0) return; // solo mode: no negotiation needed
+    // Aggregate live peer samples — _rttSamples is frozen at game start
+    // and won't reflect mid-match RTT changes (slider in demo, real
+    // network drift in production).
+    const liveSamples = [];
+    for (const p of players) if (p.rttSamples?.length) liveSamples.push(...p.rttSamples);
+    if (liveSamples.length === 0) return;
+    liveSamples.sort((a, b) => a - b);
+    const useHalfRtt = _predictionsPaused || !RB_TRUE_ROLLBACK;
+    const ownDelay = _delayFromRttSamples(liveSamples, useHalfRtt);
+    if (ownDelay == null) return;
     let maxDelay = ownDelay;
-    for (const p of Object.values(_peers)) {
-      // Peer-side formula always uses RTT/2 because peer's "ownDelay" includes
-      // their local→us lag the same way our ownDelay does.
-      const peerDelay = _delayFromRttSamples(p.rttSamples, true);
+    // Per-peer view uses the SAME formula choice as own — peer.rttSamples
+    // are MY measurements of MY ping to that peer (not the peer's own
+    // self-measurement), so the active mode determines whether RTT/2 folds
+    // in for the peer view too. Old code always used RTT/2 for peer formula
+    // even in true rollback, which leaked the "lockstep input-lag tax"
+    // back into rollback's negotiated delay (rollback never felt instant
+    // at typical RTTs because peerDelay dominated ownDelay).
+    for (const p of players) {
+      const peerDelay = _delayFromRttSamples(p.rttSamples, useHalfRtt);
       if (peerDelay != null && peerDelay > maxDelay) maxDelay = peerDelay;
     }
     if (maxDelay !== DELAY_FRAMES) {
       const prev = DELAY_FRAMES;
       DELAY_FRAMES = maxDelay;
       if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
-      _syncLog(`delay re-tuned: ${prev} -> ${maxDelay} (own=${ownDelay} ceiling=${_delayCeiling()})`);
+      _syncLog(
+        `delay re-tuned: ${prev} -> ${maxDelay} (own=${ownDelay} ceiling=${_delayCeiling()} ` +
+          `mode=${_predictionsPaused ? 'lockstep' : 'rollback'} samples=${liveSamples.length})`,
+      );
     }
     return maxDelay;
   };
