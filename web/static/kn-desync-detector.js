@@ -502,15 +502,28 @@
         }
       }
       if (!_hasRealPeer) return;
+      // Rate-limit digest BUILD to broadcast cadence + replay-active
+      // frames. Per-frame build was the dominant main-thread cost
+      // (~3-9 ms × 60 Hz on mobile = up to 540 ms/sec at default mode B).
+      // The peer broadcasts only on its own cadence-aligned frames so
+      // any digest we built between cadence frames had nothing to
+      // compare against — wasted CPU. We still build on every replay-
+      // active frame so _maybeEmitReplayTrajectoryEvent's per-replay
+      // detection isn't lost. Detection latency for cross-peer drift
+      // moves from 1 frame (~16 ms) to cadence frames (mode B = 1 frame
+      // unchanged; mode C = 6 frames ≈ 100 ms — still well inside
+      // typical desync timescales).
+      const cadence = CONFIG.digestCadence[_mode];
+      const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
+      if (!replayActive && frame % cadence !== 0) return;
+
       const localDigest = _buildLocalDigest(frame);
       if (!localDigest) return;
-      const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
       _maybeEmitReplayTrajectoryEvent(localDigest);
       if (replayActive) return;
       _localDigests.set(frame, localDigest);
       _trimDigestMap(_localDigests, frame - CONFIG.historyDepth);
       _compareAtFrame(localDigest);
-      const cadence = CONFIG.digestCadence[_mode];
       if (frame % cadence === 0) _broadcastDigest(localDigest);
     },
 
