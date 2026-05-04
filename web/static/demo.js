@@ -632,6 +632,11 @@
       _setStatus(`REC mode (${label}) — play through to a match. Recording stops automatically.`);
     } else if (MENU_AUTOPILOT_P1_TRANSITIONS.length > 0) {
       _autopilotActive = true;
+      // Freeze DELAY_FRAMES while the autopilot is running. Scripted button
+      // presses use ~5-frame windows; if delay shifts mid-press the engine
+      // reads the input ring at a different applied frame and lands past
+      // the release — press dropped. _finishAutopilot re-enables.
+      window.NetplayRollback?.setDelayRetuneEnabled?.(false);
       _setStatus('Setting up your match…');
       // Indicator deferred to the gesture click — the user hasn't even seen
       // the emulator yet, so showing "your inputs disabled" before they tap
@@ -680,6 +685,10 @@
   const _finishAutopilot = () => {
     if (!_autopilotActive) return;
     _autopilotActive = false;
+    // Re-enable RTT-tuned delay updates first so the predictions-toggle
+    // re-tune below picks up the current slider value (the slider can
+    // move via _animateLagTo right around this transition).
+    window.NetplayRollback?.setDelayRetuneEnabled?.(true);
     // Now that we're past the autopilot's menu navigation, restore the
     // engine's prediction state to the user's actual rollback choice.
     // _setRollbackEnabled gates predictions on `_autopilotActive` ?

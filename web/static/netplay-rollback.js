@@ -402,7 +402,14 @@
   //   RTT/2 + jitterMargin — engine waits for remote input, so half the
   //   round-trip IS the input lag the player feels. At 40ms RTT, low
   //   jitter, this gives delay=3 (lockstep) vs delay=1 (rollback).
+  // Demo's autopilot uses fixed-frame scripted button presses with brief
+  // (~5-frame) windows. Changing DELAY_FRAMES while a press is buffered
+  // shifts the engine's read frame, sometimes landing past the release —
+  // press lost. The demo flips this off during autopilot and back on once
+  // _finishAutopilot has run.
+  let _delayRetuneEnabled = true;
   const _recomputeDelay = () => {
+    if (!_delayRetuneEnabled) return;
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     if (!hasRollback) return;
     const players = Object.values(_peers).filter((p) => p?.slot !== null && p?.slot !== undefined);
@@ -14869,6 +14876,18 @@
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
+    // Demo: freeze DELAY_FRAMES during autopilot so the recompute path
+    // (slider changes, predictions toggle) doesn't shift fixed-frame
+    // scripted button presses out of their press windows. Re-enable
+    // after _finishAutopilot — and recompute once so the post-autopilot
+    // delay matches the now-current slider value.
+    setDelayRetuneEnabled: (on) => {
+      const next = !!on;
+      const wasEnabled = _delayRetuneEnabled;
+      _delayRetuneEnabled = next;
+      if (next && !wasEnabled) _recomputeDelay();
+      return _delayRetuneEnabled;
+    },
     // Demo/UI pause: gates the per-frame tick callback without unwinding any
     // engine state. While paused the setInterval keeps firing but tick() is
     // skipped, so the emulator does not advance. Resume picks up cleanly.
