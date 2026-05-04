@@ -761,6 +761,21 @@
       getMirroredInput: _recordMode === 'p2' ? null : (frame) => _p2InputAtFrame(frame),
     });
     window.KNFakePeer?.setNetwork?.(_networkFromControls());
+    // Pre-seed the synthetic peer's RTT with the eventual MATCH-target lag
+    // (not the menu-time slider value, which is 0). The lockstep delay
+    // negotiation in netplay-rollback fires at PHASE_LOCKSTEP_READY —
+    // BEFORE _animateLagTo runs (which is gated on inMatch becoming true,
+    // line 905-906). Seeding here with the target makes the engine pick a
+    // GGPO-style RTT-tuned delay at match start instead of falling back to
+    // DEFAULT_DELAY_FRAMES=2 because the slider was still at 0 when the
+    // negotiation ran. Real WebRTC peers fill their own samples from real
+    // pings; this only affects demo with the synthetic peer.
+    const _matchTargetLag = _savedLagPreference != null ? _savedLagPreference : DEFAULT_MATCH_LAG_MS;
+    window.NetplayRollback?.seedSyntheticRtt?.({
+      slot: 1,
+      latencyMs: _matchTargetLag,
+      jitterMs: _matchTargetLag * 0.1,
+    });
     _setRollbackEnabled(_rollbackEnabled);
 
     // Engine + peer are running, so Pause/Stop are now meaningful.

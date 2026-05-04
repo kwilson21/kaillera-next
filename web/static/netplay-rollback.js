@@ -14725,6 +14725,30 @@
     setSyncInterval: (frames) => {
       _syncBaseInterval = _syncCheckInterval = Math.max(10, frames);
     },
+    // Synthetic-peer RTT seeding for the demo: pre-populates peer.rttSamples
+    // BEFORE injectRemoteInput starts firing, so the match-start delay
+    // negotiation at checkAllLockstepReady sees a non-empty sample buffer
+    // and can compute an RTT-tuned delay (jitter+1 frame for true rollback,
+    // RTT/2+jitter+1 for legacy). Without this, demo runs always fall back
+    // to DEFAULT_DELAY_FRAMES=2 regardless of the simulated network, so
+    // ?fakePeerJitter / KNFakePeer.setNetwork never affect the delay budget
+    // and rollback-rate is artificially high. Production peers fill their
+    // own rttSamples from real WebRTC pings; this only affects demo.
+    seedSyntheticRtt: ({ slot, latencyMs, jitterMs = 0, sampleCount = 22 } = {}) => {
+      const peer = ensureSyntheticPeer(slot);
+      if (!peer) return false;
+      const baseRtt = Math.max(0, Number(latencyMs) || 0) * 2; // one-way → RTT
+      const jitter = Math.max(0, Number(jitterMs) || 0);
+      const samples = [];
+      for (let i = 0; i < sampleCount; i++) {
+        // Uniform jitter ±jitterMs around baseRtt (matches what real ping
+        // distributions look like in the IQR-filtered formula).
+        samples.push(baseRtt + (Math.random() * 2 - 1) * jitter);
+      }
+      peer._rttSamples = samples.slice();
+      peer.rttSamples = samples.slice().sort((a, b) => a - b);
+      return true;
+    },
     injectRemoteInput: ({ slot, frame, input, ackFrame = -1, redundantFrames = null, observedRttMs = 0 } = {}) => {
       const peer = ensureSyntheticPeer(slot);
       if (!peer) return false;

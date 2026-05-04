@@ -284,6 +284,21 @@
       lossProb: _clamp(lossProb ?? _network.lossProb, 0, 0.3),
       mispredictProb: _clamp(mispredictProb ?? _network.mispredictProb, 0, 0.5),
     };
+    // Seed the synthetic peer's RTT samples so the match-start delay
+    // negotiation in netplay-rollback computes an RTT-tuned delay instead
+    // of falling back to DEFAULT_DELAY_FRAMES=2. Without this, the demo's
+    // ?fakePeerJitter and KNFakePeer.setNetwork latency settings have no
+    // effect on the delay budget — every demo session runs with delay=2
+    // regardless of simulated RTT, and rollback rate is artificially high.
+    // Real WebRTC peers fill their own samples from real pings; this is
+    // demo-only seeding via the dedicated rollback API.
+    try {
+      window.NetplayRollback?.seedSyntheticRtt?.({
+        slot: _slot,
+        latencyMs: _network.latencyMs,
+        jitterMs: _network.jitterMs,
+      });
+    } catch (_) {}
   };
 
   const getStats = () => {
