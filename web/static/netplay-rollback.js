@@ -402,12 +402,14 @@
   //   RTT/2 + jitterMargin — engine waits for remote input, so half the
   //   round-trip IS the input lag the player feels. At 40ms RTT, low
   //   jitter, this gives delay=3 (lockstep) vs delay=1 (rollback).
-  // Demo's autopilot uses fixed-frame scripted button presses with brief
-  // (~5-frame) windows. Changing DELAY_FRAMES while a press is buffered
-  // shifts the engine's read frame, sometimes landing past the release —
-  // press lost. The demo flips this off during autopilot and back on once
-  // _finishAutopilot has run.
-  let _delayRetuneEnabled = true;
+  // Live RTT-driven delay re-tune is opt-in. Default OFF so production keeps
+  // the original "negotiate once at handshake, freeze for the match" behavior
+  // (real WANs drift by a few ms but not enough to justify mid-match delay
+  // changes; muscle-memory expectations beat marginal optimization there).
+  // The demo opts in via setDelayRetuneEnabled(true) AFTER _finishAutopilot
+  // so scripted autopilot inputs aren't shifted out of their press windows
+  // by mid-setup recomputes.
+  let _delayRetuneEnabled = false;
   const _recomputeDelay = () => {
     if (!_delayRetuneEnabled) return;
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
