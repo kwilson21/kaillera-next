@@ -753,6 +753,84 @@
       return 4;
     }
   })();
+  // Diagnostic-only: ?tickProfile=1 records per-tick phase costs to a
+  // circular buffer at window.__knTickProfile so a probe can identify
+  // which phase dominates tick time. Off by default; recording costs
+  // ~5 performance.now() calls per tick when on, ~0 when off.
+  const RB_TICK_PROFILE = (() => {
+    try {
+      const raw = _urlParams.get('tickProfile') ?? localStorage.getItem('kn-tick-profile');
+      if (raw === '1') return true;
+    } catch (_) {}
+    return false;
+  })();
+  if (RB_TICK_PROFILE) window.__knTickProfile = [];
+  const _pushTickProfile = (rec) => {
+    if (!RB_TICK_PROFILE) return;
+    const buf = window.__knTickProfile;
+    if (!buf) return;
+    buf.push(rec);
+    if (buf.length > 1200) buf.splice(0, buf.length - 1200);
+  };
+  // Console helper: window.knTickProfileSummary() returns a digest of the
+  // last N ticks (default 600 = 10 s at 60 Hz). Use after enabling
+  // ?tickProfile=1 and playing through the stuttery period.
+  if (typeof window !== 'undefined') {
+    window.knTickProfileSummary = (n = 600) => {
+      const buf = window.__knTickProfile || [];
+      if (!buf.length) return { error: 'no samples — load with ?tickProfile=1' };
+      const slice = buf.slice(-n);
+      const pickField = (arr, key) => arr.map((r) => r[key]).filter((v) => Number.isFinite(v));
+      const pct = (arr, p) => {
+        if (!arr.length) return null;
+        const sorted = [...arr].sort((a, b) => a - b);
+        return +sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))].toFixed(2);
+      };
+      const stats = (arr) =>
+        arr.length
+          ? {
+              count: arr.length,
+              median: pct(arr, 0.5),
+              p95: pct(arr, 0.95),
+              p99: pct(arr, 0.99),
+              max: +Math.max(...arr).toFixed(2),
+            }
+          : { count: 0 };
+      const normal = slice.filter((r) => r.path === 'normal');
+      const replay = slice.filter((r) => r.path === 'replay');
+      const pacing = slice.filter((r) => r.path === 'pacing');
+      const overVsync = slice.filter((r) => r.total > 16.67);
+      const dominantPhase = {};
+      for (const r of overVsync.filter((r) => r.path === 'normal')) {
+        const phases = [
+          ['preTick', r.preTick],
+          ['preStep', r.preStep],
+          ['step', r.step],
+          ['postStep', r.postStep],
+        ];
+        phases.sort((a, b) => b[1] - a[1]);
+        dominantPhase[phases[0][0]] = (dominantPhase[phases[0][0]] || 0) + 1;
+      }
+      return {
+        sampled: slice.length,
+        pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length },
+        normal: {
+          total: stats(pickField(normal, 'total')),
+          step: stats(pickField(normal, 'step')),
+          preTick: stats(pickField(normal, 'preTick')),
+          postStep: stats(pickField(normal, 'postStep')),
+        },
+        replay: {
+          total: stats(pickField(replay, 'total')),
+          burstMs: stats(pickField(replay, 'burstMs')),
+          burstSteps: stats(pickField(replay, 'burstSteps')),
+        },
+        overVsyncCount: overVsync.length,
+        overVsyncPct: +((overVsync.length / slice.length) * 100).toFixed(1),
+        slowTickDominantPhase: dominantPhase,
+      };
+    };
+  }
   const RB_REPLAY_BURST_BUDGET_MS = (() => {
     try {
       const raw = _urlParams.get('replayBurstBudgetMs') ?? localStorage.getItem('kn-replay-burst-budget-ms');
@@ -12015,6 +12093,7 @@
               `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
             );
           }
+          _pushTickProfile({ f: _frameNum, path: 'pacing', total: performance.now() - _t0, preTick: _tPreTick - _t0 });
           return;
         }
       }
@@ -12051,6 +12130,14 @@
             dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} REPLAYING (${remaining} left) rb:${rb}`;
           }
         }
+        _pushTickProfile({
+          f: _frameNum,
+          path: 'replay',
+          total: performance.now() - _t0,
+          preTick: _tPreTick - _t0,
+          burstMs: performance.now() - burstStart,
+          burstSteps,
+        });
         return;
       }
 
@@ -12195,6 +12282,15 @@
       KNState.frameNum = _frameNum;
       if (window.KNDesync) KNDesync.tick(_frameNum);
       const _tTotal = performance.now();
+      _pushTickProfile({
+        f: _frameNum,
+        path: 'normal',
+        total: _tTotal - _t0,
+        preTick: _tPreTick - _t0,
+        preStep: _tStep0 - _tPreTick,
+        step: _tStep - _tStep0,
+        postStep: _tTotal - _tStep,
+      });
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
       if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
