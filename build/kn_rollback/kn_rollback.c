@@ -922,7 +922,30 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
          * accuracy that GGPO was designed for. */
         #define KN_STICK_ZONE_SIZE 12
         #define KN_STICK_ZONE(v) ((v) / KN_STICK_ZONE_SIZE)
-        #define KN_AXIS_ZONE_MATCH(a, b) (KN_STICK_ZONE(a) == KN_STICK_ZONE(b))
+        /* Boundary hysteresis. The zone-only match treats values 11 and 12
+         * as different (zones 0 vs 1) even though they're 1 stick unit
+         * apart and produce indistinguishable game state. Adjacent-zone
+         * matches with a small absolute diff (≤3 units) absorb that
+         * boundary jitter. Within-zone matching is unchanged; values two
+         * or more zones apart never match. Effective behaviour: same-zone
+         * diff up to 11 = match, cross-boundary diff up to 3 = match,
+         * diff ≥ ~12 between non-adjacent zones = mispredict.
+         *
+         * The actual input is always applied to the emulator regardless of
+         * this gate — this only affects whether a rollback fires. So a
+         * widened tolerance can't desync local state; the only cost is
+         * cross-peer state drift if a missed mispredict produced different
+         * game state on the two peers. With the band tight at 3 units that
+         * drift stays well under the deadzone (~16 units) for active-stick
+         * values and is guaranteed-zero for in-deadzone values. */
+        #define KN_STICK_ZONE_BOUNDARY_BAND 3
+        #define KN_AXIS_ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
+        #define KN_AXIS_ZONE_ADJACENT(a, b) \
+            (KN_STICK_ZONE(a) == KN_STICK_ZONE(b) + 1 || KN_STICK_ZONE(a) + 1 == KN_STICK_ZONE(b))
+        #define KN_AXIS_ZONE_MATCH(a, b) ( \
+            KN_STICK_ZONE(a) == KN_STICK_ZONE(b) || \
+            (KN_AXIS_ABS_DIFF(a, b) <= KN_STICK_ZONE_BOUNDARY_BAND && KN_AXIS_ZONE_ADJACENT(a, b)) \
+        )
         int btn_match = (pred->buttons == buttons);
         int lxd = pred->lx - lx; if (lxd < 0) lxd = -lxd;
         int lyd = pred->ly - ly; if (lyd < 0) lyd = -lyd;
