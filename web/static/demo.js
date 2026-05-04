@@ -325,26 +325,34 @@
       reader.readAsArrayBuffer(file);
     });
 
-  // Default lag the slider animates up to when the first match starts.
-  const DEFAULT_MATCH_LAG_MS = 120;
+  // Slider now represents RTT (round-trip time, what real ping shows),
+  // not one-way latency. The synthetic peer's per-packet delivery delay
+  // is rtt/2 (one-way). DEFAULT_MATCH_RTT_MS = 200 ms maps to the prior
+  // 100 ms one-way default (was 120 — slight reduction for realism;
+  // 200 ms RTT is on the high end of typical cross-country internet).
+  const DEFAULT_MATCH_RTT_MS = 200;
+  const RTT_SLIDER_MAX = 400;
   // Animation handle for the slider's 0 → target transition.
   let _lagAnimRaf = 0;
 
-  const _readLag = () => {
-    const lag = Number($('lag')?.value ?? 0);
-    return Number.isFinite(lag) ? Math.max(0, Math.min(300, lag)) : 0;
+  const _readRtt = () => {
+    const rtt = Number($('lag')?.value ?? 0);
+    return Number.isFinite(rtt) ? Math.max(0, Math.min(RTT_SLIDER_MAX, rtt)) : 0;
   };
 
   const _networkFromControls = () => {
-    // Slider value IS the actual lag now — no per-frame menu suppression.
-    // The slider sits at 0 in menus and animates up to DEFAULT_MATCH_LAG_MS
-    // (or the user's saved preference) when the match starts, so what the
-    // user sees on the slider matches what the synthetic peer experiences.
-    const lag = _readLag();
+    // Slider value is RTT (ms). Convert to one-way for fake-peer's
+    // internal `latencyMs` (which is added once to delivery time per
+    // packet — that's the one-way travel cost). Jitter scales with RTT
+    // at 5 % so a 200 ms RTT picks up ±10 ms jitter, matching real WAN
+    // behaviour. Default loss rate 0.005 (0.5 %) — real WebRTC is in
+    // the 0.1-1 % range on good links and the demo should exercise the
+    // redundant-frame recovery path it would actually rely on.
+    const rtt = _readRtt();
     return {
-      latencyMs: lag,
-      jitterMs: lag * 0.1,
-      lossProb: 0,
+      latencyMs: rtt / 2,
+      jitterMs: rtt * 0.05,
+      lossProb: rtt > 0 ? 0.005 : 0,
       mispredictProb: 0,
     };
   };
@@ -383,9 +391,9 @@
   };
 
   const _updateSliderLabels = () => {
-    const network = _networkFromControls();
+    const rtt = _readRtt();
     const label = $('lag-value');
-    if (label) label.textContent = `${network.latencyMs.toFixed(0)} ms`;
+    if (label) label.textContent = `${rtt.toFixed(0)} ms RTT`;
   };
 
   const _applyNetwork = () => {
@@ -652,8 +660,8 @@
     try {
       // Persist only the user's manually-chosen preference, not the
       // currently-animated slider position (which may be mid-animation).
-      if (_savedLagPreference != null) {
-        localStorage.setItem('kn-demo-lag', String(_savedLagPreference));
+      if (_savedRttPreference != null) {
+        localStorage.setItem('kn-demo-rtt', String(_savedRttPreference));
       }
     } catch (_) {}
     _setStatus('Stopping…');
@@ -671,17 +679,33 @@
     location.reload();
   };
 
-  // User's preferred lag value, if they manually moved the slider in a
-  // previous session. The slider itself starts at 0; this number is only
-  // used as the animation target when a match begins. null means "use
-  // DEFAULT_MATCH_LAG_MS" (i.e., user hasn't expressed a preference).
-  let _savedLagPreference = null;
+  // User's preferred RTT value (round-trip ms), if they manually moved
+  // the slider in a previous session. The slider itself starts at 0; this
+  // number is only used as the animation target when a match begins.
+  // null means "use DEFAULT_MATCH_RTT_MS" (user hasn't expressed a
+  // preference). Migrates `kn-demo-lag` (the old one-way-ms key) to
+  // `kn-demo-rtt` by doubling — preserves prior preference shape under
+  // the new RTT semantics.
+  let _savedRttPreference = null;
   const _restoreSavedLag = () => {
     try {
-      const saved = localStorage.getItem('kn-demo-lag');
-      if (saved != null) {
-        const n = Number(saved);
-        if (Number.isFinite(n) && n >= 0 && n <= 300) _savedLagPreference = n;
+      const savedRtt = localStorage.getItem('kn-demo-rtt');
+      if (savedRtt != null) {
+        const n = Number(savedRtt);
+        if (Number.isFinite(n) && n >= 0 && n <= RTT_SLIDER_MAX) _savedRttPreference = n;
+      } else {
+        // One-time migration from the old one-way key
+        const legacy = localStorage.getItem('kn-demo-lag');
+        if (legacy != null) {
+          const n = Number(legacy);
+          if (Number.isFinite(n) && n >= 0) {
+            _savedRttPreference = Math.min(RTT_SLIDER_MAX, n * 2);
+            try {
+              localStorage.setItem('kn-demo-rtt', String(_savedRttPreference));
+              localStorage.removeItem('kn-demo-lag');
+            } catch (_) {}
+          }
+        }
       }
     } catch (_) {}
   };
@@ -761,20 +785,20 @@
       getMirroredInput: _recordMode === 'p2' ? null : (frame) => _p2InputAtFrame(frame),
     });
     window.KNFakePeer?.setNetwork?.(_networkFromControls());
-    // Pre-seed the synthetic peer's RTT with the eventual MATCH-target lag
+    // Pre-seed the synthetic peer's RTT with the eventual MATCH-target RTT
     // (not the menu-time slider value, which is 0). The lockstep delay
     // negotiation in netplay-rollback fires at PHASE_LOCKSTEP_READY —
-    // BEFORE _animateLagTo runs (which is gated on inMatch becoming true,
-    // line 905-906). Seeding here with the target makes the engine pick a
-    // GGPO-style RTT-tuned delay at match start instead of falling back to
-    // DEFAULT_DELAY_FRAMES=2 because the slider was still at 0 when the
-    // negotiation ran. Real WebRTC peers fill their own samples from real
-    // pings; this only affects demo with the synthetic peer.
-    const _matchTargetLag = _savedLagPreference != null ? _savedLagPreference : DEFAULT_MATCH_LAG_MS;
+    // BEFORE _animateRttTo runs (gated on inMatch becoming true). Seeding
+    // here with the target makes the engine pick a GGPO-style RTT-tuned
+    // delay at match start instead of falling back to DEFAULT_DELAY_FRAMES=2
+    // because the slider was still at 0 when the negotiation ran. Real
+    // WebRTC peers fill their own samples from real pings; this only
+    // affects demo with the synthetic peer.
+    const _matchTargetRtt = _savedRttPreference != null ? _savedRttPreference : DEFAULT_MATCH_RTT_MS;
     window.NetplayRollback?.seedSyntheticRtt?.({
       slot: 1,
-      latencyMs: _matchTargetLag,
-      jitterMs: _matchTargetLag * 0.1,
+      rttMs: _matchTargetRtt,
+      jitterMs: _matchTargetRtt * 0.05,
     });
     _setRollbackEnabled(_rollbackEnabled);
 
@@ -913,11 +937,11 @@
         // over from here.
         _finishRecording();
         _finishAutopilot();
-        // Animate the lag slider from 0 (its menu-time value) up to the
-        // user's saved preference (or DEFAULT_MATCH_LAG_MS). The animation
+        // Animate the RTT slider from 0 (its menu-time value) up to the
+        // user's saved preference (or DEFAULT_MATCH_RTT_MS). The animation
         // calls _applyNetwork() each frame, so the synthetic peer's
-        // latency tracks the visible slider position smoothly.
-        const target = _savedLagPreference != null ? _savedLagPreference : DEFAULT_MATCH_LAG_MS;
+        // RTT tracks the visible slider position smoothly.
+        const target = _savedRttPreference != null ? _savedRttPreference : DEFAULT_MATCH_RTT_MS;
         _animateLagTo(target, 800);
         // Entering a vs match — re-arm interaction tracking and auto-start
         // auto-compare for this match. Each new match gets its own chance to
@@ -1031,7 +1055,7 @@
         _lagAnimRaf = 0;
       }
       // Remember this as the user's preference for future match starts.
-      _savedLagPreference = _readLag();
+      _savedRttPreference = _readRtt();
       _applyNetwork();
     });
     $('rollback-toggle')?.addEventListener('click', () => {

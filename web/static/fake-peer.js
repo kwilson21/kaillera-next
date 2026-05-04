@@ -52,6 +52,13 @@
     jitterMs: 8,
     lossProb: 0.02,
     mispredictProb: 0.08,
+    // reorderProb: probability per packet that its delivery time gets
+    // swapped with the next-queued packet's, producing visible
+    // out-of-order arrival even when sorted by deliveryAt. Real
+    // jitter already produces some natural reordering near burst
+    // boundaries; this is the explicit-stress-test knob for the C
+    // engine's out-of-order input handling. Default 0.
+    reorderProb: 0,
   };
 
   const _clamp = (value, min, max) => Math.min(max, Math.max(min, Number(value) || 0));
@@ -185,12 +192,26 @@
     }
 
     const jitter = _network.jitterMs > 0 ? (Math.random() * 2 - 1) * _network.jitterMs : 0;
-    _queue.push({
+    const newEntry = {
       frame,
       input,
       scheduledDeliveryAt: now + Math.max(0, _network.latencyMs + jitter),
       enqueuedAt: now,
-    });
+    };
+    // Explicit reorder simulation: with reorderProb, swap this packet's
+    // delivery time with the most-recently-queued one so the C engine
+    // sees an out-of-order arrival (later frame number, earlier delivery).
+    // Distinct from the natural jitter-driven reorder near burst boundaries
+    // — this fires regardless of jitter level, useful for stress-testing
+    // when the test harness wants OOO every N packets.
+    if (_network.reorderProb > 0 && _queue.length > 0 && Math.random() < _network.reorderProb) {
+      const prev = _queue[_queue.length - 1];
+      const tmp = prev.scheduledDeliveryAt;
+      prev.scheduledDeliveryAt = newEntry.scheduledDeliveryAt;
+      newEntry.scheduledDeliveryAt = tmp;
+      _recordEvent({ reorder: true });
+    }
+    _queue.push(newEntry);
   };
 
   const _injectNow = (frame, input, observedRttMs = 0) =>
@@ -218,7 +239,11 @@
       const engineFrameAtDelivery = Math.max(0, Math.trunc(Number(hud?.currentFrame) || _lastEngineFrameSeen));
       const delay = Math.max(0, Math.trunc(Number(hud?.delay) || 0));
       const frameLateness = Math.max(0, engineFrameAtDelivery - delay - entry.frame);
-      const accepted = _injectNow(entry.frame, entry.input, _network.latencyMs);
+      // observedRttMs is RTT (round-trip) per netplay-rollback's contract.
+      // _network.latencyMs is the one-way travel time we apply to the
+      // delivery schedule; doubling it gives the round-trip equivalent
+      // that a real peer would have measured via the delay-ping handshake.
+      const accepted = _injectNow(entry.frame, entry.input, _network.latencyMs * 2);
       _recordEvent({
         delivered: !!accepted,
         lateness: frameLateness * (1000 / 60),
@@ -277,12 +302,13 @@
     _heldUntilFrame = -1;
   };
 
-  const setNetwork = ({ latencyMs, jitterMs, lossProb, mispredictProb } = {}) => {
+  const setNetwork = ({ latencyMs, jitterMs, lossProb, mispredictProb, reorderProb } = {}) => {
     _network = {
       latencyMs: _clamp(latencyMs ?? _network.latencyMs, 0, 300),
       jitterMs: _clamp(jitterMs ?? _network.jitterMs, 0, 100),
       lossProb: _clamp(lossProb ?? _network.lossProb, 0, 0.3),
       mispredictProb: _clamp(mispredictProb ?? _network.mispredictProb, 0, 0.5),
+      reorderProb: _clamp(reorderProb ?? _network.reorderProb, 0, 0.5),
     };
     // Seed the synthetic peer's RTT samples so the match-start delay
     // negotiation in netplay-rollback computes an RTT-tuned delay instead
@@ -295,8 +321,13 @@
     try {
       window.NetplayRollback?.seedSyntheticRtt?.({
         slot: _slot,
-        latencyMs: _network.latencyMs,
-        jitterMs: _network.jitterMs,
+        rttMs: _network.latencyMs * 2,
+        // Jitter on a per-packet delivery is one-way; the corresponding
+        // RTT-side jitter on a round-trip ping would also be one-way at
+        // each leg → ~2x the one-way jitterMs at the round-trip
+        // measurement. Match real ping behaviour so the IQR formula
+        // sees representative spread.
+        jitterMs: _network.jitterMs * 2,
       });
     } catch (_) {}
   };
@@ -315,6 +346,7 @@
       queuedPackets: _queue.length,
       mispredictsLastSec: recent.filter((event) => event.mispredict).length,
       lossLastSec: recent.filter((event) => event.loss).length,
+      reordersLastSec: recent.filter((event) => event.reorder).length,
     };
   };
 

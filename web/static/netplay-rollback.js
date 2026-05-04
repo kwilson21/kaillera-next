@@ -14734,10 +14734,14 @@
     // ?fakePeerJitter / KNFakePeer.setNetwork never affect the delay budget
     // and rollback-rate is artificially high. Production peers fill their
     // own rttSamples from real WebRTC pings; this only affects demo.
-    seedSyntheticRtt: ({ slot, latencyMs, jitterMs = 0, sampleCount = 22 } = {}) => {
+    seedSyntheticRtt: ({ slot, rttMs, latencyMs, jitterMs = 0, sampleCount = 22 } = {}) => {
       const peer = ensureSyntheticPeer(slot);
       if (!peer) return false;
-      const baseRtt = Math.max(0, Number(latencyMs) || 0) * 2; // one-way → RTT
+      // Accept rttMs (preferred) or legacy latencyMs (one-way, doubled).
+      // peer.rttSamples is consumed by the delay formula at lockstep-ready
+      // (peerMs = fMedian/2 + jitter + 16.67) which expects RTT, so we
+      // store RTT values directly.
+      const baseRtt = rttMs != null ? Math.max(0, Number(rttMs) || 0) : Math.max(0, Number(latencyMs) || 0) * 2;
       const jitter = Math.max(0, Number(jitterMs) || 0);
       const samples = [];
       for (let i = 0; i < sampleCount; i++) {
