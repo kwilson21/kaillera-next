@@ -836,8 +836,42 @@
     // Engine + peer are running, so Pause/Stop are now meaningful.
     _setEmuButtonsEnabled(true);
 
+    // Start GamepadManager so a connected controller flows through the
+    // same readLocalInput pipeline the lobby uses (shared.js:486-495
+    // pulls from GamepadManager.readGamepad). Without this call P1 input
+    // is keyboard-only even when a gamepad is plugged in.
+    _ensureGamepadManager();
+
     _setStatus('Tap to start emulator');
     _pollRollbackReady();
+  };
+
+  // Idempotent — first call starts polling, subsequent calls just refresh
+  // the slot binding (mirrors play.js's startGamepadManager pattern).
+  let _gamepadManagerStarted = false;
+  const _ensureGamepadManager = () => {
+    if (!window.GamepadManager) return;
+    window.GamepadManager.start({
+      playerSlot: 0,
+      onUpdate: _updateGamepadStatus,
+    });
+    _gamepadManagerStarted = true;
+    _updateGamepadStatus();
+  };
+
+  const _updateGamepadStatus = () => {
+    const el = $('gamepad-status');
+    if (!el) return;
+    const detected = window.GamepadManager?.getDetected?.() || [];
+    if (detected.length === 0) {
+      el.textContent = 'No gamepad detected — keyboard works (open Controls for the keymap).';
+      el.classList.remove('is-detected');
+      return;
+    }
+    const name = detected[0].id?.replace(/\s*\(Vendor:.*$/, '').trim() || 'Gamepad';
+    const more = detected.length > 1 ? ` (+${detected.length - 1} more)` : '';
+    el.textContent = `Gamepad detected: ${name}${more}. Open Controls to remap.`;
+    el.classList.add('is-detected');
   };
 
   const _pollRollbackReady = () => {
@@ -1180,6 +1214,15 @@
     $('emu-stop')?.addEventListener('click', () => {
       _markUserInteracted();
       _stopEmu();
+    });
+    $('emu-controls')?.addEventListener('click', () => {
+      _markUserInteracted();
+      // Open the same controller-settings panel the lobby uses (loaded
+      // via the demo.html script tag). Lazy-init GamepadManager on first
+      // open so detection works whether or not we hit this from the
+      // engine-start path.
+      _ensureGamepadManager();
+      window.ControllerSettings?.toggle?.();
     });
     $('auto-compare-btn')?.addEventListener('click', () => {
       _markUserInteracted();

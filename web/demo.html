@@ -462,6 +462,22 @@
         font-weight: 700;
       }
 
+      .gamepad-status {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.4;
+        text-align: center;
+      }
+
+      .gamepad-status.is-detected {
+        color: var(--success);
+        background: rgba(125, 220, 138, 0.08);
+      }
+
       .hud-details {
         margin-top: 12px;
         padding-top: 10px;
@@ -571,6 +587,7 @@
     <script src="/static/kn-audio.js"></script>
     <script src="/static/kn-diagnostics.js"></script>
     <script src="/static/kn-desync-detector.js"></script>
+    <script src="/static/controller-settings.js"></script>
     <script src="/static/netplay-rollback.js"></script>
     <script src="/static/fake-peer.js"></script>
     <script src="/static/demo.js"></script>
@@ -646,9 +663,13 @@
           </div>
 
           <div class="emu-controls">
+            <button id="emu-controls" type="button">🎮 Controls</button>
             <button id="emu-pause" type="button" disabled>⏸ Pause</button>
             <button id="emu-stop" type="button" disabled>⏹ Stop</button>
           </div>
+          <p id="gamepad-status" class="gamepad-status" aria-live="polite">
+            No gamepad detected — keyboard works (open Controls for the keymap).
+          </p>
         </aside>
       </div>
 
