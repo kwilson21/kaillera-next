@@ -684,20 +684,24 @@
 
       <p class="explainer">
         Rollback netplay runs your game locally without waiting on the network. It predicts what the opponent will
-        press, and rewinds-and-replays silently when it guesses wrong. Lockstep, the older approach, waits for the
-        opponent's input every frame — so every keypress carries the round-trip delay directly. The round-trip is still
-        on the wire either way; rollback just hides it locally.
+        press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
+        latency. Either way your input still lands at the current frame, which is the point: rollback hides the network
+        from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the opponent's input
+        every frame, so every keypress carries the round-trip delay directly. The round-trip is on the wire either way;
+        the two modes just choose where to pay the cost.
       </p>
       <p class="explainer">
-        The proof is the contrast: at the same simulated RTT, rollback feels instant while lockstep makes every press
-        arrive late. The rollback button toggles between them; auto-compare flips every 6 seconds so you can feel the
-        difference without clicking.
+        The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
+        every press arrive late. Lockstep stays smoother visually (it never rewinds); rollback's framerate dips at high
+        RTT because predictions miss more often and the engine has more state to replay. The rollback button toggles
+        between them; auto-compare flips every 6 seconds so you can feel the difference without clicking.
       </p>
       <p class="explainer">
         In this demo P2 is a synthetic peer running in the same tab. During menus it follows a baked autopilot; in match
         it plays random inputs at roughly human cadence. Each time the peer's input differs from what the engine
-        predicted, the engine rewinds — that fills the Rollbacks counter. Crank the RTT slider higher and the count
-        rises: that's what rollback is hiding.
+        predicted, the engine rewinds — that fills the Rollbacks counter and (at high RTT) shows up in the fps readout.
+        Crank the RTT slider higher and the count rises: that's what rollback is hiding from your inputs but not from
+        your eyes.
       </p>
     </main>
   </body>

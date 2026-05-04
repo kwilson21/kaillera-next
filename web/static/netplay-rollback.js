@@ -14853,6 +14853,7 @@
         currentFrame: _frameNum,
         delay: DELAY_FRAMES,
         isCRollback: _useCRollback,
+        fps: _fpsCurrent,
       };
     },
     getInfo: () => {

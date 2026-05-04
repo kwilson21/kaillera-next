@@ -1076,12 +1076,14 @@
       };
     }
     if (_rollbackEnabled) {
+      // Rollback's promise is INPUT-feel, not full visual smoothness.
+      // At high RTT predictions miss often and the engine rewinds
+      // visibly — local input still applies at the current frame, but
+      // the screen judders through the corrections. Saying just
+      // "INSTANT" oversells; "INSTANT INPUT" is the honest version.
       return {
-        text: 'INSTANT',
-        // Rollback hides the network's frame delay. The PILL shows the
-        // EFFECTIVE delay (what the user feels = 0); the sub-text
-        // explains the cost rollback is hiding.
-        sub: `The connection has a ${delay}-frame delay (${delayMs.toFixed(0)} ms). Rollback hides it — your input applies right now.`,
+        text: 'INSTANT INPUT',
+        sub: `The connection has a ${delay}-frame delay (${delayMs.toFixed(0)} ms). Rollback hides it from your inputs — every press lands at the current frame. Visual smoothness still depends on RTT: more rollbacks per second means more visible rewinds.`,
         state: 'instant',
         showTier: true,
         effectiveDelay: 0,
@@ -1090,7 +1092,7 @@
     }
     return {
       text: `${delayMs.toFixed(0)} ms LATE`,
-      sub: `Lockstep makes you feel the full ${delay}-frame delay because it can't predict the peer's input.`,
+      sub: `Lockstep makes you feel the full ${delay}-frame delay because it can't predict the peer's input. Visuals stay smooth (no rewinds), but every press is delayed.`,
       state: 'late',
       showTier: true,
       effectiveDelay: delay,
@@ -1159,9 +1161,17 @@
         : rollbacks > 0
           ? `${rollbacks} (idle)`
           : 'none yet';
+    // FPS: rAF cadence over a 1 s window (engine maintains _fpsCurrent
+    // internally — exposed via getHudCounters as of 60 Hz tick path).
+    // At high RTT rollback bursts can drop the visible framerate even
+    // though tick work itself is well under the vsync budget. The
+    // framerate readout makes that cost visible — it's the "what
+    // rollback can't hide" the headline copy now acknowledges.
+    const fps = counters?.fps ?? 0;
+    const fpsText = fps > 0 ? `${fps} fps` : '— fps';
     details.textContent =
       `Engine: ${cEngine} · Mode: ${mode} · RTT: ${rtt.toFixed(0)} ms · ` +
-      `Frame: ${frame} · Rollbacks: ${rollbackText}`;
+      `${fpsText} · Frame: ${frame} · Rollbacks: ${rollbackText}`;
   };
 
   const _updateHud = () => {
