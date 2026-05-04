@@ -976,21 +976,21 @@
       getMirroredInput: _recordMode === 'p2' ? null : (frame) => _p2InputAtFrame(frame),
     });
     window.KNFakePeer?.setNetwork?.(_networkFromControls());
-    // Pre-seed the synthetic peer's RTT with the eventual MATCH-target RTT
-    // (not the menu-time slider value, which is 0). The lockstep delay
-    // negotiation in netplay-rollback fires at PHASE_LOCKSTEP_READY —
-    // BEFORE _animateRttTo runs (gated on inMatch becoming true). Seeding
-    // here with the target makes the engine pick a GGPO-style RTT-tuned
-    // delay at match start instead of falling back to DEFAULT_DELAY_FRAMES=2
-    // because the slider was still at 0 when the negotiation ran. Real
-    // WebRTC peers fill their own samples from real pings; this only
-    // affects demo with the synthetic peer.
-    const _matchTargetRtt = _savedRttPreference != null ? _savedRttPreference : DEFAULT_MATCH_RTT_MS;
-    window.NetplayRollback?.seedSyntheticRtt?.({
-      slot: 1,
-      rttMs: _matchTargetRtt,
-      jitterMs: _matchTargetRtt * 0.05,
-    });
+    // The handshake's delay negotiation runs once at PHASE_LOCKSTEP_READY
+    // and the C engine's kn_rollback_init bakes that delay value in. The
+    // baked menu autopilot was recorded with DEFAULT_DELAY_FRAMES=2; if
+    // the handshake settles on anything else (e.g. delay=3 at higher RTT
+    // pre-seed), the P2 mirrored inputs end up applied 1 frame later in
+    // game state than they were recorded — stage-select cursor lands on
+    // the wrong stage, character-select misses by a frame, etc.
+    //
+    // We now rely on live delay re-tune (setDelayRetuneEnabled(true) in
+    // _finishAutopilot) plus the post-match _animateLagTo slider sweep
+    // to drive DELAY_FRAMES up to the user's RTT preference once the
+    // autopilot is done. So we don't pre-seed match-target RTT here —
+    // handshake fires at zero/menu RTT, picks delay=2 (matching the
+    // recording), autopilot runs deterministically, then the slider
+    // animation re-tunes delay for actual play.
     _setRollbackEnabled(_rollbackEnabled);
 
     // Engine + peer are running, so Pause/Stop are now meaningful.
