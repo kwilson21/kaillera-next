@@ -9888,9 +9888,14 @@
   //   5. Step exactly one frame
   //   6. Increment frame counter
 
-  // FPS + debug tracking
+  // FPS + debug tracking — measured as game-frame advance rate (NOT tick rate).
+  // Old version incremented per JS tick which always fires at 60Hz, so it
+  // reported 60 fps even when the engine was stalling on missing remote
+  // inputs (lockstep at high RTT) or pacing/replay overhead held the sim at
+  // 24-40 fps. _fpsFrameAtWindowStart captures _frameNum at window open;
+  // _fpsCurrent = current _frameNum - _fpsFrameAtWindowStart at window close.
   let _fpsLastTime = 0;
-  let _fpsFrameCount = 0;
+  let _fpsFrameAtWindowStart = -1;
   let _fpsCurrent = 0;
   let _remoteReceived = 0;
   let _remoteMissed = 0;
@@ -10062,7 +10067,7 @@
       for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];
     }
     _fpsLastTime = performance.now();
-    _fpsFrameCount = 0;
+    _fpsFrameAtWindowStart = -1;
     _fpsCurrent = 0;
     _remoteReceived = 0;
     _remoteMissed = 0;
@@ -11392,12 +11397,18 @@
       }
     }
 
-    // FPS counter
-    _fpsFrameCount++;
+    // FPS counter — game-frame advance rate over a 1s window. Sampling on
+    // _frameNum (not on tick count) means stalls and replay overhead show up
+    // honestly. At 200ms RTT lockstep this reads ~24 fps, rollback ~40 fps —
+    // the actual engine throughput, not the 60 Hz tick pump rate.
     const now = performance.now();
-    if (now - _fpsLastTime >= 1000) {
-      _fpsCurrent = _fpsFrameCount;
-      _fpsFrameCount = 0;
+    if (_fpsFrameAtWindowStart < 0) {
+      _fpsFrameAtWindowStart = _frameNum;
+      _fpsLastTime = now;
+    } else if (now - _fpsLastTime >= 1000) {
+      const advanced = _frameNum - _fpsFrameAtWindowStart;
+      _fpsCurrent = Math.max(0, advanced);
+      _fpsFrameAtWindowStart = _frameNum;
       _fpsLastTime = now;
     }
 
@@ -12019,18 +12030,25 @@
         const pendingReplay = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
         if (!pendingReplay) {
           const applyFrame = _frameNum - DELAY_FRAMES;
-          let allInputsPresent = true;
-          for (const p of activePeers) {
-            if (p.slot === _playerSlot) continue;
-            if (_peerPhantom[p.slot]) continue;
-            if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
-              allInputsPresent = false;
-              break;
+          // applyFrame < 0 means we haven't advanced far enough for any
+          // remote input to exist for this frame. Mirrors the C engine's
+          // `if (apply_frame >= 0)` guard at kn_rollback.c:1342. Without
+          // this skip, demo's predictions-paused mode hangs at frame 0
+          // forever (applyFrame=-DELAY_FRAMES, never resolves).
+          if (applyFrame >= 0) {
+            let allInputsPresent = true;
+            for (const p of activePeers) {
+              if (p.slot === _playerSlot) continue;
+              if (_peerPhantom[p.slot]) continue;
+              if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
+                allInputsPresent = false;
+                break;
+              }
             }
-          }
-          if (!allInputsPresent) {
-            if (_stallStart === 0) _stallStart = performance.now();
-            return; // stall — same shape as BOOT/STRICT-MENU early returns
+            if (!allInputsPresent) {
+              if (_stallStart === 0) _stallStart = performance.now();
+              return; // stall — same shape as BOOT/STRICT-MENU early returns
+            }
           }
         }
         _stallStart = 0;
