@@ -777,7 +777,7 @@
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return false;
+    return true;
   })();
   // True rollback netcode: apply LOCAL input at the current frame for instant
   // input feel; predict + apply REMOTE inputs at applyFrame as before.
@@ -1079,6 +1079,10 @@
   // tick (before kn_pre_tick) so the C engine sees a consistent input
   // snapshot per frame — no race between async DC delivery and sync tick.
   const _pendingCInputs = []; // {slot, frame, buttons, lx, ly, cx, cy}
+  // Module-scope sort comparator so the per-tick in-place sort doesn't
+  // allocate a fresh closure each call. (frame, slot) ascending so
+  // duplicates land adjacent and frames feed monotonically.
+  const _pendingCInputsSortFn = (a, b) => a.frame - b.frame || a.slot - b.slot;
   const RDRAM_TAINT_BLOCKS = 128;
   const _clearPendingCInputs = (reason) => {
     if (_pendingCInputs.length === 0) return;
@@ -11826,12 +11830,15 @@
       // input snapshot per frame. No race between async DC delivery and
       // the sync prediction/serialize logic inside kn_pre_tick.
       if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
-        const feedByKey = new Map();
-        for (const qi of _pendingCInputs) {
-          feedByKey.set(`${qi.slot}:${qi.frame}`, qi);
-        }
-        const feedQueue = [...feedByKey.values()].sort((a, b) => a.frame - b.frame || a.slot - b.slot);
-        for (const qi of feedQueue) {
+        // Sort in place by (frame, slot) so frames feed monotonically and
+        // duplicates land adjacent (last write wins inside C's slot:frame
+        // store). Avoids the prior Map + [...spread] + template-literal
+        // keys that allocated per tick at 60 Hz; the in-place sort uses
+        // a stable closure (allocated once at module scope) and feeds
+        // directly without an intermediate Array.
+        if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+        for (let i = 0; i < _pendingCInputs.length; i++) {
+          const qi = _pendingCInputs[i];
           tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
         }
         _pendingCInputs.length = 0;
@@ -12079,29 +12086,46 @@
       // delay (which itself scales with RTT), so input feels like lockstep.
       if (RB_TRUE_ROLLBACK) {
         writeInputToMemory(_playerSlot, localInput);
-        const inputParts = [`L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`];
+        // Defer log-string allocation until we actually log. Per-tick at
+        // 60 Hz we'd otherwise build N+1 template-literal strings + a
+        // regex-tested array even though only ~1% of ticks log
+        // (anyNonZero short-circuits and 60-frame heartbeat).
+        let anyNonZero = !!(localInput.buttons || localInput.lx || localInput.ly);
         if (applyFrame >= 0) {
           for (let s = 0; s < rb_numPlayers; s++) {
             if (s === _playerSlot) continue;
             const inp = _rbGetInput(tickMod, s, applyFrame);
             writeInputToMemory(s, inp);
-            inputParts.push(`R${s}@${applyFrame}[${inp.buttons},${inp.lx},${inp.ly}]`);
+            if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
           }
         }
-        const anyNonZero = inputParts.some((p) => !/\[0,0,0\]$/.test(p));
         if (anyNonZero || _frameNum % 60 === 0) {
-          _syncLog(`NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} ${inputParts.join(' ')}`);
+          let line = `NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`;
+          if (applyFrame >= 0) {
+            for (let s = 0; s < rb_numPlayers; s++) {
+              if (s === _playerSlot) continue;
+              const inp = _rbGetInput(tickMod, s, applyFrame);
+              line += ` R${s}@${applyFrame}[${inp.buttons},${inp.lx},${inp.ly}]`;
+            }
+          }
+          _syncLog(line);
         }
       } else if (applyFrame >= 0) {
-        const inputParts = [];
+        // Same deferral pattern: read + write inputs, only build the log
+        // string once we know we'll actually log it.
+        let anyNonZero = false;
         for (let s = 0; s < rb_numPlayers; s++) {
           const inp = _rbGetInput(tickMod, s, applyFrame);
           writeInputToMemory(s, inp);
-          inputParts.push(`s${s}[${inp.buttons},${inp.lx},${inp.ly}]`);
+          if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
         }
-        const anyNonZero = inputParts.some((p) => !p.includes('[0,0,0]'));
         if (anyNonZero || _frameNum % 60 === 0) {
-          _syncLog(`NORMAL-INPUT f=${applyFrame} ${inputParts.join(' ')}`);
+          let line = `NORMAL-INPUT f=${applyFrame}`;
+          for (let s = 0; s < rb_numPlayers; s++) {
+            const inp = _rbGetInput(tickMod, s, applyFrame);
+            line += ` s${s}[${inp.buttons},${inp.lx},${inp.ly}]`;
+          }
+          _syncLog(line);
         }
       }
 
