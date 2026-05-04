@@ -7907,6 +7907,10 @@
       // contribute to local input lag — RTT only sets rollback depth.
       // Legacy model: delay also inflates local input application, so RTT/2
       // must be folded in or the negotiated delay can't keep up at high RTT.
+      // (Tried bumping delay to cover RTT/2 in true rollback to eliminate
+      // mispredicts — but C engine bakes delay_frames at kn_rollback_init,
+      // so JS-side increases don't propagate. Reverted; burst=1 cuts pauses
+      // by spreading replay work instead of avoiding it.)
       const effectiveMs = RB_TRUE_ROLLBACK
         ? jitterMargin + 16.67 // 1-frame safety on top of measured jitter
         : filteredMedian / 2 + jitterMargin + 16.67;
