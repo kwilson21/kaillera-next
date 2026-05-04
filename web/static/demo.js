@@ -897,49 +897,62 @@
     return { label: 'Terrible', tone: 'bad' };
   };
 
-  const _inputFeel = (isCRollback, delayFrames) => {
-    const rtt = _readRtt();
+  const _inputFeel = (isCRollback, isInMatch, delayFrames) => {
     const delay = Number.isFinite(delayFrames) ? Math.max(0, delayFrames | 0) : 0;
-    // Engine-locked frame delay → milliseconds at 60 Hz. THIS is the
-    // actual input lag the user feels in lockstep mode (the demo's input
-    // hook returns inputs from `delay` frames ago when rollback is OFF
-    // — see _maybeLockstepDelay). RTT/network is just what produced
-    // that delay budget at match start; what they FEEL is the frames.
     const delayMs = delay * 16.67;
-    if (rtt === 0 || !isCRollback) {
+    // Pre-match: rollback engine is loaded but no netplay activity is
+    // happening (no peer inputs contesting the local engine, so no
+    // predictions, no rollbacks, and no input lag from any delay budget
+    // — even lockstep mode has nothing to wait for). Tell the user
+    // that, instead of pretending the network conditions are felt.
+    if (!isInMatch) {
+      return {
+        text: 'WAITING',
+        sub: 'Start a match to see rollback in action. Nothing is being predicted in menus.',
+        state: 'idle',
+        showTier: false,
+        effectiveDelay: 0,
+        networkDelay: delay,
+      };
+    }
+    if (delay <= 0) {
       return {
         text: 'NO LAG',
-        sub:
-          rtt === 0
-            ? 'Crank the slider — both modes feel the same at 0 ms RTT.'
-            : "Drop a ROM and reach gameplay — rollback engine isn't engaged in menus.",
+        sub: 'Crank the RTT slider — both modes feel the same at 0 ms.',
         state: 'idle',
-        delayFrames: delay,
-        delayMs: 0,
+        showTier: false,
+        effectiveDelay: 0,
+        networkDelay: 0,
       };
     }
     if (_rollbackEnabled) {
       return {
         text: 'INSTANT',
-        sub: `Rollback hides the network. Without it, every press would feel ${delayMs.toFixed(0)} ms late.`,
+        // Rollback hides the network's frame delay. The PILL shows the
+        // EFFECTIVE delay (what the user feels = 0); the sub-text
+        // explains the cost rollback is hiding.
+        sub: `The connection has a ${delay}-frame delay (${delayMs.toFixed(0)} ms). Rollback hides it — your input applies right now.`,
         state: 'instant',
-        delayFrames: delay,
-        delayMs: 0,
+        showTier: true,
+        effectiveDelay: 0,
+        networkDelay: delay,
       };
     }
     return {
       text: `${delayMs.toFixed(0)} ms LATE`,
-      sub: `Without rollback, every press waits ${delay} frame${delay === 1 ? '' : 's'} for the peer to acknowledge.`,
+      sub: `Lockstep makes you feel the full ${delay}-frame delay because it can't predict the peer's input.`,
       state: 'late',
-      delayFrames: delay,
-      delayMs,
+      showTier: true,
+      effectiveDelay: delay,
+      networkDelay: delay,
     };
   };
 
   const _renderHudText = (counters, totalPreds) => {
     const rtt = _readRtt();
     const delay = counters?.delay ?? 0;
-    const feel = _inputFeel(counters?.isCRollback, delay);
+    const isInMatch = !!window.NetplayRollback?.isInMatch?.();
+    const feel = _inputFeel(counters?.isCRollback, isInMatch, delay);
     const feelEl = $('hud-feel');
     if (feelEl) {
       feelEl.textContent = feel.text;
@@ -950,19 +963,31 @@
     const subEl = $('hud-feel-sub');
     if (subEl) subEl.textContent = feel.sub;
 
-    // Connection-quality readout — Kaillera-style tier (Excellent / Good /
-    // Fair / Poor / Bad) based on the engine-locked frame delay. Same
-    // delay number for both modes; what differs is whether rollback hides
-    // it. Match the format real netplay clients show so the user has a
-    // mental model that translates: "Frame delay: 3 (Good)" means the same
-    // here as it would in Fightcade or Kaillera.
+    // Connection-quality pill — Kaillera-style tier based on the EFFECTIVE
+    // (felt) frame delay, which differs by mode:
+    //   Rollback ON  → effective delay = 0 (rollback hides the network)
+    //   Rollback OFF → effective delay = full network delay
+    // Toggling the rollback button flips the tier, making the contrast
+    // visible at a glance. When not in a match, the pill explicitly says
+    // so instead of misleading "Excellent" or "Terrible" labels for a
+    // network that isn't being exercised yet.
     const delayEl = $('hud-frame-delay');
     if (delayEl) {
-      const tier = _connectionTier(delay);
-      delayEl.innerHTML = `Connection: <strong>${tier.label}</strong> &middot; Frame delay: <strong>${delay}</strong>`;
-      delayEl.classList.toggle('is-great', tier.tone === 'great');
-      delayEl.classList.toggle('is-okay', tier.tone === 'okay');
-      delayEl.classList.toggle('is-bad', tier.tone === 'bad');
+      if (!feel.showTier) {
+        delayEl.innerHTML = isInMatch
+          ? '<strong>No active rollback</strong> &middot; Crank the RTT slider'
+          : '<strong>Engine waiting</strong> &middot; Start a match to test rollback';
+        delayEl.classList.remove('is-great', 'is-okay', 'is-bad');
+      } else {
+        const tier = _connectionTier(feel.effectiveDelay);
+        const label = _rollbackEnabled
+          ? `Rollback feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${feel.effectiveDelay} frame${feel.effectiveDelay === 1 ? '' : 's'}</strong>`
+          : `Lockstep feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${feel.effectiveDelay} frame${feel.effectiveDelay === 1 ? '' : 's'}</strong>`;
+        delayEl.innerHTML = label;
+        delayEl.classList.toggle('is-great', tier.tone === 'great');
+        delayEl.classList.toggle('is-okay', tier.tone === 'okay');
+        delayEl.classList.toggle('is-bad', tier.tone === 'bad');
+      }
     }
 
     const details = $('hud-details');
