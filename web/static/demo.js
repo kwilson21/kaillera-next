@@ -425,6 +425,37 @@
 
   const _zeroLocalInput = () => ({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
 
+  // Lockstep input buffering for the demo's mode toggle. When the user
+  // selects "Lockstep" (rollback OFF), return the input from
+  // DELAY_FRAMES ago so the on-screen result feels the way real lockstep
+  // netcode (Kaillera, classic fightsticks) actually does — every keypress
+  // shows up DELAY_FRAMES later because lockstep can't apply local input
+  // until the peer has acknowledged the same frame. Without this, the
+  // engine's `_predictionsPaused` only pauses prediction generation; it
+  // doesn't add input lag, so rollback ON and rollback OFF both feel
+  // identical when the network is RTT-tuned to never stall.
+  //
+  // The buffer holds the last LOCKSTEP_BUF_MAX inputs keyed by engine
+  // frame. Always recording (regardless of toggle state) means switching
+  // modes mid-match doesn't lose history. In rollback mode the buffer
+  // is filled but never queried — pure record-only overhead, ~negligible.
+  const _lockstepInputBuf = [];
+  const LOCKSTEP_BUF_MAX = 32;
+  const _maybeLockstepDelay = (input) => {
+    const counters = window.NetplayRollback?.getHudCounters?.();
+    const frame = counters?.currentFrame ?? -1;
+    const delay = counters?.delay ?? 0;
+    if (frame < 0 || delay <= 0) return input;
+    _lockstepInputBuf.push({ frame, input: { ...input } });
+    while (_lockstepInputBuf.length > LOCKSTEP_BUF_MAX) _lockstepInputBuf.shift();
+    if (_rollbackEnabled) return input;
+    const targetFrame = frame - delay;
+    for (let i = _lockstepInputBuf.length - 1; i >= 0; i--) {
+      if (_lockstepInputBuf[i].frame <= targetFrame) return _lockstepInputBuf[i].input;
+    }
+    return _zeroLocalInput();
+  };
+
   // Wrap KNShared.readLocalInput once. In record mode, capture inputs to a
   // buffer indexed by current engine frame. Otherwise, replay scripted inputs
   // from MENU_AUTOPILOT_P1_TRANSITIONS via _p1InputAtFrame (or pass real
@@ -489,9 +520,9 @@
       }
       if (_randomP1InMatch && window.NetplayRollback?.isInMatch?.()) {
         const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
-        return _randomP1InputForFrame(currentFrame);
+        return _maybeLockstepDelay(_randomP1InputForFrame(currentFrame));
       }
-      return realInput;
+      return _maybeLockstepDelay(realInput);
     };
     _wrappedReadLocalInput = true;
     if (_recordMode) {
