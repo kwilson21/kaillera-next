@@ -367,6 +367,65 @@
     return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
   };
 
+  // IQR-filtered RTT-to-delay formula. Shared by initial negotiation and the
+  // public recomputeDelay() API so the demo's slider can re-tune mid-match.
+  // Returns delay-frame integer (clamped to [MIN, current ceiling]).
+  // useHalfRtt=true folds RTT/2 into local input lag (legacy lockstep-with-rollback
+  // path); false treats delay as a pure remote-prediction window (true rollback).
+  const _delayFromRttSamples = (samples, useHalfRtt) => {
+    if (!samples || samples.length === 0) return null;
+    const sorted = samples.slice().sort((a, b) => a - b);
+    const q1 = sorted[Math.floor(sorted.length * 0.25)];
+    const q3 = sorted[Math.floor(sorted.length * 0.75)];
+    const iqr = q3 - q1;
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const lower = q1 - 1.5 * iqr;
+    const upper = q3 + 1.5 * iqr;
+    const filtered = sorted.filter((s) => s >= lower && s <= upper);
+    const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
+    const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
+    const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
+    const effectiveMs = useHalfRtt ? filteredMedian / 2 + jitterMargin + 16.67 : jitterMargin + 16.67;
+    return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
+  };
+
+  // Re-runs delay negotiation against the current RTT samples and ceiling.
+  // Safe to call any time after the engine is past PHASE_LOCKSTEP_READY.
+  // Used by:
+  //   1. seedSyntheticRtt — demo slider updates synthetic peer RTT, this
+  //      re-tunes DELAY_FRAMES so lockstep mode reflects the new RTT
+  //      instead of staying pinned at whatever was negotiated at game start.
+  //   2. setPredictionsPaused — toggling rollback↔lockstep changes the
+  //      ceiling, so the negotiated delay should re-tune (a higher delay
+  //      is fine in rollback's prediction window but unplayable as lockstep
+  //      input lag).
+  const _recomputeDelay = () => {
+    const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
+    if (!hasRollback) return;
+    const playerPeerSids = Object.keys(_peers).filter((sid) => {
+      const p = _peers[sid];
+      return p.slot !== null && p.slot !== undefined;
+    });
+    if (playerPeerSids.length === 0) return; // solo mode: no negotiation
+    const useHalfRtt = !RB_TRUE_ROLLBACK;
+    let ownDelay = _delayFromRttSamples(_rttSamples, useHalfRtt);
+    if (ownDelay == null) ownDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+    let maxDelay = ownDelay;
+    for (const p of Object.values(_peers)) {
+      // Peer-side formula always uses RTT/2 because peer's "ownDelay" includes
+      // their local→us lag the same way our ownDelay does.
+      const peerDelay = _delayFromRttSamples(p.rttSamples, true);
+      if (peerDelay != null && peerDelay > maxDelay) maxDelay = peerDelay;
+    }
+    if (maxDelay !== DELAY_FRAMES) {
+      const prev = DELAY_FRAMES;
+      DELAY_FRAMES = maxDelay;
+      if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
+      _syncLog(`delay re-tuned: ${prev} -> ${maxDelay} (own=${ownDelay} ceiling=${_delayCeiling()})`);
+    }
+    return maxDelay;
+  };
+
   let _onExtraDataChannel = null;
   let _onUnhandledMessage = null;
 
@@ -14755,6 +14814,11 @@
       }
       peer._rttSamples = samples.slice();
       peer.rttSamples = samples.slice().sort((a, b) => a - b);
+      // Demo slider raises/lowers RTT mid-match — re-run delay negotiation
+      // against the new samples so DELAY_FRAMES tracks the slider instead of
+      // staying pinned at whatever was negotiated at game start. No-op
+      // before lockstep-ready handshake completes (peers list empty).
+      _recomputeDelay();
       return true;
     },
     injectRemoteInput: ({ slot, frame, input, ackFrame = -1, redundantFrames = null, observedRttMs = 0 } = {}) => {
@@ -14781,20 +14845,12 @@
       const next = !!on;
       if (_predictionsPaused !== next) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
-      // Mode flip changes the delay ceiling — lockstep caps at 9 (Kaillera-style
-      // input-lag ceiling), rollback caps at 12 (engine ring/replay ceiling).
-      // If the previously negotiated DELAY_FRAMES exceeds the new ceiling
-      // (typical when user toggles rollback→lockstep at high RTT), clamp it
-      // down so the player doesn't sit on >9 frames of felt input lag.
-      // We only clamp DOWN — toggling lockstep→rollback leaves the value alone
-      // (it's already within both ceilings).
-      const ceiling = _delayCeiling();
-      if (DELAY_FRAMES > ceiling) {
-        const prev = DELAY_FRAMES;
-        DELAY_FRAMES = ceiling;
-        _syncLog(`delay clamped on mode flip: ${prev} -> ${DELAY_FRAMES} (ceiling=${ceiling})`);
-        if (window.showEffectiveDelay) window.showEffectiveDelay(DELAY_FRAMES, DELAY_FRAMES);
-      }
+      // Mode flip changes the delay ceiling (lockstep 9 vs rollback 12) AND
+      // changes whether RTT/2 should fold into the formula. Re-run the RTT
+      // negotiation against current samples so the delay reflects the new
+      // mode — at low RTT this drops the delay back down out of the ceiling
+      // pin; at high RTT it picks the right value for the active mode.
+      _recomputeDelay();
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
