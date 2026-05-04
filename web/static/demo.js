@@ -646,8 +646,25 @@
   const _setEmuButtonsEnabled = (enabled) => {
     const pause = $('emu-pause');
     const stop = $('emu-stop');
+    const reset = $('emu-reset');
     if (pause) pause.disabled = !enabled;
     if (stop) stop.disabled = !enabled;
+    if (reset) reset.disabled = !enabled;
+  };
+
+  // Hard reset: reloads the page so the demo restarts from the autopilot
+  // boot path. Cleaner than trying to rewind engine state mid-session
+  // (state ring, Emscripten thread, audio worklet all need fresh init
+  // anyway — see _stopEmu's comments). Persists user's RTT preference
+  // first so a refresh doesn't lose their slider tuning.
+  const _resetDemo = () => {
+    try {
+      if (_savedRttPreference != null) {
+        localStorage.setItem('kn-demo-rtt', String(_savedRttPreference));
+      }
+    } catch (_) {}
+    _setStatus('Resetting demo…');
+    location.reload();
   };
 
   const _toggleEmuPause = () => {
@@ -1080,6 +1097,11 @@
         // over from here.
         _finishRecording();
         _finishAutopilot();
+        // Clear any post-match indicator the previous round left behind —
+        // _finishAutopilot's "enabled" toast only fires on first-time
+        // autopilot finish, so subsequent rounds rely on this explicit
+        // clear.
+        _showInputIndicator(null);
         // Animate the RTT slider from 0 (its menu-time value) up to the
         // user's saved preference (or DEFAULT_MATCH_RTT_MS). The animation
         // calls _applyNetwork() each frame, so the synthetic peer's
@@ -1102,7 +1124,15 @@
         // Animate the slider back down to 0 so menu navigation is responsive
         // and the visible position matches the actual lag.
         _animateLagTo(0, 500);
-        _setStatus('Back in menu — rollback ON. Start another match to auto-compare again.');
+        _setStatus('Match ended. Hit Reset to restart the demo, or play through the menus.');
+        // Show the same disabled-input alert that fires at boot, with a
+        // post-match-specific message. The autopilot is one-shot (only
+        // navigates from boot to first match), so post-match menus are
+        // on the user — but the results screen / fade-back transitions
+        // ignore input until they auto-advance, which feels like P1
+        // input is broken. Tell the user explicitly what's happening
+        // and point at Reset.
+        _showInputIndicator('post-match');
       }
     }
 
@@ -1224,6 +1254,10 @@
       _ensureGamepadManager();
       window.ControllerSettings?.toggle?.();
     });
+    $('emu-reset')?.addEventListener('click', () => {
+      _markUserInteracted();
+      _resetDemo();
+    });
     $('auto-compare-btn')?.addEventListener('click', () => {
       _markUserInteracted();
       _toggleAutoCompare();
@@ -1300,6 +1334,10 @@
         if (cur) cur.remove();
         _inputIndicatorTimer = null;
       }, 2400);
+    } else if (state === 'post-match') {
+      el.textContent = 'Match ended — hit Reset for another round';
+      el.style.background = '#f5c84b';
+      el.style.animation = 'inputFadeIn 200ms ease-out, inputPulse 1.6s ease-in-out 200ms infinite';
     }
     document.body.appendChild(el);
   };
