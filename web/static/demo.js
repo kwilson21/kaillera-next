@@ -637,6 +637,15 @@
       // reads the input ring at a different applied frame and lands past
       // the release — press dropped. _finishAutopilot re-enables.
       window.NetplayRollback?.setDelayRetuneEnabled?.(false);
+      // Force predictions paused during autopilot. Without this the engine
+      // runs in true rollback (predictions live), which can roll through
+      // the autopilot's brief 5-frame button windows and drop the press —
+      // typical failure is CSS not selecting 2P, leaving the user in 1P
+      // mode. _setRollbackEnabled has the same intent at line 522 but only
+      // fires when the user toggles or at init (with _autopilotActive
+      // still false), so we have to call it explicitly here.
+      // _finishAutopilot restores predictions to the user's rollback choice.
+      window.NetplayRollback?.setPredictionsPaused?.(true);
       _setStatus('Setting up your match…');
       // Indicator deferred to the gesture click — the user hasn't even seen
       // the emulator yet, so showing "your inputs disabled" before they tap
