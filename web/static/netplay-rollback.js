@@ -2122,6 +2122,71 @@
     }
   };
 
+  // Determinism check: round-trip the worker for its current frame +
+  // hashes (gameplay / game-state / full-state) and diff against main's
+  // hashes computed at the same frame. Used to validate whether worker
+  // state can serve as a replay-coprocessor source — if `gp` and `game`
+  // match but `full` differs, the renderer/runtime divergence is in
+  // tainted regions and adoption is feasible. If `gp` differs, game-
+  // relevant state has diverged and the approach is dead.
+  //
+  // Usage in console (after demo enters a match with ?shadowEmu=1):
+  //   await window.knShadowHashCheck()
+  if (typeof window !== 'undefined') {
+    let _hashCheckSeq = 0;
+    window.knShadowHashCheck = async (timeoutMs = 1000) => {
+      if (!_rbShadowWorker || !_rbShadowReady) {
+        return { error: 'shadow worker not ready (load with ?shadowEmu=1 and play to a match first)' };
+      }
+      const seq = ++_hashCheckSeq;
+      const tickMod = window.EJS_emulator?.gameManager?.Module;
+      if (!tickMod?._kn_get_frame) return { error: 'main module exports unavailable' };
+
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          _rbShadowWorker.removeEventListener('message', handler);
+          resolve({ error: 'timeout waiting for worker reply' });
+        }, timeoutMs);
+        const handler = (evt) => {
+          const msg = evt.data;
+          if (!msg || msg.type !== 'hash-result' || msg.seq !== seq) return;
+          clearTimeout(timer);
+          _rbShadowWorker.removeEventListener('message', handler);
+          if (msg.error) return resolve({ error: msg.error });
+          const f = msg.frame | 0;
+          // Compute main's hashes at the SAME frame the worker reported.
+          // Both modules share the kn_*_hash exports; the frame argument
+          // looks up that frame's saved state in the C-level ring buffer.
+          const mainGp = (tickMod._kn_gameplay_hash?.(f) ?? 0) >>> 0;
+          const mainGame = (tickMod._kn_game_state_hash?.(f) ?? 0) >>> 0;
+          const mainFull = (tickMod._kn_full_state_hash?.(f) ?? 0) >>> 0;
+          const mainFrame = tickMod._kn_get_frame?.() ?? -1;
+          const mainTainted = tickMod._kn_get_tainted_block_count?.() ?? -1;
+          const hex = (n) => '0x' + (n >>> 0).toString(16).padStart(8, '0');
+          resolve({
+            workerFrame: f,
+            mainFrame,
+            workerLagFrames: mainFrame - f,
+            gp: { worker: hex(msg.gp), main: hex(mainGp), match: msg.gp === mainGp },
+            game: { worker: hex(msg.game), main: hex(mainGame), match: msg.game === mainGame },
+            full: { worker: hex(msg.full), main: hex(mainFull), match: msg.full === mainFull },
+            taint: { worker: msg.taintedBlockCount, main: mainTainted },
+            interpretation:
+              msg.gp !== mainGp
+                ? 'GAME STATE DIVERGED — worker cannot serve as replay coprocessor'
+                : msg.game !== mainGame
+                  ? 'game state matches; non-renderer RDRAM still differs (audio/runtime spillover?)'
+                  : msg.full !== mainFull
+                    ? 'game + non-tainted RDRAM match; only tainted regions differ — coprocessor approach VIABLE with selective adoption'
+                    : 'BIT-EXACT MATCH (full state identical)',
+          });
+        };
+        _rbShadowWorker.addEventListener('message', handler);
+        _rbShadowWorker.postMessage({ type: 'query-hash', seq });
+      });
+    };
+  }
+
   const _shadowTransferBuffer = (bytes) => {
     if (!bytes) return null;
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -2548,6 +2613,41 @@
       stats.lastBootMs = performance.now() - (stats._bootStartedAt || performance.now());
       _shadowMarkNeedsFreshPaint();
       _shadowLog(`ready frame=${stats.lastFrame} bootMs=${stats.lastBootMs.toFixed(1)} sab=${msg.sab ? 1 : 0}`);
+      // If main already initialized its rollback engine before worker
+      // booted (common case — worker boot is async, main init fires
+      // synchronously when the game starts), push the same init params
+      // to worker now so its state ring populates from this point on.
+      // Worker won't have main's pre-boot history but will lockstep
+      // forward from `_rbInitFrame` once stepOnce starts routing
+      // through kn_pre_tick.
+      if (_useCRollback && _rbInitFrame >= 0 && _rbShadowWorker) {
+        try {
+          const localCaps = _localRollbackCaps?.() ?? { trueRollback: 1 };
+          _rbShadowWorker.postMessage({
+            type: 'rollback-init',
+            rollbackMax: _rbRollbackMax,
+            delayFrames: DELAY_FRAMES,
+            localSlot: _playerSlot,
+            numPlayers: rb_numPlayers,
+            initFrame: _frameNum,
+            trueRollback: localCaps.trueRollback ? 1 : 0,
+            stateBackend: RB_ROLLBACK_STATE_BACKEND === 'split-rdram' ? 1 : 0,
+          });
+          _syncLog(
+            `SHADOW-ROLLBACK-INIT (post-boot): max=${_rbRollbackMax} delay=${DELAY_FRAMES} slot=${_playerSlot} players=${rb_numPlayers} frame=${_frameNum}`,
+          );
+        } catch (e) {
+          _syncLog(`SHADOW-ROLLBACK-INIT (post-boot) failed: ${e?.message || e}`);
+        }
+      }
+    } else if (msg.type === 'rollback-init-result') {
+      if (msg.ok) {
+        _shadowLog(
+          `rollback-init OK max=${msg.rollbackMax} delay=${msg.delayFrames} slot=${msg.localSlot} frame=${msg.initFrame}`,
+        );
+      } else {
+        _shadowLog(`rollback-init FAILED: ${msg.error}`);
+      }
     } else if (msg.type === 'stepped') {
       _rbShadowInFlight = Math.max(0, _rbShadowInFlight - 1);
       stats.stepAcks++;
@@ -10535,6 +10635,32 @@
         _syncLog(
           `C-ROLLBACK init: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers} heapMB=${heapMB}`,
         );
+        // Mirror the init to the shadow worker if it's ready. The
+        // worker's rollback engine MUST be initialized with identical
+        // params so its state ring populates in lockstep with main's,
+        // which is the prerequisite for using worker state as a replay
+        // coprocessor source. If worker isn't booted yet, _shadowMaybeStart
+        // (called on every normal-tick) will eventually fire boot and
+        // _shadowOnReady can re-trigger the init then.
+        if (RB_SHADOW_EMU && _rbShadowReady && _rbShadowWorker) {
+          try {
+            _rbShadowWorker.postMessage({
+              type: 'rollback-init',
+              rollbackMax,
+              delayFrames: effectiveDelay,
+              localSlot: _playerSlot,
+              numPlayers,
+              initFrame,
+              trueRollback: localCaps.trueRollback ? 1 : 0,
+              stateBackend: RB_ROLLBACK_STATE_BACKEND === 'split-rdram' ? 1 : 0,
+            });
+            _syncLog(
+              `SHADOW-ROLLBACK-INIT sent: max=${rollbackMax} delay=${effectiveDelay} slot=${_playerSlot} players=${numPlayers}`,
+            );
+          } catch (e) {
+            _syncLog(`SHADOW-ROLLBACK-INIT failed: ${e?.message || e}`);
+          }
+        }
 
         // Host broadcasts its init frame so guests can match it. Mirrors the
         // rb-delay broadcast at line ~5017; deferred-init for SR fires after

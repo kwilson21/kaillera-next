@@ -31,6 +31,18 @@
   let coreBase = '/static/ejs/cores/';
   let coreSettings = '';
   let lastInputs = [];
+  // Rollback-engine state: set when main sends 'rollback-init' after its
+  // own kn_rollback_init succeeds. Worker uses its rollback engine for
+  // (a) state ring saves so kn_*_hash exports return real values for
+  // determinism comparison with main; (b) eventually as the source of
+  // corrected state for the replay-coprocessor flow. The init params
+  // mirror main's exactly — same delay, same local slot, same num
+  // players, same backend — so worker's ring matches main's modulo
+  // tainted regions.
+  let rollbackInited = false;
+  let rbLocalSlot = 0;
+  let rbDelayFrames = 0;
+  let rbNumPlayers = 4;
   let parentTarget = null;
   let glContext = null;
   // Self-paced pump: one stepOnce per ~16ms task so the OffscreenCanvas
@@ -483,14 +495,58 @@
 
   const stepOnce = (frame, inputs) => {
     if (!ready || !mod) return false;
-    applyInputs(inputs || lastInputs);
+    const inputArr = inputs || lastInputs;
+    applyInputs(inputArr);
     const f = Number.isFinite(frame) ? frame | 0 : currentFrame;
     const frameTime = (f + 1) * FRAME_MS;
     if (mod._kn_set_frame) mod._kn_set_frame(f);
     if (mod._kn_set_frame_time) mod._kn_set_frame_time(frameTime);
+    // Route inputs through the rollback engine when it's been
+    // initialized so the state ring populates with main-matching
+    // saves. kn_feed_input writes remote-slot inputs to the ring at
+    // the apply-frame; kn_pre_tick saves state + records the local
+    // slot's input + (for confirmed-only worker timeline) finds remote
+    // inputs in the ring with no prediction needed.
+    //
+    // frame_adv=-1 disables pacing-throttle in pre_tick — worker's
+    // not predicting ahead, so frame advantage tracking doesn't apply.
+    if (rollbackInited && mod._kn_pre_tick) {
+      const applyFrame = f - rbDelayFrames;
+      let localInput = null;
+      if (Array.isArray(inputArr)) {
+        for (const inp of inputArr) {
+          if (!inp) continue;
+          if ((inp.slot | 0) === rbLocalSlot) {
+            localInput = inp;
+          } else if (mod._kn_feed_input && applyFrame >= 0) {
+            mod._kn_feed_input(
+              inp.slot | 0,
+              applyFrame | 0,
+              inp.buttons | 0,
+              inp.lx | 0,
+              inp.ly | 0,
+              inp.cx | 0,
+              inp.cy | 0,
+            );
+          }
+        }
+      }
+      const li = localInput || { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+      try {
+        mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
+      } catch (_) {
+        // pre_tick may throw on edge cases (uninitialized state, OOB);
+        // fall back to plain step behavior so worker keeps mirroring.
+      }
+    }
     captureSavedRunner();
     if (!savedRunner) return false;
     savedRunner(frameTime);
+    if (rollbackInited && mod._kn_post_tick) {
+      try {
+        mod._kn_post_tick();
+      } catch (_) {}
+    }
     currentFrame = f + 1;
     setStatusValue(STATUS_IDX.frame, currentFrame);
     bumpStatusValue(STATUS_IDX.steps);
@@ -802,6 +858,80 @@
         } catch (_) {}
         post({ type: 'stopped' });
         close();
+      } else if (message.type === 'rollback-init') {
+        // Initialize the rollback engine in the worker with the SAME
+        // params main used for its own kn_rollback_init. After this:
+        //   - rb.initialized=true → kn_*_hash exports return real
+        //     values (determinism check becomes possible)
+        //   - state ring lives in worker memory, populated by
+        //     subsequent stepOnce calls that route through kn_pre_tick
+        //   - worker's ring at frame F should bit-match main's ring at
+        //     frame F modulo tainted regions (renderer / audio / kernel
+        //     spillover) once we wire kn_pre_tick into the step path.
+        try {
+          const {
+            rollbackMax = 22,
+            delayFrames = 6,
+            localSlot = 0,
+            numPlayers = 4,
+            initFrame = -1,
+            trueRollback = 1,
+            stateBackend = 1, // 1 = split-rdram (matches main's default)
+          } = message;
+          if (!mod?._kn_rollback_init) {
+            post({ type: 'rollback-init-result', ok: false, error: 'kn_rollback_init export missing' });
+          } else {
+            if (mod._kn_set_state_backend) mod._kn_set_state_backend(stateBackend | 0);
+            mod._kn_rollback_init(rollbackMax | 0, delayFrames | 0, localSlot | 0, numPlayers | 0);
+            if (mod._kn_set_true_rollback) mod._kn_set_true_rollback(trueRollback | 0);
+            if (initFrame >= 0 && mod._kn_set_frame) {
+              mod._kn_set_frame(initFrame | 0);
+              currentFrame = initFrame | 0;
+              setStatusValue(STATUS_IDX.frame, currentFrame);
+            }
+            rollbackInited = true;
+            rbLocalSlot = localSlot | 0;
+            rbDelayFrames = delayFrames | 0;
+            rbNumPlayers = numPlayers | 0;
+            post({
+              type: 'rollback-init-result',
+              ok: true,
+              rollbackMax: rollbackMax | 0,
+              delayFrames: delayFrames | 0,
+              localSlot: localSlot | 0,
+              numPlayers: numPlayers | 0,
+              initFrame: initFrame | 0,
+            });
+          }
+        } catch (e) {
+          rollbackInited = false;
+          post({ type: 'rollback-init-result', ok: false, error: String(e) });
+        }
+      } else if (message.type === 'query-hash') {
+        // Returns the worker's most recently SAVED frame (rb.frame-1
+        // because rb_save_slot fires BEFORE the step in kn_pre_tick;
+        // the state at rb.frame itself isn't saved yet at the moment
+        // of query) plus its three hashes at that frame.
+        try {
+          const cur = mod?._kn_get_frame?.() ?? -1;
+          const queryFrame = cur > 0 ? cur - 1 : -1;
+          const gp = queryFrame >= 0 ? (mod?._kn_gameplay_hash?.(queryFrame) ?? 0) >>> 0 : 0;
+          const game = queryFrame >= 0 ? (mod?._kn_game_state_hash?.(queryFrame) ?? 0) >>> 0 : 0;
+          const full = queryFrame >= 0 ? (mod?._kn_full_state_hash?.(queryFrame) ?? 0) >>> 0 : 0;
+          const tainted = mod?._kn_get_tainted_block_count?.() ?? -1;
+          post({
+            type: 'hash-result',
+            seq: message.seq | 0,
+            currentFrame: cur,
+            frame: queryFrame, // the frame the hashes are FOR
+            gp,
+            game,
+            full,
+            taintedBlockCount: tainted,
+          });
+        } catch (e) {
+          post({ type: 'hash-result', seq: message.seq | 0, error: String(e) });
+        }
       }
     } catch (error) {
       fail(message.type || 'message', error);
