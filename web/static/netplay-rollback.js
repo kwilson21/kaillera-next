@@ -810,14 +810,9 @@
     } catch (_) {}
     return false;
   })();
-  // Default 24 ms cross-fade on hide — softens the position discontinuity
-  // between the static snapshot (frozen at rollback-start position) and
-  // the live canvas (now at post-replay position). Without the fade, the
-  // snapshot snap-cuts to display:none and the live canvas appears at its
-  // actual post-replay position, exposing the full scene-motion delta as
-  // a visible jump (~1-3 px at typical 60 px/s gameplay × 23 ms median
-  // replay). 24 ms is below the median 80 ms inter-rollback interval so
-  // adjacent rollbacks don't overlap; opt-out via ?replayVisualFadeMs=0.
+  // Cross-fade on hide for the opt-in visual-freeze overlay. The
+  // freeze itself now defaults off because play testing showed the
+  // raw replay path feels better than a static snapshot pause.
   const RB_VISUAL_FADE_MS = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeMs') ?? localStorage.getItem('kn-replay-visual-fade-ms');
@@ -830,10 +825,11 @@
   })();
   const _rbVisualFreezeEnabled = (() => {
     try {
-      if (_urlParams.get('replayVisualFreeze') === '0') return false;
-      if (localStorage.getItem('kn-replay-visual-freeze') === '0') return false;
+      const raw = _urlParams.get('replayVisualFreeze') ?? localStorage.getItem('kn-replay-visual-freeze');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return false;
   })();
   // Tail fade — start fading the freeze overlay out a few ms BEFORE
   // replay completes so by the time the live canvas catches up there
@@ -2713,7 +2709,8 @@
   };
 
   const _showRollbackVisualFreeze = (depth = 0, localInput = null) => {
-    if (!_rbVisualFreezeEnabled || _rbVisualFreezeActive) return _rbVisualFreezeActive;
+    if (_rbVisualFreezeActive) return true;
+    if (!_rbVisualFreezeEnabled && !RB_SHADOW_FRAME_BLIT) return false;
     // Skip freeze for shallow rollbacks. depth ≤ 2 = at most ~32 ms
     // of replay scrub at 60 Hz, which reads as a tiny stutter rather
     // than a freeze; showing the snapshot for that long actually adds
@@ -2734,6 +2731,7 @@
     // and creates the same perceptual twitch/flicker the oracle was meant to
     // avoid.
     if (RB_SHADOW_FRAME_BLIT && _shadowShowOverlay(depth, source, rect)) return true;
+    if (!_rbVisualFreezeEnabled) return false;
     const snapshotAge = _rbVisualSnapshotFrame >= 0 ? Math.abs(_frameNum - _rbVisualSnapshotFrame) : Infinity;
     if (!_rbVisualSnapshotCanvas || snapshotAge > RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES) {
       if (!_captureRollbackVisualSnapshot()) return false;
@@ -14818,6 +14816,10 @@
       overlaySmoothing: _getRollbackMotionStats(),
       motionNudge: _getRollbackMotionNudgeStats(),
       enabled: {
+        replayVisualFreeze: _rbVisualFreezeEnabled,
+        replayVisualFadeMs: RB_VISUAL_FADE_MS,
+        replayTailFadeMs: RB_REPLAY_TAIL_FADE_MS,
+        replayVisualFreezeMinDepth: RB_VISUAL_FREEZE_MIN_DEPTH,
         replayMotionSmoothing: RB_REPLAY_MOTION_SMOOTHING,
         replayMotionScale: RB_REPLAY_MOTION_SCALE,
         replayMotionNudge: RB_REPLAY_MOTION_NUDGE,
