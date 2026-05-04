@@ -510,7 +510,17 @@
       }
     }
     _rollbackEnabled = next;
-    window.NetplayRollback?.setPredictionsPaused?.(!_rollbackEnabled);
+    // While the autopilot is replaying baked menu inputs, FORCE lockstep
+    // (predictions paused) regardless of the toggle's visible state.
+    // Reason: at non-zero delay the engine's prediction model can roll
+    // back through the autopilot's brief button-press windows (5 frames
+    // for an A-press to advance a menu) and miss the press, leaving the
+    // autopilot in a half-set-up state. With predictions paused, both
+    // peers' inputs apply deterministically at delay-frame applied
+    // frames — same outcome every run. The user's choice is restored
+    // by _finishAutopilot the moment isInMatch flips true.
+    const enginePredictionsOn = _autopilotActive ? false : _rollbackEnabled;
+    window.NetplayRollback?.setPredictionsPaused?.(!enginePredictionsOn);
     _updateRollbackToggle();
   };
 
@@ -670,6 +680,11 @@
   const _finishAutopilot = () => {
     if (!_autopilotActive) return;
     _autopilotActive = false;
+    // Now that we're past the autopilot's menu navigation, restore the
+    // engine's prediction state to the user's actual rollback choice.
+    // _setRollbackEnabled gates predictions on `_autopilotActive` ?
+    // false : _rollbackEnabled, so this re-applies cleanly.
+    window.NetplayRollback?.setPredictionsPaused?.(!_rollbackEnabled);
     _showInputIndicator('enabled');
   };
 
@@ -734,13 +749,28 @@
 
   window.KNStartEmulatorBoot = ensureEmulatorBooted;
 
-  const _setEmuButtonsEnabled = (enabled) => {
+  // Enabled-set for the emu-controls row. Reset tracks engine-running
+  // (it's the recovery path — stays accessible even mid-autopilot so
+  // the user can bail out if setup goes sideways). Pause and Stop are
+  // gated additionally on inMatch — pressing Pause during the
+  // autopilot's menu navigation lands the game in a half-set-up state
+  // that doesn't recover cleanly. _refreshEmuButtonsAvailability is
+  // called from the rAF in _updateHud as inMatch flips, plus once at
+  // engine boot to set the initial state.
+  let _engineRunning = false;
+  const _refreshEmuButtonsAvailability = () => {
     const pause = $('emu-pause');
     const stop = $('emu-stop');
     const reset = $('emu-reset');
-    if (pause) pause.disabled = !enabled;
-    if (stop) stop.disabled = !enabled;
-    if (reset) reset.disabled = !enabled;
+    const inMatch = !!window.NetplayRollback?.isInMatch?.();
+    const interactiveOk = _engineRunning && inMatch;
+    if (pause) pause.disabled = !interactiveOk;
+    if (stop) stop.disabled = !interactiveOk;
+    if (reset) reset.disabled = !_engineRunning;
+  };
+  const _setEmuButtonsEnabled = (enabled) => {
+    _engineRunning = !!enabled;
+    _refreshEmuButtonsAvailability();
   };
 
   // Hard reset: reloads the page so the demo restarts from the autopilot
@@ -1200,6 +1230,8 @@
     const inMatch = !!window.NetplayRollback?.isInMatch?.();
     if (inMatch !== _wasInMatch) {
       _wasInMatch = inMatch;
+      // Pause/Stop track inMatch; recompute now that it changed.
+      _refreshEmuButtonsAvailability();
       if (inMatch) {
         // Stop recording (in record mode) or end autopilot (in replay mode)
         // exactly when the player crosses into the match. Real input takes

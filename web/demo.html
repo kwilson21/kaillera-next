@@ -88,9 +88,14 @@
         display: grid;
         grid-template-columns: minmax(0, 1fr) 340px;
         gap: 16px;
-        /* Default `align-items: stretch` so the stage fills the grid row
-         * to match the sidebar's height. Was `start` which left empty
-         * space below the stage when the sidebar was taller. */
+        align-items: start;
+      }
+
+      .stage-col {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-width: 0;
       }
 
       .stage {
@@ -99,13 +104,13 @@
         border-radius: 12px;
         background: #050607;
         overflow: hidden;
-        /* Stretch to match the sidebar's height instead of forcing a fixed
-         * 4:3 aspect ratio. The canvas inside uses object-fit: contain so
-         * it preserves the game's native ratio at whatever height the row
-         * settles on; without this, the stage was always 4:3 and the row
-         * picked up the sidebar's full height, leaving a tall empty band
-         * between the bottom of the stage and the explainer text below. */
-        min-height: 480px;
+        /* Stage is 4:3 to match the N64's native ratio so the canvas
+         * fills it edge-to-edge with no letterbox bars. Whichever
+         * column ends up taller (stage-col with stage + explainers, or
+         * sidebar) just drives the grid row's height; explainer text
+         * lives in the same column as the stage so the bottom of the
+         * canvas is followed by readable copy with no big air gap. */
+        aspect-ratio: 4 / 3;
         max-height: calc(100vh - 200px);
       }
 
@@ -609,28 +614,54 @@
       </header>
 
       <div class="stage-row">
-        <section class="stage" aria-label="Emulator">
-          <div id="game"></div>
-          <div id="rom-drop">
-            <div class="drop-inner">
-              <span class="drop-title">Drop ROM here</span>
-              <p class="drop-copy">Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.</p>
-              <label class="file-button">
-                Choose ROM
-                <input id="rom-file" type="file" accept=".z64,.n64,.v64" />
-              </label>
+        <div class="stage-col">
+          <section class="stage" aria-label="Emulator">
+            <div id="game"></div>
+            <div id="rom-drop">
+              <div class="drop-inner">
+                <span class="drop-title">Drop ROM here</span>
+                <p class="drop-copy">
+                  Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.
+                </p>
+                <label class="file-button">
+                  Choose ROM
+                  <input id="rom-file" type="file" accept=".z64,.n64,.v64" />
+                </label>
+              </div>
             </div>
-          </div>
-          <div id="game-loading" class="hidden">
-            <div class="game-loading-content">
-              <div class="game-loading-spinner"></div>
-              <span id="game-loading-text">Loading...</span>
+            <div id="game-loading" class="hidden">
+              <div class="game-loading-content">
+                <div class="game-loading-spinner"></div>
+                <span id="game-loading-text">Loading...</span>
+              </div>
             </div>
-          </div>
-          <div id="gesture-prompt" class="hidden">
-            <button id="gesture-button" class="gesture-button" type="button">▶ Tap to start</button>
-          </div>
-        </section>
+            <div id="gesture-prompt" class="hidden">
+              <button id="gesture-button" class="gesture-button" type="button">▶ Tap to start</button>
+            </div>
+          </section>
+
+          <p class="explainer">
+            Rollback netplay runs your game locally without waiting on the network. It predicts what the opponent will
+            press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
+            latency. Either way your input still lands at the current frame, which is the point: rollback hides the
+            network from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the
+            opponent's input every frame, so every keypress carries the round-trip delay directly. The round-trip is on
+            the wire either way; the two modes just choose where to pay the cost.
+          </p>
+          <p class="explainer">
+            The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
+            every press arrive late. Lockstep stays smoother visually (it never rewinds); rollback's framerate dips at
+            high RTT because predictions miss more often and the engine has more state to replay. The rollback button
+            toggles between them; auto-compare flips every 6 seconds so you can feel the difference without clicking.
+          </p>
+          <p class="explainer">
+            In this demo P2 is a synthetic peer running in the same tab. During menus it follows a baked autopilot; in
+            match it plays random inputs at roughly human cadence. Each time the peer's input differs from what the
+            engine predicted, the engine rewinds — that fills the Rollbacks counter and (at high RTT) shows up in the
+            fps readout. Crank the RTT slider higher and the count rises: that's what rollback is hiding from your
+            inputs but not from your eyes.
+          </p>
+        </div>
 
         <aside class="sidebar" aria-label="Demo controls">
           <a id="play-cta" class="play-cta" href="/">
@@ -681,28 +712,6 @@
           </p>
         </aside>
       </div>
-
-      <p class="explainer">
-        Rollback netplay runs your game locally without waiting on the network. It predicts what the opponent will
-        press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
-        latency. Either way your input still lands at the current frame, which is the point: rollback hides the network
-        from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the opponent's input
-        every frame, so every keypress carries the round-trip delay directly. The round-trip is on the wire either way;
-        the two modes just choose where to pay the cost.
-      </p>
-      <p class="explainer">
-        The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
-        every press arrive late. Lockstep stays smoother visually (it never rewinds); rollback's framerate dips at high
-        RTT because predictions miss more often and the engine has more state to replay. The rollback button toggles
-        between them; auto-compare flips every 6 seconds so you can feel the difference without clicking.
-      </p>
-      <p class="explainer">
-        In this demo P2 is a synthetic peer running in the same tab. During menus it follows a baked autopilot; in match
-        it plays random inputs at roughly human cadence. Each time the peer's input differs from what the engine
-        predicted, the engine rewinds — that fills the Rollbacks counter and (at high RTT) shows up in the fps readout.
-        Crank the RTT slider higher and the count rises: that's what rollback is hiding from your inputs but not from
-        your eyes.
-      </p>
     </main>
   </body>
 </html>
