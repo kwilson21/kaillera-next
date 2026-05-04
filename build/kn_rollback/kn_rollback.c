@@ -2297,7 +2297,10 @@ int kn_set_delay_frames(int new_delay) {
         return rb.delay_frames;
     }
     if (new_delay < 1) new_delay = 1;
-    if (new_delay > 16) new_delay = 16;
+    // Cap at 20 — covers ~528 ms RTT (delay*16.67=333ms minus 1f safety
+    // = ~316 ms = RTT/2 + jitter envelope). Above that the ring would
+    // need to grow further than init reserved.
+    if (new_delay > 20) new_delay = 20;
     if (new_delay == rb.delay_frames) return rb.delay_frames;
     int old_delay = rb.delay_frames;
     rb.delay_frames = new_delay;

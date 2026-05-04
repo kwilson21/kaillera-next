@@ -119,15 +119,28 @@
       cy: input.cy ? input.cy + _adcJitter() : 0,
     };
   };
+  // Marks a window of frames where ALL packets get a delivery spike.
+  // Single-packet spikes don't trigger rollback because the redundancy
+  // buffer (REDUNDANT_FRAMES=5 frames in each on-time packet) carries
+  // older inputs forward and pre-empts the spike. Spiking a CONTIGUOUS
+  // window > REDUNDANT_FRAMES blocks the redundancy bypass — both the
+  // primary packet AND its 5-deep redundancy carriers are all delayed
+  // together, so the engine genuinely has nothing to apply at the
+  // apply-frame deadline → predicts → mispredicts when the burst
+  // eventually arrives → rollback.
+  // 6-frame window matches the real-network behavior of brief
+  // congestion: a queue stalls for ~100 ms, all packets release together.
+  let _spikeWindowEnd = -1;
+  const SPIKE_BURST_FRAMES = 6;
   const _matchInputForFrame = (frame) => {
     if (frame > _heldUntilFrame || !_heldRandomInput) {
       _heldRandomInput = _randomInput();
       // Hold 30-90 frames (~500ms-1.5s) — closer to real human button-hold
-      // cadence (run, charge, neutral). Old 3-15 churned every ~150ms which
-      // made prediction miss on practically every press edge — at 200ms RTT
-      // each miss cost a 12-frame replay (one game frame per JS tick) read
-      // as a visible 200ms pause every ~0.5s.
+      // cadence (run, charge, neutral).
       _heldUntilFrame = frame + 30 + Math.floor(Math.random() * 60);
+      // Open a 6-frame spike window that includes this transition + the
+      // next 5 packets, blocking redundancy bypass.
+      _spikeWindowEnd = frame + SPIKE_BURST_FRAMES - 1;
     }
     return _applyJitter(_heldRandomInput);
   };
@@ -196,10 +209,24 @@
     }
 
     const jitter = _network.jitterMs > 0 ? (Math.random() * 2 - 1) * _network.jitterMs : 0;
+    // Spike all packets in the 6-frame burst window after a transition.
+    // Single-packet spikes don't trigger rollback (redundancy bypass);
+    // spiking the whole burst blocks both primary AND redundant copies,
+    // so the engine genuinely has to predict → mispredicts when the
+    // delayed burst arrives → visible rollback.
+    // 100 ms spike at 100 ms RTT (delay≈5) puts arrival at engine-frame
+    // F+9 ≈ depth 4 past apply, well within visible_rb_max=12.
+    let spikeMs = 0;
+    if (_network.latencyMs > 0 && frame <= _spikeWindowEnd) {
+      spikeMs = 100;
+      if (frame === _spikeWindowEnd) {
+        _recordEvent({ spike: true, spikeMs: Math.round(spikeMs) });
+      }
+    }
     const newEntry = {
       frame,
       input,
-      scheduledDeliveryAt: now + Math.max(0, _network.latencyMs + jitter),
+      scheduledDeliveryAt: now + Math.max(0, _network.latencyMs + jitter + spikeMs),
       enqueuedAt: now,
     };
     // Explicit reorder simulation: with reorderProb, swap this packet's
@@ -351,6 +378,8 @@
       mispredictsLastSec: recent.filter((event) => event.mispredict).length,
       lossLastSec: recent.filter((event) => event.loss).length,
       reordersLastSec: recent.filter((event) => event.reorder).length,
+      spikesLastSec: recent.filter((event) => event.spike).length,
+      maxSpikeMs: Math.max(0, ..._events.filter((e) => e.spikeMs).map((e) => e.spikeMs)),
     };
   };
 

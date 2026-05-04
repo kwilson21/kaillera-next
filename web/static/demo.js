@@ -418,13 +418,15 @@
       reader.readAsArrayBuffer(file);
     });
 
-  // Slider now represents RTT (round-trip time, what real ping shows),
-  // not one-way latency. The synthetic peer's per-packet delivery delay
-  // is rtt/2 (one-way). DEFAULT_MATCH_RTT_MS = 200 ms maps to the prior
-  // 100 ms one-way default (was 120 — slight reduction for realism;
-  // 200 ms RTT is on the high end of typical cross-country internet).
-  const DEFAULT_MATCH_RTT_MS = 200;
-  const RTT_SLIDER_MAX = 400;
+  // Slider represents RTT (round-trip time, what real ping shows). The
+  // synthetic peer's per-packet delivery delay is rtt/2 (one-way).
+  // DEFAULT_MATCH_RTT_MS = 100 ms is roughly cross-country LAN-ish.
+  // RTT_SLIDER_MAX = 150 ms covers the realistic envelope for
+  // competitive netplay. Past 150 ms the gameplay degrades for reasons
+  // unrelated to rollback (block windows, reaction time, etc.) so
+  // higher numbers wouldn't be a useful demo.
+  const DEFAULT_MATCH_RTT_MS = 100;
+  const RTT_SLIDER_MAX = 150;
   // Animation handle for the slider's 0 → target transition.
   let _lagAnimRaf = 0;
 

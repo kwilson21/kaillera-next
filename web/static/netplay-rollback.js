@@ -358,15 +358,12 @@
   //   bursts on misprediction get visibly painful.
   const ROLLBACK_MIN_DELAY_FRAMES = 1;
   const LOCKSTEP_MAX_DELAY_FRAMES = 9;
-  // Bumped from 12 to 16 to cover RTT envelopes up to ~480 ms (which the
-  // demo's slider can reach). At delay=12 a 370 ms RTT match misses peer
-  // inputs by 1-2 frames per input change → rollbacks fire constantly →
-  // visible pauses. The C engine accepts up to 16 (kn_set_delay_frames
-  // clamps there), and the ring is pre-allocated below at delay+10
-  // headroom so apply_frame = current - 16 still resolves to a valid
-  // history slot. Memory cost: ~8.5MB per slot × (16+10+1)=27 slots ≈
-  // 230MB total, vs ~190MB at the old 12+10 sizing.
-  const ROLLBACK_MAX_DELAY_FRAMES = 16;
+  // 12 frames covers ~167 ms half-RTT + jitter — fine for the demo's
+  // 0-150 ms RTT slider band (which is also the realistic range for
+  // competitive netplay). The C engine clamps at 20 internally so a
+  // future bump here is rebuild-free, but anything past 150 ms RTT in
+  // a fighting game is unplayable for reasons unrelated to the engine.
+  const ROLLBACK_MAX_DELAY_FRAMES = 12;
   const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);
   const clampRollbackDelay = (value, fallback = ROLLBACK_MIN_DELAY_FRAMES) => {
     const parsed = parseInt(value, 10);
@@ -10198,11 +10195,10 @@
         // Always 4 (KN_MAX_PLAYERS) — avoids contiguous slot assumption.
         const numPlayers = 4;
         // Ring buffer size = rollbackMax + 1 slots × ~8.5MB each (split-rdram).
-        // Pre-size for the worst-case ROLLBACK_MAX_DELAY_FRAMES=16 so
+        // Pre-size for the worst-case ROLLBACK_MAX_DELAY_FRAMES so
         // kn_set_delay_frames can bump delay live without overflowing the
-        // ring's apply_frame=current-delay history. Floor at 12 covers the
-        // legacy default. Memory: 26 slots × ~8.5MB ≈ 220MB (vs ~190MB at
-        // the old 12+10 cap).
+        // ring's apply_frame=current-delay history. Memory: 22 slots ×
+        // ~8.5MB ≈ 190MB at the current cap=12.
         const rollbackMax = Math.max(12, ROLLBACK_MAX_DELAY_FRAMES + 10, effectiveDelay + 10);
         if (detMod._kn_set_state_backend) {
           const backendId = RB_ROLLBACK_STATE_BACKEND === 'split-rdram' ? 1 : 0;
