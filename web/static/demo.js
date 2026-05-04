@@ -880,31 +880,49 @@
     }
   };
 
-  const _inputFeel = (isCRollback) => {
-    const lag = _networkFromControls().latencyMs;
-    if (lag === 0) {
+  const _inputFeel = (isCRollback, delayFrames) => {
+    const rtt = _readRtt();
+    const delay = Number.isFinite(delayFrames) ? Math.max(0, delayFrames | 0) : 0;
+    // Engine-locked frame delay → milliseconds at 60 Hz. THIS is the
+    // actual input lag the user feels in lockstep mode (the demo's input
+    // hook returns inputs from `delay` frames ago when rollback is OFF
+    // — see _maybeLockstepDelay). RTT/network is just what produced
+    // that delay budget at match start; what they FEEL is the frames.
+    const delayMs = delay * 16.67;
+    if (rtt === 0 || !isCRollback) {
       return {
         text: 'NO LAG',
-        sub: 'Crank the slider — both modes feel the same at 0 ms.',
+        sub:
+          rtt === 0
+            ? 'Crank the slider — both modes feel the same at 0 ms RTT.'
+            : "Drop a ROM and reach gameplay — rollback engine isn't engaged in menus.",
         state: 'idle',
+        delayFrames: delay,
+        delayMs: 0,
       };
     }
     if (_rollbackEnabled) {
-      const sub = isCRollback
-        ? `Rollback hiding ${(lag * 2).toFixed(0)} ms of round-trip.`
-        : "Drop a ROM and reach gameplay — rollback engine isn't engaged in menus.";
-      return { text: 'INSTANT', sub, state: 'instant' };
+      return {
+        text: 'INSTANT',
+        sub: `Rollback predicts through ${delay} frames of delay (${delayMs.toFixed(0)} ms) — local input applies at the current frame.`,
+        state: 'instant',
+        delayFrames: delay,
+        delayMs: 0,
+      };
     }
     return {
-      text: `${(lag * 2).toFixed(0)} ms LATE`,
-      sub: 'Lockstep waits the round-trip every input.',
+      text: `${delayMs.toFixed(0)} ms LATE`,
+      sub: `Lockstep waits ${delay} frames before applying any input — what every keypress is delayed by.`,
       state: 'late',
+      delayFrames: delay,
+      delayMs,
     };
   };
 
   const _renderHudText = (counters, totalPreds) => {
-    const lag = _networkFromControls().latencyMs;
-    const feel = _inputFeel(counters?.isCRollback);
+    const rtt = _readRtt();
+    const delay = counters?.delay ?? 0;
+    const feel = _inputFeel(counters?.isCRollback, delay);
     const feelEl = $('hud-feel');
     if (feelEl) {
       feelEl.textContent = feel.text;
@@ -914,6 +932,21 @@
 
     const subEl = $('hud-feel-sub');
     if (subEl) subEl.textContent = feel.sub;
+
+    // Frame-delay readout — the headline metric for rollback vs lockstep.
+    // Shows the engine-locked DELAY_FRAMES and the input lag each mode
+    // produces from it. Rollback mode says "0 ms (instant)" because true
+    // rollback applies local input at the current frame; lockstep mode
+    // shows the full delay × 16.67 ms input lag the user actually feels.
+    const delayEl = $('hud-frame-delay');
+    if (delayEl) {
+      const lockstepMs = delay * 16.67;
+      const rollbackText = `<strong>${delay}f</strong> network buffer · <strong>0 ms</strong> input lag (predicted)`;
+      const lockstepText = `<strong>${delay}f</strong> network buffer · <strong>${lockstepMs.toFixed(0)} ms</strong> input lag`;
+      delayEl.innerHTML = _rollbackEnabled ? rollbackText : lockstepText;
+      delayEl.classList.toggle('is-instant', _rollbackEnabled);
+      delayEl.classList.toggle('is-late', !_rollbackEnabled && delay > 0);
+    }
 
     const details = $('hud-details');
     if (!details) return;
@@ -930,7 +963,7 @@
     const ss = window.NetplayRollback?.getSceneStatus?.() || { scene: -1, status: -1, remix: false };
     const gameTag = ss.remix ? 'remix' : 'ssb64';
     details.textContent =
-      `Engine: ${cEngine} · Mode: ${mode} · Network: ${lag.toFixed(0)} ms · Frame: ${frame} · ` +
+      `Engine: ${cEngine} · Mode: ${mode} · RTT: ${rtt.toFixed(0)} ms · Frame: ${frame} · ` +
       `Predictions: ${totalPreds} (${_formatNumber(_smoothedPredsPerSec, 0)}/s · ` +
       `${correctPreds}/${totalPreds || 1} correct) · ` +
       `${gameTag} scene=${ss.scene} status=${ss.status}`;

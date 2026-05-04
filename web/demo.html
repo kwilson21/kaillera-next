@@ -428,6 +428,35 @@
         min-height: 1.4em;
       }
 
+      .frame-delay {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 0.85rem;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.4;
+        transition:
+          color 200ms,
+          background 200ms;
+      }
+
+      .frame-delay.is-instant {
+        color: var(--success);
+        background: rgba(125, 220, 138, 0.08);
+      }
+
+      .frame-delay.is-late {
+        color: var(--danger);
+        background: rgba(255, 102, 102, 0.08);
+      }
+
+      .frame-delay strong {
+        font-weight: 700;
+      }
+
       .hud-details {
         margin-top: 12px;
         padding-top: 10px;
@@ -584,8 +613,11 @@
             <h2>Result</h2>
             <div id="hud-feel" class="input-feel">CRANK THE LAG →</div>
             <div id="hud-feel-sub" class="input-feel-sub">No lag — both modes feel the same.</div>
+            <div id="hud-frame-delay" class="frame-delay">
+              <strong>0f</strong> network buffer · <strong>0 ms</strong> input lag
+            </div>
             <div id="hud-details" class="hud-details">
-              Mode: ROLLBACK · Network: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
+              Mode: ROLLBACK · RTT: 0ms · Frame: 0 · Predictions: 0 (0/s) · Correct: 0/0
             </div>
           </div>
 
