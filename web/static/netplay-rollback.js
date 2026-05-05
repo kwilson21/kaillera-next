@@ -2254,6 +2254,30 @@
                     }
                     _frameNum = applyFrame;
                     KNState.frameNum = _frameNum;
+                    // ── Reset peer freshness tracking after backward jump ──
+                    // worker-coproc apply rewound _frameNum from its
+                    // pre-rollback peak (depth frames ahead) down to
+                    // applyFrame. _lastRemoteFramePerSlot[slot] still holds
+                    // the pre-rollback peak frame from before the jump, so
+                    // any subsequent peer input at frame ≤ peak gets rejected
+                    // by the `recvFrame > _lastRemoteFramePerSlot` freshness
+                    // check at line ~6229 — _peerLastAdvanceTime never
+                    // updates and ROLLBACK_STALL_MS fires 3 s later, freezing
+                    // the sim until PEER-PHANTOM clears the slot 5 s in. The
+                    // fix: rebase the per-slot last-known frame to
+                    // (applyFrame-1) so the next peer input at applyFrame or
+                    // later registers as fresh, AND bump
+                    // _peerLastAdvanceTime[slot] to now so the rb-stall
+                    // check has a 3-s grace window from the apply point. Mode
+                    // 1 (local replay) does not hit this because its
+                    // _frameNum advances forward THROUGH the replay window
+                    // and never decrements.
+                    for (const s of Object.keys(_lastRemoteFramePerSlot)) {
+                      const slot = s | 0;
+                      if (slot === _playerSlot) continue;
+                      _lastRemoteFramePerSlot[slot] = applyFrame - 1;
+                      _peerLastAdvanceTime[slot] = performance.now();
+                    }
                     // ── Synchronous paint for frame T ──────────────────
                     // Apply just landed state-entering-T; the next regular
                     // tick would paint frame T after a few ms of scheduler
@@ -11111,8 +11135,41 @@
     _diag?.cleanup();
   };
 
+  // Diagnostic: per-tick early-return tracker. Each rAF the tick logs
+  // its outcome ("advance", "skip:phase", "skip:rb-stall", etc.) into
+  // a counter map plus a recent-history ring. Toggled via
+  // ?tickReturnTrace=1 / localStorage 'kn-tick-return-trace'. Costs
+  // negligible when off (counter increment + truncate ring).
+  const _tickReturnCounts = Object.create(null);
+  const _tickReturnRing = []; // [{ t, frame, tag }]
+  const _TICK_RETURN_RING_MAX = 240;
+  const _tickReturnTraceEnabled = (() => {
+    try {
+      const raw = _urlParams.get('tickReturnTrace') ?? localStorage.getItem('kn-tick-return-trace');
+      return raw === '1';
+    } catch (_) {
+      return false;
+    }
+  })();
+  const _markTickReturn = (tag) => {
+    _tickReturnCounts[tag] = (_tickReturnCounts[tag] || 0) + 1;
+    if (_tickReturnTraceEnabled) {
+      _tickReturnRing.push({ t: performance.now(), frame: _frameNum, tag });
+      if (_tickReturnRing.length > _TICK_RETURN_RING_MAX) _tickReturnRing.shift();
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.knTickReturnStats = () => ({
+      counts: { ..._tickReturnCounts },
+      recent: _tickReturnRing.slice(-60),
+    });
+  }
+
   const tick = () => {
-    if (_phase !== PHASE_RUNNING) return;
+    if (_phase !== PHASE_RUNNING) {
+      _markTickReturn('skip:phase');
+      return;
+    }
     _checkStateTransition();
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
@@ -11141,7 +11198,10 @@
       }
     }
 
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE) return; // frozen while late-joiner loads state
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+      _markTickReturn('skip:late-join-pause');
+      return; // frozen while late-joiner loads state
+    }
     // Guests defer the entire tick loop until the host's authoritative
     // rb-delay broadcast arrives and the C rollback engine is initialized
     // with the agreed delay. Without this, the guest would advance frames
@@ -11180,6 +11240,7 @@
           }
         }
       } else {
+        _markTickReturn('skip:rb-pending-init');
         return;
       }
     }
@@ -11263,12 +11324,32 @@
     if (_useCRollback && !menuStartBarrierPending && _frameNum >= FRAME_PACING_WARMUP) {
       const nowStall = performance.now();
       const stallPeers = getInputPeers();
+      const stallApplyFrame = _frameNum - DELAY_FRAMES;
       for (const p of stallPeers) {
         if (_peerPhantom[p.slot]) continue;
         const last = _peerLastAdvanceTime[p.slot];
         if (last === undefined) continue;
         const stale = nowStall - last;
         if (stale >= ROLLBACK_STALL_MS) {
+          // Short-circuit: even if _peerLastAdvanceTime is stale,
+          // _peerLastAdvanceTime only tracks "newest peer frame seen
+          // at main" — it can lag behind the ring's actual content
+          // when the apply-side rolled back (worker-coproc Mode 2)
+          // and incoming peer inputs at frames ≤ pre-rollback peak
+          // get rejected by the freshness check at line ~6229. If
+          // the ring DOES have an input for the current apply_frame,
+          // the engine doesn't need to stall — it has what it needs
+          // to advance. This breaks the post-rollback deadlock
+          // observed in Mode 2 without affecting genuine peer-dead
+          // cases (in those, ring is empty for current apply_frame).
+          if (stallApplyFrame >= 0 && _remoteInputs[p.slot]?.[stallApplyFrame] !== undefined) {
+            // Bump _peerLastAdvanceTime so the next tick doesn't re-
+            // hit this branch; treat the present-in-ring input as
+            // proof of recent peer activity even if its recvFrame was
+            // stale-rejected.
+            _peerLastAdvanceTime[p.slot] = nowStall;
+            continue;
+          }
           if (_runSubstate !== RUN_RB_STALL) {
             _runSubstate = RUN_RB_STALL;
             _rollbackStallStart = nowStall;
@@ -11618,7 +11699,12 @@
     }
 
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
-    if (_skipFrameAdvance) return;
+    if (_skipFrameAdvance) {
+      _markTickReturn(
+        _runSubstate === RUN_RB_STALL ? 'skip:rb-stall' : _runSubstate === RUN_PACING ? 'skip:pacing' : 'skip:other',
+      );
+      return;
+    }
 
     // ── SR deferred-init hook ───────────────────────────────────────────
     // The MENU→GAMEPLAY transition logic that fires the deferred init
@@ -11653,6 +11739,7 @@
       const tickMod = window.EJS_emulator?.gameManager?.Module;
       if (!tickMod?._kn_pre_tick) {
         _useCRollback = false;
+        _markTickReturn('skip:no-pre-tick');
         return;
       }
 
@@ -11667,6 +11754,7 @@
       // calls _workerCoprocAbort which clears pending and falls back to
       // local-replay for subsequent rollbacks.
       if (_workerCoprocPending) {
+        _markTickReturn('skip:coproc-pending');
         return;
       }
 
@@ -11972,6 +12060,7 @@
                       `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
                   );
                 }
+                _markTickReturn('skip:menu-lockstep');
                 return;
               }
             }
@@ -11988,6 +12077,7 @@
                       `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
                   );
                 }
+                _markTickReturn('skip:boot-lockstep');
                 return;
               }
               // Fabricate zero input and continue
@@ -12058,6 +12148,7 @@
                 );
                 _rbStallLogged = _frameNum;
               }
+              _markTickReturn('skip:rb-input-stall');
               return;
             }
             // Within rollback budget — let C engine predict through it
@@ -12115,6 +12206,7 @@
             }
             if (!allInputsPresent) {
               if (_stallStart === 0) _stallStart = performance.now();
+              _markTickReturn('skip:demo-paused-stall');
               return; // stall — same shape as BOOT/STRICT-MENU early returns
             }
           }
@@ -12293,6 +12385,7 @@
           }
           _pushTickProfile({ f: _frameNum, path: 'pacing', total: performance.now() - _t0, preTick: _tPreTick - _t0 });
           _pushRbProbe('pacing');
+          _markTickReturn('skip:pacing-c');
           return;
         }
       }
@@ -12413,6 +12506,7 @@
               workerCoproc: true,
             });
             _pushRbProbe('replay');
+            _markTickReturn('skip:coproc-dispatched');
             return;
           } catch (e) {
             _syncLog(`WORKER-COPROC dispatch failed: ${e?.message || e} — falling back to main replay`);
@@ -12487,6 +12581,7 @@
           burstSteps,
         });
         _pushRbProbe('replay');
+        _markTickReturn('replay-burst');
         return;
       }
 
@@ -12646,6 +12741,7 @@
         postStep: _tTotal - _tStep,
       });
       _pushRbProbe('normal');
+      _markTickReturn('advance');
 
       // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
       if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {

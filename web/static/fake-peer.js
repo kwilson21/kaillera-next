@@ -417,11 +417,25 @@
     const lookahead = _stallTickCount >= STALL_DETECT_FRAMES ? STALL_LOOKAHEAD_FRAMES : 0;
     const lookaheadCap = engineFrame + lookahead;
     const targetFrame = Math.max(engineFrame, Math.min(_lastSeenFrame + 1, lookaheadCap));
+    let scheduledThisTick = 0;
     for (let frame = _lastSeenFrame + 1; frame <= targetFrame; frame++) {
       _scheduleFrame(frame, now);
+      scheduledThisTick++;
     }
     _lastSeenFrame = Math.max(_lastSeenFrame, targetFrame);
     _drainQueue(now);
+    if (window.__knFakePeerProbe) {
+      window.__knFakePeerProbe.push({
+        t: now,
+        engineFrame,
+        lastSeenFrame: _lastSeenFrame,
+        stallTicks: _stallTickCount,
+        lookahead,
+        scheduledThisTick,
+        queueLen: _queue.length,
+      });
+      if (window.__knFakePeerProbe.length > 4_000) window.__knFakePeerProbe.shift();
+    }
     _rafId = _nativeRAF(_tick);
   };
 

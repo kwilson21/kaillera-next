@@ -45,7 +45,8 @@ async function trace(url) {
       t.includes('PEER-RECOVERED') ||
       t.includes('C-REPLAY') ||
       t.includes('REPLAY-NORUN') ||
-      t.includes('INPUT-FIRST')
+      t.includes('INPUT-FIRST') ||
+      t.includes('peer-tracking-reset')
     ) {
       syncLog.push(t.slice(0, 280));
     }
@@ -63,6 +64,7 @@ async function trace(url) {
       running: false,
       fakePeerSends: [],
     };
+    window.__knFakePeerProbe = [];
     // Hook fake-peer's _scheduleFrame to capture every input it sends.
     // KNFakePeer is the public API; we instrument by wrapping start.
     const origStart = window.KNFakePeer?.start;
@@ -133,37 +135,43 @@ async function trace(url) {
   // Run for 35 s — enough to cover boot + autopilot + first match start.
   await new Promise((r) => setTimeout(r, 35_000));
 
-  const { records, syncLogTail, freezeState, fakePeerSends } = await page.evaluate(() => {
-    window.__knFreezeProbeStop();
-    // _syncLog writes to a private circular buffer; only "critical" messages
-    // hit console.log. Pull the ring directly to capture ROLLBACK-STALL,
-    // PEER-PHANTOM, etc.
-    const ring = window._knSyncLogRing || window.NetplayRollback?._syncLogRing;
-    let tail = [];
-    try {
-      const all = ring?.entries?.() ?? ring?.snapshot?.() ?? [];
-      tail = all.slice(-200).map((e) => `t=${e.t | 0} f=${e.f} ${e.msg}`);
-    } catch (_) {}
-    // Snapshot the engine's view of peer freshness — the rollback-stall
-    // condition reads `_peerLastAdvanceTime[slot]`, fake-peer's
-    // `getCurrentFrame()` reads `_frameNum`. Capture both via the
-    // exposed HUD + introspection paths.
-    const hud = window.NetplayRollback?.getHudCounters?.() || {};
-    const peerSnap = window.NetplayRollback?.getPeerSnap?.() || null;
-    const fakePeerStats = window.KNFakePeer?.getStats?.() || null;
-    const fakePeerFrame = window.KNFakePeer?.getCurrentSendingFrame?.() || null;
-    return {
-      records: window.__knFreezeProbe.records.slice(),
-      syncLogTail: tail,
-      fakePeerSends: window.__knFreezeProbe.fakePeerSends.slice(),
-      freezeState: {
-        knFrame: hud.currentFrame ?? -1,
-        peerSnap,
-        fakePeerStats,
-        fakePeerFrame,
-      },
-    };
-  });
+  const { records, syncLogTail, freezeState, fakePeerSends, tickReturnStats, fakePeerProbe } = await page.evaluate(
+    () => {
+      window.__knFreezeProbeStop();
+      // _syncLog writes to a private circular buffer; only "critical" messages
+      // hit console.log. Pull the ring directly to capture ROLLBACK-STALL,
+      // PEER-PHANTOM, etc.
+      const ring = window._knSyncLogRing || window.NetplayRollback?._syncLogRing;
+      let tail = [];
+      try {
+        const all = ring?.entries?.() ?? ring?.snapshot?.() ?? [];
+        tail = all.slice(-200).map((e) => `t=${e.t | 0} f=${e.f} ${e.msg}`);
+      } catch (_) {}
+      // Snapshot the engine's view of peer freshness — the rollback-stall
+      // condition reads `_peerLastAdvanceTime[slot]`, fake-peer's
+      // `getCurrentFrame()` reads `_frameNum`. Capture both via the
+      // exposed HUD + introspection paths.
+      const hud = window.NetplayRollback?.getHudCounters?.() || {};
+      const peerSnap = window.NetplayRollback?.getPeerSnap?.() || null;
+      const fakePeerStats = window.KNFakePeer?.getStats?.() || null;
+      const fakePeerFrame = window.KNFakePeer?.getCurrentSendingFrame?.() || null;
+      const tickReturnStats = window.knTickReturnStats?.() || null;
+      const fakePeerProbe = (window.__knFakePeerProbe || []).slice();
+      return {
+        records: window.__knFreezeProbe.records.slice(),
+        syncLogTail: tail,
+        fakePeerSends: window.__knFreezeProbe.fakePeerSends.slice(),
+        tickReturnStats,
+        fakePeerProbe,
+        freezeState: {
+          knFrame: hud.currentFrame ?? -1,
+          peerSnap,
+          fakePeerStats,
+          fakePeerFrame,
+        },
+      };
+    },
+  );
   // Mix in-page sync-ring entries with the console-captured ones.
   for (const e of syncLogTail) syncLog.push(`[ring] ${e.slice(0, 280)}`);
 
@@ -302,6 +310,36 @@ async function trace(url) {
       }
     }
     if (unchangedCount > 0) console.log(`  ... (read same frame ${unchangedCount} more times)`);
+  }
+  if (fakePeerProbe?.length && realSimFreezes.length > 0) {
+    const freeze = realSimFreezes[0];
+    console.log(`\nfake-peer ticks around first freeze (${freeze.startT}-${freeze.endT}ms):`);
+    const around = fakePeerProbe.filter((p) => p.t >= freeze.startT - 200 && p.t <= freeze.endT + 200);
+    let lastEng = -1;
+    for (const p of around.slice(0, 60)) {
+      const marker = p.engineFrame !== lastEng ? '↑' : ' ';
+      console.log(
+        `  t=${p.t.toFixed(0)}ms ${marker}eng=${p.engineFrame} last=${p.lastSeenFrame} stall=${p.stallTicks} la=${p.lookahead} sched=${p.scheduledThisTick} q=${p.queueLen}`,
+      );
+      lastEng = p.engineFrame;
+    }
+    if (around.length > 60) console.log(`  ... +${around.length - 60} more`);
+  } else if (fakePeerProbe?.length) {
+    console.log(`\nfake-peer last 20 ticks (no freeze detected):`);
+    for (const p of fakePeerProbe.slice(-20)) {
+      console.log(
+        `  t=${p.t.toFixed(0)}ms eng=${p.engineFrame} last=${p.lastSeenFrame} stall=${p.stallTicks} la=${p.lookahead} sched=${p.scheduledThisTick} q=${p.queueLen}`,
+      );
+    }
+  }
+  if (tickReturnStats) {
+    console.log(`\ntick early-return counts:`);
+    const sorted = Object.entries(tickReturnStats.counts).sort((a, b) => b[1] - a[1]);
+    for (const [tag, n] of sorted) console.log(`  ${tag}: ${n}`);
+    console.log(`\ntick recent-history (last ${tickReturnStats.recent.length}):`);
+    for (const r of tickReturnStats.recent) {
+      console.log(`  t=${r.t.toFixed(0)}ms frame=${r.frame} ${r.tag}`);
+    }
   }
   console.log(`\nrelevant log lines: ${syncLog.length}`);
   for (const e of syncLog.slice(-40)) console.log(`  ${e}`);
