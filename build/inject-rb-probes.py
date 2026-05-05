@@ -43,6 +43,10 @@ GLOBALS_ANCHOR = "extern void emscripten_mainloop(void);"
 
 GLOBALS_INSERT = """extern void emscripten_mainloop(void);
 
+/* Forward declaration for rb_log — used by inject-rb-probes.py probes
+ * that fire BEFORE rb_log's static definition later in the file. */
+static void rb_log(const char *fmt, ...);
+
 /* ── Rollback-engine OOB-throw localization probes (diagnostic) ───────
  * Updated at every save/restore boundary so JS reads the last reached
  * point after a WASM RuntimeError in stepOneFrame. The cached-interpreter
@@ -111,6 +115,7 @@ SAVE_SLOT_SPLIT_ORIGINAL = """static int rb_save_slot(int idx, int frame, int ma
 
 SAVE_SLOT_SPLIT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, int mark_last) {
     KN_RB_PROBE_SLOT(100, idx);
+    rb_log("RBSV-ENTRY idx=%d frame=%d split=%d", idx, frame, rb_using_split_state());
     if (rb_using_split_state()) {
         uint32_t cpu_size;
         if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
@@ -119,10 +124,14 @@ SAVE_SLOT_SPLIT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, in
             kn_diag_rb_serialize_count++;
             kn_diag_rb_serialize_ret = 0;
             KN_RB_PROBE_SLOT(101, idx);
+            rb_log("RBSV-NULL-PTR idx=%d", idx);
             return 0;
         }
+        rb_log("RBSV-PRE-RDRAM-COPY idx=%d size=%u", idx, (unsigned)rb.split_rdram_size);
         memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        rb_log("RBSV-PRE-READ-CPU idx=%d", idx);
         cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        rb_log("RBSV-POST-READ-CPU idx=%d size=%u", idx, (unsigned)cpu_size);
         if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
             rb.split_save_failures++;
             kn_diag_rb_serialize_count++;
@@ -145,6 +154,7 @@ SAVE_SLOT_SPLIT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, in
     }
     kn_diag_rb_serialize_count++;
     KN_RB_PROBE_SLOT(101, idx);
+    rb_log("RBSV-PRE-SF idx=%d", idx);
     rb.ring_sf_state[idx] = sf_pack();"""
 
 # ---------------------------------------------------------------------------

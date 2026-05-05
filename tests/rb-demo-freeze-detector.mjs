@@ -351,7 +351,7 @@ async function trace(url) {
     console.log(`\nC-ROLLBACK-THROW samples (${cRollbackThrowSamples.length}):`);
     for (const s of cRollbackThrowSamples) {
       console.log(
-        `  t=${s.t.toFixed(0)}ms f=${s.f} cp=${s.cp} fAdv=${s.frameAdv} replayDepth=${s.replayDepth} pendingRb=${s.pendingRb} rbFrame=${s.rbFrame} rbCount=${s.rollbackCount} failed=${s.failedRollbacks} msg=${s.msg}`,
+        `  t=${s.t.toFixed(0)}ms f=${s.f} cp=${s.cp} fAdv=${s.frameAdv} replayDepth=${s.replayDepth} pendingRb=${s.pendingRb} rbFrame=${s.rbFrame} rbCount=${s.rollbackCount} failed=${s.failedRollbacks} diagPhase=${s.diagPhase} diagSlot=0x${(s.diagSlot >>> 0).toString(16)} pcRaw=0x${(s.diagSerCount >>> 0).toString(16)} memSize=0x${(s.wasmMemSize >>> 0).toString(16)} msg=${s.msg}`,
       );
       console.log(`    stack: ${s.stack.slice(0, 800).replace(/\n/g, '\n           ')}`);
       if (s.cDebugTail) {

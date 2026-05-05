@@ -640,6 +640,23 @@ KNHLE_EOF
             || { echo "FATAL: inject-ksw-probes.py failed"; exit 1; }
     fi
 
+    # Diagnostic: bisect kn_sync_read_cpu by stamping kn_diag_rb_phase
+    # before each memcpy/sub-call so JS can pinpoint which one OOBs.
+    # Remove this hook and build/inject-sync-cpu-probes.py once the
+    # post-coproc-apply trap is fixed.
+    if [ -f "${SCRIPT_DIR}/inject-sync-cpu-probes.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-sync-cpu-probes.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-sync-cpu-probes.py failed"; exit 1; }
+    fi
+
+    # FIX: ensure kn_sync_write_cpu's savestates_load_set_pc actually
+    # updates r4300->pc. Cleared skip_jump+delay_slot pre-call, validates
+    # post-call and falls back to interp_PC if pc is past 2GB.
+    if [ -f "${SCRIPT_DIR}/inject-sync-cpu-write-fix.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-sync-cpu-write-fix.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-sync-cpu-write-fix.py failed"; exit 1; }
+    fi
+
     # static save scratch: replace malloc/free in savestates_save_m64p with
     # a static reusable buffer. retro_serialize is called 60×/sec by the
     # rollback engine; the malloc was suspected to cause WASM heap growth.

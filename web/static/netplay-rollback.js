@@ -13675,6 +13675,10 @@
               rbFrame: m?._kn_get_frame?.() ?? -1,
               rollbackCount: m?._kn_get_rollback_count?.() ?? -1,
               failedRollbacks: m?._kn_get_failed_rollbacks?.() ?? -1,
+              diagPhase: m?._kn_get_diag_rb_phase?.() ?? -1,
+              diagSlot: m?._kn_get_diag_rb_save_slot?.() ?? -1,
+              diagSerCount: m?._kn_get_diag_rb_serialize_count?.() ?? -1,
+              wasmMemSize: m?.HEAPU8?.byteLength ?? -1,
               cDebugTail,
             });
           }
