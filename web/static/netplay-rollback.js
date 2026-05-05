@@ -11178,21 +11178,39 @@
     }
   };
   let _tickEnteredCount = 0;
+  // Last checkpoint reached inside tick() — overwrites each call. When the
+  // run freezes and no _markTickReturn fires for thousands of ticks, the
+  // last value here pinpoints which control-flow region tick() last
+  // executed before exiting via an unmarked path or exception.
+  let _tickLastCheckpoint = 'init';
+  // Counts how many times each checkpoint is reached (cumulative). At
+  // freeze, the checkpoint with the highest count among "reached but no
+  // following marker fires" is the bottleneck region.
+  const _tickCheckpointCounts = Object.create(null);
+  const _chk = (name) => {
+    _tickLastCheckpoint = name;
+    _tickCheckpointCounts[name] = (_tickCheckpointCounts[name] || 0) + 1;
+  };
   if (typeof window !== 'undefined') {
     window.knTickReturnStats = () => ({
       counts: { ..._tickReturnCounts },
       recent: _tickReturnRing.slice(-60),
       tickEntered: _tickEnteredCount,
+      lastCheckpoint: _tickLastCheckpoint,
+      checkpointCounts: { ..._tickCheckpointCounts },
     });
   }
 
   const tick = () => {
     _tickEnteredCount = (_tickEnteredCount || 0) + 1;
+    _chk('enter');
     if (_phase !== PHASE_RUNNING) {
       _markTickReturn('skip:phase');
       return;
     }
+    _chk('post-phase');
     _checkStateTransition();
+    _chk('post-state-transition');
 
     // MF6: Detection-only watchdog. Logs TICK-STUCK with a rich
     // diagnostic snapshot when the frame counter has not advanced
@@ -11318,6 +11336,8 @@
       applySyncState(pending.bytes, pending.frame, pending.fromProactive);
     }
 
+    _chk('post-sync-target');
+
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
     // Pacing decisions (stall, safety freeze, soft throttle) skip frame
     // advance but must NOT skip input send — otherwise both peers starve
@@ -11330,6 +11350,7 @@
     if (menuStartBarrier.freezeFrame) {
       _skipFrameAdvance = true;
     }
+    _chk('post-barrier');
 
     // If any input peer hasn't advanced for ROLLBACK_STALL_MS, freeze the
     // local simulation instead of predicting forward. This is essentially
@@ -11720,6 +11741,8 @@
       }
     }
 
+    _chk('post-input-send');
+
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
     if (_skipFrameAdvance) {
       _markTickReturn(
@@ -11727,6 +11750,7 @@
       );
       return;
     }
+    _chk('post-skip-gate');
 
     // ── SR deferred-init hook ───────────────────────────────────────────
     // The MENU→GAMEPLAY transition logic that fires the deferred init
@@ -11758,293 +11782,356 @@
     // ~120 boot frames independently and end up permanently desynced.
     // After convergence, the rollback path takes over with prediction.
     if (_useCRollback) {
-      const tickMod = window.EJS_emulator?.gameManager?.Module;
-      if (!tickMod?._kn_pre_tick) {
-        _useCRollback = false;
-        _markTickReturn('skip:no-pre-tick');
-        return;
-      }
-
-      // ── Worker-coproc wait gate ──────────────────────────────────────
-      // While a worker-coprocessor replay is in flight, the C engine has
-      // already rewound to (targetFrame - replayDepth) and main has cleared
-      // its replay state. We must NOT advance the emulator forward (no
-      // input drain, no kn_pre_tick, no step) until the worker replies
-      // with corrected state at applyFrame=targetFrame. The visual freeze
-      // overlay covers the canvas during this brief wait. If the wait
-      // exceeds RB_WORKER_COPROC_TIMEOUT_MS the dispatch's setTimeout
-      // calls _workerCoprocAbort which clears pending and falls back to
-      // local-replay for subsequent rollbacks.
-      if (_workerCoprocPending) {
-        _markTickReturn('skip:coproc-pending');
-        return;
-      }
-
-      // ── Hybrid input stall ───────────────────────────────────────────
-      // Three modes, one goal: never let the local peer run so far ahead
-      // that rollback can't correct a misprediction.
-      //
-      // BOOT (first BOOT_GRACE_FRAMES): pure lockstep stall — wait for
-      // remote input before every frame. Prevents the boot race where
-      // both emulators predict through boot frames and desync.
-      //
-      // STRICT MENU (Title/Mode Select/CSS/stage select/pause): pure
-      // lockstep stall. Rollback's stash-and-restore only preserves
-      // in-match gameplay state; menu navigation state lives outside
-      // those bytes. A misprediction during menus can corrupt the setup
-      // path, so we never fabricate inputs there.
-      //
-      // MATCH LOADING (scene=22, game_status=0): not a controllable menu.
-      // It must not use the no-timeout menu stall path; a single missing
-      // mobile frame at this transition would otherwise freeze both peers
-      // before gameplay. Let rollback/pacing handle this phase.
-      //
-      // GAMEPLAY (game_status == 1, after BOOT_GRACE_FRAMES): let
-      // rollback predict through the first few frames of missing input
-      // (hides jitter). But if frame advantage exceeds DELAY_FRAMES + 4,
-      // stall to wait — prevents runaway prediction → phantom →
-      // disconnect. Rollback handles small gaps, lockstep stall handles
-      // big ones.
-      //
-      // Late joiners skip boot convergence — they loaded the host's state
-      // directly, no 120-frame boot race to protect against. Without this,
-      // late joiners stall in pure-lockstep waiting for ALL peers' input
-      // every frame, which is fatal on mobile with 3+ peers.
-      // Boot grace: stall in pure lockstep for the first BOOT_GRACE_FRAMES.
-      // _rbInitFrame === -1 means C-rollback hasn't initialized yet. This can
-      // be because (a) the WASM core doesn't support it, or (b) the guest is
-      // waiting for the host's rb-delay broadcast. In case (b), we must NOT
-      // skip boot grace — the boot sync depends on it. Use _frameNum as the
-      // fallback reference when _rbInitFrame hasn't been set yet.
-      // _bootDoneForSync: gates boot sync trigger (needs 120 frames for emulator to stabilize)
-      // _bootDone: gates lockstep stall (always true — no stall during boot/intro,
-      //   boot sync at f=120 and CSS sync at menu entry handle alignment instead)
-      const _bootRef = _rbInitFrame >= 0 ? _rbInitFrame : 0;
-      const _bootDoneForSync = _frameNum - _bootRef > BOOT_GRACE_FRAMES;
-      const _bootDone = true;
-      // Gate rollback on SSB64 menu/gameplay phase. Active gameplay may use
-      // rollback prediction; strict input menus use pure lockstep so
-      // irreversible menu edges are never predicted.
-      const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
-      const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
-      const localGameplay = !_isSmashRemix() || menuPhase.gameplay;
-      const localInMenu = !!menuPhase.localActive;
-      // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
-      // Status 0 is dangerous only in controllable menus; scene=22/status=0
-      // is battle loading and uses rollback/pacing instead of no-timeout lockstep.
-      // Status -1 means RDRAM not available (non-SSB64) — safe fallback.
-      // scene_curr lets us enter strict lockstep at Title/Mode Select/1P/VS
-      // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
-      // input and split one peer into 1P while the other remains in Mode Select.
-      const inMenu = menuPhase.active;
-      if (!_inGameplay && localGameplay && _bootDone) {
-        _inGameplay = true;
-        _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
-        // Smash Remix defers rollback init until here — see line ~6900.
-        // Both peers fire on their own local transition; doRollbackInit
-        // calls _kn_set_frame(_frameNum) so per-peer frame-skew at init
-        // time is handled the same way as late-join.
-        if (window._rbDeferredForGameplay) {
-          const fn = window._rbDeferredForGameplay;
-          window._rbDeferredForGameplay = null;
-          _syncLog(`C-ROLLBACK firing deferred init at f=${_frameNum}`);
-          fn();
-        }
-      } else if (_inGameplay && localInMenu) {
-        _inGameplay = false;
-        if (_frameNum - _inGameplayLoggedAt > 60) {
-          _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
-          _inGameplayLoggedAt = _frameNum;
-        }
-        // Tear down C rollback when leaving gameplay so menu state isn't
-        // serialized — Smash Remix specifically defers init to avoid this
-        // (see line ~7099). Without teardown, the engine keeps running
-        // through every subsequent menu in the session, making the second
-        // match's first MENU→GAMEPLAY transition behave differently from
-        // the first (no fresh init, polluted prediction/stat state).
-        // Re-arm the deferred-init closure so the next gameplay transition
-        // re-fires init cleanly.
-        if (_useCRollback && _rbReinitClosure) {
-          const tickMod = window.EJS_emulator?.gameManager?.Module;
-          if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
-          if (_rbInputPtr && tickMod?._free) {
-            tickMod._free(_rbInputPtr);
-            _rbInputPtr = 0;
-          }
-          if (_rbRegionsBufPtr && tickMod?._free) {
-            tickMod._free(_rbRegionsBufPtr);
-            _rbRegionsBufPtr = 0;
-          }
+      try {
+        _chk('cr:enter');
+        const tickMod = window.EJS_emulator?.gameManager?.Module;
+        if (!tickMod?._kn_pre_tick) {
           _useCRollback = false;
-          _rbInitFrame = -1;
-          // Guests must wait for the host's fresh rb-init-frame broadcast
-          // for the next match. Host's delay is unchanged across matches,
-          // but the init frame is per-match.
-          if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
-          window._rbDeferredForGameplay = _rbReinitClosure;
-          _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
-        }
-      }
-      // Menu lockstep arming: once a real controllable menu is visible, never
-      // fabricate missing remote inputs. This intentionally does not request
-      // or apply a state push; menu determinism comes from preventing the bad
-      // predicted frame, not resyncing after it.
-      if (strictInputLockstep && !window._knCssSyncDone) {
-        window._knCssSyncDone = true;
-        _syncLog(`MENU-LOCKSTEP armed at f=${_frameNum}, scene=${sceneCurr}, gameStatus=${gameStatus}`);
-      }
-      if (menuPhase.waitingPeerSlots?.length && _frameNum - _lastPeerPhaseWaitLogFrame >= 60) {
-        _lastPeerPhaseWaitLogFrame = _frameNum;
-        _syncLog(
-          `PHASE-LOCK f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
-            `waitingPeers=[${menuPhase.waitingPeerSlots.join(',')}]`,
-        );
-      }
-      // Lockstep stall during controllable menus. During boot, intro, and
-      // battle loading, run freely; once scene_curr reaches Title/Mode
-      // Select/menus, never fabricate missing remote input.
-      const _menuLockstepActive = strictInputLockstep;
-      const _rbBootConverged = _bootDone && !_menuLockstepActive;
-      const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
-      const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
-      const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);
-      if (phaseLockSlots.length) {
-        const waitKey = `${sceneCurr}:${gameStatus}:${phaseLockSlots.join(',')}`;
-        if (_phaseLockStallKey !== waitKey) {
-          _phaseLockStallKey = waitKey;
-          _phaseLockStallStartTime = _tickNow;
-        }
-        const stallMs = _tickNow - _phaseLockStallStartTime;
-        if (stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-          for (const slot of phaseLockSlots) {
-            markPeerPhantomForStallTimeout(
-              slot,
-              'phase-lock-timeout',
-              `stalledMs=${Math.round(stallMs)} scene=${sceneCurr} gameStatus=${gameStatus}`,
-            );
-          }
-          _syncLog(
-            `PHASE-LOCK-TIMEOUT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
-              `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
-              `stalledMs=${Math.round(stallMs)} — force-releasing phase lock`,
-          );
-          _phaseLockStallKey = '';
-          _phaseLockStallStartTime = 0;
-        } else if (phaseWaitSlots.length) {
-          _markTickReturn('skip:phase-lock');
+          _markTickReturn('skip:no-pre-tick');
           return;
         }
-      } else {
-        _phaseLockStallKey = '';
-        _phaseLockStallStartTime = 0;
-      }
-      // Boot sync: legacy savestate startup can still need one host state push
-      // after boot grace. kn-sync startup already loaded the host's authoritative
-      // CPU/peripheral/RDRAM state at the manual start boundary; repeating that
-      // push can rewind the guest after menus have begun and create an input stall.
-      if (_bootDoneForSync && !window._knBootSyncDone) {
-        window._knBootSyncDone = true;
-        if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
-          const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-          if (hostPeer?.dc?.readyState === 'open') {
-            try {
-              hostPeer.dc.send('sync-request-full');
-              _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
-            } catch (e) {
-              _syncLog(`BOOT-SYNC send failed: ${e}`);
-            }
+        _chk('cr:have-tickmod');
+
+        // ── Worker-coproc wait gate ──────────────────────────────────────
+        // While a worker-coprocessor replay is in flight, the C engine has
+        // already rewound to (targetFrame - replayDepth) and main has cleared
+        // its replay state. We must NOT advance the emulator forward (no
+        // input drain, no kn_pre_tick, no step) until the worker replies
+        // with corrected state at applyFrame=targetFrame. The visual freeze
+        // overlay covers the canvas during this brief wait. If the wait
+        // exceeds RB_WORKER_COPROC_TIMEOUT_MS the dispatch's setTimeout
+        // calls _workerCoprocAbort which clears pending and falls back to
+        // local-replay for subsequent rollbacks.
+        if (_workerCoprocPending) {
+          _markTickReturn('skip:coproc-pending');
+          return;
+        }
+        _chk('cr:past-coproc-gate');
+
+        // ── Hybrid input stall ───────────────────────────────────────────
+        // Three modes, one goal: never let the local peer run so far ahead
+        // that rollback can't correct a misprediction.
+        //
+        // BOOT (first BOOT_GRACE_FRAMES): pure lockstep stall — wait for
+        // remote input before every frame. Prevents the boot race where
+        // both emulators predict through boot frames and desync.
+        //
+        // STRICT MENU (Title/Mode Select/CSS/stage select/pause): pure
+        // lockstep stall. Rollback's stash-and-restore only preserves
+        // in-match gameplay state; menu navigation state lives outside
+        // those bytes. A misprediction during menus can corrupt the setup
+        // path, so we never fabricate inputs there.
+        //
+        // MATCH LOADING (scene=22, game_status=0): not a controllable menu.
+        // It must not use the no-timeout menu stall path; a single missing
+        // mobile frame at this transition would otherwise freeze both peers
+        // before gameplay. Let rollback/pacing handle this phase.
+        //
+        // GAMEPLAY (game_status == 1, after BOOT_GRACE_FRAMES): let
+        // rollback predict through the first few frames of missing input
+        // (hides jitter). But if frame advantage exceeds DELAY_FRAMES + 4,
+        // stall to wait — prevents runaway prediction → phantom →
+        // disconnect. Rollback handles small gaps, lockstep stall handles
+        // big ones.
+        //
+        // Late joiners skip boot convergence — they loaded the host's state
+        // directly, no 120-frame boot race to protect against. Without this,
+        // late joiners stall in pure-lockstep waiting for ALL peers' input
+        // every frame, which is fatal on mobile with 3+ peers.
+        // Boot grace: stall in pure lockstep for the first BOOT_GRACE_FRAMES.
+        // _rbInitFrame === -1 means C-rollback hasn't initialized yet. This can
+        // be because (a) the WASM core doesn't support it, or (b) the guest is
+        // waiting for the host's rb-delay broadcast. In case (b), we must NOT
+        // skip boot grace — the boot sync depends on it. Use _frameNum as the
+        // fallback reference when _rbInitFrame hasn't been set yet.
+        // _bootDoneForSync: gates boot sync trigger (needs 120 frames for emulator to stabilize)
+        // _bootDone: gates lockstep stall (always true — no stall during boot/intro,
+        //   boot sync at f=120 and CSS sync at menu entry handle alignment instead)
+        const _bootRef = _rbInitFrame >= 0 ? _rbInitFrame : 0;
+        const _bootDoneForSync = _frameNum - _bootRef > BOOT_GRACE_FRAMES;
+        const _bootDone = true;
+        // Gate rollback on SSB64 menu/gameplay phase. Active gameplay may use
+        // rollback prediction; strict input menus use pure lockstep so
+        // irreversible menu edges are never predicted.
+        const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
+        const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
+        const localGameplay = !_isSmashRemix() || menuPhase.gameplay;
+        const localInMenu = !!menuPhase.localActive;
+        // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
+        // Status 0 is dangerous only in controllable menus; scene=22/status=0
+        // is battle loading and uses rollback/pacing instead of no-timeout lockstep.
+        // Status -1 means RDRAM not available (non-SSB64) — safe fallback.
+        // scene_curr lets us enter strict lockstep at Title/Mode Select/1P/VS
+        // menus before CSS; waiting until CSS lets Mode Select fabricate a zero
+        // input and split one peer into 1P while the other remains in Mode Select.
+        const inMenu = menuPhase.active;
+        if (!_inGameplay && localGameplay && _bootDone) {
+          _inGameplay = true;
+          _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
+          // Smash Remix defers rollback init until here — see line ~6900.
+          // Both peers fire on their own local transition; doRollbackInit
+          // calls _kn_set_frame(_frameNum) so per-peer frame-skew at init
+          // time is handled the same way as late-join.
+          if (window._rbDeferredForGameplay) {
+            const fn = window._rbDeferredForGameplay;
+            window._rbDeferredForGameplay = null;
+            _syncLog(`C-ROLLBACK firing deferred init at f=${_frameNum}`);
+            fn();
           }
-        } else if (_syncEnabled && _playerSlot !== 0) {
-          _syncLog(`BOOT-SYNC skipped: initial state already ${_lockstepStartStateKind}`);
-        }
-      }
-      const rbApplyFrame = _frameNum - DELAY_FRAMES;
-      // Tick timing: measure wall-clock between ticks for FPS diagnosis
-      const _tickWallNow = performance.now();
-      if (!window._knLastTickWall) window._knLastTickWall = _tickWallNow;
-      if (!window._knTickDeltas) window._knTickDeltas = [];
-      const _tickDelta = _tickWallNow - window._knLastTickWall;
-      window._knLastTickWall = _tickWallNow;
-      if (_tickDelta > 0 && _tickDelta < 200) window._knTickDeltas.push(_tickDelta);
-      if (window._knTickDeltas.length > 120) window._knTickDeltas.splice(0, window._knTickDeltas.length - 120);
-      if (
-        _frameNum > 0 &&
-        _frameNum % 300 === 0 &&
-        window._knTickDeltas.length > 10 &&
-        window._knLastTickPerfFrame !== _frameNum
-      ) {
-        window._knLastTickPerfFrame = _frameNum;
-        const sorted = [...window._knTickDeltas].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        const p95 = sorted[Math.floor(sorted.length * 0.95)];
-        const avgFps = 1000 / (sorted.reduce((a, b) => a + b) / sorted.length);
-        // Check input availability for peers
-        const inputPeers = getInputPeers();
-        let inputAvail = 'none';
-        if (rbApplyFrame >= 0 && inputPeers.length > 0) {
-          const avail = inputPeers.filter((p) => _remoteInputs[p.slot]?.[rbApplyFrame]).length;
-          inputAvail = `${avail}/${inputPeers.length}`;
-        }
-        _syncLog(
-          `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
-            `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
-        );
-      }
-      // Reset deadlock recovery flag periodically — without this, a single
-      // 3s stall permanently disables lockstep enforcement. Re-stall every
-      // 5 seconds to give the connection time to recover. Also reset
-      // immediately when peer input catches up.
-      if (_bootStallRecoveryFired && rbApplyFrame >= 0) {
-        const recoveryPeers = getInputPeers();
-        const allHaveInput =
-          recoveryPeers.length > 0 && recoveryPeers.every((p) => _remoteInputs[p.slot]?.[rbApplyFrame]);
-        if (allHaveInput) {
-          _bootStallRecoveryFired = false;
-          _syncLog(`BOOT-STALL-RECOVERY reset: peer input available at applyF=${rbApplyFrame}`);
-        } else if (!_bootStallRecoveryResetTime) {
-          _bootStallRecoveryResetTime = performance.now();
-        } else if (performance.now() - _bootStallRecoveryResetTime >= 5000) {
-          _bootStallRecoveryFired = false;
-          _bootStallRecoveryResetTime = 0;
-          _syncLog(`BOOT-STALL-RECOVERY periodic reset: re-stalling to wait for peer input`);
-        }
-      }
-      if (!_rbBootConverged && !_resyncRequestInFlight && !_bootStallRecoveryFired) {
-        // Menu/CSS/SSS: strict lockstep. Never fabricate zero input here:
-        // a single missed A/Start frame can select a different character or
-        // stage on one peer and turn setup into a permanent desync.
-        // Skipped when resync is in flight or deadlock recovery fired —
-        // the tick must continue so the resync handler can process the
-        // host's state push. Without this, the tick returns early and
-        // the resync response is never handled.
-        if (rbApplyFrame >= 0) {
-          const bootInputPeers = getInputPeers(_menuLockstepActive);
-          let stalled = false;
-          let missingSlot = -1;
-          for (const p of bootInputPeers) {
-            if (_peerPhantom[p.slot]) continue;
-            if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
-              stalled = true;
-              missingSlot = p.slot;
-              break;
-            }
+        } else if (_inGameplay && localInMenu) {
+          _inGameplay = false;
+          if (_frameNum - _inGameplayLoggedAt > 60) {
+            _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
+            _inGameplayLoggedAt = _frameNum;
           }
-          if (stalled) {
-            const nowWall = performance.now();
-            if (_bootStallFrame !== rbApplyFrame) {
-              _bootStallFrame = rbApplyFrame;
-              _bootStallStartTime = nowWall;
-              _bootStallRecoveryFired = false;
-              _resendSent = false;
+          // Tear down C rollback when leaving gameplay so menu state isn't
+          // serialized — Smash Remix specifically defers init to avoid this
+          // (see line ~7099). Without teardown, the engine keeps running
+          // through every subsequent menu in the session, making the second
+          // match's first MENU→GAMEPLAY transition behave differently from
+          // the first (no fresh init, polluted prediction/stat state).
+          // Re-arm the deferred-init closure so the next gameplay transition
+          // re-fires init cleanly.
+          if (_useCRollback && _rbReinitClosure) {
+            const tickMod = window.EJS_emulator?.gameManager?.Module;
+            if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
+            if (_rbInputPtr && tickMod?._free) {
+              tickMod._free(_rbInputPtr);
+              _rbInputPtr = 0;
             }
-            const stallDuration = nowWall - _bootStallStartTime;
-            if (_menuLockstepActive) {
-              if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-                markPeerPhantomForStallTimeout(
-                  missingSlot,
-                  'menu-lockstep-timeout',
-                  `stalledMs=${Math.round(stallDuration)} apply=${rbApplyFrame}`,
-                );
+            if (_rbRegionsBufPtr && tickMod?._free) {
+              tickMod._free(_rbRegionsBufPtr);
+              _rbRegionsBufPtr = 0;
+            }
+            _useCRollback = false;
+            _rbInitFrame = -1;
+            // Guests must wait for the host's fresh rb-init-frame broadcast
+            // for the next match. Host's delay is unchanged across matches,
+            // but the init frame is per-match.
+            if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
+            window._rbDeferredForGameplay = _rbReinitClosure;
+            _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
+          }
+        }
+        // Menu lockstep arming: once a real controllable menu is visible, never
+        // fabricate missing remote inputs. This intentionally does not request
+        // or apply a state push; menu determinism comes from preventing the bad
+        // predicted frame, not resyncing after it.
+        if (strictInputLockstep && !window._knCssSyncDone) {
+          window._knCssSyncDone = true;
+          _syncLog(`MENU-LOCKSTEP armed at f=${_frameNum}, scene=${sceneCurr}, gameStatus=${gameStatus}`);
+        }
+        if (menuPhase.waitingPeerSlots?.length && _frameNum - _lastPeerPhaseWaitLogFrame >= 60) {
+          _lastPeerPhaseWaitLogFrame = _frameNum;
+          _syncLog(
+            `PHASE-LOCK f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
+              `waitingPeers=[${menuPhase.waitingPeerSlots.join(',')}]`,
+          );
+        }
+        // Lockstep stall during controllable menus. During boot, intro, and
+        // battle loading, run freely; once scene_curr reaches Title/Mode
+        // Select/menus, never fabricate missing remote input.
+        const _menuLockstepActive = strictInputLockstep;
+        const _rbBootConverged = _bootDone && !_menuLockstepActive;
+        const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
+        const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
+        const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);
+        if (phaseLockSlots.length) {
+          const waitKey = `${sceneCurr}:${gameStatus}:${phaseLockSlots.join(',')}`;
+          if (_phaseLockStallKey !== waitKey) {
+            _phaseLockStallKey = waitKey;
+            _phaseLockStallStartTime = _tickNow;
+          }
+          const stallMs = _tickNow - _phaseLockStallStartTime;
+          if (stallMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+            for (const slot of phaseLockSlots) {
+              markPeerPhantomForStallTimeout(
+                slot,
+                'phase-lock-timeout',
+                `stalledMs=${Math.round(stallMs)} scene=${sceneCurr} gameStatus=${gameStatus}`,
+              );
+            }
+            _syncLog(
+              `PHASE-LOCK-TIMEOUT f=${_frameNum} scene=${sceneCurr} gameStatus=${gameStatus} ` +
+                `waitingPeers=[${phaseWaitSlots.join(',')}] mismatchPeers=[${phaseLockSlots.join(',')}] ` +
+                `stalledMs=${Math.round(stallMs)} — force-releasing phase lock`,
+            );
+            _phaseLockStallKey = '';
+            _phaseLockStallStartTime = 0;
+          } else if (phaseWaitSlots.length) {
+            _markTickReturn('skip:phase-lock');
+            return;
+          }
+        } else {
+          _phaseLockStallKey = '';
+          _phaseLockStallStartTime = 0;
+        }
+        // Boot sync: legacy savestate startup can still need one host state push
+        // after boot grace. kn-sync startup already loaded the host's authoritative
+        // CPU/peripheral/RDRAM state at the manual start boundary; repeating that
+        // push can rewind the guest after menus have begun and create an input stall.
+        if (_bootDoneForSync && !window._knBootSyncDone) {
+          window._knBootSyncDone = true;
+          if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
+            const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
+            if (hostPeer?.dc?.readyState === 'open') {
+              try {
+                hostPeer.dc.send('sync-request-full');
+                _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
+              } catch (e) {
+                _syncLog(`BOOT-SYNC send failed: ${e}`);
+              }
+            }
+          } else if (_syncEnabled && _playerSlot !== 0) {
+            _syncLog(`BOOT-SYNC skipped: initial state already ${_lockstepStartStateKind}`);
+          }
+        }
+        const rbApplyFrame = _frameNum - DELAY_FRAMES;
+        // Tick timing: measure wall-clock between ticks for FPS diagnosis
+        const _tickWallNow = performance.now();
+        if (!window._knLastTickWall) window._knLastTickWall = _tickWallNow;
+        if (!window._knTickDeltas) window._knTickDeltas = [];
+        const _tickDelta = _tickWallNow - window._knLastTickWall;
+        window._knLastTickWall = _tickWallNow;
+        if (_tickDelta > 0 && _tickDelta < 200) window._knTickDeltas.push(_tickDelta);
+        if (window._knTickDeltas.length > 120) window._knTickDeltas.splice(0, window._knTickDeltas.length - 120);
+        if (
+          _frameNum > 0 &&
+          _frameNum % 300 === 0 &&
+          window._knTickDeltas.length > 10 &&
+          window._knLastTickPerfFrame !== _frameNum
+        ) {
+          window._knLastTickPerfFrame = _frameNum;
+          const sorted = [...window._knTickDeltas].sort((a, b) => a - b);
+          const median = sorted[Math.floor(sorted.length / 2)];
+          const p95 = sorted[Math.floor(sorted.length * 0.95)];
+          const avgFps = 1000 / (sorted.reduce((a, b) => a + b) / sorted.length);
+          // Check input availability for peers
+          const inputPeers = getInputPeers();
+          let inputAvail = 'none';
+          if (rbApplyFrame >= 0 && inputPeers.length > 0) {
+            const avail = inputPeers.filter((p) => _remoteInputs[p.slot]?.[rbApplyFrame]).length;
+            inputAvail = `${avail}/${inputPeers.length}`;
+          }
+          _syncLog(
+            `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
+              `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
+          );
+        }
+        // Reset deadlock recovery flag periodically — without this, a single
+        // 3s stall permanently disables lockstep enforcement. Re-stall every
+        // 5 seconds to give the connection time to recover. Also reset
+        // immediately when peer input catches up.
+        if (_bootStallRecoveryFired && rbApplyFrame >= 0) {
+          const recoveryPeers = getInputPeers();
+          const allHaveInput =
+            recoveryPeers.length > 0 && recoveryPeers.every((p) => _remoteInputs[p.slot]?.[rbApplyFrame]);
+          if (allHaveInput) {
+            _bootStallRecoveryFired = false;
+            _syncLog(`BOOT-STALL-RECOVERY reset: peer input available at applyF=${rbApplyFrame}`);
+          } else if (!_bootStallRecoveryResetTime) {
+            _bootStallRecoveryResetTime = performance.now();
+          } else if (performance.now() - _bootStallRecoveryResetTime >= 5000) {
+            _bootStallRecoveryFired = false;
+            _bootStallRecoveryResetTime = 0;
+            _syncLog(`BOOT-STALL-RECOVERY periodic reset: re-stalling to wait for peer input`);
+          }
+        }
+        if (!_rbBootConverged && !_resyncRequestInFlight && !_bootStallRecoveryFired) {
+          // Menu/CSS/SSS: strict lockstep. Never fabricate zero input here:
+          // a single missed A/Start frame can select a different character or
+          // stage on one peer and turn setup into a permanent desync.
+          // Skipped when resync is in flight or deadlock recovery fired —
+          // the tick must continue so the resync handler can process the
+          // host's state push. Without this, the tick returns early and
+          // the resync response is never handled.
+          if (rbApplyFrame >= 0) {
+            const bootInputPeers = getInputPeers(_menuLockstepActive);
+            let stalled = false;
+            let missingSlot = -1;
+            for (const p of bootInputPeers) {
+              if (_peerPhantom[p.slot]) continue;
+              if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
+                stalled = true;
+                missingSlot = p.slot;
+                break;
+              }
+            }
+            if (stalled) {
+              const nowWall = performance.now();
+              if (_bootStallFrame !== rbApplyFrame) {
+                _bootStallFrame = rbApplyFrame;
+                _bootStallStartTime = nowWall;
+                _bootStallRecoveryFired = false;
+                _resendSent = false;
+              }
+              const stallDuration = nowWall - _bootStallStartTime;
+              if (_menuLockstepActive) {
+                if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+                  markPeerPhantomForStallTimeout(
+                    missingSlot,
+                    'menu-lockstep-timeout',
+                    `stalledMs=${Math.round(stallDuration)} apply=${rbApplyFrame}`,
+                  );
+                  if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
+                  if (!_remoteInputs[missingSlot][rbApplyFrame]) {
+                    _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
+                    _pendingCInputs.push({
+                      slot: missingSlot,
+                      frame: rbApplyFrame,
+                      buttons: 0,
+                      lx: 0,
+                      ly: 0,
+                      cx: 0,
+                      cy: 0,
+                    });
+                  }
+                  _syncLog(
+                    `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot} ` +
+                      `stalledMs=${Math.round(stallDuration)} — force-releasing strict lockstep`,
+                  );
+                  _bootStallFrame = -1;
+                  _bootStallStartTime = 0;
+                  _bootStallRecoveryFired = false;
+                } else {
+                  if (stallDuration >= MAX_STALL_MS && !_resendSent) {
+                    _resendSent = true;
+                    const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
+                    try {
+                      missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
+                    } catch (_) {}
+                    _syncLog(
+                      `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
+                    );
+                  }
+                  if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                    window._knLastBootStallLogFrame = _frameNum;
+                    _syncLog(
+                      `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                        `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                    );
+                  }
+                  _markTickReturn('skip:menu-lockstep');
+                  return;
+                }
+              }
+
+              // Boot/pre-menu fallback: stall briefly, then fabricate zero to
+              // avoid deadlock before user-controlled setup state exists.
+              if (!_menuLockstepActive) {
+                const _bootStallTimeout = Math.max(33, Math.min(250, (_rttMedian || 50) * 2));
+                if (stallDuration < _bootStallTimeout) {
+                  if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
+                    window._knLastBootStallLogFrame = _frameNum;
+                    _syncLog(
+                      `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
+                        `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                    );
+                  }
+                  _markTickReturn('skip:boot-lockstep');
+                  return;
+                }
+                // Fabricate zero input and continue
                 if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
                 if (!_remoteInputs[missingSlot][rbApplyFrame]) {
                   _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
@@ -12058,884 +12145,1004 @@
                     cy: 0,
                   });
                 }
-                _syncLog(
-                  `MENU-LOCKSTEP-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot} ` +
-                    `stalledMs=${Math.round(stallDuration)} — force-releasing strict lockstep`,
-                );
-                _bootStallFrame = -1;
-                _bootStallStartTime = 0;
-                _bootStallRecoveryFired = false;
-              } else {
-                if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-                  _resendSent = true;
-                  const missingPeer = bootInputPeers.find((peer) => peer.slot === missingSlot);
-                  try {
-                    missingPeer?.dc?.send(`resend:${rbApplyFrame}`);
-                  } catch (_) {}
-                  _syncLog(
-                    `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${rbApplyFrame} missingSlot=${missingSlot}`,
-                  );
+                // Fall through to normal tick with fabricated zero input
+              }
+            }
+            _bootStallFrame = -1;
+            _bootStallStartTime = 0;
+            _bootStallRecoveryFired = false;
+          }
+        } else if (_rbBootConverged && rbApplyFrame >= 0) {
+          // Gameplay: stall only when too far ahead for rollback to help
+          const rbInputPeers = getInputPeers();
+          // Stall threshold: must match the C engine's visible_rb_max so we
+          // don't bail before rollback can absorb the gap. Legacy model uses
+          // delay+4 (kn_rollback.c). True rollback expands this to delay+10
+          // (capped at 12 by KN_MAX_VISIBLE_ROLLBACK_DEPTH); keeping the JS
+          // stall at the old delay+4 produces continuous lockstep-like stalls
+          // at typical RTT/2 frame depths because peer naturally sits 5-7
+          // frames behind on 80ms RTT.
+          const stallThreshold = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
+          for (const p of rbInputPeers) {
+            if (_peerPhantom[p.slot]) continue;
+            if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
+              // Input missing — check how far ahead we are
+              const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
+              const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
+              if (adv >= stallThreshold) {
+                const nowRbInputStall = performance.now();
+                const rbStallKey = `${p.slot}:${rbApplyFrame}`;
+                if (_rbInputStallKey !== rbStallKey) {
+                  _rbInputStallKey = rbStallKey;
+                  _rbInputStallStartTime = nowRbInputStall;
                 }
-                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                  window._knLastBootStallLogFrame = _frameNum;
-                  _syncLog(
-                    `MENU-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
+                const stalledMs = nowRbInputStall - _rbInputStallStartTime;
+                if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
+                  markPeerPhantomForStallTimeout(
+                    p.slot,
+                    'rb-input-stall-timeout',
+                    `stalledMs=${Math.round(stalledMs)} apply=${rbApplyFrame} adv=${adv}`,
                   );
+                  _syncLog(
+                    `RB-INPUT-STALL-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
+                      `adv=${adv} stalledMs=${Math.round(stalledMs)} — force-releasing rollback input stall`,
+                  );
+                  _rbInputStallKey = '';
+                  _rbInputStallStartTime = 0;
+                  continue;
                 }
-                _markTickReturn('skip:menu-lockstep');
+                // Too far ahead — stall to let peer catch up
+                if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
+                  _syncLog(
+                    `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
+                      `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling (rollback budget exhausted)`,
+                  );
+                  _rbStallLogged = _frameNum;
+                }
+                _markTickReturn('skip:rb-input-stall');
                 return;
               }
+              // Within rollback budget — let C engine predict through it
             }
+          }
+          _rbInputStallKey = '';
+          _rbInputStallStartTime = 0;
+        }
 
-            // Boot/pre-menu fallback: stall briefly, then fabricate zero to
-            // avoid deadlock before user-controlled setup state exists.
-            if (!_menuLockstepActive) {
-              const _bootStallTimeout = Math.max(33, Math.min(250, (_rttMedian || 50) * 2));
-              if (stallDuration < _bootStallTimeout) {
-                if (_frameNum % 60 === 0 && window._knLastBootStallLogFrame !== _frameNum) {
-                  window._knLastBootStallLogFrame = _frameNum;
-                  _syncLog(
-                    `BOOT-LOCKSTEP f=${_frameNum} initF=${_rbInitFrame} applyF=${rbApplyFrame} ` +
-                      `stalledMs=${Math.round(stallDuration)} — stalling for slot=${missingSlot}`,
-                  );
+        // ── Drain queued remote inputs into C engine ──────────────────────
+        // WebRTC callbacks push to _pendingCInputs instead of calling
+        // kn_feed_input directly. Draining here — at the tick boundary,
+        // before kn_pre_tick — guarantees the C engine sees a consistent
+        // input snapshot per frame. No race between async DC delivery and
+        // the sync prediction/serialize logic inside kn_pre_tick.
+        if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
+          // Sort in place by (frame, slot) so frames feed monotonically and
+          // duplicates land adjacent (last write wins inside C's slot:frame
+          // store). Avoids the prior Map + [...spread] + template-literal
+          // keys that allocated per tick at 60 Hz; the in-place sort uses
+          // a stable closure (allocated once at module scope) and feeds
+          // directly without an intermediate Array.
+          if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+          for (let i = 0; i < _pendingCInputs.length; i++) {
+            const qi = _pendingCInputs[i];
+            tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
+          }
+          _pendingCInputs.length = 0;
+        }
+
+        // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
+        // When the demo orchestrator pauses predictions to simulate lockstep
+        // behavior under jitter, stall like BOOT/STRICT-MENU do — but only if
+        // no replay is queued and not all input peers have the apply frame.
+        // Use the non-clearing peek; the clearing variant would swallow the
+        // replay before kn_pre_tick consumes it (kn_rollback.c:933-948).
+        if (_predictionsPaused) {
+          const pendingReplay = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+          if (!pendingReplay) {
+            const applyFrame = _frameNum - DELAY_FRAMES;
+            // applyFrame < 0 means we haven't advanced far enough for any
+            // remote input to exist for this frame. Mirrors the C engine's
+            // `if (apply_frame >= 0)` guard at kn_rollback.c:1342. Without
+            // this skip, demo's predictions-paused mode hangs at frame 0
+            // forever (applyFrame=-DELAY_FRAMES, never resolves).
+            if (applyFrame >= 0) {
+              let allInputsPresent = true;
+              for (const p of activePeers) {
+                if (p.slot === _playerSlot) continue;
+                if (_peerPhantom[p.slot]) continue;
+                if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
+                  allInputsPresent = false;
+                  break;
                 }
-                _markTickReturn('skip:boot-lockstep');
-                return;
               }
-              // Fabricate zero input and continue
-              if (!_remoteInputs[missingSlot]) _remoteInputs[missingSlot] = {};
-              if (!_remoteInputs[missingSlot][rbApplyFrame]) {
-                _remoteInputs[missingSlot][rbApplyFrame] = KNShared.ZERO_INPUT;
-                _pendingCInputs.push({
-                  slot: missingSlot,
-                  frame: rbApplyFrame,
-                  buttons: 0,
-                  lx: 0,
-                  ly: 0,
-                  cx: 0,
-                  cy: 0,
-                });
-              }
-              // Fall through to normal tick with fabricated zero input
-            }
-          }
-          _bootStallFrame = -1;
-          _bootStallStartTime = 0;
-          _bootStallRecoveryFired = false;
-        }
-      } else if (_rbBootConverged && rbApplyFrame >= 0) {
-        // Gameplay: stall only when too far ahead for rollback to help
-        const rbInputPeers = getInputPeers();
-        // Stall threshold: must match the C engine's visible_rb_max so we
-        // don't bail before rollback can absorb the gap. Legacy model uses
-        // delay+4 (kn_rollback.c). True rollback expands this to delay+10
-        // (capped at 12 by KN_MAX_VISIBLE_ROLLBACK_DEPTH); keeping the JS
-        // stall at the old delay+4 produces continuous lockstep-like stalls
-        // at typical RTT/2 frame depths because peer naturally sits 5-7
-        // frames behind on 80ms RTT.
-        const stallThreshold = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
-        for (const p of rbInputPeers) {
-          if (_peerPhantom[p.slot]) continue;
-          if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
-            // Input missing — check how far ahead we are
-            const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
-            const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
-            if (adv >= stallThreshold) {
-              const nowRbInputStall = performance.now();
-              const rbStallKey = `${p.slot}:${rbApplyFrame}`;
-              if (_rbInputStallKey !== rbStallKey) {
-                _rbInputStallKey = rbStallKey;
-                _rbInputStallStartTime = nowRbInputStall;
-              }
-              const stalledMs = nowRbInputStall - _rbInputStallStartTime;
-              if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-                markPeerPhantomForStallTimeout(
-                  p.slot,
-                  'rb-input-stall-timeout',
-                  `stalledMs=${Math.round(stalledMs)} apply=${rbApplyFrame} adv=${adv}`,
-                );
-                _syncLog(
-                  `RB-INPUT-STALL-TIMEOUT f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
-                    `adv=${adv} stalledMs=${Math.round(stalledMs)} — force-releasing rollback input stall`,
-                );
-                _rbInputStallKey = '';
-                _rbInputStallStartTime = 0;
-                continue;
-              }
-              // Too far ahead — stall to let peer catch up
-              if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
-                _syncLog(
-                  `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
-                    `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling (rollback budget exhausted)`,
-                );
-                _rbStallLogged = _frameNum;
-              }
-              _markTickReturn('skip:rb-input-stall');
-              return;
-            }
-            // Within rollback budget — let C engine predict through it
-          }
-        }
-        _rbInputStallKey = '';
-        _rbInputStallStartTime = 0;
-      }
-
-      // ── Drain queued remote inputs into C engine ──────────────────────
-      // WebRTC callbacks push to _pendingCInputs instead of calling
-      // kn_feed_input directly. Draining here — at the tick boundary,
-      // before kn_pre_tick — guarantees the C engine sees a consistent
-      // input snapshot per frame. No race between async DC delivery and
-      // the sync prediction/serialize logic inside kn_pre_tick.
-      if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
-        // Sort in place by (frame, slot) so frames feed monotonically and
-        // duplicates land adjacent (last write wins inside C's slot:frame
-        // store). Avoids the prior Map + [...spread] + template-literal
-        // keys that allocated per tick at 60 Hz; the in-place sort uses
-        // a stable closure (allocated once at module scope) and feeds
-        // directly without an intermediate Array.
-        if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
-        for (let i = 0; i < _pendingCInputs.length; i++) {
-          const qi = _pendingCInputs[i];
-          tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
-        }
-        _pendingCInputs.length = 0;
-      }
-
-      // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
-      // When the demo orchestrator pauses predictions to simulate lockstep
-      // behavior under jitter, stall like BOOT/STRICT-MENU do — but only if
-      // no replay is queued and not all input peers have the apply frame.
-      // Use the non-clearing peek; the clearing variant would swallow the
-      // replay before kn_pre_tick consumes it (kn_rollback.c:933-948).
-      if (_predictionsPaused) {
-        const pendingReplay = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
-        if (!pendingReplay) {
-          const applyFrame = _frameNum - DELAY_FRAMES;
-          // applyFrame < 0 means we haven't advanced far enough for any
-          // remote input to exist for this frame. Mirrors the C engine's
-          // `if (apply_frame >= 0)` guard at kn_rollback.c:1342. Without
-          // this skip, demo's predictions-paused mode hangs at frame 0
-          // forever (applyFrame=-DELAY_FRAMES, never resolves).
-          if (applyFrame >= 0) {
-            let allInputsPresent = true;
-            for (const p of activePeers) {
-              if (p.slot === _playerSlot) continue;
-              if (_peerPhantom[p.slot]) continue;
-              if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
-                allInputsPresent = false;
-                break;
+              if (!allInputsPresent) {
+                if (_stallStart === 0) _stallStart = performance.now();
+                _markTickReturn('skip:demo-paused-stall');
+                return; // stall — same shape as BOOT/STRICT-MENU early returns
               }
             }
-            if (!allInputsPresent) {
-              if (_stallStart === 0) _stallStart = performance.now();
-              _markTickReturn('skip:demo-paused-stall');
-              return; // stall — same shape as BOOT/STRICT-MENU early returns
-            }
           }
+          _stallStart = 0;
         }
-        _stallStart = 0;
-      }
 
-      // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
-      // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
-      // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
-      const _t0 = performance.now();
-      if (!_rbVisualFreezeActive && (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0) {
-        _captureRollbackVisualSnapshot();
-      }
-      // C currently throttles at frame_adv >= delay + 2. Bias the value so
-      // the actual cap is frame_adv >= delay: once the fast peer has consumed
-      // the whole input buffer, wait instead of creating a guaranteed rollback.
-      // Demo mode forces -1 (no throttle) so the engine runs full speed and
-      // predicts whenever inputs are missing — only the demo's synthetic peer
-      // setup tolerates the unbounded prediction, real matches still throttle.
-      const _frameAdvForC = _demoMode ? -1 : _rbBootConverged ? _frameAdvRaw + 2 : -1;
-      let catchingUp = tickMod._kn_pre_tick(
-        localInput.buttons,
-        localInput.lx,
-        localInput.ly,
-        localInput.cx,
-        localInput.cy,
-        _frameAdvForC,
-      );
-      _refreshRunnerAfterRollbackRestore(tickMod);
-      // ── R3: Fatal stale-ring poll ────────────────────────────────────
-      // If kn_feed_input just detected a misprediction for a frame
-      // whose ring slot was overwritten, log FATAL-RING-STALE with full
-      // diagnostic fields. Per §Core principle: dev throws, prod logs
-      // and continues. No resync recovery.
-      // See docs/netplay-invariants.md §R3.
-      if (!_rbFatalBuf && tickMod._malloc) _rbFatalBuf = tickMod._malloc(12);
-      if (!_rbLiveMismatchBuf && tickMod._malloc) _rbLiveMismatchBuf = tickMod._malloc(12);
-      if (tickMod._kn_get_fatal_stale && _rbFatalBuf) {
-        const hit = tickMod._kn_get_fatal_stale(_rbFatalBuf, _rbFatalBuf + 4, _rbFatalBuf + 8);
-        if (hit) {
-          const heap = tickMod.HEAP32;
-          const base = _rbFatalBuf >> 2;
-          const staleF = heap[base];
-          const staleIdx = heap[base + 1];
-          const staleActual = heap[base + 2];
-          _syncLog(
-            `FATAL-RING-STALE f=${staleF} ring[${staleIdx}]=${staleActual} ` +
-              `curF=${_frameNum} tick=${performance.now().toFixed(1)}`,
-          );
-          if (window.KN_DEV_BUILD) {
-            throw new Error(`FATAL-RING-STALE: ring[${staleIdx}]=${staleActual} but needed frame ${staleF}`);
-          }
+        // ── Pre-tick: save state, handle replay if catching up, store input, predict ──
+        // Returns 1 if catching up (C did a replay frame via retro_run — skip normal step).
+        // Returns 0 for normal tick (JS does writeInputToMemory + stepOneFrame).
+        const _t0 = performance.now();
+        if (!_rbVisualFreezeActive && (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0) {
+          _captureRollbackVisualSnapshot();
         }
-      }
-      // ── R4: Post-replay live-state mismatch poll ─────────────────────
-      // kn_post_tick compares the live emulator state hash to what the
-      // ring claims for the just-completed replay frame. If they differ,
-      // the replay introduced drift and the run is corrupted. Per §Core
-      // principle: dev throws, prod logs and continues. No resync.
-      // See docs/netplay-invariants.md §R4.
-      if (tickMod._kn_get_live_mismatch && _rbLiveMismatchBuf) {
-        const hit = tickMod._kn_get_live_mismatch(_rbLiveMismatchBuf, _rbLiveMismatchBuf + 4, _rbLiveMismatchBuf + 8);
-        if (hit) {
-          const heap32 = tickMod.HEAP32;
-          const heapU32 = tickMod.HEAPU32;
-          const base = _rbLiveMismatchBuf >> 2;
-          const mf = heap32[base];
-          const ringHash = heapU32[base + 1];
-          const liveHash = heapU32[base + 2];
-          _syncLog(
-            `RB-LIVE-MISMATCH f=${mf} ring=0x${ringHash.toString(16)} ` +
-              `live=0x${liveHash.toString(16)} curF=${_frameNum}`,
-          );
-          if (window.KN_DEV_BUILD) {
-            throw new Error(
-              `RB-LIVE-MISMATCH: ring=0x${ringHash.toString(16)} live=0x${liveHash.toString(16)} at f=${mf}`,
-            );
-          }
-        }
-      }
-      const _tPreTick = performance.now();
-
-      // Sync JS frame counter with C
-      _frameNum = tickMod._kn_get_frame();
-      KNState.frameNum = _frameNum;
-
-      // Log replay start/done
-      const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
-      // ── R5: pre-tick return-value invariant ─────────────────────────────
-      // If C just set replay_depth > 0, kn_pre_tick MUST return 2 (replay
-      // frame). Any other return value means the rollback branch ran but
-      // the replay branch didn't — the emulator state is about to freeze
-      // at the rollback target while the frame counter keeps advancing.
-      // Per §Core principle: log-loud-and-continue. No resync recovery.
-      // See docs/netplay-invariants.md §R5.
-      if (replayDepth > 0 && catchingUp !== 2) {
-        const rbFrame = tickMod._kn_get_frame?.() ?? -1;
-        _syncLog(
-          `RB-INVARIANT-FIXUP f=${_frameNum} replayDepth=${replayDepth} ` +
-            `catchingUp=${catchingUp} rbFrame=${rbFrame} tick=${performance.now().toFixed(1)} — forcing replay step`,
+        // C currently throttles at frame_adv >= delay + 2. Bias the value so
+        // the actual cap is frame_adv >= delay: once the fast peer has consumed
+        // the whole input buffer, wait instead of creating a guaranteed rollback.
+        // Demo mode forces -1 (no throttle) so the engine runs full speed and
+        // predicts whenever inputs are missing — only the demo's synthetic peer
+        // setup tolerates the unbounded prediction, real matches still throttle.
+        const _frameAdvForC = _demoMode ? -1 : _rbBootConverged ? _frameAdvRaw + 2 : -1;
+        _chk('cr:pre-pretick');
+        let catchingUp = tickMod._kn_pre_tick(
+          localInput.buttons,
+          localInput.lx,
+          localInput.ly,
+          localInput.cx,
+          localInput.cy,
+          _frameAdvForC,
         );
-        catchingUp = 2;
-      }
-      if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
-        const hudNow = performance.now();
-        _hudRollbackEvents++;
-        _hudEventTimestamps.push(hudNow);
-        while (_hudEventTimestamps.length > 0 && hudNow - _hudEventTimestamps[0] > HUD_EVENT_WINDOW_MS) {
-          _hudEventTimestamps.shift();
-        }
-        _hudRollbackDepthSamples.push(replayDepth);
-        if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
-        _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
-        _showRollbackVisualFreeze(replayDepth, localInput);
-        _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
-        _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
-        _rbReplayLogged = true;
-        // Reset paint-last-replay-frame counters at rollback start.
-        // _replayOriginalDepth is the # of frames the replay needs to
-        // execute; we'll flip headless OFF before the final one of
-        // these so the canvas paints the corrected state at end of
-        // that step instead of waiting for the next forward tick.
-        _replayOriginalDepth = replayDepth;
-        _replayStepsThisRollback = 0;
-        // Replay must execute the same RSP/audio task as the original forward
-        // frame so rollback advances emulator-side audio state faithfully.
-        // We mute at the JS playback boundary in the catchingUp===2 path
-        // instead of skipping the task in WASM.
-        //
-        // Profiling override: ?replayAudioMode=N lets us measure whether
-        // skipping RSP audio (mode 1: skip outright; mode 2: snapshot+restore
-        // around the alist call) saves measurable per-step cost during replay.
-        // Mode 0 (current default) is the only deterministic option; modes 1/2
-        // are PROBE-ONLY and not safe for real netplay.
-        const _replayAudioMode = (() => {
-          try {
-            const raw = _urlParams.get('replayAudioMode');
-            if (raw === null) return 0;
-            const n = parseInt(raw, 10);
-            return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0;
-          } catch (_) {
-            return 0;
-          }
-        })();
-        if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(_replayAudioMode);
-        _syncLog(
-          `REPLAY-AUDIO-MUTE: RSP audio mode=${_replayAudioMode}; WebAudio feed muted for replay depth=${replayDepth}`,
-        );
-      }
-      if (_rbReplayLogged && catchingUp !== 2) _finishCReplay(tickMod);
-
-      if (catchingUp === 3) {
-        // Check if all peers are phantom — if so, ignore C-level throttle
-        // to prevent permanent freeze when the only peer has disconnected.
-        const allPhantom = getInputPeers().every((p) => _peerPhantom[p.slot]);
-        if (allPhantom) {
-          if (_runSubstate === RUN_PACING) {
-            if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
-            _pacingThrottleStartAt = 0;
-            if (window._knLastCPhantomReleaseFrame !== _frameNum) {
-              window._knLastCPhantomReleaseFrame = _frameNum;
-              _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
-            }
-          }
-          // Fall through to normal tick instead of returning
-        } else {
-          _pacingCapsFrames++;
-          if (_runSubstate !== RUN_PACING) {
-            _runSubstate = RUN_PACING;
-            _pacingThrottleStartAt = performance.now();
-            _pacingCapsCount++;
-            _logPacing(
-              `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
-            );
-          }
-          _pushTickProfile({ f: _frameNum, path: 'pacing', total: performance.now() - _t0, preTick: _tPreTick - _t0 });
-          _pushRbProbe('pacing');
-          _markTickReturn('skip:pacing-c');
-          return;
-        }
-      }
-      if (_runSubstate === RUN_PACING) {
-        if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
-        _pacingThrottleStartAt = 0;
-        _logPacing(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} source=C`);
-      }
-
-      if (catchingUp === 2) {
-        // ── Worker-as-replay-coprocessor branch (option D) ─────────────
-        // When ?workerCoproc=1, hand the replay off to the shadow
-        // worker instead of doing it on main. The worker has its own
-        // rb engine + state ring (initialized in lockstep via
-        // 'rollback-init' message), so it can perform the same replay
-        // and ship back the corrected state at the target frame.
-        // Main meanwhile clears its own replay state so subsequent
-        // ticks don't re-enter this branch, then waits for the
-        // worker's reply (visible as a brief freeze, hopefully shorter
-        // than main's own replay because the worker isn't constrained
-        // by main's rAF cadence).
-        if (
-          RB_WORKER_COPROC &&
-          !_workerCoprocAborted &&
-          _rbShadowReady &&
-          _rbShadowWorker &&
-          !_rbShadowFailed &&
-          !_workerCoprocPending &&
-          tickMod._kn_clear_replay_state &&
-          tickMod._kn_apply_split_state_partial
-        ) {
-          const targetFrame = _frameNum;
-          // Build the full set of confirmed inputs spanning the
-          // rollback window so worker can advance its ring forward
-          // with corrected values. Walk back from targetFrame; for
-          // each frame in [targetFrame-replayDepth, targetFrame), pull
-          // the input each slot recorded then.
-          const inputsForWorker = [];
-          for (let f = targetFrame - replayDepth; f < targetFrame; f++) {
-            if (f < 0) continue;
-            for (let s = 0; s < rb_numPlayers; s++) {
-              let inp;
-              if (s === _playerSlot) {
-                inp = _localInputs[f] || KNShared.ZERO_INPUT;
-              } else {
-                inp = _rbGetInput(tickMod, s, f) || _remoteInputs[s]?.[f] || KNShared.ZERO_INPUT;
-              }
-              inputsForWorker.push({
-                slot: s,
-                frame: f,
-                buttons: inp.buttons | 0,
-                lx: inp.lx | 0,
-                ly: inp.ly | 0,
-                cx: inp.cx | 0,
-                cy: inp.cy | 0,
-              });
-            }
-          }
-          const seq = ++_workerCoprocSeq;
-          try {
-            _rbShadowWorker.postMessage({
-              type: 'rollback-replay',
-              seq,
-              targetFrame,
-              depth: replayDepth,
-              inputs: inputsForWorker,
-            });
-            const dispatchedAt = performance.now();
-            // Schedule a timeout so a lost/slow worker reply doesn't
-            // wedge the demo forever. On fire: auto-disable workerCoproc
-            // and clear pending so the next tick can advance again. The
-            // emulator state at this moment is rewound to
-            // (targetFrame - replayDepth) — abort just lets it run
-            // forward from there with the (now-correct) input ring,
-            // converging back to the same frame the worker would have
-            // produced. _frameNum still equals targetFrame, so we
-            // realign it to rb.frame on abort.
-            const timeoutId = setTimeout(() => {
-              if (_workerCoprocPending?.seq !== seq) return;
-              _workerCoprocStats.timeouts++;
-              _workerCoprocAbort(`reply timeout seq=${seq} after ${RB_WORKER_COPROC_TIMEOUT_MS}ms`);
-              const mod = window.EJS_emulator?.gameManager?.Module;
-              if (mod?._kn_get_frame) {
-                _frameNum = mod._kn_get_frame();
-                KNState.frameNum = _frameNum;
-              }
-              _hideRollbackVisualFreeze();
-            }, RB_WORKER_COPROC_TIMEOUT_MS);
-            _workerCoprocPending = { seq, targetFrame, depth: replayDepth, dispatchedAt, timeoutId };
-            _workerCoprocStats.dispatched++;
+        _chk('cr:post-pretick');
+        _refreshRunnerAfterRollbackRestore(tickMod);
+        _chk('cr:post-refresh-runner');
+        // ── R3: Fatal stale-ring poll ────────────────────────────────────
+        // If kn_feed_input just detected a misprediction for a frame
+        // whose ring slot was overwritten, log FATAL-RING-STALE with full
+        // diagnostic fields. Per §Core principle: dev throws, prod logs
+        // and continues. No resync recovery.
+        // See docs/netplay-invariants.md §R3.
+        if (!_rbFatalBuf && tickMod._malloc) _rbFatalBuf = tickMod._malloc(12);
+        if (!_rbLiveMismatchBuf && tickMod._malloc) _rbLiveMismatchBuf = tickMod._malloc(12);
+        if (tickMod._kn_get_fatal_stale && _rbFatalBuf) {
+          const hit = tickMod._kn_get_fatal_stale(_rbFatalBuf, _rbFatalBuf + 4, _rbFatalBuf + 8);
+          if (hit) {
+            const heap = tickMod.HEAP32;
+            const base = _rbFatalBuf >> 2;
+            const staleF = heap[base];
+            const staleIdx = heap[base + 1];
+            const staleActual = heap[base + 2];
             _syncLog(
-              `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}`,
+              `FATAL-RING-STALE f=${staleF} ring[${staleIdx}]=${staleActual} ` +
+                `curF=${_frameNum} tick=${performance.now().toFixed(1)}`,
             );
-            // Clear main's own replay state so kn_pre_tick on next
-            // tick doesn't re-trigger replay branch. The worker-coproc
-            // wait gate at the top of the C-rollback path will then
-            // freeze the emulator at the rewound state until the worker
-            // reply arrives (or timeout fires).
-            tickMod._kn_clear_replay_state();
-            // Visual freeze overlay covers the canvas during the
-            // ~20-30ms wait. We deliberately do NOT enable headless
-            // mode: the emulator isn't ticking forward (gate blocks
-            // it), so there's nothing to suppress paints from. Keeping
-            // headless off means if the gate or worker fails open,
-            // recovery paints land naturally.
-            _showRollbackVisualFreeze(replayDepth, localInput);
-            // Lazy-start the frame-advance watchdog. Catches "demo
-            // hangs" cases the dispatch timeout can't (e.g., reply
-            // arrived but apply threw, leaving runner dead).
-            if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
+            if (window.KN_DEV_BUILD) {
+              throw new Error(`FATAL-RING-STALE: ring[${staleIdx}]=${staleActual} but needed frame ${staleF}`);
+            }
+          }
+        }
+        // ── R4: Post-replay live-state mismatch poll ─────────────────────
+        // kn_post_tick compares the live emulator state hash to what the
+        // ring claims for the just-completed replay frame. If they differ,
+        // the replay introduced drift and the run is corrupted. Per §Core
+        // principle: dev throws, prod logs and continues. No resync.
+        // See docs/netplay-invariants.md §R4.
+        if (tickMod._kn_get_live_mismatch && _rbLiveMismatchBuf) {
+          const hit = tickMod._kn_get_live_mismatch(_rbLiveMismatchBuf, _rbLiveMismatchBuf + 4, _rbLiveMismatchBuf + 8);
+          if (hit) {
+            const heap32 = tickMod.HEAP32;
+            const heapU32 = tickMod.HEAPU32;
+            const base = _rbLiveMismatchBuf >> 2;
+            const mf = heap32[base];
+            const ringHash = heapU32[base + 1];
+            const liveHash = heapU32[base + 2];
+            _syncLog(
+              `RB-LIVE-MISMATCH f=${mf} ring=0x${ringHash.toString(16)} ` +
+                `live=0x${liveHash.toString(16)} curF=${_frameNum}`,
+            );
+            if (window.KN_DEV_BUILD) {
+              throw new Error(
+                `RB-LIVE-MISMATCH: ring=0x${ringHash.toString(16)} live=0x${liveHash.toString(16)} at f=${mf}`,
+              );
+            }
+          }
+        }
+        const _tPreTick = performance.now();
+
+        // Sync JS frame counter with C
+        _frameNum = tickMod._kn_get_frame();
+        KNState.frameNum = _frameNum;
+
+        // Log replay start/done
+        const replayDepth = tickMod._kn_get_replay_depth?.() ?? 0;
+        // ── R5: pre-tick return-value invariant ─────────────────────────────
+        // If C just set replay_depth > 0, kn_pre_tick MUST return 2 (replay
+        // frame). Any other return value means the rollback branch ran but
+        // the replay branch didn't — the emulator state is about to freeze
+        // at the rollback target while the frame counter keeps advancing.
+        // Per §Core principle: log-loud-and-continue. No resync recovery.
+        // See docs/netplay-invariants.md §R5.
+        if (replayDepth > 0 && catchingUp !== 2) {
+          const rbFrame = tickMod._kn_get_frame?.() ?? -1;
+          _syncLog(
+            `RB-INVARIANT-FIXUP f=${_frameNum} replayDepth=${replayDepth} ` +
+              `catchingUp=${catchingUp} rbFrame=${rbFrame} tick=${performance.now().toFixed(1)} — forcing replay step`,
+          );
+          catchingUp = 2;
+        }
+        if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
+          const hudNow = performance.now();
+          _hudRollbackEvents++;
+          _hudEventTimestamps.push(hudNow);
+          while (_hudEventTimestamps.length > 0 && hudNow - _hudEventTimestamps[0] > HUD_EVENT_WINDOW_MS) {
+            _hudEventTimestamps.shift();
+          }
+          _hudRollbackDepthSamples.push(replayDepth);
+          if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
+          _syncLog(`C-REPLAY start: depth=${replayDepth} took=${(_tPreTick - _t0).toFixed(1)}ms`);
+          _showRollbackVisualFreeze(replayDepth, localInput);
+          _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
+          _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
+          _rbReplayLogged = true;
+          // Reset paint-last-replay-frame counters at rollback start.
+          // _replayOriginalDepth is the # of frames the replay needs to
+          // execute; we'll flip headless OFF before the final one of
+          // these so the canvas paints the corrected state at end of
+          // that step instead of waiting for the next forward tick.
+          _replayOriginalDepth = replayDepth;
+          _replayStepsThisRollback = 0;
+          // Replay must execute the same RSP/audio task as the original forward
+          // frame so rollback advances emulator-side audio state faithfully.
+          // We mute at the JS playback boundary in the catchingUp===2 path
+          // instead of skipping the task in WASM.
+          //
+          // Profiling override: ?replayAudioMode=N lets us measure whether
+          // skipping RSP audio (mode 1: skip outright; mode 2: snapshot+restore
+          // around the alist call) saves measurable per-step cost during replay.
+          // Mode 0 (current default) is the only deterministic option; modes 1/2
+          // are PROBE-ONLY and not safe for real netplay.
+          const _replayAudioMode = (() => {
+            try {
+              const raw = _urlParams.get('replayAudioMode');
+              if (raw === null) return 0;
+              const n = parseInt(raw, 10);
+              return Number.isFinite(n) && n >= 0 && n <= 2 ? n : 0;
+            } catch (_) {
+              return 0;
+            }
+          })();
+          if (tickMod._kn_set_skip_rsp_audio) tickMod._kn_set_skip_rsp_audio(_replayAudioMode);
+          _syncLog(
+            `REPLAY-AUDIO-MUTE: RSP audio mode=${_replayAudioMode}; WebAudio feed muted for replay depth=${replayDepth}`,
+          );
+        }
+        if (_rbReplayLogged && catchingUp !== 2) _finishCReplay(tickMod);
+
+        if (catchingUp === 3) {
+          // Check if all peers are phantom — if so, ignore C-level throttle
+          // to prevent permanent freeze when the only peer has disconnected.
+          const allPhantom = getInputPeers().every((p) => _peerPhantom[p.slot]);
+          if (allPhantom) {
+            if (_runSubstate === RUN_PACING) {
+              if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
+              _pacingThrottleStartAt = 0;
+              if (window._knLastCPhantomReleaseFrame !== _frameNum) {
+                window._knLastCPhantomReleaseFrame = _frameNum;
+                _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
+              }
+            }
+            // Fall through to normal tick instead of returning
+          } else {
+            _pacingCapsFrames++;
+            if (_runSubstate !== RUN_PACING) {
+              _runSubstate = RUN_PACING;
+              _pacingThrottleStartAt = performance.now();
+              _pacingCapsCount++;
+              _logPacing(
+                `PACING-THROTTLE start fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} source=C`,
+              );
+            }
             _pushTickProfile({
               f: _frameNum,
-              path: 'replay',
+              path: 'pacing',
               total: performance.now() - _t0,
               preTick: _tPreTick - _t0,
-              burstMs: 0,
-              burstSteps: 0,
-              workerCoproc: true,
             });
-            _pushRbProbe('replay');
-            _markTickReturn('skip:coproc-dispatched');
+            _pushRbProbe('pacing');
+            _markTickReturn('skip:pacing-c');
             return;
-          } catch (e) {
-            _syncLog(`WORKER-COPROC dispatch failed: ${e?.message || e} — falling back to main replay`);
-            _workerCoprocPending = null;
-            _workerCoprocStats.dispatchFailures++;
-            // fall through to main's local replay
           }
+        }
+        if (_runSubstate === RUN_PACING) {
+          if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
+          _pacingThrottleStartAt = 0;
+          _logPacing(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)} source=C`);
         }
 
-        const burstStart = performance.now();
-        let burstSteps = 0;
-        let replayDone = false;
-        // Read the current adaptive burst cap (set by the feedback
-        // loop in _observeReplayTick — starts at 2, climbs only after
-        // sustained safe ticks). budget gates the loop in case actual
-        // step cost spikes mid-burst beyond what the median estimated.
-        const burstCap = _adaptiveReplayBurst();
-        const budgetMs = burstCap * Math.max(1.5, _stepCostMedianMs);
-        while (catchingUp === 2) {
-          // Paint-last-replay-frame: if THIS step will be the final one
-          // of the entire replay, turn OFF headless so the emulator's
-          // swap_buffer + video_cb run. The canvas paints the corrected
-          // state at frame F immediately at end of this tick instead of
-          // waiting for the next forward tick (~17 ms later). Cuts
-          // perceived freeze duration without changing tick count.
-          //
-          // Step count is tracked in JS (_replayStepsThisRollback) —
-          // _kn_get_replay_depth returns the ORIGINAL depth (constant),
-          // not the remaining count, so we can't query it from C. We
-          // only flip on the LAST replay frame; earlier frames stay
-          // headless because painting them would expose the rewind +
-          // intermediate-replay states (the "ghost" jolt the user saw
-          // when full RDP was enabled during replay).
-          const isLastReplayStep = _replayOriginalDepth > 0 && _replayStepsThisRollback + 1 >= _replayOriginalDepth;
-          if (isLastReplayStep) {
-            _setReplayFullHeadless(tickMod, false, 'last-replay-frame-paint');
+        _chk(`cr:catching-up-${catchingUp}`);
+        if (catchingUp === 2) {
+          // ── Worker-as-replay-coprocessor branch (option D) ─────────────
+          // When ?workerCoproc=1, hand the replay off to the shadow
+          // worker instead of doing it on main. The worker has its own
+          // rb engine + state ring (initialized in lockstep via
+          // 'rollback-init' message), so it can perform the same replay
+          // and ship back the corrected state at the target frame.
+          // Main meanwhile clears its own replay state so subsequent
+          // ticks don't re-enter this branch, then waits for the
+          // worker's reply (visible as a brief freeze, hopefully shorter
+          // than main's own replay because the worker isn't constrained
+          // by main's rAF cadence).
+          if (
+            RB_WORKER_COPROC &&
+            !_workerCoprocAborted &&
+            _rbShadowReady &&
+            _rbShadowWorker &&
+            !_rbShadowFailed &&
+            !_workerCoprocPending &&
+            tickMod._kn_clear_replay_state &&
+            tickMod._kn_apply_split_state_partial
+          ) {
+            const targetFrame = _frameNum;
+            // Build the full set of confirmed inputs spanning the
+            // rollback window so worker can advance its ring forward
+            // with corrected values. Walk back from targetFrame; for
+            // each frame in [targetFrame-replayDepth, targetFrame), pull
+            // the input each slot recorded then.
+            const inputsForWorker = [];
+            for (let f = targetFrame - replayDepth; f < targetFrame; f++) {
+              if (f < 0) continue;
+              for (let s = 0; s < rb_numPlayers; s++) {
+                let inp;
+                if (s === _playerSlot) {
+                  inp = _localInputs[f] || KNShared.ZERO_INPUT;
+                } else {
+                  inp = _rbGetInput(tickMod, s, f) || _remoteInputs[s]?.[f] || KNShared.ZERO_INPUT;
+                }
+                inputsForWorker.push({
+                  slot: s,
+                  frame: f,
+                  buttons: inp.buttons | 0,
+                  lx: inp.lx | 0,
+                  ly: inp.ly | 0,
+                  cx: inp.cx | 0,
+                  cy: inp.cy | 0,
+                });
+              }
+            }
+            const seq = ++_workerCoprocSeq;
+            try {
+              _rbShadowWorker.postMessage({
+                type: 'rollback-replay',
+                seq,
+                targetFrame,
+                depth: replayDepth,
+                inputs: inputsForWorker,
+              });
+              const dispatchedAt = performance.now();
+              // Schedule a timeout so a lost/slow worker reply doesn't
+              // wedge the demo forever. On fire: auto-disable workerCoproc
+              // and clear pending so the next tick can advance again. The
+              // emulator state at this moment is rewound to
+              // (targetFrame - replayDepth) — abort just lets it run
+              // forward from there with the (now-correct) input ring,
+              // converging back to the same frame the worker would have
+              // produced. _frameNum still equals targetFrame, so we
+              // realign it to rb.frame on abort.
+              const timeoutId = setTimeout(() => {
+                if (_workerCoprocPending?.seq !== seq) return;
+                _workerCoprocStats.timeouts++;
+                _workerCoprocAbort(`reply timeout seq=${seq} after ${RB_WORKER_COPROC_TIMEOUT_MS}ms`);
+                const mod = window.EJS_emulator?.gameManager?.Module;
+                if (mod?._kn_get_frame) {
+                  _frameNum = mod._kn_get_frame();
+                  KNState.frameNum = _frameNum;
+                }
+                _hideRollbackVisualFreeze();
+              }, RB_WORKER_COPROC_TIMEOUT_MS);
+              _workerCoprocPending = { seq, targetFrame, depth: replayDepth, dispatchedAt, timeoutId };
+              _workerCoprocStats.dispatched++;
+              _syncLog(
+                `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}`,
+              );
+              // Clear main's own replay state so kn_pre_tick on next
+              // tick doesn't re-trigger replay branch. The worker-coproc
+              // wait gate at the top of the C-rollback path will then
+              // freeze the emulator at the rewound state until the worker
+              // reply arrives (or timeout fires).
+              tickMod._kn_clear_replay_state();
+              // Visual freeze overlay covers the canvas during the
+              // ~20-30ms wait. We deliberately do NOT enable headless
+              // mode: the emulator isn't ticking forward (gate blocks
+              // it), so there's nothing to suppress paints from. Keeping
+              // headless off means if the gate or worker fails open,
+              // recovery paints land naturally.
+              _showRollbackVisualFreeze(replayDepth, localInput);
+              // Lazy-start the frame-advance watchdog. Catches "demo
+              // hangs" cases the dispatch timeout can't (e.g., reply
+              // arrived but apply threw, leaving runner dead).
+              if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
+              _pushTickProfile({
+                f: _frameNum,
+                path: 'replay',
+                total: performance.now() - _t0,
+                preTick: _tPreTick - _t0,
+                burstMs: 0,
+                burstSteps: 0,
+                workerCoproc: true,
+              });
+              _pushRbProbe('replay');
+              _markTickReturn('skip:coproc-dispatched');
+              return;
+            } catch (e) {
+              _syncLog(`WORKER-COPROC dispatch failed: ${e?.message || e} — falling back to main replay`);
+              _workerCoprocPending = null;
+              _workerCoprocStats.dispatchFailures++;
+              // fall through to main's local replay
+            }
           }
-          _runCReplayFrame(tickMod);
-          _replayStepsThisRollback++;
-          burstSteps++;
-          const replayRemaining = tickMod._kn_get_replay_depth?.() ?? 0;
-          if (replayRemaining <= 0) {
-            replayDone = true;
-            break;
-          }
-          const burstMs = performance.now() - burstStart;
-          if (burstSteps >= burstCap || burstMs >= budgetMs) break;
-          catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
-        }
-        // Feed the measurement-driven sizer with this tick's actual
-        // wall-clock duration. Decides whether to keep, decrement,
-        // or (after sustained safe operation) increment the cap for
-        // the next rollback.
-        _observeReplayTick(performance.now() - burstStart);
-        if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
-        // Overlay
-        if (_frameNum % 15 === 0) {
-          const dbg = document.getElementById('np-debug');
-          if (dbg) {
-            dbg.style.display = '';
-            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
-            const remaining = tickMod._kn_get_replay_depth?.() ?? 0;
-            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} REPLAYING (${remaining} left) rb:${rb}`;
-          }
-        }
-        _pushTickProfile({
-          f: _frameNum,
-          path: 'replay',
-          total: performance.now() - _t0,
-          preTick: _tPreTick - _t0,
-          burstMs: performance.now() - burstStart,
-          burstSteps,
-        });
-        _pushRbProbe('replay');
-        _markTickReturn('replay-burst');
-        return;
-      }
 
-      const applyFrame = _frameNum - DELAY_FRAMES;
-      // Diagnostic: compare C ring input with JS _remoteInputs every 60 frames
-      if (_frameNum % 60 === 0 && applyFrame >= 0) {
-        for (let s = 0; s < rb_numPlayers; s++) {
-          if (s === _playerSlot) continue;
-          const cInp = _rbGetInput(tickMod, s, applyFrame);
-          const jsInp = _remoteInputs[s]?.[applyFrame];
-          if (jsInp && (cInp.buttons !== jsInp.buttons || cInp.lx !== jsInp.lx || cInp.ly !== jsInp.ly)) {
-            _syncLog(
-              `INPUT-DIFF f=${_frameNum} apply=${applyFrame} slot=${s} c=[${cInp.buttons},${cInp.lx},${cInp.ly}] js=[${jsInp.buttons},${jsInp.lx},${jsInp.ly}]`,
-            );
+          const burstStart = performance.now();
+          let burstSteps = 0;
+          let replayDone = false;
+          // Read the current adaptive burst cap (set by the feedback
+          // loop in _observeReplayTick — starts at 2, climbs only after
+          // sustained safe ticks). budget gates the loop in case actual
+          // step cost spikes mid-burst beyond what the median estimated.
+          const burstCap = _adaptiveReplayBurst();
+          const budgetMs = burstCap * Math.max(1.5, _stepCostMedianMs);
+          while (catchingUp === 2) {
+            // Paint-last-replay-frame: if THIS step will be the final one
+            // of the entire replay, turn OFF headless so the emulator's
+            // swap_buffer + video_cb run. The canvas paints the corrected
+            // state at frame F immediately at end of this tick instead of
+            // waiting for the next forward tick (~17 ms later). Cuts
+            // perceived freeze duration without changing tick count.
+            //
+            // Step count is tracked in JS (_replayStepsThisRollback) —
+            // _kn_get_replay_depth returns the ORIGINAL depth (constant),
+            // not the remaining count, so we can't query it from C. We
+            // only flip on the LAST replay frame; earlier frames stay
+            // headless because painting them would expose the rewind +
+            // intermediate-replay states (the "ghost" jolt the user saw
+            // when full RDP was enabled during replay).
+            const isLastReplayStep = _replayOriginalDepth > 0 && _replayStepsThisRollback + 1 >= _replayOriginalDepth;
+            if (isLastReplayStep) {
+              _setReplayFullHeadless(tickMod, false, 'last-replay-frame-paint');
+            }
+            _runCReplayFrame(tickMod);
+            _replayStepsThisRollback++;
+            burstSteps++;
+            const replayRemaining = tickMod._kn_get_replay_depth?.() ?? 0;
+            if (replayRemaining <= 0) {
+              replayDone = true;
+              break;
+            }
+            const burstMs = performance.now() - burstStart;
+            if (burstSteps >= burstCap || burstMs >= budgetMs) break;
+            catchingUp = _prepareCReplayFrame(tickMod, localInput, _frameAdvForC);
           }
-          if (!jsInp && cInp !== KNShared.ZERO_INPUT && cInp.buttons !== 0) {
-            _syncLog(
-              `INPUT-MISSING f=${_frameNum} apply=${applyFrame} slot=${s} cHas=true jsHas=false c=[${cInp.buttons},${cInp.lx},${cInp.ly}]`,
-            );
+          // Feed the measurement-driven sizer with this tick's actual
+          // wall-clock duration. Decides whether to keep, decrement,
+          // or (after sustained safe operation) increment the cap for
+          // the next rollback.
+          _observeReplayTick(performance.now() - burstStart);
+          if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
+          // Overlay
+          if (_frameNum % 15 === 0) {
+            const dbg = document.getElementById('np-debug');
+            if (dbg) {
+              dbg.style.display = '';
+              const rb = tickMod._kn_get_rollback_count?.() ?? 0;
+              const remaining = tickMod._kn_get_replay_depth?.() ?? 0;
+              dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} REPLAYING (${remaining} left) rb:${rb}`;
+            }
           }
+          _pushTickProfile({
+            f: _frameNum,
+            path: 'replay',
+            total: performance.now() - _t0,
+            preTick: _tPreTick - _t0,
+            burstMs: performance.now() - burstStart,
+            burstSteps,
+          });
+          _pushRbProbe('replay');
+          _markTickReturn('replay-burst');
+          return;
         }
-      }
-      for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-      // True-rollback netcode: local input applied at the CURRENT frame for
-      // instant input feel; remote inputs applied at applyFrame (predicted by
-      // C engine if not yet confirmed). The C replay path mirrors this split
-      // so replay reproduces the same input application as the original
-      // forward frame — see kn_pre_tick replay branch in build/kn_rollback/
-      // kn_rollback.c (gated by kn_set_true_rollback flag pushed down at game
-      // start). Mismatched peers are blocked by the capability handshake.
-      // Legacy "lockstep with rollback recovery": all slots applied at
-      // applyFrame, including local — local input lag scales with negotiated
-      // delay (which itself scales with RTT), so input feels like lockstep.
-      if (RB_TRUE_ROLLBACK) {
-        writeInputToMemory(_playerSlot, localInput);
-        // Defer log-string allocation until we actually log. Per-tick at
-        // 60 Hz we'd otherwise build N+1 template-literal strings + a
-        // regex-tested array even though only ~1% of ticks log
-        // (anyNonZero short-circuits and 60-frame heartbeat).
-        let anyNonZero = !!(localInput.buttons || localInput.lx || localInput.ly);
-        if (applyFrame >= 0) {
+
+        const applyFrame = _frameNum - DELAY_FRAMES;
+        // Diagnostic: compare C ring input with JS _remoteInputs every 60 frames
+        if (_frameNum % 60 === 0 && applyFrame >= 0) {
           for (let s = 0; s < rb_numPlayers; s++) {
             if (s === _playerSlot) continue;
-            const inp = _rbGetInput(tickMod, s, applyFrame);
-            writeInputToMemory(s, inp);
-            if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
+            const cInp = _rbGetInput(tickMod, s, applyFrame);
+            const jsInp = _remoteInputs[s]?.[applyFrame];
+            if (jsInp && (cInp.buttons !== jsInp.buttons || cInp.lx !== jsInp.lx || cInp.ly !== jsInp.ly)) {
+              _syncLog(
+                `INPUT-DIFF f=${_frameNum} apply=${applyFrame} slot=${s} c=[${cInp.buttons},${cInp.lx},${cInp.ly}] js=[${jsInp.buttons},${jsInp.lx},${jsInp.ly}]`,
+              );
+            }
+            if (!jsInp && cInp !== KNShared.ZERO_INPUT && cInp.buttons !== 0) {
+              _syncLog(
+                `INPUT-MISSING f=${_frameNum} apply=${applyFrame} slot=${s} cHas=true jsHas=false c=[${cInp.buttons},${cInp.lx},${cInp.ly}]`,
+              );
+            }
           }
         }
-        if (anyNonZero || _frameNum % 60 === 0) {
-          let line = `NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`;
+        for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
+        // True-rollback netcode: local input applied at the CURRENT frame for
+        // instant input feel; remote inputs applied at applyFrame (predicted by
+        // C engine if not yet confirmed). The C replay path mirrors this split
+        // so replay reproduces the same input application as the original
+        // forward frame — see kn_pre_tick replay branch in build/kn_rollback/
+        // kn_rollback.c (gated by kn_set_true_rollback flag pushed down at game
+        // start). Mismatched peers are blocked by the capability handshake.
+        // Legacy "lockstep with rollback recovery": all slots applied at
+        // applyFrame, including local — local input lag scales with negotiated
+        // delay (which itself scales with RTT), so input feels like lockstep.
+        if (RB_TRUE_ROLLBACK) {
+          writeInputToMemory(_playerSlot, localInput);
+          // Defer log-string allocation until we actually log. Per-tick at
+          // 60 Hz we'd otherwise build N+1 template-literal strings + a
+          // regex-tested array even though only ~1% of ticks log
+          // (anyNonZero short-circuits and 60-frame heartbeat).
+          let anyNonZero = !!(localInput.buttons || localInput.lx || localInput.ly);
           if (applyFrame >= 0) {
             for (let s = 0; s < rb_numPlayers; s++) {
               if (s === _playerSlot) continue;
               const inp = _rbGetInput(tickMod, s, applyFrame);
-              line += ` R${s}@${applyFrame}[${inp.buttons},${inp.lx},${inp.ly}]`;
+              writeInputToMemory(s, inp);
+              if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
             }
           }
-          _syncLog(line);
-        }
-      } else if (applyFrame >= 0) {
-        // Same deferral pattern: read + write inputs, only build the log
-        // string once we know we'll actually log it.
-        let anyNonZero = false;
-        for (let s = 0; s < rb_numPlayers; s++) {
-          const inp = _rbGetInput(tickMod, s, applyFrame);
-          writeInputToMemory(s, inp);
-          if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
-        }
-        if (anyNonZero || _frameNum % 60 === 0) {
-          let line = `NORMAL-INPUT f=${applyFrame}`;
+          if (anyNonZero || _frameNum % 60 === 0) {
+            let line = `NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`;
+            if (applyFrame >= 0) {
+              for (let s = 0; s < rb_numPlayers; s++) {
+                if (s === _playerSlot) continue;
+                const inp = _rbGetInput(tickMod, s, applyFrame);
+                line += ` R${s}@${applyFrame}[${inp.buttons},${inp.lx},${inp.ly}]`;
+              }
+            }
+            _syncLog(line);
+          }
+        } else if (applyFrame >= 0) {
+          // Same deferral pattern: read + write inputs, only build the log
+          // string once we know we'll actually log it.
+          let anyNonZero = false;
           for (let s = 0; s < rb_numPlayers; s++) {
             const inp = _rbGetInput(tickMod, s, applyFrame);
-            line += ` s${s}[${inp.buttons},${inp.lx},${inp.ly}]`;
+            writeInputToMemory(s, inp);
+            if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
           }
-          _syncLog(line);
-        }
-      }
-
-      if (RB_SHADOW_EMU) {
-        if (!_rbShadowReady && !_rbShadowBooting && !_rbShadowFailed) _shadowMaybeStart('normal-tick');
-        if (_rbShadowReady) {
-          const shadowInputs = _shadowBuildInputs(tickMod, localInput, applyFrame);
-          if (_rbShadowVisible) {
-            _shadowShowPersistentOverlay();
-          } else if (RB_SHADOW_LEAD_FRAMES > 0) {
-            const targetFrame = _frameNum + RB_SHADOW_LEAD_FRAMES;
-            _shadowPostLead(targetFrame, shadowInputs, 'normal-lead', 2, false);
-          } else {
-            _shadowPostStep(_frameNum, shadowInputs, 'normal', 1);
-            _shadowShowPersistentOverlay();
+          if (anyNonZero || _frameNum % 60 === 0) {
+            let line = `NORMAL-INPUT f=${applyFrame}`;
+            for (let s = 0; s < rb_numPlayers; s++) {
+              const inp = _rbGetInput(tickMod, s, applyFrame);
+              line += ` s${s}[${inp.buttons},${inp.lx},${inp.ly}]`;
+            }
+            _syncLog(line);
           }
         }
-      }
 
-      if (tickMod._kn_reset_audio) {
-        tickMod._kn_reset_audio();
-        _resetAudioCallsSinceRb++;
-      }
-      _syncRNGSeed(tickMod, _frameNum);
-      const _tStep0 = performance.now();
-      // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
-      // performance.now() override stays armed and returns frozen WASM
-      // cycle time, which freezes the setInterval tick scheduler and the
-      // entire game loop. See netplay-lockstep.js:6873.
-      _inDeterministicStep = true;
-      try {
-        stepOneFrame();
-      } catch (e) {
-        _syncLog(_formatStepThrew('normal', e));
-        console.error('[lockstep] stepOneFrame threw (normal):', e);
-      } finally {
-        _inDeterministicStep = false;
-      }
-      // 2026-04-29 audio-diag: invariant check post-step. Counters tick
-      // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
-      _checkAiInvariant(tickMod, 3);
-      const _tStep = performance.now();
-      // Update the per-step cost sliding window used by the adaptive
-      // replay-burst sizer. Only sampled from normal-path forward ticks
-      // (skip the first 30 frames to avoid boot-time noise). The
-      // replay path reads the median of this window via
-      // _adaptiveReplayBurst() to size how many frames to fit per
-      // replay tick — see RB_VSYNC_USABLE_MS.
-      if (_frameNum > 30) {
-        const stepDt = _tStep - _tStep0;
-        if (stepDt > 0 && stepDt < 50) {
-          _stepCostHistory.push(stepDt);
-          if (_stepCostHistory.length > STEP_COST_WINDOW) _stepCostHistory.shift();
-          _stepCostStatsDirty = true;
+        if (RB_SHADOW_EMU) {
+          if (!_rbShadowReady && !_rbShadowBooting && !_rbShadowFailed) _shadowMaybeStart('normal-tick');
+          if (_rbShadowReady) {
+            const shadowInputs = _shadowBuildInputs(tickMod, localInput, applyFrame);
+            if (_rbShadowVisible) {
+              _shadowShowPersistentOverlay();
+            } else if (RB_SHADOW_LEAD_FRAMES > 0) {
+              const targetFrame = _frameNum + RB_SHADOW_LEAD_FRAMES;
+              _shadowPostLead(targetFrame, shadowInputs, 'normal-lead', 2, false);
+            } else {
+              _shadowPostStep(_frameNum, shadowInputs, 'normal', 1);
+              _shadowShowPersistentOverlay();
+            }
+          }
         }
-      }
-      if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
-        _captureRollbackVisualSnapshot();
-      }
-      // Post-step RNG reseed: the game advances RNG during the frame a
-      // different number of times on each peer (from interrupt timing
-      // differences). Re-seeding AFTER the step ensures the stored RNG
-      // value is identical for the next frame, regardless of within-frame
-      // divergence. Without this, random character/stage selection picks
-      // different results on iPhone↔iPhone.
-      _syncRNGSeed(tickMod, _frameNum);
-      feedAudio();
 
-      // ── Post-tick: advance C frame counter ──
-      const newFrame = tickMod._kn_post_tick();
-      _frameNum = newFrame;
-      KNState.frameNum = _frameNum;
-      if (window.KNDesync) KNDesync.tick(_frameNum);
-      const _tTotal = performance.now();
-      _pushTickProfile({
-        f: _frameNum,
-        path: 'normal',
-        total: _tTotal - _t0,
-        preTick: _tPreTick - _t0,
-        preStep: _tStep0 - _tPreTick,
-        step: _tStep - _tStep0,
-        postStep: _tTotal - _tStep,
-      });
-      _pushRbProbe('normal');
-      _markTickReturn('advance');
-
-      // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
-      if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
-        window._knPostSyncDiagFrames--;
-        const gpH = (tickMod._kn_gameplay_hash?.(_frameNum - 1) ?? 0) >>> 0;
-        const gameH = (tickMod._kn_game_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
-        const fullH = (tickMod._kn_full_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
-        const eqH = (tickMod._kn_eventqueue_hash?.() ?? 0) >>> 0;
-        const hidH = (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) >>> 0;
-        _syncLog(
-          `POST-SYNC-DIAG f=${_frameNum} gp=0x${gpH.toString(16)} game=0x${gameH.toString(16)} ` +
-            `full=0x${fullH.toString(16)} eq=0x${eqH.toString(16)} hid=0x${hidH.toString(16)}`,
-        );
-      }
-
-      // ── P4: silent-desync detection (LOG-ONLY) ──
-      // kn_feed_input (drained at tick boundary above) increments
-      // failed_rollbacks when a misprediction targets a frame outside the
-      // rollback ring (too old OR state overwritten). This
-      // is a silent desync: the correction can't be applied. We log so the
-      // session record captures it, but we deliberately do NOT trigger a
-      // mid-game resync — snaps feel worse than gradual divergence and break
-      // the player's muscle memory. Fix the determinism gap, not the symptom.
-      if (tickMod._kn_get_failed_rollbacks) {
-        const nowFailed = tickMod._kn_get_failed_rollbacks();
-        if (nowFailed > _rbLastFailedRollbacks) {
-          const delta = nowFailed - _rbLastFailedRollbacks;
-          _rbLastFailedRollbacks = nowFailed;
-          _syncLog(`FAILED-ROLLBACK detected: +${delta} total=${nowFailed} (log-only, no resync)`);
+        if (tickMod._kn_reset_audio) {
+          tickMod._kn_reset_audio();
+          _resetAudioCallsSinceRb++;
         }
-      }
-
-      // ── Periodic input ack logging — track confirmed frame ──
-      if (_frameNum % 60 === 0) {
-        let minAckFromPeer = Infinity;
-        let minRecvFromPeer = Infinity;
-        const peerInfo = [];
-        for (const p of getActivePeers()) {
-          if (p.slot === null || p.slot === undefined) continue;
-          const ack = p.lastAckFromPeer ?? -1;
-          const recv = p.lastFrameFromPeer ?? -1;
-          if (ack < minAckFromPeer) minAckFromPeer = ack;
-          if (recv < minRecvFromPeer) minRecvFromPeer = recv;
-          peerInfo.push(`s${p.slot}[ack=${ack},recv=${recv}]`);
+        _syncRNGSeed(tickMod, _frameNum);
+        const _tStep0 = performance.now();
+        // try/finally: if stepOneFrame throws (WASM OOB, abort, etc.), the
+        // performance.now() override stays armed and returns frozen WASM
+        // cycle time, which freezes the setInterval tick scheduler and the
+        // entire game loop. See netplay-lockstep.js:6873.
+        _chk('cr:pre-step');
+        _inDeterministicStep = true;
+        try {
+          stepOneFrame();
+        } catch (e) {
+          _syncLog(_formatStepThrew('normal', e));
+          console.error('[lockstep] stepOneFrame threw (normal):', e);
+        } finally {
+          _inDeterministicStep = false;
         }
-        const confirmed = Math.min(minAckFromPeer, minRecvFromPeer);
-        const lag = _frameNum - confirmed;
-        if (peerInfo.length > 0) {
-          _syncLog(`INPUT-ACK f=${_frameNum} confirmed=${confirmed} lag=${lag} ${peerInfo.join(' ')}`);
+        _chk('cr:post-step');
+        // 2026-04-29 audio-diag: invariant check post-step. Counters tick
+        // every time BUSY is set without AI_INT in queue. Cheap (one WASM call).
+        _checkAiInvariant(tickMod, 3);
+        _chk('cr:post-ai-invariant');
+        const _tStep = performance.now();
+        // Update the per-step cost sliding window used by the adaptive
+        // replay-burst sizer. Only sampled from normal-path forward ticks
+        // (skip the first 30 frames to avoid boot-time noise). The
+        // replay path reads the median of this window via
+        // _adaptiveReplayBurst() to size how many frames to fit per
+        // replay tick — see RB_VSYNC_USABLE_MS.
+        if (_frameNum > 30) {
+          const stepDt = _tStep - _tStep0;
+          if (stepDt > 0 && stepDt < 50) {
+            _stepCostHistory.push(stepDt);
+            if (_stepCostHistory.length > STEP_COST_WINDOW) _stepCostHistory.shift();
+            _stepCostStatsDirty = true;
+          }
         }
-      }
-
-      // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
-      _diag.checkFreeze(localInput);
-
-      // ── Bisect-on-mismatch: when a divergence is detected, switch to
-      // per-frame hash broadcasts for the next N frames so we can pinpoint
-      // exactly when the next divergence happens. Without this, mismatch
-      // detection only fires at 300-frame boundaries — we can detect THAT
-      // divergence exists but not WHEN it was introduced. Per-frame hashing
-      // shrinks the window from 300 frames to 1 frame, but is expensive
-      // (~0.5 ms/frame), so we only run it briefly after a mismatch.
-      const bisectThisFrame =
-        _knDeepDiagnostics &&
-        _rbBisectActive &&
-        _rbBisectFramesRemaining > 0 &&
-        _frameNum % 300 !== 0 &&
-        _isRbCheckGameplayPhase();
-      if (bisectThisFrame) {
-        _rbBisectFramesRemaining--;
-        if (_rbBisectFramesRemaining === 0) {
-          _rbBisectActive = false;
-          _syncLog(`RB-BISECT done at f=${_frameNum}`);
+        if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
+          _captureRollbackVisualSnapshot();
         }
-        // Broadcast both the cheap hash AND the per-region snapshot.
-        // Field test 754/755 had 1553 RB-REGION-DIFF entries stuck on
-        // "peer regions not yet received" because the receiver had no
-        // peer region data for the frame the bisect was checking. The
-        // periodic rb-regions broadcast only fires every 300 frames;
-        // bisect mode needs to send region snapshots per frame too.
-        // Cost: ~2 KB extra per bisect frame for at most 30 frames.
-        const hashFrame = _frameNum - 1;
-        const checkFrame = hashFrame;
-        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-        if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+        // Post-step RNG reseed: the game advances RNG during the frame a
+        // different number of times on each peer (from interrupt timing
+        // differences). Re-seeding AFTER the step ensures the stored RNG
+        // value is identical for the next frame, regardless of within-frame
+        // divergence. Without this, random character/stage selection picks
+        // different results on iPhone↔iPhone.
+        _syncRNGSeed(tickMod, _frameNum);
+        feedAudio();
+
+        _chk('cr:pre-post-tick');
+        // ── Post-tick: advance C frame counter ──
+        const newFrame = tickMod._kn_post_tick();
+        _chk('cr:post-post-tick');
+        _frameNum = newFrame;
+        KNState.frameNum = _frameNum;
+        if (window.KNDesync) KNDesync.tick(_frameNum);
+        const _tTotal = performance.now();
+        _pushTickProfile({
+          f: _frameNum,
+          path: 'normal',
+          total: _tTotal - _t0,
+          preTick: _tPreTick - _t0,
+          preStep: _tStep0 - _tPreTick,
+          step: _tStep - _tStep0,
+          postStep: _tTotal - _tStep,
+        });
+        _pushRbProbe('normal');
+        _markTickReturn('advance');
+
+        // Post-sync diagnostic burst: hash full state for 10 frames after boot sync
+        if (_knDeepDiagnostics && window._knPostSyncDiagFrames > 0) {
+          window._knPostSyncDiagFrames--;
+          const gpH = (tickMod._kn_gameplay_hash?.(_frameNum - 1) ?? 0) >>> 0;
+          const gameH = (tickMod._kn_game_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
+          const fullH = (tickMod._kn_full_state_hash?.(_frameNum - 1) ?? 0) >>> 0;
+          const eqH = (tickMod._kn_eventqueue_hash?.() ?? 0) >>> 0;
+          const hidH = (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) >>> 0;
+          _syncLog(
+            `POST-SYNC-DIAG f=${_frameNum} gp=0x${gpH.toString(16)} game=0x${gameH.toString(16)} ` +
+              `full=0x${fullH.toString(16)} eq=0x${eqH.toString(16)} hid=0x${hidH.toString(16)}`,
+          );
+        }
+
+        // ── P4: silent-desync detection (LOG-ONLY) ──
+        // kn_feed_input (drained at tick boundary above) increments
+        // failed_rollbacks when a misprediction targets a frame outside the
+        // rollback ring (too old OR state overwritten). This
+        // is a silent desync: the correction can't be applied. We log so the
+        // session record captures it, but we deliberately do NOT trigger a
+        // mid-game resync — snaps feel worse than gradual divergence and break
+        // the player's muscle memory. Fix the determinism gap, not the symptom.
+        if (tickMod._kn_get_failed_rollbacks) {
+          const nowFailed = tickMod._kn_get_failed_rollbacks();
+          if (nowFailed > _rbLastFailedRollbacks) {
+            const delta = nowFailed - _rbLastFailedRollbacks;
+            _rbLastFailedRollbacks = nowFailed;
+            _syncLog(`FAILED-ROLLBACK detected: +${delta} total=${nowFailed} (log-only, no resync)`);
+          }
+        }
+
+        // ── Periodic input ack logging — track confirmed frame ──
+        if (_frameNum % 60 === 0) {
+          let minAckFromPeer = Infinity;
+          let minRecvFromPeer = Infinity;
+          const peerInfo = [];
           for (const p of getActivePeers()) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send(`rb-check:${checkFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
-              } catch (_) {}
-            }
+            if (p.slot === null || p.slot === undefined) continue;
+            const ack = p.lastAckFromPeer ?? -1;
+            const recv = p.lastFrameFromPeer ?? -1;
+            if (ack < minAckFromPeer) minAckFromPeer = ack;
+            if (recv < minRecvFromPeer) minRecvFromPeer = recv;
+            peerInfo.push(`s${p.slot}[ack=${ack},recv=${recv}]`);
           }
-          // Region snapshot via the frame-specific export so the snapshot
-          // matches the frame we just sent the hash for, not the most
-          // recent ring slot.
-          const NUM_REGIONS_BISECT = 256;
-          if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_BISECT * 4);
-          if (_rbRegionsBufPtr) {
-            let ok = 0;
-            if (tickMod._kn_state_region_hashes_frame) {
-              ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-            } else if (tickMod._kn_state_region_hashes) {
-              tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS_BISECT);
-              ok = NUM_REGIONS_BISECT;
+          const confirmed = Math.min(minAckFromPeer, minRecvFromPeer);
+          const lag = _frameNum - confirmed;
+          if (peerInfo.length > 0) {
+            _syncLog(`INPUT-ACK f=${_frameNum} confirmed=${confirmed} lag=${lag} ${peerInfo.join(' ')}`);
+          }
+        }
+
+        // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
+        _diag.checkFreeze(localInput);
+
+        // ── Bisect-on-mismatch: when a divergence is detected, switch to
+        // per-frame hash broadcasts for the next N frames so we can pinpoint
+        // exactly when the next divergence happens. Without this, mismatch
+        // detection only fires at 300-frame boundaries — we can detect THAT
+        // divergence exists but not WHEN it was introduced. Per-frame hashing
+        // shrinks the window from 300 frames to 1 frame, but is expensive
+        // (~0.5 ms/frame), so we only run it briefly after a mismatch.
+        const bisectThisFrame =
+          _knDeepDiagnostics &&
+          _rbBisectActive &&
+          _rbBisectFramesRemaining > 0 &&
+          _frameNum % 300 !== 0 &&
+          _isRbCheckGameplayPhase();
+        if (bisectThisFrame) {
+          _rbBisectFramesRemaining--;
+          if (_rbBisectFramesRemaining === 0) {
+            _rbBisectActive = false;
+            _syncLog(`RB-BISECT done at f=${_frameNum}`);
+          }
+          // Broadcast both the cheap hash AND the per-region snapshot.
+          // Field test 754/755 had 1553 RB-REGION-DIFF entries stuck on
+          // "peer regions not yet received" because the receiver had no
+          // peer region data for the frame the bisect was checking. The
+          // periodic rb-regions broadcast only fires every 300 frames;
+          // bisect mode needs to send region snapshots per frame too.
+          // Cost: ~2 KB extra per bisect frame for at most 30 frames.
+          const hashFrame = _frameNum - 1;
+          const checkFrame = hashFrame;
+          const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
+          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
+                } catch (_) {}
+              }
             }
-            if (ok > 0) {
-              const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-              const regionsHex = Array.from(regions)
-                .map((h) => h.toString(16))
-                .join(',');
-              if (!window._rbLocalRegions) window._rbLocalRegions = {};
-              window._rbLocalRegions[checkFrame] = regionsHex;
-              for (const p of getActivePeers()) {
-                if (p.dc?.readyState === 'open') {
-                  try {
-                    p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                  } catch (_) {}
+            // Region snapshot via the frame-specific export so the snapshot
+            // matches the frame we just sent the hash for, not the most
+            // recent ring slot.
+            const NUM_REGIONS_BISECT = 256;
+            if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_BISECT * 4);
+            if (_rbRegionsBufPtr) {
+              let ok = 0;
+              if (tickMod._kn_state_region_hashes_frame) {
+                ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
+              } else if (tickMod._kn_state_region_hashes) {
+                tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS_BISECT);
+                ok = NUM_REGIONS_BISECT;
+              }
+              if (ok > 0) {
+                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
+                const regionsHex = Array.from(regions)
+                  .map((h) => h.toString(16))
+                  .join(',');
+                if (!window._rbLocalRegions) window._rbLocalRegions = {};
+                window._rbLocalRegions[checkFrame] = regionsHex;
+                for (const p of getActivePeers()) {
+                  if (p.dc?.readyState === 'open') {
+                    try {
+                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
+                    } catch (_) {}
+                  }
                 }
               }
             }
           }
         }
-      }
 
-      // ── Post-rollback verification: immediately after a replay completes,
-      // broadcast the rolled-forward state hash so peers can confirm the
-      // rollback restoration produced bit-identical state. Without this,
-      // a "toxic" rollback (one that introduces divergence) is invisible
-      // until the next 300-frame checkpoint, making it impossible to
-      // attribute the divergence to a specific rollback event.
-      //
-      // We ALSO broadcast per-64KB RDRAM block hashes + the per-region
-      // savestate digest here, so the 2026-04-08 audit path (match
-      // 002ad0f6) can pinpoint which block diverges AT the rollback
-      // boundary instead of inferring it from the next 300-frame
-      // checkpoint 180 frames later. Without per-rollback block data, we
-      // can see divergence has happened by f=3599 but not whether it was
-      // introduced at f=3420, f=3440, or f=3460.
-      if (_rbPendingPostRollbackHash && !_isRbCheckGameplayPhase()) {
-        _rbPendingPostRollbackHash = false;
-      }
-      if (_rbPendingPostRollbackHash) {
-        _rbPendingPostRollbackHash = false;
-        const hashFrame = _frameNum - 1;
-        const checkFrame = hashFrame;
-        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-        const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
-        const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
-        const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
-        const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
-        const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
-        if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+        // ── Post-rollback verification: immediately after a replay completes,
+        // broadcast the rolled-forward state hash so peers can confirm the
+        // rollback restoration produced bit-identical state. Without this,
+        // a "toxic" rollback (one that introduces divergence) is invisible
+        // until the next 300-frame checkpoint, making it impossible to
+        // attribute the divergence to a specific rollback event.
+        //
+        // We ALSO broadcast per-64KB RDRAM block hashes + the per-region
+        // savestate digest here, so the 2026-04-08 audit path (match
+        // 002ad0f6) can pinpoint which block diverges AT the rollback
+        // boundary instead of inferring it from the next 300-frame
+        // checkpoint 180 frames later. Without per-rollback block data, we
+        // can see divergence has happened by f=3599 but not whether it was
+        // introduced at f=3420, f=3440, or f=3460.
+        if (_rbPendingPostRollbackHash && !_isRbCheckGameplayPhase()) {
+          _rbPendingPostRollbackHash = false;
+        }
+        if (_rbPendingPostRollbackHash) {
+          _rbPendingPostRollbackHash = false;
+          const hashFrame = _frameNum - 1;
+          const checkFrame = hashFrame;
+          const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
+          const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
+          const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
+          const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
+          const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
+          const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
+          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+            _syncLog(
+              `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+            );
+            // Cache for RB-CHECK comparison (see periodic broadcast below for
+            // why — same race window applies on the post-rollback path).
+            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
+            window._rbLocalGameHashes[checkFrame] = gpHash;
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
+                } catch (_) {}
+              }
+            }
+
+            // Block-level snapshot + broadcast (duplicates the 300-frame
+            // periodic logic at a per-rollback cadence). Cache locally and
+            // broadcast so the peer can diff at this exact frame. Skips if
+            // the WASM exports or malloc aren't available (old core).
+            if (
+              _knDeepDiagnostics &&
+              tickMod._kn_rdram_block_hashes &&
+              tickMod._kn_get_taint_blocks &&
+              tickMod._malloc
+            ) {
+              if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
+              if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
+              if (_rbHashBufPtr && _rbTaintBufPtr) {
+                tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+                tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
+                const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
+                const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
+                const blocksSnap = Array.from(blocks);
+                const taintSnap = Array.from(taint);
+                const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
+                const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
+                _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
+                window._rbLocalBlocks[checkFrame] = blocksSnap;
+                window._rbLocalTaint[checkFrame] = taintSnap;
+                for (const p of getActivePeers()) {
+                  if (p.dc?.readyState === 'open') {
+                    try {
+                      p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+
+            // Per-region savestate digest (frame-specific variant so the
+            // regions match the post-rollback state of hashFrame, not the
+            // most recent ring slot). This is what lets the peer see which
+            // slice of the savestate — RDRAM r0..r31 vs post-RDRAM r32 —
+            // drifted at the rollback boundary.
+            const NUM_REGIONS_POSTRB = 256;
+            if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
+              _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_POSTRB * 4);
+            }
+            if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
+              const ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
+              if (ok > 0) {
+                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
+                const regionsHex = Array.from(regions)
+                  .map((h) => h.toString(16))
+                  .join(',');
+                if (!window._rbLocalRegions) window._rbLocalRegions = {};
+                window._rbLocalRegions[checkFrame] = regionsHex;
+                for (const p of getActivePeers()) {
+                  if (p.dc?.readyState === 'open') {
+                    try {
+                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // ── Periodic logging with timing + per-region hash exchange ──
+        // Tighter interval during menus (30 frames) to catch CSS/stage-select
+        // divergence before it compounds. 300 frames during gameplay.
+        const _hashInterval = _inGameplay ? 300 : _isLocalDev ? 30 : 60;
+        if (_frameNum % _hashInterval === 0) {
+          const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
+          const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
+          const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
+          const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+          const hashFrame = _frameNum - 1;
+          const checkFrame = hashFrame;
+          // Gameplay hash for RB-CHECK: hashes ONLY game-relevant RDRAM
+          // addresses (damage, stocks, timer, RNG seeds). Immune to audio/
+          // video/heap noise. game_state_hash + full_state_hash kept for
+          // diagnostic monitoring.
+          const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
+          const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
+          const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
+          const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
+          const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
+          const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
+          // Per-region hashes — splits state buffer into 256 chunks
+          // (~34 KB regions for an ~8.6 MB savestate). At 32 regions the
+          // entire post-RDRAM section (CPU/cp0/cp1/event queue/fb) fit in
+          // one region, hiding which subsystem was diverging. 256 regions
+          // gives us ~7 regions covering the 256 KB post-RDRAM section, so
+          // a single mismatch pinpoints subsystem-level granularity.
+          const NUM_REGIONS = 256;
+          if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
+            _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
+          }
+          let regionsHex = '';
+          if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes) {
+            tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS);
+            const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
+            regionsHex = Array.from(regions)
+              .map((h) => h.toString(16))
+              .join(',');
+          }
           _syncLog(
-            `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+            `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} eq=0x${(tickMod._kn_eventqueue_hash?.() >>> 0).toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
           );
-          // Cache for RB-CHECK comparison (see periodic broadcast below for
-          // why — same race window applies on the post-rollback path).
-          if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-          window._rbLocalGameHashes[checkFrame] = gpHash;
-          for (const p of getActivePeers()) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-              } catch (_) {}
+          if (regionsHex) {
+            _syncLog(`C-REGIONS f=${checkFrame} ${regionsHex}`);
+            // Stash our own snapshot keyed by frame so the RB-CHECK mismatch
+            // handler can diff against the peer's regions for the SAME frame.
+            // Without this, comparing regions across slightly different frames
+            // would always show divergence (regions evolve every frame).
+            if (!window._rbLocalRegions) window._rbLocalRegions = {};
+            window._rbLocalRegions[checkFrame] = regionsHex;
+            // Trim old snapshots — keep only the last ~16 frames to bound memory
+            const keys = Object.keys(window._rbLocalRegions)
+              .map(Number)
+              .sort((a, b) => a - b);
+            if (keys.length > 16) {
+              for (const k of keys.slice(0, keys.length - 16)) {
+                delete window._rbLocalRegions[k];
+              }
+            }
+            // Broadcast regions for cross-player comparison
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
+                } catch (_) {}
+              }
+            }
+          }
+          // Broadcast gameplay hash for peer comparison.
+          // This is the authoritative desync detection hash — only game-relevant
+          // RDRAM addresses. game_state_hash kept for diagnostic monitoring.
+          //
+          // Cache the hash we sent so RB-CHECK can compare against it instead
+          // of re-hashing the ring buffer when the peer's reply arrives. Without
+          // this cache, a rollback that occurs between broadcast and receipt
+          // would invalidate the local state for that frame, producing a
+          // phantom MISMATCH (host hash post-rollback vs peer hash from before
+          // the rollback). The peer's hash IS the canonical "what did this frame
+          // look like at the moment of broadcast" — so the right comparison is
+          // "what we broadcast" vs "what they broadcast" at the same instant.
+          if (_isRbCheckGameplayPhase()) {
+            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
+            window._rbLocalGameHashes[checkFrame] = gpHash;
+            // Trim — keep only the most recent ~16 frames to bound memory.
+            const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
+              .map(Number)
+              .sort((a, b) => a - b);
+            if (_rbHashKeys.length > 16) {
+              for (const k of _rbHashKeys.slice(0, _rbHashKeys.length - 16)) {
+                delete window._rbLocalGameHashes[k];
+              }
+            }
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
+                } catch (_) {}
+              }
             }
           }
 
-          // Block-level snapshot + broadcast (duplicates the 300-frame
-          // periodic logic at a per-rollback cadence). Cache locally and
-          // broadcast so the peer can diff at this exact frame. Skips if
-          // the WASM exports or malloc aren't available (old core).
+          // Block-level diagnostic: hash every 64 KB of RDRAM (128 blocks) and
+          // dump the taint bitmap. Share with peer so that when RB-CHECK misses
+          // we can pinpoint which untainted block is diverging and map it back
+          // to the subsystem that owns that address.
           if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
             if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
             if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
@@ -12944,13 +13151,23 @@
               tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
               const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
               const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
+              // Snapshot — use Array.from so later mutation of HEAPU8 can't
+              // corrupt what we stored for comparison against the peer.
               const blocksSnap = Array.from(blocks);
               const taintSnap = Array.from(taint);
+              // Compact hex representation (8 chars per block → 1024 chars total)
               const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
               const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
-              _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
+              // Taint bitmap is 128 chars — tiny. Full block hashes are
+              // 1024 chars per line; we keep them out of the steady-state log
+              // and only dump via RB-BYTES on actual mismatch.
+              _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex}`);
+              // Cache our own snapshot keyed by hashFrame so RB-DIFF can
+              // compare frame-exactly against the peer's snapshot instead of
+              // re-sampling live RDRAM (which would be frames ahead by then).
               window._rbLocalBlocks[checkFrame] = blocksSnap;
               window._rbLocalTaint[checkFrame] = taintSnap;
+              // Broadcast block hashes to peer for per-block divergence diff
               for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
@@ -12960,628 +13177,595 @@
               }
             }
           }
-
-          // Per-region savestate digest (frame-specific variant so the
-          // regions match the post-rollback state of hashFrame, not the
-          // most recent ring slot). This is what lets the peer see which
-          // slice of the savestate — RDRAM r0..r31 vs post-RDRAM r32 —
-          // drifted at the rollback boundary.
-          const NUM_REGIONS_POSTRB = 256;
-          if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-            _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_POSTRB * 4);
-          }
-          if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
-            const ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-            if (ok > 0) {
-              const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-              const regionsHex = Array.from(regions)
-                .map((h) => h.toString(16))
-                .join(',');
-              if (!window._rbLocalRegions) window._rbLocalRegions = {};
-              window._rbLocalRegions[checkFrame] = regionsHex;
-              for (const p of getActivePeers()) {
-                if (p.dc?.readyState === 'open') {
-                  try {
-                    p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                  } catch (_) {}
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // ── Periodic logging with timing + per-region hash exchange ──
-      // Tighter interval during menus (30 frames) to catch CSS/stage-select
-      // divergence before it compounds. 300 frames during gameplay.
-      const _hashInterval = _inGameplay ? 300 : _isLocalDev ? 30 : 60;
-      if (_frameNum % _hashInterval === 0) {
-        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
-        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
-        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
-        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        const hashFrame = _frameNum - 1;
-        const checkFrame = hashFrame;
-        // Gameplay hash for RB-CHECK: hashes ONLY game-relevant RDRAM
-        // addresses (damage, stocks, timer, RNG seeds). Immune to audio/
-        // video/heap noise. game_state_hash + full_state_hash kept for
-        // diagnostic monitoring.
-        const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-        const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
-        const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
-        const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
-        const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
-        const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
-        // Per-region hashes — splits state buffer into 256 chunks
-        // (~34 KB regions for an ~8.6 MB savestate). At 32 regions the
-        // entire post-RDRAM section (CPU/cp0/cp1/event queue/fb) fit in
-        // one region, hiding which subsystem was diverging. 256 regions
-        // gives us ~7 regions covering the 256 KB post-RDRAM section, so
-        // a single mismatch pinpoints subsystem-level granularity.
-        const NUM_REGIONS = 256;
-        if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-          _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
-        }
-        let regionsHex = '';
-        if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes) {
-          tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS);
-          const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
-          regionsHex = Array.from(regions)
-            .map((h) => h.toString(16))
-            .join(',');
-        }
-        _syncLog(
-          `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} eq=0x${(tickMod._kn_eventqueue_hash?.() >>> 0).toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
-        );
-        if (regionsHex) {
-          _syncLog(`C-REGIONS f=${checkFrame} ${regionsHex}`);
-          // Stash our own snapshot keyed by frame so the RB-CHECK mismatch
-          // handler can diff against the peer's regions for the SAME frame.
-          // Without this, comparing regions across slightly different frames
-          // would always show divergence (regions evolve every frame).
-          if (!window._rbLocalRegions) window._rbLocalRegions = {};
-          window._rbLocalRegions[checkFrame] = regionsHex;
-          // Trim old snapshots — keep only the last ~16 frames to bound memory
-          const keys = Object.keys(window._rbLocalRegions)
-            .map(Number)
-            .sort((a, b) => a - b);
-          if (keys.length > 16) {
-            for (const k of keys.slice(0, keys.length - 16)) {
-              delete window._rbLocalRegions[k];
-            }
-          }
-          // Broadcast regions for cross-player comparison
-          for (const p of getActivePeers()) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-              } catch (_) {}
-            }
-          }
-        }
-        // Broadcast gameplay hash for peer comparison.
-        // This is the authoritative desync detection hash — only game-relevant
-        // RDRAM addresses. game_state_hash kept for diagnostic monitoring.
-        //
-        // Cache the hash we sent so RB-CHECK can compare against it instead
-        // of re-hashing the ring buffer when the peer's reply arrives. Without
-        // this cache, a rollback that occurs between broadcast and receipt
-        // would invalidate the local state for that frame, producing a
-        // phantom MISMATCH (host hash post-rollback vs peer hash from before
-        // the rollback). The peer's hash IS the canonical "what did this frame
-        // look like at the moment of broadcast" — so the right comparison is
-        // "what we broadcast" vs "what they broadcast" at the same instant.
-        if (_isRbCheckGameplayPhase()) {
-          if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-          window._rbLocalGameHashes[checkFrame] = gpHash;
-          // Trim — keep only the most recent ~16 frames to bound memory.
-          const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
-            .map(Number)
-            .sort((a, b) => a - b);
-          if (_rbHashKeys.length > 16) {
-            for (const k of _rbHashKeys.slice(0, _rbHashKeys.length - 16)) {
-              delete window._rbLocalGameHashes[k];
-            }
-          }
-          for (const p of getActivePeers()) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-              } catch (_) {}
-            }
-          }
         }
 
-        // Block-level diagnostic: hash every 64 KB of RDRAM (128 blocks) and
-        // dump the taint bitmap. Share with peer so that when RB-CHECK misses
-        // we can pinpoint which untainted block is diverging and map it back
-        // to the subsystem that owns that address.
-        if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
-          if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
-          if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
-          if (_rbHashBufPtr && _rbTaintBufPtr) {
-            tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-            tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-            const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-            const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-            // Snapshot — use Array.from so later mutation of HEAPU8 can't
-            // corrupt what we stored for comparison against the peer.
-            const blocksSnap = Array.from(blocks);
-            const taintSnap = Array.from(taint);
-            // Compact hex representation (8 chars per block → 1024 chars total)
-            const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
-            const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
-            // Taint bitmap is 128 chars — tiny. Full block hashes are
-            // 1024 chars per line; we keep them out of the steady-state log
-            // and only dump via RB-BYTES on actual mismatch.
-            _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex}`);
-            // Cache our own snapshot keyed by hashFrame so RB-DIFF can
-            // compare frame-exactly against the peer's snapshot instead of
-            // re-sampling live RDRAM (which would be frames ahead by then).
-            window._rbLocalBlocks[checkFrame] = blocksSnap;
-            window._rbLocalTaint[checkFrame] = taintSnap;
-            // Broadcast block hashes to peer for per-block divergence diff
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
-                } catch (_) {}
-              }
+        // Check pending peer hashes only after the frame has aged out of the
+        // local correction window. A peer may send rb-check immediately after
+        // its own rollback while we have not received/applied the matching late
+        // input yet; comparing at age 1-3 frames flags the old prediction, not
+        // the final corrected state. Once old enough, compare against the newest
+        // ring entry for that frame, since rollback endpoint saves can replace
+        // the earlier predicted hash.
+        if (window._rbPendingChecks) {
+          for (const fStr of Object.keys(window._rbPendingChecks)) {
+            const f = parseInt(fStr);
+            const checkAge = _frameNum - f;
+            // Match the stall threshold's depth budget so we wait long enough
+            // for rollback-driven hash corrections to finalize before treating
+            // a peer's rb-check as authoritative. True-rollback widens this
+            // window to delay+10 (cap 12); legacy stays at delay+4.
+            const _checkAgeBudget = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
+            const minCheckAge = Math.min(Math.max(_checkAgeBudget, 4), Math.max(_rbRollbackMax - 1, 4));
+            if (checkAge > _rbRollbackMax) {
+              delete window._rbPendingChecks[fStr];
+              delete window._rbPendingGameChecks?.[fStr];
+              _syncLog(`RB-CHECK f=${f} STALE (missed finalized window age=${checkAge})`);
+              continue;
             }
-          }
-        }
-      }
-
-      // Check pending peer hashes only after the frame has aged out of the
-      // local correction window. A peer may send rb-check immediately after
-      // its own rollback while we have not received/applied the matching late
-      // input yet; comparing at age 1-3 frames flags the old prediction, not
-      // the final corrected state. Once old enough, compare against the newest
-      // ring entry for that frame, since rollback endpoint saves can replace
-      // the earlier predicted hash.
-      if (window._rbPendingChecks) {
-        for (const fStr of Object.keys(window._rbPendingChecks)) {
-          const f = parseInt(fStr);
-          const checkAge = _frameNum - f;
-          // Match the stall threshold's depth budget so we wait long enough
-          // for rollback-driven hash corrections to finalize before treating
-          // a peer's rb-check as authoritative. True-rollback widens this
-          // window to delay+10 (cap 12); legacy stays at delay+4.
-          const _checkAgeBudget = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
-          const minCheckAge = Math.min(Math.max(_checkAgeBudget, 4), Math.max(_rbRollbackMax - 1, 4));
-          if (checkAge > _rbRollbackMax) {
-            delete window._rbPendingChecks[fStr];
-            delete window._rbPendingGameChecks?.[fStr];
-            _syncLog(`RB-CHECK f=${f} STALE (missed finalized window age=${checkAge})`);
-            continue;
-          }
-          if (checkAge >= minCheckAge) {
-            const peerHash = window._rbPendingChecks[fStr];
-            delete window._rbPendingChecks[fStr];
-            const localHash = tickMod._kn_gameplay_hash?.(f) ?? window._rbLocalGameHashes?.[f] ?? 0;
-            if (localHash === 0) {
-              _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
-            } else if (localHash === peerHash) {
-              // Gameplay hash matches — also check game_state_hash for
-              // broader divergence (player positions, animation, objects).
-              const peerGameHash = window._rbPendingGameChecks?.[fStr];
-              if (peerGameHash != null) {
-                delete window._rbPendingGameChecks[fStr];
-                const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
-                if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
-                  // Throttle STATE-DRIFT logging: first + every 300 frames on prod
-                  if (!window._stateDriftCount) window._stateDriftCount = 0;
-                  window._stateDriftCount++;
-                  const shouldLog = _isLocalDev || window._stateDriftCount <= 3 || window._stateDriftCount % 10 === 0;
-                  if (shouldLog) {
-                    _syncLog(
-                      `RB-STATE-DRIFT f=${f} gp=MATCH game=DIFFER peer=0x${peerGameHash.toString(16)} local=0x${localGameHash.toString(16)} — non-gameplay RDRAM diverged (#${window._stateDriftCount})`,
-                    );
-                  }
-                  // Fire GP-DUMP for context (first 3 + every 10th)
-                  if (shouldLog && _rdramBase) {
-                    const m = window.EJS_emulator?.gameManager?.Module;
-                    if (m?.HEAPU32) {
-                      const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
-                      const r8 = (off) => m.HEAPU8[_rdramBase + off];
-                      const vals = [
-                        `scr=${r32(0xa4ad0).toString(16)}`,
-                        `gs=${r32(0xa4d18).toString(16)}`,
-                        `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
-                        `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)}`,
-                        `rng=${r32(KN_RNG_SEED_RDRAM).toString(16)},${r32(KN_RNG_ALT_SEED_RDRAM).toString(16)}`,
-                      ];
-                      _syncLog(`GP-DRIFT f=${f} ${vals.join(' ')}`);
-                      // CSS player struct state for menu desync diagnosis
-                      const cssVals = [
-                        `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
-                        `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
-                        `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
-                        `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
-                        `fc=${r32(0x3cb30).toString(16)}`,
-                        `sfc=${r32(0x3b6e4).toString(16)}`,
-                      ];
-                      if (!window._knLastGpCssFrame || f - window._knLastGpCssFrame >= 60) {
-                        window._knLastGpCssFrame = f;
-                        _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
-                      }
-                    }
-                  }
-                  // Arm bisect mode on STATE-DRIFT so the byte-level
-                  // pipeline (REGION-DIFF, SUBHASH-DIFF, REGION-BYTES)
-                  // fires for the next 30 frames. Same pipeline as
-                  // gameplay_hash MISMATCH but triggered by game_state_hash.
-                  if (_knDeepDiagnostics && !_rbBisectActive && _rbBisectCount < RB_BISECT_MAX_PER_MATCH) {
-                    _rbBisectActive = true;
-                    _rbBisectFramesRemaining = 30;
-                    _rbBisectCount++;
-                    _syncLog(`RB-BISECT armed for ${_rbBisectFramesRemaining} frames after STATE-DRIFT at f=${f}`);
-                  }
-                } else {
-                  _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
-                }
-              } else {
-                _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
-              }
-              // Track last-known-good frame so post-mortem analysis can
-              // bound the divergence window without scanning the whole log.
-              if (f > _rbLastGoodFrame) _rbLastGoodFrame = f;
-              _rbBisectActive = false;
-              _rbBisectFramesRemaining = 0;
-            } else {
-              _syncLog(
-                `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame}`,
-              );
-              // Dump actual gameplay address values on first mismatch so we
-              // can see exactly which byte diverges. Read live RDRAM directly.
-              if (_rdramBase) {
-                const m = window.EJS_emulator?.gameManager?.Module;
-                if (m?.HEAPU32) {
-                  const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
-                  const r8 = (off) => m.HEAPU8[_rdramBase + off];
-                  const vals = [
-                    `scr=${r32(0xa4ad0).toString(16)}`,
-                    `gs=${r32(0xa4d18).toString(16)}`,
-                    `vs=${r32(0xa4d08).toString(16)},${r32(0xa4d0c).toString(16)},${r32(0xa4d10).toString(16)},${r32(0xa4d14).toString(16)},${r32(0xa4d18).toString(16)},${r32(0xa4d1c).toString(16)},${r32(0xa4d20).toString(16)}`,
-                    `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
-                    `chr=${r32(0x130d8c).toString(16)},${r32(0x1318dc).toString(16)},${r32(0x13242c).toString(16)},${r32(0x132f7c).toString(16)}`,
-                    `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)},${r32(0x132450).toString(16)},${r32(0x132fa0).toString(16)}`,
-                    `rng=${r32(KN_RNG_SEED_RDRAM).toString(16)},${r32(KN_RNG_ALT_SEED_RDRAM).toString(16)}`,
-                  ];
-                  _syncLog(`GP-DUMP f=${f} ${vals.join(' ')}`);
-                  // CSS player struct state (VS mode, 0x8013BA88 base, 0xBC stride)
-                  // char_id(+0x48) cursor_state(+0x54) selected(+0x58) held_token(+0x80)
-                  const cssVals = [
-                    `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
-                    `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
-                    `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
-                    `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
-                    `fc=${r32(0x3cb30).toString(16)}`,
-                    `sfc=${r32(0x3b6e4).toString(16)}`,
-                  ];
-                  _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
-                }
-              }
-              // Arm bisect mode: per-frame hash broadcasts for the next 30
-              // frames. The next divergence will be flagged at frame-exact
-              // precision instead of 300-frame coarse granularity.
-              //
-              // Match-level cap: a SUSTAINED divergence (e.g., cycle-clock
-              // drift in cp0/event queue) re-arms bisect on every detection,
-              // turning a single root cause into thousands of per-frame
-              // broadcasts that eat the frame budget. Cap at
-              // RB_BISECT_MAX_PER_MATCH cycles — the first few captures give
-              // us the data we need, later firings are wasted CPU. Field
-              // test in match 768 fired bisect 1203× from one root cause.
-              if (_knDeepDiagnostics && !_rbBisectActive && _rbBisectCount < RB_BISECT_MAX_PER_MATCH) {
-                _rbBisectActive = true;
-                _rbBisectFramesRemaining = 30;
-                _rbBisectCount++;
-                _syncLog(`RB-BISECT armed for ${_rbBisectFramesRemaining} frames after mismatch at f=${f}`);
-              }
-              // Intentionally LOG-ONLY in rollback mode. In-game resyncs feel
-              // worse than gradual divergence — they snap the player out of
-              // their muscle-memory loop. The point of rollback is invisible
-              // recovery via prediction + replay; if the underlying state
-              // determinism gap can't sustain that, the answer is to fix the
-              // determinism gap, not to paper over it with snaps. The
-              // RB-DIFF + RB-BYTES diagnostics below pinpoint WHERE state
-              // diverges so we can chase it at the C level.
-              // On mismatch, diff our cached block-hash snapshot (sampled at
-              // the same frame we sent it to the peer) against the peer's
-              // snapshot (sampled at their same frame). This is frame-exact
-              // — no temporal skew. If peer hasn't arrived yet, the diff
-              // will run when the message comes in (see rb-blocks handler).
-              if (_knDeepDiagnostics) {
-                const peerBlocksHex = window._rbPendingBlocks?.[fStr];
-                const localSnap = window._rbLocalBlocks?.[f];
-                const localTaint = window._rbLocalTaint?.[f];
-                if (peerBlocksHex && localSnap && localTaint) {
-                  const diffs = [];
-                  for (let b = 0; b < 128; b++) {
-                    const hexStart = b * 8;
-                    const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
-                    const peerVal = parseInt(peerHex, 16) >>> 0;
-                    const localVal = localSnap[b] >>> 0;
-                    if (peerVal !== localVal) {
-                      diffs.push(
-                        `blk${b}(0x${(b * 0x10000).toString(16)}${localTaint[b] ? ' TAINTED' : ''})=peer:${peerHex}/local:${localVal.toString(16).padStart(8, '0')}`,
+            if (checkAge >= minCheckAge) {
+              const peerHash = window._rbPendingChecks[fStr];
+              delete window._rbPendingChecks[fStr];
+              const localHash = tickMod._kn_gameplay_hash?.(f) ?? window._rbLocalGameHashes?.[f] ?? 0;
+              if (localHash === 0) {
+                _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
+              } else if (localHash === peerHash) {
+                // Gameplay hash matches — also check game_state_hash for
+                // broader divergence (player positions, animation, objects).
+                const peerGameHash = window._rbPendingGameChecks?.[fStr];
+                if (peerGameHash != null) {
+                  delete window._rbPendingGameChecks[fStr];
+                  const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
+                  if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
+                    // Throttle STATE-DRIFT logging: first + every 300 frames on prod
+                    if (!window._stateDriftCount) window._stateDriftCount = 0;
+                    window._stateDriftCount++;
+                    const shouldLog = _isLocalDev || window._stateDriftCount <= 3 || window._stateDriftCount % 10 === 0;
+                    if (shouldLog) {
+                      _syncLog(
+                        `RB-STATE-DRIFT f=${f} gp=MATCH game=DIFFER peer=0x${peerGameHash.toString(16)} local=0x${localGameHash.toString(16)} — non-gameplay RDRAM diverged (#${window._stateDriftCount})`,
                       );
                     }
-                  }
-                  if (diffs.length) {
-                    _syncLog(
-                      `RB-DIFF f=${f} ${diffs.length}/128 blocks differ: ${diffs.slice(0, 24).join(' ')}${diffs.length > 24 ? ` …+${diffs.length - 24}` : ''}`,
-                    );
-                    // Auto-dump first 256 bytes of each diverging UNTAINTED
-                    // block. Tainted blocks are expected to differ — we don't
-                    // need their bytes. Untainted divergence is the smoking
-                    // gun and we want byte-level evidence.
-                    if (tickMod._kn_get_rdram_ptr) {
-                      const rdramPtr = tickMod._kn_get_rdram_ptr();
-                      for (let b = 0; b < 128; b++) {
-                        if (localTaint[b]) continue;
-                        const hexStart = b * 8;
-                        const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
-                        const peerVal = parseInt(peerHex, 16) >>> 0;
-                        const localVal = localSnap[b] >>> 0;
-                        if (peerVal === localVal) continue;
-                        const off = rdramPtr + b * 0x10000;
-                        const slice = new Uint8Array(tickMod.HEAPU8.buffer, off, 256);
-                        const hex = Array.from(slice)
-                          .map((x) => x.toString(16).padStart(2, '0'))
-                          .join('');
-                        _syncLog(`RB-BYTES f=${f} blk${b}(0x${(b * 0x10000).toString(16)}): ${hex}`);
+                    // Fire GP-DUMP for context (first 3 + every 10th)
+                    if (shouldLog && _rdramBase) {
+                      const m = window.EJS_emulator?.gameManager?.Module;
+                      if (m?.HEAPU32) {
+                        const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
+                        const r8 = (off) => m.HEAPU8[_rdramBase + off];
+                        const vals = [
+                          `scr=${r32(0xa4ad0).toString(16)}`,
+                          `gs=${r32(0xa4d18).toString(16)}`,
+                          `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
+                          `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)}`,
+                          `rng=${r32(KN_RNG_SEED_RDRAM).toString(16)},${r32(KN_RNG_ALT_SEED_RDRAM).toString(16)}`,
+                        ];
+                        _syncLog(`GP-DRIFT f=${f} ${vals.join(' ')}`);
+                        // CSS player struct state for menu desync diagnosis
+                        const cssVals = [
+                          `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
+                          `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
+                          `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
+                          `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
+                          `fc=${r32(0x3cb30).toString(16)}`,
+                          `sfc=${r32(0x3b6e4).toString(16)}`,
+                        ];
+                        if (!window._knLastGpCssFrame || f - window._knLastGpCssFrame >= 60) {
+                          window._knLastGpCssFrame = f;
+                          _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
+                        }
                       }
                     }
+                    // Arm bisect mode on STATE-DRIFT so the byte-level
+                    // pipeline (REGION-DIFF, SUBHASH-DIFF, REGION-BYTES)
+                    // fires for the next 30 frames. Same pipeline as
+                    // gameplay_hash MISMATCH but triggered by game_state_hash.
+                    if (_knDeepDiagnostics && !_rbBisectActive && _rbBisectCount < RB_BISECT_MAX_PER_MATCH) {
+                      _rbBisectActive = true;
+                      _rbBisectFramesRemaining = 30;
+                      _rbBisectCount++;
+                      _syncLog(`RB-BISECT armed for ${_rbBisectFramesRemaining} frames after STATE-DRIFT at f=${f}`);
+                    }
                   } else {
-                    _syncLog(`RB-DIFF f=${f} NO block diffs (hash mismatch must be outside RDRAM)`);
+                    _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
                   }
-                } else if (!peerBlocksHex) {
-                  _syncLog(`RB-DIFF f=${f} (peer blocks not yet received)`);
-                } else if (!localSnap) {
-                  _syncLog(`RB-DIFF f=${f} (local snapshot missing — non-checkpoint mismatch)`);
+                } else {
+                  _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
                 }
-
-                // ── Region diff (covers WHOLE savestate, not just RDRAM) ──
-                // The block diff above only sees RDRAM divergence. The 87
-                // mismatches in the 2026-04-07 field test all reported "NO
-                // block diffs", meaning divergence was in the non-RDRAM
-                // portion of the savestate (CPU regs / cp0 / cp1 / TLB /
-                // event queue / fb tracker). This region diff localizes
-                // exactly which 1/32-of-state slice diverged so we can map
-                // the divergence to a subsystem and decide whether to taint
-                // or fix it at the C level.
-                const peerRegionsCsv = window._rbPendingRegions?.[fStr];
-                const localRegionsCsv = window._rbLocalRegions?.[f];
-                if (peerRegionsCsv && localRegionsCsv) {
-                  const peerRegions = peerRegionsCsv.split(',');
-                  const localRegions = localRegionsCsv.split(',');
-                  if (peerRegions.length === localRegions.length) {
-                    const NUM_REGIONS = peerRegions.length;
-                    // Map region index → subsystem name based on savestate layout.
-                    // mupen64plus savestate buffer is roughly:
-                    //   header + ROM info + DMA regs (~64 KB)  → region 0
-                    //   RDRAM (8 MB) → bulk of regions
-                    //   SP mem + PIF + TLB LUT + cp0 + cp1 + cp2 + event queue
-                    //   + fb tracker (~256 KB) → last 1-2 regions
-                    // We use the C-side rdram_offset_in_state to compute exact
-                    // boundaries. Falls back to "region N" if offsets unknown.
-                    const stateSize = tickMod._kn_get_state_buffer_size?.() ?? 0;
-                    const rdramOff = tickMod._kn_get_rdram_offset_in_state?.() ?? 0;
-                    const regionSize = stateSize > 0 ? Math.floor(stateSize / NUM_REGIONS) : 0;
-                    const regionLabel = (idx) => {
-                      if (regionSize === 0) return `r${idx}`;
-                      const start = idx * regionSize;
-                      const end = idx === NUM_REGIONS - 1 ? stateSize : (idx + 1) * regionSize;
-                      if (rdramOff > 0 && start < rdramOff) return `r${idx}:HEADER`;
-                      if (rdramOff > 0 && start >= rdramOff && end <= rdramOff + 0x800000) return `r${idx}:RDRAM`;
-                      if (rdramOff > 0 && start >= rdramOff + 0x800000) return `r${idx}:POST-RDRAM`;
-                      return `r${idx}`;
-                    };
+                // Track last-known-good frame so post-mortem analysis can
+                // bound the divergence window without scanning the whole log.
+                if (f > _rbLastGoodFrame) _rbLastGoodFrame = f;
+                _rbBisectActive = false;
+                _rbBisectFramesRemaining = 0;
+              } else {
+                _syncLog(
+                  `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame}`,
+                );
+                // Dump actual gameplay address values on first mismatch so we
+                // can see exactly which byte diverges. Read live RDRAM directly.
+                if (_rdramBase) {
+                  const m = window.EJS_emulator?.gameManager?.Module;
+                  if (m?.HEAPU32) {
+                    const r32 = (off) => m.HEAPU32[(_rdramBase + (off & ~3)) >> 2];
+                    const r8 = (off) => m.HEAPU8[_rdramBase + off];
+                    const vals = [
+                      `scr=${r32(0xa4ad0).toString(16)}`,
+                      `gs=${r32(0xa4d18).toString(16)}`,
+                      `vs=${r32(0xa4d08).toString(16)},${r32(0xa4d0c).toString(16)},${r32(0xa4d10).toString(16)},${r32(0xa4d14).toString(16)},${r32(0xa4d18).toString(16)},${r32(0xa4d1c).toString(16)},${r32(0xa4d20).toString(16)}`,
+                      `stk=${r8(0xa4d53)},${r8(0xa4dc7)},${r8(0xa4e3b)},${r8(0xa4eaf)}`,
+                      `chr=${r32(0x130d8c).toString(16)},${r32(0x1318dc).toString(16)},${r32(0x13242c).toString(16)},${r32(0x132f7c).toString(16)}`,
+                      `dmg=${r32(0x130db0).toString(16)},${r32(0x131900).toString(16)},${r32(0x132450).toString(16)},${r32(0x132fa0).toString(16)}`,
+                      `rng=${r32(KN_RNG_SEED_RDRAM).toString(16)},${r32(KN_RNG_ALT_SEED_RDRAM).toString(16)}`,
+                    ];
+                    _syncLog(`GP-DUMP f=${f} ${vals.join(' ')}`);
+                    // CSS player struct state (VS mode, 0x8013BA88 base, 0xBC stride)
+                    // char_id(+0x48) cursor_state(+0x54) selected(+0x58) held_token(+0x80)
+                    const cssVals = [
+                      `p1_css:cid=${r32(0x13bad0).toString(16)},cur=${r32(0x13badc).toString(16)},sel=${r32(0x13bae0).toString(16)},rec=${r32(0x13bae4).toString(16)},s7c=${r32(0x13bb04).toString(16)},tok=${r32(0x13bb08).toString(16)},pan=${r32(0x13bb0c).toString(16)},sf2=${r32(0x13bb10).toString(16)}`,
+                      `p2_css:cid=${r32(0x13bb8c).toString(16)},cur=${r32(0x13bb98).toString(16)},sel=${r32(0x13bb9c).toString(16)},rec=${r32(0x13bba0).toString(16)},s7c=${r32(0x13bbc0).toString(16)},tok=${r32(0x13bbc4).toString(16)},pan=${r32(0x13bbc8).toString(16)},sf2=${r32(0x13bbcc).toString(16)}`,
+                      `p3_css:cid=${r32(0x13bc48).toString(16)},cur=${r32(0x13bc54).toString(16)},sel=${r32(0x13bc58).toString(16)},rec=${r32(0x13bc5c).toString(16)},s7c=${r32(0x13bc7c).toString(16)},tok=${r32(0x13bc80).toString(16)},pan=${r32(0x13bc84).toString(16)},sf2=${r32(0x13bc88).toString(16)}`,
+                      `p4_css:cid=${r32(0x13bd04).toString(16)},cur=${r32(0x13bd10).toString(16)},sel=${r32(0x13bd14).toString(16)},rec=${r32(0x13bd18).toString(16)},s7c=${r32(0x13bd38).toString(16)},tok=${r32(0x13bd3c).toString(16)},pan=${r32(0x13bd40).toString(16)},sf2=${r32(0x13bd44).toString(16)}`,
+                      `fc=${r32(0x3cb30).toString(16)}`,
+                      `sfc=${r32(0x3b6e4).toString(16)}`,
+                    ];
+                    _syncLog(`GP-CSS f=${f} ${cssVals.join(' ')}`);
+                  }
+                }
+                // Arm bisect mode: per-frame hash broadcasts for the next 30
+                // frames. The next divergence will be flagged at frame-exact
+                // precision instead of 300-frame coarse granularity.
+                //
+                // Match-level cap: a SUSTAINED divergence (e.g., cycle-clock
+                // drift in cp0/event queue) re-arms bisect on every detection,
+                // turning a single root cause into thousands of per-frame
+                // broadcasts that eat the frame budget. Cap at
+                // RB_BISECT_MAX_PER_MATCH cycles — the first few captures give
+                // us the data we need, later firings are wasted CPU. Field
+                // test in match 768 fired bisect 1203× from one root cause.
+                if (_knDeepDiagnostics && !_rbBisectActive && _rbBisectCount < RB_BISECT_MAX_PER_MATCH) {
+                  _rbBisectActive = true;
+                  _rbBisectFramesRemaining = 30;
+                  _rbBisectCount++;
+                  _syncLog(`RB-BISECT armed for ${_rbBisectFramesRemaining} frames after mismatch at f=${f}`);
+                }
+                // Intentionally LOG-ONLY in rollback mode. In-game resyncs feel
+                // worse than gradual divergence — they snap the player out of
+                // their muscle-memory loop. The point of rollback is invisible
+                // recovery via prediction + replay; if the underlying state
+                // determinism gap can't sustain that, the answer is to fix the
+                // determinism gap, not to paper over it with snaps. The
+                // RB-DIFF + RB-BYTES diagnostics below pinpoint WHERE state
+                // diverges so we can chase it at the C level.
+                // On mismatch, diff our cached block-hash snapshot (sampled at
+                // the same frame we sent it to the peer) against the peer's
+                // snapshot (sampled at their same frame). This is frame-exact
+                // — no temporal skew. If peer hasn't arrived yet, the diff
+                // will run when the message comes in (see rb-blocks handler).
+                if (_knDeepDiagnostics) {
+                  const peerBlocksHex = window._rbPendingBlocks?.[fStr];
+                  const localSnap = window._rbLocalBlocks?.[f];
+                  const localTaint = window._rbLocalTaint?.[f];
+                  if (peerBlocksHex && localSnap && localTaint) {
                     const diffs = [];
-                    const diffIdxs = [];
-                    for (let i = 0; i < NUM_REGIONS; i++) {
-                      if (peerRegions[i] !== localRegions[i]) {
-                        diffs.push(`${regionLabel(i)}:peer=${peerRegions[i]}/local=${localRegions[i]}`);
-                        diffIdxs.push(i);
+                    for (let b = 0; b < 128; b++) {
+                      const hexStart = b * 8;
+                      const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
+                      const peerVal = parseInt(peerHex, 16) >>> 0;
+                      const localVal = localSnap[b] >>> 0;
+                      if (peerVal !== localVal) {
+                        diffs.push(
+                          `blk${b}(0x${(b * 0x10000).toString(16)}${localTaint[b] ? ' TAINTED' : ''})=peer:${peerHex}/local:${localVal.toString(16).padStart(8, '0')}`,
+                        );
                       }
                     }
                     if (diffs.length) {
                       _syncLog(
-                        `RB-REGION-DIFF f=${f} ${diffs.length}/${NUM_REGIONS} regions differ rdramOff=0x${rdramOff.toString(16)} stateSize=${stateSize} regionSize=${regionSize}: ${diffs.slice(0, 16).join(' ')}${diffs.length > 16 ? ` …+${diffs.length - 16}` : ''}`,
+                        `RB-DIFF f=${f} ${diffs.length}/128 blocks differ: ${diffs.slice(0, 24).join(' ')}${diffs.length > 24 ? ` …+${diffs.length - 24}` : ''}`,
                       );
-
-                      // ── Byte dump for diverging regions ──
-                      // Read raw bytes from the local savestate buffer for the
-                      // first 8 diverging regions and log them as hex. The peer
-                      // does the same on its side; we correlate via match_id
-                      // when post-mortem-analyzing the session logs. This is
-                      // the smoking gun: it tells us EXACTLY which bytes differ
-                      // and lets us trace them back to a struct field in the
-                      // mupen64plus savestate format.
-                      if (tickMod._kn_get_state_for_frame) {
-                        const statePtr = tickMod._kn_get_state_for_frame(f);
-                        if (statePtr) {
-                          // Sub-region bisect: each region is ~64 KB. Dumping
-                          // only the first 256 bytes left the actual diverging
-                          // bytes invisible — the 757/756 field test had the
-                          // first-256 bytes byte-identical between peers but
-                          // the region hashes still differed, meaning the
-                          // diverging bytes were elsewhere in the chunk.
-                          //
-                          // Strategy: subdivide the diverging region into
-                          // 256-byte sub-chunks, hash each with FNV-1a, send
-                          // the sub-chunk hashes to the peer, and dump bytes
-                          // for the sub-chunks that differ. We piggyback on
-                          // rb-subhash:<frame>:<ri>:<csv> for the sub-hashes,
-                          // matching peers via the existing _rbPending* maps.
-                          //
-                          // For now (single-pass without peer correlation),
-                          // dump bytes at MULTIPLE offsets within the region:
-                          // the start, plus 7 spread offsets, so we get a
-                          // 256B × 8 = 2 KB sample of the 64 KB region. Most
-                          // divergences should land in one of those samples.
-                          const dumpCount = Math.min(8, diffIdxs.length);
-                          const SUB_DUMPS_PER_REGION = 8;
-                          for (let di = 0; di < dumpCount; di++) {
-                            const ri = diffIdxs[di];
-                            const regionStart = ri * regionSize;
-                            // Sub-chunk hash array — lets the analyzer narrow
-                            // divergence to a 256-byte window inside the region
-                            // post-mortem (peer dumps are correlated by
-                            // matchId + frame + region index).
-                            try {
-                              const subSize = 256;
-                              const subCount = Math.floor(regionSize / subSize);
-                              const subHashes = new Array(subCount);
-                              const fullSlice = new Uint8Array(
-                                tickMod.HEAPU8.buffer,
-                                statePtr + regionStart,
-                                regionSize,
-                              );
-                              for (let si = 0; si < subCount; si++) {
-                                let hash = 2166136261;
-                                const base = si * subSize;
-                                for (let bi = 0; bi < subSize; bi++) {
-                                  hash = Math.imul(hash ^ fullSlice[base + bi], 16777619) >>> 0;
-                                }
-                                subHashes[si] = hash;
-                              }
-                              // Stash + broadcast sub-hashes
-                              if (!window._rbLocalSubHashes) window._rbLocalSubHashes = {};
-                              const key = `${f}:${ri}`;
-                              window._rbLocalSubHashes[key] = subHashes;
-                              const subCsv = subHashes.map((h) => h.toString(16)).join(',');
-                              for (const p of getActivePeers()) {
-                                if (p.dc?.readyState === 'open') {
-                                  try {
-                                    p.dc.send(`rb-subhash:${f}:${ri}:${subCsv}`);
-                                  } catch (_) {}
-                                }
-                              }
-                              // Compare against peer sub-hashes if we have them
-                              // — usually we don't yet on first detection, but
-                              // the peer's response will correlate post-mortem.
-                              const peerSubCsv = window._rbPendingSubHashes?.[key];
-                              const divergingSubs = [];
-                              if (peerSubCsv) {
-                                const peerSubHashes = peerSubCsv.split(',');
-                                for (let si = 0; si < Math.min(subCount, peerSubHashes.length); si++) {
-                                  const peerVal = parseInt(peerSubHashes[si], 16) >>> 0;
-                                  if (peerVal !== subHashes[si] >>> 0) divergingSubs.push(si);
-                                }
-                              }
-                              // Decide which sub-chunks to dump:
-                              //  - If we have peer sub-hashes and find divergences,
-                              //    dump JUST those (precise targeting)
-                              //  - Otherwise dump SUB_DUMPS_PER_REGION samples
-                              //    spread across the region (broad coverage)
-                              const dumpIdxs = divergingSubs.length
-                                ? divergingSubs.slice(0, 3)
-                                : Array.from({ length: Math.min(SUB_DUMPS_PER_REGION, 3) }, (_, k) =>
-                                    Math.floor((k * subCount) / SUB_DUMPS_PER_REGION),
-                                  );
-                              for (const si of dumpIdxs) {
-                                const subOff = si * subSize;
-                                const slice = new Uint8Array(
-                                  tickMod.HEAPU8.buffer,
-                                  statePtr + regionStart + subOff,
-                                  subSize,
-                                );
-                                const hex = Array.from(slice)
-                                  .map((x) => x.toString(16).padStart(2, '0'))
-                                  .join('');
-                                _syncLog(
-                                  `RB-REGION-BYTES f=${f} ${regionLabel(ri)} sub=${si}/${subCount} off=0x${(regionStart + subOff).toString(16)} len=${subSize}: ${hex}`,
-                                );
-                              }
-                              if (divergingSubs.length) {
-                                _syncLog(
-                                  `RB-SUBHASH-DIFF f=${f} r${ri} ${divergingSubs.length}/${subCount} sub-chunks differ: ${divergingSubs.slice(0, 16).join(',')}${divergingSubs.length > 16 ? `…+${divergingSubs.length - 16}` : ''}`,
-                                );
-                              }
-                            } catch (err) {
-                              _syncLog(`RB-REGION-BYTES f=${f} r${ri} read failed: ${err}`);
-                            }
-                          }
+                      // Auto-dump first 256 bytes of each diverging UNTAINTED
+                      // block. Tainted blocks are expected to differ — we don't
+                      // need their bytes. Untainted divergence is the smoking
+                      // gun and we want byte-level evidence.
+                      if (tickMod._kn_get_rdram_ptr) {
+                        const rdramPtr = tickMod._kn_get_rdram_ptr();
+                        for (let b = 0; b < 128; b++) {
+                          if (localTaint[b]) continue;
+                          const hexStart = b * 8;
+                          const peerHex = peerBlocksHex.slice(hexStart, hexStart + 8);
+                          const peerVal = parseInt(peerHex, 16) >>> 0;
+                          const localVal = localSnap[b] >>> 0;
+                          if (peerVal === localVal) continue;
+                          const off = rdramPtr + b * 0x10000;
+                          const slice = new Uint8Array(tickMod.HEAPU8.buffer, off, 256);
+                          const hex = Array.from(slice)
+                            .map((x) => x.toString(16).padStart(2, '0'))
+                            .join('');
+                          _syncLog(`RB-BYTES f=${f} blk${b}(0x${(b * 0x10000).toString(16)}): ${hex}`);
                         }
                       }
                     } else {
-                      _syncLog(`RB-REGION-DIFF f=${f} NO region diffs (hash sampling artefact?)`);
+                      _syncLog(`RB-DIFF f=${f} NO block diffs (hash mismatch must be outside RDRAM)`);
                     }
-                  } else {
-                    _syncLog(
-                      `RB-REGION-DIFF f=${f} region count mismatch peer=${peerRegions.length} local=${localRegions.length}`,
-                    );
+                  } else if (!peerBlocksHex) {
+                    _syncLog(`RB-DIFF f=${f} (peer blocks not yet received)`);
+                  } else if (!localSnap) {
+                    _syncLog(`RB-DIFF f=${f} (local snapshot missing — non-checkpoint mismatch)`);
                   }
-                } else if (!peerRegionsCsv) {
-                  _syncLog(`RB-REGION-DIFF f=${f} (peer regions not yet received)`);
-                } else if (!localRegionsCsv) {
-                  _syncLog(`RB-REGION-DIFF f=${f} (local regions snapshot missing)`);
+
+                  // ── Region diff (covers WHOLE savestate, not just RDRAM) ──
+                  // The block diff above only sees RDRAM divergence. The 87
+                  // mismatches in the 2026-04-07 field test all reported "NO
+                  // block diffs", meaning divergence was in the non-RDRAM
+                  // portion of the savestate (CPU regs / cp0 / cp1 / TLB /
+                  // event queue / fb tracker). This region diff localizes
+                  // exactly which 1/32-of-state slice diverged so we can map
+                  // the divergence to a subsystem and decide whether to taint
+                  // or fix it at the C level.
+                  const peerRegionsCsv = window._rbPendingRegions?.[fStr];
+                  const localRegionsCsv = window._rbLocalRegions?.[f];
+                  if (peerRegionsCsv && localRegionsCsv) {
+                    const peerRegions = peerRegionsCsv.split(',');
+                    const localRegions = localRegionsCsv.split(',');
+                    if (peerRegions.length === localRegions.length) {
+                      const NUM_REGIONS = peerRegions.length;
+                      // Map region index → subsystem name based on savestate layout.
+                      // mupen64plus savestate buffer is roughly:
+                      //   header + ROM info + DMA regs (~64 KB)  → region 0
+                      //   RDRAM (8 MB) → bulk of regions
+                      //   SP mem + PIF + TLB LUT + cp0 + cp1 + cp2 + event queue
+                      //   + fb tracker (~256 KB) → last 1-2 regions
+                      // We use the C-side rdram_offset_in_state to compute exact
+                      // boundaries. Falls back to "region N" if offsets unknown.
+                      const stateSize = tickMod._kn_get_state_buffer_size?.() ?? 0;
+                      const rdramOff = tickMod._kn_get_rdram_offset_in_state?.() ?? 0;
+                      const regionSize = stateSize > 0 ? Math.floor(stateSize / NUM_REGIONS) : 0;
+                      const regionLabel = (idx) => {
+                        if (regionSize === 0) return `r${idx}`;
+                        const start = idx * regionSize;
+                        const end = idx === NUM_REGIONS - 1 ? stateSize : (idx + 1) * regionSize;
+                        if (rdramOff > 0 && start < rdramOff) return `r${idx}:HEADER`;
+                        if (rdramOff > 0 && start >= rdramOff && end <= rdramOff + 0x800000) return `r${idx}:RDRAM`;
+                        if (rdramOff > 0 && start >= rdramOff + 0x800000) return `r${idx}:POST-RDRAM`;
+                        return `r${idx}`;
+                      };
+                      const diffs = [];
+                      const diffIdxs = [];
+                      for (let i = 0; i < NUM_REGIONS; i++) {
+                        if (peerRegions[i] !== localRegions[i]) {
+                          diffs.push(`${regionLabel(i)}:peer=${peerRegions[i]}/local=${localRegions[i]}`);
+                          diffIdxs.push(i);
+                        }
+                      }
+                      if (diffs.length) {
+                        _syncLog(
+                          `RB-REGION-DIFF f=${f} ${diffs.length}/${NUM_REGIONS} regions differ rdramOff=0x${rdramOff.toString(16)} stateSize=${stateSize} regionSize=${regionSize}: ${diffs.slice(0, 16).join(' ')}${diffs.length > 16 ? ` …+${diffs.length - 16}` : ''}`,
+                        );
+
+                        // ── Byte dump for diverging regions ──
+                        // Read raw bytes from the local savestate buffer for the
+                        // first 8 diverging regions and log them as hex. The peer
+                        // does the same on its side; we correlate via match_id
+                        // when post-mortem-analyzing the session logs. This is
+                        // the smoking gun: it tells us EXACTLY which bytes differ
+                        // and lets us trace them back to a struct field in the
+                        // mupen64plus savestate format.
+                        if (tickMod._kn_get_state_for_frame) {
+                          const statePtr = tickMod._kn_get_state_for_frame(f);
+                          if (statePtr) {
+                            // Sub-region bisect: each region is ~64 KB. Dumping
+                            // only the first 256 bytes left the actual diverging
+                            // bytes invisible — the 757/756 field test had the
+                            // first-256 bytes byte-identical between peers but
+                            // the region hashes still differed, meaning the
+                            // diverging bytes were elsewhere in the chunk.
+                            //
+                            // Strategy: subdivide the diverging region into
+                            // 256-byte sub-chunks, hash each with FNV-1a, send
+                            // the sub-chunk hashes to the peer, and dump bytes
+                            // for the sub-chunks that differ. We piggyback on
+                            // rb-subhash:<frame>:<ri>:<csv> for the sub-hashes,
+                            // matching peers via the existing _rbPending* maps.
+                            //
+                            // For now (single-pass without peer correlation),
+                            // dump bytes at MULTIPLE offsets within the region:
+                            // the start, plus 7 spread offsets, so we get a
+                            // 256B × 8 = 2 KB sample of the 64 KB region. Most
+                            // divergences should land in one of those samples.
+                            const dumpCount = Math.min(8, diffIdxs.length);
+                            const SUB_DUMPS_PER_REGION = 8;
+                            for (let di = 0; di < dumpCount; di++) {
+                              const ri = diffIdxs[di];
+                              const regionStart = ri * regionSize;
+                              // Sub-chunk hash array — lets the analyzer narrow
+                              // divergence to a 256-byte window inside the region
+                              // post-mortem (peer dumps are correlated by
+                              // matchId + frame + region index).
+                              try {
+                                const subSize = 256;
+                                const subCount = Math.floor(regionSize / subSize);
+                                const subHashes = new Array(subCount);
+                                const fullSlice = new Uint8Array(
+                                  tickMod.HEAPU8.buffer,
+                                  statePtr + regionStart,
+                                  regionSize,
+                                );
+                                for (let si = 0; si < subCount; si++) {
+                                  let hash = 2166136261;
+                                  const base = si * subSize;
+                                  for (let bi = 0; bi < subSize; bi++) {
+                                    hash = Math.imul(hash ^ fullSlice[base + bi], 16777619) >>> 0;
+                                  }
+                                  subHashes[si] = hash;
+                                }
+                                // Stash + broadcast sub-hashes
+                                if (!window._rbLocalSubHashes) window._rbLocalSubHashes = {};
+                                const key = `${f}:${ri}`;
+                                window._rbLocalSubHashes[key] = subHashes;
+                                const subCsv = subHashes.map((h) => h.toString(16)).join(',');
+                                for (const p of getActivePeers()) {
+                                  if (p.dc?.readyState === 'open') {
+                                    try {
+                                      p.dc.send(`rb-subhash:${f}:${ri}:${subCsv}`);
+                                    } catch (_) {}
+                                  }
+                                }
+                                // Compare against peer sub-hashes if we have them
+                                // — usually we don't yet on first detection, but
+                                // the peer's response will correlate post-mortem.
+                                const peerSubCsv = window._rbPendingSubHashes?.[key];
+                                const divergingSubs = [];
+                                if (peerSubCsv) {
+                                  const peerSubHashes = peerSubCsv.split(',');
+                                  for (let si = 0; si < Math.min(subCount, peerSubHashes.length); si++) {
+                                    const peerVal = parseInt(peerSubHashes[si], 16) >>> 0;
+                                    if (peerVal !== subHashes[si] >>> 0) divergingSubs.push(si);
+                                  }
+                                }
+                                // Decide which sub-chunks to dump:
+                                //  - If we have peer sub-hashes and find divergences,
+                                //    dump JUST those (precise targeting)
+                                //  - Otherwise dump SUB_DUMPS_PER_REGION samples
+                                //    spread across the region (broad coverage)
+                                const dumpIdxs = divergingSubs.length
+                                  ? divergingSubs.slice(0, 3)
+                                  : Array.from({ length: Math.min(SUB_DUMPS_PER_REGION, 3) }, (_, k) =>
+                                      Math.floor((k * subCount) / SUB_DUMPS_PER_REGION),
+                                    );
+                                for (const si of dumpIdxs) {
+                                  const subOff = si * subSize;
+                                  const slice = new Uint8Array(
+                                    tickMod.HEAPU8.buffer,
+                                    statePtr + regionStart + subOff,
+                                    subSize,
+                                  );
+                                  const hex = Array.from(slice)
+                                    .map((x) => x.toString(16).padStart(2, '0'))
+                                    .join('');
+                                  _syncLog(
+                                    `RB-REGION-BYTES f=${f} ${regionLabel(ri)} sub=${si}/${subCount} off=0x${(regionStart + subOff).toString(16)} len=${subSize}: ${hex}`,
+                                  );
+                                }
+                                if (divergingSubs.length) {
+                                  _syncLog(
+                                    `RB-SUBHASH-DIFF f=${f} r${ri} ${divergingSubs.length}/${subCount} sub-chunks differ: ${divergingSubs.slice(0, 16).join(',')}${divergingSubs.length > 16 ? `…+${divergingSubs.length - 16}` : ''}`,
+                                  );
+                                }
+                              } catch (err) {
+                                _syncLog(`RB-REGION-BYTES f=${f} r${ri} read failed: ${err}`);
+                              }
+                            }
+                          }
+                        }
+                      } else {
+                        _syncLog(`RB-REGION-DIFF f=${f} NO region diffs (hash sampling artefact?)`);
+                      }
+                    } else {
+                      _syncLog(
+                        `RB-REGION-DIFF f=${f} region count mismatch peer=${peerRegions.length} local=${localRegions.length}`,
+                      );
+                    }
+                  } else if (!peerRegionsCsv) {
+                    _syncLog(`RB-REGION-DIFF f=${f} (peer regions not yet received)`);
+                  } else if (!localRegionsCsv) {
+                    _syncLog(`RB-REGION-DIFF f=${f} (local regions snapshot missing)`);
+                  }
                 }
               }
-            }
-            if (window._rbPendingBlocks) delete window._rbPendingBlocks[fStr];
-            if (window._rbPendingRegions) delete window._rbPendingRegions[fStr];
-          }
-        }
-      }
-      // Clean up old pending checks (older than 60 frames)
-      if (window._rbPendingChecks && _frameNum % 300 === 0) {
-        for (const f of Object.keys(window._rbPendingChecks)) {
-          if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
-        }
-        if (window._rbPendingBlocks) {
-          for (const f of Object.keys(window._rbPendingBlocks)) {
-            if (parseInt(f) < _frameNum - 60) delete window._rbPendingBlocks[f];
-          }
-        }
-        if (window._rbPendingRegions) {
-          for (const f of Object.keys(window._rbPendingRegions)) {
-            if (parseInt(f) < _frameNum - 60) delete window._rbPendingRegions[f];
-          }
-        }
-        if (window._rbLocalBlocks) {
-          for (const f of Object.keys(window._rbLocalBlocks)) {
-            if (parseInt(f) < _frameNum - 60) {
-              delete window._rbLocalBlocks[f];
-              delete window._rbLocalTaint[f];
+              if (window._rbPendingBlocks) delete window._rbPendingBlocks[fStr];
+              if (window._rbPendingRegions) delete window._rbPendingRegions[fStr];
             }
           }
         }
-        if (window._rbLocalRegions) {
-          for (const f of Object.keys(window._rbLocalRegions)) {
-            if (parseInt(f) < _frameNum - 60) delete window._rbLocalRegions[f];
+        // Clean up old pending checks (older than 60 frames)
+        if (window._rbPendingChecks && _frameNum % 300 === 0) {
+          for (const f of Object.keys(window._rbPendingChecks)) {
+            if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
+          }
+          if (window._rbPendingBlocks) {
+            for (const f of Object.keys(window._rbPendingBlocks)) {
+              if (parseInt(f) < _frameNum - 60) delete window._rbPendingBlocks[f];
+            }
+          }
+          if (window._rbPendingRegions) {
+            for (const f of Object.keys(window._rbPendingRegions)) {
+              if (parseInt(f) < _frameNum - 60) delete window._rbPendingRegions[f];
+            }
+          }
+          if (window._rbLocalBlocks) {
+            for (const f of Object.keys(window._rbLocalBlocks)) {
+              if (parseInt(f) < _frameNum - 60) {
+                delete window._rbLocalBlocks[f];
+                delete window._rbLocalTaint[f];
+              }
+            }
+          }
+          if (window._rbLocalRegions) {
+            for (const f of Object.keys(window._rbLocalRegions)) {
+              if (parseInt(f) < _frameNum - 60) delete window._rbLocalRegions[f];
+            }
           }
         }
-      }
 
-      if (_frameNum % 60 === 0 && !(_frameNum % 300 === 0)) {
-        const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
-        const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
-        const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
-        const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-        _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
-      }
-
-      // Debug overlay
-      if (_frameNum % 15 === 0) {
-        const dbg = document.getElementById('np-debug');
-        if (dbg) {
-          dbg.style.display = '';
-          const rb = tickMod._kn_get_rollback_count?.() ?? 0;
-          const pred = tickMod._kn_get_prediction_count?.() ?? 0;
-          const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
+        if (_frameNum % 60 === 0 && !(_frameNum % 300 === 0)) {
+          const rbCount = tickMod._kn_get_rollback_count?.() ?? 0;
+          const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
+          const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
           const maxD = tickMod._kn_get_max_depth?.() ?? 0;
-          dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
+          _syncLog(`C-STATE f=${_frameNum} rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD}`);
         }
+
+        // Debug overlay
+        if (_frameNum % 15 === 0) {
+          const dbg = document.getElementById('np-debug');
+          if (dbg) {
+            dbg.style.display = '';
+            const rb = tickMod._kn_get_rollback_count?.() ?? 0;
+            const pred = tickMod._kn_get_prediction_count?.() ?? 0;
+            const correct = tickMod._kn_get_correct_predictions?.() ?? 0;
+            const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+            dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
+          }
+        }
+        if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+          _diag.captureAndSendScreenshot();
+        }
+        _markTickReturn('end:c-rollback');
+        return;
+      } catch (eCR) {
+        _markTickReturn('unmarked:c-rollback-throw');
+        const cp = _tickLastCheckpoint;
+        // Track consecutive throws at the same frame. If recovery (clear
+        // replay state + memory growth refresh + rdram_base refresh) fails
+        // to unblock the engine, the trap is happening on a forward-save
+        // path too and recovery can't save it. Fall back to legacy lockstep
+        // for the rest of the match — already-fired rollbacks (the demo's
+        // success criterion) are preserved; the demo just stops trying to
+        // run new C rollbacks. This is a SAFETY VALVE for unrecoverable
+        // WASM traps, NOT a routine path: legitimate rollback bugs are
+        // caught by RB-CHECK / RB-INVARIANT-VIOLATION mechanisms upstream
+        // before throwing.
+        if (!window.__knCRollbackThrowFrame || window.__knCRollbackThrowFrame !== _frameNum) {
+          window.__knCRollbackThrowFrame = _frameNum;
+          window.__knCRollbackThrowFrameCount = 1;
+        } else {
+          window.__knCRollbackThrowFrameCount = (window.__knCRollbackThrowFrameCount || 0) + 1;
+        }
+        const consecutiveThrows = window.__knCRollbackThrowFrameCount;
+        // Stash for offline inspection — playwright filter truncates
+        // stacks to 240 chars.
+        try {
+          if (!window.__knCRollbackThrowSamples) window.__knCRollbackThrowSamples = [];
+          if (window.__knCRollbackThrowSamples.length < 5) {
+            const m = window.EJS_emulator?.gameManager?.Module;
+            let cDebugTail = '';
+            try {
+              if (m?._kn_get_debug_log) {
+                const ptr = m._kn_get_debug_log();
+                const full = ptr ? (m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr)) : '';
+                if (typeof full === 'string') cDebugTail = full.slice(-2400);
+              }
+            } catch (_) {}
+            window.__knCRollbackThrowSamples.push({
+              t: performance.now(),
+              cp,
+              f: _frameNum,
+              msg: eCR?.message || String(eCR),
+              stack: (eCR?.stack || '').slice(0, 4000),
+              frameAdv: _frameAdvRaw,
+              replayDepth: m?._kn_get_replay_depth?.() ?? -1,
+              pendingRb: m?._kn_peek_pending_rollback?.() ?? -1,
+              rbFrame: m?._kn_get_frame?.() ?? -1,
+              rollbackCount: m?._kn_get_rollback_count?.() ?? -1,
+              failedRollbacks: m?._kn_get_failed_rollbacks?.() ?? -1,
+              cDebugTail,
+            });
+          }
+        } catch (_) {}
+        // Recovery: a WASM trap inside kn_pre_tick leaves the C engine with
+        // replay state half-set. Without recovery, every subsequent tick
+        // re-enters the same throwing path → permanent freeze.
+        //
+        // Empirically observed (Mode 2 demo, frame ~1409 second rollback after
+        // worker coproc apply): rb_save_slot/rb_restore_slot_state OOBs the
+        // 8 MB memcpy or the kn_sync_write_cpu's TLB memset. The cause looks
+        // like a stale rb.rdram_base — Emscripten heap moved (memory growth
+        // detached the old buffer) but the C-side pointer wasn't refreshed.
+        // _refreshRunnerAfterRollbackRestore fires on did_restore=1 and
+        // already calls _emscripten_notify_memory_growth, but did_restore is
+        // CONSUMED by the call so the flag is gone by the time the second
+        // rollback fires.
+        //
+        // Recovery sequence:
+        //   1. Clear replay state (drops the rollback we couldn't apply)
+        //   2. Notify memory growth to refresh JS-side HEAPU8 views
+        //   3. Refresh C-side rb.rdram_base via _kn_set_rdram_preserve with
+        //      a fresh _kn_get_rdram_ptr. This is idempotent and replaces
+        //      the saved_rdram buffer too.
+        //   4. Resync JS _frameNum with rb.frame
+        // The dropped rollback shows up in P2 hash checks — same outcome
+        // shape as FAILED-ROLLBACK.
+        const tickModRecovery = window.EJS_emulator?.gameManager?.Module;
+        try {
+          if (tickModRecovery?._kn_clear_replay_state) {
+            tickModRecovery._kn_clear_replay_state();
+          }
+          if (tickModRecovery?._emscripten_notify_memory_growth) {
+            tickModRecovery._emscripten_notify_memory_growth(0);
+          }
+          if (tickModRecovery?.updateMemoryViews) {
+            tickModRecovery.updateMemoryViews();
+          }
+          if (tickModRecovery?._kn_set_rdram_preserve && tickModRecovery?._kn_get_rdram_ptr) {
+            const freshPtr = tickModRecovery._kn_get_rdram_ptr();
+            if (freshPtr) tickModRecovery._kn_set_rdram_preserve(freshPtr);
+          }
+          if (tickModRecovery?._kn_get_frame) {
+            _frameNum = tickModRecovery._kn_get_frame();
+            KNState.frameNum = _frameNum;
+          }
+        } catch (_) {}
+        try {
+          // The visual freeze overlay was probably never shown for this
+          // throw (we crashed before reaching catchingUp===2 dispatch), but
+          // hide it just in case to avoid a dangling overlay if a previous
+          // rollback's freeze was still up.
+          _hideRollbackVisualFreeze?.();
+        } catch (_) {}
+        // Layered safety valve, escalating with consecutive throws:
+        //  1st throw: disable worker coproc (force local-replay path next).
+        //   Empirically the trap fires when the SECOND rollback after a
+        //   worker coproc apply tries to restore-and-resave. Local replay
+        //   (replay-burst path) doesn't show the same crash, so dropping
+        //   to mode-1 dispatch saves rollback functionality without risking
+        //   the freeze.
+        //  3rd+ throw: disable C rollback entirely. Same-frame trap means
+        //   local replay also OOBs — fall back to legacy lockstep.
+        if (consecutiveThrows === 1 && !_workerCoprocAborted) {
+          _workerCoprocAborted = true;
+          try {
+            _syncLog(
+              `C-ROLLBACK-FALLBACK first throw at f=${_frameNum} — disabling worker coproc (local replay still active)`,
+            );
+          } catch (_) {}
+        }
+        if (consecutiveThrows >= 3 && _useCRollback) {
+          _useCRollback = false;
+          try {
+            _syncLog(
+              `C-ROLLBACK-FALLBACK consecutive throws=${consecutiveThrows} at f=${_frameNum} ` +
+                `— disabling C rollback for the rest of the match (legacy lockstep takes over)`,
+            );
+          } catch (_) {}
+        }
+        try {
+          _syncLog(
+            `C-ROLLBACK-THROW lastCp=${cp} f=${_frameNum} consec=${consecutiveThrows} err=${(eCR?.message || String(eCR)).slice(0, 200)} ` +
+              `— cleared replay state, continuing`,
+          );
+        } catch (_) {}
+        try {
+          console.error('[lockstep] C-rollback tick threw at cp=', cp, eCR);
+        } catch (_) {}
+        return;
       }
-      if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
-        _diag.captureAndSendScreenshot();
-      }
-      _markTickReturn('end:c-rollback');
-      return;
     }
 
     // Check if all INPUT peers (peers who have sent at least 1 input)

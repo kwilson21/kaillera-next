@@ -135,8 +135,8 @@ async function trace(url) {
   // Run for 35 s — enough to cover boot + autopilot + first match start.
   await new Promise((r) => setTimeout(r, 35_000));
 
-  const { records, syncLogTail, freezeState, fakePeerSends, tickReturnStats, fakePeerProbe } = await page.evaluate(
-    () => {
+  const { records, syncLogTail, freezeState, fakePeerSends, tickReturnStats, fakePeerProbe, cRollbackThrowSamples } =
+    await page.evaluate(() => {
       window.__knFreezeProbeStop();
       // _syncLog writes to a private circular buffer; only "critical" messages
       // hit console.log. Pull the ring directly to capture ROLLBACK-STALL,
@@ -157,12 +157,14 @@ async function trace(url) {
       const fakePeerFrame = window.KNFakePeer?.getCurrentSendingFrame?.() || null;
       const tickReturnStats = window.knTickReturnStats?.() || null;
       const fakePeerProbe = (window.__knFakePeerProbe || []).slice();
+      const cRollbackThrowSamples = (window.__knCRollbackThrowSamples || []).slice();
       return {
         records: window.__knFreezeProbe.records.slice(),
         syncLogTail: tail,
         fakePeerSends: window.__knFreezeProbe.fakePeerSends.slice(),
         tickReturnStats,
         fakePeerProbe,
+        cRollbackThrowSamples,
         freezeState: {
           knFrame: hud.currentFrame ?? -1,
           peerSnap,
@@ -170,8 +172,7 @@ async function trace(url) {
           fakePeerFrame,
         },
       };
-    },
-  );
+    });
   // Mix in-page sync-ring entries with the console-captured ones.
   for (const e of syncLogTail) syncLog.push(`[ring] ${e.slice(0, 280)}`);
 
@@ -336,9 +337,29 @@ async function trace(url) {
     console.log(`\ntick early-return counts (entered=${tickReturnStats.tickEntered}):`);
     const sorted = Object.entries(tickReturnStats.counts).sort((a, b) => b[1] - a[1]);
     for (const [tag, n] of sorted) console.log(`  ${tag}: ${n}`);
+    if (tickReturnStats.checkpointCounts) {
+      console.log(`\ntick checkpoint counts (lastCp=${tickReturnStats.lastCheckpoint}):`);
+      const cpSorted = Object.entries(tickReturnStats.checkpointCounts).sort((a, b) => b[1] - a[1]);
+      for (const [cp, n] of cpSorted) console.log(`  ${cp}: ${n}`);
+    }
     console.log(`\ntick recent-history (last ${tickReturnStats.recent.length}):`);
     for (const r of tickReturnStats.recent) {
       console.log(`  t=${r.t.toFixed(0)}ms frame=${r.frame} ${r.tag}`);
+    }
+  }
+  if (cRollbackThrowSamples?.length) {
+    console.log(`\nC-ROLLBACK-THROW samples (${cRollbackThrowSamples.length}):`);
+    for (const s of cRollbackThrowSamples) {
+      console.log(
+        `  t=${s.t.toFixed(0)}ms f=${s.f} cp=${s.cp} fAdv=${s.frameAdv} replayDepth=${s.replayDepth} pendingRb=${s.pendingRb} rbFrame=${s.rbFrame} rbCount=${s.rollbackCount} failed=${s.failedRollbacks} msg=${s.msg}`,
+      );
+      console.log(`    stack: ${s.stack.slice(0, 800).replace(/\n/g, '\n           ')}`);
+      if (s.cDebugTail) {
+        console.log(`    C-debug tail (last 2400 chars):`);
+        for (const ln of s.cDebugTail.split('\n').slice(-30)) {
+          if (ln.trim()) console.log(`       [C] ${ln}`);
+        }
+      }
     }
   }
   console.log(`\nrelevant log lines: ${syncLog.length}`);
