@@ -45,7 +45,7 @@ INSTRUMENTED_TAIL = (
     "force fallback to interp_PC with the saved N64 addr in .addr. */ "
     "if ((uintptr_t)dev->r4300.pc >= 0x80000000u) { "
     "dev->r4300.interp_PC.addr = pc_val; "
-    "dev->r4300.interp_PC.ops = (void(*)(void))0; "
+    "dev->r4300.interp_PC.ops = dev->r4300.cached_interp.not_compiled; "
     "dev->r4300.pc = &dev->r4300.interp_PC; "
     "} "
     "} return 0; }"
