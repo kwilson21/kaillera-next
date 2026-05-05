@@ -425,11 +425,15 @@ static int rb_restore_slot_state(int idx) {
         rb.split_restore_failures++;
         return 0;
     }
-    memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+    /* CPU first, RDRAM second — mirrors kn_apply_split_state_partial. If
+     * kn_sync_write_cpu fails (e.g. corrupt buffer), bail before touching
+     * RDRAM so the live state stays mutually consistent: live CPU + live
+     * RDRAM, not live CPU + ring-snapshot RDRAM. */
     if (kn_sync_write_cpu(rb.ring_cpu_bufs[idx], rb.ring_cpu_sizes[idx]) != 0) {
         rb.split_restore_failures++;
         return 0;
     }
+    memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
     rb_restore_slot_aux(idx);
     rb.split_restore_count++;
     return 1;
