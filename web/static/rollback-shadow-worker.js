@@ -990,24 +990,51 @@
               }
             }
             const li = localInput || { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
-            mod._kn_set_frame?.(frameToStep);
-            mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
+            // kn_set_frame is rejected during replay/rollback (pending_rollback>=0
+            // at i=0, replay_remaining>0 at i>=1), so calls inside the loop are
+            // dead. We reset rb.frame explicitly AFTER the loop, before
+            // kn_save_endpoint_state, so the endpoint lands in ring[targetFrame].
+            const catchup = mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
+            // R1-R6 fail-loud: at i=0 the kn_feed_input calls above must have
+            // queued pending_rollback so kn_pre_tick takes the restore path
+            // and returns 2 (catching up). If it returns anything else, the
+            // ring slot at startFrame is stale or the rollback machinery
+            // didn't trigger — stepping `depth` frames forward from worker's
+            // current position would silently produce wrong endpoint state
+            // for main. Reject the job so main's _coprocRecover handles it
+            // via local replay instead.
+            if (i === 0 && catchup !== 2) {
+              return reject(
+                `rollback did not trigger on first pre_tick (returned ${catchup}); ring slot at startFrame=${startFrame} likely stale`,
+              );
+            }
             captureSavedRunner();
             if (savedRunner) savedRunner((frameToStep + 1) * FRAME_MS);
             mod._kn_post_tick();
             stepped++;
           }
 
-          // After the replay loop, rb.frame = targetFrame and the live
-          // state is "entering-targetFrame" (post-frame-(targetFrame-1)).
-          // pre_tick saves BEFORE stepping, so the most recently saved
-          // ring slot is targetFrame-1 — applying that on main would
-          // make the next stepOneFrame paint frame targetFrame-1, which
-          // is the SAME frame the user already saw before the rollback.
-          // To eliminate the visible one-frame skip we explicitly save
-          // ring[targetFrame] = state-entering-targetFrame, then query
-          // it. Main applies that and the next synchronous stepOneFrame
-          // paints frame targetFrame for the first time.
+          // After the replay loop, the live state is "entering-targetFrame"
+          // (post-frame-(targetFrame-1)). Pre_tick saves BEFORE stepping, so
+          // the most recently saved ring slot is targetFrame-1 — applying
+          // that on main would make the next stepOneFrame paint frame
+          // targetFrame-1, which is the SAME frame the user already saw
+          // before the rollback. To eliminate the visible one-frame skip we
+          // explicitly save ring[targetFrame] = state-entering-targetFrame,
+          // then query it. Main applies that and the next synchronous
+          // stepOneFrame paints frame targetFrame for the first time.
+          //
+          // rb.frame ends the loop at startFrame + depth (= targetFrame in
+          // the steady-state where the worker entered with rb.frame ==
+          // targetFrame), but the C-side replay path uses the worker's
+          // pre-rollback rb.frame to compute its internal depth, so a
+          // worker that drifted ahead/behind targetFrame would land
+          // rb.frame somewhere else. Either way, kn_save_endpoint_state
+          // saves to ring[rb.frame % ring_size], so we need rb.frame ==
+          // targetFrame for the lookup at line below to find the slot.
+          // kn_set_frame requires pending_rollback < 0 and replay_remaining
+          // == 0 — both true here once the loop finishes.
+          if (mod._kn_set_frame) mod._kn_set_frame(targetFrame);
           if (mod._kn_save_endpoint_state) {
             const saveRc = mod._kn_save_endpoint_state();
             if (saveRc !== 0) return reject(`save-endpoint failed rc=${saveRc}`);

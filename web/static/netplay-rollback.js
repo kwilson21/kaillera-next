@@ -2359,8 +2359,20 @@
                       `WORKER-COPROC complete seq=${pending.seq} targetFrame=${applyFrame} depth=${pending.depth} roundtripMs=${roundtripMs.toFixed(1)} workerSavedFrame=${msg.savedFrame}`,
                     );
                   } else {
+                    // Apply returned non-zero. The C engine rejected the
+                    // worker's payload (-2 wrong backend, -3 cpu_size, -4
+                    // rdram_size mismatch, -5 rdram_base unavail, -6
+                    // taint-block divisibility broken). Each one means
+                    // the same payload shape will fail again — without
+                    // _workerCoprocAbort, every subsequent rollback runs
+                    // the full dispatch + 200ms timeout cycle before
+                    // local replay takes over, making Mode 2 strictly
+                    // worse than Mode 1 indefinitely. Match the
+                    // missing-export branch above: disable coproc for
+                    // the page-load and recover this rollback locally.
                     _workerCoprocStats.failed++;
                     _shadowLog(`rollback-replay-result: kn_apply_split_state_partial returned ${result}`);
+                    _workerCoprocAbort(`apply returned ${result}`);
                     _coprocRecover(tickMod, 'worker-coproc-fail');
                   }
                 }
