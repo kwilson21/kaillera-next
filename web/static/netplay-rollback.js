@@ -428,10 +428,12 @@
     for (const p of players) if (p.rttSamples?.length) liveSamples.push(...p.rttSamples);
     if (liveSamples.length === 0) return;
     liveSamples.sort((a, b) => a - b);
-    // Cover RTT/2 + jitter in both modes (see initial-negotiation comment
-    // for rationale). Pushed live to C below if kn_set_delay_frames is
-    // available so the engine's prediction window matches JS-side delay.
-    const useHalfRtt = true;
+    // Mode-aware formula (see comment block above). When predictions are
+    // live (true rollback), local input applies at the current frame so
+    // RTT/2 isn't input lag — use jitterMargin only. When predictions are
+    // paused (demo lockstep / legacy path), the engine waits for remote
+    // input and RTT/2 IS the input lag the player feels.
+    const useHalfRtt = _predictionsPaused;
     const ownDelay = _delayFromRttSamples(liveSamples, useHalfRtt);
     if (ownDelay == null) return;
     let maxDelay = ownDelay;

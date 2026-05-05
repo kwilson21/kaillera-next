@@ -2206,6 +2206,9 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
  *   -3: kn_sync_write_cpu rejected the CPU buffer
  *   -4: RDRAM buffer size mismatch (caller's size != engine's split_rdram_size)
  *   -5: rdram_base unavailable (rb_ensure_rdram_base failed)
+ *   -6: KN_TAINT_BLOCKS does not evenly divide split_rdram_size — refuse
+ *       the apply rather than do a full memcpy that would clobber renderer-
+ *       private blocks. JS recovers via local replay.
  *
  * After success, rb.frame is set to `frame` and rb.did_restore is raised
  * so JS can call _refreshRunnerAfterRollbackRestore to re-capture the
@@ -2238,15 +2241,20 @@ int kn_apply_split_state_partial(
      * state and SHOULD be adopted. */
     const uint32_t block_size = rdram_size / KN_TAINT_BLOCKS;
     if (block_size == 0 || (block_size * KN_TAINT_BLOCKS) != rdram_size) {
-        /* Defensive: split_rdram_size should always be divisible. If
-         * not, fall back to all-or-nothing copy of all blocks. */
-        memcpy(rb.rdram_base, rdram_bytes, rdram_size);
-    } else {
-        for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
-            if (kn_rdram_taint[b]) continue;
-            const uint32_t offset = (uint32_t)b * block_size;
-            memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
-        }
+        /* split_rdram_size MUST divide evenly into KN_TAINT_BLOCKS or the
+         * taint map can't address per-block ranges. A full memcpy here
+         * would clobber renderer-private blocks (e.g. GLideN64's pending
+         * GL state) with the worker's ANGRYLION bytes — exactly the
+         * corruption split-state exists to prevent. Refuse the apply so
+         * JS can fall back to local replay (_coprocRecover). */
+        rb_log("FATAL kn_apply_split_state_partial: rdram_size=%u not divisible by KN_TAINT_BLOCKS=%d (block_size=%u) — refusing apply",
+            rdram_size, (int)KN_TAINT_BLOCKS, block_size);
+        return -6;
+    }
+    for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+        if (kn_rdram_taint[b]) continue;
+        const uint32_t offset = (uint32_t)b * block_size;
+        memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
     }
 
     rb.frame = frame;
@@ -2276,11 +2284,14 @@ int kn_apply_split_state_partial(
 EMSCRIPTEN_KEEPALIVE
 #endif
 void kn_clear_replay_state(void) {
+    const int old_pending = rb.pending_rollback;
+    const int old_remaining = rb.replay_remaining;
+    const int old_depth = rb.replay_depth;
     rb.pending_rollback = -1;
     rb.replay_remaining = 0;
     rb.replay_depth = 0;
     rb_log("kn_clear_replay_state: cleared (was pending_rollback=%d replay_remaining=%d replay_depth=%d)",
-        rb.pending_rollback, rb.replay_remaining, rb.replay_depth);
+        old_pending, old_remaining, old_depth);
 }
 
 /* Save the current emulator state into the ring at rb.frame.
