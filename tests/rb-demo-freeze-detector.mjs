@@ -35,7 +35,7 @@ async function trace(url) {
     const t = msg.text();
     if (msg.type() === 'error') errors.push(t.slice(0, 240));
     if (t.includes('TICK-STUCK') || t.includes('REPLAY-NORUN') || t.includes('FATAL') || t.includes('STALL')) {
-      stuckEvents.push(t.slice(0, 240));
+      stuckEvents.push(t.slice(0, 1500));
     }
     if (
       t.includes('WORKER-COPROC') ||
@@ -333,7 +333,7 @@ async function trace(url) {
     }
   }
   if (tickReturnStats) {
-    console.log(`\ntick early-return counts:`);
+    console.log(`\ntick early-return counts (entered=${tickReturnStats.tickEntered}):`);
     const sorted = Object.entries(tickReturnStats.counts).sort((a, b) => b[1] - a[1]);
     for (const [tag, n] of sorted) console.log(`  ${tag}: ${n}`);
     console.log(`\ntick recent-history (last ${tickReturnStats.recent.length}):`);

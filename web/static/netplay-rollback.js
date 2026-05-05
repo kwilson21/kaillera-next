@@ -4822,6 +4822,24 @@
     else if (_runSubstate === RUN_RB_STALL) cause = 'rollback-stall';
     else if (_runSubstate === RUN_PACING) cause = 'pacing-throttle';
 
+    // Per-tick early-return tag counts and recent history. When cause=
+    // 'unknown' the existing flag check missed the culprit; the per-
+    // return-path counter (incremented at every marked early-return in
+    // tick) localizes which gate is firing repeatedly. Most-recent 12
+    // marks show the immediate sequence that led to the stuck state.
+    const recentMarks =
+      typeof _tickReturnRing !== 'undefined'
+        ? _tickReturnRing
+            .slice(-12)
+            .map((r) => `${r.t | 0}:f${r.frame}:${r.tag}`)
+            .join('|')
+        : '';
+    const markCounts =
+      typeof _tickReturnCounts !== 'undefined'
+        ? Object.entries(_tickReturnCounts)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(',')
+        : '';
     _syncLog(
       `TICK-STUCK severity=${severity} f=${_frameNum} stuckMs=${Math.round(stuckMs)} ` +
         `cause=${cause} rbPending=${!!window._rbPendingInit} ` +
@@ -4829,6 +4847,7 @@
         `bootStallFrame=${_bootStallFrame} scheduledSyncs=${_scheduledSyncRequests.length} ` +
         `pacing=${_runSubstate === RUN_PACING} rbStall=${_runSubstate === RUN_RB_STALL} ` +
         `wasmStep=${_wasmStepActive} stallStart=${_stallStart} ` +
+        `tickMarks=[${markCounts}] recentMarks=[${recentMarks}] ` +
         `peers=${JSON.stringify(peerSnap)}`,
     );
   };
@@ -11158,14 +11177,17 @@
       if (_tickReturnRing.length > _TICK_RETURN_RING_MAX) _tickReturnRing.shift();
     }
   };
+  let _tickEnteredCount = 0;
   if (typeof window !== 'undefined') {
     window.knTickReturnStats = () => ({
       counts: { ..._tickReturnCounts },
       recent: _tickReturnRing.slice(-60),
+      tickEntered: _tickEnteredCount,
     });
   }
 
   const tick = () => {
+    _tickEnteredCount = (_tickEnteredCount || 0) + 1;
     if (_phase !== PHASE_RUNNING) {
       _markTickReturn('skip:phase');
       return;
@@ -11909,6 +11931,7 @@
           _phaseLockStallKey = '';
           _phaseLockStallStartTime = 0;
         } else if (phaseWaitSlots.length) {
+          _markTickReturn('skip:phase-lock');
           return;
         }
       } else {
@@ -13557,6 +13580,7 @@
       if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
         _diag.captureAndSendScreenshot();
       }
+      _markTickReturn('end:c-rollback');
       return;
     }
 
@@ -13609,6 +13633,7 @@
                 `stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
             );
             _stallStart = 0;
+            _markTickReturn('skip:legacy-menu-lockstep-timeout');
             return;
           }
           if (stallDuration >= MAX_STALL_MS && !_resendSent) {
@@ -13623,6 +13648,7 @@
               `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
             );
           }
+          _markTickReturn('skip:legacy-menu-lockstep-stall');
           return;
         }
 
@@ -13645,6 +13671,7 @@
             `INPUT-GAP-FILL applyFrame=${applyFrame} slots=[${gapSlots.join(',')}] — peer ahead, immediate fabricate`,
           );
           _stallStart = 0;
+          _markTickReturn('skip:legacy-gap-fill');
           return; // re-enter next tick with input now present
         }
 
@@ -13756,9 +13783,11 @@
             // Don't re-enter full tick() — that causes burst frame processing
             // when buffered inputs resolve. Let setInterval(16) handle the
             // next frame step at the natural 60fps cadence.
+            _markTickReturn('skip:legacy-input-stall-resend');
             return;
           } else {
             _remoteMissed++;
+            _markTickReturn('skip:legacy-input-stall-wait');
             return;
           }
         } // end normal stall path (else of allMissingArePhantom)
@@ -13904,6 +13933,7 @@
         _resyncRequestInFlight = false; // unblock future resync requests
         _lastResyncTime = 0; // clear cooldown so next desync triggers immediately
       } else {
+        _markTickReturn('skip:legacy-awaiting-resync');
         return;
       }
     }
@@ -13933,6 +13963,7 @@
     _frameNum++;
     KNState.frameNum = _frameNum;
     if (window.KNDesync) KNDesync.tick(_frameNum);
+    _markTickReturn('advance:legacy');
 
     // P0-1 funnel: fire milestone_reached once when the player reaches
     // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the
