@@ -358,6 +358,24 @@
     }
   };
 
+  // Stall detection: when the engine's frame counter hasn't advanced
+  // for this many rAFs, fake-peer is allowed to schedule speculatively
+  // past engineFrame (lookahead). Avoids the receiver↔sender deadlock
+  // when auto-compare pauses predictions during a 60 ms latency spike:
+  // engine stalls waiting for missing input, fake-peer reads the
+  // frozen engineFrame and stops scheduling, ROLLBACK-STALL fires 3 s
+  // later. Threshold = 3 rAFs (~50 ms): well past normal frame timing
+  // jitter, well below the 3 s ROLLBACK-STALL trigger.
+  const STALL_DETECT_FRAMES = 3;
+  // How far past engineFrame fake-peer is allowed to schedule when a
+  // stall is detected. Sized so a single 60 ms burst spike has its
+  // queued packets drained AND fake-peer keeps producing through the
+  // recovery window. In normal (non-stalled) operation the lookahead
+  // is 0 so fake-peer's pacing matches the engine's frame counter and
+  // rollbacks fire as designed.
+  const STALL_LOOKAHEAD_FRAMES = 6;
+  let _stallTickCount = 0;
+  let _lastEngineFrameSeenForStall = -1;
   const _tick = () => {
     if (!_running) return;
     const now = _now();
@@ -377,10 +395,32 @@
       _inputHistory = [];
     }
 
-    for (let frame = _lastSeenFrame + 1; frame <= engineFrame; frame++) {
+    // Detect engine stall: rAFs in a row with no frame advance.
+    if (engineFrame === _lastEngineFrameSeenForStall) {
+      _stallTickCount++;
+    } else {
+      _stallTickCount = 0;
+      _lastEngineFrameSeenForStall = engineFrame;
+    }
+    // Schedule one input per rAF in normal play (matching the engine's
+    // pace). When the engine stalls past STALL_DETECT_FRAMES, allow
+    // speculative scheduling past engineFrame up to STALL_LOOKAHEAD_FRAMES
+    // ahead — keeps producing inputs that bridge the recovery window
+    // when main unstalls. Without lookahead, a paused-predictions stall
+    // would deadlock: main waits for missing remote input, fake-peer
+    // reads the frozen engineFrame and stops scheduling. With infinite
+    // lookahead, fake-peer outruns the engine to the point where every
+    // remote input is already present and rollbacks never fire — that
+    // breaks the demo's purpose. The conditional design preserves the
+    // rollback-fires-on-jitter behavior in normal play AND breaks the
+    // deadlock when it triggers.
+    const lookahead = _stallTickCount >= STALL_DETECT_FRAMES ? STALL_LOOKAHEAD_FRAMES : 0;
+    const lookaheadCap = engineFrame + lookahead;
+    const targetFrame = Math.max(engineFrame, Math.min(_lastSeenFrame + 1, lookaheadCap));
+    for (let frame = _lastSeenFrame + 1; frame <= targetFrame; frame++) {
       _scheduleFrame(frame, now);
     }
-    _lastSeenFrame = Math.max(_lastSeenFrame, engineFrame);
+    _lastSeenFrame = Math.max(_lastSeenFrame, targetFrame);
     _drainQueue(now);
     _rafId = _nativeRAF(_tick);
   };

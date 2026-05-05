@@ -279,6 +279,13 @@
   // entry with the largest frame <= currentFrame (or zero if no entry
   // yet). To regenerate: visit ?record=1, play to a match, download
   // kn-demo-autopilot.json, then dedupe consecutive same-input frames.
+  // Min hold ≥5 frames for any button-press transition: the recording
+  // captures the exact press width the user produced, but at runtime
+  // the engine's tick cadence (rAF jitter, delay drift between
+  // recording and replay) can shrink the effective window by 1-2
+  // frames. CSS character-confirm A-presses captured at 3 frames
+  // (released at 680 originally) intermittently fell outside their
+  // window and the autopilot stalled on the character grid.
   const MENU_AUTOPILOT_P1_TRANSITIONS = [
     [101, 0, 0, 0, 0, 0],
     [162, 8, 0, 0, 0, 0],
@@ -298,7 +305,7 @@
     [659, 0, 83, 0, 0, 0],
     [662, 0, 0, 0, 0, 0],
     [677, 1, 0, 0, 0, 0],
-    [680, 0, 0, 0, 0, 0],
+    [683, 0, 0, 0, 0, 0],
     [736, 8, 0, 0, 0, 0],
     [742, 0, 0, 0, 0, 0],
     [871, 0, -83, 0, 0, 0],
