@@ -1345,9 +1345,17 @@
         // auto-compare for this match. Each new match gets its own chance to
         // demo hands-free even if the user took control in a previous one.
         _userInteractedThisMatch = false;
-        _setStatus('Match started — auto-comparing rollback ON ↔ OFF');
+        // ?autoCompare=0 disables auto-compare (for testing pure-rollback freeze
+        // profile without the periodic lockstep flips).
+        const _autoCompareDisabled = _urlParams.get('autoCompare') === '0';
+        _setStatus(
+          _autoCompareDisabled
+            ? 'Match started — pure rollback (auto-compare disabled)'
+            : 'Match started — auto-comparing rollback ON ↔ OFF',
+        );
         setTimeout(() => {
-          if (_wasInMatch && !_userInteractedThisMatch && !_isAutoCompareRunning()) _startAutoCompare();
+          if (_wasInMatch && !_userInteractedThisMatch && !_isAutoCompareRunning() && !_autoCompareDisabled)
+            _startAutoCompare();
         }, 600);
       } else {
         // Left the match — stop the demo and put rollback back ON so the
