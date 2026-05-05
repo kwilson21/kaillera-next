@@ -907,6 +907,161 @@
           rollbackInited = false;
           post({ type: 'rollback-init-result', ok: false, error: String(e) });
         }
+      } else if (message.type === 'rollback-replay') {
+        // Coprocessor replay path. Main detected a misprediction at
+        // `targetFrame` of depth `depth` and corrected inputs are
+        // attached. Worker:
+        //   1. Confirms its ring slot at (targetFrame - depth) is
+        //      populated (it should be — worker's been lockstep-stepping
+        //      with main, so its ring at any recent frame is valid).
+        //   2. Restores RDRAM + CPU state from that ring slot via
+        //      kn_pre_tick's pending-rollback path.
+        //   3. Replays `depth` frames feeding the corrected inputs
+        //      through kn_pre_tick (recording them into the ring) and
+        //      stepping the runner.
+        //   4. Serializes the resulting state at `targetFrame` via
+        //      kn_get_split_state_for_shadow and posts the bytes back
+        //      to main as transferable buffers.
+        //
+        // Inputs format (from main): array of { slot, frame, buttons,
+        // lx, ly, cx, cy } — one entry per (slot, frame) that has a
+        // confirmed input within the replay window. kn_feed_input
+        // records each into the worker's input ring at the given frame.
+        const seq = message.seq | 0;
+        const targetFrame = message.targetFrame | 0;
+        const depth = message.depth | 0;
+        const inputs = Array.isArray(message.inputs) ? message.inputs : [];
+        const reject = (why) => post({ type: 'rollback-replay-result', seq, ok: false, error: why });
+        try {
+          if (!rollbackInited) return reject('rollback engine not initialized in worker');
+          if (!mod?._kn_pre_tick || !mod?._kn_post_tick) return reject('missing pre/post tick exports');
+          if (!mod?._kn_get_split_state_for_shadow || !mod?._malloc || !mod?._free)
+            return reject('missing split-state/alloc exports');
+          const startFrame = targetFrame - depth;
+          if (startFrame < 0) return reject(`invalid range: targetFrame=${targetFrame} depth=${depth}`);
+
+          // Feed the corrected inputs into the worker's ring BEFORE
+          // triggering the rollback. kn_pre_tick's pending-rollback
+          // path then sees fresh inputs at every replay frame and
+          // doesn't predict.
+          if (mod._kn_feed_input) {
+            for (const inp of inputs) {
+              if (!inp) continue;
+              mod._kn_feed_input(
+                inp.slot | 0,
+                inp.frame | 0,
+                inp.buttons | 0,
+                inp.lx | 0,
+                inp.ly | 0,
+                inp.cx | 0,
+                inp.cy | 0,
+              );
+            }
+          }
+
+          // Trigger rollback: pre_tick with pending_rollback set via
+          // a feed_input at startFrame would have queued it. But the
+          // simpler path: restore directly via the ring restore call.
+          // There's no public restore export — kn_pre_tick handles it
+          // via internal state tracking. Easiest API surface: just
+          // step forward from the ring slot at startFrame and let
+          // pre_tick's normal flow drive replay.
+          //
+          // Per the C engine: a rollback is initiated by setting
+          // rb.pending_rollback = startFrame, which kn_pre_tick acts
+          // on. We trigger this via kn_feed_input with a corrected
+          // input at startFrame that differs from what was previously
+          // there — the misprediction handler then sets pending_rollback.
+          //
+          // For this v1 implementation we trust that the inputs main
+          // sent already triggered the rollback machinery. We just
+          // step `depth` frames; pre_tick's replay branch handles the
+          // restore on the first call automatically because
+          // pending_rollback is set.
+          let stepped = 0;
+          for (let i = 0; i < depth; i++) {
+            const frameToStep = startFrame + i;
+            // Find the local slot's input for this frame (if main sent it).
+            let localInput = null;
+            for (const inp of inputs) {
+              if (inp && (inp.slot | 0) === rbLocalSlot && (inp.frame | 0) === frameToStep) {
+                localInput = inp;
+                break;
+              }
+            }
+            const li = localInput || { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+            mod._kn_set_frame?.(frameToStep);
+            mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
+            captureSavedRunner();
+            if (savedRunner) savedRunner((frameToStep + 1) * FRAME_MS);
+            mod._kn_post_tick();
+            stepped++;
+          }
+
+          // After the replay loop, rb.frame = targetFrame and the live
+          // state is "entering-targetFrame" (post-frame-(targetFrame-1)).
+          // pre_tick saves BEFORE stepping, so the most recently saved
+          // ring slot is targetFrame-1 — applying that on main would
+          // make the next stepOneFrame paint frame targetFrame-1, which
+          // is the SAME frame the user already saw before the rollback.
+          // To eliminate the visible one-frame skip we explicitly save
+          // ring[targetFrame] = state-entering-targetFrame, then query
+          // it. Main applies that and the next synchronous stepOneFrame
+          // paints frame targetFrame for the first time.
+          if (mod._kn_save_endpoint_state) {
+            const saveRc = mod._kn_save_endpoint_state();
+            if (saveRc !== 0) return reject(`save-endpoint failed rc=${saveRc}`);
+          }
+          // Read back the freshly computed state at targetFrame.
+          // kn_get_split_state_for_shadow returns an array of 9 uint32s
+          // describing the ring slot's RDRAM + CPU + hidden + HLE
+          // pointers and sizes.
+          const outBytes = 9 * 4;
+          const outPtr = mod._malloc(outBytes);
+          if (!outPtr) return reject('split-state out alloc failed');
+          const out = new Uint32Array(mod.HEAPU32.buffer, outPtr, 9);
+          // Query at targetFrame (which we just saved via save_endpoint)
+          // when available, otherwise fall back to the older "T-1, accept
+          // a redundant repaint" path.
+          const queryFrame = mod._kn_save_endpoint_state ? targetFrame : targetFrame - 1;
+          const result = mod._kn_get_split_state_for_shadow(queryFrame, outPtr, 9);
+          if (result !== 9) {
+            mod._free(outPtr);
+            return reject(`split-state-export failed for frame=${queryFrame} (returned ${result})`);
+          }
+          // Copy bytes out of WASM heap so we can transfer them.
+          // Layout: rdramPtr, rdramSize, cpuPtr, cpuSize, hiddenPtr,
+          // hiddenSize, hlePtr, hleSize, savedFrame.
+          const rdramPtr = out[0];
+          const rdramSize = out[1];
+          const cpuPtr = out[2];
+          const cpuSize = out[3];
+          const savedFrame = out[8];
+          // Copy to detachable buffers (Uint8Array slice).
+          const rdramBytes = mod.HEAPU8.slice(rdramPtr, rdramPtr + rdramSize);
+          const cpuBytes = mod.HEAPU8.slice(cpuPtr, cpuPtr + cpuSize);
+          mod._free(outPtr);
+
+          post(
+            {
+              type: 'rollback-replay-result',
+              seq,
+              ok: true,
+              targetFrame,
+              savedFrame: savedFrame | 0,
+              depthReplayed: stepped,
+              rdram: rdramBytes.buffer,
+              rdramSize,
+              cpu: cpuBytes.buffer,
+              cpuSize,
+            },
+            [rdramBytes.buffer, cpuBytes.buffer],
+          );
+          currentFrame = targetFrame;
+          setStatusValue(STATUS_IDX.frame, currentFrame);
+        } catch (e) {
+          reject(`replay threw: ${e?.message || e}`);
+        }
       } else if (message.type === 'query-hash') {
         // Returns the worker's most recently SAVED frame (rb.frame-1
         // because rb_save_slot fires BEFORE the step in kn_pre_tick;

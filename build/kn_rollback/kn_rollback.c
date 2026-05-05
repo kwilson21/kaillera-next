@@ -2186,6 +2186,134 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
     return 9;
 }
 
+/* ── Selective state adoption (worker-as-replay-coprocessor) ───────────
+ *
+ * Loads a split-state snapshot produced by another instance (typically
+ * the shadow worker via kn_get_split_state_for_shadow), but copies only
+ * the deterministic RDRAM blocks — those NOT marked tainted in this
+ * instance's kn_rdram_taint map. Tainted blocks (renderer/audio/kernel
+ * spillover that legitimately differs between workers running different
+ * RDP plugins) are left as-is so the local renderer's pending GL state
+ * stays consistent with its own framebuffer regions.
+ *
+ * CPU state is loaded in full because it's deterministic across renderer
+ * choices (R4300 + RSP register state, scheduler state, etc. — none of
+ * the rendering plugins touch CPU state).
+ *
+ * Returns 0 on success, negative error codes on failure:
+ *   -1: rollback engine not initialized
+ *   -2: not using split-rdram backend (this function is split-state only)
+ *   -3: kn_sync_write_cpu rejected the CPU buffer
+ *   -4: RDRAM buffer size mismatch (caller's size != engine's split_rdram_size)
+ *   -5: rdram_base unavailable (rb_ensure_rdram_base failed)
+ *
+ * After success, rb.frame is set to `frame` and rb.did_restore is raised
+ * so JS can call _refreshRunnerAfterRollbackRestore to re-capture the
+ * Emscripten rAF runner (retro_unserialize equivalent invalidation).
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_apply_split_state_partial(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame
+) {
+    if (!rb.initialized) return -1;
+    if (!rb_using_split_state()) return -2;
+    if (!cpu_bytes || cpu_size == 0) return -3;
+    if (!rdram_bytes || rdram_size == 0) return -4;
+    if (rdram_size != rb.split_rdram_size) return -4;
+    if (!rb_ensure_rdram_base() || !rb.rdram_base) return -5;
+
+    /* CPU state: full adoption. Worker's CPU state at frame F is bit-
+     * identical to what main's would be at the same frame (verified
+     * by gp/game hash matches in the determinism check). */
+    if (kn_sync_write_cpu(cpu_bytes, cpu_size) != 0) return -3;
+
+    /* RDRAM: copy only non-tainted blocks. KN_TAINT_BLOCKS divides the
+     * 8 MB RDRAM into 128 × 64 KB blocks; the taint map flags blocks
+     * touched by audio/RSP/renderer code that legitimately diverges
+     * across worker/main. Blocks NOT flagged are deterministic game
+     * state and SHOULD be adopted. */
+    const uint32_t block_size = rdram_size / KN_TAINT_BLOCKS;
+    if (block_size == 0 || (block_size * KN_TAINT_BLOCKS) != rdram_size) {
+        /* Defensive: split_rdram_size should always be divisible. If
+         * not, fall back to all-or-nothing copy of all blocks. */
+        memcpy(rb.rdram_base, rdram_bytes, rdram_size);
+    } else {
+        for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+            if (kn_rdram_taint[b]) continue;
+            const uint32_t offset = (uint32_t)b * block_size;
+            memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
+        }
+    }
+
+    rb.frame = frame;
+    rb.did_restore = 1;
+    /* Clear any in-flight rollback state. The caller (worker
+     * coprocessor) just delivered the corrected state at `frame`, so
+     * any pending_rollback or replay_remaining values from earlier
+     * pre_tick calls on this instance are stale. */
+    rb.pending_rollback = -1;
+    rb.replay_remaining = 0;
+    rb.replay_depth = 0;
+    rb_log("kn_apply_split_state_partial: frame=%d cpu_size=%u rdram_size=%u tainted_blocks_skipped=%d",
+        frame, cpu_size, rdram_size, kn_get_tainted_block_count());
+    return 0;
+}
+
+/* Clear pending rollback / active replay without applying any state.
+ * Used by the worker-coprocessor JS path: when main detects catchingUp
+ * and decides to delegate the replay to the worker, it calls this to
+ * tell the C engine "stop trying to do the replay yourself; corrected
+ * state will arrive shortly via kn_apply_split_state_partial."
+ *
+ * Without this, the next kn_pre_tick re-enters the replay branch
+ * because replay_remaining > 0, which would cause main to do the work
+ * we're trying to off-load to the worker. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_clear_replay_state(void) {
+    rb.pending_rollback = -1;
+    rb.replay_remaining = 0;
+    rb.replay_depth = 0;
+    rb_log("kn_clear_replay_state: cleared (was pending_rollback=%d replay_remaining=%d replay_depth=%d)",
+        rb.pending_rollback, rb.replay_remaining, rb.replay_depth);
+}
+
+/* Save the current emulator state into the ring at rb.frame.
+ *
+ * Used by the shadow worker after its replay loop completes. The loop
+ * runs depth iterations of pre_tick + step + post_tick, ending with
+ * rb.frame = targetFrame and the live state = "entering-targetFrame"
+ * (i.e., post-frame-(targetFrame-1)). Pre_tick saves BEFORE stepping,
+ * so the most recently saved ring slot is targetFrame-1; the slot at
+ * targetFrame has not yet been written.
+ *
+ * Without this call, kn_get_split_state_for_shadow can only return
+ * state-entering-(targetFrame-1) — main applies that and the next
+ * stepOneFrame paints frame targetFrame-1, which is the SAME frame the
+ * user already saw before the rollback. Calling kn_save_endpoint_state
+ * after the loop populates ring[targetFrame] = state-entering-target,
+ * so the next stepOneFrame in main paints frame targetFrame for the
+ * first time — eliminating the one-frame skip in the visible output.
+ *
+ * Returns 0 on success, -1 if not initialized.
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_save_endpoint_state(void) {
+    if (!rb.initialized) return -1;
+    if (rb.ring_size <= 0) return -2;
+    int idx = rb.frame % rb.ring_size;
+    int rc = rb_save_slot(idx, rb.frame, 1);
+    rb_log("kn_save_endpoint_state: frame=%d idx=%d rc=%d", rb.frame, idx, rc);
+    return rc == 1 ? 0 : -3;
+}
+
 /* ── Stat getters ──────────────────────────────────────────────────── */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE

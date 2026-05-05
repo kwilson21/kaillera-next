@@ -618,6 +618,107 @@
   // end of that tick instead of deferring to the next forward tick.
   let _replayStepsThisRollback = 0;
   let _replayOriginalDepth = 0;
+  // ── Worker-as-replay-coprocessor (option D) ─────────────────────────
+  // When ?workerCoproc=1, on misprediction main hands the replay off to
+  // the shadow worker (which has its own rb engine, lockstep-stepped
+  // with main) instead of running the replay locally. Worker computes
+  // corrected state, posts the bytes back, main adopts via
+  // kn_apply_split_state_partial (CPU full + non-tainted RDRAM only).
+  // Renderer-private RDRAM (tainted blocks) stays as main's, so
+  // GLideN64's pending GL state isn't disturbed by ANGRYLION's bytes.
+  // Rollback mode toggle.
+  //   Mode 1 (default): classic local-replay path. On misprediction,
+  //     main rewinds and replays the missed frames itself in an
+  //     amortized burst — typical visible freeze ≈ 65 ms at depth=7.
+  //   Mode 2: worker coprocessor. Main hands the replay off to the
+  //     shadow worker and adopts its corrected state via
+  //     kn_apply_split_state_partial (CPU full + non-tainted RDRAM).
+  //     Visible freeze ≈ 14 ms (one vsync) — bound by the worker's
+  //     reply roundtrip and the next-paint scheduling latency.
+  // Use ?rollbackMode=2 (or the legacy ?workerCoproc=1) to opt into
+  // Mode 2.
+  const RB_WORKER_COPROC = (() => {
+    try {
+      const raw = _urlParams.get('workerCoproc') ?? localStorage.getItem('kn-worker-coproc');
+      if (raw === '1') return true;
+      const mode = _urlParams.get('rollbackMode') ?? localStorage.getItem('kn-rollback-mode');
+      if (mode === '2') return true;
+    } catch (_) {}
+    return false;
+  })();
+  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId }
+  let _workerCoprocSeq = 0;
+  let _workerCoprocAborted = false; // permanent disable after a hang/timeout
+  let _workerCoprocLastFrameAdvance = 0;
+  let _workerCoprocLastFrameNum = -1;
+  let _workerCoprocWatchdogId = 0;
+  const _workerCoprocStats = {
+    dispatched: 0,
+    completed: 0,
+    failed: 0,
+    dispatchFailures: 0,
+    timeouts: 0,
+    watchdogTrips: 0,
+    totalRoundtripMs: 0,
+    maxRoundtripMs: 0,
+  };
+  // Worker reply timeout (ms). If the worker doesn't reply within this
+  // window, declare the request lost and clear pending so the next
+  // rollback can dispatch (or fall back to main's local replay if
+  // workerCoproc has been auto-disabled by the watchdog).
+  const RB_WORKER_COPROC_TIMEOUT_MS = 200;
+  // Frame-advance watchdog: if main's _frameNum doesn't advance for
+  // this many ms after a coproc dispatch, the coproc path is wedging
+  // the demo. Permanently disable workerCoproc for this page-load and
+  // log the event. Main's local-replay fallback then handles all
+  // future rollbacks.
+  const RB_WORKER_COPROC_HANG_MS = 500;
+  const _workerCoprocAbort = (reason) => {
+    if (_workerCoprocAborted) return;
+    _workerCoprocAborted = true;
+    _syncLog(`WORKER-COPROC AUTO-DISABLED: ${reason}`);
+    if (_workerCoprocPending?.timeoutId) clearTimeout(_workerCoprocPending.timeoutId);
+    _workerCoprocPending = null;
+    if (_workerCoprocWatchdogId) {
+      clearInterval(_workerCoprocWatchdogId);
+      _workerCoprocWatchdogId = 0;
+    }
+  };
+  // Frame-advance watchdog: lazy-started on first dispatch. Polls every
+  // 100ms; if _frameNum hasn't advanced for RB_WORKER_COPROC_HANG_MS, the
+  // coproc path is wedging the demo (e.g., apply threw, runner is dead,
+  // or some unforeseen state). Calls _workerCoprocAbort which clears
+  // pending and hides the overlay so the demo can recover. Watchdog
+  // remains running for the page-load to catch repeat occurrences.
+  const _startWorkerCoprocWatchdog = () => {
+    if (_workerCoprocWatchdogId || _workerCoprocAborted) return;
+    _workerCoprocLastFrameNum = _frameNum;
+    _workerCoprocLastFrameAdvance = performance.now();
+    _workerCoprocWatchdogId = setInterval(() => {
+      if (_workerCoprocAborted) return;
+      const now = performance.now();
+      if (_frameNum !== _workerCoprocLastFrameNum) {
+        _workerCoprocLastFrameNum = _frameNum;
+        _workerCoprocLastFrameAdvance = now;
+        return;
+      }
+      // Frame counter stuck. Only treat as a hang if we have an
+      // outstanding worker-coproc dispatch — otherwise main might be
+      // legitimately paused (tab hidden, late-join pause, etc.).
+      if (!_workerCoprocPending) return;
+      const stuckMs = now - _workerCoprocLastFrameAdvance;
+      if (stuckMs >= RB_WORKER_COPROC_HANG_MS) {
+        _workerCoprocStats.watchdogTrips++;
+        _workerCoprocAbort(`frame-advance hang stuckMs=${Math.round(stuckMs)} pendingSeq=${_workerCoprocPending?.seq}`);
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        if (mod?._kn_get_frame) {
+          _frameNum = mod._kn_get_frame();
+          KNState.frameNum = _frameNum;
+        }
+        _hideRollbackVisualFreeze();
+      }
+    }, 100);
+  };
   let _rbVisualFreezeOverlay = null; // canvas copy shown while replay frames render underneath
   let _rbVisualFreezeCtx = null;
   let _rbVisualSnapshotCanvas = null; // last live pre-rollback frame, captured before state restore
@@ -1005,6 +1106,22 @@
         consecutiveSafeReplayTicks: _consecutiveSafeReplayTicks,
       };
     };
+    // Worker-coprocessor stats — call window.knWorkerCoprocStats() in
+    // console after enabling ?workerCoproc=1 to see how the worker is
+    // performing. Avg roundtrip is the key metric: if it's under
+    // ~50 ms, replays are faster than main's local replay; if it's
+    // >50 ms, the dispatch + worker compute + state-transfer overhead
+    // is more than main's replay would have cost. See
+    // _workerCoprocPending for the in-flight slot.
+    window.knWorkerCoprocStats = () => ({
+      enabled: RB_WORKER_COPROC,
+      pending: _workerCoprocPending ? { ..._workerCoprocPending } : null,
+      ..._workerCoprocStats,
+      avgRoundtripMs:
+        _workerCoprocStats.completed > 0
+          ? +(_workerCoprocStats.totalRoundtripMs / _workerCoprocStats.completed).toFixed(2)
+          : null,
+    });
   }
   // Legacy alias used by the existing code paths and the tail-fade
   // timing. Kept as a getter-style constant so call sites stay
@@ -1398,18 +1515,6 @@
     } catch (_) {}
     return false;
   })();
-  // Canvas-velocity-driven motion. When on, the motion path samples
-  // the live canvas each frame, computes a center-of-brightness
-  // motion vector, and uses that for the freeze translate instead of
-  // stick magnitude. Generic — works for any ROM.
-  const RB_REPLAY_RDRAM_MOTION = (() => {
-    try {
-      const raw = _urlParams.get('replayRdramMotion') ?? localStorage.getItem('kn-replay-rdram-motion');
-      if (raw === '0') return false;
-      if (raw === '1') return true;
-    } catch (_) {}
-    return false;
-  })();
   // Show the worker's ANGRYLION-rendered framebuffer directly during
   // rollback. Default OFF because raw ANGRYLION output (320×240, no
   // shaders, no HD textures) looks visually different from the live
@@ -1506,7 +1611,10 @@
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return RB_SHADOW_FRAME_BLIT || RB_SHADOW_MOTION_ORACLE;
+    // workerCoproc requires the shadow worker (it dispatches replays
+    // there). Auto-enable so users don't have to pass shadowEmu=1
+    // separately.
+    return RB_SHADOW_FRAME_BLIT || RB_SHADOW_MOTION_ORACLE || RB_WORKER_COPROC;
   })();
   let _hudRollbackEvents = 0; // monotonic counter
   let _hudRollbackDepthSamples = []; // rolling window of replay depths
@@ -1719,72 +1827,6 @@
     }
   };
 
-  // Track on-screen motion by sampling the live canvas's center of
-  // brightness over recent frames. The shift between samples is a
-  // crude proxy for "where the action is moving" — works without any
-  // game-specific RDRAM offsets, so it generalizes to any ROM. Cheap
-  // because we sample a tiny 32×24 downsample.
-  const _kn_canvasMotion = {
-    canvas: null,
-    ctx: null,
-    history: [], // recent (cogX, cogY, t) samples
-    lastSampledFrame: -1,
-    veloX: 0,
-    veloY: 0,
-  };
-  const _sampleLiveCanvasMotion = () => {
-    // Only sample every few frames — the readback is a sync GPU
-    // operation (~3-4 ms in V8) and we don't need per-frame
-    // resolution for a 30 ms freeze window. Sampling every 3 frames
-    // gives 5 samples / 80 ms which is plenty for velocity estimation
-    // while keeping per-tick cost amortized.
-    if (_kn_canvasMotion.lastSampledFrame >= 0 && _frameNum - _kn_canvasMotion.lastSampledFrame < 3) return;
-    _kn_canvasMotion.lastSampledFrame = _frameNum;
-    const live = _findRollbackVisualCanvas?.();
-    if (!live) return;
-    if (!_kn_canvasMotion.canvas) {
-      _kn_canvasMotion.canvas = document.createElement('canvas');
-      _kn_canvasMotion.canvas.width = 32;
-      _kn_canvasMotion.canvas.height = 24;
-      _kn_canvasMotion.ctx = _kn_canvasMotion.canvas.getContext('2d', { willReadFrequently: true });
-    }
-    const ctx = _kn_canvasMotion.ctx;
-    if (!ctx) return;
-    try {
-      ctx.drawImage(live, 0, 0, 32, 24);
-      const data = ctx.getImageData(0, 0, 32, 24).data;
-      let sumX = 0,
-        sumY = 0,
-        sumW = 0;
-      for (let y = 0; y < 24; y++) {
-        for (let x = 0; x < 32; x++) {
-          const i = (y * 32 + x) * 4;
-          const lum = data[i] + data[i + 1] + data[i + 2];
-          sumX += x * lum;
-          sumY += y * lum;
-          sumW += lum;
-        }
-      }
-      if (sumW > 0) {
-        const cogX = sumX / sumW;
-        const cogY = sumY / sumW;
-        const now = performance.now();
-        const hist = _kn_canvasMotion.history;
-        hist.push({ x: cogX, y: cogY, t: now });
-        if (hist.length > 6) hist.shift();
-        if (hist.length >= 2) {
-          // velocity from first → last in history (px per ms in 32×24 space)
-          const first = hist[0];
-          const last = hist[hist.length - 1];
-          const dt = last.t - first.t;
-          if (dt > 0) {
-            _kn_canvasMotion.veloX = (last.x - first.x) / dt;
-            _kn_canvasMotion.veloY = (last.y - first.y) / dt;
-          }
-        }
-      }
-    } catch (_) {}
-  };
   // Worker-oracle motion: shadow worker is forward-simulating, so its
   // most recent framebuffer's center-of-brightness vs the baseline
   // (captured when the freeze started) tells us EXACTLY where the
@@ -1793,7 +1835,6 @@
   // stick-input guesswork, no live-canvas optical flow — just the
   // worker's actual prediction.
   const _workerOracleMotion = () => {
-    if (!RB_SHADOW_MOTION_ORACLE) return null;
     const cog = _knWorkerCog;
     const baseline = cog.baseline;
     const last = cog.history[cog.history.length - 1];
@@ -1846,37 +1887,19 @@
   };
 
   const _gameVelocityToRollbackMotion = () => {
-    // Priority 1: worker oracle if a fresh COG history is available.
-    // Falls through to the canvas-motion path on any failure (no
-    // worker, no baseline yet, no recent samples).
-    const oracle = _workerOracleMotion();
-    if (oracle) return oracle;
-    if (!RB_REPLAY_RDRAM_MOTION) return null;
-    const cm = _kn_canvasMotion;
-    if (cm.history.length < 2) return null;
-    // velocity is in (32×24) units per ms — scale to pixels for the
-    // freeze duration (~30 ms). Cap at RB_MOTION_SMOOTHING_MAX_PX so
-    // it can't wobble more than the legacy nudge.
-    const dwellMs = 30;
-    const downsampleScaleX = 32; // 1 cog pixel ≈ this many overlay px
-    const downsampleScaleY = 24;
-    const dx = cm.veloX * dwellMs * downsampleScaleX * 0.05;
-    const dy = cm.veloY * dwellMs * downsampleScaleY * 0.05;
-    const cap = RB_MOTION_SMOOTHING_MAX_PX;
-    const clamp = (v) => Math.max(-cap, Math.min(cap, v));
-    return {
-      source: 'canvas-cog',
-      dx: clamp(dx),
-      dy: clamp(dy),
-      scale: RB_REPLAY_MOTION_SCALE ? RB_MOTION_SMOOTHING_BASE_SCALE : 1,
-    };
+    // Worker oracle is the only RDRAM-derived motion source — its
+    // ANGRYLION framebuffer reads happen off the main thread, so they
+    // don't disturb the user's WebGL canvas. The legacy live-canvas
+    // sampler was removed (caused "triangles forming" geometry
+    // artifacts on the gameplay canvas via WebGL→2D readback flushes).
+    return _workerOracleMotion();
   };
 
   const _inputToRollbackMotion = (input) => {
-    // Canvas-velocity-driven motion takes priority when enabled (see
-    // _sampleLiveCanvasMotion). Falls back to stick-driven motion
-    // (#4) when canvas sampling is disabled or hasn't built up
-    // enough history yet.
+    // Worker-COG motion is the priority source (off-thread ANGRYLION
+    // framebuffer reads, no impact on the user's WebGL canvas). Falls
+    // back to stick-driven motion when the worker isn't running or
+    // hasn't accumulated enough COG samples yet.
     const rdramMotion = _gameVelocityToRollbackMotion();
     if (rdramMotion) return rdramMotion;
     const maxAxis = 32767;
@@ -2648,6 +2671,187 @@
       } else {
         _shadowLog(`rollback-init FAILED: ${msg.error}`);
       }
+    } else if (msg.type === 'rollback-replay-result') {
+      // Worker delivered the corrected state for a coprocessor replay.
+      // Apply it via kn_apply_split_state_partial (CPU full + non-tainted
+      // RDRAM only) and unblock further replays.
+      if (!_workerCoprocPending || _workerCoprocPending.seq !== msg.seq) {
+        _shadowLog(`rollback-replay-result for stale/unknown seq=${msg.seq}; ignoring`);
+      } else {
+        const pending = _workerCoprocPending;
+        _workerCoprocPending = null;
+        if (pending.timeoutId) clearTimeout(pending.timeoutId);
+        const dispatchedAt = pending.dispatchedAt;
+        const roundtripMs = performance.now() - dispatchedAt;
+        // Recovery helper: on any failure path, hide the overlay, clear
+        // any lingering headless flag, and realign _frameNum to rb.frame
+        // so the gate-released tick advances coherently.
+        const _coprocRecover = (mod, reason) => {
+          if (mod) _setReplayFullHeadless(mod, false, reason);
+          _hideRollbackVisualFreeze();
+          if (mod?._kn_get_frame) {
+            _frameNum = mod._kn_get_frame();
+            KNState.frameNum = _frameNum;
+          }
+        };
+        if (msg.ok) {
+          const tickMod = window.EJS_emulator?.gameManager?.Module;
+          if (!tickMod?._kn_apply_split_state_partial) {
+            _workerCoprocStats.failed++;
+            _shadowLog('rollback-replay-result: apply export missing — coproc disabled');
+            _workerCoprocAbort('apply export missing');
+            _coprocRecover(tickMod, 'worker-coproc-no-apply');
+          } else if (!msg.cpu || !msg.rdram) {
+            _workerCoprocStats.failed++;
+            _shadowLog(`rollback-replay-result: missing payload cpu=${!!msg.cpu} rdram=${!!msg.rdram}`);
+            _coprocRecover(tickMod, 'worker-coproc-no-payload');
+          } else {
+            try {
+              const rdramBytes = new Uint8Array(msg.rdram);
+              const cpuBytes = new Uint8Array(msg.cpu);
+              if (rdramBytes.length === 0 || cpuBytes.length === 0) {
+                _workerCoprocStats.failed++;
+                _shadowLog(`rollback-replay-result: empty payload cpu=${cpuBytes.length} rdram=${rdramBytes.length}`);
+                _coprocRecover(tickMod, 'worker-coproc-empty');
+              } else {
+                // Allocate WASM-side buffers, copy bytes, call apply.
+                const rdramPtr = tickMod._malloc(rdramBytes.length);
+                const cpuPtr = tickMod._malloc(cpuBytes.length);
+                if (!rdramPtr || !cpuPtr) {
+                  if (rdramPtr) tickMod._free(rdramPtr);
+                  if (cpuPtr) tickMod._free(cpuPtr);
+                  _workerCoprocStats.failed++;
+                  _shadowLog('rollback-replay-result: malloc failed');
+                  _coprocRecover(tickMod, 'worker-coproc-malloc-fail');
+                } else {
+                  tickMod.HEAPU8.set(rdramBytes, rdramPtr);
+                  tickMod.HEAPU8.set(cpuBytes, cpuPtr);
+                  const applyFrame = pending.targetFrame;
+                  const result = tickMod._kn_apply_split_state_partial(
+                    cpuPtr,
+                    cpuBytes.length,
+                    rdramPtr,
+                    rdramBytes.length,
+                    applyFrame,
+                  );
+                  tickMod._free(rdramPtr);
+                  tickMod._free(cpuPtr);
+                  if (result === 0) {
+                    // State adopted. Refresh the rAF runner (retro_unserialize
+                    // equivalent invalidation). _refreshRunnerAfterRollbackRestore
+                    // gates on _kn_rollback_did_restore which apply sets to 1.
+                    // If _pendingRunner is somehow still null after refresh
+                    // (worker-coproc is a new path; retro_unserialize wasn't
+                    // actually called, so the rAF runner may not have been
+                    // invalidated and pause/resumeMainLoop is a no-op), fall
+                    // back to recaptureManualRunner so the next stepOneFrame
+                    // doesn't no-op.
+                    _refreshRunnerAfterRollbackRestore(tickMod);
+                    if (_manualMode && !_pendingRunner) {
+                      recaptureManualRunner(tickMod, 'worker-coproc-no-runner');
+                    }
+                    _frameNum = applyFrame;
+                    KNState.frameNum = _frameNum;
+                    // ── Synchronous paint for frame T ──────────────────
+                    // Apply just landed state-entering-T; the next regular
+                    // tick would paint frame T after a few ms of scheduler
+                    // latency. Inline a forward step here so paint(T) lands
+                    // immediately, shaving the gap between paint(T-1) and
+                    // paint(T) closer to the natural 16.7 ms vsync cadence.
+                    // Mirrors the normal forward-tick sequence: pre_tick →
+                    // writeInputToMemory → reset_audio + RNG sync →
+                    // stepOneFrame → feedAudio → post_tick. Wrapped in try
+                    // so any failure falls back to the next regular tick
+                    // advancing normally.
+                    if (_pendingRunner) {
+                      try {
+                        const localAtT = _localInputs[applyFrame] || KNShared.ZERO_INPUT;
+                        const preCu = tickMod._kn_pre_tick(
+                          localAtT.buttons | 0,
+                          localAtT.lx | 0,
+                          localAtT.ly | 0,
+                          localAtT.cx | 0,
+                          localAtT.cy | 0,
+                          -1,
+                        );
+                        if (preCu === 0) {
+                          const applyFrameForInputs = applyFrame - DELAY_FRAMES;
+                          if (RB_TRUE_ROLLBACK) {
+                            writeInputToMemory(_playerSlot, localAtT);
+                            if (applyFrameForInputs >= 0) {
+                              for (let s = 0; s < rb_numPlayers; s++) {
+                                if (s === _playerSlot) continue;
+                                writeInputToMemory(s, _rbGetInput(tickMod, s, applyFrameForInputs));
+                              }
+                            }
+                          } else if (applyFrameForInputs >= 0) {
+                            for (let s = 0; s < rb_numPlayers; s++) {
+                              writeInputToMemory(s, _rbGetInput(tickMod, s, applyFrameForInputs));
+                            }
+                          }
+                          if (tickMod._kn_reset_audio) {
+                            tickMod._kn_reset_audio();
+                            _resetAudioCallsSinceRb++;
+                          }
+                          _syncRNGSeed(tickMod, _frameNum);
+                          _inDeterministicStep = true;
+                          try {
+                            stepOneFrame();
+                          } finally {
+                            _inDeterministicStep = false;
+                          }
+                          _syncRNGSeed(tickMod, _frameNum);
+                          if (typeof feedAudio === 'function') feedAudio();
+                          const newFrame = tickMod._kn_post_tick();
+                          _frameNum = newFrame;
+                          KNState.frameNum = _frameNum;
+                        } else {
+                          _shadowLog(`worker-coproc sync-step skipped: pre_tick returned ${preCu}`);
+                        }
+                      } catch (e) {
+                        _shadowLog(`worker-coproc sync-step threw: ${e?.message || e}`);
+                      }
+                    }
+                    _setReplayFullHeadless(tickMod, false, 'worker-coproc-finish');
+                    _hideRollbackVisualFreeze();
+                    _workerCoprocStats.completed++;
+                    _workerCoprocStats.totalRoundtripMs += roundtripMs;
+                    if (roundtripMs > _workerCoprocStats.maxRoundtripMs) {
+                      _workerCoprocStats.maxRoundtripMs = roundtripMs;
+                    }
+                    _hudRollbackEvents++;
+                    _hudEventTimestamps.push(performance.now());
+                    while (
+                      _hudEventTimestamps.length > 0 &&
+                      performance.now() - _hudEventTimestamps[0] > HUD_EVENT_WINDOW_MS
+                    ) {
+                      _hudEventTimestamps.shift();
+                    }
+                    _hudRollbackDepthSamples.push(pending.depth);
+                    if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
+                    _syncLog(
+                      `WORKER-COPROC complete seq=${pending.seq} targetFrame=${applyFrame} depth=${pending.depth} roundtripMs=${roundtripMs.toFixed(1)} workerSavedFrame=${msg.savedFrame}`,
+                    );
+                  } else {
+                    _workerCoprocStats.failed++;
+                    _shadowLog(`rollback-replay-result: kn_apply_split_state_partial returned ${result}`);
+                    _coprocRecover(tickMod, 'worker-coproc-fail');
+                  }
+                }
+              }
+            } catch (e) {
+              _workerCoprocStats.failed++;
+              _shadowLog(`rollback-replay-result threw: ${e?.message || e}`);
+              _coprocRecover(tickMod, 'worker-coproc-throw');
+            }
+          }
+        } else {
+          _workerCoprocStats.failed++;
+          const tickMod = window.EJS_emulator?.gameManager?.Module;
+          _shadowLog(`rollback-replay-result FAILED seq=${pending.seq}: ${msg.error}`);
+          _coprocRecover(tickMod, 'worker-coproc-fail');
+        }
+      }
     } else if (msg.type === 'stepped') {
       _rbShadowInFlight = Math.max(0, _rbShadowInFlight - 1);
       stats.stepAcks++;
@@ -2727,7 +2931,13 @@
         // Compute COG over a coarse 32×24 grid for cheap motion
         // estimation. Only every-other frame already arrives, so
         // this samples ~30 Hz — plenty for a 30 ms freeze window.
-        if (RB_SHADOW_MOTION_ORACLE && msg.frame !== _knWorkerCog.lastFrame) {
+        // Capture worker COG whenever a frame arrives — the cost is one
+        // 32×24 luminance reduction (~50 µs) and the data is consumed
+        // by _workerOracleMotion / _gameVelocityToRollbackMotion any
+        // time motion smoothing is enabled. Was previously gated on
+        // RB_SHADOW_MOTION_ORACLE so motion-smoothing fell through to
+        // live-canvas sampling, which produced the "triangles" artifact.
+        if (msg.frame !== _knWorkerCog.lastFrame) {
           _knWorkerCog.lastFrame = msg.frame;
           let sumX = 0,
             sumY = 0,
@@ -2943,6 +3153,20 @@
 
   const _shadowPostStep = (frame, inputs, reason = 'normal', count = 1, force = false) => {
     if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
+    // ── Worker-coproc queue priority ───────────────────────────────────
+    // While a 'rollback-replay' is in flight, suppress new 'step'
+    // messages so the worker's postMessage queue drains and the
+    // rollback-replay handler runs sooner. Worker is single-threaded
+    // and processes messages FIFO; queueing more steps behind a pending
+    // rollback-replay just adds tail latency to the reply main is
+    // blocked on. The gate at the top of the C-rollback path freezes
+    // the emulator while pending, so missing a few step messages here
+    // doesn't desync the worker — main will catch the worker up via
+    // its lockstep stepping after the apply completes.
+    if (!force && _workerCoprocPending) {
+      _getShadowStats().droppedSteps++;
+      return false;
+    }
     if (!force && _rbShadowInFlight >= RB_SHADOW_MAX_IN_FLIGHT) {
       _getShadowStats().droppedSteps++;
       return false;
@@ -3378,7 +3602,7 @@
       // this rollback are measured against the moment the freeze
       // started. Use the most recent worker COG sample as baseline;
       // the worker is running ~30 fps so it's at most ~33 ms stale.
-      if (RB_SHADOW_MOTION_ORACLE) {
+      {
         const hist = _knWorkerCog.history;
         const last = hist[hist.length - 1];
         _knWorkerCog.baseline = last ? { cogX: last.cogX, cogY: last.cogY, frame: last.frame } : null;
@@ -3492,7 +3716,7 @@
     // delta from a fresh baseline, not from the previous freeze's
     // start. Otherwise consecutive rollbacks compose translates
     // unboundedly.
-    if (RB_SHADOW_MOTION_ORACLE) _knWorkerCog.baseline = null;
+    _knWorkerCog.baseline = null;
     const keepShadowNudge = RB_REPLAY_MOTION_NUDGE && _rbShadowVisible && _rbShadowOverlay && !RB_SHADOW_PERSISTENT;
     if (keepShadowNudge) _cancelRollbackMotionSmoothing();
     else _resetRollbackMotionSmoothing();
@@ -12047,6 +12271,20 @@
         return;
       }
 
+      // ── Worker-coproc wait gate ──────────────────────────────────────
+      // While a worker-coprocessor replay is in flight, the C engine has
+      // already rewound to (targetFrame - replayDepth) and main has cleared
+      // its replay state. We must NOT advance the emulator forward (no
+      // input drain, no kn_pre_tick, no step) until the worker replies
+      // with corrected state at applyFrame=targetFrame. The visual freeze
+      // overlay covers the canvas during this brief wait. If the wait
+      // exceeds RB_WORKER_COPROC_TIMEOUT_MS the dispatch's setTimeout
+      // calls _workerCoprocAbort which clears pending and falls back to
+      // local-replay for subsequent rollbacks.
+      if (_workerCoprocPending) {
+        return;
+      }
+
       // ── Hybrid input stall ───────────────────────────────────────────
       // Three modes, one goal: never let the local peer run so far ahead
       // that rollback can't correct a misprediction.
@@ -12680,6 +12918,125 @@
       }
 
       if (catchingUp === 2) {
+        // ── Worker-as-replay-coprocessor branch (option D) ─────────────
+        // When ?workerCoproc=1, hand the replay off to the shadow
+        // worker instead of doing it on main. The worker has its own
+        // rb engine + state ring (initialized in lockstep via
+        // 'rollback-init' message), so it can perform the same replay
+        // and ship back the corrected state at the target frame.
+        // Main meanwhile clears its own replay state so subsequent
+        // ticks don't re-enter this branch, then waits for the
+        // worker's reply (visible as a brief freeze, hopefully shorter
+        // than main's own replay because the worker isn't constrained
+        // by main's rAF cadence).
+        if (
+          RB_WORKER_COPROC &&
+          !_workerCoprocAborted &&
+          _rbShadowReady &&
+          _rbShadowWorker &&
+          !_rbShadowFailed &&
+          !_workerCoprocPending &&
+          tickMod._kn_clear_replay_state &&
+          tickMod._kn_apply_split_state_partial
+        ) {
+          const targetFrame = _frameNum;
+          // Build the full set of confirmed inputs spanning the
+          // rollback window so worker can advance its ring forward
+          // with corrected values. Walk back from targetFrame; for
+          // each frame in [targetFrame-replayDepth, targetFrame), pull
+          // the input each slot recorded then.
+          const inputsForWorker = [];
+          for (let f = targetFrame - replayDepth; f < targetFrame; f++) {
+            if (f < 0) continue;
+            for (let s = 0; s < rb_numPlayers; s++) {
+              let inp;
+              if (s === _playerSlot) {
+                inp = _localInputs[f] || KNShared.ZERO_INPUT;
+              } else {
+                inp = _rbGetInput(tickMod, s, f) || _remoteInputs[s]?.[f] || KNShared.ZERO_INPUT;
+              }
+              inputsForWorker.push({
+                slot: s,
+                frame: f,
+                buttons: inp.buttons | 0,
+                lx: inp.lx | 0,
+                ly: inp.ly | 0,
+                cx: inp.cx | 0,
+                cy: inp.cy | 0,
+              });
+            }
+          }
+          const seq = ++_workerCoprocSeq;
+          try {
+            _rbShadowWorker.postMessage({
+              type: 'rollback-replay',
+              seq,
+              targetFrame,
+              depth: replayDepth,
+              inputs: inputsForWorker,
+            });
+            const dispatchedAt = performance.now();
+            // Schedule a timeout so a lost/slow worker reply doesn't
+            // wedge the demo forever. On fire: auto-disable workerCoproc
+            // and clear pending so the next tick can advance again. The
+            // emulator state at this moment is rewound to
+            // (targetFrame - replayDepth) — abort just lets it run
+            // forward from there with the (now-correct) input ring,
+            // converging back to the same frame the worker would have
+            // produced. _frameNum still equals targetFrame, so we
+            // realign it to rb.frame on abort.
+            const timeoutId = setTimeout(() => {
+              if (_workerCoprocPending?.seq !== seq) return;
+              _workerCoprocStats.timeouts++;
+              _workerCoprocAbort(`reply timeout seq=${seq} after ${RB_WORKER_COPROC_TIMEOUT_MS}ms`);
+              const mod = window.EJS_emulator?.gameManager?.Module;
+              if (mod?._kn_get_frame) {
+                _frameNum = mod._kn_get_frame();
+                KNState.frameNum = _frameNum;
+              }
+              _hideRollbackVisualFreeze();
+            }, RB_WORKER_COPROC_TIMEOUT_MS);
+            _workerCoprocPending = { seq, targetFrame, depth: replayDepth, dispatchedAt, timeoutId };
+            _workerCoprocStats.dispatched++;
+            _syncLog(
+              `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}`,
+            );
+            // Clear main's own replay state so kn_pre_tick on next
+            // tick doesn't re-trigger replay branch. The worker-coproc
+            // wait gate at the top of the C-rollback path will then
+            // freeze the emulator at the rewound state until the worker
+            // reply arrives (or timeout fires).
+            tickMod._kn_clear_replay_state();
+            // Visual freeze overlay covers the canvas during the
+            // ~20-30ms wait. We deliberately do NOT enable headless
+            // mode: the emulator isn't ticking forward (gate blocks
+            // it), so there's nothing to suppress paints from. Keeping
+            // headless off means if the gate or worker fails open,
+            // recovery paints land naturally.
+            if (!_showRollbackVisualFreeze(replayDepth, localInput)) _startRollbackCanvasNudge(localInput, replayDepth);
+            // Lazy-start the frame-advance watchdog. Catches "demo
+            // hangs" cases the dispatch timeout can't (e.g., reply
+            // arrived but apply threw, leaving runner dead).
+            if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
+            _pushTickProfile({
+              f: _frameNum,
+              path: 'replay',
+              total: performance.now() - _t0,
+              preTick: _tPreTick - _t0,
+              burstMs: 0,
+              burstSteps: 0,
+              workerCoproc: true,
+            });
+            _pushRbProbe('replay');
+            return;
+          } catch (e) {
+            _syncLog(`WORKER-COPROC dispatch failed: ${e?.message || e} — falling back to main replay`);
+            _workerCoprocPending = null;
+            _workerCoprocStats.dispatchFailures++;
+            // fall through to main's local replay
+          }
+        }
+
         const burstStart = performance.now();
         let burstSteps = 0;
         let replayDone = false;
@@ -12879,15 +13236,18 @@
       if (!_rbVisualFreezeActive && _rbVisualFreezeEnabled && _frameNum % RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES === 0) {
         _captureRollbackVisualSnapshot();
       }
-      // Sample on-screen motion for the canvas-velocity-driven motion
-      // smoothing path (see _gameVelocityToRollbackMotion). Runs once
-      // per tick after stepOneFrame so the live canvas has the new
-      // frame; cheap (32×24 downsample readback). Skipped while a
-      // freeze overlay is up — sampling the overlay would zero the
-      // velocity since the snapshot is static.
-      if (RB_REPLAY_RDRAM_MOTION && !_rbVisualFreezeActive) {
-        _sampleLiveCanvasMotion();
-      }
+      // Live-canvas COG sampling was the original motion source for the
+      // freeze-overlay smoothing path, but ctx.drawImage(webglCanvas,
+      // ...) every 3 frames triggers a synchronous WebGL→2D readback
+      // (~3-4 ms) that flushes the GPU command queue mid-render. On
+      // some GPU/driver combos this leaves geometry partially
+      // composited and produces visible "triangles forming" artifacts
+      // in the live image. The worker is already reading its own
+      // ANGRYLION-rendered framebuffer for the shadow-frame-blit and
+      // motion-oracle paths; that COG is consumed in the shadow
+      // message handler and stored in _knWorkerCog. _workerOracleMotion
+      // serves it to the smoothing overlay without ever touching the
+      // user's WebGL canvas.
       // Post-step RNG reseed: the game advances RNG during the frame a
       // different number of times on each peer (from interrupt timing
       // differences). Re-seeding AFTER the step ensures the stored RNG

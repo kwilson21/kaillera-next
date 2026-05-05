@@ -126,6 +126,14 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_get_split_state_stats,|_kn_get_split_state_stats,_kn_get_split_state_for_shadow,|' Makefile.emulatorjs
         echo "    Added shadow split-state WASM export"
     fi
+    if grep -q "_kn_get_split_state_for_shadow" Makefile.emulatorjs && ! grep -q "_kn_apply_split_state_partial" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_split_state_for_shadow,|_kn_get_split_state_for_shadow,_kn_apply_split_state_partial,_kn_clear_replay_state,|' Makefile.emulatorjs
+        echo "    Added selective state-adopt + replay-clear WASM exports"
+    fi
+    if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_save_endpoint_state" Makefile.emulatorjs; then
+        sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_save_endpoint_state,|' Makefile.emulatorjs
+        echo "    Added save-endpoint WASM export"
+    fi
     # VI register accessors for shadow-worker framebuffer readback.
     # Anchored on _kn_get_rdram_size which is already in the export list.
     if grep -q "_kn_get_rdram_size" Makefile.emulatorjs && ! grep -q "_kn_get_vi_origin" Makefile.emulatorjs; then
