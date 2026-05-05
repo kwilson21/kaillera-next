@@ -1383,21 +1383,6 @@
       const raw = _urlParams.get('replayVisualFreeze') ?? localStorage.getItem('kn-replay-visual-freeze');
       if (raw === '1') return true;
       if (raw === '0') return false;
-      // Default ON for Mode 2. The worker coproc dispatch + apply takes
-      // ~14 ms regardless of replay depth, and during that gap the live
-      // canvas would otherwise show the pre-dispatch state then jump
-      // suddenly to the post-apply state — visible as input twitches when
-      // a user mashes buttons (each press triggers a rollback). The overlay
-      // holds the pre-dispatch frame until the corrected state is ready
-      // to paint, masking the jump. Mode 1 (local replay) keeps the
-      // legacy default-off because shallow rollbacks scrub in <16 ms and
-      // the overlay reads as a longer pause than the scrub.
-      const _isMode2 =
-        _urlParams.get('rollbackMode') === '2' ||
-        _urlParams.get('workerCoproc') === '1' ||
-        localStorage.getItem('kn-rollback-mode') === '2' ||
-        localStorage.getItem('kn-worker-coproc') === '1';
-      if (_isMode2) return true;
     } catch (_) {}
     return false;
   })();
@@ -1419,23 +1404,15 @@
     }
   })();
   // Minimum rollback depth before the snapshot-freeze fallback fires.
-  // For Mode 2 (worker coproc) every dispatch is ~14 ms regardless of
-  // depth, so even depth-1 mispredictions get the overlay (the gap
-  // would otherwise show as an input twitch). For Mode 1 (local replay)
-  // shallow rollbacks scrub in <16 ms and the overlay reads as a longer
-  // pause than the scrub, so default 3.
+  // Default 3 — depth 1-2 rollbacks (≤32 ms scrub at 60 Hz) read as a
+  // tiny stutter and the freeze overlay actively makes them feel
+  // longer. Set to 0 to freeze every rollback (legacy behavior).
   const RB_VISUAL_FREEZE_MIN_DEPTH = (() => {
     try {
       const raw =
         _urlParams.get('replayVisualFreezeMinDepth') ?? localStorage.getItem('kn-replay-visual-freeze-min-depth');
-      const _isMode2 =
-        _urlParams.get('rollbackMode') === '2' ||
-        _urlParams.get('workerCoproc') === '1' ||
-        localStorage.getItem('kn-rollback-mode') === '2' ||
-        localStorage.getItem('kn-worker-coproc') === '1';
-      const _default = _isMode2 ? 1 : 3;
-      const parsed = raw === null ? _default : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return _default;
+      const parsed = raw === null ? 3 : parseInt(raw, 10);
+      if (!Number.isFinite(parsed)) return 3;
       return Math.max(0, Math.min(8, parsed));
     } catch (_) {
       return 3;
