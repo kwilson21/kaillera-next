@@ -1033,7 +1033,32 @@
           // saves to ring[rb.frame % ring_size], so we need rb.frame ==
           // targetFrame for the lookup at line below to find the slot.
           // kn_set_frame requires pending_rollback < 0 and replay_remaining
-          // == 0 — both true here once the loop finishes.
+          // == 0 — both true here once the loop finishes IF the worker
+          // entered the replay with rb.frame == targetFrame. If the
+          // worker drifted ahead (rb.frame > targetFrame at dispatch),
+          // the C engine computes its own internal replay_depth =
+          // rb.frame_at_dispatch - startFrame > depth_js. After depth_js
+          // iterations, rb.frame == targetFrame but replay_remaining =
+          // (drift > 0) is left non-zero. kn_set_frame is then silently
+          // rejected by its guard, kn_save_endpoint_state still writes to
+          // ring[targetFrame % ring_size] (since rb.frame == targetFrame),
+          // but replay_remaining > 0 poisons the engine for subsequent
+          // stepOnce calls — the next kn_pre_tick re-enters the catching-up
+          // branch and writes garbage ring slots.
+          //
+          // Surface the drift loudly: check rb.frame before set_frame
+          // (the path is always entered with rb.frame == targetFrame in
+          // the no-drift case). If it differs, reject the job so main
+          // can recover via _coprocRecover instead of silently corrupting
+          // the worker's ring.
+          const preSetFrame = mod._kn_get_frame ? mod._kn_get_frame() : targetFrame;
+          if (preSetFrame !== targetFrame) {
+            return reject(
+              `worker drifted: rb.frame=${preSetFrame} but targetFrame=${targetFrame} ` +
+                `(diff=${preSetFrame - targetFrame}); kn_set_frame would be silently rejected ` +
+                `due to non-zero replay_remaining`,
+            );
+          }
           if (mod._kn_set_frame) mod._kn_set_frame(targetFrame);
           if (mod._kn_save_endpoint_state) {
             const saveRc = mod._kn_save_endpoint_state();

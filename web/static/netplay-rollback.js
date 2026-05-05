@@ -2387,6 +2387,16 @@
           _workerCoprocStats.failed++;
           const tickMod = window.EJS_emulator?.gameManager?.Module;
           _shadowLog(`rollback-replay-result FAILED seq=${pending.seq}: ${msg.error}`);
+          // Symmetric with the apply-export-missing branch (line ~2204):
+          // when the worker rejects the dispatch (ring slot stale, reject()
+          // condition, etc.), permanent worker failures should disable
+          // worker coproc and fall through to local replay. Without this,
+          // every subsequent rollback re-dispatches, gets a quick ok:false,
+          // and converges via _coprocRecover frame-by-frame over depth × 16ms
+          // (~112 ms at depth=7) — strictly worse than Mode 1's ~65 ms
+          // burst-replay. Call _workerCoprocAbort to flip the flag and
+          // route future rollbacks through local replay.
+          _workerCoprocAbort(`worker rejected replay seq=${pending.seq}: ${msg.error || 'unknown'}`);
           _coprocRecover(tickMod, 'worker-coproc-fail');
         }
       }
@@ -13755,12 +13765,20 @@
         //  3rd+ throw: disable C rollback entirely. Same-frame trap means
         //   local replay also OOBs — fall back to legacy lockstep.
         if (consecutiveThrows === 1 && !_workerCoprocAborted) {
-          _workerCoprocAborted = true;
-          try {
-            _syncLog(
-              `C-ROLLBACK-FALLBACK first throw at f=${_frameNum} — disabling worker coproc (local replay still active)`,
-            );
-          } catch (_) {}
+          // Route through _workerCoprocAbort() — direct
+          // `_workerCoprocAborted = true` would skip the cleanup that
+          // cancels any in-flight dispatch's pending timeoutId, nulls
+          // _workerCoprocPending, and stops the watchdog interval.
+          // Without that, a worker reply arriving after the C throw
+          // would still match the pending seq and call
+          // _kn_apply_split_state_partial on the just-faulted engine,
+          // potentially corrupting state or triggering a second throw.
+          // The 200 ms timeout would then call _workerCoprocAbort()
+          // which returns early (flag already true) and never nulls
+          // _workerCoprocPending, leaving it permanently set.
+          _workerCoprocAbort(
+            `C-rollback throw on first consecutive at f=${_frameNum} — disabling worker coproc (local replay still active)`,
+          );
         }
         if (consecutiveThrows >= 3 && _useCRollback) {
           _useCRollback = false;
