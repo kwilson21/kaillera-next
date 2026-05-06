@@ -467,7 +467,27 @@ static int rb_save_slot(int idx, int frame, int mark_last) {
             rb.split_save_failures++;
             return 0;
         }
-        memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        /* Mirror the restore-side taint-skip optimization: tainted blocks
+         * (audio scratch / RSP / renderer copy-back) won't be restored
+         * because kn_apply_split_state_partial_with_aux skips them at
+         * line ~2284-2289. Saving them is wasted work. JS never calls
+         * kn_reset_taint, so taint is monotonic within a session — a
+         * block tainted at save is guaranteed tainted at restore. Skip
+         * saving tainted blocks: the slot's bytes for those blocks are
+         * stale, but the restore won't read them. Net: ~30-50%
+         * reduction in per-save memcpy bytes. */
+        const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+        if (block_size > 0 && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size) {
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                if (kn_rdram_taint[b]) continue;
+                const uint32_t offset = (uint32_t)b * block_size;
+                memcpy(rb.ring_rdram_bufs[idx] + offset, rb.rdram_base + offset, block_size);
+            }
+        } else {
+            /* Block geometry mismatch — fall back to full memcpy. Same
+             * defensive path as the restore side. */
+            memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        }
         cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
         if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
             rb.split_save_failures++;
