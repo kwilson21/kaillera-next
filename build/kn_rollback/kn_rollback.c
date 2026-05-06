@@ -2187,6 +2187,10 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
     out[6] = (uint32_t)(uintptr_t)((rb.ring_hle_state && rb.ring_hle_state[idx]) ? rb.ring_hle_state[idx] : NULL);
     out[7] = (rb.ring_hle_state && rb.ring_hle_state[idx] && rb.hle_state_size > 0) ? (uint32_t)rb.hle_state_size : 0;
     out[8] = (uint32_t)target;
+    if (count >= 10) {
+        out[9] = (uint32_t)rb.ring_sf_state[idx];
+        return 10;
+    }
     return 9;
 }
 
@@ -2204,6 +2208,11 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
  * choices (R4300 + RSP register state, scheduler state, etc. — none of
  * the rendering plugins touch CPU state).
  *
+ * The aux-aware entry point also restores the per-slot sidecars that
+ * rb_restore_slot_state() restores on the local replay path: SoftFloat,
+ * hidden Remix state, and HLE state. Worker coproc must use that entry
+ * point; CPU/RDRAM alone is not a complete rollback state.
+ *
  * Returns 0 on success, negative error codes on failure:
  *   -1: rollback engine not initialized
  *   -2: not using split-rdram backend (this function is split-state only)
@@ -2213,6 +2222,8 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
  *   -6: KN_TAINT_BLOCKS does not evenly divide split_rdram_size — refuse
  *       the apply rather than do a full memcpy that would clobber renderer-
  *       private blocks. JS recovers via local replay.
+ *   -7: hidden-state sidecar missing or wrong size
+ *   -8: HLE-state sidecar missing or wrong size
  *
  * After success, rb.frame is set to `frame` and rb.did_restore is raised
  * so JS can call _refreshRunnerAfterRollbackRestore to re-capture the
@@ -2221,10 +2232,13 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int kn_apply_split_state_partial(
+int kn_apply_split_state_partial_with_aux(
     const uint8_t *cpu_bytes, uint32_t cpu_size,
     const uint8_t *rdram_bytes, uint32_t rdram_size,
-    int frame
+    int frame,
+    int softfloat_state,
+    const uint32_t *hidden_state, uint32_t hidden_size,
+    const uint8_t *hle_state, uint32_t hle_size
 ) {
     if (!rb.initialized) return -1;
     if (!rb_using_split_state()) return -2;
@@ -2232,11 +2246,16 @@ int kn_apply_split_state_partial(
     if (!rdram_bytes || rdram_size == 0) return -4;
     if (rdram_size != rb.split_rdram_size) return -4;
     if (!rb_ensure_rdram_base() || !rb.rdram_base) return -5;
-
-    /* CPU state: full adoption. Worker's CPU state at frame F is bit-
-     * identical to what main's would be at the same frame (verified
-     * by gp/game hash matches in the determinism check). */
-    if (kn_sync_write_cpu(cpu_bytes, cpu_size) != 0) return -3;
+    if (!hidden_state || hidden_size != (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t))) {
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: hidden sidecar invalid ptr=%p size=%u expected=%u",
+            (const void *)hidden_state, hidden_size, (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t)));
+        return -7;
+    }
+    if (!hle_state || hle_size == 0 || rb.hle_state_size <= 0 || hle_size != (uint32_t)rb.hle_state_size) {
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: hle sidecar invalid ptr=%p size=%u expected=%d",
+            (const void *)hle_state, hle_size, rb.hle_state_size);
+        return -8;
+    }
 
     /* RDRAM: copy only non-tainted blocks. KN_TAINT_BLOCKS divides the
      * 8 MB RDRAM into 128 × 64 KB blocks; the taint map flags blocks
@@ -2251,15 +2270,25 @@ int kn_apply_split_state_partial(
          * GL state) with the worker's ANGRYLION bytes — exactly the
          * corruption split-state exists to prevent. Refuse the apply so
          * JS can fall back to local replay (_coprocRecover). */
-        rb_log("FATAL kn_apply_split_state_partial: rdram_size=%u not divisible by KN_TAINT_BLOCKS=%d (block_size=%u) — refusing apply",
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: rdram_size=%u not divisible by KN_TAINT_BLOCKS=%d (block_size=%u) — refusing apply",
             rdram_size, (int)KN_TAINT_BLOCKS, block_size);
         return -6;
     }
+
+    /* CPU state: full adoption. Worker's CPU state at frame F is bit-
+     * identical to what main's would be at the same frame (verified
+     * by gp/game hash matches in the determinism check). Validate all
+     * sidecars and taint geometry first so error returns do not leave a
+     * half-applied state behind. */
+    if (kn_sync_write_cpu(cpu_bytes, cpu_size) != 0) return -3;
     for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
         if (kn_rdram_taint[b]) continue;
         const uint32_t offset = (uint32_t)b * block_size;
         memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
     }
+    sf_restore(softfloat_state);
+    if (rb.ring_hidden_state) kn_restore_hidden_state_impl(hidden_state);
+    if (rb.ring_hle_state) kn_hle_restore_from(hle_state);
 
     rb.frame = frame;
     rb.did_restore = 1;
@@ -2270,16 +2299,33 @@ int kn_apply_split_state_partial(
     rb.pending_rollback = -1;
     rb.replay_remaining = 0;
     rb.replay_depth = 0;
-    rb_log("kn_apply_split_state_partial: frame=%d cpu_size=%u rdram_size=%u tainted_blocks_skipped=%d",
-        frame, cpu_size, rdram_size, kn_get_tainted_block_count());
+    rb_log("kn_apply_split_state_partial_with_aux: frame=%d cpu_size=%u rdram_size=%u hidden=%u hle=%u sf=0x%x tainted_blocks_skipped=%d",
+        frame, cpu_size, rdram_size, hidden_size, hle_size, softfloat_state, kn_get_tainted_block_count());
     return 0;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_apply_split_state_partial(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame
+) {
+    (void)cpu_bytes;
+    (void)cpu_size;
+    (void)rdram_bytes;
+    (void)rdram_size;
+    (void)frame;
+    rb_log("kn_apply_split_state_partial: refused legacy CPU/RDRAM-only apply; use kn_apply_split_state_partial_with_aux");
+    return -7;
 }
 
 /* Clear pending rollback / active replay without applying any state.
  * Used by the worker-coprocessor JS path: when main detects catchingUp
  * and decides to delegate the replay to the worker, it calls this to
  * tell the C engine "stop trying to do the replay yourself; corrected
- * state will arrive shortly via kn_apply_split_state_partial."
+ * state will arrive shortly via kn_apply_split_state_partial_with_aux."
  *
  * Without this, the next kn_pre_tick re-enters the replay branch
  * because replay_remaining > 0, which would cause main to do the work

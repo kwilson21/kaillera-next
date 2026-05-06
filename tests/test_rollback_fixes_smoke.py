@@ -111,6 +111,8 @@ def test_rollback_fixes_smoke(page):
                 hasGetStateBackend: typeof m._kn_get_state_backend === 'function',
                 hasGetSplitStateStats: typeof m._kn_get_split_state_stats === 'function',
                 hasGetSplitStateForShadow: typeof m._kn_get_split_state_for_shadow === 'function',
+                hasApplySplitStatePartialWithAux:
+                    typeof m._kn_apply_split_state_partial_with_aux === 'function',
             };
         }"""
     )
@@ -128,5 +130,6 @@ def test_rollback_fixes_smoke(page):
         assert module_check["hasGetStateBackend"]
         assert module_check["hasGetSplitStateStats"]
         assert module_check["hasGetSplitStateForShadow"]
+        assert module_check["hasApplySplitStatePartialWithAux"]
 
     print("[smoke] ✓ all rollback hardening APIs present")

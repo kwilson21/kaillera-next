@@ -660,7 +660,13 @@
     // wantSample / black-detection path — we send framebuffer bytes
     // separately from the small "is it black?" probe.
     let fbPosted = false;
-    const fbThrottleKey = (currentFrame >>> 0) & 1;
+    // Throttle bitmap/RGBA frame sends to ~15 Hz instead of every other
+    // step (~30 Hz). The overlay only shows during the ~30-50 ms rollback
+    // freeze; even a 60 ms-old bitmap is "current enough" for that window
+    // and halving the send rate cuts the worker→main postMessage cost +
+    // worker-side transferToImageBitmap fence cost in half. message.force
+    // (used by prewarm requests) bypasses the throttle.
+    const fbThrottleKey = (currentFrame >>> 0) & 0x3;
     const sendFrame = stepped > 0 && message.wantFrame && (fbThrottleKey === 0 || message.force);
     const forceSample = message.reason === 'replay-runahead' || String(message.reason || '').startsWith('prewarm');
     // When we sent a real framebuffer (which by definition isn't
@@ -671,27 +677,57 @@
     // non-black flag the main-thread frame handler just set.
     const sample = stepped > 0 && message.wantSample && !sendFrame ? sampleFrameBlack(forceSample) : lastFrameSample;
     if (sendFrame) {
-      try {
-        const fb = readFramebuffer();
-        if (fb && fb.rgba && fb.width > 0 && fb.height > 0) {
-          // Make a copy that we can transfer (the persistent buffer
-          // is reused; transferring would detach it). For low overhead
-          // we send a sliced ArrayBuffer.
-          const copy = new Uint8ClampedArray(fb.rgba);
-          post(
-            {
-              type: 'frame',
-              seq: message.seq | 0,
-              frame: currentFrame,
-              width: fb.width,
-              height: fb.height,
-              rgba: copy.buffer,
-            },
-            [copy.buffer],
-          );
-          fbPosted = true;
+      // ImageBitmap path (preferred). The worker's OffscreenCanvas IS
+      // the WebGL drawing buffer the GLideN64 RDP plugin renders to.
+      // canvas.transferToImageBitmap() atomically captures it and
+      // hands ownership to main as a transferable ImageBitmap — main
+      // can blit to a sibling canvas via bitmaprenderer (GPU→GPU,
+      // no readPixels). Bypasses the entire RDRAM-readback path
+      // which only worked under ANGRYLION (which our WASM build can't
+      // actually run; see project_rollback_blackflicker_fix_may5.md).
+      if (canvas && typeof canvas.transferToImageBitmap === 'function') {
+        try {
+          const bmp = canvas.transferToImageBitmap();
+          if (bmp && bmp.width > 0 && bmp.height > 0) {
+            post(
+              {
+                type: 'frame-bitmap',
+                seq: message.seq | 0,
+                frame: currentFrame,
+                width: bmp.width,
+                height: bmp.height,
+                bitmap: bmp,
+              },
+              [bmp],
+            );
+            fbPosted = true;
+          }
+        } catch (_) {
+          // transferToImageBitmap can fail on some WebGL contexts
+          // (e.g., context was lost). Fall through to the legacy
+          // RDRAM path below.
         }
-      } catch (_) {}
+      }
+      if (!fbPosted) {
+        try {
+          const fb = readFramebuffer();
+          if (fb && fb.rgba && fb.width > 0 && fb.height > 0) {
+            const copy = new Uint8ClampedArray(fb.rgba);
+            post(
+              {
+                type: 'frame',
+                seq: message.seq | 0,
+                frame: currentFrame,
+                width: fb.width,
+                height: fb.height,
+                rgba: copy.buffer,
+              },
+              [copy.buffer],
+            );
+            fbPosted = true;
+          }
+        } catch (_) {}
+      }
     }
     // When we successfully posted a framebuffer message, the main
     // thread already has a real, non-black frame in hand. Force the
@@ -973,45 +1009,96 @@
           // input at startFrame that differs from what was previously
           // there — the misprediction handler then sets pending_rollback.
           //
-          // For this v1 implementation we trust that the inputs main
-          // sent already triggered the rollback machinery. We just
-          // step `depth` frames; pre_tick's replay branch handles the
-          // restore on the first call automatically because
-          // pending_rollback is set.
+          // The misprediction-trigger reliance is unreliable for the
+          // worker — the worker's stepOnce eagerly feeds REMOTE inputs
+          // as REAL via kn_feed_input(slot, applyFrame, ...), so its
+          // predicted[s][idx] flag is virtually never set. When main
+          // dispatches with corrected inputs, the worker's kn_feed_input
+          // calls above don't see a stale prediction to compare against
+          // → no pending_rollback → first kn_pre_tick returns 0 → the
+          // legacy v1 path then rejected with "rollback did not trigger".
+          // Replace with deterministic manual restore: clear any leftover
+          // replay state, restore the worker's saved RDRAM/CPU at
+          // startFrame, force rb.frame back to startFrame, then step
+          // forward `depth` times writing controllers ourselves (the C
+          // engine's normal-step path doesn't write controllers — JS
+          // owns that). After the loop rb.frame == targetFrame and we
+          // can save endpoint + ship.
+          if (
+            !mod?._kn_clear_replay_state ||
+            !mod?._kn_restore_frame ||
+            !mod?._kn_set_frame ||
+            !mod?._kn_write_controller ||
+            !mod?._kn_get_input ||
+            !mod?._kn_save_endpoint_state
+          ) {
+            return reject(
+              'manual-restore exports missing (clear_replay/restore_frame/set_frame/write_ctrl/get_input/save_endpoint)',
+            );
+          }
+          mod._kn_clear_replay_state();
+          if (!mod._kn_restore_frame(startFrame)) {
+            return reject(`kn_restore_frame failed for startFrame=${startFrame} (ring slot stale)`);
+          }
+          mod._kn_set_frame(startFrame);
+          if ((mod._kn_get_frame?.() ?? startFrame) !== startFrame) {
+            return reject(`kn_set_frame(${startFrame}) ineffective; rb.frame=${mod._kn_get_frame?.() ?? '?'}`);
+          }
+          // Scratch buffer for kn_get_input output (5 int32).
+          const scratchPtr = mod._malloc(20);
+          if (!scratchPtr) return reject('scratch alloc for kn_get_input failed');
           let stepped = 0;
-          for (let i = 0; i < depth; i++) {
-            const frameToStep = startFrame + i;
-            // Find the local slot's input for this frame (if main sent it).
-            let localInput = null;
-            for (const inp of inputs) {
-              if (inp && (inp.slot | 0) === rbLocalSlot && (inp.frame | 0) === frameToStep) {
-                localInput = inp;
-                break;
+          try {
+            for (let i = 0; i < depth; i++) {
+              const frameToStep = startFrame + i;
+              const applyFrame = frameToStep - rbDelayFrames;
+              // LOCAL input at frameToStep — from corrected inputs[].
+              let localInput = null;
+              for (const inp of inputs) {
+                if (inp && (inp.slot | 0) === rbLocalSlot && (inp.frame | 0) === frameToStep) {
+                  localInput = inp;
+                  break;
+                }
               }
+              const li = localInput || { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+              mod._kn_write_controller(rbLocalSlot, li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0);
+              // REMOTE controllers from worker's input ring at applyFrame.
+              for (let s = 0; s < 4; s++) {
+                if (s === rbLocalSlot) continue;
+                if (s >= rbNumPlayers) continue;
+                if (applyFrame < 0) {
+                  mod._kn_write_controller(s, 0, 0, 0, 0, 0);
+                  continue;
+                }
+                const present = mod._kn_get_input(
+                  s,
+                  applyFrame,
+                  scratchPtr,
+                  scratchPtr + 4,
+                  scratchPtr + 8,
+                  scratchPtr + 12,
+                  scratchPtr + 16,
+                );
+                if (present) {
+                  const v = new Int32Array(mod.HEAPU8.buffer, scratchPtr, 5);
+                  mod._kn_write_controller(s, v[0], v[1], v[2], v[3], v[4]);
+                } else {
+                  mod._kn_write_controller(s, 0, 0, 0, 0, 0);
+                }
+              }
+              mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
+              captureSavedRunner();
+              if (!savedRunner) {
+                return reject(`savedRunner missing at i=${i} frame=${frameToStep}`);
+              }
+              savedRunner((frameToStep + 1) * FRAME_MS);
+              mod._kn_post_tick();
+              stepped++;
             }
-            const li = localInput || { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
-            // kn_set_frame is rejected during replay/rollback (pending_rollback>=0
-            // at i=0, replay_remaining>0 at i>=1), so calls inside the loop are
-            // dead. We reset rb.frame explicitly AFTER the loop, before
-            // kn_save_endpoint_state, so the endpoint lands in ring[targetFrame].
-            const catchup = mod._kn_pre_tick(li.buttons | 0, li.lx | 0, li.ly | 0, li.cx | 0, li.cy | 0, -1);
-            // R1-R6 fail-loud: at i=0 the kn_feed_input calls above must have
-            // queued pending_rollback so kn_pre_tick takes the restore path
-            // and returns 2 (catching up). If it returns anything else, the
-            // ring slot at startFrame is stale or the rollback machinery
-            // didn't trigger — stepping `depth` frames forward from worker's
-            // current position would silently produce wrong endpoint state
-            // for main. Reject the job so main's _coprocRecover handles it
-            // via local replay instead.
-            if (i === 0 && catchup !== 2) {
-              return reject(
-                `rollback did not trigger on first pre_tick (returned ${catchup}); ring slot at startFrame=${startFrame} likely stale`,
-              );
-            }
-            captureSavedRunner();
-            if (savedRunner) savedRunner((frameToStep + 1) * FRAME_MS);
-            mod._kn_post_tick();
-            stepped++;
+          } finally {
+            try {
+              mod._free(scratchPtr);
+            } catch (_) {}
           }
 
           // After the replay loop, the live state is "entering-targetFrame"
@@ -1065,34 +1152,43 @@
             if (saveRc !== 0) return reject(`save-endpoint failed rc=${saveRc}`);
           }
           // Read back the freshly computed state at targetFrame.
-          // kn_get_split_state_for_shadow returns an array of 9 uint32s
-          // describing the ring slot's RDRAM + CPU + hidden + HLE
-          // pointers and sizes.
-          const outBytes = 9 * 4;
+          // kn_get_split_state_for_shadow returns up to 10 uint32s:
+          // rdramPtr, rdramSize, cpuPtr, cpuSize, hiddenPtr, hiddenSize,
+          // hlePtr, hleSize, savedFrame, softfloatState. The legacy
+          // export returned 9 (no softfloatState); main accepts both
+          // shapes via the result-count check below.
+          const outWords = 10;
+          const outBytes = outWords * 4;
           const outPtr = mod._malloc(outBytes);
           if (!outPtr) return reject('split-state out alloc failed');
-          const out = new Uint32Array(mod.HEAPU32.buffer, outPtr, 9);
-          // Query at targetFrame (which we just saved via save_endpoint)
-          // when available, otherwise fall back to the older "T-1, accept
-          // a redundant repaint" path.
+          const out = new Uint32Array(mod.HEAPU32.buffer, outPtr, outWords);
           const queryFrame = mod._kn_save_endpoint_state ? targetFrame : targetFrame - 1;
-          const result = mod._kn_get_split_state_for_shadow(queryFrame, outPtr, 9);
-          if (result !== 9) {
+          const result = mod._kn_get_split_state_for_shadow(queryFrame, outPtr, outWords);
+          if (result < 9) {
             mod._free(outPtr);
             return reject(`split-state-export failed for frame=${queryFrame} (returned ${result})`);
           }
-          // Copy bytes out of WASM heap so we can transfer them.
-          // Layout: rdramPtr, rdramSize, cpuPtr, cpuSize, hiddenPtr,
-          // hiddenSize, hlePtr, hleSize, savedFrame.
           const rdramPtr = out[0];
           const rdramSize = out[1];
           const cpuPtr = out[2];
           const cpuSize = out[3];
+          const hiddenPtr = out[4];
+          const hiddenSize = out[5];
+          const hlePtr = out[6];
+          const hleSize = out[7];
           const savedFrame = out[8];
-          // Copy to detachable buffers (Uint8Array slice).
+          const softfloatState = result >= 10 ? out[9] | 0 : (mod._kn_get_softfloat_state?.() ?? 0);
           const rdramBytes = mod.HEAPU8.slice(rdramPtr, rdramPtr + rdramSize);
           const cpuBytes = mod.HEAPU8.slice(cpuPtr, cpuPtr + cpuSize);
+          const hiddenBytes =
+            hiddenPtr && hiddenSize ? mod.HEAPU8.slice(hiddenPtr, hiddenPtr + hiddenSize) : new Uint8Array(0);
+          const hleBytes = hlePtr && hleSize ? mod.HEAPU8.slice(hlePtr, hlePtr + hleSize) : new Uint8Array(0);
           mod._free(outPtr);
+          if (!hiddenBytes.byteLength || !hleBytes.byteLength) {
+            return reject(
+              `split-state-export missing sidecars hidden=${hiddenBytes.byteLength} hle=${hleBytes.byteLength}`,
+            );
+          }
 
           post(
             {
@@ -1106,8 +1202,13 @@
               rdramSize,
               cpu: cpuBytes.buffer,
               cpuSize,
+              hidden: hiddenBytes.buffer,
+              hiddenSize: hiddenBytes.byteLength,
+              hle: hleBytes.buffer,
+              hleSize: hleBytes.byteLength,
+              softfloatState,
             },
-            [rdramBytes.buffer, cpuBytes.buffer],
+            [rdramBytes.buffer, cpuBytes.buffer, hiddenBytes.buffer, hleBytes.buffer],
           );
           currentFrame = targetFrame;
           setStatusValue(STATUS_IDX.frame, currentFrame);

@@ -620,12 +620,52 @@
   // end of that tick instead of deferring to the next forward tick.
   let _replayStepsThisRollback = 0;
   let _replayOriginalDepth = 0;
+  // Hash-based paint suppression telemetry. At rollback START, capture
+  // kn_gameplay_hash(rollback_target_frame) — that's the hash of the
+  // pre-rollback (predicted) state at frame N as it currently sits in
+  // the ring slot. After replay completes, compare to the post-rollback
+  // hash at the same frame. When they're EQUAL the rollback was
+  // visually a no-op (typically: stick-jitter mispredict where the
+  // gameplay-hash addresses didn't budge), so paint-last-replay-frame's
+  // brief "predicted -> corrected" twitch is showing the user a
+  // transition that doesn't exist. Suppress the paint in that case
+  // and let the next normal tick paint frame N+1 naturally — the user
+  // sees one transition instead of two and no more "flash".
+  // For visually-different rollbacks (real character correction) we
+  // also suppress here: the visible delta between predicted and
+  // corrected within ~16 ms then between corrected and N+1 within
+  // another 16 ms reads as a "double-tap" jitter; skipping the early
+  // paint converts that into a single bigger transition (predicted ->
+  // N+1) which the eye integrates as motion rather than glitch.
+  // Net: trade ~16 ms of perceived latency for visibly smoother
+  // post-rollback transitions.
+  //
+  // 2026-05-05 real-video instrumentation correlated localized flash
+  // anomalies with hash-equal/no-op rollback paints under the legacy
+  // path. Default to the smoother suppression path; opt back into the
+  // legacy fast-paint behavior with ?paintLastReplayFrame=1.
+  const RB_PAINT_LAST_REPLAY_FRAME = (() => {
+    try {
+      const raw = _urlParams.get('paintLastReplayFrame') ?? localStorage.getItem('kn-paint-last-replay-frame');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+  let _rollbackPreHash = 0;
+  let _rollbackPreHashFrame = -1;
+  // Telemetry counters — exposed via knAdaptiveDebug() too for headless tests.
+  let _rollbackHashEqualCount = 0;
+  let _rollbackHashDifferCount = 0;
+  let _rollbackHashUnknownCount = 0;
   // ── Worker-as-replay-coprocessor (option D) ─────────────────────────
   // When ?workerCoproc=1, on misprediction main hands the replay off to
   // the shadow worker (which has its own rb engine, lockstep-stepped
   // with main) instead of running the replay locally. Worker computes
   // corrected state, posts the bytes back, main adopts via
-  // kn_apply_split_state_partial (CPU full + non-tainted RDRAM only).
+  // kn_apply_split_state_partial_with_aux when available, or legacy
+  // kn_apply_split_state_partial plus explicit hidden/HLE sidecar restores
+  // for older built cores.
   // Renderer-private RDRAM (tainted blocks) stays as main's, so
   // GLideN64's pending GL state isn't disturbed by ANGRYLION's bytes.
   // Rollback mode toggle.
@@ -634,7 +674,8 @@
   //     amortized burst — typical visible freeze ≈ 65 ms at depth=7.
   //   Mode 2: worker coprocessor. Main hands the replay off to the
   //     shadow worker and adopts its corrected state via
-  //     kn_apply_split_state_partial (CPU full + non-tainted RDRAM).
+  //     kn_apply_split_state_partial_with_aux, or legacy partial apply plus
+  //     explicit hidden/HLE sidecar restores on older built cores.
   //     Visible freeze ≈ 14 ms (one vsync) — bound by the worker's
   //     reply roundtrip and the next-paint scheduling latency.
   // Use ?rollbackMode=2 (or the legacy ?workerCoproc=1) to opt into
@@ -654,6 +695,19 @@
   let _workerCoprocLastFrameAdvance = 0;
   let _workerCoprocLastFrameNum = -1;
   let _workerCoprocWatchdogId = 0;
+  // Consecutive transient rejects (worker said no, or apply returned an error
+  // code). Reset to 0 on every successful dispatch. Above
+  // RB_WORKER_COPROC_REJECT_LIMIT we treat the rejections as structural and
+  // auto-disable; below it we just locally recover this single rollback and
+  // let the next dispatch try again. This is what lets the engine survive
+  // the post-init warmup window: when the first misprediction lands at
+  // (currentFrame - depth) < worker_init_frame, the worker's ring slot at
+  // startFrame is genuinely empty (worker init was less than `depth` frames
+  // ago, ring hasn't been populated yet). That single rollback can't be
+  // serviced and gracefully falls back to local replay, but a few frames
+  // later the ring has caught up and dispatches succeed at Mode 2 speeds.
+  let _workerCoprocConsecutiveRejects = 0;
+  const RB_WORKER_COPROC_REJECT_LIMIT = 8;
   const _workerCoprocStats = {
     dispatched: 0,
     completed: 0,
@@ -661,6 +715,8 @@
     dispatchFailures: 0,
     timeouts: 0,
     watchdogTrips: 0,
+    transientRejects: 0,
+    consecutiveRejects: 0,
     totalRoundtripMs: 0,
     maxRoundtripMs: 0,
   };
@@ -771,6 +827,10 @@
   let _rbShadowVisibleCommits = 0;
   let _rbRdpSkipActive = false;
   let _rbFullHeadlessActive = false;
+  let _rbAudioOutputSkipActive = false;
+  // Telemetry counters — exposed via knAdaptiveDebug() for headless tests.
+  let _rbAudioOutputSkipEnableCount = 0;
+  let _rbAudioOutputSkipDisableCount = 0;
   const RB_VISUAL_SNAPSHOT_MAX_AGE_FRAMES = 30;
   const RB_VISUAL_SNAPSHOT_INTERVAL_FRAMES = 4;
   const RB_SHADOW_STATUS = {
@@ -1015,6 +1075,20 @@
   let _adaptiveBurstCap = 2;
   let _adaptiveBurstCeiling = RB_REPLAY_BURST_HARD_CAP; // shrinks when an overshoot is observed
   let _consecutiveSafeReplayTicks = 0;
+  // Defense against the wouldFit math being lied to. The performance.now()
+  // override at ~10537 returns kn_get_cycle_time_ms during deterministic
+  // steps, and under heavy concurrent JS load (background captures,
+  // backgrounded tabs with throttled timers) the real-time samples used
+  // for _stepCostP90Ms can briefly read suspiciously low. Without a floor
+  // the wouldFit check `target * max(1.5, p90)` lets burst climb all the
+  // way to the hard cap while real per-step cost is still 4-5 ms. The
+  // resulting burst-of-8 tick costs ~40 ms wall-clock, dropping paints
+  // and producing visible freezes that don't match the configured cap.
+  // Floor projection at the typical SoftFloat step cost (~3.5 ms) so the
+  // wouldFit check stays conservative even when the running estimate is
+  // off; the real overshoot path (line ~1023) still owns the actual safety
+  // — this just keeps an artifact-low estimate from skipping past it.
+  const RB_STEP_COST_PROJECTION_FLOOR_MS = 3.5;
   const _observeReplayTick = (tickMs) => {
     if (RB_REPLAY_BURST_STATIC > 0) return; // user override; don't adapt
     if (tickMs > RB_BURST_PROBE_VSYNC_LIMIT_MS) {
@@ -1029,7 +1103,8 @@
       _consecutiveSafeReplayTicks++;
       if (_consecutiveSafeReplayTicks >= RB_BURST_PROBE_THRESHOLD) {
         const target = _adaptiveBurstCap + 1;
-        const wouldFit = target * Math.max(1.5, _stepCostP90Ms) <= RB_VSYNC_USABLE_MS;
+        const projectedStep = Math.max(RB_STEP_COST_PROJECTION_FLOOR_MS, _stepCostP90Ms);
+        const wouldFit = target * projectedStep <= RB_VSYNC_USABLE_MS;
         if (wouldFit && target <= _adaptiveBurstCeiling) {
           _adaptiveBurstCap = target;
           _consecutiveSafeReplayTicks = 0;
@@ -1062,6 +1137,22 @@
         adaptiveBurst: burst,
         adaptiveBudgetMs: +(burst * Math.max(1.5, _stepCostMedianMs)).toFixed(2),
         consecutiveSafeReplayTicks: _consecutiveSafeReplayTicks,
+        // Hash-based paint-suppression telemetry. equal = visual no-op
+        // rollbacks (would have been redundant paints under the legacy
+        // paint-last-replay-frame path). differ = real state corrections.
+        // unknown = pre-hash unavailable (common at boot / first rollback
+        // before ring populates).
+        rollbackHashEqual: _rollbackHashEqualCount,
+        rollbackHashDiffer: _rollbackHashDifferCount,
+        rollbackHashUnknown: _rollbackHashUnknownCount,
+        paintLastReplayFrame: RB_PAINT_LAST_REPLAY_FRAME,
+        // Audio-output skip during replay (Mode 1 perf): each enable
+        // pairs with a disable. If counts diverge, the lifecycle has a
+        // leak. enableCount also doubles as "rollbacks that toggled
+        // the flag" for cross-checking against rollbackEventsTotal.
+        replayAudioOutputSkip: RB_SKIP_AUDIO_OUTPUT_DURING_REPLAY,
+        replayAudioOutputSkipEnableCount: _rbAudioOutputSkipEnableCount,
+        replayAudioOutputSkipDisableCount: _rbAudioOutputSkipDisableCount,
       };
     };
     // Worker-coprocessor stats — call window.knWorkerCoprocStats() in
@@ -1331,6 +1422,30 @@
       const raw = _urlParams.get('fullHeadless') ?? localStorage.getItem('kn-full-headless');
       if (raw === '1') return true;
       if (raw === '0') return false;
+    } catch (_) {}
+    return true;
+  })();
+  // Defaulted ON. Short-circuits aiLenChanged() in the WASM core during
+  // replay frames — skips the sinc resampler (native FP) and the
+  // audio_batch_cb Asyncify yield to JS. RSP audio HLE still runs and
+  // the AI controller's internal state evolves identically (per
+  // build/patches/audio-backend-skip-output.patch), so determinism is
+  // preserved.
+  //
+  // Why default ON: replayed audio is bit-identical to the forward-pass
+  // audio that was already captured into the netplay FIFO during the
+  // initial tick. Re-running the resampler + JS callback during replay
+  // re-produces samples we already have — a strict waste of cycles AND
+  // a risk of double-writes into the kn_audio_buffer FIFO. Skipping is
+  // both a perf win (less work per replay step → smaller Mode 1 freeze)
+  // and a correctness win (no duplicate audio capture).
+  //
+  // Opt out via ?replaySkipAudio=0 if a regression is suspected.
+  const RB_SKIP_AUDIO_OUTPUT_DURING_REPLAY = (() => {
+    try {
+      const raw = _urlParams.get('replaySkipAudio') ?? localStorage.getItem('kn-replay-skip-audio');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
     } catch (_) {}
     return true;
   })();
@@ -2085,12 +2200,12 @@
     if (!mod?._kn_get_split_state_for_shadow || !mod?._malloc || !mod?._free || !mod.HEAPU8 || !mod.HEAPU32) {
       return null;
     }
-    const ptr = mod._malloc(9 * 4);
+    const ptr = mod._malloc(10 * 4);
     if (!ptr) return null;
     try {
-      const n = mod._kn_get_split_state_for_shadow(frame | 0, ptr, 9);
+      const n = mod._kn_get_split_state_for_shadow(frame | 0, ptr, 10);
       if (n < 9) return null;
-      const out = new Uint32Array(mod.HEAPU32.buffer, ptr, 9);
+      const out = new Uint32Array(mod.HEAPU32.buffer, ptr, 10);
       const rdramPtr = out[0] >>> 0;
       const rdramBytes = out[1] >>> 0;
       const cpuPtr = out[2] >>> 0;
@@ -2100,6 +2215,7 @@
       const hlePtr = out[6] >>> 0;
       const hleBytes = out[7] >>> 0;
       const snapshotFrame = out[8] | 0;
+      const softfloatState = n >= 10 ? out[9] | 0 : (mod._kn_get_softfloat_state?.() ?? 0);
       if (!rdramPtr || !rdramBytes || !cpuPtr || !cpuBytes) return null;
       const readSlice = (base, len) =>
         base && len ? new Uint8Array(mod.HEAPU8.buffer, base, len).slice() : new Uint8Array(0);
@@ -2109,6 +2225,7 @@
         cpu: readSlice(cpuPtr, cpuBytes),
         hidden: readSlice(hiddenPtr, hiddenBytes),
         hle: readSlice(hlePtr, hleBytes),
+        softfloatState,
       };
     } catch (e) {
       _shadowLog(`split-state-read failed ${e?.message || e}`);
@@ -2175,8 +2292,9 @@
       }
     } else if (msg.type === 'rollback-replay-result') {
       // Worker delivered the corrected state for a coprocessor replay.
-      // Apply it via kn_apply_split_state_partial (CPU full + non-tainted
-      // RDRAM only) and unblock further replays.
+      // Apply it via kn_apply_split_state_partial_with_aux when available,
+      // or legacy partial apply plus explicit sidecar restores on older
+      // built cores, and unblock further replays.
       if (!_workerCoprocPending || _workerCoprocPending.seq !== msg.seq) {
         _shadowLog(`rollback-replay-result for stale/unknown seq=${msg.seq}; ignoring`);
       } else {
@@ -2198,47 +2316,106 @@
         };
         if (msg.ok) {
           const tickMod = window.EJS_emulator?.gameManager?.Module;
-          if (!tickMod?._kn_apply_split_state_partial) {
+          const hasWasmBufferApi =
+            typeof tickMod?._malloc === 'function' && typeof tickMod?._free === 'function' && !!tickMod?.HEAPU8;
+          const hasAuxApply = typeof tickMod?._kn_apply_split_state_partial_with_aux === 'function';
+          const hasLegacySidecarApply =
+            typeof tickMod?._kn_apply_split_state_partial === 'function' &&
+            typeof tickMod?._kn_restore_hidden_state_impl === 'function' &&
+            typeof tickMod?._kn_hle_restore_from === 'function';
+          if (!hasWasmBufferApi || (!hasAuxApply && !hasLegacySidecarApply)) {
             _workerCoprocStats.failed++;
-            _shadowLog('rollback-replay-result: apply export missing — coproc disabled');
-            _workerCoprocAbort('apply export missing');
+            _shadowLog(
+              `rollback-replay-result: split apply unavailable malloc=${typeof tickMod?._malloc === 'function'} free=${typeof tickMod?._free === 'function'} heap=${!!tickMod?.HEAPU8} aux=${hasAuxApply} legacySidecars=${hasLegacySidecarApply}`,
+            );
+            _workerCoprocAbort('split-state apply exports missing');
             _coprocRecover(tickMod, 'worker-coproc-no-apply');
-          } else if (!msg.cpu || !msg.rdram) {
+          } else if (!msg.cpu || !msg.rdram || !msg.hidden || !msg.hle || !Number.isFinite(msg.softfloatState)) {
             _workerCoprocStats.failed++;
-            _shadowLog(`rollback-replay-result: missing payload cpu=${!!msg.cpu} rdram=${!!msg.rdram}`);
+            _shadowLog(
+              `rollback-replay-result: missing payload cpu=${!!msg.cpu} rdram=${!!msg.rdram} hidden=${!!msg.hidden} hle=${!!msg.hle} sf=${Number.isFinite(msg.softfloatState)}`,
+            );
+            _workerCoprocAbort('missing worker-coproc payload');
             _coprocRecover(tickMod, 'worker-coproc-no-payload');
           } else {
             try {
               const rdramBytes = new Uint8Array(msg.rdram);
               const cpuBytes = new Uint8Array(msg.cpu);
-              if (rdramBytes.length === 0 || cpuBytes.length === 0) {
+              const hiddenBytes = new Uint8Array(msg.hidden);
+              const hleBytes = new Uint8Array(msg.hle);
+              if (
+                rdramBytes.length === 0 ||
+                cpuBytes.length === 0 ||
+                hiddenBytes.length === 0 ||
+                hleBytes.length === 0
+              ) {
                 _workerCoprocStats.failed++;
-                _shadowLog(`rollback-replay-result: empty payload cpu=${cpuBytes.length} rdram=${rdramBytes.length}`);
+                _shadowLog(
+                  `rollback-replay-result: empty payload cpu=${cpuBytes.length} rdram=${rdramBytes.length} hidden=${hiddenBytes.length} hle=${hleBytes.length}`,
+                );
+                _workerCoprocAbort('empty worker-coproc payload');
                 _coprocRecover(tickMod, 'worker-coproc-empty');
               } else {
                 // Allocate WASM-side buffers, copy bytes, call apply.
                 const rdramPtr = tickMod._malloc(rdramBytes.length);
                 const cpuPtr = tickMod._malloc(cpuBytes.length);
-                if (!rdramPtr || !cpuPtr) {
+                const hiddenPtr = tickMod._malloc(hiddenBytes.length);
+                const hlePtr = tickMod._malloc(hleBytes.length);
+                if (!rdramPtr || !cpuPtr || !hiddenPtr || !hlePtr) {
                   if (rdramPtr) tickMod._free(rdramPtr);
                   if (cpuPtr) tickMod._free(cpuPtr);
+                  if (hiddenPtr) tickMod._free(hiddenPtr);
+                  if (hlePtr) tickMod._free(hlePtr);
                   _workerCoprocStats.failed++;
                   _shadowLog('rollback-replay-result: malloc failed');
+                  _workerCoprocAbort('worker-coproc malloc failed');
                   _coprocRecover(tickMod, 'worker-coproc-malloc-fail');
                 } else {
                   tickMod.HEAPU8.set(rdramBytes, rdramPtr);
                   tickMod.HEAPU8.set(cpuBytes, cpuPtr);
+                  tickMod.HEAPU8.set(hiddenBytes, hiddenPtr);
+                  tickMod.HEAPU8.set(hleBytes, hlePtr);
                   const applyFrame = pending.targetFrame;
-                  const result = tickMod._kn_apply_split_state_partial(
-                    cpuPtr,
-                    cpuBytes.length,
-                    rdramPtr,
-                    rdramBytes.length,
-                    applyFrame,
-                  );
-                  tickMod._free(rdramPtr);
-                  tickMod._free(cpuPtr);
+                  const applyMethod = hasAuxApply
+                    ? 'kn_apply_split_state_partial_with_aux'
+                    : 'kn_apply_split_state_partial+sidecars';
+                  let result = -99;
+                  try {
+                    if (hasAuxApply) {
+                      result = tickMod._kn_apply_split_state_partial_with_aux(
+                        cpuPtr,
+                        cpuBytes.length,
+                        rdramPtr,
+                        rdramBytes.length,
+                        applyFrame,
+                        msg.softfloatState | 0,
+                        hiddenPtr,
+                        hiddenBytes.length,
+                        hlePtr,
+                        hleBytes.length,
+                      );
+                    } else {
+                      result = tickMod._kn_apply_split_state_partial(
+                        cpuPtr,
+                        cpuBytes.length,
+                        rdramPtr,
+                        rdramBytes.length,
+                        applyFrame,
+                      );
+                      if (result === 0) {
+                        tickMod._kn_restore_hidden_state_impl(hiddenPtr);
+                        tickMod._kn_hle_restore_from(hlePtr);
+                      }
+                    }
+                  } finally {
+                    tickMod._free(rdramPtr);
+                    tickMod._free(cpuPtr);
+                    tickMod._free(hiddenPtr);
+                    tickMod._free(hlePtr);
+                  }
                   if (result === 0) {
+                    _workerCoprocConsecutiveRejects = 0;
+                    _workerCoprocStats.consecutiveRejects = 0;
                     // State adopted. Refresh the rAF runner (retro_unserialize
                     // equivalent invalidation). _refreshRunnerAfterRollbackRestore
                     // gates on _kn_rollback_did_restore which apply sets to 1.
@@ -2356,23 +2533,37 @@
                     _hudRollbackDepthSamples.push(pending.depth);
                     if (_hudRollbackDepthSamples.length > HUD_DEPTH_WINDOW) _hudRollbackDepthSamples.shift();
                     _syncLog(
-                      `WORKER-COPROC complete seq=${pending.seq} targetFrame=${applyFrame} depth=${pending.depth} roundtripMs=${roundtripMs.toFixed(1)} workerSavedFrame=${msg.savedFrame}`,
+                      `WORKER-COPROC complete seq=${pending.seq} targetFrame=${applyFrame} depth=${pending.depth} roundtripMs=${roundtripMs.toFixed(1)} workerSavedFrame=${msg.savedFrame} apply=${applyMethod}`,
                     );
                   } else {
                     // Apply returned non-zero. The C engine rejected the
                     // worker's payload (-2 wrong backend, -3 cpu_size, -4
                     // rdram_size mismatch, -5 rdram_base unavail, -6
-                    // taint-block divisibility broken). Each one means
-                    // the same payload shape will fail again — without
-                    // _workerCoprocAbort, every subsequent rollback runs
-                    // the full dispatch + 200ms timeout cycle before
-                    // local replay takes over, making Mode 2 strictly
-                    // worse than Mode 1 indefinitely. Match the
-                    // missing-export branch above: disable coproc for
-                    // the page-load and recover this rollback locally.
+                    // taint-block divisibility broken, -7/-8 sidecar
+                    // mismatch). Most non-zero codes are structural
+                    // (geometry / version mismatch) and will fail every
+                    // subsequent dispatch the same way — but treating
+                    // them as immediate aborts also kills Mode 2 on
+                    // benign races (e.g., a rebuilt worker briefly
+                    // missing a sidecar at boot). Allow up to
+                    // RB_WORKER_COPROC_REJECT_LIMIT consecutive non-zero
+                    // returns before disabling, falling back to local
+                    // replay for each one in the meantime. A real
+                    // structural failure trips the limit within
+                    // RB_WORKER_COPROC_REJECT_LIMIT rollbacks; a
+                    // transient one is absorbed.
                     _workerCoprocStats.failed++;
-                    _shadowLog(`rollback-replay-result: kn_apply_split_state_partial returned ${result}`);
-                    _workerCoprocAbort(`apply returned ${result}`);
+                    _workerCoprocConsecutiveRejects++;
+                    _workerCoprocStats.transientRejects++;
+                    _workerCoprocStats.consecutiveRejects = _workerCoprocConsecutiveRejects;
+                    _shadowLog(
+                      `rollback-replay-result: ${applyMethod} returned ${result} (consecutive=${_workerCoprocConsecutiveRejects}/${RB_WORKER_COPROC_REJECT_LIMIT})`,
+                    );
+                    if (_workerCoprocConsecutiveRejects >= RB_WORKER_COPROC_REJECT_LIMIT) {
+                      _workerCoprocAbort(
+                        `apply returned ${result} (${_workerCoprocConsecutiveRejects} consecutive rejects)`,
+                      );
+                    }
                     _coprocRecover(tickMod, 'worker-coproc-fail');
                   }
                 }
@@ -2380,23 +2571,36 @@
             } catch (e) {
               _workerCoprocStats.failed++;
               _shadowLog(`rollback-replay-result threw: ${e?.message || e}`);
+              _workerCoprocAbort('worker-coproc result handler threw');
               _coprocRecover(tickMod, 'worker-coproc-throw');
             }
           }
         } else {
           _workerCoprocStats.failed++;
+          _workerCoprocConsecutiveRejects++;
+          _workerCoprocStats.transientRejects++;
+          _workerCoprocStats.consecutiveRejects = _workerCoprocConsecutiveRejects;
           const tickMod = window.EJS_emulator?.gameManager?.Module;
-          _shadowLog(`rollback-replay-result FAILED seq=${pending.seq}: ${msg.error}`);
-          // Symmetric with the apply-export-missing branch (line ~2204):
-          // when the worker rejects the dispatch (ring slot stale, reject()
-          // condition, etc.), permanent worker failures should disable
-          // worker coproc and fall through to local replay. Without this,
-          // every subsequent rollback re-dispatches, gets a quick ok:false,
-          // and converges via _coprocRecover frame-by-frame over depth × 16ms
-          // (~112 ms at depth=7) — strictly worse than Mode 1's ~65 ms
-          // burst-replay. Call _workerCoprocAbort to flip the flag and
-          // route future rollbacks through local replay.
-          _workerCoprocAbort(`worker rejected replay seq=${pending.seq}: ${msg.error || 'unknown'}`);
+          _shadowLog(
+            `rollback-replay-result FAILED seq=${pending.seq}: ${msg.error} (consecutive=${_workerCoprocConsecutiveRejects}/${RB_WORKER_COPROC_REJECT_LIMIT})`,
+          );
+          // Most worker rejections are transient: the most common one is
+          // "kn_restore_frame failed for startFrame=N (ring slot stale)",
+          // which fires when a misprediction's depth reaches back past the
+          // worker's rollback-init frame (the ring is genuinely empty
+          // before init). Locally recover this single rollback and let
+          // the next dispatch try again — by then the worker's ring has
+          // accumulated enough history. If the rejections are *persistent*
+          // (a real determinism bug or a wedged worker), the consecutive
+          // counter trips the limit and we permanently fall back to Mode 1
+          // local replay; without that ceiling, every rollback would do
+          // dispatch + ok:false + local replay, making Mode 2 strictly
+          // worse than Mode 1.
+          if (_workerCoprocConsecutiveRejects >= RB_WORKER_COPROC_REJECT_LIMIT) {
+            _workerCoprocAbort(
+              `worker rejected replay: ${msg.error || 'unknown'} (${_workerCoprocConsecutiveRejects} consecutive rejects)`,
+            );
+          }
           _coprocRecover(tickMod, 'worker-coproc-fail');
         }
       }
@@ -2460,15 +2664,257 @@
       if (msg.split && _rbShadowReady && !_rbShadowFailed && _rbShadowWorker) {
         _shadowPostRetroState(stats, `${msg.reason || 'resync'}-retro-fallback`, msg.frame);
       }
+    } else if (msg.type === 'frame-bitmap') {
+      // ImageBitmap path: worker called canvas.transferToImageBitmap()
+      // on its WebGL OffscreenCanvas (where GLideN64 actually rendered)
+      // and shipped the bitmap. We blit it to a sibling bitmaprenderer
+      // canvas — GPU→GPU transfer, no readPixels readback. This is
+      // the path that actually works under GLideN64 (the only RDP
+      // plugin our WASM build can run).
+      try {
+        if (!msg.bitmap || !msg.width || !msg.height) return;
+        const sBmp = _getShadowStats();
+        sBmp.bitmapFrameMessagesReceived = (sBmp.bitmapFrameMessagesReceived || 0) + 1;
+        // Lazy-init the sibling bitmaprenderer canvas.
+        if (!_rbShadowFrameCanvas || !_rbShadowFrameCanvas.__knBmpRenderer) {
+          if (_rbShadowFrameCanvas) {
+            // Destroy the old 2D variant (if any) so the new one can
+            // own the layout slot.
+            try {
+              _rbShadowFrameCanvas.parentNode?.removeChild(_rbShadowFrameCanvas);
+            } catch (_) {}
+            _rbShadowFrameCanvas = null;
+          }
+          const fc = document.createElement('canvas');
+          fc.id = 'kn-rollback-shadow-frame';
+          fc.setAttribute('aria-hidden', 'true');
+          fc.style.cssText = [
+            'position:fixed',
+            'display:none',
+            'pointer-events:none',
+            'z-index:55',
+            'margin:0',
+            'padding:0',
+            'border:0',
+            'background:transparent',
+            'image-rendering:pixelated',
+            'image-rendering:crisp-edges',
+            'will-change:opacity',
+            'contain:strict',
+          ].join(';');
+          fc.width = msg.width;
+          fc.height = msg.height;
+          let bmpCtx;
+          try {
+            bmpCtx = fc.getContext('bitmaprenderer');
+          } catch (_) {
+            bmpCtx = null;
+          }
+          if (!bmpCtx) {
+            // Browser doesn't support bitmaprenderer — release the
+            // bitmap so it doesn't leak, fall back to the legacy 'frame'
+            // RGBA path on subsequent messages.
+            try {
+              msg.bitmap.close?.();
+            } catch (_) {}
+            return;
+          }
+          fc.__knBmpCtx = bmpCtx;
+          fc.__knBmpRenderer = true;
+          _rbShadowFrameCanvas = fc;
+          const root = document.fullscreenElement || document.body || document.documentElement;
+          if (root) root.appendChild(fc);
+        }
+        const fc = _rbShadowFrameCanvas;
+        if (fc.width !== msg.width) fc.width = msg.width;
+        if (fc.height !== msg.height) fc.height = msg.height;
+        try {
+          // transferFromImageBitmap consumes the bitmap (no need to close).
+          fc.__knBmpCtx.transferFromImageBitmap(msg.bitmap);
+        } catch (e) {
+          try {
+            msg.bitmap.close?.();
+          } catch (_) {}
+          _shadowLog(`bitmap-blit failed: ${e?.message || e}`);
+          return;
+        }
+        sBmp.lastFramePaintAt = performance.now();
+        sBmp.lastFrameWidth = msg.width;
+        sBmp.lastFrameHeight = msg.height;
+        // Bitmap path never sends black bytes (transferToImageBitmap
+        // captures the GL drawing buffer post-render, which by definition
+        // contains the rendered frame). Clear the look-black + needs-
+        // fresh-paint flags so the paint gate reveals subsequent shows.
+        _rbShadowLastLooksBlack = false;
+        _rbShadowNeedsFreshPaint = false;
+        _rbShadowLastGoodPaintAt = performance.now();
+        _rbShadowLastPaintFrame = msg.frame ?? _rbShadowLastPaintFrame;
+        // Reset the bad-frame counter — bitmap path is producing
+        // confirmed-good frames.
+        sBmp.consecutiveBadFrames = 0;
+        sBmp.consecutiveNoisyFrames = 0;
+        sBmp.frameBlitDisabled = false;
+      } catch (e) {
+        try {
+          msg.bitmap?.close?.();
+        } catch (_) {}
+        _shadowLog(`bitmap-frame handler failed: ${e?.message || e}`);
+      }
     } else if (msg.type === 'frame') {
       // Worker has read its emulator's RDRAM framebuffer and sent us
       // raw RGBA bytes. Used for the (default-off) direct-blit path —
       // paint into _rbShadowFrameCanvas. Visually mismatched vs the
       // GLideN64 live canvas, so off by default; see RB_SHADOW_FRAME_BLIT.
       try {
+        // After ~150 consecutive bad-frame messages the underlying
+        // worker emulator clearly isn't producing usable framebuffer
+        // bytes (RDP plugin not writing to RDRAM, runner stalled, etc).
+        // Drop subsequent 'frame' messages without even sampling to
+        // avoid burning CPU on guaranteed-bad data; the existing paint
+        // gate keeps the overlay hidden so the user sees no flicker.
+        const _kn_stats0 = _getShadowStats();
+        if (_kn_stats0.frameBlitDisabled) return;
         if (!msg.rgba || !msg.width || !msg.height) return;
         const bytes = new Uint8ClampedArray(msg.rgba);
         if (bytes.length !== msg.width * msg.height * 4) return;
+        // Black-frame guard. The worker reads its emulator's RDRAM via
+        // readFramebuffer() and ships the bytes here. Right after a
+        // resync — and intermittently during cross-engine resync windows
+        // — the RDRAM framebuffer can be all zeros (the worker's
+        // emulator hasn't repainted it yet). Painting those bytes onto
+        // the visible _rbShadowFrameCanvas while the overlay is up gives
+        // the user a black flash. The previous code unconditionally
+        // painted then set _rbShadowLastLooksBlack=false (per the
+        // "non-black by definition" comment), which was wrong: black
+        // bytes are still black bytes, and clearing the flag let the
+        // paint gate happily reveal the next overlay over a black canvas
+        // (commit history note in RB_SHADOW_OVERLAY_OPACITY: "Tried
+        // 0.97; black flicker visible.").
+        // Sample 5 pixels (matches the worker's WebGL black-check
+        // pattern); if max channel < 12, treat as black: skip the blit
+        // so the canvas keeps its last non-black frame, and mark
+        // _rbShadowLastLooksBlack=true so the paint gate skips the
+        // next overlay show until we have a confirmed non-black paint.
+        let _kn_fb_max = 0;
+        const _kn_fb_pts = [
+          [msg.width >> 1, msg.height >> 1],
+          [(msg.width * 3) >> 3, (msg.height * 3) >> 3],
+          [(msg.width * 5) >> 3, (msg.height * 3) >> 3],
+          [(msg.width * 3) >> 3, (msg.height * 5) >> 3],
+          [(msg.width * 5) >> 3, (msg.height * 5) >> 3],
+        ];
+        for (let _kn_i = 0; _kn_i < _kn_fb_pts.length; _kn_i++) {
+          const _kn_off = (_kn_fb_pts[_kn_i][1] * msg.width + _kn_fb_pts[_kn_i][0]) * 4;
+          if (_kn_off + 2 >= bytes.length) continue;
+          if (bytes[_kn_off] > _kn_fb_max) _kn_fb_max = bytes[_kn_off];
+          if (bytes[_kn_off + 1] > _kn_fb_max) _kn_fb_max = bytes[_kn_off + 1];
+          if (bytes[_kn_off + 2] > _kn_fb_max) _kn_fb_max = bytes[_kn_off + 2];
+        }
+        if (_kn_fb_max < 12) {
+          // Bytes are effectively black. Don't blit (canvas keeps last
+          // good frame). Mark the look-black flag so the paint gate
+          // skips the next show. Bump a counter so we can see this
+          // firing in the diagnostic dump.
+          const sBlk = _getShadowStats();
+          sBlk.blackFrameBlitsSkipped = (sBlk.blackFrameBlitsSkipped || 0) + 1;
+          // Also count toward the consecutive-bad-frames counter — a
+          // worker sending only black frames is just as much a sign of
+          // a non-functional render path as one sending only noise.
+          sBlk.consecutiveBadFrames = (sBlk.consecutiveBadFrames || 0) + 1;
+          _rbShadowLastLooksBlack = true;
+          if (sBlk.consecutiveBadFrames >= 200 && !sBlk.frameBlitDisabled) {
+            sBlk.frameBlitDisabled = true;
+            _shadowLog(
+              `frame-blit DISABLED after ${sBlk.consecutiveBadFrames} consecutive bad frames ` +
+                `(${sBlk.blackFrameBlitsSkipped} black, ${sBlk.noisyFrameBlitsSkipped || 0} noisy). ` +
+                `Worker not producing usable framebuffer bytes; overlay paint gate stays sealed.`,
+            );
+          }
+          return;
+        }
+        // Noise-frame guard. The frame-blit feature reads RDRAM at
+        // VI_ORIGIN, which only contains a real framebuffer when the
+        // RDP plugin writes to RDRAM (ANGRYLION). Under the default
+        // GLideN64 plugin, the renderer writes to an offscreen FBO and
+        // RDRAM stays uninitialized — readFramebuffer then returns
+        // whatever stale heap bytes happen to be at VI_ORIGIN. Painted
+        // unconditionally those produce TV-static onto the visible
+        // overlay (and were the user-reported symptom that surfaced
+        // after the black-skip guard above stopped masking them with
+        // black flashes). Neighbor variance discriminates: real game
+        // framebuffers have local correlation (neighbor diff 5-30),
+        // garbage memory does not (neighbor diff 200+). 64 sample
+        // pairs is enough signal at <0.1 ms cost.
+        let _kn_neighbor_sum = 0;
+        const _kn_n_pairs = 64;
+        for (let _kn_pi = 0; _kn_pi < _kn_n_pairs; _kn_pi++) {
+          const _kn_x = (_kn_pi * 79 + 13) % (msg.width - 1);
+          const _kn_y = (_kn_pi * 31 + 7) % msg.height;
+          const _kn_off = (_kn_y * msg.width + _kn_x) * 4;
+          if (_kn_off + 6 >= bytes.length) continue;
+          _kn_neighbor_sum += Math.abs(bytes[_kn_off] - bytes[_kn_off + 4]);
+          _kn_neighbor_sum += Math.abs(bytes[_kn_off + 1] - bytes[_kn_off + 5]);
+          _kn_neighbor_sum += Math.abs(bytes[_kn_off + 2] - bytes[_kn_off + 6]);
+        }
+        const _kn_avg_neighbor = _kn_neighbor_sum / _kn_n_pairs;
+        if (_kn_avg_neighbor > 80) {
+          // Doesn't look like a coherent framebuffer. Skip the blit.
+          // Mark the look-black flag so the paint gate skips the next
+          // overlay show — better to keep the canvas frozen on the
+          // last real frame than to flash garbage.
+          const sNz = _getShadowStats();
+          sNz.noisyFrameBlitsSkipped = (sNz.noisyFrameBlitsSkipped || 0) + 1;
+          sNz.consecutiveNoisyFrames = (sNz.consecutiveNoisyFrames || 0) + 1;
+          sNz.consecutiveBadFrames = (sNz.consecutiveBadFrames || 0) + 1;
+          _rbShadowLastLooksBlack = true;
+          // After many consecutive noisy frames, log loudly — likely
+          // running a non-ANGRYLION RDP plugin where shadowFrameBlit
+          // can never produce real frames. The user's URL flag turned
+          // it on but the renderer doesn't support it; keep skipping
+          // (the no-paint path == shadowFrameBlit-off behaviour).
+          if (sNz.consecutiveNoisyFrames === 30 && !sNz.noisyFrameWarned) {
+            sNz.noisyFrameWarned = true;
+            _shadowLog(
+              `frame-blit producing only noisy frames — RDP plugin likely not ANGRYLION. ` +
+                `Suppressing further blits; canvas keeps last good frame. ` +
+                `(noisyTotal=${sNz.noisyFrameBlitsSkipped} blackTotal=${sNz.blackFrameBlitsSkipped || 0})`,
+            );
+          }
+          // After ~150 sustained noisy frames, give up entirely. The
+          // worker is producing only garbage — likely the RDP plugin
+          // isn't writing to RDRAM at VI_ORIGIN. Stop paying the
+          // sample-and-skip cost on every subsequent message.
+          if (sNz.consecutiveNoisyFrames >= 150 && !sNz.frameBlitDisabled) {
+            sNz.frameBlitDisabled = true;
+            _shadowLog(
+              `frame-blit DISABLED after ${sNz.consecutiveNoisyFrames} consecutive noisy frames. ` +
+                `Overlay paint gate stays sealed; live canvas remains the only visible surface during rollback.`,
+            );
+          }
+          if (window.__knFrameByteDiag) {
+            window.__knFrameByteDiag.push({
+              t: performance.now(),
+              frame: msg.frame,
+              kind: 'noisy',
+              avgNeighborDiff: +_kn_avg_neighbor.toFixed(1),
+            });
+            if (window.__knFrameByteDiag.length > 1000) window.__knFrameByteDiag.shift();
+          }
+          return;
+        }
+        // Real-looking frame — reset the consecutive-bad counters.
+        const sOk = _getShadowStats();
+        sOk.consecutiveNoisyFrames = 0;
+        sOk.consecutiveBadFrames = 0;
+        if (window.__knFrameByteDiag) {
+          window.__knFrameByteDiag.push({
+            t: performance.now(),
+            frame: msg.frame,
+            kind: 'painted',
+            avgNeighborDiff: +_kn_avg_neighbor.toFixed(1),
+          });
+          if (window.__knFrameByteDiag.length > 1000) window.__knFrameByteDiag.shift();
+        }
         const overlay = _shadowEnsureOverlay();
         if (!overlay) return;
         if (!overlay.__kn2dCtx) {
@@ -2582,16 +3028,20 @@
             : typeof ejs?.gameManager?.EJS?.getCoreSettings === 'function'
               ? ejs.gameManager.EJS.getCoreSettings()
               : '';
-        // Force ANGRYLION (software RDP) in the shadow worker so the
-        // rendered framebuffer lives in RDRAM (where we can read it
-        // via _kn_get_vi_origin / _kn_get_rdram_ptr) rather than in
-        // GLideN64's offscreen FBOs (where it can't be reached
-        // through OffscreenCanvas under the current build). The
-        // worker's emulator is presentation-only — it never feeds
-        // back to authoritative state, and it doesn't need
-        // GLideN64's HD textures or shader effects, so the visual
-        // downgrade is acceptable for the few-ms-per-rollback window.
-        // ?shadowRdp=gliden64 forces back to GLideN64 for A/B.
+        // Worker requests ANGRYLION via the rdp-plugin core option, but
+        // our WASM build doesn't include LLE RSP (too slow under
+        // emscripten — see project_pyrite64_feasibility.md), so the
+        // core silently falls back to GLideN64 with the warning
+        // "Requested Angrylion but no LLE RSP available, falling back
+        // to GLideN64!" baked into the binary. Until LLE RSP is viable
+        // in WASM, the prepend below is aspirational — the worker
+        // ends up with the same RDP plugin as main (GLideN64), and
+        // shadowFrameBlit can never produce real RDRAM-resident
+        // framebuffers. The 'frame' message handler's black-byte +
+        // noise-byte guards prevent the resulting bad blits from
+        // reaching the visible canvas. ?shadowRdp=gliden64 forces
+        // GLideN64 explicitly for A/B (no-op today, since that's
+        // what we get anyway).
         const rdpOverride = _urlParams.get('shadowRdp');
         const desiredRdp = rdpOverride && rdpOverride !== '1' ? rdpOverride : 'angrylion';
         if (!coreSettings.includes('mupen64plus-Next-rdp-plugin')) {
@@ -2753,9 +3203,27 @@
     // than the freeze it replaces. Keep this code path behind a
     // ?shadowFrameBlit=1 flag for future iteration.
     if (RB_SHADOW_FRAME_BLIT && _rbShadowFrameCanvas) {
+      // Brief opacity fade-in (~8ms — half a vsync) so the overlay
+      // doesn't snap onto the canvas with a visible jump. Measurement
+      // (rb-bitmap-perf-flicker.mjs) showed the bare-snap show-transition
+      // averaged ~40 unit brightness delta between the predicted-state
+      // canvas and the confirmed-state bitmap. Snap is the dominant
+      // visible artifact for deeper rollbacks where prediction and
+      // confirmed-input render meaningfully differ; a short fade-in
+      // converts the snap into a brief blend the eye reads as motion.
+      // Use a triple-rAF dance: start at 0, then RAF to apply the
+      // transition + target opacity (browser commits the 0 first).
       _rbShadowFrameCanvas.style.transition = 'none';
-      _rbShadowFrameCanvas.style.opacity = String(RB_SHADOW_OVERLAY_OPACITY);
+      _rbShadowFrameCanvas.style.opacity = '0';
       _rbShadowFrameCanvas.style.display = 'block';
+      const _fadeMs = 8;
+      const _targetOp = String(RB_SHADOW_OVERLAY_OPACITY);
+      const _raf = window.APISandbox?.nativeRAF || window.requestAnimationFrame.bind(window);
+      _raf(() => {
+        if (!_rbShadowFrameCanvas) return;
+        _rbShadowFrameCanvas.style.transition = `opacity ${_fadeMs}ms linear`;
+        _rbShadowFrameCanvas.style.opacity = _targetOp;
+      });
     }
     if (RB_SHADOW_HIDE_LIVE) _hideLiveCanvasUnderOverlay();
     _rbShadowVisible = true;
@@ -9872,6 +10340,21 @@
     }
   };
 
+  const _setReplayAudioOutputSkip = (tickMod, enable, reason = '') => {
+    if (!tickMod?._kn_set_skip_audio_output) return;
+    const next = !!enable && RB_SKIP_AUDIO_OUTPUT_DURING_REPLAY;
+    if (_rbAudioOutputSkipActive === next) return;
+    try {
+      tickMod._kn_set_skip_audio_output(next ? 1 : 0);
+      _rbAudioOutputSkipActive = next;
+      if (next) _rbAudioOutputSkipEnableCount++;
+      else _rbAudioOutputSkipDisableCount++;
+      _syncLog(`REPLAY-AUDIO-OUTPUT-SKIP ${next ? 'on' : 'off'}${reason ? ` ${reason}` : ''}`);
+    } catch (e) {
+      _syncLog(`REPLAY-AUDIO-OUTPUT-SKIP failed: ${e?.message || e}`);
+    }
+  };
+
   const _forceReplayEndComposite = (reason = '') => {
     const t0 = performance.now();
     try {
@@ -9903,10 +10386,12 @@
     if (!_rbReplayLogged) {
       _setReplayFullHeadless(tickMod, false, 'finish-noop');
       _setReplayRdpSkip(tickMod, false, 'finish-noop');
+      _setReplayAudioOutputSkip(tickMod, false, 'finish-noop');
       return;
     }
     _setReplayFullHeadless(tickMod, false, 'finish');
     _setReplayRdpSkip(tickMod, false, 'finish');
+    _setReplayAudioOutputSkip(tickMod, false, 'finish');
     // Let the shadow overlay remain alive through its hold window. The
     // main-rAF pump keeps producing visible worker frames while replay
     // finishes, and the post-replay resync below is deferred until hide
@@ -9929,6 +10414,34 @@
     _syncLog(
       `C-REPLAY done: caught up at f=${_frameNum} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFpDone.toString(16)} sf=0x${sfStateDone.toString(16)} taint=${taintedCountDone}`,
     );
+    // Compare to pre-rollback hash captured at C-REPLAY start. If the
+    // gameplay-hash addresses (player positions, animations, stocks,
+    // timer, RNG, etc) match pre/post then this rollback was a visual
+    // no-op — the user's screen had the right content already and the
+    // legacy paint-last-replay-frame would have re-painted the same
+    // pixels. Tracked here for telemetry; the burst-loop suppression
+    // above already skips the redundant paint regardless.
+    {
+      const preH = _rollbackPreHash >>> 0;
+      const postLiveH = (tickMod._kn_live_gameplay_hash?.() ?? 0) >>> 0;
+      const haveBoth = preH !== 0 && postLiveH !== 0 && _rollbackPreHashFrame >= 0;
+      if (haveBoth) {
+        if (preH === postLiveH) {
+          _rollbackHashEqualCount++;
+          _syncLog(`C-REPLAY-VISUAL-NOOP f=${hashFrame} gp=0x${preH.toString(16)} pre==post`);
+        } else {
+          _rollbackHashDifferCount++;
+          if (_rollbackHashDifferCount + _rollbackHashEqualCount <= 4) {
+            _syncLog(
+              `C-REPLAY-VISUAL-DIFFER f=${hashFrame} pre=0x${preH.toString(16)} post=0x${postLiveH.toString(16)}`,
+            );
+          }
+        }
+      } else {
+        _rollbackHashUnknownCount++;
+      }
+    }
+    _rollbackPreHashFrame = -1;
     if (rbCheckGameplay) {
       for (const p of getActivePeers()) {
         if (p.dc?.readyState === 'open') {
@@ -10099,6 +10612,11 @@
         lsMod._kn_set_headless(0);
         _rbFullHeadlessActive = false;
         _syncLog(`replay full headless ${RB_FULL_HEADLESS_DURING_REPLAY ? 'available by flag' : 'disabled'}`);
+      }
+      if (lsMod?._kn_set_skip_audio_output) {
+        lsMod._kn_set_skip_audio_output(0);
+        _rbAudioOutputSkipActive = false;
+        _syncLog(`replay audio-output skip ${RB_SKIP_AUDIO_OUTPUT_DURING_REPLAY ? 'available' : 'disabled by flag'}`);
       }
     } else {
       _syncLog('stock core — JS-level timing patch (fallback)');
@@ -10974,6 +11492,10 @@
     if (stopMod?._kn_set_skip_rdp_replay) {
       stopMod._kn_set_skip_rdp_replay(0);
       _rbRdpSkipActive = false;
+    }
+    if (stopMod?._kn_set_skip_audio_output) {
+      stopMod._kn_set_skip_audio_output(0);
+      _rbAudioOutputSkipActive = false;
     }
     if (stopMod?._kn_set_skip_rsp_audio) stopMod._kn_set_skip_rsp_audio(0);
     _resetControllerPresentMask();
@@ -12301,6 +12823,19 @@
         // predicts whenever inputs are missing — only the demo's synthetic peer
         // setup tolerates the unbounded prediction, real matches still throttle.
         const _frameAdvForC = _demoMode ? -1 : _rbBootConverged ? _frameAdvRaw + 2 : -1;
+        // Hash-based paint suppression: if a rollback is about to fire
+        // AND we haven't already captured for this rollback (multi-tick
+        // replays peek as pending=-1 on continuation ticks even though
+        // _finishCReplay hasn't run yet), capture the LIVE gameplay-hash
+        // here. Last chance — pre_tick is about to overwrite live state
+        // with the rewound ring slot. _finishCReplay compares to the new
+        // live hash to decide whether the rollback was visually a no-op
+        // and resets _rollbackPreHashFrame back to -1.
+        const _rbAboutToFire = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+        if (_rbAboutToFire && _rollbackPreHashFrame < 0) {
+          _rollbackPreHash = (tickMod._kn_live_gameplay_hash?.() ?? 0) >>> 0;
+          _rollbackPreHashFrame = _frameNum;
+        }
         _chk('cr:pre-pretick');
         let catchingUp = tickMod._kn_pre_tick(
           localInput.buttons,
@@ -12400,7 +12935,10 @@
           _showRollbackVisualFreeze(replayDepth, localInput);
           _setReplayRdpSkip(tickMod, true, `depth=${replayDepth}`);
           _setReplayFullHeadless(tickMod, true, `depth=${replayDepth}`);
+          _setReplayAudioOutputSkip(tickMod, true, `depth=${replayDepth}`);
           _rbReplayLogged = true;
+          // (preLiveHash already captured just before pre_tick above;
+          // see the _rbAboutToFire / kn_live_gameplay_hash block.)
           // Reset paint-last-replay-frame counters at rollback start.
           // _replayOriginalDepth is the # of frames the replay needs to
           // execute; we'll flip headless OFF before the final one of
@@ -12489,6 +13027,11 @@
           // worker's reply (visible as a brief freeze, hopefully shorter
           // than main's own replay because the worker isn't constrained
           // by main's rAF cadence).
+          const workerCoprocHasAuxApply = typeof tickMod._kn_apply_split_state_partial_with_aux === 'function';
+          const workerCoprocHasLegacySidecarApply =
+            typeof tickMod._kn_apply_split_state_partial === 'function' &&
+            typeof tickMod._kn_restore_hidden_state_impl === 'function' &&
+            typeof tickMod._kn_hle_restore_from === 'function';
           if (
             RB_WORKER_COPROC &&
             !_workerCoprocAborted &&
@@ -12497,7 +13040,7 @@
             !_rbShadowFailed &&
             !_workerCoprocPending &&
             tickMod._kn_clear_replay_state &&
-            tickMod._kn_apply_split_state_partial
+            (workerCoprocHasAuxApply || workerCoprocHasLegacySidecarApply)
           ) {
             const targetFrame = _frameNum;
             // Build the full set of confirmed inputs spanning the
@@ -12622,9 +13165,37 @@
             // headless because painting them would expose the rewind +
             // intermediate-replay states (the "ghost" jolt the user saw
             // when full RDP was enabled during replay).
+            //
+            // Cascade-flash suppression: if a NEW pending_rollback is
+            // already queued at the moment we'd flip headless OFF, this
+            // rollback's "corrected" frame is about to be invalidated by
+            // the next rollback's restore-and-replay anyway. Painting it
+            // produces a visible twitch that gets immediately overwritten,
+            // and the intermediate state often differs from both the
+            // pre-cascade and post-cascade state in ways the eye notices.
+            // Suppress the paint when a cascade is detected so the canvas
+            // stays frozen on the last STABLE pre-cascade frame until the
+            // entire cascade resolves; the next rollback's last-frame
+            // paint does the only visible state update.
             const isLastReplayStep = _replayOriginalDepth > 0 && _replayStepsThisRollback + 1 >= _replayOriginalDepth;
             if (isLastReplayStep) {
-              _setReplayFullHeadless(tickMod, false, 'last-replay-frame-paint');
+              const cascadeQueued = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+              if (RB_PAINT_LAST_REPLAY_FRAME && !cascadeQueued) {
+                // Legacy fast-paint path (?paintLastReplayFrame=1).
+                _setReplayFullHeadless(tickMod, false, 'last-replay-frame-paint');
+              } else if (cascadeQueued) {
+                _syncLog(
+                  `CASCADE-PAINT-SUPPRESSED f=${_frameNum} step=${_replayStepsThisRollback + 1}/${_replayOriginalDepth} pendingNext=${tickMod._kn_peek_pending_rollback?.() ?? -1}`,
+                );
+              }
+              // Default behaviour now: keep headless ON through the
+              // last replay step. _finishCReplay below will flip it OFF
+              // and the next browser composite will paint whatever's in
+              // the GL buffer — the corrected state at frame N. The
+              // resulting visible transition is one bigger jump
+              // (predicted N -> next-frame N+1) instead of the legacy
+              // double-tap (predicted N -> corrected N -> next N+1),
+              // which the eye reads as motion rather than glitch.
             }
             _runCReplayFrame(tickMod);
             _replayStepsThisRollback++;
@@ -13765,17 +14336,15 @@
         //  3rd+ throw: disable C rollback entirely. Same-frame trap means
         //   local replay also OOBs — fall back to legacy lockstep.
         if (consecutiveThrows === 1 && !_workerCoprocAborted) {
-          // Route through _workerCoprocAbort() — direct
-          // `_workerCoprocAborted = true` would skip the cleanup that
-          // cancels any in-flight dispatch's pending timeoutId, nulls
-          // _workerCoprocPending, and stops the watchdog interval.
-          // Without that, a worker reply arriving after the C throw
-          // would still match the pending seq and call
-          // _kn_apply_split_state_partial on the just-faulted engine,
-          // potentially corrupting state or triggering a second throw.
-          // The 200 ms timeout would then call _workerCoprocAbort()
-          // which returns early (flag already true) and never nulls
-          // _workerCoprocPending, leaving it permanently set.
+          // Route through _workerCoprocAbort() — direct `_workerCoprocAborted
+          // = true` would skip the cleanup that cancels any in-flight
+          // dispatch's pending timeoutId, nulls _workerCoprocPending, and
+          // stops the watchdog interval. Without that, a worker reply
+          // arriving after the C throw would still match the pending seq
+          // and call _kn_apply_split_state_partial on the just-faulted
+          // engine, potentially corrupting state or triggering a second
+          // throw. The 200 ms timeout would then early-return (flag
+          // already true) and never null _workerCoprocPending.
           _workerCoprocAbort(
             `C-rollback throw on first consecutive at f=${_frameNum} — disabling worker coproc (local replay still active)`,
           );

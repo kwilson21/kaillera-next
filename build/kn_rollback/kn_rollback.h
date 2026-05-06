@@ -124,6 +124,17 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count);
 int kn_get_rdram_offset_in_state(void);
 int kn_get_state_buffer_size(void);
 int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count);
+int kn_apply_split_state_partial_with_aux(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame,
+    int softfloat_state,
+    const uint32_t *hidden_state, uint32_t hidden_size,
+    const uint8_t *hle_state, uint32_t hle_size);
+int kn_apply_split_state_partial(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame);
 
 /* Full state hash — hashes the saved state for a specific frame from the
  * ring buffer. Pass -1 to hash the most recent saved state. */
