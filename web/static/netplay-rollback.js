@@ -1438,13 +1438,27 @@
     // along for the ride from a previous tuning iteration.
     return false;
   })();
+  // Headless-during-replay: with the flag ON, kn_set_headless suspends
+  // GLSM bind/unbind + libretro_swap_buffer + video_cb during replay, so
+  // the canvas stays frozen on the last drawn frame for the duration of
+  // the replay loop (~50ms typical). Per project memory and direct user
+  // observation, this static snapshot pause is what reads to the eye as
+  // a "freeze" — the engine frame counter pause from my metric doesn't
+  // cause user-visible artifacts on its own; the un-painted canvas does.
+  //
+  // Flipping default OFF: every replay frame paints, producing a brief
+  // forward-scrub motion (state restore → replay frames → final state).
+  // Per project_rollback_real_flicker_may5.md and earlier play testing,
+  // "the raw replay path feels better than a static snapshot pause."
+  // Trade-off: visible scrub motion vs invisible-but-perceived freeze.
+  // Restore old behavior with ?fullHeadless=1.
   const RB_FULL_HEADLESS_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('fullHeadless') ?? localStorage.getItem('kn-full-headless');
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return false;
   })();
   // Defaulted ON. Short-circuits aiLenChanged() in the WASM core during
   // replay frames — skips the sinc resampler (native FP) and the
