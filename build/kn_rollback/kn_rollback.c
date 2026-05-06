@@ -136,6 +136,26 @@ int kn_skip_post_rdram_in_hash = 0;
  * kn_rollback_shutdown because init memset() clears rb. */
 static int kn_requested_state_backend = KN_STATE_BACKEND_RETRO;
 
+/* Deferred-rollback mode flag (Mode 2 deferred / "true GGPO with worker").
+ * When set, kn_pre_tick observes pending_rollback but does NOT execute the
+ * rewind+replay branch; main keeps predicting forward while JS dispatches
+ * the replay to the shadow worker. The flag is global (not in rb struct)
+ * so that kn_rollback_shutdown / kn_rollback_init don't reset it; JS owns
+ * the lifecycle (set on dispatch, clear after apply+converge). */
+static int rb_deferred_rollback_flag = 0;
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_deferred_rollback(int enable) {
+    rb_deferred_rollback_flag = enable ? 1 : 0;
+}
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_deferred_rollback(void) {
+    return rb_deferred_rollback_flag;
+}
+
 static uint32_t kn_fnv1a_stride(uint32_t hash, const uint8_t *data, size_t len, size_t stride) {
     if (!data || stride == 0) return hash;
     for (size_t i = 0; i < len; i += stride) {
@@ -1166,6 +1186,28 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         return 3; /* ring maintained, skip frame advance */
     }
 
+    /* ── Deferred-rollback bypass ──
+     * When kn_set_deferred_rollback(1) was called by JS, the engine
+     * leaves pending_rollback set BUT does not execute the rewind+replay
+     * branch. JS reads pending_rollback via kn_peek_pending_rollback,
+     * dispatches the replay to the shadow worker, and lets main continue
+     * predicting forward. When the worker reply lands, JS applies the
+     * corrected state via kn_apply_split_state_partial_with_aux (which
+     * clears pending_rollback) and runs a local fast-forward replay to
+     * converge from the apply frame to where main was when the apply
+     * landed.
+     *
+     * If pending_rollback is set but deferred mode is on AND we're already
+     * mid-replay (replay_remaining > 0), do NOT skip — finish the current
+     * replay first. New cascade rollbacks during a deferred dispatch
+     * should be handled synchronously by JS turning deferred mode OFF
+     * before pre_tick fires (see _workerCoprocPending check). */
+    if (rb_deferred_rollback_flag && rb.pending_rollback >= 0 && rb.replay_remaining == 0) {
+        rb_log("C-PRETICK-DEFERRED pending=%d frame=%d (skipping rewind; JS will apply via worker)",
+            rb.pending_rollback, rb.frame);
+        /* Fall through to normal forward processing below. pending_rollback
+         * stays set so kn_peek_pending_rollback returns it. */
+    } else
     /* ── Handle pending rollback: restore state, start amortized catch-up ──
      *
      * P3: Preempt an active replay if a newer (earlier-frame) misprediction

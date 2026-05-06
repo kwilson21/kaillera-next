@@ -703,7 +703,27 @@
     } catch (_) {}
     return true;
   })();
-  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel, epoch }
+  // Mode 2 deferred-rollback: "true GGPO with worker" architecture.
+  // When pending_rollback is detected, JS dispatches the replay to the
+  // shadow worker AND tells the C engine to NOT rewind via
+  // kn_set_deferred_rollback(1). Main keeps predicting forward (no
+  // freeze during the worker compute window). When the worker reply
+  // arrives, JS applies the corrected state at targetFrame and runs a
+  // local fast-forward replay to converge from targetFrame to where
+  // main was at apply time. Net freeze: N × ~12ms where N = rAFs the
+  // worker took (typical 1-2 = 12-24ms vs Mode 1's 50ms).
+  //
+  // Default OFF (opt-in via ?workerCoprocDeferred=1). Requires the
+  // _kn_set_deferred_rollback C export.
+  const RB_WORKER_COPROC_DEFERRED = (() => {
+    try {
+      const raw = _urlParams.get('workerCoprocDeferred') ?? localStorage.getItem('kn-worker-coproc-deferred');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel, epoch, deferred }
   // Cascade-safe epoch: incremented every time a NEW rollback enters the
   // replay branch. Worker dispatches capture the epoch at dispatch time;
   // if the engine has cascaded (epoch advanced) by the time the worker
@@ -1439,26 +1459,30 @@
     return false;
   })();
   // Headless-during-replay: with the flag ON, kn_set_headless suspends
-  // GLSM bind/unbind + libretro_swap_buffer + video_cb during replay, so
-  // the canvas stays frozen on the last drawn frame for the duration of
-  // the replay loop (~50ms typical). Per project memory and direct user
-  // observation, this static snapshot pause is what reads to the eye as
-  // a "freeze" — the engine frame counter pause from my metric doesn't
-  // cause user-visible artifacts on its own; the un-painted canvas does.
+  // GLSM bind/unbind + libretro_swap_buffer + video_cb during replay,
+  // so the canvas stays frozen on the last drawn frame for the duration
+  // of the replay loop (~50ms typical).
   //
-  // Flipping default OFF: every replay frame paints, producing a brief
-  // forward-scrub motion (state restore → replay frames → final state).
-  // Per project_rollback_real_flicker_may5.md and earlier play testing,
-  // "the raw replay path feels better than a static snapshot pause."
-  // Trade-off: visible scrub motion vs invisible-but-perceived freeze.
-  // Restore old behavior with ?fullHeadless=1.
+  // Briefly tried flipping default OFF (commit 74dc9e8) to let replay
+  // frames paint as scrub motion. User reported BOTH parallel and
+  // deferred Mode 2 froze at match start with that flip — the per-step
+  // paint cost (1-2ms) added to per-step burst time pushed bursts over
+  // vsync, forcing the adaptive sizer to drop burst to 1. burst=1 with
+  // depth=4 = 4 rAFs = ~67ms wall-clock per rollback (vs 33ms at
+  // burst=2). Match-start has many cascading rollbacks → compounds into
+  // a visible match-start freeze.
+  //
+  // Reverted to default ON. The "static held frame" perception is the
+  // lesser evil compared to multi-rAF burst stretching at high rollback
+  // frequency. Restore the scrub-motion path with ?fullHeadless=0 if
+  // you want to A/B perception.
   const RB_FULL_HEADLESS_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('fullHeadless') ?? localStorage.getItem('kn-full-headless');
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return false;
+    return true;
   })();
   // Defaulted ON. Short-circuits aiLenChanged() in the WASM core during
   // replay frames — skips the sinc resampler (native FP) and the
@@ -2351,6 +2375,163 @@
         };
         if (msg.ok) {
           const tickMod = window.EJS_emulator?.gameManager?.Module;
+          // ── Deferred-mode apply + local fast-forward ──
+          // Main has been predicting forward from pending.mainFrameAtDispatch.
+          // Worker reply has corrected state at pending.targetFrame (= the
+          // misprediction's pendingFrame). Main is now at currentMainFrame.
+          // Apply worker state at targetFrame (jumps rb.frame BACKWARD), then
+          // fast-forward replay to converge to currentMainFrame.
+          if (pending.deferred) {
+            // Cascade-safety: if epoch advanced (a NEW rollback fired during
+            // the deferred dispatch), discard. main's local-replay path will
+            // handle the cascade synchronously (deferred mode was turned OFF
+            // when JS detected the cascade and let pre_tick rewind normally).
+            if (pending.epoch !== _workerCoprocEpoch) {
+              _workerCoprocStats.completed++;
+              _workerCoprocStats.totalRoundtripMs += roundtripMs;
+              _shadowLog(
+                `WORKER-COPROC deferred-stale-cascade seq=${pending.seq} dispatchEpoch=${pending.epoch} currentEpoch=${_workerCoprocEpoch} (cascade preempted)`,
+              );
+              // Defensive: turn off deferred mode + recover frame counter.
+              if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+              if (tickMod?._kn_get_frame) {
+                _frameNum = tickMod._kn_get_frame();
+                KNState.frameNum = _frameNum;
+              }
+              return;
+            }
+            // The currentMainFrame is where main is RIGHT NOW (post-prediction).
+            // After apply, rb.frame becomes pending.targetFrame and we need
+            // to replay (currentMainFrame - pending.targetFrame) frames to
+            // reach currentMainFrame again.
+            const currentMainFrame = tickMod?._kn_get_frame?.() ?? _frameNum;
+            const convergeFrames = currentMainFrame - pending.targetFrame;
+            const hasWasmBufferApi =
+              typeof tickMod?._malloc === 'function' && typeof tickMod?._free === 'function' && !!tickMod?.HEAPU8;
+            if (
+              !hasWasmBufferApi ||
+              !msg.cpu ||
+              !msg.rdram ||
+              !msg.hidden ||
+              !msg.hle ||
+              !Number.isFinite(msg.softfloatState)
+            ) {
+              _workerCoprocStats.failed++;
+              _workerCoprocAbort('deferred-apply: missing payload or buffer API');
+              if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+              _coprocRecover(tickMod, 'deferred-no-payload');
+              return;
+            }
+            try {
+              const rdramBytes = new Uint8Array(msg.rdram);
+              const cpuBytes = new Uint8Array(msg.cpu);
+              const hiddenBytes = new Uint8Array(msg.hidden);
+              const hleBytes = new Uint8Array(msg.hle);
+              const rdramPtr = tickMod._malloc(rdramBytes.length);
+              const cpuPtr = tickMod._malloc(cpuBytes.length);
+              const hiddenPtr = tickMod._malloc(hiddenBytes.length);
+              const hlePtr = tickMod._malloc(hleBytes.length);
+              if (!rdramPtr || !cpuPtr || !hiddenPtr || !hlePtr) {
+                if (rdramPtr) tickMod._free(rdramPtr);
+                if (cpuPtr) tickMod._free(cpuPtr);
+                if (hiddenPtr) tickMod._free(hiddenPtr);
+                if (hlePtr) tickMod._free(hlePtr);
+                _workerCoprocStats.failed++;
+                _workerCoprocAbort('deferred-apply: malloc failed');
+                if (tickMod._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+                _coprocRecover(tickMod, 'deferred-malloc-fail');
+                return;
+              }
+              try {
+                tickMod.HEAPU8.set(rdramBytes, rdramPtr);
+                tickMod.HEAPU8.set(cpuBytes, cpuPtr);
+                tickMod.HEAPU8.set(hiddenBytes, hiddenPtr);
+                tickMod.HEAPU8.set(hleBytes, hlePtr);
+                const applyResult = tickMod._kn_apply_split_state_partial_with_aux(
+                  cpuPtr,
+                  cpuBytes.length,
+                  rdramPtr,
+                  rdramBytes.length,
+                  pending.targetFrame,
+                  msg.softfloatState | 0,
+                  hiddenPtr,
+                  hiddenBytes.length,
+                  hlePtr,
+                  hleBytes.length,
+                );
+                if (applyResult !== 0) {
+                  _workerCoprocStats.failed++;
+                  _shadowLog(
+                    `deferred-apply returned ${applyResult} — falling back; rb.frame=${tickMod._kn_get_frame?.() ?? '?'}`,
+                  );
+                  if (tickMod._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+                  _coprocRecover(tickMod, 'deferred-apply-fail');
+                  return;
+                }
+                // Apply succeeded. rb.frame = pending.targetFrame, replay state cleared.
+                // Now run convergeFrames local replay steps to reach currentMainFrame.
+                _refreshRunnerAfterRollbackRestore(tickMod);
+                if (tickMod._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+                const convergeStart = performance.now();
+                let convergedSteps = 0;
+                if (convergeFrames > 0) {
+                  // Set headless ON for the convergence replay (suppress
+                  // intermediate paints; the final paint comes from the next
+                  // normal rAF after we exit this handler).
+                  _setReplayFullHeadless(tickMod, true, 'deferred-converge');
+                  _setReplayAudioOutputSkip(tickMod, true, 'deferred-converge');
+                  for (let i = 0; i < convergeFrames; i++) {
+                    // Each step needs inputs at (rb.frame - delay) for remotes
+                    // and at rb.frame for local. Engine pre_tick handles this
+                    // via the input ring. We run pre_tick + step + post_tick
+                    // synchronously to fast-forward.
+                    const localAtFrame = _localInputs[tickMod._kn_get_frame()] || KNShared.ZERO_INPUT;
+                    const preCu = tickMod._kn_pre_tick(
+                      localAtFrame.buttons | 0,
+                      localAtFrame.lx | 0,
+                      localAtFrame.ly | 0,
+                      localAtFrame.cx | 0,
+                      localAtFrame.cy | 0,
+                      -1,
+                    );
+                    if (preCu !== 0) {
+                      // Pre_tick says rollback or pacing — break and let
+                      // normal rAF handle. Should not happen in convergence.
+                      _shadowLog(`deferred-converge: pre_tick returned ${preCu} at i=${i} — breaking`);
+                      break;
+                    }
+                    _runCReplayFrame(tickMod);
+                    convergedSteps++;
+                  }
+                  _setReplayFullHeadless(tickMod, false, 'deferred-converge-done');
+                  _setReplayAudioOutputSkip(tickMod, false, 'deferred-converge-done');
+                }
+                const convergeMs = performance.now() - convergeStart;
+                _frameNum = tickMod._kn_get_frame?.() ?? _frameNum;
+                KNState.frameNum = _frameNum;
+                _workerCoprocStats.completed++;
+                _workerCoprocStats.totalRoundtripMs += roundtripMs;
+                if (roundtripMs > _workerCoprocStats.maxRoundtripMs) {
+                  _workerCoprocStats.maxRoundtripMs = roundtripMs;
+                }
+                _syncLog(
+                  `WORKER-COPROC deferred apply+converge seq=${pending.seq} target=${pending.targetFrame} mainAtDispatch=${pending.mainFrameAtDispatch} mainAtApply=${currentMainFrame} convergeFrames=${convergedSteps}/${convergeFrames} convergeMs=${convergeMs.toFixed(1)} roundtripMs=${roundtripMs.toFixed(1)}`,
+                );
+              } finally {
+                tickMod._free(rdramPtr);
+                tickMod._free(cpuPtr);
+                tickMod._free(hiddenPtr);
+                tickMod._free(hlePtr);
+              }
+            } catch (e) {
+              _workerCoprocStats.failed++;
+              _shadowLog(`deferred-apply threw: ${e?.message || e}`);
+              if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+              _workerCoprocAbort('deferred-apply threw');
+              _coprocRecover(tickMod, 'deferred-throw');
+            }
+            return;
+          }
           // ── Parallel-mode redundant short-circuit ──
           // If parallel was set on the dispatch and main has already
           // caught up to (or past) the worker's targetFrame, main's
@@ -12915,10 +13096,125 @@
         // with the rewound ring slot. _finishCReplay compares to the new
         // live hash to decide whether the rollback was visually a no-op
         // and resets _rollbackPreHashFrame back to -1.
-        const _rbAboutToFire = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+        const _rbPendingFrameNow = tickMod._kn_peek_pending_rollback?.() ?? -1;
+        const _rbAboutToFire = _rbPendingFrameNow >= 0;
         if (_rbAboutToFire && _rollbackPreHashFrame < 0) {
           _rollbackPreHash = (tickMod._kn_live_gameplay_hash?.() ?? 0) >>> 0;
           _rollbackPreHashFrame = _frameNum;
+        }
+
+        // ── Deferred-mode cascade fallback ──
+        // If a deferred dispatch is in flight AND a NEW pending_rollback
+        // (different target) has appeared, the worker's in-flight reply
+        // is computing for inputs that don't include the new misprediction.
+        // Cancel deferred mode so pre_tick rewinds synchronously for the
+        // cascade. The in-flight reply will be discarded as stale via the
+        // epoch check.
+        if (
+          _workerCoprocPending?.deferred &&
+          _rbAboutToFire &&
+          _rbPendingFrameNow !== _workerCoprocPending.targetFrame &&
+          tickMod._kn_set_deferred_rollback
+        ) {
+          tickMod._kn_set_deferred_rollback(0);
+          _workerCoprocEpoch++;
+          _syncLog(
+            `DEFERRED-CASCADE-FALLBACK: oldTarget=${_workerCoprocPending.targetFrame} newPending=${_rbPendingFrameNow} mainFrame=${_frameNum} (deferred OFF; pre_tick will rewind synchronously; in-flight reply will be discarded)`,
+          );
+        }
+
+        // ── Deferred-rollback dispatch (Mode 2 deferred / "true GGPO with worker") ──
+        // If a rollback is about to fire AND deferred mode is enabled AND we
+        // have a worker available AND no other dispatch is in flight, send
+        // the corrected inputs to the worker and tell C to NOT rewind. Main
+        // keeps predicting forward; when the worker reply arrives, JS
+        // applies the corrected state and runs a local fast-forward replay
+        // to converge.
+        //
+        // Cascade safety: only one deferred dispatch in flight (gated by
+        // !_workerCoprocPending). If a new pending_rollback fires while a
+        // deferred dispatch is active, we DON'T defer this one — let
+        // pre_tick rewind synchronously (Mode 1 fallback) and the existing
+        // epoch logic discards the in-flight worker reply when it lands.
+        if (
+          _rbAboutToFire &&
+          RB_WORKER_COPROC_DEFERRED &&
+          RB_WORKER_COPROC &&
+          !_workerCoprocAborted &&
+          _rbShadowReady &&
+          _rbShadowWorker &&
+          !_rbShadowFailed &&
+          !_workerCoprocPending &&
+          tickMod._kn_set_deferred_rollback &&
+          tickMod._kn_apply_split_state_partial_with_aux
+        ) {
+          const pendingFrame = tickMod._kn_peek_pending_rollback();
+          const targetFrame = _frameNum;
+          const replayDepth = targetFrame - pendingFrame;
+          if (replayDepth > 0 && replayDepth <= KN_MAX_VISIBLE_ROLLBACK_DEPTH) {
+            const inputsForWorker = [];
+            for (let f = pendingFrame; f < targetFrame; f++) {
+              if (f < 0) continue;
+              for (let s = 0; s < rb_numPlayers; s++) {
+                let inp;
+                if (s === _playerSlot) {
+                  inp = _localInputs[f] || KNShared.ZERO_INPUT;
+                } else {
+                  inp = _rbGetInput(tickMod, s, f) || _remoteInputs[s]?.[f] || KNShared.ZERO_INPUT;
+                }
+                inputsForWorker.push({
+                  slot: s,
+                  frame: f,
+                  buttons: inp.buttons | 0,
+                  lx: inp.lx | 0,
+                  ly: inp.ly | 0,
+                  cx: inp.cx | 0,
+                  cy: inp.cy | 0,
+                });
+              }
+            }
+            const seq = ++_workerCoprocSeq;
+            _workerCoprocEpoch++;
+            try {
+              _rbShadowWorker.postMessage({
+                type: 'rollback-replay',
+                seq,
+                targetFrame: pendingFrame, // worker rolls back TO this frame
+                depth: replayDepth,
+                inputs: inputsForWorker,
+              });
+              const dispatchedAt = performance.now();
+              const timeoutId = setTimeout(() => {
+                if (_workerCoprocPending?.seq !== seq) return;
+                _workerCoprocStats.timeouts++;
+                _workerCoprocAbort(`deferred reply timeout seq=${seq} after ${RB_WORKER_COPROC_TIMEOUT_MS}ms`);
+                // Defensive: clear deferred mode so pre_tick resumes normal rewind.
+                if (tickMod._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+              }, RB_WORKER_COPROC_TIMEOUT_MS);
+              _workerCoprocPending = {
+                seq,
+                targetFrame: pendingFrame, // the frame state will be applied at
+                depth: replayDepth,
+                dispatchedAt,
+                timeoutId,
+                deferred: true,
+                epoch: _workerCoprocEpoch,
+                mainFrameAtDispatch: _frameNum,
+              };
+              _workerCoprocStats.dispatched++;
+              // Tell C engine to skip the rewind on next pre_tick.
+              tickMod._kn_set_deferred_rollback(1);
+              if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
+              _syncLog(
+                `WORKER-COPROC dispatched seq=${seq} deferred targetFrame=${pendingFrame} depth=${replayDepth} mainFrame=${_frameNum} (main keeps predicting)`,
+              );
+            } catch (e) {
+              _syncLog(`WORKER-COPROC deferred dispatch failed: ${e?.message || e} — falling back to local replay`);
+              _workerCoprocPending = null;
+              _workerCoprocStats.dispatchFailures++;
+              // Don't engage deferred mode; let pre_tick rewind synchronously.
+            }
+          }
         }
         _chk('cr:pre-pretick');
         let catchingUp = tickMod._kn_pre_tick(

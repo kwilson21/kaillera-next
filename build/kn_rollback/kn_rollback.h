@@ -36,6 +36,19 @@ int kn_get_pending_rollback(void);
  * Use this for read-only checks; use kn_get_pending_rollback to consume. */
 int kn_peek_pending_rollback(void);
 
+/* Deferred-rollback mode (Mode 2 deferred / "true GGPO with worker"):
+ * When enabled, kn_pre_tick will NOT execute the rewind+replay branch
+ * even if pending_rollback is set. The flag is preserved so JS can
+ * read it (via kn_peek_pending_rollback) and dispatch to the shadow
+ * worker. Main keeps predicting forward. When the worker reply arrives,
+ * JS applies the corrected state via kn_apply_split_state_partial_with_aux
+ * and then runs a local fast-forward replay to converge from the
+ * corrected frame to where main was when the apply landed.
+ *
+ * Default OFF (legacy synchronous-rewind behavior). Setter is idempotent. */
+void kn_set_deferred_rollback(int enable);
+int kn_get_deferred_rollback(void);
+
 /* Get pointer to saved state for a given frame.
  * Returns NULL if frame not in ring buffer.
  */

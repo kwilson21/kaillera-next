@@ -134,6 +134,12 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_save_endpoint_state,|' Makefile.emulatorjs
         echo "    Added save-endpoint WASM export"
     fi
+    # Deferred-rollback mode for Mode 2 "true GGPO with worker" architecture.
+    # Anchored on _kn_clear_replay_state which is added by an earlier sed above.
+    if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_set_deferred_rollback" Makefile.emulatorjs; then
+        sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_set_deferred_rollback,_kn_get_deferred_rollback,|' Makefile.emulatorjs
+        echo "    Added deferred-rollback WASM exports"
+    fi
     # VI register accessors for shadow-worker framebuffer readback.
     # Anchored on _kn_get_rdram_size which is already in the export list.
     if grep -q "_kn_get_rdram_size" Makefile.emulatorjs && ! grep -q "_kn_get_vi_origin" Makefile.emulatorjs; then
