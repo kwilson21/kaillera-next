@@ -4,21 +4,25 @@
   const STATS_WINDOW_MS = 5000;
   const LAST_SEC_MS = 1000;
   const REDUNDANT_FRAMES = 5;
-  // Diagnostic flag: ?fakePeerJitter=1 adds per-frame ±2 unit noise to the
+  // Defaulted ON: ?fakePeerJitter=1 adds per-frame ±2 unit noise to the
   // held stick value, simulating the analog-stick ADC noise + hand tremor
   // a real human peer produces. Without it the synthetic peer holds an
   // exact stick value across a held-period (3-15 frames), which means the
   // C engine's linear-extrapolation predictor is exact at every match
-  // frame — no mispredict-tolerance boundary case ever fires. With it
-  // enabled, the held value drifts ±2 units around the base, so when the
-  // base is near a zone boundary (every 12 stick units) some predictions
-  // miss by 1-3 units across a boundary — exactly what the boundary
-  // hysteresis (commit 5f402ef) is designed to absorb. Demo-only knob;
-  // does not affect production peer behavior.
-  let _jitterEnabled = false;
+  // frame — no mispredict-tolerance boundary case ever fires. With jitter
+  // enabled (the realistic case), held values drift ±2 units around the
+  // base, so when the base is near a zone boundary (every 12 stick units)
+  // some predictions miss by 1-3 units across a boundary — exactly what
+  // the boundary hysteresis (commit 5f402ef) is designed to absorb. This
+  // makes the demo's rollback behavior representative of real netplay
+  // instead of an unrealistically smooth synthetic baseline.
+  // Opt-out via ?fakePeerJitter=0.
+  let _jitterEnabled = true;
   try {
     const params = new URLSearchParams(window.location?.search || '');
-    if (params.get('fakePeerJitter') === '1') _jitterEnabled = true;
+    const raw = params.get('fakePeerJitter');
+    if (raw === '0') _jitterEnabled = false;
+    else if (raw === '1') _jitterEnabled = true;
   } catch (_) {}
   // RetroArch joypad bits we may pick when generating P2's in-match random
   // inputs. Excludes:
