@@ -16487,19 +16487,25 @@
     },
     setPredictionsPaused: (on) => {
       const next = !!on;
-      if (_predictionsPaused !== next) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
+      const changed = _predictionsPaused !== next;
+      if (changed) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
-      // Mode flip used to call _recomputeDelay() so lockstep would settle
-      // at a higher number than rollback. Removed: the C engine's
-      // delay_frames is baked at kn_rollback_init time, so JS-side delay
-      // changes don't reach C. They DO shift the JS-level lockstep stall's
-      // applyFrame check though, which in auto-compare's 6s flip cadence
-      // produced cyclical pauses while the engine waited for remote
-      // inputs at the new deeper apply frame.
-      // The mode-difference UX comes from demo.js _maybeLockstepDelay
-      // buffering local input by DELAY_FRAMES in lockstep mode (rollback
-      // pass-through). Same DELAY_FRAMES in both modes still gives the
-      // right contrast — instant input vs DELAY_FRAMES of input lag.
+      // Re-tune delay using the new mode's formula. Lockstep needs
+      // RTT/2 + jitter coverage; rollback needs jitter only. Without
+      // this, toggling rollback→lockstep at high RTT leaves DELAY_FRAMES
+      // pinned at rollback's lower value, the HUD reports the wrong
+      // delay, and the JS-level lockstep stall waits for inputs that
+      // can't arrive within the rollback-sized window — visible as
+      // periodic stalls.
+      //
+      // Earlier removal cited cyclical pauses with auto-compare's 6s
+      // flip cadence. Two reasons that no longer applies:
+      // (1) auto-compare is now opt-out via ?autoCompare=0, which the
+      //     demo defaults to off, AND
+      // (2) the C engine now has _kn_set_delay_frames (called inside
+      //     _recomputeDelay) so JS-side delay changes DO reach C —
+      //     the mismatch that caused the cyclical pauses is gone.
+      if (changed) _recomputeDelay();
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
