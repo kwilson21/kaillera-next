@@ -650,7 +650,7 @@
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return false;
   })();
   let _rollbackPreHash = 0;
   let _rollbackPreHashFrame = -1;
