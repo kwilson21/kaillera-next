@@ -680,20 +680,14 @@
   //     reply roundtrip and the next-paint scheduling latency.
   // Use ?rollbackMode=2 (or the legacy ?workerCoproc=1) to opt into
   // Mode 2.
-  // Speculative dual emulator: Mode 2 enabled by default on this branch
-  // (paired with deferred-mode default ON below) so the user can test
-  // the proper Option 2 architecture without URL flags. Opt out via
-  // ?workerCoproc=0 to fall back to Mode 1.
   const RB_WORKER_COPROC = (() => {
     try {
       const raw = _urlParams.get('workerCoproc') ?? localStorage.getItem('kn-worker-coproc');
-      if (raw === '0') return false;
       if (raw === '1') return true;
       const mode = _urlParams.get('rollbackMode') ?? localStorage.getItem('kn-rollback-mode');
-      if (mode === '1') return false;
       if (mode === '2') return true;
     } catch (_) {}
-    return true;
+    return false;
   })();
   // Mode 2 parallel-replay: dispatch to worker AND let main run its own
   // Mode 1 replay loop. Eliminates the wait-gate freeze (~50ms in legacy
@@ -719,17 +713,18 @@
   // main was at apply time. Net freeze: N × ~12ms where N = rAFs the
   // worker took (typical 1-2 = 12-24ms vs Mode 1's 50ms).
   //
-  // Default ON on this branch alongside RB_WORKER_COPROC=true so the
-  // proper speculative-dual-emulator architecture is the default Mode 2
-  // path. Opt out via ?workerCoprocDeferred=0 to fall back to parallel
-  // mode (which still does its own Mode 1 replay on main).
+  // Opt-in via ?workerCoprocDeferred=1 (requires ?workerCoproc=1 too).
+  // Briefly defaulted ON for testing in 79cfcc9 — reverted because the
+  // GGPO-style snap-back+scrub-forward visual reads as glitches to
+  // testers used to Mode 1's held-canvas pause. Architecture is sound;
+  // perception is the gate.
   const RB_WORKER_COPROC_DEFERRED = (() => {
     try {
       const raw = _urlParams.get('workerCoprocDeferred') ?? localStorage.getItem('kn-worker-coproc-deferred');
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return true;
+    return false;
   })();
   let _workerCoprocPending = null; // { seq, targetFrame, rollbackStartFrame, depth, dispatchedAt, timeoutId, parallel, epoch, deferred }
   // Cascade-safe epoch: incremented every time a NEW rollback enters the
