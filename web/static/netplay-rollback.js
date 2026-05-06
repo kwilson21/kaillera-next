@@ -1636,6 +1636,25 @@
   let _rbConvergedLogged = false; // one-shot log when convergence window ends
   let _rbStallLogged = 0; // frame at which last RB-INPUT-STALL was logged (rate limit)
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
+  // Pre-allocated scratch for _rbGetInput. Without these, every call
+  // (3-4× per replay step in true rollback) does:
+  //   - new Int32Array(mod.HEAPU8.buffer, _rbInputPtr, 5)  ← typed-array
+  //   - { buttons, lx, ly, cx, cy }                        ← input object
+  // For depth=7 rollback that's 28+ allocations → noticeable GC pressure.
+  // Pre-allocated scratch reuses the same view + per-slot object across
+  // calls. The typed-array view is invalidated on HEAPU8 detach (heap
+  // grow) — recreated lazily inside _rbGetInput when buffer mismatch.
+  let _rbInputScratchView = null;
+  let _rbInputScratchPtr = 0; // tracks the ptr the view is bound to
+  // 4 per-slot scratch objects so concurrent calls within a single tick
+  // (e.g. true-rollback writes 4 slots in one step) don't clobber each
+  // other before the WASM-side write consumes them.
+  const _rbInputScratch = [
+    { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
+    { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
+    { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
+    { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
+  ];
   let _rbRegionsBufPtr = 0; // WASM heap pointer for state region hashes (32 × uint32)
   let _rbTaintBufPtr = 0; // WASM heap pointer for taint bitmap (128 × uint8)
   let _rbFatalBuf = 0; // RF7 (R3): WASM heap pointer for kn_get_fatal_stale out params (3 × int32)
@@ -4647,8 +4666,29 @@
       _rbInputPtr + 16,
     );
     if (!present) return KNShared.ZERO_INPUT;
-    const heap = new Int32Array(mod.HEAPU8.buffer, _rbInputPtr, 5);
-    return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
+    // Refresh the cached typed-array view if HEAPU8 detached (heap grew)
+    // or this is the first call. Otherwise reuse — saves ~3-4 typed-array
+    // allocations per replay step.
+    const heapBuf = mod.HEAPU8.buffer;
+    if (!_rbInputScratchView || _rbInputScratchView.buffer !== heapBuf || _rbInputScratchPtr !== _rbInputPtr) {
+      _rbInputScratchView = new Int32Array(heapBuf, _rbInputPtr, 5);
+      _rbInputScratchPtr = _rbInputPtr;
+    }
+    // Per-slot scratch object — populated in-place so the next call
+    // doesn't clobber a value still being consumed by writeInputToMemory.
+    // (Within one rAF, _rbGetInput fires up to 4× back-to-back — one per
+    // slot — and each result is consumed synchronously by the immediate
+    // writeInputToMemory call before the next _rbGetInput runs. Per-slot
+    // separation guards against any future caller that holds 2+ inputs
+    // across calls.)
+    const slotIdx = slot >= 0 && slot < _rbInputScratch.length ? slot : 0;
+    const out = _rbInputScratch[slotIdx];
+    out.buttons = _rbInputScratchView[0];
+    out.lx = _rbInputScratchView[1];
+    out.ly = _rbInputScratchView[2];
+    out.cx = _rbInputScratchView[3];
+    out.cy = _rbInputScratchView[4];
+    return out;
   };
 
   const _feedCInput = (mod, slot, frame, input) => {
@@ -11800,6 +11840,9 @@
       if (_rbInputPtr && stopMod?._free) {
         stopMod._free(_rbInputPtr);
         _rbInputPtr = 0;
+        // Invalidate cached scratch view bound to the freed ptr.
+        _rbInputScratchView = null;
+        _rbInputScratchPtr = 0;
       }
       if (_rbRegionsBufPtr && stopMod?._free) {
         stopMod._free(_rbRegionsBufPtr);
@@ -12739,6 +12782,8 @@
             if (_rbInputPtr && tickMod?._free) {
               tickMod._free(_rbInputPtr);
               _rbInputPtr = 0;
+              _rbInputScratchView = null;
+              _rbInputScratchPtr = 0;
             }
             if (_rbRegionsBufPtr && tickMod?._free) {
               tickMod._free(_rbRegionsBufPtr);
