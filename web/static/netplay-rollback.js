@@ -723,7 +723,7 @@
     } catch (_) {}
     return false;
   })();
-  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel, epoch, deferred }
+  let _workerCoprocPending = null; // { seq, targetFrame, rollbackStartFrame, depth, dispatchedAt, timeoutId, parallel, epoch, deferred }
   // Cascade-safe epoch: incremented every time a NEW rollback enters the
   // replay branch. Worker dispatches capture the epoch at dispatch time;
   // if the engine has cascaded (epoch advanced) by the time the worker
@@ -758,6 +758,7 @@
     watchdogTrips: 0,
     transientRejects: 0,
     consecutiveRejects: 0,
+    cascadeDiscarded: 0,
     totalRoundtripMs: 0,
     maxRoundtripMs: 0,
   };
@@ -843,6 +844,13 @@
   let _rbShadowBooting = false;
   let _rbShadowReady = false;
   let _rbShadowFailed = false;
+  let _rbShadowBootTimeoutId = 0;
+  // Bootstrap deadline: if the worker doesn't post 'ready' within this
+  // window, _shadowDisable() the engine. Without it, _rbShadowBooting
+  // could stay true forever on a silently-crashed worker, gating Mode 2
+  // for the page-load with no recovery (no tick-loop stall — _rbShadowReady
+  // also stays false — but the user gets Mode 1 only with no diagnostic).
+  const RB_SHADOW_BOOT_TIMEOUT_MS = 15000;
   let _rbShadowVisible = false;
   let _rbShadowStatusSab = null;
   let _rbShadowStatus = null;
@@ -2095,6 +2103,10 @@
     _rbShadowBooting = false;
     _rbShadowReady = false;
     _rbShadowFailed = false;
+    if (_rbShadowBootTimeoutId) {
+      clearTimeout(_rbShadowBootTimeoutId);
+      _rbShadowBootTimeoutId = 0;
+    }
     _rbShadowStatusSab = null;
     _rbShadowStatus = null;
     _rbShadowBootPromise = null;
@@ -2309,6 +2321,10 @@
       _rbShadowReady = true;
       _rbShadowFailed = false;
       _rbShadowInFlight = 0;
+      if (_rbShadowBootTimeoutId) {
+        clearTimeout(_rbShadowBootTimeoutId);
+        _rbShadowBootTimeoutId = 0;
+      }
       stats.ready++;
       stats.lastFrame = msg.frame ?? -1;
       stats.lastBootMs = performance.now() - (stats._bootStartedAt || performance.now());
@@ -2378,7 +2394,7 @@
           // ── Deferred-mode apply + local fast-forward ──
           // Main has been predicting forward from pending.mainFrameAtDispatch.
           // Worker reply has corrected state at pending.targetFrame (= the
-          // misprediction's pendingFrame). Main is now at currentMainFrame.
+          // replay end frame from dispatch). Main is now at currentMainFrame.
           // Apply worker state at targetFrame (jumps rb.frame BACKWARD), then
           // fast-forward replay to converge to currentMainFrame.
           if (pending.deferred) {
@@ -2389,6 +2405,13 @@
             if (pending.epoch !== _workerCoprocEpoch) {
               _workerCoprocStats.completed++;
               _workerCoprocStats.totalRoundtripMs += roundtripMs;
+              // Cascade discards bypass the consecutive-reject auto-disable
+              // path (intentionally — the worker did its job, we just raced
+              // a newer rollback). But under sustained jitter a *truly*
+              // hung worker could be masked because dispatched ticks while
+              // failed doesn't. Track separately so session logs can
+              // compute real worker-success ratio: (completed - cascadeDiscarded) / dispatched.
+              _workerCoprocStats.cascadeDiscarded++;
               _shadowLog(
                 `WORKER-COPROC deferred-stale-cascade seq=${pending.seq} dispatchEpoch=${pending.epoch} currentEpoch=${_workerCoprocEpoch} (cascade preempted)`,
               );
@@ -2549,6 +2572,7 @@
             if (roundtripMs > _workerCoprocStats.maxRoundtripMs) {
               _workerCoprocStats.maxRoundtripMs = roundtripMs;
             }
+            _workerCoprocStats.cascadeDiscarded++;
             _shadowLog(
               `WORKER-COPROC parallel-stale-cascade seq=${pending.seq} dispatchEpoch=${pending.epoch} currentEpoch=${_workerCoprocEpoch} target=${pending.targetFrame} (cascade preempted; discarding to avoid state corruption)`,
             );
@@ -3268,6 +3292,12 @@
     const stats = _getShadowStats();
     stats.bootAttempts++;
     stats._bootStartedAt = performance.now();
+    if (_rbShadowBootTimeoutId) clearTimeout(_rbShadowBootTimeoutId);
+    _rbShadowBootTimeoutId = setTimeout(() => {
+      _rbShadowBootTimeoutId = 0;
+      if (_rbShadowReady || _rbShadowFailed) return;
+      _shadowDisable('boot-timeout', `worker did not post 'ready' within ${RB_SHADOW_BOOT_TIMEOUT_MS}ms`);
+    }, RB_SHADOW_BOOT_TIMEOUT_MS);
     _rbShadowBootPromise = (async () => {
       try {
         const offscreen = overlay.transferControlToOffscreen();
@@ -3376,7 +3406,7 @@
     // the emulator while pending, so missing a few step messages here
     // doesn't desync the worker — main will catch the worker up via
     // its lockstep stepping after the apply completes.
-    if (!force && _workerCoprocPending) {
+    if (!force && _workerCoprocPending && !_workerCoprocPending.deferred) {
       _getShadowStats().droppedSteps++;
       return false;
     }
@@ -11765,6 +11795,7 @@
 
     // Shutdown C-level rollback
     if (_useCRollback) {
+      if (stopMod?._kn_set_deferred_rollback) stopMod._kn_set_deferred_rollback(0);
       if (stopMod?._kn_rollback_shutdown) stopMod._kn_rollback_shutdown();
       if (_rbInputPtr && stopMod?._free) {
         stopMod._free(_rbInputPtr);
@@ -12608,7 +12639,7 @@
         // exceeds RB_WORKER_COPROC_TIMEOUT_MS the dispatch's setTimeout
         // calls _workerCoprocAbort which clears pending and falls back to
         // local-replay for subsequent rollbacks.
-        if (_workerCoprocPending && !_workerCoprocPending.parallel) {
+        if (_workerCoprocPending && !_workerCoprocPending.parallel && !_workerCoprocPending.deferred) {
           // Legacy wait-gate path. Parallel mode lets main continue its
           // local Mode 1 replay; worker reply applies opportunistically
           // via the rollback-replay-result handler.
@@ -12703,6 +12734,7 @@
           // re-fires init cleanly.
           if (_useCRollback && _rbReinitClosure) {
             const tickMod = window.EJS_emulator?.gameManager?.Module;
+            if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
             if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
             if (_rbInputPtr && tickMod?._free) {
               tickMod._free(_rbInputPtr);
@@ -13113,13 +13145,13 @@
         if (
           _workerCoprocPending?.deferred &&
           _rbAboutToFire &&
-          _rbPendingFrameNow !== _workerCoprocPending.targetFrame &&
+          _rbPendingFrameNow !== _workerCoprocPending.rollbackStartFrame &&
           tickMod._kn_set_deferred_rollback
         ) {
           tickMod._kn_set_deferred_rollback(0);
           _workerCoprocEpoch++;
           _syncLog(
-            `DEFERRED-CASCADE-FALLBACK: oldTarget=${_workerCoprocPending.targetFrame} newPending=${_rbPendingFrameNow} mainFrame=${_frameNum} (deferred OFF; pre_tick will rewind synchronously; in-flight reply will be discarded)`,
+            `DEFERRED-CASCADE-FALLBACK: oldStart=${_workerCoprocPending.rollbackStartFrame} newPending=${_rbPendingFrameNow} mainFrame=${_frameNum} (deferred OFF; pre_tick will rewind synchronously; in-flight reply will be discarded)`,
           );
         }
 
@@ -13179,7 +13211,7 @@
               _rbShadowWorker.postMessage({
                 type: 'rollback-replay',
                 seq,
-                targetFrame: pendingFrame, // worker rolls back TO this frame
+                targetFrame, // worker replays from pendingFrame to this frame
                 depth: replayDepth,
                 inputs: inputsForWorker,
               });
@@ -13193,7 +13225,8 @@
               }, RB_WORKER_COPROC_TIMEOUT_MS);
               _workerCoprocPending = {
                 seq,
-                targetFrame: pendingFrame, // the frame state will be applied at
+                targetFrame,
+                rollbackStartFrame: pendingFrame,
                 depth: replayDepth,
                 dispatchedAt,
                 timeoutId,
@@ -13206,7 +13239,7 @@
               tickMod._kn_set_deferred_rollback(1);
               if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
               _syncLog(
-                `WORKER-COPROC dispatched seq=${seq} deferred targetFrame=${pendingFrame} depth=${replayDepth} mainFrame=${_frameNum} (main keeps predicting)`,
+                `WORKER-COPROC dispatched seq=${seq} deferred startFrame=${pendingFrame} targetFrame=${targetFrame} depth=${replayDepth} mainFrame=${_frameNum} (main keeps predicting)`,
               );
             } catch (e) {
               _syncLog(`WORKER-COPROC deferred dispatch failed: ${e?.message || e} — falling back to local replay`);
@@ -13216,6 +13249,7 @@
             }
           }
         }
+        const _frameBeforePreTick = _frameNum;
         _chk('cr:pre-pretick');
         let catchingUp = tickMod._kn_pre_tick(
           localInput.buttons,
@@ -13426,14 +13460,15 @@
             tickMod._kn_clear_replay_state &&
             (workerCoprocHasAuxApply || workerCoprocHasLegacySidecarApply)
           ) {
-            const targetFrame = _frameNum;
+            const targetFrame = _frameBeforePreTick;
+            const rollbackStartFrame = _frameNum;
             // Build the full set of confirmed inputs spanning the
             // rollback window so worker can advance its ring forward
             // with corrected values. Walk back from targetFrame; for
             // each frame in [targetFrame-replayDepth, targetFrame), pull
             // the input each slot recorded then.
             const inputsForWorker = [];
-            for (let f = targetFrame - replayDepth; f < targetFrame; f++) {
+            for (let f = rollbackStartFrame; f < targetFrame; f++) {
               if (f < 0) continue;
               for (let s = 0; s < rb_numPlayers; s++) {
                 let inp;
@@ -13486,6 +13521,7 @@
               _workerCoprocPending = {
                 seq,
                 targetFrame,
+                rollbackStartFrame,
                 depth: replayDepth,
                 dispatchedAt,
                 timeoutId,
@@ -13494,7 +13530,7 @@
               };
               _workerCoprocStats.dispatched++;
               _syncLog(
-                `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}${RB_WORKER_COPROC_PARALLEL ? ' parallel' : ''}`,
+                `WORKER-COPROC dispatched seq=${seq} startFrame=${rollbackStartFrame} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}${RB_WORKER_COPROC_PARALLEL ? ' parallel' : ''}`,
               );
               if (!RB_WORKER_COPROC_PARALLEL) {
                 // ── Legacy wait-gate path ──

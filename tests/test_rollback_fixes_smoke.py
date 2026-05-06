@@ -113,6 +113,8 @@ def test_rollback_fixes_smoke(page):
                 hasGetSplitStateForShadow: typeof m._kn_get_split_state_for_shadow === 'function',
                 hasApplySplitStatePartialWithAux:
                     typeof m._kn_apply_split_state_partial_with_aux === 'function',
+                hasSetDeferredRollback: typeof m._kn_set_deferred_rollback === 'function',
+                hasGetDeferredRollback: typeof m._kn_get_deferred_rollback === 'function',
             };
         }"""
     )
@@ -131,5 +133,7 @@ def test_rollback_fixes_smoke(page):
         assert module_check["hasGetSplitStateStats"]
         assert module_check["hasGetSplitStateForShadow"]
         assert module_check["hasApplySplitStatePartialWithAux"]
+        assert module_check["hasSetDeferredRollback"]
+        assert module_check["hasGetDeferredRollback"]
 
     print("[smoke] ✓ all rollback hardening APIs present")

@@ -126,9 +126,14 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_get_split_state_stats,|_kn_get_split_state_stats,_kn_get_split_state_for_shadow,|' Makefile.emulatorjs
         echo "    Added shadow split-state WASM export"
     fi
-    if grep -q "_kn_get_split_state_for_shadow" Makefile.emulatorjs && ! grep -q "_kn_apply_split_state_partial" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_split_state_for_shadow,|_kn_get_split_state_for_shadow,_kn_apply_split_state_partial,_kn_clear_replay_state,|' Makefile.emulatorjs
-        echo "    Added selective state-adopt + replay-clear WASM exports"
+    if grep -q "_kn_get_split_state_for_shadow" Makefile.emulatorjs && ! grep -q "_kn_apply_split_state_partial_with_aux" Makefile.emulatorjs; then
+        if grep -q "_kn_apply_split_state_partial" Makefile.emulatorjs; then
+            sed -i 's|_kn_apply_split_state_partial,|_kn_apply_split_state_partial_with_aux,_kn_apply_split_state_partial,|' Makefile.emulatorjs
+            echo "    Added aux selective state-adopt WASM export"
+        else
+            sed -i 's|_kn_get_split_state_for_shadow,|_kn_get_split_state_for_shadow,_kn_apply_split_state_partial_with_aux,_kn_apply_split_state_partial,_kn_clear_replay_state,|' Makefile.emulatorjs
+            echo "    Added selective state-adopt + replay-clear WASM exports"
+        fi
     fi
     if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_save_endpoint_state" Makefile.emulatorjs; then
         sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_save_endpoint_state,|' Makefile.emulatorjs
