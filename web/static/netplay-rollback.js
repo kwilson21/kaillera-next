@@ -680,14 +680,20 @@
   //     reply roundtrip and the next-paint scheduling latency.
   // Use ?rollbackMode=2 (or the legacy ?workerCoproc=1) to opt into
   // Mode 2.
+  // Speculative dual emulator: Mode 2 enabled by default on this branch
+  // (paired with deferred-mode default ON below) so the user can test
+  // the proper Option 2 architecture without URL flags. Opt out via
+  // ?workerCoproc=0 to fall back to Mode 1.
   const RB_WORKER_COPROC = (() => {
     try {
       const raw = _urlParams.get('workerCoproc') ?? localStorage.getItem('kn-worker-coproc');
+      if (raw === '0') return false;
       if (raw === '1') return true;
       const mode = _urlParams.get('rollbackMode') ?? localStorage.getItem('kn-rollback-mode');
+      if (mode === '1') return false;
       if (mode === '2') return true;
     } catch (_) {}
-    return false;
+    return true;
   })();
   // Mode 2 parallel-replay: dispatch to worker AND let main run its own
   // Mode 1 replay loop. Eliminates the wait-gate freeze (~50ms in legacy
@@ -713,15 +719,17 @@
   // main was at apply time. Net freeze: N × ~12ms where N = rAFs the
   // worker took (typical 1-2 = 12-24ms vs Mode 1's 50ms).
   //
-  // Default OFF (opt-in via ?workerCoprocDeferred=1). Requires the
-  // _kn_set_deferred_rollback C export.
+  // Default ON on this branch alongside RB_WORKER_COPROC=true so the
+  // proper speculative-dual-emulator architecture is the default Mode 2
+  // path. Opt out via ?workerCoprocDeferred=0 to fall back to parallel
+  // mode (which still does its own Mode 1 replay on main).
   const RB_WORKER_COPROC_DEFERRED = (() => {
     try {
       const raw = _urlParams.get('workerCoprocDeferred') ?? localStorage.getItem('kn-worker-coproc-deferred');
       if (raw === '1') return true;
       if (raw === '0') return false;
     } catch (_) {}
-    return false;
+    return true;
   })();
   let _workerCoprocPending = null; // { seq, targetFrame, rollbackStartFrame, depth, dispatchedAt, timeoutId, parallel, epoch, deferred }
   // Cascade-safe epoch: incremented every time a NEW rollback enters the
@@ -2492,44 +2500,19 @@
                   return;
                 }
                 // Apply succeeded. rb.frame = pending.targetFrame, replay state cleared.
-                // Now run convergeFrames local replay steps to reach currentMainFrame.
+                // Speculative dual emulator (proper Option 2): DON'T run a
+                // synchronous convergence loop. Just sync _frameNum to
+                // rb.frame (= targetFrame) and return. Main's normal forward
+                // execution will run pre_tick + step + post_tick once per
+                // rAF, naturally catching up over (currentMainFrame -
+                // targetFrame) rAFs. Each forward tick paints normally
+                // (no headless), so the user sees a brief "snap backward"
+                // (apply lands rb.frame at targetFrame, where main was
+                // previously at targetFrame+N) followed by N frames of
+                // forward scrub motion. Classic GGPO rollback feel — motion
+                // through the correction instead of a held canvas freeze.
                 _refreshRunnerAfterRollbackRestore(tickMod);
                 if (tickMod._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
-                const convergeStart = performance.now();
-                let convergedSteps = 0;
-                if (convergeFrames > 0) {
-                  // Set headless ON for the convergence replay (suppress
-                  // intermediate paints; the final paint comes from the next
-                  // normal rAF after we exit this handler).
-                  _setReplayFullHeadless(tickMod, true, 'deferred-converge');
-                  _setReplayAudioOutputSkip(tickMod, true, 'deferred-converge');
-                  for (let i = 0; i < convergeFrames; i++) {
-                    // Each step needs inputs at (rb.frame - delay) for remotes
-                    // and at rb.frame for local. Engine pre_tick handles this
-                    // via the input ring. We run pre_tick + step + post_tick
-                    // synchronously to fast-forward.
-                    const localAtFrame = _localInputs[tickMod._kn_get_frame()] || KNShared.ZERO_INPUT;
-                    const preCu = tickMod._kn_pre_tick(
-                      localAtFrame.buttons | 0,
-                      localAtFrame.lx | 0,
-                      localAtFrame.ly | 0,
-                      localAtFrame.cx | 0,
-                      localAtFrame.cy | 0,
-                      -1,
-                    );
-                    if (preCu !== 0) {
-                      // Pre_tick says rollback or pacing — break and let
-                      // normal rAF handle. Should not happen in convergence.
-                      _shadowLog(`deferred-converge: pre_tick returned ${preCu} at i=${i} — breaking`);
-                      break;
-                    }
-                    _runCReplayFrame(tickMod);
-                    convergedSteps++;
-                  }
-                  _setReplayFullHeadless(tickMod, false, 'deferred-converge-done');
-                  _setReplayAudioOutputSkip(tickMod, false, 'deferred-converge-done');
-                }
-                const convergeMs = performance.now() - convergeStart;
                 _frameNum = tickMod._kn_get_frame?.() ?? _frameNum;
                 KNState.frameNum = _frameNum;
                 _workerCoprocStats.completed++;
@@ -2538,7 +2521,7 @@
                   _workerCoprocStats.maxRoundtripMs = roundtripMs;
                 }
                 _syncLog(
-                  `WORKER-COPROC deferred apply+converge seq=${pending.seq} target=${pending.targetFrame} mainAtDispatch=${pending.mainFrameAtDispatch} mainAtApply=${currentMainFrame} convergeFrames=${convergedSteps}/${convergeFrames} convergeMs=${convergeMs.toFixed(1)} roundtripMs=${roundtripMs.toFixed(1)}`,
+                  `WORKER-COPROC deferred-apply seq=${pending.seq} target=${pending.targetFrame} mainAtDispatch=${pending.mainFrameAtDispatch} mainAtApply=${currentMainFrame} convergeFrames=${convergeFrames} (snap-back to ${pending.targetFrame}, normal forward will catch up over next ${convergeFrames} rAFs) roundtripMs=${roundtripMs.toFixed(1)}`,
                 );
               } finally {
                 tickMod._free(rdramPtr);
