@@ -703,7 +703,14 @@
     } catch (_) {}
     return true;
   })();
-  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel }
+  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel, epoch }
+  // Cascade-safe epoch: incremented every time a NEW rollback enters the
+  // replay branch. Worker dispatches capture the epoch at dispatch time;
+  // if the engine has cascaded (epoch advanced) by the time the worker
+  // reply arrives, the dispatch is stale — applying its state would
+  // overwrite the cascade's correct state with the prior-rollback's
+  // state. Stale replies are logged and discarded.
+  let _workerCoprocEpoch = 0;
   let _workerCoprocSeq = 0;
   let _workerCoprocAborted = false; // permanent disable after a hang/timeout
   let _workerCoprocLastFrameAdvance = 0;
@@ -2336,6 +2343,22 @@
           // local Mode 1 replay produced the same state deterministically.
           // Apply would be a no-op or, worse, a backward jump if main
           // is now beyond targetFrame. Skip the apply entirely.
+          //
+          // Cascade-safety: also discard if the engine has cascaded
+          // (epoch advanced) since dispatch. The worker computed state
+          // for a PRIOR rollback's input set; applying it now would
+          // overwrite the cascade's correct state with stale state.
+          if (pending.parallel && pending.epoch !== _workerCoprocEpoch) {
+            _workerCoprocStats.completed++;
+            _workerCoprocStats.totalRoundtripMs += roundtripMs;
+            if (roundtripMs > _workerCoprocStats.maxRoundtripMs) {
+              _workerCoprocStats.maxRoundtripMs = roundtripMs;
+            }
+            _shadowLog(
+              `WORKER-COPROC parallel-stale-cascade seq=${pending.seq} dispatchEpoch=${pending.epoch} currentEpoch=${_workerCoprocEpoch} target=${pending.targetFrame} (cascade preempted; discarding to avoid state corruption)`,
+            );
+            return;
+          }
           if (pending.parallel) {
             const currentFrameParallel = tickMod?._kn_get_frame?.() ?? -1;
             if (currentFrameParallel >= pending.targetFrame) {
@@ -12970,6 +12993,10 @@
           catchingUp = 2;
         }
         if (replayDepth > 0 && catchingUp === 2 && !_rbReplayLogged) {
+          // Bump cascade epoch — any in-flight worker reply for the
+          // PRIOR rollback is now stale and will be discarded by the
+          // reply handler instead of overwriting this cascade's state.
+          _workerCoprocEpoch++;
           const hudNow = performance.now();
           _hudRollbackEvents++;
           _hudEventTimestamps.push(hudNow);
@@ -13153,6 +13180,7 @@
                 dispatchedAt,
                 timeoutId,
                 parallel: RB_WORKER_COPROC_PARALLEL,
+                epoch: _workerCoprocEpoch,
               };
               _workerCoprocStats.dispatched++;
               _syncLog(
