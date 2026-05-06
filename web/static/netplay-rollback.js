@@ -689,7 +689,21 @@
     } catch (_) {}
     return false;
   })();
-  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId }
+  // Mode 2 parallel-replay: dispatch to worker AND let main run its own
+  // Mode 1 replay loop. Eliminates the wait-gate freeze (~50ms in legacy
+  // Mode 2). Worker reply applies opportunistically: if main caught up
+  // first (deterministic), reply is redundant; if main still mid-replay
+  // across multiple rAFs, apply short-circuits remaining replay.
+  // Default ON when ?workerCoproc=1; opt-out via ?workerCoprocParallel=0.
+  const RB_WORKER_COPROC_PARALLEL = (() => {
+    try {
+      const raw = _urlParams.get('workerCoprocParallel') ?? localStorage.getItem('kn-worker-coproc-parallel');
+      if (raw === '0') return false;
+      if (raw === '1') return true;
+    } catch (_) {}
+    return true;
+  })();
+  let _workerCoprocPending = null; // { seq, targetFrame, depth, dispatchedAt, timeoutId, parallel }
   let _workerCoprocSeq = 0;
   let _workerCoprocAborted = false; // permanent disable after a hang/timeout
   let _workerCoprocLastFrameAdvance = 0;
@@ -2316,6 +2330,36 @@
         };
         if (msg.ok) {
           const tickMod = window.EJS_emulator?.gameManager?.Module;
+          // ── Parallel-mode redundant short-circuit ──
+          // If parallel was set on the dispatch and main has already
+          // caught up to (or past) the worker's targetFrame, main's
+          // local Mode 1 replay produced the same state deterministically.
+          // Apply would be a no-op or, worse, a backward jump if main
+          // is now beyond targetFrame. Skip the apply entirely.
+          if (pending.parallel) {
+            const currentFrameParallel = tickMod?._kn_get_frame?.() ?? -1;
+            if (currentFrameParallel >= pending.targetFrame) {
+              _workerCoprocStats.completed++;
+              _workerCoprocStats.totalRoundtripMs += roundtripMs;
+              if (roundtripMs > _workerCoprocStats.maxRoundtripMs) {
+                _workerCoprocStats.maxRoundtripMs = roundtripMs;
+              }
+              _shadowLog(
+                `WORKER-COPROC parallel-redundant seq=${pending.seq} target=${pending.targetFrame} mainAt=${currentFrameParallel} roundtripMs=${roundtripMs.toFixed(1)} (main local replay finished first)`,
+              );
+              // No state change needed — main's _finishCReplay (or the
+              // _rbReplayLogged && catchingUp !== 2 hook in tick())
+              // already handled headless/overlay/RDP-skip cleanup.
+              return;
+            }
+            // Main still mid-replay (multi-rAF case): fall through to
+            // apply, which will short-circuit the rest. apply clears
+            // replay_remaining internally so next pre_tick takes the
+            // normal forward branch.
+            _shadowLog(
+              `WORKER-COPROC parallel-shortcircuit seq=${pending.seq} target=${pending.targetFrame} mainAt=${currentFrameParallel} roundtripMs=${roundtripMs.toFixed(1)} (apply will skip remaining ${pending.targetFrame - currentFrameParallel} replay frames)`,
+            );
+          }
           const hasWasmBufferApi =
             typeof tickMod?._malloc === 'function' && typeof tickMod?._free === 'function' && !!tickMod?.HEAPU8;
           const hasAuxApply = typeof tickMod?._kn_apply_split_state_partial_with_aux === 'function';
@@ -12346,7 +12390,10 @@
         // exceeds RB_WORKER_COPROC_TIMEOUT_MS the dispatch's setTimeout
         // calls _workerCoprocAbort which clears pending and falls back to
         // local-replay for subsequent rollbacks.
-        if (_workerCoprocPending) {
+        if (_workerCoprocPending && !_workerCoprocPending.parallel) {
+          // Legacy wait-gate path. Parallel mode lets main continue its
+          // local Mode 1 replay; worker reply applies opportunistically
+          // via the rollback-replay-result handler.
           _markTickReturn('skip:coproc-pending');
           return;
         }
@@ -13099,40 +13146,57 @@
                 }
                 _hideRollbackVisualFreeze();
               }, RB_WORKER_COPROC_TIMEOUT_MS);
-              _workerCoprocPending = { seq, targetFrame, depth: replayDepth, dispatchedAt, timeoutId };
+              _workerCoprocPending = {
+                seq,
+                targetFrame,
+                depth: replayDepth,
+                dispatchedAt,
+                timeoutId,
+                parallel: RB_WORKER_COPROC_PARALLEL,
+              };
               _workerCoprocStats.dispatched++;
               _syncLog(
-                `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}`,
+                `WORKER-COPROC dispatched seq=${seq} targetFrame=${targetFrame} depth=${replayDepth} inputs=${inputsForWorker.length}${RB_WORKER_COPROC_PARALLEL ? ' parallel' : ''}`,
               );
-              // Clear main's own replay state so kn_pre_tick on next
-              // tick doesn't re-trigger replay branch. The worker-coproc
-              // wait gate at the top of the C-rollback path will then
-              // freeze the emulator at the rewound state until the worker
-              // reply arrives (or timeout fires).
-              tickMod._kn_clear_replay_state();
-              // Visual freeze overlay covers the canvas during the
-              // ~20-30ms wait. We deliberately do NOT enable headless
-              // mode: the emulator isn't ticking forward (gate blocks
-              // it), so there's nothing to suppress paints from. Keeping
-              // headless off means if the gate or worker fails open,
-              // recovery paints land naturally.
-              _showRollbackVisualFreeze(replayDepth, localInput);
-              // Lazy-start the frame-advance watchdog. Catches "demo
-              // hangs" cases the dispatch timeout can't (e.g., reply
-              // arrived but apply threw, leaving runner dead).
-              if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
-              _pushTickProfile({
-                f: _frameNum,
-                path: 'replay',
-                total: performance.now() - _t0,
-                preTick: _tPreTick - _t0,
-                burstMs: 0,
-                burstSteps: 0,
-                workerCoproc: true,
-              });
-              _pushRbProbe('replay');
-              _markTickReturn('skip:coproc-dispatched');
-              return;
+              if (!RB_WORKER_COPROC_PARALLEL) {
+                // ── Legacy wait-gate path ──
+                // Clear main's own replay state so kn_pre_tick on next
+                // tick doesn't re-trigger replay branch. The worker-coproc
+                // wait gate at the top of the C-rollback path will then
+                // freeze the emulator at the rewound state until the worker
+                // reply arrives (or timeout fires).
+                tickMod._kn_clear_replay_state();
+                // Visual freeze overlay covers the canvas during the
+                // ~20-30ms wait. We deliberately do NOT enable headless
+                // mode: the emulator isn't ticking forward (gate blocks
+                // it), so there's nothing to suppress paints from. Keeping
+                // headless off means if the gate or worker fails open,
+                // recovery paints land naturally.
+                _showRollbackVisualFreeze(replayDepth, localInput);
+                // Lazy-start the frame-advance watchdog. Catches "demo
+                // hangs" cases the dispatch timeout can't (e.g., reply
+                // arrived but apply threw, leaving runner dead).
+                if (!_workerCoprocWatchdogId) _startWorkerCoprocWatchdog();
+                _pushTickProfile({
+                  f: _frameNum,
+                  path: 'replay',
+                  total: performance.now() - _t0,
+                  preTick: _tPreTick - _t0,
+                  burstMs: 0,
+                  burstSteps: 0,
+                  workerCoproc: true,
+                });
+                _pushRbProbe('replay');
+                _markTickReturn('skip:coproc-dispatched');
+                return;
+              }
+              // ── Parallel path ──
+              // Worker dispatched; main's replay state is INTACT. Fall
+              // through to the Mode 1 replay loop below. Main runs its
+              // own local replay; worker computes in parallel. Reply is
+              // handled in the rollback-replay-result message handler.
+              // No visual freeze overlay, no early return — main proceeds
+              // through the existing Mode 1 burst loop.
             } catch (e) {
               _syncLog(`WORKER-COPROC dispatch failed: ${e?.message || e} — falling back to main replay`);
               _workerCoprocPending = null;
