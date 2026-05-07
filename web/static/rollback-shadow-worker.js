@@ -469,9 +469,17 @@
           cpuBytes: cpu.byteLength | 0,
         });
       }
-      mod.HEAPU8.set(rdram, rdramPtr);
+      /* Write CPU FIRST and gate RDRAM on success — if kn_sync_write_cpu
+       * fails, leaving worker's RDRAM partially-applied (new bytes) while
+       * CPU still reflects the previous frame would be a silent desync:
+       * next pre_tick saves the inconsistent state into the ring, the
+       * following Mode 2 dispatch restores from it and ships it back to
+       * main via kn_get_split_state_for_shadow. Greptile P1 finding.
+       * Mirror class of bug to the rb_restore_slot_state ordering issue
+       * already fixed in the C engine. */
       result = withTempBytes(cpu, (ptr, len) => mod._kn_sync_write_cpu(ptr, len));
       if (result !== 0) return reject(`split cpu restore failed result=${result}`);
+      mod.HEAPU8.set(rdram, rdramPtr);
       if (message.hidden && mod._kn_restore_hidden_state_impl) {
         withTempBytes(message.hidden, (ptr) => {
           if (ptr) mod._kn_restore_hidden_state_impl(ptr);
