@@ -136,6 +136,40 @@ int kn_skip_post_rdram_in_hash = 0;
  * kn_rollback_shutdown because init memset() clears rb. */
 static int kn_requested_state_backend = KN_STATE_BACKEND_RETRO;
 
+/* Phase A2 user-controlled toggles. Stored OUTSIDE rb so they survive
+ * kn_rollback_init / kn_rollback_shutdown cycles. The rb struct mirrors
+ * them at init time so the hot path doesn't have to indirect.
+ *
+ * delta_save_enabled: always-on dirty-mask compute (cheap, used by sparse + debug).
+ * delta_restore_enabled: chain-walk restore (works with both full + sparse slots).
+ * delta_validate_enabled: parallel-run full restore + hash compare to detect bugs.
+ * delta_save_sparse_enabled: NEW (Phase A3). Save writes only dirty blocks to
+ *   slot — slot becomes a sparse store. baseline_rdram backstops blocks not
+ *   in the chain. Hash funcs + Mode 2 worker exposure use a reconstructor.
+ *   Default OFF until validated. */
+/* 2026-05-07: User reports visual glitches after ~280 rollbacks in real
+ * demo even with sparse OFF (i.e., delta restore + full saves). The
+ * Phase A2 validation harness reported 0 byte-mismatches in shorter
+ * runs, but real gameplay surfaces issues at longer time horizons —
+ * same lesson as feedback_validation_passes_glitches_remain.md applies
+ * to delta RESTORE too, not just sparse SAVE. Defaulting delta_restore
+ * OFF until the cause is properly understood. The save-side dirty mask
+ * compute stays ON (cheap, useful for stats and any future delta work). */
+static int kn_user_delta_save_enabled = 1;
+static int kn_user_delta_restore_enabled = 0;
+static int kn_user_delta_validate_enabled = 0;
+/* Phase A3 sparse-save: OFF by default. Validation harness reported 0
+ * mismatches in 2-min Playwright runs at anchor_interval=2, but real
+ * gameplay surfaced visual glitches the harness didn't catch — the
+ * harness only verifies bit-equivalent RDRAM after restore, not the
+ * downstream renderer/audio invariants that depend on save-time state.
+ * Likely a similar class of issue to the original taint-skip dead end:
+ * tainted regions need to be RESTORE-consistent with non-tainted ones,
+ * and sparse save + chain-walk reconstruction can leave them in mixed
+ * states that pass byte-equality but break GLideN64 / RSP HLE assumptions.
+ * Keep the toggle for future experimentation; don't default ON. */
+static int kn_user_delta_save_sparse_enabled = 0;
+
 /* Deferred-rollback mode flag (Mode 2 deferred / "true GGPO with worker").
  * When set, kn_pre_tick observes pending_rollback but does NOT execute the
  * rewind+replay branch; main keeps predicting forward while JS dispatches
@@ -250,6 +284,65 @@ static struct {
     uint32_t split_restore_count;
     uint32_t split_save_failures;
     uint32_t split_restore_failures;
+    /* Delta-save infrastructure (Phase A2). Per-slot dirty mask records
+     * which 64 KB RDRAM blocks differ from the PREVIOUS slot's snapshot.
+     * Save still does a full memcpy (cheap baseline cost), but stores the
+     * dirty mask so restore can do a "smart" partial memcpy: walk slots
+     * forward from target slot to current frame, OR-union dirty masks to
+     * find the set of blocks whose live RDRAM might differ from target,
+     * then memcpy only those blocks from target slot back to live. Gives
+     * ~80% reduction in restore memcpy in active gameplay (measured A1:
+     * 18% dirty per ~8-frame interval).
+     *
+     * delta_phase_in_match: JS-flipped phase tag for stats bucketing.
+     * delta_save_enabled:    always compute mask (cheap, ~64 µs/save).
+     * delta_restore_enabled: use delta restore (the actual perf win).
+     * delta_validate_enabled: parallel-run full restore, hash-compare.
+     *   Captures bugs as immediate FATAL log instead of mysterious GL
+     *   corruption downstream. Cost: 2x restore memcpy + hash compute. */
+    int delta_phase_in_match;
+    int delta_save_enabled;
+    int delta_restore_enabled;
+    int delta_validate_enabled;
+    int delta_save_sparse_enabled;
+    uint8_t (*ring_rdram_dirty_mask)[KN_TAINT_BLOCKS];
+    /* Phase A3 sparse: per-slot flag — 1 if slot is a periodic FULL save
+     * (anchor), 0 if it's a sparse save. Used to keep "anchor in chain"
+     * from blowing up the union dirty set: anchors carry full data but
+     * say nothing about what blocks actually changed since the target,
+     * so they shouldn't be unioned. They CAN serve as source candidates
+     * during the chain walk (full data is always valid). */
+    uint8_t *ring_slot_is_anchor;
+    uint8_t *delta_validation_buf;        /* one buffer reused per restore */
+    /* Phase A3 sparse save: baseline_rdram holds the latest live values.
+     * Updated on every save (with the dirty blocks). Used as:
+     *   - diff target when computing dirty mask (live vs baseline)
+     *   - chain-walk fallback when restoring blocks never in any in-ring
+     *     slot's mask (block hasn't been written within ring window).
+     * Also used by reconstruct_full_slot when Mode 2 worker / hash funcs
+     * need a full slot view. */
+    uint8_t *baseline_rdram;
+    int baseline_initialized;             /* set after first full populate */
+    /* Per-slot reconstructed snapshot (lazy, for consumers that need full).
+     * Reused buffer to avoid allocation. */
+    uint8_t *reconstructed_slot_buf;
+    uint64_t delta_dirty_blocks_total[2];   /* [0]=out-of-match [1]=in-match */
+    uint32_t delta_samples_taken[2];
+    uint32_t delta_max_dirty_blocks[2];
+    uint32_t delta_min_dirty_blocks[2];
+    /* Restore-side telemetry */
+    uint64_t delta_restore_blocks_skipped;  /* blocks we DIDN'T need to copy */
+    uint64_t delta_restore_blocks_copied;
+    uint32_t delta_restore_count_full;      /* fell back to full memcpy */
+    uint32_t delta_restore_count_delta;     /* used delta path */
+    uint32_t delta_validation_failures;
+    /* Last-mismatch diagnostics (exposed via kn_get_delta_stats extension) */
+    int32_t  delta_last_mismatch_target_frame;
+    uint32_t delta_last_mismatch_block_count;
+    int32_t  delta_last_mismatch_first_block;
+    int32_t  delta_last_mismatch_last_block;
+    uint32_t delta_last_mismatch_chain_len;
+    uint8_t  delta_mismatch_blocks_seen[KN_TAINT_BLOCKS];  /* per-block mismatch counter */
 
     /* Input ring: per-player, per-frame */
     kn_input_t inputs[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
@@ -410,10 +503,25 @@ static size_t rb_split_logical_size_for_idx(int idx) {
     return (size_t)rb.split_rdram_size + rb.split_last_cpu_size;
 }
 
+/* Forward decl — defined near the EMSCRIPTEN_KEEPALIVE exports below. */
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size);
+
 static uint32_t kn_fnv1a_split_range(uint32_t hash, int idx, size_t start, size_t len, size_t stride) {
     if (!rb_using_split_state() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
         !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || stride == 0) {
         return hash;
+    }
+    /* Phase A3 sparse-aware: when sparse save is on, slot[idx]'s RDRAM
+     * is sparse — read from reconstructed_slot_buf instead. Reconstruction
+     * is one-shot per call and amortizes across the byte loop. Falls
+     * through to direct read if reconstruction fails or sparse is off. */
+    const uint8_t *rdram_src = rb.ring_rdram_bufs[idx];
+    if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+        && rb.baseline_initialized) {
+        if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                          rb.split_rdram_size) > 0) {
+            rdram_src = rb.reconstructed_slot_buf;
+        }
     }
     size_t end = start + len;
     size_t logical_size = rb_split_logical_size_for_idx(idx);
@@ -421,7 +529,7 @@ static uint32_t kn_fnv1a_split_range(uint32_t hash, int idx, size_t start, size_
     for (size_t off = start; off < end; off += stride) {
         uint8_t byte = 0;
         if (off < rb.split_rdram_size) {
-            byte = rb.ring_rdram_bufs[idx][off];
+            byte = rdram_src[off];
         } else {
             size_t cpu_off = off - rb.split_rdram_size;
             uint32_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
@@ -453,7 +561,217 @@ static int rb_restore_slot_state(int idx) {
         rb.split_restore_failures++;
         return 0;
     }
-    memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+    /* Phase A2 delta restore: instead of full 8 MB memcpy, walk slots
+     * forward from target idx to current to OR-union dirty masks and
+     * find which 64 KB blocks have changed since the target frame. Only
+     * those blocks need to be copied back from the target slot — the
+     * rest already match the target's snapshot in live RDRAM (because
+     * live = some later save's state, which equals target's state for
+     * blocks unchanged in between).
+     *
+     * Validation: when delta_validate_enabled, also do a parallel full
+     * memcpy to delta_validation_buf BEFORE the delta restore overwrites
+     * live RDRAM, then compare live vs validation buf after delta. Hash
+     * mismatch = bug. Logged FATAL with block info for triage.
+     *
+     * Falls back to full memcpy when:
+     *   - delta_restore_enabled == 0 (default, opt-in for testing)
+     *   - any intermediate slot's dirty mask is missing or stale (ring
+     *     wraparound: target was saved more than ring_size frames ago)
+     *   - block_size doesn't divide split_rdram_size evenly (defensive) */
+    const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+    int delta_path =
+        rb.delta_restore_enabled && rb.ring_rdram_dirty_mask &&
+        block_size > 0 && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+    /* Stash baseline for validation BEFORE we touch live RDRAM. In sparse
+     * mode the slot is sparse so we need to reconstruct the full snapshot
+     * by walking the chain (same logic as the sparse restore path uses for
+     * source lookup). In full mode the slot itself IS the snapshot. */
+    if (rb.delta_validate_enabled && rb.delta_validation_buf) {
+        const int sparse_validate = rb.delta_save_sparse_enabled
+            && rb.baseline_rdram && rb.baseline_initialized;
+        if (sparse_validate) {
+            /* Build full reference: for each block, latest dirty source
+             * ≤ target_frame, falling back to baseline. Identical algorithm
+             * to the restore-path's per-block walk so any divergence in
+             * either path surfaces as a validation mismatch. */
+            const uint32_t bs = rb.split_rdram_size / KN_TAINT_BLOCKS;
+            const int tf = rb.ring_frames[idx];
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                int best_frame = -1, best_i = -1;
+                for (int i = 0; i < rb.ring_size; i++) {
+                    const int f2 = rb.ring_frames[i];
+                    if (f2 < 0 || f2 > tf) continue;
+                    const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                        || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+                    if (!has_data) continue;
+                    if (f2 > best_frame) { best_frame = f2; best_i = i; }
+                }
+                const uint8_t *src = (best_i >= 0)
+                    ? (rb.ring_rdram_bufs[best_i] + (size_t)b * bs)
+                    : (rb.baseline_rdram + (size_t)b * bs);
+                memcpy(rb.delta_validation_buf + (size_t)b * bs, src, bs);
+            }
+        } else {
+            memcpy(rb.delta_validation_buf, rb.ring_rdram_bufs[idx],
+                   rb.split_rdram_size);
+        }
+    }
+    if (delta_path) {
+        /* Phase A3 chain-walk restore. Two modes share the same outer
+         * structure but read source bytes differently:
+         *
+         *   FULL slot mode (sparse save off): slot[idx] holds a complete
+         *     8 MB snapshot of frame target_frame. For blocks in the dirty
+         *     union, just memcpy slot[idx][b] → live[b].
+         *
+         *   SPARSE slot mode (sparse save on): slot[idx][b] is meaningful
+         *     only when ring_rdram_dirty_mask[idx][b]=1. For other blocks
+         *     in the union, walk slots backward in TIME order (frame ≤
+         *     target_frame, newest first) to find the most recent slot M
+         *     where mask[M][b]=1, then memcpy slot[M][b] → live[b]. If no
+         *     such M exists in the ring, baseline_rdram[b] is the fallback
+         *     (it always reflects the latest live values; for blocks not
+         *     touched in any in-ring slot's mask, baseline = correct
+         *     value at every in-ring frame).
+         *
+         * Both modes need an in-flight mask covering live writes since
+         * the most-recent save (frame K's stepOneFrame + frame K+1's
+         * writeInputToMemory both happen between pre_tick(K) and
+         * pre_tick(K+1) where rollback fires). For FULL mode we compute
+         * it via memcmp(live, slot[max_idx]). For SPARSE mode we ALSO
+         * compute it via memcmp(live, baseline_rdram) — baseline equals
+         * the most-recent saved state. */
+        const int target_frame = rb.ring_frames[idx];
+        const int sparse = rb.delta_save_sparse_enabled
+            && rb.baseline_rdram && rb.baseline_initialized;
+        if (target_frame < 0) {
+            delta_path = 0;
+        } else {
+            uint8_t union_dirty[KN_TAINT_BLOCKS];
+            memset(union_dirty, 0, KN_TAINT_BLOCKS);
+            int frames_in_chain = 0;
+            int max_frame = -1, max_idx = -1;
+            for (int i = 0; i < rb.ring_size; i++) {
+                if (i == idx) continue;
+                const int f = rb.ring_frames[i];
+                if (f < 0) continue;
+                if (f > max_frame) { max_frame = f; max_idx = i; }
+                if (f <= target_frame) continue;
+                /* Anchor masks are now HONEST (real diff vs baseline),
+                 * so we include them in the union just like sparse masks.
+                 * The anchor flag is consulted only by the source-walk
+                 * below (anchor slots are universal source candidates
+                 * because they carry full data for every block). */
+                const uint8_t *m = rb.ring_rdram_dirty_mask[i];
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    union_dirty[b] |= m[b];
+                }
+                frames_in_chain++;
+            }
+            const uint8_t *inflight_compare =
+                sparse ? rb.baseline_rdram
+                       : (max_idx >= 0 ? rb.ring_rdram_bufs[max_idx] : NULL);
+            if (frames_in_chain == 0 || inflight_compare == NULL) {
+                delta_path = 0;
+            } else {
+                /* In-flight diff: live vs the most-recent saved snapshot
+                 * (slot in full mode, baseline in sparse mode — both hold
+                 * the equivalent state). */
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (union_dirty[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    if (memcmp(rb.rdram_base + off,
+                               inflight_compare + off,
+                               block_size) != 0) {
+                        union_dirty[b] = 1;
+                    }
+                }
+                uint32_t copied = 0, skipped = 0;
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!union_dirty[b]) { skipped++; continue; }
+                    const uint32_t off = (uint32_t)b * block_size;
+                    const uint8_t *src;
+                    if (!sparse) {
+                        /* Full slot mode — target slot has b's value. */
+                        src = rb.ring_rdram_bufs[idx] + off;
+                    } else {
+                        /* Sparse mode — walk slots backward in time
+                         * (frame ≤ target, newest first) to find the most
+                         * recent slot M with valid data for block b. A
+                         * slot has valid data for b if mask[M][b]=1 OR
+                         * the slot is an anchor (full snapshot). */
+                        int best_frame = -1, best_i = -1;
+                        for (int i = 0; i < rb.ring_size; i++) {
+                            const int f2 = rb.ring_frames[i];
+                            if (f2 < 0 || f2 > target_frame) continue;
+                            const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                                || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+                            if (!has_data) continue;
+                            if (f2 > best_frame) {
+                                best_frame = f2; best_i = i;
+                            }
+                        }
+                        src = (best_i >= 0)
+                            ? (rb.ring_rdram_bufs[best_i] + off)
+                            : (rb.baseline_rdram + off);
+                    }
+                    memcpy(rb.rdram_base + off, src, block_size);
+                    copied++;
+                }
+                rb.delta_restore_blocks_copied += copied;
+                rb.delta_restore_blocks_skipped += skipped;
+                rb.delta_restore_count_delta++;
+            }
+        }
+    }
+    if (!delta_path) {
+        /* Phase A3 sparse-aware fallback: in sparse mode the slot doesn't
+         * have a full snapshot, so we must reconstruct via chain walk. */
+        if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+            && rb.baseline_initialized
+            && kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                             rb.split_rdram_size) > 0) {
+            memcpy(rb.rdram_base, rb.reconstructed_slot_buf, rb.split_rdram_size);
+        } else {
+            memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+        }
+        rb.delta_restore_count_full++;
+    }
+    /* Validation: compare live RDRAM against the stashed full snapshot. */
+    if (rb.delta_validate_enabled && rb.delta_validation_buf) {
+        if (memcmp(rb.rdram_base, rb.delta_validation_buf, rb.split_rdram_size) != 0) {
+            rb.delta_validation_failures++;
+            /* Find the offending block(s) for triage. */
+            int first_bad = -1, last_bad = -1, bad_count = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(rb.rdram_base + off,
+                           rb.delta_validation_buf + off, block_size) != 0) {
+                    if (first_bad < 0) first_bad = b;
+                    last_bad = b;
+                    bad_count++;
+                    if (rb.delta_mismatch_blocks_seen[b] < 0xFF) {
+                        rb.delta_mismatch_blocks_seen[b]++;
+                    }
+                }
+            }
+            rb.delta_last_mismatch_target_frame = rb.ring_frames[idx];
+            rb.delta_last_mismatch_block_count = (uint32_t)bad_count;
+            rb.delta_last_mismatch_first_block = first_bad;
+            rb.delta_last_mismatch_last_block = last_bad;
+            if (rb.delta_validation_failures < 32) {
+                rb_log("FATAL DELTA-RESTORE-MISMATCH idx=%d target_frame=%d "
+                       "current_frame=%d delta_path=%d bad_blocks=%d first=%d last=%d "
+                       "(restore would have left RDRAM inconsistent — falling back)",
+                       idx, rb.ring_frames[idx], rb.frame, delta_path,
+                       bad_count, first_bad, last_bad);
+            }
+            /* Self-heal: copy the full snapshot back so live state is correct
+             * regardless of the delta path's bug. Match correctness > perf. */
+            memcpy(rb.rdram_base, rb.delta_validation_buf, rb.split_rdram_size);
+        }
+    }
     rb_restore_slot_aux(idx);
     rb.split_restore_count++;
     return 1;
@@ -467,7 +785,111 @@ static int rb_save_slot(int idx, int frame, int mark_last) {
             rb.split_save_failures++;
             return 0;
         }
-        memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        /* Phase A3 sparse save:
+         *   - Sparse mode (delta_save_sparse_enabled): diff live vs baseline
+         *     (which always holds a current full snapshot), write only dirty
+         *     blocks to slot[idx] + update baseline. ~80% bandwidth reduction.
+         *     Slot becomes a sparse store — readers must use chain-walk
+         *     reconstruction or kn_reconstruct_slot_full().
+         *   - Full mode (default): diff live vs prev_slot (which is full),
+         *     write the dirty mask, then full memcpy slot = live. The dirty
+         *     mask is consumed at restore time to avoid copying clean blocks.
+         *
+         * First save in either mode: mark all dirty, full memcpy. In sparse
+         * mode, also populates baseline. */
+        const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+        const int block_size_ok = block_size > 0
+            && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+        const int sparse = rb.delta_save_sparse_enabled && rb.baseline_rdram
+            && block_size_ok && rb.ring_rdram_dirty_mask;
+        const int prev_idx = (idx + rb.ring_size - 1) % rb.ring_size;
+        /* Choose diff target: baseline (sparse) or prev slot (full mode). */
+        const uint8_t *diff_target = sparse
+            ? (rb.baseline_initialized ? rb.baseline_rdram : NULL)
+            : ((rb.ring_size > 1 && rb.ring_rdram_bufs[prev_idx]
+                && rb.ring_frames[prev_idx] >= 0 && rb.split_save_count > 0)
+               ? rb.ring_rdram_bufs[prev_idx] : NULL);
+        const int diff_valid = rb.delta_save_enabled
+            && rb.ring_rdram_dirty_mask
+            && block_size_ok
+            && diff_target != NULL;
+        if (diff_valid) {
+            uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            uint32_t dirty = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(diff_target + off,
+                           rb.rdram_base + off, block_size) != 0) {
+                    mask[b] = 1;
+                    dirty++;
+                } else {
+                    mask[b] = 0;
+                }
+            }
+            /* Stats bucket */
+            const int p = rb.delta_phase_in_match ? 1 : 0;
+            rb.delta_dirty_blocks_total[p] += dirty;
+            rb.delta_samples_taken[p]++;
+            if (dirty > rb.delta_max_dirty_blocks[p]) rb.delta_max_dirty_blocks[p] = dirty;
+            if (dirty < rb.delta_min_dirty_blocks[p]) rb.delta_min_dirty_blocks[p] = dirty;
+        } else if (rb.ring_rdram_dirty_mask) {
+            /* No diff target available (first save / wraparound) → mark all
+             * dirty so any restore that uses this slot's mask gets full data. */
+            memset(rb.ring_rdram_dirty_mask[idx], 1, KN_TAINT_BLOCKS);
+        }
+        if (sparse) {
+            /* Sparse path — write only dirty blocks to slot + baseline.
+             *
+             * Periodic full save anchor: every (ring_size / 2) saves we
+             * promote to a full snapshot (mark all dirty, memcpy full).
+             * Without this, blocks first written AFTER a rollback target
+             * have no source ≤ target in the chain, and the baseline
+             * fallback returns the wrong value (baseline reflects post-
+             * target writes). The full save acts as a historical anchor:
+             * within any window of ring_size/2 saves, at least one slot
+             * has all blocks valid. Cost amortized: ~30 µs/save extra. */
+            /* anchor_interval=2: 50% of saves are full anchors. Empirically
+             * the only value that gave 0 validation mismatches in 2-min
+             * runs of the demo (interval=3 still flaked occasionally on
+             * heap-area blocks due to deep-rollback / ring-boundary edge
+             * cases I couldn't fully chase down). Per-save amortized cost
+             * = 0.5 * 1ms + 0.5 * 150µs ≈ 575 µs vs 1 ms full = ~43%
+             * bandwidth reduction. The validation harness still catches
+             * any future regression via memcmp + self-heal fallback. */
+            int anchor_interval = 2;
+            const int force_full = !rb.baseline_initialized
+                || (anchor_interval > 0
+                    && (rb.split_save_count % anchor_interval) == 0);
+            if (force_full) {
+                /* Full snapshot — memcpy everything to slot + baseline,
+                 * tag slot as anchor so source walk can use any block
+                 * from it (full data available regardless of mask).
+                 * Keep the dirty mask HONEST (real diff vs baseline) so
+                 * the union walk doesn't explode whenever an anchor lands
+                 * in the chain. The mask was already computed above by
+                 * the diff_valid branch (or set to all-1 if no diff
+                 * target was available, which is the genuine first-save
+                 * case where every block IS new). */
+                memcpy(rb.baseline_rdram, rb.rdram_base, rb.split_rdram_size);
+                memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+                rb.baseline_initialized = 1;
+                if (rb.ring_slot_is_anchor) rb.ring_slot_is_anchor[idx] = 1;
+            } else {
+                const uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!mask[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    memcpy(rb.ring_rdram_bufs[idx] + off,
+                           rb.rdram_base + off, block_size);
+                    memcpy(rb.baseline_rdram + off,
+                           rb.rdram_base + off, block_size);
+                }
+                if (rb.ring_slot_is_anchor) rb.ring_slot_is_anchor[idx] = 0;
+            }
+        } else {
+            /* Full path (current behavior) — slot[idx] is a full snapshot. */
+            memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        }
         cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
         if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
             rb.split_save_failures++;
@@ -612,6 +1034,20 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
         rb.ring_cpu_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
         rb.ring_rdram_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
         rb.ring_cpu_sizes = (uint32_t *)calloc(rb.ring_size, sizeof(uint32_t));
+        rb.ring_rdram_dirty_mask = calloc(rb.ring_size, sizeof(*rb.ring_rdram_dirty_mask));
+        rb.ring_slot_is_anchor = (uint8_t *)calloc(rb.ring_size, sizeof(uint8_t));
+        rb.delta_validation_buf = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.baseline_rdram = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.reconstructed_slot_buf = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.baseline_initialized = 0;
+        rb.delta_min_dirty_blocks[0] = KN_TAINT_BLOCKS + 1;
+        rb.delta_min_dirty_blocks[1] = KN_TAINT_BLOCKS + 1;
+        /* Mirror user toggles. They survive init via the static globals
+         * (see top of file) so JS-set state isn't wiped on match restart. */
+        rb.delta_save_enabled = kn_user_delta_save_enabled;
+        rb.delta_restore_enabled = kn_user_delta_restore_enabled;
+        rb.delta_validate_enabled = kn_user_delta_validate_enabled;
+        rb.delta_save_sparse_enabled = kn_user_delta_save_sparse_enabled;
     } else {
         rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
     }
@@ -826,6 +1262,11 @@ void kn_rollback_shutdown(void) {
         free(rb.ring_rdram_bufs);
     }
     free(rb.ring_cpu_sizes);
+    free(rb.ring_rdram_dirty_mask);
+    free(rb.ring_slot_is_anchor);
+    free(rb.delta_validation_buf);
+    free(rb.baseline_rdram);
+    free(rb.reconstructed_slot_buf);
     if (rb.ring_hle_state) {
         for (i = 0; i < rb.ring_size; i++) {
             free(rb.ring_hle_state[i]);
@@ -844,6 +1285,11 @@ void kn_rollback_shutdown(void) {
     rb.ring_cpu_bufs = NULL;
     rb.ring_rdram_bufs = NULL;
     rb.ring_cpu_sizes = NULL;
+    rb.ring_rdram_dirty_mask = NULL;
+    rb.ring_slot_is_anchor = NULL;
+    rb.delta_validation_buf = NULL;
+    rb.baseline_rdram = NULL;
+    rb.reconstructed_slot_buf = NULL;
     rb.ring_hle_state = NULL;
     rb.ring_frames = NULL;
     rb.ring_sf_state = NULL;
@@ -1915,13 +2361,22 @@ uint32_t kn_game_state_hash(int frame) {
     if (rb_using_split_state()) {
         uint32_t hash = KN_FNV1A_OFFSET;
         if (!rb.ring_rdram_bufs || !rb.ring_rdram_bufs[idx]) return 0;
+        /* Phase A3 sparse-aware: reconstruct slot bytes if sparse mode on. */
+        const uint8_t *rdram_src = rb.ring_rdram_bufs[idx];
+        if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+            && rb.baseline_initialized) {
+            if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                              rb.split_rdram_size) > 0) {
+                rdram_src = rb.reconstructed_slot_buf;
+            }
+        }
         for (uint32_t block = 0; block < KN_TAINT_BLOCKS; block++) {
             size_t block_start = ((size_t)block << KN_TAINT_BLOCK_SHIFT);
             if (block_start >= rb.split_rdram_size) break;
             if (kn_rdram_taint[block]) continue;
             size_t block_end = block_start + ((size_t)1 << KN_TAINT_BLOCK_SHIFT);
             if (block_end > rb.split_rdram_size) block_end = rb.split_rdram_size;
-            hash = kn_fnv1a_stride(hash, rb.ring_rdram_bufs[idx] + block_start, block_end - block_start, 16);
+            hash = kn_fnv1a_stride(hash, rdram_src + block_start, block_end - block_start, 16);
         }
         if (!kn_skip_post_rdram_in_hash) {
             size_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
@@ -2207,6 +2662,219 @@ int kn_get_split_state_stats(uint32_t *out, int count) {
     return 8;
 }
 
+/* Phase A1 diagnostic: JS flips this on game-start / off on game-end so
+ * dirty-block measurements separate match gameplay from menus/loading. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_phase(int in_match) {
+    rb.delta_phase_in_match = in_match ? 1 : 0;
+}
+
+/* Phase A3: rebuild a full slot snapshot via chain walk into a caller-
+ * supplied buffer. Used by Mode 2 worker exposure (kn_get_split_state_for_shadow)
+ * and any consumer that needs slot bytes in full-snapshot form when sparse
+ * save is on. Cost: 8 MB worth of per-block copies (chain walk dominated
+ * by memcpy bandwidth). Returns 0 on failure (slot empty / split-state
+ * disabled / sparse not initialized). Returns split_rdram_size on success. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size) {
+    if (!rb.initialized || !rb_using_split_state() || !out) return 0;
+    if (idx < 0 || idx >= rb.ring_size) return 0;
+    if (!rb.ring_rdram_bufs || !rb.ring_rdram_bufs[idx]) return 0;
+    if (out_size < rb.split_rdram_size) return 0;
+    if (rb.ring_frames[idx] < 0) return 0;
+    if (!rb.delta_save_sparse_enabled) {
+        /* Slot is full snapshot — direct copy. */
+        memcpy(out, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+        return rb.split_rdram_size;
+    }
+    /* Sparse: walk per block. */
+    if (!rb.baseline_rdram || !rb.baseline_initialized) return 0;
+    if (!rb.ring_rdram_dirty_mask) return 0;
+    const uint32_t bs = rb.split_rdram_size / KN_TAINT_BLOCKS;
+    if (bs == 0 || (bs * KN_TAINT_BLOCKS) != rb.split_rdram_size) return 0;
+    const int tf = rb.ring_frames[idx];
+    for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+        int best_frame = -1, best_i = -1;
+        for (int i = 0; i < rb.ring_size; i++) {
+            const int f2 = rb.ring_frames[i];
+            if (f2 < 0 || f2 > tf) continue;
+            const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+            if (!has_data) continue;
+            if (f2 > best_frame) { best_frame = f2; best_i = i; }
+        }
+        const uint8_t *src = (best_i >= 0)
+            ? (rb.ring_rdram_bufs[best_i] + (size_t)b * bs)
+            : (rb.baseline_rdram + (size_t)b * bs);
+        memcpy(out + (size_t)b * bs, src, bs);
+    }
+    return rb.split_rdram_size;
+}
+
+/* Phase A2: enable/disable delta restore + validation harness.
+ * Setters update both the user-toggle global AND the rb mirror so
+ * the hot path sees the change immediately. Init copies the global
+ * back into rb on the next kn_rollback_init. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_restore(int enabled) {
+    kn_user_delta_restore_enabled = enabled ? 1 : 0;
+    rb.delta_restore_enabled = kn_user_delta_restore_enabled;
+}
+
+/* Phase A3 setter: toggle sparse save. Switching ON invalidates the
+ * baseline AND clears all ring slots — sparse-mode chain walk treats
+ * every slot as sparse (uses mask to know which blocks have valid data)
+ * but pre-toggle slots were full snapshots with non-meaningful masks.
+ * Mixing them gives the wrong result for blocks where mask[old_slot][b]=0
+ * but old_slot's bytes for b are actually valid. Cleanest: drop the old
+ * slots entirely. Any in-flight rollback that targets an old frame will
+ * fail to find its target and the engine falls through to other recovery
+ * paths. Switching OFF reverts to legacy save behavior; existing sparse
+ * slots stay valid because the next save will populate them as full
+ * snapshots (full mode always memcpy's the full live RDRAM). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_save_sparse(int enabled) {
+    const int prev = rb.delta_save_sparse_enabled;
+    kn_user_delta_save_sparse_enabled = enabled ? 1 : 0;
+    rb.delta_save_sparse_enabled = kn_user_delta_save_sparse_enabled;
+    if (!prev && rb.delta_save_sparse_enabled) {
+        rb.baseline_initialized = 0;
+        if (rb.ring_frames) {
+            for (int i = 0; i < rb.ring_size; i++) rb.ring_frames[i] = -1;
+        }
+        if (rb.ring_slot_is_anchor) {
+            memset(rb.ring_slot_is_anchor, 0, rb.ring_size);
+        }
+        rb.last_save_frame = -1;
+    }
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_save_sparse(void) {
+    return kn_user_delta_save_sparse_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_restore(void) {
+    return kn_user_delta_restore_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_validate(int enabled) {
+    kn_user_delta_validate_enabled = enabled ? 1 : 0;
+    rb.delta_validate_enabled = kn_user_delta_validate_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_validate(void) {
+    return kn_user_delta_validate_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_phase(void) {
+    return rb.delta_phase_in_match;
+}
+
+/* Returns 24 stat words:
+ *   [0..7]   = out-of-match save-side stats
+ *   [8..15]  = in-match save-side stats
+ *   [16..23] = restore-side + flag stats
+ * Save bucket layout (indices [0..7] / [8..15]):
+ *   +0: samples_taken
+ *   +1: dirty_blocks_total (low 32 bits)
+ *   +2: dirty_blocks_total (high 32 bits)
+ *   +3: max_dirty_blocks (out of KN_TAINT_BLOCKS=128)
+ *   +4: min_dirty_blocks (UINT32_MAX/sentinel if no samples)
+ *   +5: KN_TAINT_BLOCKS (= block count denominator)
+ *   +6: rdram_block_size (KB per block)
+ *   +7: 0 (reserved)
+ * Restore bucket [16..23]:
+ *   +0: delta_restore_count_delta
+ *   +1: delta_restore_count_full
+ *   +2: delta_restore_blocks_copied (low 32)
+ *   +3: delta_restore_blocks_copied (high 32)
+ *   +4: delta_restore_blocks_skipped (low 32)
+ *   +5: delta_restore_blocks_skipped (high 32)
+ *   +6: delta_validation_failures
+ *   +7: flags = (save<<0) | (restore<<1) | (validate<<2)
+ * Per-bucket avg_dirty% = (dirty_blocks_total / samples_taken) / KN_TAINT_BLOCKS. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_stats(uint32_t *out, int count) {
+    if (!out || count < 24) return 0;
+    const uint32_t block_kb = rb.split_rdram_size > 0
+        ? (rb.split_rdram_size / KN_TAINT_BLOCKS) / 1024u
+        : 0u;
+    for (int p = 0; p < 2; p++) {
+        const int base = p * 8;
+        out[base + 0] = rb.delta_samples_taken[p];
+        out[base + 1] = (uint32_t)(rb.delta_dirty_blocks_total[p] & 0xFFFFFFFFu);
+        out[base + 2] = (uint32_t)(rb.delta_dirty_blocks_total[p] >> 32);
+        out[base + 3] = rb.delta_max_dirty_blocks[p];
+        out[base + 4] = rb.delta_min_dirty_blocks[p];
+        out[base + 5] = (uint32_t)KN_TAINT_BLOCKS;
+        out[base + 6] = block_kb;
+        out[base + 7] = 0;
+    }
+    out[16] = rb.delta_restore_count_delta;
+    out[17] = rb.delta_restore_count_full;
+    out[18] = (uint32_t)(rb.delta_restore_blocks_copied & 0xFFFFFFFFu);
+    out[19] = (uint32_t)(rb.delta_restore_blocks_copied >> 32);
+    out[20] = (uint32_t)(rb.delta_restore_blocks_skipped & 0xFFFFFFFFu);
+    out[21] = (uint32_t)(rb.delta_restore_blocks_skipped >> 32);
+    out[22] = rb.delta_validation_failures;
+    out[23] = (uint32_t)(
+        (rb.delta_save_enabled ? 1 : 0) |
+        ((rb.delta_restore_enabled ? 1 : 0) << 1) |
+        ((rb.delta_validate_enabled ? 1 : 0) << 2));
+    return 24;
+}
+
+/* Per-block mismatch histogram. out[b] = times block b was found
+ * mismatched in any validation failure. KN_TAINT_BLOCKS bytes total.
+ * Lets JS pinpoint which RDRAM regions delta restore mishandles. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_mismatch_histogram(uint8_t *out, int count) {
+    if (!out || count < KN_TAINT_BLOCKS) return 0;
+    memcpy(out, rb.delta_mismatch_blocks_seen, KN_TAINT_BLOCKS);
+    return KN_TAINT_BLOCKS;
+}
+
+/* Last-mismatch metadata. out[0]=target_frame, [1]=block_count,
+ * [2]=first_block, [3]=last_block. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_last_mismatch(int32_t *out, int count) {
+    if (!out || count < 4) return 0;
+    out[0] = rb.delta_last_mismatch_target_frame;
+    out[1] = (int32_t)rb.delta_last_mismatch_block_count;
+    out[2] = rb.delta_last_mismatch_first_block;
+    out[3] = rb.delta_last_mismatch_last_block;
+    return 4;
+}
+
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -2220,7 +2888,18 @@ int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
         !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || rb.ring_cpu_sizes[idx] == 0) {
         return 0;
     }
-    out[0] = (uint32_t)(uintptr_t)rb.ring_rdram_bufs[idx];
+    /* Phase A3: when sparse save is on, the slot's RDRAM buffer is sparse.
+     * Reconstruct a full snapshot into reconstructed_slot_buf and expose
+     * THAT pointer instead — the worker reads as if from a regular slot. */
+    const uint8_t *rdram_ptr = rb.ring_rdram_bufs[idx];
+    if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+        && rb.baseline_initialized) {
+        if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                          rb.split_rdram_size) > 0) {
+            rdram_ptr = rb.reconstructed_slot_buf;
+        }
+    }
+    out[0] = (uint32_t)(uintptr_t)rdram_ptr;
     out[1] = rb.split_rdram_size;
     out[2] = (uint32_t)(uintptr_t)rb.ring_cpu_bufs[idx];
     out[3] = rb.ring_cpu_sizes[idx];
@@ -2341,6 +3020,9 @@ int kn_apply_split_state_partial_with_aux(
     rb.pending_rollback = -1;
     rb.replay_remaining = 0;
     rb.replay_depth = 0;
+    /* Phase A3: external state apply invalidates baseline_rdram (we
+     * don't know what just got written) — force re-init on next save. */
+    rb.baseline_initialized = 0;
     rb_log("kn_apply_split_state_partial_with_aux: frame=%d cpu_size=%u rdram_size=%u hidden=%u hle=%u sf=0x%x tainted_blocks_skipped=%d",
         frame, cpu_size, rdram_size, hidden_size, hle_size, softfloat_state, kn_get_tainted_block_count());
     return 0;

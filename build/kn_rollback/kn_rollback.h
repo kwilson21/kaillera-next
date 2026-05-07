@@ -137,6 +137,25 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count);
 int kn_get_rdram_offset_in_state(void);
 int kn_get_state_buffer_size(void);
 int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count);
+
+/* Phase A1 diagnostic — RDRAM dirty-block sampling per save. */
+void kn_set_delta_phase(int in_match);
+int kn_get_delta_phase(void);
+int kn_get_delta_stats(uint32_t *out, int count);
+
+/* Phase A2 — runtime toggles for delta restore + validation harness. */
+void kn_set_delta_restore(int enabled);
+int kn_get_delta_restore(void);
+void kn_set_delta_validate(int enabled);
+int kn_get_delta_validate(void);
+int kn_get_delta_mismatch_histogram(uint8_t *out, int count);
+int kn_get_delta_last_mismatch(int32_t *out, int count);
+
+/* Phase A3 — sparse save (write only dirty blocks per save). */
+void kn_set_delta_save_sparse(int enabled);
+int kn_get_delta_save_sparse(void);
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size);
+
 int kn_apply_split_state_partial_with_aux(
     const uint8_t *cpu_bytes, uint32_t cpu_size,
     const uint8_t *rdram_bytes, uint32_t rdram_size,

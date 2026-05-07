@@ -3650,7 +3650,17 @@
     if (!RB_SHADOW_EMU || !_rbShadowReady || !_rbShadowWorker || _rbShadowFailed) return false;
     const stats = _getShadowStats();
     const t0 = performance.now();
-    const split = options.allowSplit === false ? null : _shadowReadSplitStateBytes(_frameNum);
+    /* Pass -1 → C uses rb.frame-1 (the most recently SAVED frame, always
+     * in the ring). Passing _frameNum directly was the bug: at boot /
+     * post-tick-advance, the slot for the current frame hasn't been saved
+     * yet so kn_get_split_state_for_shadow returned 0 (n<9) and shadow
+     * resync silently fell back to the slow ~5-10ms retro_serialize path.
+     * At 16 rb/s that was burning ~80-160ms/sec for nothing — visible as
+     * framerate drops in heavy-rollback runs. (Reverted earlier in the
+     * session because it surfaced a SEPARATE Mode 2 issue — the apply
+     * path's tainted-block skip; that issue exists independently and
+     * isn't relevant when Mode 2 isn't active.) */
+    const split = options.allowSplit === false ? null : _shadowReadSplitStateBytes(-1);
     try {
       if (split?.rdram?.byteLength && split?.cpu?.byteLength) {
         const rdram = _shadowTransferBuffer(split.rdram);
@@ -4576,6 +4586,129 @@
             } finally {
               mod._free?.(ptr);
             }
+          },
+          /* Phase A1 delta-save measurement: flip phase manually around
+           * match start/end, then read stats at end. Two phase buckets
+           * (out-of-match, in-match) since menu vs match write patterns
+           * differ a lot. Stats are an upper bound on per-save dirty rate
+           * — sampled every 8th save, so the "8-frame change set" measured
+           *  is ≥ the true per-frame dirty set. Use to decide whether the
+           * delta-save refactor is worth pursuing. */
+          setDeltaPhase(inMatch) {
+            const mod = getMod();
+            if (!mod?._kn_set_delta_phase) {
+              console.error('knDiag.setDeltaPhase: export missing — rebuild WASM core.');
+              return null;
+            }
+            mod._kn_set_delta_phase(inMatch ? 1 : 0);
+            console.log(`knDiag.setDeltaPhase: in_match=${inMatch ? 1 : 0}`);
+            return inMatch ? 1 : 0;
+          },
+          deltaStats() {
+            const mod = getMod();
+            if (!mod?._kn_get_delta_stats || !mod?._malloc || !mod.HEAPU32) {
+              console.error('knDiag.deltaStats: export missing — rebuild WASM core.');
+              return null;
+            }
+            const ptr = mod._malloc(24 * 4);
+            if (!ptr) return null;
+            try {
+              const n = mod._kn_get_delta_stats(ptr, 24);
+              if (n <= 0) return null;
+              const v = new Uint32Array(mod.HEAPU32.buffer, ptr, 24);
+              const summarize = (base) => {
+                const samples = v[base + 0];
+                const totalLo = v[base + 1];
+                const totalHi = v[base + 2];
+                const total = totalHi * 0x100000000 + totalLo;
+                const max = v[base + 3];
+                const min = v[base + 4];
+                const blocks = v[base + 5];
+                const blockKB = v[base + 6];
+                const avgDirtyBlocks = samples > 0 ? total / samples : 0;
+                const avgDirtyPct = blocks > 0 ? (avgDirtyBlocks / blocks) * 100 : 0;
+                return {
+                  samples,
+                  avgDirtyBlocks: Number(avgDirtyBlocks.toFixed(2)),
+                  avgDirtyPct: Number(avgDirtyPct.toFixed(1)),
+                  maxDirtyBlocks: max,
+                  minDirtyBlocks: samples > 0 ? min : null,
+                  blockCount: blocks,
+                  blockKB,
+                  estDirtyKBPerSave: Number((avgDirtyBlocks * blockKB).toFixed(1)),
+                };
+              };
+              const restoreCopiedLo = v[18];
+              const restoreCopiedHi = v[19];
+              const restoreSkippedLo = v[20];
+              const restoreSkippedHi = v[21];
+              const restoreCopied = restoreCopiedHi * 0x100000000 + restoreCopiedLo;
+              const restoreSkipped = restoreSkippedHi * 0x100000000 + restoreSkippedLo;
+              const restoreCountDelta = v[16];
+              const restoreCountFull = v[17];
+              const validationFailures = v[22];
+              const flags = v[23];
+              const restoreTotalBlocks = restoreCopied + restoreSkipped;
+              const out = {
+                outOfMatch: summarize(0),
+                inMatch: summarize(8),
+                restore: {
+                  countDelta: restoreCountDelta,
+                  countFull: restoreCountFull,
+                  blocksCopied: restoreCopied,
+                  blocksSkipped: restoreSkipped,
+                  avgSkippedPct:
+                    restoreTotalBlocks > 0 ? Number(((restoreSkipped / restoreTotalBlocks) * 100).toFixed(1)) : 0,
+                  validationFailures,
+                },
+                flags: {
+                  saveEnabled: !!(flags & 1),
+                  restoreEnabled: !!(flags & 2),
+                  validateEnabled: !!(flags & 4),
+                },
+              };
+              console.log('knDiag.deltaStats:', out);
+              return out;
+            } finally {
+              mod._free?.(ptr);
+            }
+          },
+          /* Phase A2: enable delta restore (real perf win) and validation
+           * harness (parallel full-restore + hash compare; logs FATAL
+           * DELTA-RESTORE-MISMATCH on any mismatch). Recommend turning
+           * BOTH on for testing, then disable validate after silent run. */
+          setDeltaRestore(enabled) {
+            const mod = getMod();
+            if (!mod?._kn_set_delta_restore) {
+              console.error('knDiag.setDeltaRestore: export missing — rebuild WASM core.');
+              return null;
+            }
+            mod._kn_set_delta_restore(enabled ? 1 : 0);
+            console.log(`knDiag.setDeltaRestore: enabled=${enabled ? 1 : 0}`);
+            return enabled ? 1 : 0;
+          },
+          setDeltaValidate(enabled) {
+            const mod = getMod();
+            if (!mod?._kn_set_delta_validate) {
+              console.error('knDiag.setDeltaValidate: export missing — rebuild WASM core.');
+              return null;
+            }
+            mod._kn_set_delta_validate(enabled ? 1 : 0);
+            console.log(`knDiag.setDeltaValidate: enabled=${enabled ? 1 : 0}`);
+            return enabled ? 1 : 0;
+          },
+          /* Phase A3: sparse save (only memcpy dirty blocks per save).
+           * The actual perf win — saves drop from ~1 ms to ~150 µs each.
+           * Toggle ON for testing, observe gameplay + knDiag.deltaStats(). */
+          setDeltaSaveSparse(enabled) {
+            const mod = getMod();
+            if (!mod?._kn_set_delta_save_sparse) {
+              console.error('knDiag.setDeltaSaveSparse: export missing — rebuild WASM core.');
+              return null;
+            }
+            mod._kn_set_delta_save_sparse(enabled ? 1 : 0);
+            console.log(`knDiag.setDeltaSaveSparse: enabled=${enabled ? 1 : 0}`);
+            return enabled ? 1 : 0;
           },
           shadowStats() {
             const stats = _shadowStatsSnapshot();

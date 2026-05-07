@@ -115,6 +115,16 @@ def test_rollback_fixes_smoke(page):
                     typeof m._kn_apply_split_state_partial_with_aux === 'function',
                 hasSetDeferredRollback: typeof m._kn_set_deferred_rollback === 'function',
                 hasGetDeferredRollback: typeof m._kn_get_deferred_rollback === 'function',
+                hasSetDeltaPhase: typeof m._kn_set_delta_phase === 'function',
+                hasGetDeltaPhase: typeof m._kn_get_delta_phase === 'function',
+                hasGetDeltaStats: typeof m._kn_get_delta_stats === 'function',
+                hasSetDeltaRestore: typeof m._kn_set_delta_restore === 'function',
+                hasGetDeltaRestore: typeof m._kn_get_delta_restore === 'function',
+                hasSetDeltaValidate: typeof m._kn_set_delta_validate === 'function',
+                hasGetDeltaValidate: typeof m._kn_get_delta_validate === 'function',
+                hasSetDeltaSaveSparse: typeof m._kn_set_delta_save_sparse === 'function',
+                hasGetDeltaSaveSparse: typeof m._kn_get_delta_save_sparse === 'function',
+                hasReconstructSlot: typeof m._kn_reconstruct_slot_full_into === 'function',
             };
         }"""
     )
@@ -135,5 +145,15 @@ def test_rollback_fixes_smoke(page):
         assert module_check["hasApplySplitStatePartialWithAux"]
         assert module_check["hasSetDeferredRollback"]
         assert module_check["hasGetDeferredRollback"]
+        assert module_check["hasSetDeltaPhase"]
+        assert module_check["hasGetDeltaPhase"]
+        assert module_check["hasGetDeltaStats"]
+        assert module_check["hasSetDeltaRestore"]
+        assert module_check["hasGetDeltaRestore"]
+        assert module_check["hasSetDeltaValidate"]
+        assert module_check["hasGetDeltaValidate"]
+        assert module_check["hasSetDeltaSaveSparse"]
+        assert module_check["hasGetDeltaSaveSparse"]
+        assert module_check["hasReconstructSlot"]
 
     print("[smoke] ✓ all rollback hardening APIs present")

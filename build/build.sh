@@ -139,6 +139,22 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_save_endpoint_state,|' Makefile.emulatorjs
         echo "    Added save-endpoint WASM export"
     fi
+    # Phase A1 delta-save measurement exports (diagnostic only).
+    # Anchored on _kn_get_split_state_stats — added by an earlier sed above.
+    if grep -q "_kn_get_split_state_stats" Makefile.emulatorjs && ! grep -q "_kn_get_delta_stats" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_split_state_stats,|_kn_get_split_state_stats,_kn_set_delta_phase,_kn_get_delta_phase,_kn_get_delta_stats,|' Makefile.emulatorjs
+        echo "    Added delta-save measurement WASM exports"
+    fi
+    # Phase A2 delta-restore + validation toggles. Anchored on _kn_get_delta_stats.
+    if grep -q "_kn_get_delta_stats" Makefile.emulatorjs && ! grep -q "_kn_set_delta_restore" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_delta_stats,|_kn_get_delta_stats,_kn_set_delta_restore,_kn_get_delta_restore,_kn_set_delta_validate,_kn_get_delta_validate,_kn_get_delta_mismatch_histogram,_kn_get_delta_last_mismatch,|' Makefile.emulatorjs
+        echo "    Added delta-restore + validation WASM exports"
+    fi
+    # Phase A3 sparse save toggle + slot reconstructor. Anchored on _kn_get_delta_last_mismatch.
+    if grep -q "_kn_get_delta_last_mismatch" Makefile.emulatorjs && ! grep -q "_kn_set_delta_save_sparse" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_delta_last_mismatch,|_kn_get_delta_last_mismatch,_kn_set_delta_save_sparse,_kn_get_delta_save_sparse,_kn_reconstruct_slot_full_into,|' Makefile.emulatorjs
+        echo "    Added sparse-save WASM exports"
+    fi
     # Deferred-rollback mode for Mode 2 "true GGPO with worker" architecture.
     # Anchored on _kn_clear_replay_state which is added by an earlier sed above.
     if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_set_deferred_rollback" Makefile.emulatorjs; then

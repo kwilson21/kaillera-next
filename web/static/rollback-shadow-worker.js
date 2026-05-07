@@ -250,11 +250,32 @@
       ];
       const pixel = new Uint8Array(4);
       let maxChannel = 0;
+      /* Unbind any PIXEL_PACK buffer the WASM core left bound — without
+       * this, gl.readPixels emits INVALID_OPERATION ("PIXEL_PACK buffer
+       * should not be bound") on every probe call. The core's GLideN64
+       * ASYNC framebuffer-readback leaves a PIXEL_PACK_BUFFER bound for
+       * its own readback flow; sampleFrameBlack uses CPU-side readPixels
+       * which requires the binding be null. Restore the binding after
+       * so we don't break the core's next async readback. */
+      const PIXEL_PACK_BUFFER = 0x88eb;
+      const PIXEL_PACK_BUFFER_BINDING = 0x88ed;
+      let savedBinding = null;
+      try {
+        savedBinding = gl.getParameter(PIXEL_PACK_BUFFER_BINDING);
+        if (savedBinding) gl.bindBuffer(PIXEL_PACK_BUFFER, null);
+      } catch (_) {
+        savedBinding = null;
+      }
       for (const [px, py] of points) {
         const x = Math.max(0, Math.min(width - 1, Math.floor(width * px)));
         const y = Math.max(0, Math.min(height - 1, Math.floor(height * py)));
         gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
         maxChannel = Math.max(maxChannel, pixel[0], pixel[1], pixel[2]);
+      }
+      if (savedBinding) {
+        try {
+          gl.bindBuffer(PIXEL_PACK_BUFFER, savedBinding);
+        } catch (_) {}
       }
       lastFrameSample = {
         known: true,
