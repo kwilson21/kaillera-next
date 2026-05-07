@@ -4710,6 +4710,26 @@
             console.log(`knDiag.setDeltaSaveSparse: enabled=${enabled ? 1 : 0}`);
             return enabled ? 1 : 0;
           },
+          /* Mode 2 apply experiment: when enabled=0 (default), the worker's
+           * reply applies ALL RDRAM bytes (renderer-consistent, may pop
+           * audio briefly). When enabled=1, skips tainted blocks (legacy,
+           * preserves audio FIFO timing but breaks renderer state on
+           * Mode 2 dispatch). Use to A/B test if audio jolt is acceptable. */
+          setApplySkipTainted(enabled) {
+            const mod = getMod();
+            if (!mod?._kn_set_apply_skip_tainted) {
+              console.error('knDiag.setApplySkipTainted: export missing — rebuild WASM core.');
+              return null;
+            }
+            mod._kn_set_apply_skip_tainted(enabled ? 1 : 0);
+            console.log(`knDiag.setApplySkipTainted: enabled=${enabled ? 1 : 0}`);
+            return enabled ? 1 : 0;
+          },
+          getApplySkipTainted() {
+            const mod = getMod();
+            if (!mod?._kn_get_apply_skip_tainted) return null;
+            return mod._kn_get_apply_skip_tainted();
+          },
           shadowStats() {
             const stats = _shadowStatsSnapshot();
             console.log('knDiag.shadowStats:', stats);

@@ -170,6 +170,22 @@ static int kn_user_delta_validate_enabled = 0;
  * Keep the toggle for future experimentation; don't default ON. */
 static int kn_user_delta_save_sparse_enabled = 0;
 
+/* Mode 2 apply experiment (2026-05-07). Toggle controlling whether
+ * kn_apply_split_state_partial_with_aux skips tainted blocks.
+ *
+ * 1 = legacy skip-all-tainted (DEFAULT). Preserves audio FIFO timing AND
+ *     OS-critical state (thread stacks at 0x20000, OS kernel at 0x40000).
+ *     But leaves renderer-relevant bytes inconsistent → vertex buffer
+ *     flood + freeze on Mode 2 dispatch.
+ *
+ * 0 = apply EVERYTHING. Tested 2026-05-07: causes emulator reset because
+ *     overwriting OS thread stacks with worker's slightly-different values
+ *     corrupts kernel state. Confirms the "narrow apply_skip subset"
+ *     approach (Option 3) is the only viable path: skip OS/audio-critical
+ *     blocks, apply renderer-relevant blocks. Requires per-block decomp
+ *     classification — multi-day work. Toggle stays for future iteration. */
+static int kn_user_apply_skip_tainted = 1;
+
 /* Deferred-rollback mode flag (Mode 2 deferred / "true GGPO with worker").
  * When set, kn_pre_tick observes pending_rollback but does NOT execute the
  * rewind+replay branch; main keeps predicting forward while JS dispatches
@@ -2764,6 +2780,22 @@ int kn_get_delta_save_sparse(void) {
     return kn_user_delta_save_sparse_enabled;
 }
 
+/* Mode 2 apply experiment toggle. 0 = apply everything (default),
+ * 1 = skip tainted blocks (legacy, preserves audio timing). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_apply_skip_tainted(int enabled) {
+    kn_user_apply_skip_tainted = enabled ? 1 : 0;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_apply_skip_tainted(void) {
+    return kn_user_apply_skip_tainted;
+}
+
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -3002,10 +3034,18 @@ int kn_apply_split_state_partial_with_aux(
      * sidecars and taint geometry first so error returns do not leave a
      * half-applied state behind. */
     if (kn_sync_write_cpu(cpu_bytes, cpu_size) != 0) return -3;
-    for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
-        if (kn_rdram_taint[b]) continue;
-        const uint32_t offset = (uint32_t)b * block_size;
-        memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
+    if (kn_user_apply_skip_tainted) {
+        /* Legacy: skip tainted blocks (preserves main's audio FIFO timing
+         * but leaves renderer-relevant bytes inconsistent). */
+        for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+            if (kn_rdram_taint[b]) continue;
+            const uint32_t offset = (uint32_t)b * block_size;
+            memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
+        }
+    } else {
+        /* Experimental (default): apply EVERYTHING from worker's reply.
+         * Renderer state stays consistent. Audio may pop briefly. */
+        memcpy(rb.rdram_base, rdram_bytes, rdram_size);
     }
     sf_restore(softfloat_state);
     if (rb.ring_hidden_state) kn_restore_hidden_state_impl(hidden_state);

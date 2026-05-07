@@ -155,6 +155,11 @@ if [ -d "${PATCHES_DIR}" ]; then
         sed -i 's|_kn_get_delta_last_mismatch,|_kn_get_delta_last_mismatch,_kn_set_delta_save_sparse,_kn_get_delta_save_sparse,_kn_reconstruct_slot_full_into,|' Makefile.emulatorjs
         echo "    Added sparse-save WASM exports"
     fi
+    # Mode 2 apply experiment: toggle for skip-tainted-blocks behavior.
+    if grep -q "_kn_reconstruct_slot_full_into" Makefile.emulatorjs && ! grep -q "_kn_set_apply_skip_tainted" Makefile.emulatorjs; then
+        sed -i 's|_kn_reconstruct_slot_full_into,|_kn_reconstruct_slot_full_into,_kn_set_apply_skip_tainted,_kn_get_apply_skip_tainted,|' Makefile.emulatorjs
+        echo "    Added Mode 2 apply-skip-tainted toggle WASM exports"
+    fi
     # Deferred-rollback mode for Mode 2 "true GGPO with worker" architecture.
     # Anchored on _kn_clear_replay_state which is added by an earlier sed above.
     if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_set_deferred_rollback" Makefile.emulatorjs; then

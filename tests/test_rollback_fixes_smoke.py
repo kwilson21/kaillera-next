@@ -125,6 +125,8 @@ def test_rollback_fixes_smoke(page):
                 hasSetDeltaSaveSparse: typeof m._kn_set_delta_save_sparse === 'function',
                 hasGetDeltaSaveSparse: typeof m._kn_get_delta_save_sparse === 'function',
                 hasReconstructSlot: typeof m._kn_reconstruct_slot_full_into === 'function',
+                hasSetApplySkipTainted: typeof m._kn_set_apply_skip_tainted === 'function',
+                hasGetApplySkipTainted: typeof m._kn_get_apply_skip_tainted === 'function',
             };
         }"""
     )
@@ -155,5 +157,7 @@ def test_rollback_fixes_smoke(page):
         assert module_check["hasSetDeltaSaveSparse"]
         assert module_check["hasGetDeltaSaveSparse"]
         assert module_check["hasReconstructSlot"]
+        assert module_check["hasSetApplySkipTainted"]
+        assert module_check["hasGetApplySkipTainted"]
 
     print("[smoke] ✓ all rollback hardening APIs present")

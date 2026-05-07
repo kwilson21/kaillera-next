@@ -156,6 +156,12 @@ void kn_set_delta_save_sparse(int enabled);
 int kn_get_delta_save_sparse(void);
 uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size);
 
+/* Mode 2 apply experiment — toggle whether apply_split_state_partial_with_aux
+ * skips tainted blocks. 0 = apply everything (default, renderer-consistent).
+ * 1 = legacy skip (preserves audio FIFO, breaks renderer). */
+void kn_set_apply_skip_tainted(int enabled);
+int kn_get_apply_skip_tainted(void);
+
 int kn_apply_split_state_partial_with_aux(
     const uint8_t *cpu_bytes, uint32_t cpu_size,
     const uint8_t *rdram_bytes, uint32_t rdram_size,
