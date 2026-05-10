@@ -336,6 +336,23 @@
     };
   })();
 
+  // Competitive default: prioritize stable 60fps over minimum input lag.
+  // At any RTT, pick the smallest DELAY that fully covers RTT/2 + jitter
+  // so the engine never stalls waiting for inputs. Trades a few extra
+  // frames of input lag (~17-33ms) for no dropped paints.
+  //
+  // Opt out via ?prioritizeLatency=1 → uses the user's UI preference
+  // even when smaller, accepting per-frame stall for less input lag.
+  // (Pre-2026-05-10 behavior — DELAY=2 at 110ms RTT giving ~26-46fps).
+  const RB_PRIORITIZE_FPS = (() => {
+    try {
+      const raw = _urlParams.get('prioritizeLatency') ?? localStorage.getItem('kn-prioritize-latency');
+      if (raw === '1') return false;
+      if (raw === '0') return true;
+    } catch (_) {}
+    return true; // competitive default
+  })();
+
   // Input delay in frames -- both peers buffer this many frames of input
   // before applying. Hides network latency: peer has DELAY_FRAMES worth
   // of time to deliver their input before we need it.
@@ -5127,7 +5144,38 @@
           `effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
       );
     } else {
-      ownDelay = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
+      // Non-rollback / no-RTT-samples path. User-set delay preference
+      // is the baseline. If we have RTT samples AND prioritizeFps is
+      // on, compute the RTT-required floor so lockstep doesn't stall
+      // at high RTT (DELAY=2 at 110ms RTT gives ~26-46fps; same RTT
+      // with DELAY=4 gives 60fps at the cost of 33ms more input lag).
+      const userDelay = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
+      let rttFloor = 0;
+      if (RB_PRIORITIZE_FPS && _rttSamples?.length) {
+        const sorted = _rttSamples.slice().sort((a, b) => a - b);
+        const q1 = sorted[Math.floor(sorted.length * 0.25)];
+        const q3 = sorted[Math.floor(sorted.length * 0.75)];
+        const iqr = q3 - q1;
+        const median = sorted[Math.floor(sorted.length / 2)];
+        const lower = q1 - 1.5 * iqr;
+        const upper = q3 + 1.5 * iqr;
+        const filtered = sorted.filter((s) => s >= lower && s <= upper);
+        const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
+        const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
+        const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
+        // Same +16.67ms safety margin as the rollback branch so lockstep
+        // never stalls waiting for an input that's "almost" arrived.
+        const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67;
+        rttFloor = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
+        if (rttFloor > userDelay) {
+          _syncLog(
+            `lockstep delay floor: user=${userDelay}f, RTT-required=${rttFloor}f ` +
+              `(RTT=${filteredMedian.toFixed(0)}ms jitter=${jitterMargin.toFixed(0)}ms) ` +
+              `→ using ${rttFloor} (prioritizeFps); set ?prioritizeLatency=1 to force user pref`,
+          );
+        }
+      }
+      ownDelay = Math.max(userDelay, rttFloor);
     }
     if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);
     let maxDelay = ownDelay;
