@@ -350,6 +350,50 @@
     return Math.min(ROLLBACK_MAX_DELAY_FRAMES, Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
   };
 
+  // Predict-remote (canonical GGPO) — opt-in backport.
+  //
+  // Default rollback netcode here pins DELAY ≥ 4 and applies inputs
+  // asymmetrically — local at current frame T, remote at applyFrame=T-DELAY.
+  // That asymmetry means each peer builds state[T] from a different input
+  // vector (peer A: {local_A_T_actual, remote_B_T-DELAY_actual}; peer B:
+  // {remote_A_T-DELAY_actual, local_B_T_actual}). Any input change inside
+  // the delay window produces cross-peer state divergence that rollback
+  // can't reconcile — the rollback anchor itself differs across peers.
+  //
+  // The C engine (build/kn_rollback/kn_rollback.c) already carries the
+  // canonical GGPO infrastructure: last_known[], prev_known[], predicted[],
+  // predicted_values[], replay machinery. It just isn't used because JS
+  // pins DELAY too high and writes local asymmetrically.
+  //
+  // ?predictRemote=1 flips the contract: pin DELAY = PREDICT_REMOTE_DELAY
+  // (default 2; configurable via ?predictRemoteDelay=N), let both peers
+  // apply inputs symmetrically at frame T-DELAY, and let the C engine
+  // predict missing remote inputs with last_known + dead reckoning.
+  // Misprediction → replay corrects the rare case where actual remote
+  // arrives after the apply deadline.
+  //
+  // Off by default for this backport so existing rollback users aren't
+  // disturbed. Enable via ?predictRemote=1 for testing; flip the default
+  // once validated.
+  const PREDICT_REMOTE_DELAY = (() => {
+    try {
+      const raw = _urlParams.get('predictRemoteDelay');
+      if (raw != null) {
+        const v = parseInt(raw, 10);
+        if (Number.isFinite(v) && v >= 0 && v <= 8) return v;
+      }
+    } catch (_) {}
+    return 2;
+  })();
+  const RB_PREDICT_REMOTE = (() => {
+    try {
+      const raw = _urlParams.get('predictRemote') ?? localStorage.getItem('kn-predict-remote');
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch (_) {}
+    return false;
+  })();
+
   let _onExtraDataChannel = null;
   let _onUnhandledMessage = null;
 
@@ -3871,8 +3915,18 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
-          const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);
-          if (hostDelay > 0) {
+          // Predict-remote: host may broadcast delay=0 (or any value < the
+          // legacy clamp floor). Parse raw and override clampRollbackDelay
+          // when predictRemote is on, so the guest accepts the host's
+          // pinned value instead of bumping it back up to ROLLBACK_MIN.
+          let hostDelay;
+          if (RB_PREDICT_REMOTE) {
+            const raw = parseInt(e.data.split(':')[1], 10);
+            hostDelay = Number.isFinite(raw) && raw >= 0 ? raw : PREDICT_REMOTE_DELAY;
+          } else {
+            hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);
+          }
+          if (hostDelay > 0 || (RB_PREDICT_REMOTE && hostDelay === 0)) {
             // Cache for guests that haven't reached the init code yet.
             window._rbHostDelay = hostDelay;
             // Deferred init now waits for BOTH rb-delay AND rb-init-frame so
@@ -3916,7 +3970,7 @@
               window._rbPendingInit &&
               window._rbDoInit &&
               window._rbHostDelay !== undefined &&
-              window._rbHostDelay > 0
+              (window._rbHostDelay > 0 || (RB_PREDICT_REMOTE && window._rbHostDelay === 0))
             ) {
               window._rbPendingInit = false;
               window._rbPendingInitAt = 0;
@@ -5105,9 +5159,16 @@
         if (p.delayValue && p.delayValue > maxDelay) maxDelay = p.delayValue;
       }
     }
+    // Predict-remote override: canonical GGPO mode pins DELAY=PREDICT_REMOTE_DELAY
+    // regardless of negotiated value. See RB_PREDICT_REMOTE comment near
+    // ROLLBACK_MIN_DELAY_FRAMES. Off by default; opt-in via ?predictRemote=1.
+    if (hasRollback && RB_PREDICT_REMOTE) maxDelay = PREDICT_REMOTE_DELAY;
     DELAY_FRAMES = maxDelay;
     if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
-    _syncLog(`delay negotiated: own=${ownDelay} effective=${maxDelay}${hasRollback ? ' (rollback)' : ''}`);
+    _syncLog(
+      `delay negotiated: own=${ownDelay} effective=${maxDelay}${hasRollback ? ' (rollback)' : ''}` +
+        `${RB_PREDICT_REMOTE ? ' [predictRemote]' : ''}`,
+    );
 
     // Host broadcasts effective delay so all players use the same value.
     // Independent calculation can disagree due to asymmetric RTT/jitter.
@@ -5859,7 +5920,14 @@
 
       if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null) {
         const parsedDelay = parseInt(msg.effectiveDelay, 10);
-        const roomDelay = gm.Module?._kn_pre_tick && parsedDelay > 0 ? clampRollbackDelay(parsedDelay) : parsedDelay;
+        // Predict-remote: respect the pinned PREDICT_REMOTE_DELAY rather
+        // than clamping the host's broadcast back up to the legacy floor.
+        const roomDelay =
+          gm.Module?._kn_pre_tick && RB_PREDICT_REMOTE
+            ? PREDICT_REMOTE_DELAY
+            : gm.Module?._kn_pre_tick && parsedDelay > 0
+              ? clampRollbackDelay(parsedDelay)
+              : parsedDelay;
         DELAY_FRAMES = Number.isFinite(roomDelay) && roomDelay >= 0 ? roomDelay : DELAY_FRAMES;
         _syncLog(`late-join: using room delay ${DELAY_FRAMES}`);
       }
@@ -5995,8 +6063,8 @@
       // host's rb-delay broadcast over DataChannel (sent at game start).
       // Without this, startLockstep sets _rbPendingInit=true and the
       // tick loop is completely gated, causing a black screen.
-      if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null && DELAY_FRAMES > 0) {
-        window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);
+      if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null && (DELAY_FRAMES > 0 || RB_PREDICT_REMOTE)) {
+        window._rbHostDelay = RB_PREDICT_REMOTE ? PREDICT_REMOTE_DELAY : clampRollbackDelay(msg.effectiveDelay);
       }
       // The joiner's _frameNum was set to msg.frame above. Set the
       // matching host init frame so tryInitRollback fires immediately
@@ -7202,7 +7270,7 @@
         }
       };
 
-      if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
+      if (detMod?._kn_rollback_init && (DELAY_FRAMES > 0 || RB_PREDICT_REMOTE)) {
         if (_isSmashRemix()) {
           // Smash Remix's title/menu code path triggers a WASM `unreachable`
           // abort when the rollback engine's per-frame retro_serialize runs
@@ -7228,7 +7296,7 @@
           tryInitRollback();
         }
       } else {
-        if (DELAY_FRAMES <= 0 && detMod?._kn_rollback_init) {
+        if (DELAY_FRAMES <= 0 && !RB_PREDICT_REMOTE && detMod?._kn_rollback_init) {
           _syncLog('C-ROLLBACK disabled for zero-delay solo play');
         }
         _useCRollback = false;
@@ -7981,8 +8049,12 @@
     if (window._rbPendingInit) {
       const _rbPendingStart = window._rbPendingInitAt || 0;
       if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
-        const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
-        const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
+        const _rbFallbackDelay = RB_PREDICT_REMOTE
+          ? PREDICT_REMOTE_DELAY
+          : clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
+        const _haveDelay =
+          window._rbHostDelay !== undefined &&
+          (window._rbHostDelay > 0 || (RB_PREDICT_REMOTE && window._rbHostDelay === 0));
         const _haveInitFrame = window._rbHostInitFrame !== undefined;
         const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
         _syncLog(
