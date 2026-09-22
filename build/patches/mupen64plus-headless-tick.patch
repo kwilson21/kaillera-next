@@ -2,7 +2,7 @@ diff --git a/libretro/libretro.c b/libretro/libretro.c
 index cabae39..ee8ca7c 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -104,6 +104,57 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+@@ -104,6 +104,60 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
  
  retro_log_printf_t log_cb = NULL;
  retro_video_refresh_t video_cb = NULL;
@@ -14,6 +14,9 @@ index cabae39..ee8ca7c 100644
 +#include <emscripten.h>
 +int kn_headless = 0;
 +EMSCRIPTEN_KEEPALIVE void kn_set_headless(int enable) { kn_headless = enable; }
++int kn_skip_rdp_replay = 0;
++EMSCRIPTEN_KEEPALIVE void kn_set_skip_rdp_replay(int enable) { kn_skip_rdp_replay = enable; }
++EMSCRIPTEN_KEEPALIVE int kn_get_skip_rdp_replay(void) { return kn_skip_rdp_replay; }
 +
 +/* kaillera-next: Write full controller input for a slot.
 + * Called by kn_rollback.c during replay to set inputs before retro_run().

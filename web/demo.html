@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demo | kaillera-next</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #111;
+        --panel: #1a1a2e;
+        --panel-2: #0d0d1a;
+        --border: #2a2a40;
+        --input-border: #333;
+        --text: #eee;
+        --muted: #8a8a8a;
+        --accent: #6af;
+        --button: #3a5a8a;
+        --button-hover: #4a6fa5;
+        --success: #7ddc8a;
+        --danger: #f66;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      body {
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: sans-serif;
+      }
+
+      .shell {
+        width: min(1280px, calc(100vw - 24px));
+        margin: 0 auto;
+        padding: 16px 0 24px;
+      }
+
+      header {
+        margin-bottom: 12px;
+      }
+
+      h1,
+      h2 {
+        color: var(--accent);
+        letter-spacing: 0.1em;
+      }
+
+      h1 {
+        font-size: clamp(1.2rem, 2vw, 1.6rem);
+        line-height: 1.1;
+        text-transform: uppercase;
+      }
+
+      h2 {
+        font-size: 0.78rem;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+      }
+
+      .lede {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
+
+      .status-line {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.8rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-height: 1.2em;
+      }
+
+      .stage-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 340px;
+        gap: 16px;
+        align-items: start;
+      }
+
+      .stage-col {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        min-width: 0;
+      }
+
+      .stage {
+        position: relative;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: #050607;
+        overflow: hidden;
+        /* Stage is 4:3 to match the N64's native ratio so the canvas
+         * fills it edge-to-edge with no letterbox bars. Whichever
+         * column ends up taller (stage-col with stage + explainers, or
+         * sidebar) just drives the grid row's height; explainer text
+         * lives in the same column as the stage so the bottom of the
+         * canvas is followed by readable copy with no big air gap. */
+        aspect-ratio: 4 / 3;
+        max-height: calc(100vh - 200px);
+      }
+
+      #game {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      #game.kn-playing > div > *:not(canvas) {
+        display: none !important;
+        pointer-events: none !important;
+      }
+
+      #game canvas,
+      #game video {
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        object-fit: contain;
+        display: block;
+      }
+
+      #rom-drop,
+      .game-loading,
+      #game-loading,
+      #gesture-prompt {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        z-index: 5;
+      }
+
+      #rom-drop {
+        background: rgba(13, 13, 26, 0.94);
+      }
+
+      #rom-drop.dragover {
+        outline: 2px solid var(--accent);
+        outline-offset: -8px;
+      }
+
+      .drop-inner {
+        width: min(440px, calc(100% - 32px));
+        padding: 1.5rem;
+        border: 1px dashed var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        text-align: center;
+      }
+
+      .drop-title {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--accent);
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .drop-copy {
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      button,
+      .file-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 12px 20px;
+        border: 0;
+        border-radius: 6px;
+        background: var(--button);
+        color: #fff;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:hover,
+      .file-button:hover {
+        background: var(--button-hover);
+      }
+
+      .file-button input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      #game-loading {
+        background: rgba(5, 6, 7, 0.82);
+        z-index: 4;
+      }
+
+      #gesture-prompt {
+        background: rgba(5, 6, 7, 0.92);
+        z-index: 6;
+        cursor: pointer;
+      }
+
+      .game-loading-content {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--text);
+        font-weight: 700;
+      }
+
+      .game-loading-spinner {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.22);
+        border-top-color: var(--accent);
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .gesture-button {
+        padding: 22px 36px;
+        font-size: 1.2rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border: 0;
+        border-radius: 14px;
+        background: var(--button);
+        color: #fff;
+        cursor: pointer;
+        animation: gestureBreath 1.6s ease-in-out infinite;
+        box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.5);
+      }
+
+      .gesture-button:hover {
+        background: var(--button-hover);
+      }
+
+      @keyframes gestureBreath {
+        0%,
+        100% {
+          transform: scale(1);
+          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.4);
+        }
+        50% {
+          transform: scale(1.06);
+          box-shadow: 0 0 0 18px rgba(102, 170, 255, 0);
+        }
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .panel-card {
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+
+      .slider-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .slider-heading label {
+        color: var(--text);
+        font-weight: 700;
+        font-size: 0.95rem;
+      }
+
+      .value {
+        color: var(--accent);
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      input[type='range'] {
+        width: 100%;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+
+      .slider-hint {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+
+      .mode-toggle {
+        width: 100%;
+        min-height: 56px;
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      .mode-toggle.is-off {
+        background: #5a3140;
+      }
+
+      .mode-toggle.is-off:hover {
+        background: #724052;
+      }
+
+      .emu-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .emu-controls button {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        font-weight: 600;
+        min-height: 40px;
+        font-size: 0.95rem;
+      }
+
+      .emu-controls button:hover:not(:disabled) {
+        background: #14142a;
+      }
+
+      .emu-controls button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .emu-controls button.is-paused {
+        background: #2a3550;
+        border-color: var(--accent);
+      }
+
+      .auto-compare {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .auto-compare button {
+        width: 100%;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        font-weight: 600;
+      }
+
+      .auto-compare button:hover {
+        background: #14142a;
+      }
+
+      .auto-compare.is-running button {
+        background: #2a3550;
+        border-color: var(--accent);
+      }
+
+      .progress-track {
+        height: 4px;
+        margin-top: 8px;
+        background: var(--panel-2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 100ms linear;
+      }
+
+      .hud-card {
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+      }
+
+      .input-feel {
+        padding: 14px 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: #111125;
+        text-align: center;
+        font-size: clamp(1.1rem, 2.4vw, 1.6rem);
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+
+      .input-feel.is-instant {
+        color: var(--success);
+      }
+
+      .input-feel.is-late {
+        color: var(--danger);
+      }
+
+      .input-feel-sub {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-align: center;
+        line-height: 1.4;
+        min-height: 1.4em;
+      }
+
+      .frame-delay {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 0.85rem;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.4;
+        transition:
+          color 200ms,
+          background 200ms;
+      }
+
+      .frame-delay.is-great {
+        color: var(--success);
+        background: rgba(125, 220, 138, 0.08);
+      }
+
+      .frame-delay.is-okay {
+        color: #f4b84a;
+        background: rgba(244, 184, 74, 0.08);
+      }
+
+      .frame-delay.is-bad {
+        color: var(--danger);
+        background: rgba(255, 102, 102, 0.08);
+      }
+
+      .frame-delay strong {
+        font-weight: 700;
+      }
+
+      .gamepad-status {
+        margin-top: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.4;
+        text-align: center;
+      }
+
+      .gamepad-status.is-detected {
+        color: var(--success);
+        background: rgba(125, 220, 138, 0.08);
+      }
+
+      .hud-details {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.5;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .play-cta {
+        display: block;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        color: var(--text);
+        text-decoration: none;
+        text-align: center;
+        transition:
+          border-color 0.3s ease,
+          background 0.3s ease,
+          transform 0.3s ease;
+      }
+
+      .play-cta:hover {
+        border-color: var(--accent);
+        background: #1d2138;
+      }
+
+      .play-cta.is-convinced {
+        border-color: var(--accent);
+        background: linear-gradient(135deg, #2a3550, var(--panel));
+        animation: convincePulse 2.4s ease-in-out infinite;
+      }
+
+      @keyframes convincePulse {
+        0%,
+        100% {
+          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.45);
+        }
+        50% {
+          box-shadow: 0 0 0 14px rgba(102, 170, 255, 0);
+        }
+      }
+
+      .play-cta-headline {
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        margin-bottom: 4px;
+      }
+
+      .play-cta-sub {
+        color: var(--muted);
+        font-size: 0.78rem;
+        margin-bottom: 10px;
+      }
+
+      .play-cta-button {
+        display: inline-block;
+        padding: 10px 18px;
+        border-radius: 6px;
+        background: var(--button);
+        color: #fff;
+        font-weight: 700;
+        font-size: 0.92rem;
+      }
+
+      .play-cta:hover .play-cta-button {
+        background: var(--button-hover);
+      }
+
+      .explainer {
+        max-width: 920px;
+        margin-top: 16px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      @media (max-width: 920px) {
+        .stage-row {
+          grid-template-columns: 1fr;
+        }
+
+        .stage {
+          aspect-ratio: 4 / 3;
+          max-height: 60vh;
+        }
+      }
+    </style>
+    <script src="/static/version-guard.js"></script>
+    <script src="/static/api-sandbox.js"></script>
+    <script src="/static/core-redirector.js"></script>
+    <script src="/static/socket.io.min.js"></script>
+    <script src="/static/storage.js"></script>
+    <script src="/static/kn-state.js"></script>
+    <script src="/static/gamepad-manager.js"></script>
+    <script src="/static/shared.js"></script>
+    <script src="/static/kn-audio.js"></script>
+    <script src="/static/kn-diagnostics.js"></script>
+    <script src="/static/kn-desync-detector.js"></script>
+    <script src="/static/controller-settings.js"></script>
+    <script src="/static/netplay-rollback.js"></script>
+    <script src="/static/fake-peer.js"></script>
+    <script src="/static/demo.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <h1>Rollback demo</h1>
+        <p class="lede">Drop a ROM. Crank the lag. Toggle rollback off. Feel the difference.</p>
+        <p id="demo-status" class="status-line">Waiting for ROM</p>
+      </header>
+
+      <div class="stage-row">
+        <div class="stage-col">
+          <section class="stage" aria-label="Emulator">
+            <div id="game"></div>
+            <div id="rom-drop">
+              <div class="drop-inner">
+                <span class="drop-title">Drop ROM here</span>
+                <p class="drop-copy">
+                  Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.
+                </p>
+                <label class="file-button">
+                  Choose ROM
+                  <input id="rom-file" type="file" accept=".z64,.n64,.v64" />
+                </label>
+              </div>
+            </div>
+            <div id="game-loading" class="hidden">
+              <div class="game-loading-content">
+                <div class="game-loading-spinner"></div>
+                <span id="game-loading-text">Loading...</span>
+              </div>
+            </div>
+            <div id="gesture-prompt" class="hidden">
+              <button id="gesture-button" class="gesture-button" type="button">▶ Tap to start</button>
+            </div>
+          </section>
+
+          <p class="explainer">
+            Rollback netplay runs your game locally without waiting on the network. It predicts what the opponent will
+            press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
+            latency. Either way your input still lands at the current frame, which is the point: rollback hides the
+            network from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the
+            opponent's input every frame, so every keypress is delayed by the time it takes the peer's input to arrive —
+            about half the round-trip plus a jitter cushion. The wire delay is the same either way; the two modes just
+            choose where to pay the cost.
+          </p>
+          <p class="explainer">
+            The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
+            every press arrive late. Lockstep stays smoother visually (it never rewinds); rollback's framerate dips at
+            high RTT because predictions miss more often and the engine has more state to replay. The rollback button
+            toggles between them; auto-compare flips every 6 seconds so you can feel the difference without clicking.
+          </p>
+          <p class="explainer">
+            In this demo P2 is a synthetic peer running in the same tab. During menus it follows a baked autopilot; in
+            match it plays random inputs at roughly human cadence. Each time the peer's input differs from what the
+            engine predicted, the engine rewinds — that fills the Rollbacks counter and (at high RTT) shows up in the
+            fps readout. Crank the RTT slider higher and the count rises: that's what rollback is hiding from your
+            inputs but not from your eyes.
+          </p>
+        </div>
+
+        <aside class="sidebar" aria-label="Demo controls">
+          <a id="play-cta" class="play-cta" href="/">
+            <div id="play-cta-headline" class="play-cta-headline">Play with friends</div>
+            <div id="play-cta-sub" class="play-cta-sub">No installs. Free. Share a link.</div>
+            <span id="play-cta-button" class="play-cta-button">Open the lobby →</span>
+          </a>
+
+          <div class="hud-card">
+            <h2>Result</h2>
+            <div id="hud-feel" class="input-feel">CRANK THE LAG →</div>
+            <div id="hud-feel-sub" class="input-feel-sub">No lag — both modes feel the same.</div>
+            <div id="hud-frame-delay" class="frame-delay">
+              Connection: <strong>—</strong> &middot; Frame delay: <strong>0</strong>
+            </div>
+            <div id="hud-details" class="hud-details">
+              Engine: Waiting (start a match) · Mode: Rollback · RTT: 0 ms · — fps · Frame: 0 · Rollbacks: none yet
+            </div>
+          </div>
+
+          <div class="panel-card">
+            <div class="slider-heading">
+              <label for="lag">Network RTT</label>
+              <span id="lag-value" class="value">0 ms RTT</span>
+            </div>
+            <input id="lag" type="range" min="0" max="110" step="5" value="0" />
+            <p class="slider-hint">
+              Round-trip time, like a real ping reading. Higher RTT = more predictions/sec (the engine running ahead of
+              slot 1's input). Typical real-world: ~30 ms LAN, ~60 ms regional, ~150 ms cross-country.
+            </p>
+          </div>
+
+          <button id="rollback-toggle" class="mode-toggle" type="button" aria-pressed="true">Rollback: ON</button>
+
+          <div id="auto-compare" class="auto-compare">
+            <button id="auto-compare-btn" type="button">▶ Auto-compare every 6s</button>
+            <div class="progress-track"><div id="auto-progress" class="progress-fill"></div></div>
+          </div>
+
+          <div class="emu-controls">
+            <button id="emu-controls" type="button">🎮 Controls</button>
+            <button id="emu-reset" type="button" disabled>🔄 Reset</button>
+            <button id="emu-pause" type="button" disabled>⏸ Pause</button>
+            <button id="emu-stop" type="button" disabled>⏹ Stop</button>
+          </div>
+          <p id="gamepad-status" class="gamepad-status" aria-live="polite">
+            No gamepad detected — keyboard works (open Controls for the keymap).
+          </p>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

@@ -43,6 +43,10 @@ GLOBALS_ANCHOR = "extern void emscripten_mainloop(void);"
 
 GLOBALS_INSERT = """extern void emscripten_mainloop(void);
 
+/* Forward declaration for rb_log — used by inject-rb-probes.py probes
+ * that fire BEFORE rb_log's static definition later in the file. */
+static void rb_log(const char *fmt, ...);
+
 /* ── Rollback-engine OOB-throw localization probes (diagnostic) ───────
  * Updated at every save/restore boundary so JS reads the last reached
  * point after a WASM RuntimeError in stepOneFrame. The cached-interpreter
@@ -85,6 +89,220 @@ SAVE_SLOT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, int mark
     kn_diag_rb_serialize_ret = _ksz_ret;
     KN_RB_PROBE_SLOT(101, idx);
     if (!_ksz_ret) return 0;
+    rb.ring_sf_state[idx] = sf_pack();"""
+
+SAVE_SLOT_SPLIT_ORIGINAL = """static int rb_save_slot(int idx, int frame, int mark_last) {
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        /* Phase A3 sparse save:
+         *   - Sparse mode (delta_save_sparse_enabled): diff live vs baseline
+         *     (which always holds a current full snapshot), write only dirty
+         *     blocks to slot[idx] + update baseline. ~80% bandwidth reduction.
+         *     Slot becomes a sparse store — readers must use chain-walk
+         *     reconstruction or kn_reconstruct_slot_full().
+         *   - Full mode (default): diff live vs prev_slot (which is full),
+         *     write the dirty mask, then full memcpy slot = live. The dirty
+         *     mask is consumed at restore time to avoid copying clean blocks.
+         *
+         * First save in either mode: mark all dirty, full memcpy. In sparse
+         * mode, also populates baseline. */
+        const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+        const int block_size_ok = block_size > 0
+            && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+        const int sparse = rb.delta_save_sparse_enabled && rb.baseline_rdram
+            && block_size_ok && rb.ring_rdram_dirty_mask;
+        const int prev_idx = (idx + rb.ring_size - 1) % rb.ring_size;
+        /* Choose diff target: baseline (sparse) or prev slot (full mode). */
+        const uint8_t *diff_target = sparse
+            ? (rb.baseline_initialized ? rb.baseline_rdram : NULL)
+            : ((rb.ring_size > 1 && rb.ring_rdram_bufs[prev_idx]
+                && rb.ring_frames[prev_idx] >= 0 && rb.split_save_count > 0)
+               ? rb.ring_rdram_bufs[prev_idx] : NULL);
+        const int diff_valid = rb.delta_save_enabled
+            && rb.ring_rdram_dirty_mask
+            && block_size_ok
+            && diff_target != NULL;
+        if (diff_valid) {
+            uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            uint32_t dirty = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(diff_target + off,
+                           rb.rdram_base + off, block_size) != 0) {
+                    mask[b] = 1;
+                    dirty++;
+                } else {
+                    mask[b] = 0;
+                }
+            }
+            /* Stats bucket */
+            const int p = rb.delta_phase_in_match ? 1 : 0;
+            rb.delta_dirty_blocks_total[p] += dirty;
+            rb.delta_samples_taken[p]++;
+            if (dirty > rb.delta_max_dirty_blocks[p]) rb.delta_max_dirty_blocks[p] = dirty;
+            if (dirty < rb.delta_min_dirty_blocks[p]) rb.delta_min_dirty_blocks[p] = dirty;
+        } else if (rb.ring_rdram_dirty_mask) {
+            /* No diff target available (first save / wraparound) → mark all
+             * dirty so any restore that uses this slot's mask gets full data. */
+            memset(rb.ring_rdram_dirty_mask[idx], 1, KN_TAINT_BLOCKS);
+        }
+        if (sparse) {
+            /* Sparse path — write only dirty blocks to slot + baseline. */
+            const uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            if (!rb.baseline_initialized) {
+                /* First sparse save (or first ever) — populate baseline
+                 * full and slot full. mask was just set all-dirty above. */
+                memcpy(rb.baseline_rdram, rb.rdram_base, rb.split_rdram_size);
+                memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+                rb.baseline_initialized = 1;
+            } else {
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!mask[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    memcpy(rb.ring_rdram_bufs[idx] + off,
+                           rb.rdram_base + off, block_size);
+                    memcpy(rb.baseline_rdram + off,
+                           rb.rdram_base + off, block_size);
+                }
+            }
+        } else {
+            /* Full path (current behavior) — slot[idx] is a full snapshot. */
+            memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        }
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+    } else if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) {
+        return 0;
+    }
+    rb.ring_sf_state[idx] = sf_pack();"""
+
+SAVE_SLOT_SPLIT_INSTRUMENTED = """static int rb_save_slot(int idx, int frame, int mark_last) {
+    KN_RB_PROBE_SLOT(100, idx);
+    rb_log("RBSV-ENTRY idx=%d frame=%d split=%d", idx, frame, rb_using_split_state());
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            kn_diag_rb_serialize_count++;
+            kn_diag_rb_serialize_ret = 0;
+            KN_RB_PROBE_SLOT(101, idx);
+            rb_log("RBSV-NULL-PTR idx=%d", idx);
+            return 0;
+        }
+        rb_log("RBSV-PRE-RDRAM-COPY idx=%d size=%u", idx, (unsigned)rb.split_rdram_size);
+        /* Phase A3 sparse save:
+         *   - Sparse mode (delta_save_sparse_enabled): diff live vs baseline
+         *     (which always holds a current full snapshot), write only dirty
+         *     blocks to slot[idx] + update baseline. ~80% bandwidth reduction.
+         *     Slot becomes a sparse store — readers must use chain-walk
+         *     reconstruction or kn_reconstruct_slot_full().
+         *   - Full mode (default): diff live vs prev_slot (which is full),
+         *     write the dirty mask, then full memcpy slot = live. The dirty
+         *     mask is consumed at restore time to avoid copying clean blocks.
+         *
+         * First save in either mode: mark all dirty, full memcpy. In sparse
+         * mode, also populates baseline. */
+        const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+        const int block_size_ok = block_size > 0
+            && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+        const int sparse = rb.delta_save_sparse_enabled && rb.baseline_rdram
+            && block_size_ok && rb.ring_rdram_dirty_mask;
+        const int prev_idx = (idx + rb.ring_size - 1) % rb.ring_size;
+        /* Choose diff target: baseline (sparse) or prev slot (full mode). */
+        const uint8_t *diff_target = sparse
+            ? (rb.baseline_initialized ? rb.baseline_rdram : NULL)
+            : ((rb.ring_size > 1 && rb.ring_rdram_bufs[prev_idx]
+                && rb.ring_frames[prev_idx] >= 0 && rb.split_save_count > 0)
+               ? rb.ring_rdram_bufs[prev_idx] : NULL);
+        const int diff_valid = rb.delta_save_enabled
+            && rb.ring_rdram_dirty_mask
+            && block_size_ok
+            && diff_target != NULL;
+        if (diff_valid) {
+            uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            uint32_t dirty = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(diff_target + off,
+                           rb.rdram_base + off, block_size) != 0) {
+                    mask[b] = 1;
+                    dirty++;
+                } else {
+                    mask[b] = 0;
+                }
+            }
+            /* Stats bucket */
+            const int p = rb.delta_phase_in_match ? 1 : 0;
+            rb.delta_dirty_blocks_total[p] += dirty;
+            rb.delta_samples_taken[p]++;
+            if (dirty > rb.delta_max_dirty_blocks[p]) rb.delta_max_dirty_blocks[p] = dirty;
+            if (dirty < rb.delta_min_dirty_blocks[p]) rb.delta_min_dirty_blocks[p] = dirty;
+        } else if (rb.ring_rdram_dirty_mask) {
+            /* No diff target available (first save / wraparound) → mark all
+             * dirty so any restore that uses this slot's mask gets full data. */
+            memset(rb.ring_rdram_dirty_mask[idx], 1, KN_TAINT_BLOCKS);
+        }
+        if (sparse) {
+            /* Sparse path — write only dirty blocks to slot + baseline. */
+            const uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            if (!rb.baseline_initialized) {
+                /* First sparse save (or first ever) — populate baseline
+                 * full and slot full. mask was just set all-dirty above. */
+                memcpy(rb.baseline_rdram, rb.rdram_base, rb.split_rdram_size);
+                memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+                rb.baseline_initialized = 1;
+            } else {
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!mask[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    memcpy(rb.ring_rdram_bufs[idx] + off,
+                           rb.rdram_base + off, block_size);
+                    memcpy(rb.baseline_rdram + off,
+                           rb.rdram_base + off, block_size);
+                }
+            }
+        } else {
+            /* Full path (current behavior) — slot[idx] is a full snapshot. */
+            memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        }
+        rb_log("RBSV-PRE-READ-CPU idx=%d", idx);
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        rb_log("RBSV-POST-READ-CPU idx=%d size=%u", idx, (unsigned)cpu_size);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            kn_diag_rb_serialize_count++;
+            kn_diag_rb_serialize_ret = 0;
+            KN_RB_PROBE_SLOT(101, idx);
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+        kn_diag_rb_serialize_ret = 1;
+    } else {
+        int _ksz_ret = retro_serialize(rb.ring_bufs[idx], rb.state_size) ? 1 : 0;
+        kn_diag_rb_serialize_ret = _ksz_ret;
+        if (!_ksz_ret) {
+            kn_diag_rb_serialize_count++;
+            KN_RB_PROBE_SLOT(101, idx);
+            return 0;
+        }
+    }
+    kn_diag_rb_serialize_count++;
+    KN_RB_PROBE_SLOT(101, idx);
+    rb_log("RBSV-PRE-SF idx=%d", idx);
     rb.ring_sf_state[idx] = sf_pack();"""
 
 # ---------------------------------------------------------------------------
@@ -132,13 +350,18 @@ PROBE_PATCHES = [
         "        return 3; /* ring maintained, skip frame advance */\n"
         "    }\n",
     ),
-    # Rollback restore (line 918) — retro_unserialize.
+    # Rollback restore — state-backend restore wrapper.
     (
         "            if (rb.rdram_base && rb.saved_rdram)\n"
         "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
         "\n"
-        "            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);\n"
-        "            rb_restore_slot_aux(ring_idx);\n",
+        "            if (!rb_restore_slot_state(ring_idx)) {\n"
+        "                rb.failed_rollbacks++;\n"
+        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
+        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
+        "                    rb.state_backend, rb.failed_rollbacks);\n"
+        "                return 0;\n"
+        "            }\n",
 
         "            if (rb.rdram_base && rb.saved_rdram)\n"
         "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
@@ -146,9 +369,16 @@ PROBE_PATCHES = [
         "            KN_RB_PROBE_SLOT(40, ring_idx);\n"
         "            kn_diag_rb_unserialize_count++;\n"
         "            kn_diag_rb_unserialize_frame = (int32_t)rb_frame;\n"
-        "            kn_diag_rb_unserialize_ret = retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size) ? 1 : 0;\n"
+        "            int _krb_restore_ret = rb_restore_slot_state(ring_idx);\n"
+        "            kn_diag_rb_unserialize_ret = _krb_restore_ret;\n"
         "            KN_RB_PROBE_SLOT(41, ring_idx);\n"
-        "            rb_restore_slot_aux(ring_idx);\n",
+        "            if (!_krb_restore_ret) {\n"
+        "                rb.failed_rollbacks++;\n"
+        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
+        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
+        "                    rb.state_backend, rb.failed_rollbacks);\n"
+        "                return 0;\n"
+        "            }\n",
     ),
     # Replay save + return 2 (line 973 + line 993).
     (
@@ -231,10 +461,19 @@ def main():
         sys.exit(1)
     text = text.replace(GLOBALS_ANCHOR, GLOBALS_INSERT, 1)
 
-    if SAVE_SLOT_ORIGINAL not in text:
-        print("    inject-rb-probes.py: rb_save_slot baseline did not match", file=sys.stderr)
-        sys.exit(1)
-    text = text.replace(SAVE_SLOT_ORIGINAL, SAVE_SLOT_INSTRUMENTED, 1)
+    if SAVE_SLOT_ORIGINAL in text:
+        text = text.replace(SAVE_SLOT_ORIGINAL, SAVE_SLOT_INSTRUMENTED, 1)
+    elif SAVE_SLOT_SPLIT_ORIGINAL in text:
+        text = text.replace(SAVE_SLOT_SPLIT_ORIGINAL, SAVE_SLOT_SPLIT_INSTRUMENTED, 1)
+    else:
+        # The save_slot body churns frequently as we iterate on Phase A2/A3
+        # delta + sparse logic. The save-slot RBSV-* probes are diagnostic
+        # for OOB throws that haven't reproduced recently. Skip rather than
+        # block the build — the kn_pre_tick / kn_post_tick probes below
+        # still apply and provide most of the diagnostic value.
+        print("    inject-rb-probes.py: rb_save_slot baseline did not match — "
+              "skipping save_slot probes (other probes still applied)",
+              file=sys.stderr)
 
     for orig, new in PROBE_PATCHES:
         if orig not in text:
