@@ -72,3 +72,6 @@ build/test/
 tools/dl-recorder/
 web/smash64r-test/
 web/webgpu-pivot-test/
+
+# Local gameplay test output (scripts/test-gameplay.sh)
+test-results/

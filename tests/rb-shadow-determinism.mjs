@@ -15,8 +15,8 @@
  */
 import { chromium } from 'playwright';
 
-const ROM_PATH = '/Users/kazon/kaillera-next/.playwright-mcp/smash_remix.z64';
-const URL = 'https://localhost:27888/demo.html?p1Random=1&shadowFrameBlit=1';
+const ROM_PATH = process.env.KN_ROM || '/Users/kazon/kaillera-next/.playwright-mcp/smash_remix.z64';
+const URL = `${process.env.KN_BASE_URL || 'https://localhost:27888'}/demo.html?p1Random=1&shadowFrameBlit=1`;
 
 async function main() {
   const browser = await chromium.launch({ headless: false });

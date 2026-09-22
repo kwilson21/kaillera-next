@@ -19,7 +19,7 @@
  */
 import { chromium } from 'playwright';
 
-const ROM_PATH = '/Users/kazon/kaillera-next/.playwright-mcp/smash_remix.z64';
+const ROM_PATH = process.env.KN_ROM || '/Users/kazon/kaillera-next/.playwright-mcp/smash_remix.z64';
 const SIM_FREEZE_THRESHOLD_MS = 80;
 const PAINT_FREEZE_THRESHOLD_MS = 100;
 
@@ -371,7 +371,7 @@ async function trace(url) {
   return { realSimFreezes, standalonePaint, errors, stuckEvents };
 }
 
-const URL = process.env.URL || 'https://localhost:27888/demo.html';
+const URL = process.env.URL || `${process.env.KN_BASE_URL || 'https://localhost:27888'}/demo.html`;
 trace(URL).catch((e) => {
   console.error('fatal:', e);
   process.exit(1);
