@@ -165,3 +165,14 @@ deploy-dry:
         fi
         echo "  $current → $major.$minor.$patch ($bump)"
     fi
+
+# Build the static rollback demo (dist/) and deploy it to Cloudflare.
+# Needs `npx wrangler login` once, or CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.
+demo-deploy:
+    python3 scripts/build_demo.py
+    npx wrangler deploy
+
+# Serve the built demo locally exactly as Cloudflare will (http://localhost:8787)
+demo-dev:
+    python3 scripts/build_demo.py
+    npx wrangler dev --port 8787

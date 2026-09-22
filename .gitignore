@@ -75,3 +75,6 @@ web/webgpu-pivot-test/
 
 # Local gameplay test output (scripts/test-gameplay.sh)
 test-results/
+
+# Built static demo (scripts/build_demo.py)
+/dist/
