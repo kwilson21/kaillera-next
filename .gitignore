@@ -78,3 +78,6 @@ test-results/
 
 # Built static demo (scripts/build_demo.py)
 /dist/
+
+# Wrangler local dev state
+.wrangler/
