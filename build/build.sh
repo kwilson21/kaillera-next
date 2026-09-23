@@ -373,6 +373,27 @@ GLideN64/%.o ./GLideN64/%.o custom/GLideN64/%.o ./custom/GLideN64/%.o: CXXFLAGS 
         echo "    Keeping GLideN64 WASM SIMD (set KN_DISABLE_GLIDEN64_SIMD=1 to disable)"
     fi
 
+    # Rollback engine: always scalar WASM. The --denan pass (Stage 1b) wraps
+    # every v128 value in a check that zeroes the whole vector when any lane,
+    # read as f32, is NaN. Every negative int32 is a NaN bit pattern, so a
+    # vectorized copy of an input struct holding a negative stick axis came
+    # back as all zeros. The engine's predictor then guessed a released stick
+    # for a held one, mispredicted every frame, and rolled back repeatedly
+    # (visible as character flicker). Integer data only needs scalar code.
+    if grep -q 'rollback engine scalar WASM' Makefile; then
+        echo "    Rollback engine SIMD already disabled"
+    elif grep -q '^CFLAGS      += $(CPUOPTS)' Makefile; then
+        sed -i '/^CFLAGS      += $(CPUOPTS)/a\
+\
+# kaillera-next: rollback engine scalar WASM (--denan zeroes int SIMD lanes).\
+mupen64plus-core/src/main/kn_%.o ./mupen64plus-core/src/main/kn_%.o: CFLAGS := $(filter-out -msimd128,$(CFLAGS)) -mno-simd128\
+' Makefile && \
+            echo "    Disabled WASM SIMD for rollback engine objects" || \
+            { echo "FATAL: rollback engine SIMD disable sed failed"; exit 1; }
+    else
+        echo "FATAL: rollback engine SIMD disable anchor missing"; exit 1
+    fi
+
     # Diagnostic escape hatch: scalar WASM fixed one WebKit CSS rendering probe,
     # but it later reproduced a WebKit abort/freeze during recorded navigation.
     # Keep SIMD as the default path and only disable it for targeted graphics
