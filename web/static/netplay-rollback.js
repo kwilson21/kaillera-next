@@ -1535,6 +1535,11 @@
   // lockstep delay instead of real rollback netcode.
   // Both peers must agree (kn_get_true_rollback_capability + RB_TRUE_ROLLBACK)
   // before rollback can start; mismatch falls back to legacy behavior.
+  // Deepest rollback the C engine performs; must equal
+  // KN_MAX_VISIBLE_ROLLBACK_DEPTH in build/kn_rollback/kn_rollback.c.
+  // Mispredictions deeper than this are skipped there, so the tick loop
+  // stalls before predicting that far ahead (see the prediction window).
+  const KN_MAX_VISIBLE_ROLLBACK_DEPTH = 7;
   const RB_TRUE_ROLLBACK = (() => {
     try {
       const raw = _urlParams.get('trueRollback') ?? localStorage.getItem('kn-true-rollback');
@@ -13454,21 +13459,32 @@
         } else if (_rbBootConverged && rbApplyFrame >= 0) {
           // Gameplay: stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
-          // Stall threshold: must match the C engine's visible_rb_max so we
-          // don't bail before rollback can absorb the gap. Legacy model uses
-          // delay+4 (kn_rollback.c). True rollback expands this to delay+10
-          // (capped at 12 by KN_MAX_VISIBLE_ROLLBACK_DEPTH); keeping the JS
-          // stall at the old delay+4 produces continuous lockstep-like stalls
-          // at typical RTT/2 frame depths because peer naturally sits 5-7
-          // frames behind on 80ms RTT.
-          const stallThreshold = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
+          // Prediction window. A remote input X that turns out mispredicted
+          // rewinds to frame X + delay (its first use), so running frame F
+          // while X is still unconfirmed risks a rollback of F - X - delay
+          // frames. The C engine silently skips (DEEP-MISPREDICT-SKIP =
+          // cross-peer desync) any rollback deeper than
+          // KN_MAX_VISIBLE_ROLLBACK_DEPTH, so stall before any unconfirmed
+          // input can get that old — GGPO's max-prediction-frames rule.
+          // Two ways an input is unconfirmed:
+          //  - the peer's newest input is behind (adv = F - newest; the
+          //    oldest missing is newest + 1): stall at adv >= delay + cap;
+          //  - a lost packet left a gap behind newer inputs: stall when the
+          //    input at the edge of the window, F - delay - cap, is missing.
+          // (This used min(delay + 10, 12) from when the C cap was 12; the
+          // cap is now 7, so mispredictions 8+ deep were being skipped.)
+          // Legacy mode keeps its own delay+4 sizing.
+          const stallThreshold = RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH : DELAY_FRAMES + 4;
           for (const p of rbInputPeers) {
             if (_peerPhantom[p.slot]) continue;
-            if (!_remoteInputs[p.slot]?.[rbApplyFrame]) {
+            const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
+            const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+            const gapAtEdge =
+              RB_TRUE_ROLLBACK && windowEdge >= 0 && windowEdge < peerFrame && !_remoteInputs[p.slot]?.[windowEdge];
+            if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
               // Input missing — check how far ahead we are
-              const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
               const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
-              if (adv >= stallThreshold) {
+              if (gapAtEdge || adv >= stallThreshold) {
                 const nowRbInputStall = performance.now();
                 const rbStallKey = `${p.slot}:${rbApplyFrame}`;
                 if (_rbInputStallKey !== rbStallKey) {
