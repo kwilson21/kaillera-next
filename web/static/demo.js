@@ -746,6 +746,66 @@
     _showInputIndicator('enabled');
   };
 
+  // Autopilot deadline (invariant I1: no wait without a timeout). The script
+  // is open-loop — inputs keyed to engine frames, no feedback from the game —
+  // so one press landing a frame outside its menu window leaves the game on
+  // the character or stage select with no match coming. Without a deadline
+  // the user's keyboard stays suppressed forever. Past the last scripted
+  // input plus the battle load + 3-2-1 countdown, if the game still isn't in
+  // the battle scene: reload once (a fresh run usually lines up), then hand
+  // the keyboard to the user.
+  const AUTOPILOT_GRACE_FRAMES = 600; // ~10 s at 60 fps
+  const AUTOPILOT_DEADLINE_FRAME =
+    Math.max(
+      MENU_AUTOPILOT_P1_TRANSITIONS[MENU_AUTOPILOT_P1_TRANSITIONS.length - 1]?.[0] ?? 0,
+      MENU_AUTOPILOT_P2_TRANSITIONS[MENU_AUTOPILOT_P2_TRANSITIONS.length - 1]?.[0] ?? 0,
+    ) + AUTOPILOT_GRACE_FRAMES;
+  const BATTLE_SCENE = 22;
+  const AUTOPILOT_RETRY_KEY = 'kn-demo-autopilot-retried';
+  let _autopilotLastScene = -1;
+  let _autopilotStalled = false;
+
+  const _checkAutopilot = (counters) => {
+    if (!_autopilotActive || _autopilotStalled) return;
+    const frame = counters?.currentFrame ?? 0;
+    const s = window.NetplayRollback?.getSceneStatus?.() || {};
+    // Scene trail: when the autopilot misses, this shows which menu it
+    // stopped on and when it got there, to compare against the script.
+    if (s.ready && s.scene !== _autopilotLastScene) {
+      console.info(`[demo] autopilot scene ${_autopilotLastScene} -> ${s.scene} at frame ${frame}`);
+      _autopilotLastScene = s.scene;
+    }
+    if (frame < AUTOPILOT_DEADLINE_FRAME || s.scene === BATTLE_SCENE) return;
+    _autopilotStalled = true;
+    console.warn(
+      `[demo] AUTOPILOT-STALL frame=${frame} scene=${s.scene} status=${s.status} ` +
+        `delay=${counters?.delay ?? '?'} — match not reached`,
+    );
+    let retried = false;
+    try {
+      retried = sessionStorage.getItem(AUTOPILOT_RETRY_KEY) === '1';
+      if (!retried) sessionStorage.setItem(AUTOPILOT_RETRY_KEY, '1');
+    } catch (_) {
+      retried = true; // no storage → can't bound retries, so don't retry
+    }
+    if (!retried) {
+      _setStatus('The menu autopilot missed a button press. Restarting the demo…');
+      _resetDemo();
+      return;
+    }
+    _finishAutopilot();
+    _setStatus(
+      "The menu autopilot missed a button press, so you're in control: pick a fighter " +
+        '(WASD + C) and press Enter to continue. Reset tries the autopilot again.',
+    );
+  };
+
+  const _clearAutopilotRetry = () => {
+    try {
+      sessionStorage.removeItem(AUTOPILOT_RETRY_KEY);
+    } catch (_) {}
+  };
+
   const _showConvincePrompt = () => {
     const cta = $('play-cta');
     if (!cta) return;
@@ -1312,6 +1372,7 @@
     //                        every pause cycle.
     const inMatchStrict = !!window.NetplayRollback?.isInMatch?.();
     const inMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
+    _checkAutopilot(counters);
     // Edge-detect strict transitions for fake-peer independent of the UI
     // edge below — the strict edge fires on every pause/unpause so fake-peer
     // silences immediately, while the UI edge only fires on real match
@@ -1330,6 +1391,7 @@
         // over from here.
         _finishRecording();
         _finishAutopilot();
+        _clearAutopilotRetry();
         // Clear any post-match indicator the previous round left behind —
         // _finishAutopilot's "enabled" toast only fires on first-time
         // autopilot finish, so subsequent rounds rely on this explicit

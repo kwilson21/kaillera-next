@@ -4,9 +4,7 @@
 import { chromium } from 'playwright';
 
 const url = process.argv[2] || 'http://localhost:8787/';
-const browser = await chromium.launch(
-  process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {},
-);
+const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
 const page = await browser.newPage();
 const errors = [];
 const failed = [];
