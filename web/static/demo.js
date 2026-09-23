@@ -1077,11 +1077,6 @@
     // predicts when slot 1's input is missing, and rolls back when the actual
     // input differs from the prediction. This is the core of the demo.
     window.NetplayRollback?.setDemoMode?.(true);
-    // Keep the input delay the same in rollback and lockstep, so the
-    // auto-compare flips don't change it mid-match (each change skipped or
-    // repeated remote input frames, and rollback's 1-frame delay tripled
-    // the rollbacks).
-    window.NetplayRollback?.setDelayModeIndependent?.(true);
 
     if (_romIsSsb64Us && !_recordMode && window.KNMenuAutopilot && window.NetplayRollback.readRdram32) {
       _menuPilot = window.KNMenuAutopilot.create({
