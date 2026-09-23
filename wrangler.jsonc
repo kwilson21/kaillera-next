@@ -5,6 +5,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "kaillera-next",
   "compatibility_date": "2026-09-01",
+  // Cloudflare creates the DNS record and certificate for this hostname.
+  // It refuses if any other DNS record already exists for the name.
+  "routes": [{ "pattern": "kaillera-next.thesuperhuman.us", "custom_domain": true }],
   "assets": {
     "directory": "./dist",
     "not_found_handling": "404-page",
