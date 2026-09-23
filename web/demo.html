@@ -150,15 +150,15 @@
         background: rgba(13, 13, 26, 0.94);
       }
 
-      /* Rollback <-> lockstep switch: the game holds for a moment behind
-         this banner while the input delay changes. */
+      /* Rollback <-> lockstep switch: a label over the running game while
+         the input delay changes. */
       #mode-switch {
         position: absolute;
-        inset: 0;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
         z-index: 6;
-        display: grid;
-        place-items: center;
-        background: rgba(5, 6, 7, 0.55);
+        max-width: calc(100% - 24px);
         pointer-events: none;
       }
 

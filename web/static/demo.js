@@ -1438,19 +1438,16 @@
 
   // Switching rollback <-> lockstep mid-match changes the input delay, and a
   // delay change repeats or skips that many frames of input (the same way on
-  // every peer — it's a real netcode delay change, not a desync). Rather
-  // than let that read as a glitch, make it an explicit moment: freeze the
-  // game behind a "Switching to …" banner, change the mode while frozen,
-  // hold until the opponent's in-flight inputs for the new window have had
-  // time to land (so rollback mode doesn't resume into a burst of late
-  // inputs), then resume.
-  const MODE_SWITCH_HOLD_MS = 450;
+  // every peer — it's a real netcode delay change, not a desync). The game
+  // keeps running; a label over it names the new mode and delay so the
+  // switch reads as deliberate.
+  const MODE_SWITCH_LABEL_MS = 1500;
   let _modeSwitchTimer = 0;
   const _switchMode = (enabled, deferrals = 0) => {
     const next = !!enabled;
     const rb = window.NetplayRollback;
     const inMatch = !!rb?.isInMatchOrPaused?.();
-    if (!inMatch || _emuPaused || !rb?.pauseTick) {
+    if (!inMatch || _emuPaused) {
       _setRollbackEnabled(next);
       return;
     }
@@ -1461,11 +1458,10 @@
       _nativeRAF(() => _switchMode(next, deferrals + 1));
       return;
     }
-    rb.pauseTick();
     _setRollbackEnabled(next);
     const delay = rb.getHudCounters?.()?.delay ?? 0;
     const title = $('mode-switch-title');
-    if (title) title.textContent = next ? 'Switching to rollback' : 'Switching to lockstep';
+    if (title) title.textContent = next ? 'Switched to rollback' : 'Switched to lockstep';
     const sub = $('mode-switch-sub');
     if (sub) {
       const ms = Math.round(delay * 16.67);
@@ -1478,9 +1474,7 @@
     _modeSwitchTimer = setTimeout(() => {
       _modeSwitchTimer = 0;
       $('mode-switch')?.classList.add('hidden');
-      // Stay frozen if the user pressed Pause during the hold.
-      if (!_emuPaused) rb.resumeTick?.();
-    }, MODE_SWITCH_HOLD_MS);
+    }, MODE_SWITCH_LABEL_MS);
   };
 
   const _isAutoCompareRunning = () => _autoCompareTimer !== 0;
