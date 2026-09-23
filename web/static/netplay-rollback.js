@@ -415,6 +415,16 @@
   // so scripted autopilot inputs aren't shifted out of their press windows
   // by mid-setup recomputes.
   let _delayRetuneEnabled = false;
+  // Demo auto-compare flips predictions on/off every few seconds. With the
+  // mode-aware formula below each flip also swings the delay (rollback:
+  // jitter only, ~1 frame; lockstep: RTT/2 + jitter, ~4 at 100 ms), and a
+  // mid-match delay change skips or repeats that many remote input frames
+  // — a visible hitch on every flip — while delay 1 makes nearly every
+  // remote input late, roughly tripling rollbacks. When set, both modes use
+  // the lockstep formula, so flips never change the delay. Local input is
+  // still applied at the current frame under rollback, so rollback keeps
+  // its instant feel; only the remote-input window grows.
+  let _delayModeIndependent = false;
   const _recomputeDelay = () => {
     if (!_delayRetuneEnabled) return;
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
@@ -433,7 +443,7 @@
     // RTT/2 isn't input lag — use jitterMargin only. When predictions are
     // paused (demo lockstep / legacy path), the engine waits for remote
     // input and RTT/2 IS the input lag the player feels.
-    const useHalfRtt = _predictionsPaused;
+    const useHalfRtt = _predictionsPaused || _delayModeIndependent;
     const ownDelay = _delayFromRttSamples(liveSamples, useHalfRtt);
     if (ownDelay == null) return;
     let maxDelay = ownDelay;
@@ -16904,6 +16914,14 @@
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
+    // Demo: size the delay with the lockstep formula in both modes so the
+    // auto-compare rollback/lockstep flips never change it (see
+    // _delayModeIndependent).
+    setDelayModeIndependent: (on) => {
+      _delayModeIndependent = !!on;
+      _recomputeDelay();
+      return _delayModeIndependent;
+    },
     // Demo: freeze DELAY_FRAMES during autopilot so the recompute path
     // (slider changes, predictions toggle) doesn't shift fixed-frame
     // scripted button presses out of their press windows. Re-enable
