@@ -1043,8 +1043,8 @@
       skipInitialStateSync: true,
       // Pass real ROM hash so _isSmashRemix() can identify Smash Remix ROMs
       // and use the right RDRAM addresses for game_status. Without this, the
-      // engine treats every ROM as SSB64 and reads game_status from 0xa4f08
-      // instead of Remix's 0xa4d18 — wrong byte, isInMatch never returns true.
+      // engine treats every ROM as SSB64 and reads game_status through the
+      // SSB64 battle-state pointer, which Remix isn't verified to share.
       romHash: _romHash,
       disableStandardCheats: true,
       skipSmashTitleWait: true,

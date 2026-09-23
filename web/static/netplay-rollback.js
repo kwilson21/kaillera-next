@@ -5415,15 +5415,17 @@
   //     (smashremix/src/Global.asm:165: `constant game_status(0x800A4D19)`)
   //     Word-aligned 0x000a4d18, byte 1 of the BE word = game_status.
   const KN_REMIX_GAME_STATUS_WORD_RDRAM = 0x000a4d18;
-  //   SSB64 base: gSCManagerBattleState->game_status — VS state struct
-  //     at RDRAM 0xA4EF8 (kn_gameplay_addrs.h KN_ADDR_VS_BATTLE_HEADER),
-  //     struct offset 0x11 (ssb-decomp/src/sc/sctypes.h SCBattleState).
-  //     Word-aligned 0x000a4f08, byte 1 of the BE word = game_status.
-  //   Currently unused (no SSB64-base reader today; menu phase logic is
-  //   gated on _isSmashRemix elsewhere). Defined so future SSB64-base
-  //   callers use the right address and don't accidentally pull the
-  //   Remix one.
-  const KN_SSB64_GAME_STATUS_WORD_RDRAM = 0x000a4f08;
+  //   SSB64 base: gSCManagerBattleState->game_status, struct offset 0x11
+  //     (ssb-decomp/src/sc/sctypes.h SCBattleState). gSCManagerBattleState
+  //     @ 0x800A50E8 (symbols_us.txt) points at the live struct:
+  //     gSCManagerTransferBattleState @ 0x800A4D08 for a normal VS match
+  //     (so status @ 0x800A4D19, the same byte Remix uses), and
+  //     gSCManagerVSBattleState @ 0x800A4EF8 only for sudden death
+  //     (ssb-decomp/src/sc/sccommon/scvsbattle.c scVSBattleStartScene).
+  //     Reading 0xA4F08 directly (the previous constant) saw the
+  //     sudden-death struct, whose status stays 0 all match.
+  const KN_SSB64_BATTLE_STATE_PTR_RDRAM = 0x000a50e8;
+  const KN_BATTLE_STATE_STATUS_WORD_OFFSET = 0x10; // byte 1 of this BE word
   let _rngPatched = false;
   let _rngSeed = 0;
   let _rdramBase = 0; // WASM heap byte offset of RDRAM
@@ -17123,7 +17125,16 @@
         if (!mod?.HEAPU8 || !mod?.HEAPU32) return out;
         out.ready = true;
         out.scene = mod.HEAPU8[_rdramBase + (KN_SCENE_CURR_RDRAM ^ 3)] & 0xff;
-        const statusAddr = out.remix ? KN_REMIX_GAME_STATUS_WORD_RDRAM : KN_SSB64_GAME_STATUS_WORD_RDRAM;
+        let statusAddr = KN_REMIX_GAME_STATUS_WORD_RDRAM;
+        if (!out.remix) {
+          const ptr = mod.HEAPU32[(_rdramBase + KN_SSB64_BATTLE_STATE_PTR_RDRAM) >> 2] >>> 0;
+          const phys = ptr & 0x1fffffff;
+          // Before the first battle the pointer can be unset; the transfer
+          // struct is where a normal match's status lives anyway.
+          if (ptr >= 0x80000000 && phys < 0x800000 && (phys & 3) === 0) {
+            statusAddr = phys + KN_BATTLE_STATE_STATUS_WORD_OFFSET;
+          }
+        }
         const word = mod.HEAPU32[(_rdramBase + statusAddr) >> 2];
         out.status = (word >> 16) & 0xff;
       } catch (_) {}
