@@ -1362,22 +1362,6 @@ void kn_rollback_slot_reset(int slot) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-/* Predicted input for a remote slot from its newest real inputs:
- * dead-reckoning for the sticks (clamped to the N64 range), repeat-last
- * for buttons, which are digital. Shared by the forward and replay paths
- * so both guess the same way. */
-static kn_input_t rb_predict_input(int s) {
-    #define KN_CLAMP_STICK(v) ((v) < -83 ? -83 : (v) > 83 ? 83 : (v))
-    kn_input_t p = rb.last_known[s];
-    p.lx = KN_CLAMP_STICK(2 * rb.last_known[s].lx - rb.prev_known[s].lx);
-    p.ly = KN_CLAMP_STICK(2 * rb.last_known[s].ly - rb.prev_known[s].ly);
-    p.cx = KN_CLAMP_STICK(2 * rb.last_known[s].cx - rb.prev_known[s].cx);
-    p.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
-    p.buttons = rb.last_known[s].buttons;
-    #undef KN_CLAMP_STICK
-    return p;
-}
-
 static void rb_record_applied_tag(int emu_frame, int tag) {
     if (emu_frame < 0) return;
     int i = emu_frame % KN_INPUT_RING_SIZE;
@@ -1811,15 +1795,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
      * path as normal play. This is the only way to guarantee bit-identical
      * execution between normal play and replay. */
     if (rb.replay_remaining > 0) {
-        /* Replay a frame with the remote input frame it applied the first
-         * time. Recomputing from the current delay would re-run frames from
-         * before a delay change (the demo flips 1 <-> 4 on every rollback
-         * ON/OFF toggle) with different inputs than they originally used. */
         int replay_apply = rb.frame - rb.delay_frames;
-        {
-            int ti = rb.frame % KN_INPUT_RING_SIZE;
-            if (rb.applied_tag_frame[ti] == rb.frame) replay_apply = rb.applied_tag[ti];
-        }
         int save_idx = rb.frame % rb.ring_size;
         rb_record_applied_tag(rb.frame, replay_apply);
 
@@ -1871,26 +1847,6 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                 if (s < rb.num_players && replay_apply >= 0) {
                     int idx = replay_apply % KN_INPUT_RING_SIZE;
                     kn_input_t *inp = &rb.inputs[s][idx];
-                    /* Input still unconfirmed: re-predict from the newest
-                     * real input instead of replaying the stale forward-pass
-                     * guess. A rollback happens because a newer real input
-                     * arrived; replaying the old guess for the frames still
-                     * in flight made each of their arrivals mispredict again,
-                     * so one input change became a chain of rollbacks. The
-                     * new guess is stored as the prediction, so later
-                     * arrivals are checked against what this replay ran. */
-                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
-                    int missing = !(inp->present && inp->frame == replay_apply);
-                    if (rb.slot_active[s] && (unconfirmed || missing)) {
-                        kn_input_t pred_input = rb_predict_input(s);
-                        if (missing) rb.prediction_count++;
-                        *inp = pred_input;
-                        inp->present = 1;
-                        inp->frame = replay_apply;
-                        rb.predicted[s][idx] = 1;
-                        rb.predicted_values[s][idx] = pred_input;
-                        rb.predicted_values[s][idx].frame = replay_apply;
-                    }
                     if (inp->present && inp->frame == replay_apply) {
                         btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
                         origin = rb.predicted[s][idx] ? 'P' : 'R';
@@ -1977,7 +1933,14 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                  *
                  * Clamped to N64 stick range [-83, 83] to prevent
                  * extrapolation from producing out-of-range values. */
-                kn_input_t pred_input = rb_predict_input(s);
+                #define KN_CLAMP_STICK(v) ((v) < -83 ? -83 : (v) > 83 ? 83 : (v))
+                kn_input_t pred_input = rb.last_known[s];
+                pred_input.lx = KN_CLAMP_STICK(2 * rb.last_known[s].lx - rb.prev_known[s].lx);
+                pred_input.ly = KN_CLAMP_STICK(2 * rb.last_known[s].ly - rb.prev_known[s].ly);
+                pred_input.cx = KN_CLAMP_STICK(2 * rb.last_known[s].cx - rb.prev_known[s].cx);
+                pred_input.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
+                /* Buttons: repeat last (no extrapolation for digital) */
+                pred_input.buttons = rb.last_known[s].buttons;
                 /* Detect ring-wrap: this slot was previously predicted for a
                  * different (older) frame whose real input never arrived to
                  * verify it. The old prediction will never be checked once we
