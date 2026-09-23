@@ -17129,6 +17129,22 @@
       } catch (_) {}
       return out;
     },
+    // Read-only view of one aligned RDRAM word, for game-aware tooling (the
+    // demo's menu autopilot). `addr` is an N64 virtual (0x80xxxxxx) or
+    // physical address. Returns the big-endian word as the game sees it, or
+    // null when RDRAM isn't mapped yet or the address is out of range.
+    readRdram32: (addr) => {
+      try {
+        const mod = window.EJS_emulator?.gameManager?.Module;
+        if (!mod?.HEAPU32) return null;
+        const base = _getRdramBase(mod);
+        const phys = (addr >>> 0) & 0x1fffffff;
+        if (!base || phys >= 0x800000) return null;
+        return mod.HEAPU32[(base + (phys & ~3)) >> 2] >>> 0;
+      } catch (_) {
+        return null;
+      }
+    },
     // Precise in-match check. Currently uses the well-known Smash Remix
     // semantics (scene 22 + status 1). For SSB64 this is unverified — the
     // demo's HUD now shows raw scene/status so we can confirm the actual

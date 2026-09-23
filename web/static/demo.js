@@ -183,6 +183,11 @@
 
   let _romBlobUrl = null;
   let _romHash = null;
+  // US SSB64 gets the closed-loop menu autopilot (ssb64-menu-autopilot.js),
+  // which reads menu state from RDRAM. Other ROMs (e.g. Smash Remix, whose
+  // memory layout differs) keep the recorded frame script below.
+  let _romIsSsb64Us = false;
+  let _menuPilot = null;
   let _engineStarted = false;
   let _emulatorBootInFlight = false;
   let _loaderInjected = false;
@@ -657,6 +662,7 @@
       // sequential indexing breaks if the engine stalls or rolls back.
       if (_autopilotActive) {
         const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
+        if (_menuPilot) return _menuPilot.p1(currentFrame);
         const scripted = _p1InputAtFrame(currentFrame);
         if (scripted) return scripted;
         return _zeroLocalInput();
@@ -760,6 +766,9 @@
       MENU_AUTOPILOT_P1_TRANSITIONS[MENU_AUTOPILOT_P1_TRANSITIONS.length - 1]?.[0] ?? 0,
       MENU_AUTOPILOT_P2_TRANSITIONS[MENU_AUTOPILOT_P2_TRANSITIONS.length - 1]?.[0] ?? 0,
     ) + AUTOPILOT_GRACE_FRAMES;
+  // The closed-loop autopilot re-issues dropped presses, so it has no script
+  // end to measure from; a minute of frames without a battle means a real bug.
+  const CLOSED_LOOP_DEADLINE_FRAME = 3600;
   const BATTLE_SCENE = 22;
   const AUTOPILOT_RETRY_KEY = 'kn-demo-autopilot-retried';
   let _autopilotLastScene = -1;
@@ -775,11 +784,15 @@
       console.info(`[demo] autopilot scene ${_autopilotLastScene} -> ${s.scene} at frame ${frame}`);
       _autopilotLastScene = s.scene;
     }
-    if (frame < AUTOPILOT_DEADLINE_FRAME || s.scene === BATTLE_SCENE) return;
+    const pilotFailure = _menuPilot?.failure?.() ?? null;
+    const deadline = _menuPilot ? CLOSED_LOOP_DEADLINE_FRAME : AUTOPILOT_DEADLINE_FRAME;
+    if (!pilotFailure && (frame < deadline || s.scene === BATTLE_SCENE)) return;
     _autopilotStalled = true;
     console.warn(
       `[demo] AUTOPILOT-STALL frame=${frame} scene=${s.scene} status=${s.status} ` +
-        `delay=${counters?.delay ?? '?'} — match not reached`,
+        `delay=${counters?.delay ?? '?'} mode=${_menuPilot ? 'closed-loop' : 'script'}` +
+        (pilotFailure ? ` failure=${pilotFailure}` : '') +
+        ' — match not reached',
     );
     let retried = false;
     try {
@@ -1065,6 +1078,12 @@
     // input differs from the prediction. This is the core of the demo.
     window.NetplayRollback?.setDemoMode?.(true);
 
+    if (_romIsSsb64Us && !_recordMode && window.KNMenuAutopilot && window.NetplayRollback.readRdram32) {
+      _menuPilot = window.KNMenuAutopilot.create({
+        read32: (addr) => window.NetplayRollback.readRdram32(addr),
+        log: (msg) => console.warn(`[demo] ${msg}`),
+      });
+    }
     _installInputHook();
 
     // Start fake peer immediately. The engine needs slot 1 inputs continuously
@@ -1078,7 +1097,8 @@
       // pre-match. Suppress in ?record=p2 mode — there the user IS P2, so
       // fake-peer should consume the live keyboard input via
       // window.__knDemoP2LiveInput instead, not the recording.
-      getMirroredInput: _recordMode === 'p2' ? null : (frame) => _p2InputAtFrame(frame),
+      getMirroredInput:
+        _recordMode === 'p2' ? null : _menuPilot ? (frame) => _menuPilot.p2(frame) : (frame) => _p2InputAtFrame(frame),
     });
     window.KNFakePeer?.setNetwork?.(_networkFromControls());
     // The handshake's delay negotiation runs once at PHASE_LOCKSTEP_READY
@@ -1163,6 +1183,7 @@
       _setStatus(`Reading ${file.name}`);
       const bytes = await _readFile(file);
       _romHash = await _hashRom(bytes);
+      _romIsSsb64Us = !!window.KNMenuAutopilot?.isSsb64UsRom(bytes);
       if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
       _romBlobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
       window.EJS_gameUrl = _romBlobUrl;
