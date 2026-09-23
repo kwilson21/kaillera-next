@@ -1069,7 +1069,7 @@
     if (!el) return;
     const detected = window.GamepadManager?.getDetected?.() || [];
     if (detected.length === 0) {
-      el.textContent = 'No gamepad detected — keyboard works (open Controls for the keymap).';
+      el.textContent = 'No gamepad detected — keyboard works (keys below).';
       el.classList.remove('is-detected');
       return;
     }

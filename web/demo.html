@@ -476,6 +476,39 @@
         font-weight: 700;
       }
 
+      .keys-card h2 {
+        margin: 0 0 8px;
+        font-size: 0.85rem;
+      }
+
+      .keys {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 4px 10px;
+        margin: 0;
+        font-size: 0.78rem;
+      }
+
+      .keys dt {
+        white-space: nowrap;
+      }
+
+      .keys dd {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      kbd {
+        display: inline-block;
+        min-width: 1.5em;
+        padding: 1px 5px;
+        border: 1px solid var(--input-border);
+        border-radius: 4px;
+        background: var(--panel-2);
+        font: 0.72rem/1.4 ui-monospace, monospace;
+        text-align: center;
+      }
+
       .gamepad-status {
         margin-top: 8px;
         padding: 8px 10px;
@@ -710,8 +743,33 @@
             <button id="emu-stop" type="button" disabled>⏹ Stop</button>
           </div>
           <p id="gamepad-status" class="gamepad-status" aria-live="polite">
-            No gamepad detected — keyboard works (open Controls for the keymap).
+            No gamepad detected — keyboard works (keys below).
           </p>
+
+          <div class="panel-card keys-card">
+            <h2>Keyboard (P1)</h2>
+            <dl class="keys">
+              <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt>
+              <dd>Move (analog stick)</dd>
+              <dt><kbd>C</kbd></dt>
+              <dd>A: attack (flick + A = smash), confirm</dd>
+              <dt><kbd>X</kbd></dt>
+              <dd>B: special, back in menus</dd>
+              <dt><kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd></dt>
+              <dd>C buttons: jump</dd>
+              <dt><kbd>Z</kbd></dt>
+              <dd>Z: shield</dd>
+              <dt><kbd>Y</kbd></dt>
+              <dd>R: grab</dd>
+              <dt><kbd>T</kbd></dt>
+              <dd>L: taunt</dd>
+              <dt><kbd>Enter</kbd></dt>
+              <dd>Start</dd>
+              <dt><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd></dt>
+              <dd>D-pad</dd>
+            </dl>
+            <p class="slider-hint">Remap in 🎮 Controls. A gamepad works too.</p>
+          </div>
         </aside>
       </div>
     </main>
