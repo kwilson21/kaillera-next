@@ -1435,10 +1435,17 @@
       const spanMs = last.at - first.at;
       const gameFps =
         spanMs > 0 && Number.isFinite(first.f) ? +(((last.f - first.f) * 1000) / spanMs).toFixed(1) : null;
+      const stall = slice.filter((r) => r.path === 'stall');
       return {
         sampled: slice.length,
         gameFps,
-        pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length },
+        // Where missing frames went: stall ticks each spend a slot waiting
+        // on remote input (gap = a lost packet at the window edge, else the
+        // peer is too far behind); droppedSlots is the session total the
+        // scheduler skipped while too far behind.
+        stalls: { ticks: stall.length, gap: stall.filter((r) => r.gap).length, adv: stats(pickField(stall, 'adv')) },
+        droppedSlots: typeof _tickDroppedSlots === 'number' ? _tickDroppedSlots : null,
+        pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length, stall: stall.length },
         normal: {
           total: stats(pickField(normal, 'total')),
           step: stats(pickField(normal, 'step')),
@@ -5653,6 +5660,8 @@
   // Work one pump may do on replay ticks before yielding (see the pump).
   const TICK_REPLAY_PUMP_BUDGET_MS = 12;
   let _tickReplayOnly = false; // last tick only re-simulated; the 60 Hz slot is unspent
+  const TICK_MAX_BACKLOG_SLOTS = 12; // was 4, which a 5+ frame rollback's replay could exceed
+  let _tickDroppedSlots = 0; // slots skipped by the backlog reset (reported in knTickProfileSummary)
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -12208,7 +12217,11 @@
       if (_tickReplayOnly) return;
       const after = performance.now();
       _tickNextAt += TICK_TARGET_MS;
-      if (after - _tickNextAt > TICK_TARGET_MS * 4) {
+      // Far behind (background tab, long GC): drop the backlog rather than
+      // fast-forward through it. Sized above a full-depth rollback's replay
+      // time so catching up after a rollback never drops game time.
+      if (after - _tickNextAt > TICK_TARGET_MS * TICK_MAX_BACKLOG_SLOTS) {
+        _tickDroppedSlots += Math.floor((after - _tickNextAt) / TICK_TARGET_MS);
         _tickNextAt = after + TICK_TARGET_MS;
       }
     }, TICK_PUMP_INTERVAL_MS);
@@ -13502,14 +13515,19 @@
           // KN_MAX_VISIBLE_ROLLBACK_DEPTH, so stall before any unconfirmed
           // input can get that old — GGPO's max-prediction-frames rule.
           // Two ways an input is unconfirmed:
+          // Inputs are fed to C at the start of the next tick, after F ran,
+          // so a late X rewinds (F + 1) - (X + delay) frames; C accepts up
+          // to cap. Running F is safe while every unconfirmed X >= F + 1 -
+          // delay - cap, i.e. the oldest missing input is at least the edge
+          // F - delay - cap + 1. Two ways an input is unconfirmed:
           //  - the peer's newest input is behind (adv = F - newest; the
-          //    oldest missing is newest + 1): stall at adv >= delay + cap;
+          //    oldest missing is newest + 1): stall at adv >= delay + cap + 1;
           //  - a lost packet left a gap behind newer inputs: stall when the
-          //    input at the edge of the window, F - delay - cap, is missing.
+          //    input at F - delay - cap is missing.
           // (This used min(delay + 10, 12) from when the C cap was 12; the
           // cap is now 7, so mispredictions 8+ deep were being skipped.)
           // Legacy mode keeps its own delay+4 sizing.
-          const stallThreshold = RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH : DELAY_FRAMES + 4;
+          const stallThreshold = RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH + 1 : DELAY_FRAMES + 4;
           for (const p of rbInputPeers) {
             if (_peerPhantom[p.slot]) continue;
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
@@ -13549,6 +13567,7 @@
                   );
                   _rbStallLogged = _frameNum;
                 }
+                _pushTickProfile({ f: _frameNum, path: 'stall', total: 0, gap: gapAtEdge ? 1 : 0, adv });
                 _markTickReturn('skip:rb-input-stall');
                 return;
               }
