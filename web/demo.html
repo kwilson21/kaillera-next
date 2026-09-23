@@ -150,6 +150,38 @@
         background: rgba(13, 13, 26, 0.94);
       }
 
+      /* Rollback <-> lockstep switch: the game holds for a moment behind
+         this banner while the input delay changes. */
+      #mode-switch {
+        position: absolute;
+        inset: 0;
+        z-index: 6;
+        display: grid;
+        place-items: center;
+        background: rgba(5, 6, 7, 0.55);
+        pointer-events: none;
+      }
+
+      .mode-switch-card {
+        padding: 12px 20px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--panel);
+        text-align: center;
+      }
+
+      .mode-switch-title {
+        color: var(--accent);
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+
+      .mode-switch-sub {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
       #rom-drop.dragover {
         outline: 2px solid var(--accent);
         outline-offset: -8px;
@@ -672,32 +704,38 @@
                 <span id="game-loading-text">Loading...</span>
               </div>
             </div>
+            <div id="mode-switch" class="hidden" aria-live="polite">
+              <div class="mode-switch-card">
+                <div id="mode-switch-title" class="mode-switch-title"></div>
+                <div id="mode-switch-sub" class="mode-switch-sub"></div>
+              </div>
+            </div>
             <div id="gesture-prompt" class="hidden">
               <button id="gesture-button" class="gesture-button" type="button">▶ Tap to start</button>
             </div>
           </section>
 
           <p class="explainer">
-            Rollback netplay runs your game locally without waiting on the network. It predicts what the opponent will
-            press, and rewinds-and-replays when it guesses wrong — invisible at low latency, visible as judder at high
-            latency. Either way your input still lands at the current frame, which is the point: rollback hides the
-            network from your hands, not necessarily from your eyes. Lockstep, the older approach, waits for the
-            opponent's input every frame, so every keypress is delayed by the time it takes the peer's input to arrive —
-            about half the round-trip plus a jitter cushion. The wire delay is the same either way; the two modes just
-            choose where to pay the cost.
+            Rollback netplay runs your game locally without waiting on the network. Every player's input, yours
+            included, takes effect after a small fixed delay (a frame or two, just enough to absorb jitter), so both
+            machines apply it on the same frame. For the rest of the round-trip, the engine predicts what the opponent
+            pressed and keeps going, then rewinds and replays if the guess was wrong: invisible at low latency, visible
+            as judder at high latency. Lockstep, the older approach, waits for the opponent's input every frame, so its
+            delay has to cover about half the round-trip plus a jitter cushion, and you feel all of it.
           </p>
           <p class="explainer">
-            The proof is the contrast: at the same simulated RTT, rollback keeps your input instant while lockstep makes
-            every press arrive late. Lockstep stays smoother visually (it never rewinds); rollback's framerate dips at
-            high RTT because predictions miss more often and the engine has more state to replay. The rollback button
-            toggles between them; auto-compare flips every 6 seconds so you can feel the difference without clicking.
+            The proof is the contrast: at the same simulated RTT, rollback keeps your input delay small while lockstep
+            makes every press arrive noticeably later. Lockstep stays smoother visually (it never rewinds); rollback's
+            framerate dips at high RTT because predictions miss more often and the engine has more to replay. The
+            rollback button switches between them, and auto-compare switches every 6 seconds. Each switch changes the
+            input delay, so the game briefly holds behind a "Switching to…" banner while it does.
           </p>
           <p class="explainer">
-            In this demo P2 is a synthetic peer running in the same tab. During menus it follows a baked autopilot; in
-            match it plays random inputs at roughly human cadence. Each time the peer's input differs from what the
-            engine predicted, the engine rewinds — that fills the Rollbacks counter and (at high RTT) shows up in the
-            fps readout. Crank the RTT slider higher and the count rises: that's what rollback is hiding from your
-            inputs but not from your eyes.
+            In this demo P2 is a synthetic peer running in the same tab. An autopilot drives the menus for both players;
+            in the match P2 plays random inputs at roughly human cadence. Each time P2's input differs from what the
+            engine predicted, the engine rewinds. That fills the Rollbacks counter and, at high RTT, shows up in the fps
+            readout. Crank the RTT slider and the count rises: that's the latency rollback keeps out of your input
+            delay, paid for in rewinds instead.
           </p>
         </div>
 

@@ -415,6 +415,8 @@
   // so scripted autopilot inputs aren't shifted out of their press windows
   // by mid-setup recomputes.
   let _delayRetuneEnabled = false;
+  // Set when C refused a delay change mid-replay; the tick retries it.
+  let _delayRetunePending = false;
   const _recomputeDelay = () => {
     if (!_delayRetuneEnabled) return;
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
@@ -448,22 +450,26 @@
       const peerDelay = _delayFromRttSamples(p.rttSamples, useHalfRtt);
       if (peerDelay != null && peerDelay > maxDelay) maxDelay = peerDelay;
     }
+    _delayRetunePending = false;
     if (maxDelay !== DELAY_FRAMES) {
       const prev = DELAY_FRAMES;
-      DELAY_FRAMES = maxDelay;
-      if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
-      // Push the new delay to the C engine so its apply_frame math reflects
-      // the same prediction window. Without this, JS thinks delay=8 but C
-      // still uses the value baked at kn_rollback_init time → peer inputs
-      // arrive past C's apply deadline → rollback fires → replay pauses.
-      // The setter no-ops if a replay is currently in flight.
+      // Push the new delay to the C engine first so its apply_frame math
+      // reflects the same prediction window. C refuses while a replay is in
+      // flight; then keep the old delay in JS too (JS and C must apply
+      // inputs with the same delay) and retry at the next tick with no
+      // replay running. Previously JS switched anyway, and since the next
+      // tune then saw no change, the two stayed out of step.
       const cMod = window.EJS_emulator?.gameManager?.Module;
       if (cMod?._kn_set_delay_frames) {
         const accepted = cMod._kn_set_delay_frames(maxDelay);
         if (accepted !== maxDelay) {
-          _syncLog(`kn_set_delay_frames(${maxDelay}) returned ${accepted} (replay in flight, retry next tune)`);
+          _syncLog(`kn_set_delay_frames(${maxDelay}) returned ${accepted} (replay in flight, retrying next tick)`);
+          _delayRetunePending = true;
+          return DELAY_FRAMES;
         }
       }
+      DELAY_FRAMES = maxDelay;
+      if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
       _syncLog(
         `delay re-tuned: ${prev} -> ${maxDelay} (own=${ownDelay} ceiling=${_delayCeiling()} ` +
           `mode=${_predictionsPaused ? 'lockstep' : 'rollback'} samples=${liveSamples.length})`,
@@ -13523,6 +13529,8 @@
           _rbInputStallKey = '';
           _rbInputStallStartTime = 0;
         }
+
+        if (_delayRetunePending && !(tickMod._kn_get_replay_depth?.() > 0)) _recomputeDelay();
 
         // ── Drain queued remote inputs into C engine ──────────────────────
         // WebRTC callbacks push to _pendingCInputs instead of calling

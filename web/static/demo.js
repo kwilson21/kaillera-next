@@ -1436,6 +1436,53 @@
     _nativeRAF(_updateHud);
   };
 
+  // Switching rollback <-> lockstep mid-match changes the input delay, and a
+  // delay change repeats or skips that many frames of input (the same way on
+  // every peer — it's a real netcode delay change, not a desync). Rather
+  // than let that read as a glitch, make it an explicit moment: freeze the
+  // game behind a "Switching to …" banner, change the mode while frozen,
+  // hold until the opponent's in-flight inputs for the new window have had
+  // time to land (so rollback mode doesn't resume into a burst of late
+  // inputs), then resume.
+  const MODE_SWITCH_HOLD_MS = 450;
+  let _modeSwitchTimer = 0;
+  const _switchMode = (enabled, deferrals = 0) => {
+    const next = !!enabled;
+    const rb = window.NetplayRollback;
+    const inMatch = !!rb?.isInMatchOrPaused?.();
+    if (!inMatch || _emuPaused || !rb?.pauseTick) {
+      _setRollbackEnabled(next);
+      return;
+    }
+    // The engine can't change the delay mid-replay (a replay lasts a few
+    // frames), so wait for it to finish; capped so a switch always happens.
+    const replaying = (window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() ?? 0) > 0;
+    if (replaying && deferrals < 30) {
+      _nativeRAF(() => _switchMode(next, deferrals + 1));
+      return;
+    }
+    rb.pauseTick();
+    _setRollbackEnabled(next);
+    const delay = rb.getHudCounters?.()?.delay ?? 0;
+    const title = $('mode-switch-title');
+    if (title) title.textContent = next ? 'Switching to rollback' : 'Switching to lockstep';
+    const sub = $('mode-switch-sub');
+    if (sub) {
+      const ms = Math.round(delay * 16.67);
+      sub.textContent = next
+        ? `${delay}-frame input delay (${ms} ms) — predicts the opponent, rewinds on a wrong guess`
+        : `${delay}-frame input delay (${ms} ms) — waits for the opponent's input every frame`;
+    }
+    $('mode-switch')?.classList.remove('hidden');
+    if (_modeSwitchTimer) clearTimeout(_modeSwitchTimer);
+    _modeSwitchTimer = setTimeout(() => {
+      _modeSwitchTimer = 0;
+      $('mode-switch')?.classList.add('hidden');
+      // Stay frozen if the user pressed Pause during the hold.
+      if (!_emuPaused) rb.resumeTick?.();
+    }, MODE_SWITCH_HOLD_MS);
+  };
+
   const _isAutoCompareRunning = () => _autoCompareTimer !== 0;
 
   const _stopAutoCompare = () => {
@@ -1477,7 +1524,7 @@
     if (fill) fill.style.width = `${(phase / AUTO_COMPARE_PERIOD_MS) * 100}%`;
     if (cycle !== _autoCompareCycle) {
       _autoCompareCycle = cycle;
-      _setRollbackEnabled(cycle % 2 === 0);
+      _switchMode(cycle % 2 === 0);
     }
   };
 
@@ -1532,7 +1579,7 @@
       _markUserInteracted();
       // Manual toggle stops auto-compare so the user is back in control.
       _stopAutoCompare();
-      _setRollbackEnabled(!_rollbackEnabled);
+      _switchMode(!_rollbackEnabled);
     });
     $('emu-pause')?.addEventListener('click', () => {
       _markUserInteracted();
