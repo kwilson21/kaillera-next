@@ -735,7 +735,7 @@ KNHLE_EOF
     if [ -f "${PATCHES_DIR}/gliden64-pbo-scope.patch" ]; then
         git apply "${PATCHES_DIR}/gliden64-pbo-scope.patch" && \
             echo "    Applied GLideN64 PBO scope patch" || \
-            echo "    WARN: GLideN64 PBO scope patch failed"
+            { echo "FATAL: GLideN64 PBO scope patch failed"; exit 1; }
     fi
 
     # C-level rollback engine: copy kn_rollback.c/h into the source tree

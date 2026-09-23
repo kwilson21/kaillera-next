@@ -13508,14 +13508,11 @@
           // Gameplay: stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
           // Prediction window. A remote input X that turns out mispredicted
-          // rewinds to frame X + delay (its first use), so running frame F
-          // while X is still unconfirmed risks a rollback of F - X - delay
-          // frames. The C engine silently skips (DEEP-MISPREDICT-SKIP =
-          // cross-peer desync) any rollback deeper than
-          // KN_MAX_VISIBLE_ROLLBACK_DEPTH, so stall before any unconfirmed
-          // input can get that old — GGPO's max-prediction-frames rule.
-          // Two ways an input is unconfirmed:
-          // Inputs are fed to C at the start of the next tick, after F ran,
+          // rewinds to frame X + delay (its first use). The C engine silently
+          // skips (DEEP-MISPREDICT-SKIP = cross-peer desync) any rollback
+          // deeper than KN_MAX_VISIBLE_ROLLBACK_DEPTH, so stall before any
+          // unconfirmed input can get that old — GGPO's max-prediction-frames
+          // rule. Inputs are fed to C at the start of the next tick, after F ran,
           // so a late X rewinds (F + 1) - (X + delay) frames; C accepts up
           // to cap. Running F is safe while every unconfirmed X >= F + 1 -
           // delay - cap, i.e. the oldest missing input is at least the edge
