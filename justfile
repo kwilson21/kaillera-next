@@ -173,9 +173,10 @@ demo-deploy:
     npx wrangler deploy
 
 # Serve the built demo locally exactly as Cloudflare will (http://localhost:8787)
-demo-dev:
+# The demo is static files, so don't load the repo's .env secrets into it.
+demo-dev port="8787":
     python3 scripts/build_demo.py
-    npx wrangler dev --port 8787
+    CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false npx wrangler dev --port {{port}}
 
 # Smoke-check a running demo (default: local demo-dev). Needs `npx playwright install chromium` once.
 demo-check url="http://localhost:8787/":
