@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -65,13 +66,16 @@ def test_phase_lock_resolution_clears_strict_menu_wait():
     # The full-resolution branch resets these three pieces of state in
     # order. Locate it and require _clearStrictMenuWait inside the same
     # block.
-    needle = (
-        "        _phaseLockStallKey = '';\n"
-        "        _phaseLockStallStartTime = 0;\n"
-        "        _phaseLockLastWaitLogAt = 0;\n"
-    )
-    idx = src.find(needle)
-    assert idx >= 0, "phase-lock resolution branch not found in expected shape"
+    # Indentation-insensitive (the branch may sit inside extra nesting), and
+    # anchored to the `} else {` that follows `if (phaseLockSlots.length)` so
+    # other resets of the same three fields don't match first.
+    lock_idx = src.find("if (phaseLockSlots.length) {")
+    assert lock_idx >= 0, "phase-lock branch not found"
+    m = re.compile(
+        r"\} else \{\n\s*_phaseLockStallKey = '';\n\s*_phaseLockStallStartTime = 0;\n\s*_phaseLockLastWaitLogAt = 0;\n"
+    ).search(src, lock_idx)
+    assert m, "phase-lock resolution branch not found in expected shape"
+    idx = m.start()
     block = src[idx : idx + 600]
     assert "_clearStrictMenuWait()" in block, (
         "phase-lock resolution must clear the strict-menu overlay "
