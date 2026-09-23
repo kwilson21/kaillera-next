@@ -122,6 +122,20 @@
     return 'ssb64'; // default fallback
   };
 
+  // Flag a loaded ROM that isn't in the known_roms table. Only SHA-256
+  // hashes can be checked (FNV fallback on insecure origins never matches),
+  // and we wait until the table has actually loaded to avoid false alarms.
+  const _warnIfUnsupportedRom = () => {
+    if (!_romHash || _romHash[0] !== 'S' || !Object.keys(_knownRoms).length) return;
+    if (_knownRoms[_romHash]) return;
+    const statusEl = document.getElementById('rom-status');
+    if (statusEl) {
+      statusEl.textContent = `Loaded: ${_romName || 'ROM'} \u2014 not a supported ROM, it may not work`;
+      statusEl.classList.add('rom-unsupported');
+    }
+    showToast('Unsupported ROM \u2014 use Super Smash Bros. (US) or Smash Remix 2.0.0 / 2.0.1');
+  };
+
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
   let _romTransferState = 'idle'; // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
@@ -2817,7 +2831,10 @@
     const drop = document.getElementById('rom-drop');
     if (drop) drop.classList.add('loaded');
     const statusEl = document.getElementById('rom-status');
-    if (statusEl) statusEl.textContent = `Loaded: ${displayName}`;
+    if (statusEl) {
+      statusEl.textContent = `Loaded: ${displayName}`;
+      statusEl.classList.remove('rom-unsupported');
+    }
 
     // Enable ROM sharing checkbox if host
     const romShareCb = document.getElementById('opt-rom-sharing');
@@ -2862,6 +2879,7 @@
         if (isHost && _gameId && _gameId !== 'ssb64') {
           socket.emit('set-game-id', { game_id: _gameId });
         }
+        _warnIfUnsupportedRom();
       } catch (err) {
         console.log('[play] hash failed:', err);
         KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
@@ -2956,7 +2974,10 @@
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
-    if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+    if (statusEl) {
+      statusEl.textContent = 'Drop or click to load ROM';
+      statusEl.classList.remove('rom-unsupported');
+    }
   };
 
   // Hashes are prefixed with 'S' (SHA-256) or 'F' (FNV-1a).
@@ -5052,6 +5073,7 @@
         if (_romHash) {
           _gameId = _gameIdFromHash(_romHash);
           KNState.gameId = _gameId;
+          _warnIfUnsupportedRom();
         }
         updateHostRomInfo();
         // Retroactively verify any cached ROMs that were stored before
