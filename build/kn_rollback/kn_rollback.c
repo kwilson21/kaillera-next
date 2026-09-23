@@ -377,6 +377,14 @@ static struct {
 
     /* Prediction tracking: predicted values stored separately for comparison */
     int predicted[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
+    /* Remote-input frame each emulated frame applied, keyed by emulated
+     * frame % KN_INPUT_RING_SIZE (applied_tag_frame holds the key frame,
+     * -1 = none). Remote input for frame X runs at emulated frame
+     * X + delay_frames, with the delay in effect then — so a misprediction
+     * at X only needs to rewind to the first emulated frame that applied
+     * X or later, not to X itself. See rb_rollback_target(). */
+    int applied_tag_frame[KN_INPUT_RING_SIZE];
+    int applied_tag[KN_INPUT_RING_SIZE];
     kn_input_t predicted_values[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
     int pending_rollback;  /* earliest frame needing correction, -1 if none */
 
@@ -1029,6 +1037,7 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.pending_rollback = -1;
     rb.last_save_frame = -1;
     rb.endpoint_save_pending = 0;
+    for (i = 0; i < KN_INPUT_RING_SIZE; i++) rb.applied_tag_frame[i] = -1;
     /* retro_serialize is now safe (static scratch buffer patch eliminates the
      * 16MB malloc per call). Same code path used by gm.getState() and resync. */
     rb.state_size = retro_serialize_size();
@@ -1353,6 +1362,29 @@ void kn_rollback_slot_reset(int slot) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
+static void rb_record_applied_tag(int emu_frame, int tag) {
+    if (emu_frame < 0) return;
+    int i = emu_frame % KN_INPUT_RING_SIZE;
+    rb.applied_tag_frame[i] = emu_frame;
+    rb.applied_tag[i] = tag;
+}
+
+/* Earliest emulated frame whose state a misprediction of remote input
+ * `tag` can have changed: the first frame in [tag, limit) that applied
+ * input `tag` or later. Frames before it applied older inputs only, so
+ * restoring the ring state from `tag` itself (the old behaviour) replayed
+ * delay_frames frames that were already correct — at delay=3 that doubled
+ * the typical replay. A frame with no record stops the scan there, so an
+ * unknown history rewinds conservatively. Returns -1 if no frame before
+ * `limit` used `tag` (the frames still ahead will read the real input). */
+static int rb_rollback_target(int tag, int limit) {
+    for (int f = tag < 0 ? 0 : tag; f < limit; f++) {
+        int i = f % KN_INPUT_RING_SIZE;
+        if (rb.applied_tag_frame[i] != f || rb.applied_tag[i] >= tag) return f;
+    }
+    return -1;
+}
+
 int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
     int misprediction = 0;
     if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
@@ -1522,26 +1554,32 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
             } else {
                 visible_rb_max = rb.delay_frames + 4;
             }
-            int depth = rb.frame - frame;
-            if (depth > visible_rb_max) {
+            int rb_target = rb_rollback_target(frame, rb.frame);
+            int depth = rb.frame - rb_target;
+            if (rb_target < 0) {
+                /* No frame before rb.frame applied this input yet (it
+                 * arrived during a replay that hasn't reached it); the
+                 * replay will read the real value. */
+                rb_log("MISPREDICTION-NO-REWIND slot=%d f=%d myF=%d", slot, frame, rb.frame);
+            } else if (depth > visible_rb_max) {
                 /* Too deep to rewind invisibly — accept drift */
                 rb.failed_rollbacks++;
-                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d myF=%d depth=%d (cap=%d delay=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
-                    slot, frame, rb.frame, depth, visible_rb_max, rb.delay_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
+                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d target=%d myF=%d depth=%d (cap=%d delay=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    slot, frame, rb_target, rb.frame, depth, visible_rb_max, rb.delay_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
             } else if (depth <= rb.max_frames) {
-                int ring_idx = frame % rb.ring_size;
-                if (rb.ring_frames[ring_idx] == frame) {
-                    if (rb.pending_rollback < 0 || frame < rb.pending_rollback) {
-                        rb.pending_rollback = frame;
-                        rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
-                            slot, frame, rb.frame, depth, btn_xor, lx_d, ly_d, cx_d, cy_d);
+                int ring_idx = rb_target % rb.ring_size;
+                if (rb.ring_frames[ring_idx] == rb_target) {
+                    if (rb.pending_rollback < 0 || rb_target < rb.pending_rollback) {
+                        rb.pending_rollback = rb_target;
+                        rb_log("MISPREDICTION slot=%d f=%d target=%d myF=%d depth=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                            slot, frame, rb_target, rb.frame, depth, btn_xor, lx_d, ly_d, cx_d, cy_d);
                     }
                     misprediction = 1;
                 } else {
                     /* R3 VIOLATION: state for this frame was overwritten.
                      * With every-frame saves this should never happen. */
                     rb.failed_rollbacks++;
-                    rb.fatal_stale_f = frame;
+                    rb.fatal_stale_f = rb_target;
                     rb.fatal_stale_ring_idx = ring_idx;
                     rb.fatal_stale_actual = rb.ring_frames[ring_idx];
                     rb.fatal_stale_pending = 1;
@@ -1759,6 +1797,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
     if (rb.replay_remaining > 0) {
         int replay_apply = rb.frame - rb.delay_frames;
         int save_idx = rb.frame % rb.ring_size;
+        rb_record_applied_tag(rb.frame, replay_apply);
 
         /* Save state for this frame BEFORE stepping.
          * R5 diagnostic: log the replay frame details. */
@@ -1860,6 +1899,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
     /* ── Check remote inputs for apply frame ── */
     apply_frame = rb.frame - rb.delay_frames;
+    rb_record_applied_tag(rb.frame, apply_frame);
     rb.has_active_predictions = 0;
     if (apply_frame >= 0) {
         for (s = 0; s < rb.num_players; s++) {
