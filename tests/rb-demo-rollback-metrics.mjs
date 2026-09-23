@@ -77,6 +77,7 @@ const out = {
     : null,
   failedRollbacks: r.hud.failedRollbacks - (before.failedRollbacks || 0),
   replayTickShare: ticks ? +((dist.replay / ticks) * 100).toFixed(1) : null,
+  gameFps: r.profile.gameFps ?? null,
   normalTickMedianMs: r.profile.normal?.total?.median ?? null,
   replayTickMedianMs: r.profile.replay?.total?.median ?? null,
   integrityEvents: { console: consoleIntegrity.length, cLog: cIntegrity.length },

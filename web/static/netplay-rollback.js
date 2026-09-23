@@ -1260,6 +1260,7 @@
     if (!RB_TICK_PROFILE) return;
     const buf = window.__knTickProfile;
     if (!buf) return;
+    rec.at = performance.now();
     buf.push(rec);
     if (buf.length > 1200) buf.splice(0, buf.length - 1200);
   };
@@ -1427,8 +1428,16 @@
         phases.sort((a, b) => b[1] - a[1]);
         dominantPhase[phases[0][0]] = (dominantPhase[phases[0][0]] || 0) + 1;
       }
+      // Game frames advanced per wall-clock second over the window: 60 means
+      // replay and pacing cost no game time; below 60 is the FPS drop.
+      const first = slice[0];
+      const last = slice[slice.length - 1];
+      const spanMs = last.at - first.at;
+      const gameFps =
+        spanMs > 0 && Number.isFinite(first.f) ? +(((last.f - first.f) * 1000) / spanMs).toFixed(1) : null;
       return {
         sampled: slice.length,
+        gameFps,
         pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length },
         normal: {
           total: stats(pickField(normal, 'total')),
@@ -5641,6 +5650,9 @@
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
   const TICK_PUMP_INTERVAL_MS = 6;
+  // Work one pump may do on replay ticks before yielding (see the pump).
+  const TICK_REPLAY_PUMP_BUDGET_MS = 12;
+  let _tickReplayOnly = false; // last tick only re-simulated; the 60 Hz slot is unspent
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -12178,6 +12190,22 @@
       const now = performance.now();
       if (now + 0.25 < _tickNextAt) return;
       tick();
+      // A replay tick re-simulates past frames and leaves the game where it
+      // was, so it must not use up this 60 Hz slot: keep ticking (replay
+      // steps, then the forward frame) within a budget, GGPO-style. Spending
+      // the slot on replay lost one game frame per replayed frame — the game
+      // slowed below 60 fps and held the picture for depth x 16.7 ms on
+      // every rollback. Past the budget, the rest continues on the next
+      // pump with the slot still unspent.
+      while (
+        _tickReplayOnly &&
+        _phase === PHASE_RUNNING &&
+        !_externalTickPaused &&
+        performance.now() - now < TICK_REPLAY_PUMP_BUDGET_MS
+      ) {
+        tick();
+      }
+      if (_tickReplayOnly) return;
       const after = performance.now();
       _tickNextAt += TICK_TARGET_MS;
       if (after - _tickNextAt > TICK_TARGET_MS * 4) {
@@ -12480,6 +12508,7 @@
 
   const tick = () => {
     _tickEnteredCount = (_tickEnteredCount || 0) + 1;
+    _tickReplayOnly = false;
     _chk('enter');
     if (_phase !== PHASE_RUNNING) {
       _markTickReturn('skip:phase');
@@ -14170,6 +14199,7 @@
           });
           _pushRbProbe('replay');
           _markTickReturn('replay-burst');
+          _tickReplayOnly = true;
           return;
         }
 
