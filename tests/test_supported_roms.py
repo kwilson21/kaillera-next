@@ -34,10 +34,9 @@ def _assert_matches_config(parsed, where):
         f"{where} lists {sorted(parsed)}, expected {sorted(EXPECTED_GAMES)}"
     )
     for game, region in parsed.items():
-        if region is not None:
-            assert region == REGIONS[game], (
-                f"{where} shows {game!r} as {region!r}, config says {REGIONS[game]!r}"
-            )
+        assert region == REGIONS[game], (
+            f"{where} shows {game!r} with region {region!r}, config says {REGIONS[game]!r}"
+        )
 
 
 def test_lobby_lists_exactly_the_known_roms():
