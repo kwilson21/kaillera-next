@@ -176,3 +176,7 @@ demo-deploy:
 demo-dev:
     python3 scripts/build_demo.py
     npx wrangler dev --port 8787
+
+# Smoke-check a running demo (default: local demo-dev). Needs `npx playwright install chromium` once.
+demo-check url="http://localhost:8787/":
+    node scripts/check_demo.mjs {{url}}
