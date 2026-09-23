@@ -538,14 +538,22 @@
     }
   };
 
+  const KN_INPUT_MODEL = 2;
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
-    const trueRollbackCore = !!mod?._kn_get_true_rollback_capability && mod._kn_get_true_rollback_capability() === 1;
+    // Capability 2 = true rollback with every slot (local included) applied at
+    // frame - delay. v1 applied local input at the current frame, which made
+    // peers diverge; a v1 core no longer enables true rollback here.
+    const trueRollbackCore = !!mod?._kn_get_true_rollback_capability && mod._kn_get_true_rollback_capability() === 2;
     const stateBackend =
       RB_ROLLBACK_STATE_BACKEND === 'split-rdram' && !!mod?._kn_set_state_backend ? 'split-rdram' : 'retro';
     return {
       rdpReplaySkip: !!mod?._kn_set_skip_rdp_replay && RB_SKIP_RDP_DURING_REPLAY,
       trueRollback: trueRollbackCore && RB_TRUE_ROLLBACK,
+      // Which frame each peer applies its own input on. Tabs from before
+      // this field applied local input `delay` frames earlier than their
+      // peers did; they don't send it, so pairing with one is refused.
+      inputModel: KN_INPUT_MODEL,
       stateBackend,
     };
   };
@@ -3412,7 +3420,7 @@
     for (let s = 0; s < players; s++) {
       let inp = KNShared.ZERO_INPUT;
       if (s === _playerSlot) {
-        inp = RB_TRUE_ROLLBACK ? localInput : _localInputs[applyFrame] || localInput || KNShared.ZERO_INPUT;
+        inp = _localInputs[applyFrame] || localInput || KNShared.ZERO_INPUT;
       } else {
         const remoteFrame = applyFrame >= 0 ? applyFrame : _frameNum;
         inp = _rbGetInput(tickMod, s, remoteFrame) || _remoteInputs[s]?.[remoteFrame] || KNShared.ZERO_INPUT;
@@ -8874,6 +8882,15 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      if ((peerCaps.inputModel ?? 1) !== localCaps.inputModel) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localInputModel=${localCaps.inputModel} ` +
+            `peerInputModel=${peerCaps.inputModel ?? 1} — refusing rollback start`,
+        );
+        setStatus('Core version mismatch -- reload both players');
+        _config?.onToast?.('Core version mismatch -- reload both players');
+        return;
+      }
       const peerStateBackend = peerCaps.stateBackend || 'retro';
       if (peerStateBackend !== localCaps.stateBackend) {
         _syncLog(
@@ -14111,23 +14128,25 @@
           }
         }
         for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-        // True-rollback netcode: local input applied at the CURRENT frame for
-        // instant input feel; remote inputs applied at applyFrame (predicted by
-        // C engine if not yet confirmed). The C replay path mirrors this split
-        // so replay reproduces the same input application as the original
-        // forward frame — see kn_pre_tick replay branch in build/kn_rollback/
-        // kn_rollback.c (gated by kn_set_true_rollback flag pushed down at game
-        // start). Mismatched peers are blocked by the capability handshake.
-        // Legacy "lockstep with rollback recovery": all slots applied at
-        // applyFrame, including local — local input lag scales with negotiated
-        // delay (which itself scales with RTT), so input feels like lockstep.
+        // Every slot, local included, is applied at applyFrame = frame - delay,
+        // so an input sampled at frame F runs at F + delay on every peer — the
+        // GGPO model, where input delay applies to everyone's input alike.
+        // Applying local input at the current frame (the previous "true
+        // rollback" split) made each peer simulate its own input `delay`
+        // frames earlier than the other peer did, so peers diverged as soon
+        // as anyone pressed anything. True-rollback mode keeps a small delay
+        // (jitter-sized, see _recomputeDelay) and leaves the rest of the
+        // latency to rollback; the C replay path applies local input the same
+        // way (kn_pre_tick replay branch). Legacy mode differs only in its
+        // delay sizing and thresholds.
         if (RB_TRUE_ROLLBACK) {
-          writeInputToMemory(_playerSlot, localInput);
+          const localApplied = applyFrame >= 0 ? _rbGetInput(tickMod, _playerSlot, applyFrame) : KNShared.ZERO_INPUT;
+          writeInputToMemory(_playerSlot, localApplied);
           // Defer log-string allocation until we actually log. Per-tick at
           // 60 Hz we'd otherwise build N+1 template-literal strings + a
           // regex-tested array even though only ~1% of ticks log
           // (anyNonZero short-circuits and 60-frame heartbeat).
-          let anyNonZero = !!(localInput.buttons || localInput.lx || localInput.ly);
+          let anyNonZero = !!(localApplied.buttons || localApplied.lx || localApplied.ly);
           if (applyFrame >= 0) {
             for (let s = 0; s < rb_numPlayers; s++) {
               if (s === _playerSlot) continue;
@@ -14137,7 +14156,7 @@
             }
           }
           if (anyNonZero || _frameNum % 60 === 0) {
-            let line = `NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} L${_playerSlot}@${_frameNum}[${localInput.buttons},${localInput.lx},${localInput.ly}]`;
+            let line = `NORMAL-INPUT-TR f=${_frameNum} apply=${applyFrame} L${_playerSlot}@${applyFrame}[${localApplied.buttons},${localApplied.lx},${localApplied.ly}]`;
             if (applyFrame >= 0) {
               for (let s = 0; s < rb_numPlayers; s++) {
                 if (s === _playerSlot) continue;

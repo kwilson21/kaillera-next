@@ -396,8 +396,13 @@ static struct {
      * 0 = legacy "lockstep with rollback recovery": replay path writes ALL
      *     slots from replay_apply (frame - delay), matching the JS forward
      *     path that also writes all slots from applyFrame.
-     * 1 = true rollback: replay path writes LOCAL at rb.frame (current) and
-     *     REMOTE at replay_apply, matching the JS forward path's split.
+     * 1 = true rollback: low (jitter-sized) delay with thresholds sized for
+     *     it. Every slot, local included, is still applied at replay_apply
+     *     (frame - delay), matching the JS forward path: input delay applies
+     *     to everyone's input alike, so all peers run each input on the same
+     *     frame. (Capability v1 applied LOCAL at rb.frame, which made each
+     *     peer run its own input `delay` frames earlier than the other peer
+     *     did — cross-peer divergence. v2 cores refuse to pair with v1.)
      * Set via kn_set_true_rollback() at game-start by JS based on the
      * capability handshake. Both peers must agree (cross-peer determinism)
      * and the JS forward path must agree (local determinism). */
@@ -1823,9 +1828,11 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             int local_idx = rb.frame % KN_INPUT_RING_SIZE;
             char inputs_str[256];
             int pos = 0;
-            /* LOCAL at rb.frame */
-            kn_input_t *li = &rb.inputs[rb.local_slot][local_idx];
-            int li_present = (li->present && li->frame == rb.frame);
+            /* LOCAL at replay_apply, like every other slot */
+            (void)local_idx;
+            kn_input_t *li = replay_apply >= 0
+                ? &rb.inputs[rb.local_slot][replay_apply % KN_INPUT_RING_SIZE] : NULL;
+            int li_present = (li && li->present && li->frame == replay_apply);
             if (li_present) {
                 kn_write_controller(rb.local_slot, li->buttons, li->lx, li->ly, li->cx, li->cy);
             } else {
@@ -1833,7 +1840,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             }
             if (pos < (int)sizeof(inputs_str) - 32) {
                 pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
-                    "L%d@%d[%d,%d,%d,%c] ", rb.local_slot, rb.frame,
+                    "L%d@%d[%d,%d,%d,%c] ", rb.local_slot, replay_apply,
                     li_present ? li->buttons : 0,
                     li_present ? li->lx : 0,
                     li_present ? li->ly : 0,
@@ -3262,7 +3269,7 @@ int kn_get_tolerance_hits(void) { return rb.tolerance_hits; }
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int kn_get_true_rollback_capability(void) { return 1; }
+int kn_get_true_rollback_capability(void) { return 2; }
 
 /* Set the true-rollback flag at game-start. JS pushes the negotiated value
  * (capability bit AND'd with the URL/localStorage opt-out flag) so the C

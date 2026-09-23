@@ -573,36 +573,9 @@
 
   const _zeroLocalInput = () => ({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
 
-  // Lockstep input buffering for the demo's mode toggle. When the user
-  // selects "Lockstep" (rollback OFF), return the input from
-  // DELAY_FRAMES ago so the on-screen result feels the way real lockstep
-  // netcode (Kaillera, classic fightsticks) actually does — every keypress
-  // shows up DELAY_FRAMES later because lockstep can't apply local input
-  // until the peer has acknowledged the same frame. Without this, the
-  // engine's `_predictionsPaused` only pauses prediction generation; it
-  // doesn't add input lag, so rollback ON and rollback OFF both feel
-  // identical when the network is RTT-tuned to never stall.
-  //
-  // The buffer holds the last LOCKSTEP_BUF_MAX inputs keyed by engine
-  // frame. Always recording (regardless of toggle state) means switching
-  // modes mid-match doesn't lose history. In rollback mode the buffer
-  // is filled but never queried — pure record-only overhead, ~negligible.
-  const _lockstepInputBuf = [];
-  const LOCKSTEP_BUF_MAX = 32;
-  const _maybeLockstepDelay = (input) => {
-    const counters = window.NetplayRollback?.getHudCounters?.();
-    const frame = counters?.currentFrame ?? -1;
-    const delay = counters?.delay ?? 0;
-    if (frame < 0 || delay <= 0) return input;
-    _lockstepInputBuf.push({ frame, input: { ...input } });
-    while (_lockstepInputBuf.length > LOCKSTEP_BUF_MAX) _lockstepInputBuf.shift();
-    if (_rollbackEnabled) return input;
-    const targetFrame = frame - delay;
-    for (let i = _lockstepInputBuf.length - 1; i >= 0; i--) {
-      if (_lockstepInputBuf[i].frame <= targetFrame) return _lockstepInputBuf[i].input;
-    }
-    return _zeroLocalInput();
-  };
+  // No input-lag simulation here: the engine applies every player's input,
+  // yours included, `delay` frames after it's read, so each mode's delay is
+  // real — rollback's small jitter-sized delay, lockstep's RTT/2 + jitter.
 
   // Wrap KNShared.readLocalInput once. In record mode, capture inputs to a
   // buffer indexed by current engine frame. Otherwise, replay scripted inputs
@@ -669,9 +642,9 @@
       }
       if (_randomP1InMatch && window.NetplayRollback?.isInMatch?.()) {
         const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
-        return _maybeLockstepDelay(_randomP1InputForFrame(currentFrame));
+        return _randomP1InputForFrame(currentFrame);
       }
-      return _maybeLockstepDelay(realInput);
+      return realInput;
     };
     _wrappedReadLocalInput = true;
     if (_recordMode) {
@@ -1250,17 +1223,17 @@
       };
     }
     if (_rollbackEnabled) {
-      // Rollback's promise is INPUT-feel, not full visual smoothness.
-      // At high RTT predictions miss often and the engine rewinds
-      // visibly — local input still applies at the current frame, but
-      // the screen judders through the corrections. Saying just
-      // "INSTANT" oversells; "INSTANT INPUT" is the honest version.
+      // Rollback's promise: network latency doesn't become input lag. Every
+      // player's input (yours too) runs a small, jitter-sized delay after
+      // it's pressed — that keeps both machines applying it on the same
+      // frame — and prediction + rewind hides the rest of the RTT. More RTT
+      // means more visible rewinds, not more lag.
       return {
-        text: 'INSTANT INPUT',
-        sub: `The connection has a ${delay}-frame delay (${delayMs.toFixed(0)} ms). Rollback hides it from your inputs — every press lands at the current frame. Visual smoothness still depends on RTT: more rollbacks per second means more visible rewinds.`,
+        text: `${delayMs.toFixed(0)} ms · RTT HIDDEN`,
+        sub: `Rollback keeps a ${delay}-frame input delay (${delayMs.toFixed(0)} ms) whatever the RTT, just enough to absorb jitter. The rest of the network lag is hidden by predicting the opponent and rewinding when the guess was wrong, so more RTT means more visible rewinds, not more lag.`,
         state: 'instant',
         showTier: true,
-        effectiveDelay: 0,
+        effectiveDelay: delay,
         networkDelay: delay,
       };
     }
