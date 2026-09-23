@@ -564,7 +564,7 @@
     for (const p of Object.values(_peers)) {
       if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
         try {
-          p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl, caps }));
+          p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl, extraDelay: _extraInputDelay, caps }));
         } catch (_) {}
       }
     }
@@ -7914,6 +7914,7 @@
               handleDelayPong(msg.ts, peer);
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
+              peer.extraDelay = Number.isFinite(msg.extraDelay) ? msg.extraDelay : 0;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
@@ -11107,6 +11108,41 @@
   let _rbPendingInputLastLogAt = 0;
   let _rbPendingInitCatchup = null;
 
+  // ── Per-player extra input delay ────────────────────────────────────
+  // Each player can hold their own input back EXTRA frames before it is
+  // labeled and sent: the input read at frame t goes out as frame t+EXTRA.
+  // Every peer still applies a labeled input at label + DELAY_FRAMES, so this
+  // player's input lands at t + DELAY_FRAMES + EXTRA on every machine — a
+  // per-player delay that stays symmetric (all peers apply it on the same
+  // frame) and needs no negotiation, since it only changes this player's own
+  // labels. Use: a player on a jittery link takes a little lag so their
+  // opponent sees fewer rollbacks, or a player trades feel for smoothness.
+  // Changing it mid-match repeats (increase) or skips (decrease) that many
+  // of this player's own inputs — on every peer alike, so no desync.
+  const EXTRA_INPUT_DELAY_MAX = 8;
+  let _extraInputDelay = (() => {
+    try {
+      const raw = _urlParams.get('extraDelay') ?? localStorage.getItem('kn-extra-input-delay');
+      const n = raw === null ? 0 : parseInt(raw, 10);
+      return Number.isFinite(n) ? Math.max(0, Math.min(EXTRA_INPUT_DELAY_MAX, n)) : 0;
+    } catch (_) {
+      return 0;
+    }
+  })();
+  const _extraDelayRaw = new Map(); // frame -> input as read at that frame
+  // Called once per newly sampled local frame; returns the input to label
+  // with the current frame (the one read EXTRA frames ago).
+  const _applyExtraInputDelay = (input) => {
+    if (_extraInputDelay <= 0 && _extraDelayRaw.size === 0) return input;
+    _extraDelayRaw.set(_frameNum, input);
+    for (const f of _extraDelayRaw.keys()) {
+      if (f < _frameNum - EXTRA_INPUT_DELAY_MAX - 2) _extraDelayRaw.delete(f);
+      else break;
+    }
+    if (_extraInputDelay <= 0) return input;
+    return _extraDelayRaw.get(_frameNum - _extraInputDelay) || KNShared.ZERO_INPUT;
+  };
+
   const _resetMatchInputState = (reason) => {
     const localBuffered = Object.keys(_localInputs || {}).length;
     const remoteSlots = Object.keys(_remoteInputs || {}).sort((a, b) => Number(a) - Number(b));
@@ -11114,6 +11150,7 @@
     for (const slot of remoteSlots) remoteBuffered += Object.keys(_remoteInputs[slot] || {}).length;
 
     _localInputs = {};
+    _extraDelayRaw.clear();
     _remoteInputs = {};
     _peerInputStarted = {};
     _lastRemoteFramePerSlot = {};
@@ -11179,7 +11216,9 @@
     const suppressResumeGuardInput = performance.now() < _resumeInputGuardUntil || _lifecycleResyncPending;
     const localInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
-      : _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput());
+      : _applyExtraInputDelay(
+          _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput()),
+        );
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
@@ -12885,13 +12924,15 @@
     const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
     const localInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
-      : _cloneInput(
-          menuStartBarrier.suppressInput ||
-            suppressLateJoinBootstrapInput ||
-            suppressEjsPausedInput ||
-            suppressResumeGuardInput
-            ? KNShared.ZERO_INPUT
-            : readLocalInput(),
+      : _applyExtraInputDelay(
+          _cloneInput(
+            menuStartBarrier.suppressInput ||
+              suppressLateJoinBootstrapInput ||
+              suppressEjsPausedInput ||
+              suppressResumeGuardInput
+              ? KNShared.ZERO_INPUT
+              : readLocalInput(),
+          ),
         );
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
@@ -16923,6 +16964,15 @@
       return _predictionsPaused;
     },
     isPredictionsPaused: () => _predictionsPaused,
+    // Per-player extra input delay (see _applyExtraInputDelay). Local choice;
+    // peers stay in sync whatever value each player picks.
+    setExtraInputDelay: (n) => {
+      const v = Number.isFinite(n) ? Math.max(0, Math.min(EXTRA_INPUT_DELAY_MAX, Math.trunc(n))) : 0;
+      if (v !== _extraInputDelay) _syncLog(`extra input delay ${_extraInputDelay} -> ${v}`);
+      _extraInputDelay = v;
+      return _extraInputDelay;
+    },
+    getExtraInputDelay: () => _extraInputDelay,
     // Demo: freeze DELAY_FRAMES during autopilot so the recompute path
     // (slider changes, predictions toggle) doesn't shift fixed-frame
     // scripted button presses out of their press windows. Re-enable
@@ -17007,6 +17057,7 @@
         failedRollbacks: tickMod?._kn_get_failed_rollbacks?.() ?? 0,
         currentFrame: _frameNum,
         delay: DELAY_FRAMES,
+        extraDelay: _extraInputDelay,
         isCRollback: _useCRollback,
         fps: _fpsCurrent,
       };
