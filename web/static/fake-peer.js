@@ -16,9 +16,15 @@
   // hysteresis (commit 5f402ef) is designed to absorb. Demo-only knob;
   // does not affect production peer behavior.
   let _jitterEnabled = false;
+  // Diagnostic flag: ?fakePeerSpikes=0 turns off the synthetic 60 ms
+  // congestion bursts (_maybeOpenSpikeWindow), leaving steady latency +
+  // jitter. For measuring how much of the rollback cost the demo's
+  // deliberate spikes cause versus the network itself.
+  let _spikesEnabled = true;
   try {
     const params = new URLSearchParams(window.location?.search || '');
     if (params.get('fakePeerJitter') === '1') _jitterEnabled = true;
+    if (params.get('fakePeerSpikes') === '0') _spikesEnabled = false;
   } catch (_) {}
   // RetroArch joypad bits we may pick when generating P2's in-match random
   // inputs. Excludes:
@@ -162,6 +168,7 @@
   // transition window — but TIMING of spikes is detached from transitions,
   // so the rollback rate is stable as the user moves the RTT slider.
   const _maybeOpenSpikeWindow = (frame) => {
+    if (!_spikesEnabled) return;
     if (_nextSpikeAtFrame < 0) {
       _nextSpikeAtFrame =
         frame +
