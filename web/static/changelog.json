@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.51.3",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep recovery syncs queued until the target is reachable; no freeze credit in hidden tabs (#17)"
+      }
+    ]
+  },
+  {
     "version": "0.51.2",
     "date": "2026-09-24",
     "changes": [
