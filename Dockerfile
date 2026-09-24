@@ -16,7 +16,7 @@ COPY web/ web/
 
 # Create non-root user and logs directory
 RUN groupadd -r appuser && useradd -r -g appuser -s /usr/sbin/nologin appuser \
-    && mkdir -p /app/server/logs/sync \
+    && mkdir -p /app/server/logs/sync /app/server/data \
     && chown -R appuser:appuser /app
 USER appuser
 
