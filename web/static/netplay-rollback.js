@@ -6352,6 +6352,10 @@
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
+  // host: in-flight state pushes don't requeue after the queue was cleared,
+  // per sid (resetPeerState) or for the whole match (stop).
+  const _syncQueueGen = {};
+  let _syncQueueEpoch = 0;
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
@@ -8142,7 +8146,8 @@
    *
    * Shared queues filtered to remove entries for this slot:
    *   - _pendingCInputs (by slot)
-   *   - _scheduledSyncRequests (by targetSid if sid provided)
+   *   - _scheduledSyncRequests (by targetSid if sid provided; bumps
+   *     _syncQueueGen so an in-flight push can't requeue for it)
    *
    * Boot-stall tracking cleared if currently stalled:
    *   - _bootStallFrame / _bootStallStartTime / _bootStallRecoveryFired
@@ -8186,6 +8191,9 @@
     }
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
+      // A state push still in flight for this sid must not requeue into
+      // the new peer session.
+      _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
     }
 
     // Stall tracking — if we were stalled waiting on this slot's apply
@@ -12573,28 +12581,34 @@
         followUp,
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
       });
-    // A channel can close while the state is being compressed; the send then
-    // skips that target. Put its request back so it goes out when reachable.
+    // Confirmation skips phantom peers, so a state sent while a target is a
+    // phantom is not confirmed for that target.
+    const unconfirmedFor = new Set(
+      due.filter((r) => !confirmed || _peerPhantom[_peers[r.targetSid]?.slot]).map((r) => r.targetSid),
+    );
+    const epoch = _syncQueueEpoch;
+    const gens = due.map((r) => _syncQueueGen[r.targetSid] || 0);
     pushSyncState(targetSid).then((skipped) => {
-      for (const r of due) {
-        if (!_peers[r.targetSid]) continue; // gone: resetPeerState's job
+      due.forEach((r, i) => {
+        // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
+        if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
         if (skipped === null || skipped?.includes(r.targetSid)) {
+          // A channel can close while the state is being compressed; the
+          // send then skips that target. Put its request back unchanged so
+          // it goes out when reachable.
           _syncLog(`coord sync re-queued: send to ${r.targetSid} did not go out`);
           requeue(r, r.followUp || 0);
+        } else if (unconfirmedFor.has(r.targetSid)) {
+          // A state sent unconfirmed can still change here through a later
+          // rollback, leaving the guest on a state the host no longer has.
+          // Follow up with a fresh sync; each goes out once confirmed or at
+          // its deadline, at most SYNC_FOLLOW_UP_MAX in a row (I1).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) requeue(r, n);
+          else _syncLog(`coord sync follow-ups exhausted for ${r.targetSid}`);
         }
-      }
+      });
     });
-    // A state sent unconfirmed can still change here through a later
-    // rollback, leaving the guest on a state the host no longer has. Follow
-    // up with a fresh sync; each goes out once confirmed or at its deadline,
-    // at most SYNC_FOLLOW_UP_MAX in a row (I1).
-    if (!confirmed) {
-      for (const r of due) {
-        const n = (r.followUp || 0) + 1;
-        if (n <= SYNC_FOLLOW_UP_MAX) requeue(r, n);
-        else _syncLog(`coord sync follow-ups exhausted for ${r.targetSid}`);
-      }
-    }
   };
   const SYNC_FOLLOW_UP_MAX = 3;
 
@@ -16937,6 +16951,7 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _syncQueueEpoch++;
     _lastResyncTime = 0;
     _heldKeys.clear();
     _p1KeyMap = null;
