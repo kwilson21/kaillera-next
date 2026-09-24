@@ -14,8 +14,9 @@
  *   - no failed rollbacks and no integrity events (R2-R5 in
  *     docs/netplay-invariants.md) in either peer's engine or sync log
  *   - TICK-STUCK stalls, negotiated delay and rollback counts, for context
- * Exits 1 if the peers' gameplay state diverges, a rollback fails, or an
- * integrity event fires.
+ * Exits 1 if the peers' gameplay state diverges, a rollback fails, an
+ * integrity event fires, the match never reaches a battle, or fewer than 80%
+ * of the finalized battle frames were compared.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] \
@@ -180,11 +181,13 @@ await guest.screenshot({ path: `${OUT}/guest.png` });
 fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog); fs.writeFileSync(`${OUT}/guest-clog.txt`, G.clog);
 fs.writeFileSync(`${OUT}/host-sync.txt`, H.sync); fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
-let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null;
+let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null, battleCompared = 0;
+const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f], b = G.hashes[f];
   if (!b || !a[0] || !b[0]) continue;
   both++;
+  if (battleFrom > 0 && +f >= battleFrom) battleCompared++;
   if (a[0] !== b[0]) { gpMis++; if (firstGp === null) firstGp = +f; }
   if (a[1] !== b[1]) { fullMis++; if (firstFull === null) firstFull = +f; }
 }
@@ -192,6 +195,10 @@ const count = (log, re) => (log.match(re) || []).length;
 const INTEGRITY = /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
+// Finalized battle frames both peers could have hashed (hashing trails the
+// head by 12 frames); coverage below 80% means the comparison proves little.
+const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - battleFrom : 0;
+const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 const summary = {
   room, latencyMs: LAT, jitterMs: JITTER,
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
@@ -199,12 +206,12 @@ const summary = {
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
   integrityEvents: { host: bad(H.clog) + bad(H.sync), guest: bad(G.clog) + bad(G.sync) },
   tickStuck: { host: count(H.sync, /TICK-STUCK/g), guest: count(G.sync, /TICK-STUCK/g) },
-  hashCompare: { framesCompared: both, gameplayMismatches: gpMis, firstGameplayMismatch: firstGp, fullStateMismatches: fullMis, firstFullMismatch: firstFull },
+  hashCompare: { framesCompared: both, battleFramesCompared: battleCompared, battleCoverage: +battleCoverage.toFixed(3), gameplayMismatches: gpMis, firstGameplayMismatch: firstGp, fullStateMismatches: fullMis, firstFullMismatch: firstFull },
 };
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
 await browser.close();
 const failed = gpMis > 0 || (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0
-  || H.inBattleAt < 0 || G.inBattleAt < 0 || both === 0;
+  || H.inBattleAt < 0 || G.inBattleAt < 0 || battleCoverage < 0.8;
 process.exit(failed ? 1 : 0);
