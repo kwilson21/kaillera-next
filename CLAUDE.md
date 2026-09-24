@@ -229,14 +229,19 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
   multi-second freezes and menu timeouts there as environment first; confirm
   real bugs from the logs.
-- **Which hash to trust.** `kn_game_state_hash` (taint-filtered RDRAM + CPU)
-  is the determinism signal. `kn_full_state_hash` includes framebuffer/audio
-  blocks that legitimately differ after headless replays.
+- **Which hash to trust.** `kn_game_state_hash` is the determinism signal:
+  RDRAM minus blocks tainted by audio/framebuffer writes, plus the saved CPU
+  state unless `kn_skip_post_rdram_in_hash` is set, so equal hashes don't
+  always prove equal CPU state. `kn_full_state_hash` includes the tainted
+  blocks, which legitimately differ after headless replays.
 - **Core artifacts ship together.** The `.data` archive and the standalone
   `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
   from the same build; URLs are content-hashed via `/api/core-info`.
 - **Never tolerate a prediction mismatch.** Any "close enough" input match
-  leaves peers with different state that nothing corrects.
+  leaves peers with different state that nothing corrects. The C engine
+  used to accept stick values in the same zone without a rollback; #14 made
+  matching exact. Don't reintroduce a tolerance: filter jitter at the input
+  source instead (`KNShared.createStickDeadband`).
 
 ## Dev environment
 
