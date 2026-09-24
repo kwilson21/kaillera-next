@@ -261,8 +261,22 @@ const integrityAfterRecovery = (log, marker) => {
     return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
   }).length;
 };
+// The C debug log has no frame column; its entries name the frame they
+// concern (f= / myF=). The guest's last `kn_set_frame:` is its resync; the
+// host never rewinds, so its frames alone place an entry.
+const cIntegrityAfterRecovery = (clog, marker) => {
+  const lines = clog.split('\n');
+  let from = -1;
+  if (marker) lines.forEach((l, i) => { if (marker.test(l)) from = i; });
+  return lines.slice(from + 1).filter((l) => {
+    if (count(l, INTEGRITY) === 0) return false;
+    const m = l.match(/myF=(\d+)/) || l.match(/\bf=(\d+)/);
+    return !m || +m[1] >= recoveredAt + 30;
+  }).length;
+};
 const postRecoveryIntegrity = FREEZE_MS > 0
   ? integrityAfterRecovery(H.sync, /coord sync dispatch/) + integrityAfterRecovery(G.sync, /sync #\d+ applied/)
+    + cIntegrityAfterRecovery(H.clog, null) + cIntegrityAfterRecovery(G.clog, /kn_set_frame: \d+/)
   : 0;
 if (FREEZE_MS > 0) console.log('post-recovery integrity events:', postRecoveryIntegrity, 'battle frames compared:', battleCompared);
 const integrityFailed = FREEZE_MS > 0
