@@ -60,6 +60,10 @@ extern void emscripten_mainloop(void);
  * causing WASM heap growth and non-deterministic behavior on mobile. */
 extern uint32_t kn_sync_read(uint8_t *buf, uint32_t max_size);
 extern int kn_sync_write(const uint8_t *buf, uint32_t size);
+extern uint32_t kn_sync_read_cpu(uint8_t *buf, uint32_t max_size);
+extern int kn_sync_write_cpu(const uint8_t *buf, uint32_t size);
+extern void *kn_get_rdram_ptr(void);
+extern uint32_t kn_get_rdram_size(void);
 
 /* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
@@ -122,6 +126,85 @@ size_t kn_rdram_offset_in_state = 0;
  * across peers even when game logic is identical. Set by kn_rollback_init
  * once the rollback engine is in use. Never cleared. */
 int kn_skip_post_rdram_in_hash = 0;
+
+#define KN_STATE_BACKEND_RETRO 0
+#define KN_STATE_BACKEND_SPLIT_RDRAM 1
+#define KN_SPLIT_CPU_STATE_CAPACITY (64 * 1024)
+
+/* Experimental #9-adjacent backend. Default remains retro_serialize. JS may
+ * request split-RDRAM before kn_rollback_init; the request survives
+ * kn_rollback_shutdown because init memset() clears rb. */
+static int kn_requested_state_backend = KN_STATE_BACKEND_RETRO;
+
+/* Phase A2 user-controlled toggles. Stored OUTSIDE rb so they survive
+ * kn_rollback_init / kn_rollback_shutdown cycles. The rb struct mirrors
+ * them at init time so the hot path doesn't have to indirect.
+ *
+ * delta_save_enabled: always-on dirty-mask compute (cheap, used by sparse + debug).
+ * delta_restore_enabled: chain-walk restore (works with both full + sparse slots).
+ * delta_validate_enabled: parallel-run full restore + hash compare to detect bugs.
+ * delta_save_sparse_enabled: NEW (Phase A3). Save writes only dirty blocks to
+ *   slot — slot becomes a sparse store. baseline_rdram backstops blocks not
+ *   in the chain. Hash funcs + Mode 2 worker exposure use a reconstructor.
+ *   Default OFF until validated. */
+/* 2026-05-07: User reports visual glitches after ~280 rollbacks in real
+ * demo even with sparse OFF (i.e., delta restore + full saves). The
+ * Phase A2 validation harness reported 0 byte-mismatches in shorter
+ * runs, but real gameplay surfaces issues at longer time horizons —
+ * same lesson as feedback_validation_passes_glitches_remain.md applies
+ * to delta RESTORE too, not just sparse SAVE. Defaulting delta_restore
+ * OFF until the cause is properly understood. The save-side dirty mask
+ * compute stays ON (cheap, useful for stats and any future delta work). */
+static int kn_user_delta_save_enabled = 1;
+static int kn_user_delta_restore_enabled = 0;
+static int kn_user_delta_validate_enabled = 0;
+/* Phase A3 sparse-save: OFF by default. Validation harness reported 0
+ * mismatches in 2-min Playwright runs at anchor_interval=2, but real
+ * gameplay surfaced visual glitches the harness didn't catch — the
+ * harness only verifies bit-equivalent RDRAM after restore, not the
+ * downstream renderer/audio invariants that depend on save-time state.
+ * Likely a similar class of issue to the original taint-skip dead end:
+ * tainted regions need to be RESTORE-consistent with non-tainted ones,
+ * and sparse save + chain-walk reconstruction can leave them in mixed
+ * states that pass byte-equality but break GLideN64 / RSP HLE assumptions.
+ * Keep the toggle for future experimentation; don't default ON. */
+static int kn_user_delta_save_sparse_enabled = 0;
+
+/* Mode 2 apply experiment (2026-05-07). Toggle controlling whether
+ * kn_apply_split_state_partial_with_aux skips tainted blocks.
+ *
+ * 1 = legacy skip-all-tainted (DEFAULT). Preserves audio FIFO timing AND
+ *     OS-critical state (thread stacks at 0x20000, OS kernel at 0x40000).
+ *     But leaves renderer-relevant bytes inconsistent → vertex buffer
+ *     flood + freeze on Mode 2 dispatch.
+ *
+ * 0 = apply EVERYTHING. Tested 2026-05-07: causes emulator reset because
+ *     overwriting OS thread stacks with worker's slightly-different values
+ *     corrupts kernel state. Confirms the "narrow apply_skip subset"
+ *     approach (Option 3) is the only viable path: skip OS/audio-critical
+ *     blocks, apply renderer-relevant blocks. Requires per-block decomp
+ *     classification — multi-day work. Toggle stays for future iteration. */
+static int kn_user_apply_skip_tainted = 1;
+
+/* Deferred-rollback mode flag (Mode 2 deferred / "true GGPO with worker").
+ * When set, kn_pre_tick observes pending_rollback but does NOT execute the
+ * rewind+replay branch; main keeps predicting forward while JS dispatches
+ * the replay to the shadow worker. The flag is global (not in rb struct)
+ * so that kn_rollback_shutdown / kn_rollback_init don't reset it; JS owns
+ * the lifecycle (set on dispatch, clear after apply+converge). */
+static int rb_deferred_rollback_flag = 0;
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_deferred_rollback(int enable) {
+    rb_deferred_rollback_flag = enable ? 1 : 0;
+}
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_deferred_rollback(void) {
+    return rb_deferred_rollback_flag;
+}
 
 static uint32_t kn_fnv1a_stride(uint32_t hash, const uint8_t *data, size_t len, size_t stride) {
     if (!data || stride == 0) return hash;
@@ -206,6 +289,76 @@ static struct {
     uint8_t **ring_hle_state;
     int hle_state_size;
     size_t state_size;    /* retro_serialize_size() */
+    int state_backend;    /* KN_STATE_BACKEND_* */
+    uint8_t **ring_cpu_bufs;    /* split-RDRAM: CPU/RCP snapshot ring */
+    uint8_t **ring_rdram_bufs;  /* split-RDRAM: raw 8MB RDRAM ring */
+    uint32_t *ring_cpu_sizes;
+    uint32_t split_cpu_capacity;
+    uint32_t split_rdram_size;
+    uint32_t split_last_cpu_size;
+    uint32_t split_save_count;
+    uint32_t split_restore_count;
+    uint32_t split_save_failures;
+    uint32_t split_restore_failures;
+    /* Delta-save infrastructure (Phase A2). Per-slot dirty mask records
+     * which 64 KB RDRAM blocks differ from the PREVIOUS slot's snapshot.
+     * Save still does a full memcpy (cheap baseline cost), but stores the
+     * dirty mask so restore can do a "smart" partial memcpy: walk slots
+     * forward from target slot to current frame, OR-union dirty masks to
+     * find the set of blocks whose live RDRAM might differ from target,
+     * then memcpy only those blocks from target slot back to live. Gives
+     * ~80% reduction in restore memcpy in active gameplay (measured A1:
+     * 18% dirty per ~8-frame interval).
+     *
+     * delta_phase_in_match: JS-flipped phase tag for stats bucketing.
+     * delta_save_enabled:    always compute mask (cheap, ~64 µs/save).
+     * delta_restore_enabled: use delta restore (the actual perf win).
+     * delta_validate_enabled: parallel-run full restore, hash-compare.
+     *   Captures bugs as immediate FATAL log instead of mysterious GL
+     *   corruption downstream. Cost: 2x restore memcpy + hash compute. */
+    int delta_phase_in_match;
+    int delta_save_enabled;
+    int delta_restore_enabled;
+    int delta_validate_enabled;
+    int delta_save_sparse_enabled;
+    uint8_t (*ring_rdram_dirty_mask)[KN_TAINT_BLOCKS];
+    /* Phase A3 sparse: per-slot flag — 1 if slot is a periodic FULL save
+     * (anchor), 0 if it's a sparse save. Used to keep "anchor in chain"
+     * from blowing up the union dirty set: anchors carry full data but
+     * say nothing about what blocks actually changed since the target,
+     * so they shouldn't be unioned. They CAN serve as source candidates
+     * during the chain walk (full data is always valid). */
+    uint8_t *ring_slot_is_anchor;
+    uint8_t *delta_validation_buf;        /* one buffer reused per restore */
+    /* Phase A3 sparse save: baseline_rdram holds the latest live values.
+     * Updated on every save (with the dirty blocks). Used as:
+     *   - diff target when computing dirty mask (live vs baseline)
+     *   - chain-walk fallback when restoring blocks never in any in-ring
+     *     slot's mask (block hasn't been written within ring window).
+     * Also used by reconstruct_full_slot when Mode 2 worker / hash funcs
+     * need a full slot view. */
+    uint8_t *baseline_rdram;
+    int baseline_initialized;             /* set after first full populate */
+    /* Per-slot reconstructed snapshot (lazy, for consumers that need full).
+     * Reused buffer to avoid allocation. */
+    uint8_t *reconstructed_slot_buf;
+    uint64_t delta_dirty_blocks_total[2];   /* [0]=out-of-match [1]=in-match */
+    uint32_t delta_samples_taken[2];
+    uint32_t delta_max_dirty_blocks[2];
+    uint32_t delta_min_dirty_blocks[2];
+    /* Restore-side telemetry */
+    uint64_t delta_restore_blocks_skipped;  /* blocks we DIDN'T need to copy */
+    uint64_t delta_restore_blocks_copied;
+    uint32_t delta_restore_count_full;      /* fell back to full memcpy */
+    uint32_t delta_restore_count_delta;     /* used delta path */
+    uint32_t delta_validation_failures;
+    /* Last-mismatch diagnostics (exposed via kn_get_delta_stats extension) */
+    int32_t  delta_last_mismatch_target_frame;
+    uint32_t delta_last_mismatch_block_count;
+    int32_t  delta_last_mismatch_first_block;
+    int32_t  delta_last_mismatch_last_block;
+    uint32_t delta_last_mismatch_chain_len;
+    uint8_t  delta_mismatch_blocks_seen[KN_TAINT_BLOCKS];  /* per-block mismatch counter */
 
     /* Input ring: per-player, per-frame */
     kn_input_t inputs[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
@@ -224,12 +377,36 @@ static struct {
 
     /* Prediction tracking: predicted values stored separately for comparison */
     int predicted[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
+    /* Remote-input frame each emulated frame applied, keyed by emulated
+     * frame % KN_INPUT_RING_SIZE (applied_tag_frame holds the key frame,
+     * -1 = none). Remote input for frame X runs at emulated frame
+     * X + delay_frames, with the delay in effect then — so a misprediction
+     * at X only needs to rewind to the first emulated frame that applied
+     * X or later, not to X itself. See rb_rollback_target(). */
+    int applied_tag_frame[KN_INPUT_RING_SIZE];
+    int applied_tag[KN_INPUT_RING_SIZE];
     kn_input_t predicted_values[KN_MAX_PLAYERS][KN_INPUT_RING_SIZE];
     int pending_rollback;  /* earliest frame needing correction, -1 if none */
 
     /* Replay: set by kn_pre_tick when rollback occurs, read+cleared by JS */
     int replay_depth;     /* number of frames JS must replay (0 = none) */
     int replay_start;     /* frame to start replay from */
+
+    /* True rollback netcode flag.
+     * 0 = legacy "lockstep with rollback recovery": replay path writes ALL
+     *     slots from replay_apply (frame - delay), matching the JS forward
+     *     path that also writes all slots from applyFrame.
+     * 1 = true rollback: low (jitter-sized) delay with thresholds sized for
+     *     it. Every slot, local included, is still applied at replay_apply
+     *     (frame - delay), matching the JS forward path: input delay applies
+     *     to everyone's input alike, so all peers run each input on the same
+     *     frame. (Capability v1 applied LOCAL at rb.frame, which made each
+     *     peer run its own input `delay` frames earlier than the other peer
+     *     did — cross-peer divergence. v2 cores refuse to pair with v1.)
+     * Set via kn_set_true_rollback() at game-start by JS based on the
+     * capability handshake. Both peers must agree (cross-peer determinism)
+     * and the JS forward path must agree (local determinism). */
+    int true_rollback;
 
     /* Amortized replay: replay 1 extra frame per tick instead of all at once */
     int replay_remaining; /* frames still to replay (0 = not replaying) */
@@ -336,8 +513,423 @@ static inline void sf_restore(int packed) {
     softfloat_exceptionFlags = packed & 0xFF;
 }
 
+static void rb_restore_slot_aux(int idx);
+
+static inline int rb_using_split_state(void) {
+    return rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM;
+}
+
+static int rb_ensure_rdram_base(void) {
+    if (!rb.rdram_base) rb.rdram_base = (uint8_t *)kn_get_rdram_ptr();
+    return rb.rdram_base != NULL;
+}
+
+static size_t rb_split_logical_size_for_idx(int idx) {
+    if (!rb_using_split_state()) return rb.state_size;
+    if (idx >= 0 && rb.ring_cpu_sizes && rb.ring_cpu_sizes[idx] > 0) {
+        return (size_t)rb.split_rdram_size + rb.ring_cpu_sizes[idx];
+    }
+    return (size_t)rb.split_rdram_size + rb.split_last_cpu_size;
+}
+
+/* Forward decl — defined near the EMSCRIPTEN_KEEPALIVE exports below. */
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size);
+
+static uint32_t kn_fnv1a_split_range(uint32_t hash, int idx, size_t start, size_t len, size_t stride) {
+    if (!rb_using_split_state() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+        !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || stride == 0) {
+        return hash;
+    }
+    /* Phase A3 sparse-aware: when sparse save is on, slot[idx]'s RDRAM
+     * is sparse — read from reconstructed_slot_buf instead. Reconstruction
+     * is one-shot per call and amortizes across the byte loop. Falls
+     * through to direct read if reconstruction fails or sparse is off. */
+    const uint8_t *rdram_src = rb.ring_rdram_bufs[idx];
+    if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+        && rb.baseline_initialized) {
+        if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                          rb.split_rdram_size) > 0) {
+            rdram_src = rb.reconstructed_slot_buf;
+        }
+    }
+    size_t end = start + len;
+    size_t logical_size = rb_split_logical_size_for_idx(idx);
+    if (end > logical_size) end = logical_size;
+    for (size_t off = start; off < end; off += stride) {
+        uint8_t byte = 0;
+        if (off < rb.split_rdram_size) {
+            byte = rdram_src[off];
+        } else {
+            size_t cpu_off = off - rb.split_rdram_size;
+            uint32_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
+            if (cpu_off < cpu_size) byte = rb.ring_cpu_bufs[idx][cpu_off];
+        }
+        hash ^= byte;
+        hash *= KN_FNV1A_PRIME;
+    }
+    return hash;
+}
+
+static int rb_restore_slot_state(int idx) {
+    if (!rb_using_split_state()) {
+        if (!retro_unserialize(rb.ring_bufs[idx], rb.state_size)) return 0;
+        rb_restore_slot_aux(idx);
+        return 1;
+    }
+    if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+        !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] ||
+        rb.ring_cpu_sizes[idx] == 0) {
+        rb.split_restore_failures++;
+        return 0;
+    }
+    /* CPU first, RDRAM second — mirrors kn_apply_split_state_partial. If
+     * kn_sync_write_cpu fails (e.g. corrupt buffer), bail before touching
+     * RDRAM so the live state stays mutually consistent: live CPU + live
+     * RDRAM, not live CPU + ring-snapshot RDRAM. */
+    if (kn_sync_write_cpu(rb.ring_cpu_bufs[idx], rb.ring_cpu_sizes[idx]) != 0) {
+        rb.split_restore_failures++;
+        return 0;
+    }
+    /* Phase A2 delta restore: instead of full 8 MB memcpy, walk slots
+     * forward from target idx to current to OR-union dirty masks and
+     * find which 64 KB blocks have changed since the target frame. Only
+     * those blocks need to be copied back from the target slot — the
+     * rest already match the target's snapshot in live RDRAM (because
+     * live = some later save's state, which equals target's state for
+     * blocks unchanged in between).
+     *
+     * Validation: when delta_validate_enabled, also do a parallel full
+     * memcpy to delta_validation_buf BEFORE the delta restore overwrites
+     * live RDRAM, then compare live vs validation buf after delta. Hash
+     * mismatch = bug. Logged FATAL with block info for triage.
+     *
+     * Falls back to full memcpy when:
+     *   - delta_restore_enabled == 0 (default, opt-in for testing)
+     *   - any intermediate slot's dirty mask is missing or stale (ring
+     *     wraparound: target was saved more than ring_size frames ago)
+     *   - block_size doesn't divide split_rdram_size evenly (defensive) */
+    const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+    int delta_path =
+        rb.delta_restore_enabled && rb.ring_rdram_dirty_mask &&
+        block_size > 0 && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+    /* Stash baseline for validation BEFORE we touch live RDRAM. In sparse
+     * mode the slot is sparse so we need to reconstruct the full snapshot
+     * by walking the chain (same logic as the sparse restore path uses for
+     * source lookup). In full mode the slot itself IS the snapshot. */
+    if (rb.delta_validate_enabled && rb.delta_validation_buf) {
+        const int sparse_validate = rb.delta_save_sparse_enabled
+            && rb.baseline_rdram && rb.baseline_initialized;
+        if (sparse_validate) {
+            /* Build full reference: for each block, latest dirty source
+             * ≤ target_frame, falling back to baseline. Identical algorithm
+             * to the restore-path's per-block walk so any divergence in
+             * either path surfaces as a validation mismatch. */
+            const uint32_t bs = rb.split_rdram_size / KN_TAINT_BLOCKS;
+            const int tf = rb.ring_frames[idx];
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                int best_frame = -1, best_i = -1;
+                for (int i = 0; i < rb.ring_size; i++) {
+                    const int f2 = rb.ring_frames[i];
+                    if (f2 < 0 || f2 > tf) continue;
+                    const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                        || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+                    if (!has_data) continue;
+                    if (f2 > best_frame) { best_frame = f2; best_i = i; }
+                }
+                const uint8_t *src = (best_i >= 0)
+                    ? (rb.ring_rdram_bufs[best_i] + (size_t)b * bs)
+                    : (rb.baseline_rdram + (size_t)b * bs);
+                memcpy(rb.delta_validation_buf + (size_t)b * bs, src, bs);
+            }
+        } else {
+            memcpy(rb.delta_validation_buf, rb.ring_rdram_bufs[idx],
+                   rb.split_rdram_size);
+        }
+    }
+    if (delta_path) {
+        /* Phase A3 chain-walk restore. Two modes share the same outer
+         * structure but read source bytes differently:
+         *
+         *   FULL slot mode (sparse save off): slot[idx] holds a complete
+         *     8 MB snapshot of frame target_frame. For blocks in the dirty
+         *     union, just memcpy slot[idx][b] → live[b].
+         *
+         *   SPARSE slot mode (sparse save on): slot[idx][b] is meaningful
+         *     only when ring_rdram_dirty_mask[idx][b]=1. For other blocks
+         *     in the union, walk slots backward in TIME order (frame ≤
+         *     target_frame, newest first) to find the most recent slot M
+         *     where mask[M][b]=1, then memcpy slot[M][b] → live[b]. If no
+         *     such M exists in the ring, baseline_rdram[b] is the fallback
+         *     (it always reflects the latest live values; for blocks not
+         *     touched in any in-ring slot's mask, baseline = correct
+         *     value at every in-ring frame).
+         *
+         * Both modes need an in-flight mask covering live writes since
+         * the most-recent save (frame K's stepOneFrame + frame K+1's
+         * writeInputToMemory both happen between pre_tick(K) and
+         * pre_tick(K+1) where rollback fires). For FULL mode we compute
+         * it via memcmp(live, slot[max_idx]). For SPARSE mode we ALSO
+         * compute it via memcmp(live, baseline_rdram) — baseline equals
+         * the most-recent saved state. */
+        const int target_frame = rb.ring_frames[idx];
+        const int sparse = rb.delta_save_sparse_enabled
+            && rb.baseline_rdram && rb.baseline_initialized;
+        if (target_frame < 0) {
+            delta_path = 0;
+        } else {
+            uint8_t union_dirty[KN_TAINT_BLOCKS];
+            memset(union_dirty, 0, KN_TAINT_BLOCKS);
+            int frames_in_chain = 0;
+            int max_frame = -1, max_idx = -1;
+            for (int i = 0; i < rb.ring_size; i++) {
+                if (i == idx) continue;
+                const int f = rb.ring_frames[i];
+                if (f < 0) continue;
+                if (f > max_frame) { max_frame = f; max_idx = i; }
+                if (f <= target_frame) continue;
+                /* Anchor masks are now HONEST (real diff vs baseline),
+                 * so we include them in the union just like sparse masks.
+                 * The anchor flag is consulted only by the source-walk
+                 * below (anchor slots are universal source candidates
+                 * because they carry full data for every block). */
+                const uint8_t *m = rb.ring_rdram_dirty_mask[i];
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    union_dirty[b] |= m[b];
+                }
+                frames_in_chain++;
+            }
+            const uint8_t *inflight_compare =
+                sparse ? rb.baseline_rdram
+                       : (max_idx >= 0 ? rb.ring_rdram_bufs[max_idx] : NULL);
+            if (frames_in_chain == 0 || inflight_compare == NULL) {
+                delta_path = 0;
+            } else {
+                /* In-flight diff: live vs the most-recent saved snapshot
+                 * (slot in full mode, baseline in sparse mode — both hold
+                 * the equivalent state). */
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (union_dirty[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    if (memcmp(rb.rdram_base + off,
+                               inflight_compare + off,
+                               block_size) != 0) {
+                        union_dirty[b] = 1;
+                    }
+                }
+                uint32_t copied = 0, skipped = 0;
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!union_dirty[b]) { skipped++; continue; }
+                    const uint32_t off = (uint32_t)b * block_size;
+                    const uint8_t *src;
+                    if (!sparse) {
+                        /* Full slot mode — target slot has b's value. */
+                        src = rb.ring_rdram_bufs[idx] + off;
+                    } else {
+                        /* Sparse mode — walk slots backward in time
+                         * (frame ≤ target, newest first) to find the most
+                         * recent slot M with valid data for block b. A
+                         * slot has valid data for b if mask[M][b]=1 OR
+                         * the slot is an anchor (full snapshot). */
+                        int best_frame = -1, best_i = -1;
+                        for (int i = 0; i < rb.ring_size; i++) {
+                            const int f2 = rb.ring_frames[i];
+                            if (f2 < 0 || f2 > target_frame) continue;
+                            const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                                || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+                            if (!has_data) continue;
+                            if (f2 > best_frame) {
+                                best_frame = f2; best_i = i;
+                            }
+                        }
+                        src = (best_i >= 0)
+                            ? (rb.ring_rdram_bufs[best_i] + off)
+                            : (rb.baseline_rdram + off);
+                    }
+                    memcpy(rb.rdram_base + off, src, block_size);
+                    copied++;
+                }
+                rb.delta_restore_blocks_copied += copied;
+                rb.delta_restore_blocks_skipped += skipped;
+                rb.delta_restore_count_delta++;
+            }
+        }
+    }
+    if (!delta_path) {
+        /* Phase A3 sparse-aware fallback: in sparse mode the slot doesn't
+         * have a full snapshot, so we must reconstruct via chain walk. */
+        if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+            && rb.baseline_initialized
+            && kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                             rb.split_rdram_size) > 0) {
+            memcpy(rb.rdram_base, rb.reconstructed_slot_buf, rb.split_rdram_size);
+        } else {
+            memcpy(rb.rdram_base, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+        }
+        rb.delta_restore_count_full++;
+    }
+    /* Validation: compare live RDRAM against the stashed full snapshot. */
+    if (rb.delta_validate_enabled && rb.delta_validation_buf) {
+        if (memcmp(rb.rdram_base, rb.delta_validation_buf, rb.split_rdram_size) != 0) {
+            rb.delta_validation_failures++;
+            /* Find the offending block(s) for triage. */
+            int first_bad = -1, last_bad = -1, bad_count = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(rb.rdram_base + off,
+                           rb.delta_validation_buf + off, block_size) != 0) {
+                    if (first_bad < 0) first_bad = b;
+                    last_bad = b;
+                    bad_count++;
+                    if (rb.delta_mismatch_blocks_seen[b] < 0xFF) {
+                        rb.delta_mismatch_blocks_seen[b]++;
+                    }
+                }
+            }
+            rb.delta_last_mismatch_target_frame = rb.ring_frames[idx];
+            rb.delta_last_mismatch_block_count = (uint32_t)bad_count;
+            rb.delta_last_mismatch_first_block = first_bad;
+            rb.delta_last_mismatch_last_block = last_bad;
+            if (rb.delta_validation_failures < 32) {
+                rb_log("FATAL DELTA-RESTORE-MISMATCH idx=%d target_frame=%d "
+                       "current_frame=%d delta_path=%d bad_blocks=%d first=%d last=%d "
+                       "(restore would have left RDRAM inconsistent — falling back)",
+                       idx, rb.ring_frames[idx], rb.frame, delta_path,
+                       bad_count, first_bad, last_bad);
+            }
+            /* Self-heal: copy the full snapshot back so live state is correct
+             * regardless of the delta path's bug. Match correctness > perf. */
+            memcpy(rb.rdram_base, rb.delta_validation_buf, rb.split_rdram_size);
+        }
+    }
+    rb_restore_slot_aux(idx);
+    rb.split_restore_count++;
+    return 1;
+}
+
 static int rb_save_slot(int idx, int frame, int mark_last) {
-    if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) return 0;
+    if (rb_using_split_state()) {
+        uint32_t cpu_size;
+        if (!rb_ensure_rdram_base() || !rb.ring_rdram_bufs || !rb.ring_cpu_bufs ||
+            !rb.ring_cpu_sizes || !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx]) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        /* Phase A3 sparse save:
+         *   - Sparse mode (delta_save_sparse_enabled): diff live vs baseline
+         *     (which always holds a current full snapshot), write only dirty
+         *     blocks to slot[idx] + update baseline. ~80% bandwidth reduction.
+         *     Slot becomes a sparse store — readers must use chain-walk
+         *     reconstruction or kn_reconstruct_slot_full().
+         *   - Full mode (default): diff live vs prev_slot (which is full),
+         *     write the dirty mask, then full memcpy slot = live. The dirty
+         *     mask is consumed at restore time to avoid copying clean blocks.
+         *
+         * First save in either mode: mark all dirty, full memcpy. In sparse
+         * mode, also populates baseline. */
+        const uint32_t block_size = rb.split_rdram_size / KN_TAINT_BLOCKS;
+        const int block_size_ok = block_size > 0
+            && (block_size * KN_TAINT_BLOCKS) == rb.split_rdram_size;
+        const int sparse = rb.delta_save_sparse_enabled && rb.baseline_rdram
+            && block_size_ok && rb.ring_rdram_dirty_mask;
+        const int prev_idx = (idx + rb.ring_size - 1) % rb.ring_size;
+        /* Choose diff target: baseline (sparse) or prev slot (full mode). */
+        const uint8_t *diff_target = sparse
+            ? (rb.baseline_initialized ? rb.baseline_rdram : NULL)
+            : ((rb.ring_size > 1 && rb.ring_rdram_bufs[prev_idx]
+                && rb.ring_frames[prev_idx] >= 0 && rb.split_save_count > 0)
+               ? rb.ring_rdram_bufs[prev_idx] : NULL);
+        const int diff_valid = rb.delta_save_enabled
+            && rb.ring_rdram_dirty_mask
+            && block_size_ok
+            && diff_target != NULL;
+        if (diff_valid) {
+            uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+            uint32_t dirty = 0;
+            for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                const uint32_t off = (uint32_t)b * block_size;
+                if (memcmp(diff_target + off,
+                           rb.rdram_base + off, block_size) != 0) {
+                    mask[b] = 1;
+                    dirty++;
+                } else {
+                    mask[b] = 0;
+                }
+            }
+            /* Stats bucket */
+            const int p = rb.delta_phase_in_match ? 1 : 0;
+            rb.delta_dirty_blocks_total[p] += dirty;
+            rb.delta_samples_taken[p]++;
+            if (dirty > rb.delta_max_dirty_blocks[p]) rb.delta_max_dirty_blocks[p] = dirty;
+            if (dirty < rb.delta_min_dirty_blocks[p]) rb.delta_min_dirty_blocks[p] = dirty;
+        } else if (rb.ring_rdram_dirty_mask) {
+            /* No diff target available (first save / wraparound) → mark all
+             * dirty so any restore that uses this slot's mask gets full data. */
+            memset(rb.ring_rdram_dirty_mask[idx], 1, KN_TAINT_BLOCKS);
+        }
+        if (sparse) {
+            /* Sparse path — write only dirty blocks to slot + baseline.
+             *
+             * Periodic full save anchor: every (ring_size / 2) saves we
+             * promote to a full snapshot (mark all dirty, memcpy full).
+             * Without this, blocks first written AFTER a rollback target
+             * have no source ≤ target in the chain, and the baseline
+             * fallback returns the wrong value (baseline reflects post-
+             * target writes). The full save acts as a historical anchor:
+             * within any window of ring_size/2 saves, at least one slot
+             * has all blocks valid. Cost amortized: ~30 µs/save extra. */
+            /* anchor_interval=2: 50% of saves are full anchors. Empirically
+             * the only value that gave 0 validation mismatches in 2-min
+             * runs of the demo (interval=3 still flaked occasionally on
+             * heap-area blocks due to deep-rollback / ring-boundary edge
+             * cases I couldn't fully chase down). Per-save amortized cost
+             * = 0.5 * 1ms + 0.5 * 150µs ≈ 575 µs vs 1 ms full = ~43%
+             * bandwidth reduction. The validation harness still catches
+             * any future regression via memcmp + self-heal fallback. */
+            int anchor_interval = 2;
+            const int force_full = !rb.baseline_initialized
+                || (anchor_interval > 0
+                    && (rb.split_save_count % anchor_interval) == 0);
+            if (force_full) {
+                /* Full snapshot — memcpy everything to slot + baseline,
+                 * tag slot as anchor so source walk can use any block
+                 * from it (full data available regardless of mask).
+                 * Keep the dirty mask HONEST (real diff vs baseline) so
+                 * the union walk doesn't explode whenever an anchor lands
+                 * in the chain. The mask was already computed above by
+                 * the diff_valid branch (or set to all-1 if no diff
+                 * target was available, which is the genuine first-save
+                 * case where every block IS new). */
+                memcpy(rb.baseline_rdram, rb.rdram_base, rb.split_rdram_size);
+                memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+                rb.baseline_initialized = 1;
+                if (rb.ring_slot_is_anchor) rb.ring_slot_is_anchor[idx] = 1;
+            } else {
+                const uint8_t *mask = rb.ring_rdram_dirty_mask[idx];
+                for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+                    if (!mask[b]) continue;
+                    const uint32_t off = (uint32_t)b * block_size;
+                    memcpy(rb.ring_rdram_bufs[idx] + off,
+                           rb.rdram_base + off, block_size);
+                    memcpy(rb.baseline_rdram + off,
+                           rb.rdram_base + off, block_size);
+                }
+                if (rb.ring_slot_is_anchor) rb.ring_slot_is_anchor[idx] = 0;
+            }
+        } else {
+            /* Full path (current behavior) — slot[idx] is a full snapshot. */
+            memcpy(rb.ring_rdram_bufs[idx], rb.rdram_base, rb.split_rdram_size);
+        }
+        cpu_size = kn_sync_read_cpu(rb.ring_cpu_bufs[idx], rb.split_cpu_capacity);
+        if (cpu_size == 0 || cpu_size > rb.split_cpu_capacity) {
+            rb.split_save_failures++;
+            return 0;
+        }
+        rb.ring_cpu_sizes[idx] = cpu_size;
+        rb.split_last_cpu_size = cpu_size;
+        rb.split_save_count++;
+    } else if (!retro_serialize(rb.ring_bufs[idx], rb.state_size)) {
+        return 0;
+    }
     rb.ring_sf_state[idx] = sf_pack();
     if (rb.ring_hidden_state) kn_pack_hidden_state_impl(rb.ring_hidden_state[idx]);
     if (rb.ring_hle_state && rb.ring_hle_state[idx]) kn_hle_save_to(rb.ring_hle_state[idx]);
@@ -450,31 +1042,73 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.pending_rollback = -1;
     rb.last_save_frame = -1;
     rb.endpoint_save_pending = 0;
+    for (i = 0; i < KN_INPUT_RING_SIZE; i++) rb.applied_tag_frame[i] = -1;
     /* retro_serialize is now safe (static scratch buffer patch eliminates the
      * 16MB malloc per call). Same code path used by gm.getState() and resync. */
     rb.state_size = retro_serialize_size();
     rb.ring_size = max_frames + 1;
+    rb.state_backend = kn_requested_state_backend;
+    if (rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM) {
+        rb.split_cpu_capacity = KN_SPLIT_CPU_STATE_CAPACITY;
+        rb.split_rdram_size = kn_get_rdram_size();
+        if (rb.split_rdram_size == 0) rb.split_rdram_size = 0x800000u;
+        rb.rdram_base = (uint8_t *)kn_get_rdram_ptr();
+        if (!rb.rdram_base) {
+            rb_log("split-rdram backend requested but RDRAM base is unavailable; falling back to retro_serialize");
+            rb.state_backend = KN_STATE_BACKEND_RETRO;
+        }
+    }
 
     /* Allocate state ring */
-    rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+    if (rb.state_backend == KN_STATE_BACKEND_SPLIT_RDRAM) {
+        rb.ring_cpu_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+        rb.ring_rdram_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+        rb.ring_cpu_sizes = (uint32_t *)calloc(rb.ring_size, sizeof(uint32_t));
+        rb.ring_rdram_dirty_mask = calloc(rb.ring_size, sizeof(*rb.ring_rdram_dirty_mask));
+        rb.ring_slot_is_anchor = (uint8_t *)calloc(rb.ring_size, sizeof(uint8_t));
+        rb.delta_validation_buf = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.baseline_rdram = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.reconstructed_slot_buf = (uint8_t *)malloc(rb.split_rdram_size);
+        rb.baseline_initialized = 0;
+        rb.delta_min_dirty_blocks[0] = KN_TAINT_BLOCKS + 1;
+        rb.delta_min_dirty_blocks[1] = KN_TAINT_BLOCKS + 1;
+        /* Mirror user toggles. They survive init via the static globals
+         * (see top of file) so JS-set state isn't wiped on match restart. */
+        rb.delta_save_enabled = kn_user_delta_save_enabled;
+        rb.delta_restore_enabled = kn_user_delta_restore_enabled;
+        rb.delta_validate_enabled = kn_user_delta_validate_enabled;
+        rb.delta_save_sparse_enabled = kn_user_delta_save_sparse_enabled;
+    } else {
+        rb.ring_bufs = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
+    }
     rb.ring_frames = (int *)calloc(rb.ring_size, sizeof(int));
     rb.ring_sf_state = (int *)calloc(rb.ring_size, sizeof(int));
     rb.ring_hidden_state = calloc(rb.ring_size, sizeof(*rb.ring_hidden_state));
     rb.hle_state_size = kn_hle_state_size();
     rb.ring_hle_state = (uint8_t **)calloc(rb.ring_size, sizeof(uint8_t *));
-    if (!rb.ring_bufs || !rb.ring_frames || !rb.ring_sf_state ||
+    if ((!rb_using_split_state() && !rb.ring_bufs) ||
+        (rb_using_split_state() && (!rb.ring_cpu_bufs || !rb.ring_rdram_bufs || !rb.ring_cpu_sizes)) ||
+        !rb.ring_frames || !rb.ring_sf_state ||
         !rb.ring_hidden_state || !rb.ring_hle_state || rb.hle_state_size <= 0) {
         rb_log("FATAL: failed to allocate rollback ring metadata (hle=%d)",
             rb.hle_state_size);
         return;
     }
     for (i = 0; i < rb.ring_size; i++) {
-        rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
+        if (rb_using_split_state()) {
+            rb.ring_cpu_bufs[i] = (uint8_t *)malloc(rb.split_cpu_capacity);
+            rb.ring_rdram_bufs[i] = (uint8_t *)malloc(rb.split_rdram_size);
+        } else {
+            rb.ring_bufs[i] = (uint8_t *)malloc(rb.state_size);
+        }
         rb.ring_hle_state[i] = (uint8_t *)malloc(rb.hle_state_size);
         rb.ring_frames[i] = -1;
-        if (!rb.ring_bufs[i] || !rb.ring_hle_state[i]) {
-            rb_log("FATAL: failed to allocate ring slot %d (state=%zu hle=%d)",
-                i, rb.state_size, rb.hle_state_size);
+        if ((!rb_using_split_state() && !rb.ring_bufs[i]) ||
+            (rb_using_split_state() && (!rb.ring_cpu_bufs[i] || !rb.ring_rdram_bufs[i])) ||
+            !rb.ring_hle_state[i]) {
+            rb_log("FATAL: failed to allocate ring slot %d (backend=%d state=%zu rdram=%u cpuCap=%u hle=%d)",
+                i, rb.state_backend, rb.state_size, rb.split_rdram_size,
+                rb.split_cpu_capacity, rb.hle_state_size);
             return;
         }
     }
@@ -486,6 +1120,9 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
     rb.initialized = 1;
     rb_log("kn_rollback_init: max=%d delay=%d slot=%d players=%d stateSize=%zu ringSlots=%d",
         max_frames, delay_frames, local_slot, num_players, rb.state_size, rb.ring_size);
+    rb_log("kn_rollback_init: state_backend=%s rdram=%u cpuCap=%u",
+        rb_using_split_state() ? "split-rdram" : "retro_serialize",
+        rb.split_rdram_size, rb.split_cpu_capacity);
     rb_log("kn_rollback_init: hle_state_size=%d total_hle_ring=%d bytes",
         rb.hle_state_size, rb.hle_state_size * rb.ring_size);
 
@@ -642,6 +1279,24 @@ void kn_rollback_shutdown(void) {
         }
         free(rb.ring_bufs);
     }
+    if (rb.ring_cpu_bufs) {
+        for (i = 0; i < rb.ring_size; i++) {
+            free(rb.ring_cpu_bufs[i]);
+        }
+        free(rb.ring_cpu_bufs);
+    }
+    if (rb.ring_rdram_bufs) {
+        for (i = 0; i < rb.ring_size; i++) {
+            free(rb.ring_rdram_bufs[i]);
+        }
+        free(rb.ring_rdram_bufs);
+    }
+    free(rb.ring_cpu_sizes);
+    free(rb.ring_rdram_dirty_mask);
+    free(rb.ring_slot_is_anchor);
+    free(rb.delta_validation_buf);
+    free(rb.baseline_rdram);
+    free(rb.reconstructed_slot_buf);
     if (rb.ring_hle_state) {
         for (i = 0; i < rb.ring_size; i++) {
             free(rb.ring_hle_state[i]);
@@ -657,6 +1312,14 @@ void kn_rollback_shutdown(void) {
      * — without this, every match in a session leaks 8MB. */
     free(rb.saved_rdram);
     rb.ring_bufs = NULL;
+    rb.ring_cpu_bufs = NULL;
+    rb.ring_rdram_bufs = NULL;
+    rb.ring_cpu_sizes = NULL;
+    rb.ring_rdram_dirty_mask = NULL;
+    rb.ring_slot_is_anchor = NULL;
+    rb.delta_validation_buf = NULL;
+    rb.baseline_rdram = NULL;
+    rb.reconstructed_slot_buf = NULL;
     rb.ring_hle_state = NULL;
     rb.ring_frames = NULL;
     rb.ring_sf_state = NULL;
@@ -704,6 +1367,45 @@ void kn_rollback_slot_reset(int slot) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
+/* Predicted input for a remote slot from its newest real inputs:
+ * dead-reckoning for the sticks (clamped to the N64 range), repeat-last
+ * for buttons, which are digital. Shared by the forward and replay paths
+ * so both guess the same way. */
+static kn_input_t rb_predict_input(int s) {
+    #define KN_CLAMP_STICK(v) ((v) < -83 ? -83 : (v) > 83 ? 83 : (v))
+    kn_input_t p = rb.last_known[s];
+    p.lx = KN_CLAMP_STICK(2 * rb.last_known[s].lx - rb.prev_known[s].lx);
+    p.ly = KN_CLAMP_STICK(2 * rb.last_known[s].ly - rb.prev_known[s].ly);
+    p.cx = KN_CLAMP_STICK(2 * rb.last_known[s].cx - rb.prev_known[s].cx);
+    p.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
+    p.buttons = rb.last_known[s].buttons;
+    #undef KN_CLAMP_STICK
+    return p;
+}
+
+static void rb_record_applied_tag(int emu_frame, int tag) {
+    if (emu_frame < 0) return;
+    int i = emu_frame % KN_INPUT_RING_SIZE;
+    rb.applied_tag_frame[i] = emu_frame;
+    rb.applied_tag[i] = tag;
+}
+
+/* Earliest emulated frame whose state a misprediction of remote input
+ * `tag` can have changed: the first frame in [tag, limit) that applied
+ * input `tag` or later. Frames before it applied older inputs only, so
+ * restoring the ring state from `tag` itself (the old behaviour) replayed
+ * delay_frames frames that were already correct — at delay=3 that doubled
+ * the typical replay. A frame with no record stops the scan there, so an
+ * unknown history rewinds conservatively. Returns -1 if no frame before
+ * `limit` used `tag` (the frames still ahead will read the real input). */
+static int rb_rollback_target(int tag, int limit) {
+    for (int f = tag < 0 ? 0 : tag; f < limit; f++) {
+        int i = f % KN_INPUT_RING_SIZE;
+        if (rb.applied_tag_frame[i] != f || rb.applied_tag[i] >= tag) return f;
+    }
+    return -1;
+}
+
 int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
     int misprediction = 0;
     if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS) return 0;
@@ -759,7 +1461,30 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
          * accuracy that GGPO was designed for. */
         #define KN_STICK_ZONE_SIZE 12
         #define KN_STICK_ZONE(v) ((v) / KN_STICK_ZONE_SIZE)
-        #define KN_AXIS_ZONE_MATCH(a, b) (KN_STICK_ZONE(a) == KN_STICK_ZONE(b))
+        /* Boundary hysteresis. The zone-only match treats values 11 and 12
+         * as different (zones 0 vs 1) even though they're 1 stick unit
+         * apart and produce indistinguishable game state. Adjacent-zone
+         * matches with a small absolute diff (≤3 units) absorb that
+         * boundary jitter. Within-zone matching is unchanged; values two
+         * or more zones apart never match. Effective behaviour: same-zone
+         * diff up to 11 = match, cross-boundary diff up to 3 = match,
+         * diff ≥ ~12 between non-adjacent zones = mispredict.
+         *
+         * The actual input is always applied to the emulator regardless of
+         * this gate — this only affects whether a rollback fires. So a
+         * widened tolerance can't desync local state; the only cost is
+         * cross-peer state drift if a missed mispredict produced different
+         * game state on the two peers. With the band tight at 3 units that
+         * drift stays well under the deadzone (~16 units) for active-stick
+         * values and is guaranteed-zero for in-deadzone values. */
+        #define KN_STICK_ZONE_BOUNDARY_BAND 3
+        #define KN_AXIS_ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
+        #define KN_AXIS_ZONE_ADJACENT(a, b) \
+            (KN_STICK_ZONE(a) == KN_STICK_ZONE(b) + 1 || KN_STICK_ZONE(a) + 1 == KN_STICK_ZONE(b))
+        #define KN_AXIS_ZONE_MATCH(a, b) ( \
+            KN_STICK_ZONE(a) == KN_STICK_ZONE(b) || \
+            (KN_AXIS_ABS_DIFF(a, b) <= KN_STICK_ZONE_BOUNDARY_BAND && KN_AXIS_ZONE_ADJACENT(a, b)) \
+        )
         int btn_match = (pred->buttons == buttons);
         int lxd = pred->lx - lx; if (lxd < 0) lxd = -lxd;
         int lyd = pred->ly - ly; if (lyd < 0) lyd = -lyd;
@@ -819,28 +1544,63 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
             /* Dynamic cap: delay_frames + 4 ensures rollback can always
              * correct mispredictions at the apply frame. With delay=11,
              * a misprediction has depth=11 at minimum — the old hardcoded
-             * cap of 7 silently dropped every single rollback. */
-            int visible_rb_max = rb.delay_frames + 4;
-            int depth = rb.frame - frame;
-            if (depth > visible_rb_max) {
+             * cap of 7 silently dropped every single rollback.
+             *
+             * True rollback netcode (rb.true_rollback=1): rollback depth is
+             * determined by network RTT/2 + jitter, NOT by delay_frames any
+             * more. With delay=1 and 80ms RTT, depth still runs 5-7 frames
+             * per the demo's measured distribution. The +4 margin was sized
+             * for delay≥4; under true rollback we bump to +10 (capped at
+             * KN_MAX_VISIBLE_ROLLBACK_DEPTH=12) so the same headroom exists
+             * across the new low-delay range without dropping mispredicts. */
+            #ifndef KN_MAX_VISIBLE_ROLLBACK_DEPTH
+            /* 7 = matches Skullgirls / Mortal Kombat 11; one frame
+             * tighter than GGPO's default of 8. Capping deeper means
+             * shorter perceptible freeze windows during replay (depth
+             * × 16.67ms / burst), at the cost of silently dropping
+             * mispredictions deeper than 7 (DEEP-MISPREDICT-SKIP).
+             * The demo pairs this with an RTT slider capped at 110 ms
+             * (see RTT_SLIDER_MAX in demo.js) so spike-driven depth
+             * stays under the cap across the entire slider range —
+             * past ~110 ms RTT the depth math (latency_frames + spike
+             * frames) crosses 7 and rollbacks would silently drop. */
+            #define KN_MAX_VISIBLE_ROLLBACK_DEPTH 7
+            #endif
+            int visible_rb_max;
+            if (rb.true_rollback) {
+                int proposed = rb.delay_frames + 10;
+                visible_rb_max = (proposed < KN_MAX_VISIBLE_ROLLBACK_DEPTH)
+                               ? proposed
+                               : KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+            } else {
+                visible_rb_max = rb.delay_frames + 4;
+            }
+            int rb_target = rb_rollback_target(frame, rb.frame);
+            int depth = rb.frame - rb_target;
+            if (rb_target < 0) {
+                /* No frame before rb.frame applied this input yet (it
+                 * arrived during a replay that hasn't reached it); the
+                 * replay will read the real value. */
+                rb_log("MISPREDICTION-NO-REWIND slot=%d f=%d myF=%d", slot, frame, rb.frame);
+            } else if (depth > visible_rb_max) {
                 /* Too deep to rewind invisibly — accept drift */
                 rb.failed_rollbacks++;
-                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d myF=%d depth=%d (cap=%d delay=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
-                    slot, frame, rb.frame, depth, visible_rb_max, rb.delay_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
+                rb_log("DEEP-MISPREDICT-SKIP slot=%d f=%d target=%d myF=%d depth=%d (cap=%d delay=%d) btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                    slot, frame, rb_target, rb.frame, depth, visible_rb_max, rb.delay_frames, btn_xor, lx_d, ly_d, cx_d, cy_d);
             } else if (depth <= rb.max_frames) {
-                int ring_idx = frame % rb.ring_size;
-                if (rb.ring_frames[ring_idx] == frame) {
-                    if (rb.pending_rollback < 0 || frame < rb.pending_rollback) {
-                        rb.pending_rollback = frame;
-                        rb_log("MISPREDICTION slot=%d f=%d myF=%d depth=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
-                            slot, frame, rb.frame, depth, btn_xor, lx_d, ly_d, cx_d, cy_d);
+                int ring_idx = rb_target % rb.ring_size;
+                if (rb.ring_frames[ring_idx] == rb_target) {
+                    if (rb.pending_rollback < 0 || rb_target < rb.pending_rollback) {
+                        rb.pending_rollback = rb_target;
+                        rb_log("MISPREDICTION slot=%d f=%d target=%d myF=%d depth=%d btn_xor=0x%x lx_d=%d ly_d=%d cx_d=%d cy_d=%d",
+                            slot, frame, rb_target, rb.frame, depth, btn_xor, lx_d, ly_d, cx_d, cy_d);
                     }
                     misprediction = 1;
                 } else {
                     /* R3 VIOLATION: state for this frame was overwritten.
                      * With every-frame saves this should never happen. */
                     rb.failed_rollbacks++;
-                    rb.fatal_stale_f = frame;
+                    rb.fatal_stale_f = rb_target;
                     rb.fatal_stale_ring_idx = ring_idx;
                     rb.fatal_stale_actual = rb.ring_frames[ring_idx];
                     rb.fatal_stale_pending = 1;
@@ -899,9 +1659,34 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
     /* ── Pacing gate: if JS says we're too far ahead, maintain ring and skip ──
      * frame_adv >= 0 means JS computed a valid frame advantage.
-     * If frame_adv >= delay_frames + 2, we're ahead enough to skip — but
-     * first check if the ring needs a save to prevent FATAL-RING-STALE. */
-    if (frame_adv >= 0 && frame_adv >= rb.delay_frames + 2 &&
+     *
+     * Legacy (rb.true_rollback=0): visible_rb_max=delay+4, pacing=delay+2.
+     *   The +2 margin keeps the throttle slightly ahead of the rollback
+     *   tolerance so a late misprediction can still rewind cleanly.
+     * True rollback: pacing=delay+8 — purely a safety net for runaway
+     *   frame advantage (e.g. peer disconnected). NOT margin-coupled to
+     *   the misprediction-handler cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH=7),
+     *   because the cap is intentionally tight and the natural RTT/2
+     *   frame_adv at 100+ ms RTT routinely exceeds it. Rollbacks deeper
+     *   than the cap are silently dropped (DEEP-MISPREDICT-SKIP) instead
+     *   of forcing a throttle. */
+    int pacing_threshold;
+    if (rb.true_rollback) {
+        /* True rollback: pacing only fires as a safety net for runaway
+         * frame advantage — it's NOT tied to the visible-rollback cap.
+         * The previous formula min(delay+8, KN_MAX_VISIBLE_ROLLBACK_DEPTH-2)
+         * was a margin-below-cap safeguard, but with the cap tightened to
+         * 7 to match Skullgirls/MK11, that margin collapses to 5 — which
+         * is below the natural RTT/2 frame_adv at 100+ ms RTT. Keeping
+         * them coupled would make the engine throttle constantly on any
+         * cross-state network. Decouple: pacing fires at delay+8 (a
+         * generous safety net), rollbacks beyond cap silently drop into
+         * DEEP-MISPREDICT-SKIP as documented. */
+        pacing_threshold = rb.delay_frames + 8;
+    } else {
+        pacing_threshold = rb.delay_frames + 2;
+    }
+    if (frame_adv >= 0 && frame_adv >= pacing_threshold &&
         rb.pending_rollback < 0 && rb.replay_remaining == 0) {
         int ring_needs_save = 0;
         if (rb.last_save_frame < 0 ||
@@ -922,6 +1707,28 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         return 3; /* ring maintained, skip frame advance */
     }
 
+    /* ── Deferred-rollback bypass ──
+     * When kn_set_deferred_rollback(1) was called by JS, the engine
+     * leaves pending_rollback set BUT does not execute the rewind+replay
+     * branch. JS reads pending_rollback via kn_peek_pending_rollback,
+     * dispatches the replay to the shadow worker, and lets main continue
+     * predicting forward. When the worker reply lands, JS applies the
+     * corrected state via kn_apply_split_state_partial_with_aux (which
+     * clears pending_rollback) and runs a local fast-forward replay to
+     * converge from the apply frame to where main was when the apply
+     * landed.
+     *
+     * If pending_rollback is set but deferred mode is on AND we're already
+     * mid-replay (replay_remaining > 0), do NOT skip — finish the current
+     * replay first. New cascade rollbacks during a deferred dispatch
+     * should be handled synchronously by JS turning deferred mode OFF
+     * before pre_tick fires (see _workerCoprocPending check). */
+    if (rb_deferred_rollback_flag && rb.pending_rollback >= 0 && rb.replay_remaining == 0) {
+        rb_log("C-PRETICK-DEFERRED pending=%d frame=%d (skipping rewind; JS will apply via worker)",
+            rb.pending_rollback, rb.frame);
+        /* Fall through to normal forward processing below. pending_rollback
+         * stays set so kn_peek_pending_rollback returns it. */
+    } else
     /* ── Handle pending rollback: restore state, start amortized catch-up ──
      *
      * P3: Preempt an active replay if a newer (earlier-frame) misprediction
@@ -954,14 +1761,21 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             if (rb.rdram_base && rb.saved_rdram)
                 memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);
 
-            retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size);
-            rb_restore_slot_aux(ring_idx);
+            if (!rb_restore_slot_state(ring_idx)) {
+                rb.failed_rollbacks++;
+                rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)",
+                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,
+                    rb.state_backend, rb.failed_rollbacks);
+                return 0;
+            }
             /* R1: retro_unserialize invalidates the Emscripten rAF runner
              * captured by JS's overrideRAF interceptor. JS must re-capture
              * it via pauseMainLoop/resumeMainLoop before the next
              * stepOneFrame call, or the replay runs as silent no-ops.
+             * The split-RDRAM backend does not call retro_unserialize, so it
+             * deliberately skips the runner refresh.
              * See docs/netplay-invariants.md §R1. */
-            rb.did_restore = 1;
+            rb.did_restore = rb_using_split_state() ? 0 : 1;
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
@@ -1002,8 +1816,17 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
      * path as normal play. This is the only way to guarantee bit-identical
      * execution between normal play and replay. */
     if (rb.replay_remaining > 0) {
+        /* Replay a frame with the remote input frame it applied the first
+         * time. Recomputing from the current delay would re-run frames from
+         * before a delay change (the demo flips 1 <-> 4 on every rollback
+         * ON/OFF toggle) with different inputs than they originally used. */
         int replay_apply = rb.frame - rb.delay_frames;
+        {
+            int ti = rb.frame % KN_INPUT_RING_SIZE;
+            if (rb.applied_tag_frame[ti] == rb.frame) replay_apply = rb.applied_tag[ti];
+        }
         int save_idx = rb.frame % rb.ring_size;
+        rb_record_applied_tag(rb.frame, replay_apply);
 
         /* Save state for this frame BEFORE stepping.
          * R5 diagnostic: log the replay frame details. */
@@ -1011,8 +1834,89 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             rb.frame, rb.replay_remaining, replay_apply, save_idx);
         rb_save_slot(save_idx, rb.frame, 0);
 
-        /* Write inputs for this replay frame (logged for divergence detection) */
-        if (replay_apply >= 0) {
+        /* Write inputs for this replay frame (logged for divergence detection).
+         *
+         * True rollback (rb.true_rollback=1): mirror the JS forward-tick split
+         * in netplay-rollback.js. LOCAL is applied at rb.frame (current);
+         * REMOTE is applied at replay_apply (delayed, from C ring or predicted).
+         * If we wrote ALL slots from replay_apply during replay while the
+         * forward path wrote local-at-current, replay would simulate with a
+         * stale local input the original frame never used → R4 LIVE-MISMATCH
+         * fires every replay frame → silent state divergence.
+         *
+         * Legacy (rb.true_rollback=0): all slots from replay_apply, matching
+         * the legacy JS forward path that also writes all slots from applyFrame.
+         */
+        if (rb.true_rollback) {
+            int s;
+            int local_idx = rb.frame % KN_INPUT_RING_SIZE;
+            char inputs_str[256];
+            int pos = 0;
+            /* LOCAL at replay_apply, like every other slot */
+            (void)local_idx;
+            kn_input_t *li = replay_apply >= 0
+                ? &rb.inputs[rb.local_slot][replay_apply % KN_INPUT_RING_SIZE] : NULL;
+            int li_present = (li && li->present && li->frame == replay_apply);
+            if (li_present) {
+                kn_write_controller(rb.local_slot, li->buttons, li->lx, li->ly, li->cx, li->cy);
+            } else {
+                kn_write_controller(rb.local_slot, 0, 0, 0, 0, 0);
+            }
+            if (pos < (int)sizeof(inputs_str) - 32) {
+                pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
+                    "L%d@%d[%d,%d,%d,%c] ", rb.local_slot, replay_apply,
+                    li_present ? li->buttons : 0,
+                    li_present ? li->lx : 0,
+                    li_present ? li->ly : 0,
+                    li_present ? 'L' : 'Z');
+            }
+            /* REMOTE at replay_apply */
+            for (s = 0; s < KN_MAX_PLAYERS; s++) {
+                if (s == rb.local_slot) continue;
+                int btn = 0, lx = 0, ly = 0, cx = 0, cy = 0;
+                char origin = '?';
+                if (s < rb.num_players && replay_apply >= 0) {
+                    int idx = replay_apply % KN_INPUT_RING_SIZE;
+                    kn_input_t *inp = &rb.inputs[s][idx];
+                    /* Input still unconfirmed: re-predict from the newest
+                     * real input instead of replaying the stale forward-pass
+                     * guess. A rollback happens because a newer real input
+                     * arrived; replaying the old guess for the frames still
+                     * in flight made each of their arrivals mispredict again,
+                     * so one input change became a chain of rollbacks. The
+                     * new guess is stored as the prediction, so later
+                     * arrivals are checked against what this replay ran. */
+                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
+                    int missing = !(inp->present && inp->frame == replay_apply);
+                    if (rb.slot_active[s] && (unconfirmed || missing)) {
+                        kn_input_t pred_input = rb_predict_input(s);
+                        if (missing) rb.prediction_count++;
+                        *inp = pred_input;
+                        inp->present = 1;
+                        inp->frame = replay_apply;
+                        rb.predicted[s][idx] = 1;
+                        rb.predicted_values[s][idx] = pred_input;
+                        rb.predicted_values[s][idx].frame = replay_apply;
+                    }
+                    if (inp->present && inp->frame == replay_apply) {
+                        btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
+                        origin = rb.predicted[s][idx] ? 'P' : 'R';
+                        kn_write_controller(s, btn, lx, ly, cx, cy);
+                    } else {
+                        origin = 'Z';
+                        kn_write_controller(s, 0, 0, 0, 0, 0);
+                    }
+                } else {
+                    origin = (s < rb.num_players) ? 'Z' : 'X';
+                    kn_write_controller(s, 0, 0, 0, 0, 0);
+                }
+                if (pos < (int)sizeof(inputs_str) - 32) {
+                    pos += snprintf(inputs_str + pos, sizeof(inputs_str) - pos,
+                        "R%d@%d[%d,%d,%d,%c] ", s, replay_apply, btn, lx, ly, origin);
+                }
+            }
+            rb_log("REPLAY-INPUT-TR f=%d %s", rb.frame, inputs_str);
+        } else if (replay_apply >= 0) {
             write_frame_inputs_logged(replay_apply, 1);
         } else {
             int s;
@@ -1046,6 +1950,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
 
     /* ── Check remote inputs for apply frame ── */
     apply_frame = rb.frame - rb.delay_frames;
+    rb_record_applied_tag(rb.frame, apply_frame);
     rb.has_active_predictions = 0;
     if (apply_frame >= 0) {
         for (s = 0; s < rb.num_players; s++) {
@@ -1079,14 +1984,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                  *
                  * Clamped to N64 stick range [-83, 83] to prevent
                  * extrapolation from producing out-of-range values. */
-                #define KN_CLAMP_STICK(v) ((v) < -83 ? -83 : (v) > 83 ? 83 : (v))
-                kn_input_t pred_input = rb.last_known[s];
-                pred_input.lx = KN_CLAMP_STICK(2 * rb.last_known[s].lx - rb.prev_known[s].lx);
-                pred_input.ly = KN_CLAMP_STICK(2 * rb.last_known[s].ly - rb.prev_known[s].ly);
-                pred_input.cx = KN_CLAMP_STICK(2 * rb.last_known[s].cx - rb.prev_known[s].cx);
-                pred_input.cy = KN_CLAMP_STICK(2 * rb.last_known[s].cy - rb.prev_known[s].cy);
-                /* Buttons: repeat last (no extrapolation for digital) */
-                pred_input.buttons = rb.last_known[s].buttons;
+                kn_input_t pred_input = rb_predict_input(s);
                 /* Detect ring-wrap: this slot was previously predicted for a
                  * different (older) frame whose real input never arrived to
                  * verify it. The old prediction will never be checked once we
@@ -1396,6 +2294,19 @@ int kn_get_pending_rollback(void) {
     return f;
 }
 
+/* ── Query: pending rollback frame (non-clearing peek) ─────────────────
+ * Mirrors kn_get_pending_rollback but does NOT clear rb.pending_rollback.
+ * Used by JS prediction-pause gate to decide whether to stall before
+ * kn_pre_tick — the clearing variant would swallow the replay before
+ * pre_tick's consumer at line 933 can see it.
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_peek_pending_rollback(void) {
+    return rb.pending_rollback;
+}
+
 /* ── Query: replay depth after kn_pre_tick ─────────────────────────── */
 /* Returns number of frames to replay (0 = none). Clears the flag. */
 #ifdef __EMSCRIPTEN__
@@ -1467,6 +2378,7 @@ uint8_t* kn_get_state_for_frame(int frame) {
     if (!rb.initialized) return NULL;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return NULL;
+    if (rb_using_split_state()) return NULL;
     return rb.ring_bufs[ring_idx];
 }
 
@@ -1478,9 +2390,7 @@ int kn_restore_frame(int frame) {
     if (!rb.initialized) return 0;
     int ring_idx = frame % rb.ring_size;
     if (rb.ring_frames[ring_idx] != frame) return 0;
-    if (!retro_unserialize(rb.ring_bufs[ring_idx], rb.state_size)) return 0;
-    rb_restore_slot_aux(ring_idx);
-    return 1;
+    return rb_restore_slot_state(ring_idx);
 }
 
 /* ── Query: get state size ─────────────────────────────────────────── */
@@ -1522,6 +2432,10 @@ uint32_t kn_full_state_hash(int frame) {
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
     uint32_t hash = KN_FNV1A_OFFSET;
+    if (rb_using_split_state()) {
+        hash = kn_fnv1a_split_range(hash, idx, 0, rb_split_logical_size_for_idx(idx), 64);
+        return hash;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     hash = kn_fnv1a_stride(hash, p, rb.state_size, 64);
     return hash;
@@ -1544,6 +2458,32 @@ uint32_t kn_game_state_hash(int frame) {
     int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
+    if (rb_using_split_state()) {
+        uint32_t hash = KN_FNV1A_OFFSET;
+        if (!rb.ring_rdram_bufs || !rb.ring_rdram_bufs[idx]) return 0;
+        /* Phase A3 sparse-aware: reconstruct slot bytes if sparse mode on. */
+        const uint8_t *rdram_src = rb.ring_rdram_bufs[idx];
+        if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+            && rb.baseline_initialized) {
+            if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                              rb.split_rdram_size) > 0) {
+                rdram_src = rb.reconstructed_slot_buf;
+            }
+        }
+        for (uint32_t block = 0; block < KN_TAINT_BLOCKS; block++) {
+            size_t block_start = ((size_t)block << KN_TAINT_BLOCK_SHIFT);
+            if (block_start >= rb.split_rdram_size) break;
+            if (kn_rdram_taint[block]) continue;
+            size_t block_end = block_start + ((size_t)1 << KN_TAINT_BLOCK_SHIFT);
+            if (block_end > rb.split_rdram_size) block_end = rb.split_rdram_size;
+            hash = kn_fnv1a_stride(hash, rdram_src + block_start, block_end - block_start, 16);
+        }
+        if (!kn_skip_post_rdram_in_hash) {
+            size_t cpu_size = rb.ring_cpu_sizes ? rb.ring_cpu_sizes[idx] : 0;
+            hash = kn_fnv1a_stride(hash, rb.ring_cpu_bufs[idx], cpu_size, 16);
+        }
+        return hash;
+    }
     if (kn_rdram_offset_in_state == 0) return kn_full_state_hash(frame);
 
     const uint8_t *p = rb.ring_bufs[idx];
@@ -1600,18 +2540,21 @@ EMSCRIPTEN_KEEPALIVE
 #endif
 uint32_t kn_gameplay_hash(int frame) {
     if (!rb.initialized || rb.frame == 0) return 0;
-    if (kn_rdram_offset_in_state == 0) return 0;
+    if (!rb_using_split_state() && kn_rdram_offset_in_state == 0) return 0;
     int target = (frame < 0) ? (rb.frame - 1) : frame;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
 
-    const uint8_t *state = rb.ring_bufs[idx];
+    const uint8_t *state = rb_using_split_state() ? rb.ring_rdram_bufs[idx] : rb.ring_bufs[idx];
+    size_t state_base = rb_using_split_state() ? 0 : kn_rdram_offset_in_state;
+    size_t state_limit = rb_using_split_state() ? rb.split_rdram_size : rb.state_size;
+    if (!state) return 0;
     uint32_t hash = KN_FNV1A_OFFSET;
 
     for (size_t a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = state_base + kn_gameplay_addrs[a].rdram_offset;
         uint32_t sz = kn_gameplay_addrs[a].size;
-        if (off + sz > rb.state_size) continue; /* bounds check */
+        if (off + sz > state_limit) continue; /* bounds check */
         hash = kn_fnv1a_stride(hash, state + off, sz, 1);
     }
     return hash;
@@ -1637,6 +2580,17 @@ uint32_t kn_live_gameplay_hash(void) {
     static size_t scratch_capacity = 0;
 
     if (!rb.initialized) return 0;
+    if (rb_using_split_state()) {
+        if (!rb_ensure_rdram_base()) return 0;
+        uint32_t hash = KN_FNV1A_OFFSET;
+        for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
+            size_t off = kn_gameplay_addrs[a].rdram_offset;
+            uint32_t sz = kn_gameplay_addrs[a].size;
+            if (off + sz > rb.split_rdram_size) continue;
+            hash = kn_fnv1a_stride(hash, rb.rdram_base + off, sz, 1);
+        }
+        return hash;
+    }
     if (kn_rdram_offset_in_state == 0) return 0;
 
     size_t state_size = rb.state_size;
@@ -1672,6 +2626,7 @@ uint8_t* kn_get_last_state(void) {
     int target = rb.frame - 1;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return NULL;
+    if (rb_using_split_state()) return NULL;
     return rb.ring_bufs[idx];
 }
 
@@ -1687,6 +2642,17 @@ int kn_state_region_hashes(uint32_t *out_hashes, int count) {
     int target = rb.frame - 1;
     int idx = target % rb.ring_size;
     if (rb.ring_frames[idx] != target) return 0;
+    if (rb_using_split_state()) {
+        size_t logical_size = rb_split_logical_size_for_idx(idx);
+        size_t region_size = logical_size / count;
+        for (int r = 0; r < count; r++) {
+            size_t start = r * region_size;
+            size_t end = (r == count - 1) ? logical_size : (r + 1) * region_size;
+            uint32_t hash = kn_fnv1a_split_range(KN_FNV1A_OFFSET, idx, start, end - start, 16);
+            out_hashes[r] = hash;
+        }
+        return count;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
@@ -1715,6 +2681,17 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count) {
     if (!rb.initialized || !out_hashes || count <= 0) return 0;
     int idx = frame % rb.ring_size;
     if (rb.ring_frames[idx] != frame) return 0;
+    if (rb_using_split_state()) {
+        size_t logical_size = rb_split_logical_size_for_idx(idx);
+        size_t region_size = logical_size / count;
+        for (int r = 0; r < count; r++) {
+            size_t start = r * region_size;
+            size_t end = (r == count - 1) ? logical_size : (r + 1) * region_size;
+            uint32_t hash = kn_fnv1a_split_range(KN_FNV1A_OFFSET, idx, start, end - start, 16);
+            out_hashes[r] = hash;
+        }
+        return count;
+    }
     const uint8_t *p = rb.ring_bufs[idx];
     size_t region_size = rb.state_size / count;
     for (int r = 0; r < count; r++) {
@@ -1744,7 +2721,506 @@ int kn_get_rdram_offset_in_state(void) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_state_buffer_size(void) {
+    if (rb_using_split_state()) return (int)rb_split_logical_size_for_idx(-1);
     return (int)rb.state_size;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_state_backend(int backend) {
+    if (rb.initialized) {
+        rb_log("kn_set_state_backend ignored after init: requested=%d active=%d",
+            backend, rb.state_backend);
+        return;
+    }
+    kn_requested_state_backend = (backend == KN_STATE_BACKEND_SPLIT_RDRAM)
+        ? KN_STATE_BACKEND_SPLIT_RDRAM
+        : KN_STATE_BACKEND_RETRO;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_state_backend(void) {
+    return rb.initialized ? rb.state_backend : kn_requested_state_backend;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_split_state_stats(uint32_t *out, int count) {
+    if (!out || count < 8) return 0;
+    out[0] = (uint32_t)(rb.initialized ? rb.state_backend : kn_requested_state_backend);
+    out[1] = rb.split_save_count;
+    out[2] = rb.split_restore_count;
+    out[3] = rb.split_save_failures;
+    out[4] = rb.split_restore_failures;
+    out[5] = rb.split_last_cpu_size;
+    out[6] = rb.split_rdram_size;
+    out[7] = rb.split_cpu_capacity;
+    return 8;
+}
+
+/* Phase A1 diagnostic: JS flips this on game-start / off on game-end so
+ * dirty-block measurements separate match gameplay from menus/loading. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_phase(int in_match) {
+    rb.delta_phase_in_match = in_match ? 1 : 0;
+}
+
+/* Phase A3: rebuild a full slot snapshot via chain walk into a caller-
+ * supplied buffer. Used by Mode 2 worker exposure (kn_get_split_state_for_shadow)
+ * and any consumer that needs slot bytes in full-snapshot form when sparse
+ * save is on. Cost: 8 MB worth of per-block copies (chain walk dominated
+ * by memcpy bandwidth). Returns 0 on failure (slot empty / split-state
+ * disabled / sparse not initialized). Returns split_rdram_size on success. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size) {
+    if (!rb.initialized || !rb_using_split_state() || !out) return 0;
+    if (idx < 0 || idx >= rb.ring_size) return 0;
+    if (!rb.ring_rdram_bufs || !rb.ring_rdram_bufs[idx]) return 0;
+    if (out_size < rb.split_rdram_size) return 0;
+    if (rb.ring_frames[idx] < 0) return 0;
+    if (!rb.delta_save_sparse_enabled) {
+        /* Slot is full snapshot — direct copy. */
+        memcpy(out, rb.ring_rdram_bufs[idx], rb.split_rdram_size);
+        return rb.split_rdram_size;
+    }
+    /* Sparse: walk per block. */
+    if (!rb.baseline_rdram || !rb.baseline_initialized) return 0;
+    if (!rb.ring_rdram_dirty_mask) return 0;
+    const uint32_t bs = rb.split_rdram_size / KN_TAINT_BLOCKS;
+    if (bs == 0 || (bs * KN_TAINT_BLOCKS) != rb.split_rdram_size) return 0;
+    const int tf = rb.ring_frames[idx];
+    for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+        int best_frame = -1, best_i = -1;
+        for (int i = 0; i < rb.ring_size; i++) {
+            const int f2 = rb.ring_frames[i];
+            if (f2 < 0 || f2 > tf) continue;
+            const int has_data = rb.ring_rdram_dirty_mask[i][b]
+                || (rb.ring_slot_is_anchor && rb.ring_slot_is_anchor[i]);
+            if (!has_data) continue;
+            if (f2 > best_frame) { best_frame = f2; best_i = i; }
+        }
+        const uint8_t *src = (best_i >= 0)
+            ? (rb.ring_rdram_bufs[best_i] + (size_t)b * bs)
+            : (rb.baseline_rdram + (size_t)b * bs);
+        memcpy(out + (size_t)b * bs, src, bs);
+    }
+    return rb.split_rdram_size;
+}
+
+/* Phase A2: enable/disable delta restore + validation harness.
+ * Setters update both the user-toggle global AND the rb mirror so
+ * the hot path sees the change immediately. Init copies the global
+ * back into rb on the next kn_rollback_init. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_restore(int enabled) {
+    kn_user_delta_restore_enabled = enabled ? 1 : 0;
+    rb.delta_restore_enabled = kn_user_delta_restore_enabled;
+}
+
+/* Phase A3 setter: toggle sparse save. Switching ON invalidates the
+ * baseline AND clears all ring slots — sparse-mode chain walk treats
+ * every slot as sparse (uses mask to know which blocks have valid data)
+ * but pre-toggle slots were full snapshots with non-meaningful masks.
+ * Mixing them gives the wrong result for blocks where mask[old_slot][b]=0
+ * but old_slot's bytes for b are actually valid. Cleanest: drop the old
+ * slots entirely. Any in-flight rollback that targets an old frame will
+ * fail to find its target and the engine falls through to other recovery
+ * paths. Switching OFF reverts to legacy save behavior; existing sparse
+ * slots stay valid because the next save will populate them as full
+ * snapshots (full mode always memcpy's the full live RDRAM). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_save_sparse(int enabled) {
+    const int prev = rb.delta_save_sparse_enabled;
+    kn_user_delta_save_sparse_enabled = enabled ? 1 : 0;
+    rb.delta_save_sparse_enabled = kn_user_delta_save_sparse_enabled;
+    if (!prev && rb.delta_save_sparse_enabled) {
+        rb.baseline_initialized = 0;
+        if (rb.ring_frames) {
+            for (int i = 0; i < rb.ring_size; i++) rb.ring_frames[i] = -1;
+        }
+        if (rb.ring_slot_is_anchor) {
+            memset(rb.ring_slot_is_anchor, 0, rb.ring_size);
+        }
+        rb.last_save_frame = -1;
+    }
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_save_sparse(void) {
+    return kn_user_delta_save_sparse_enabled;
+}
+
+/* Mode 2 apply experiment toggle. 0 = apply everything (default),
+ * 1 = skip tainted blocks (legacy, preserves audio timing). */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_apply_skip_tainted(int enabled) {
+    kn_user_apply_skip_tainted = enabled ? 1 : 0;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_apply_skip_tainted(void) {
+    return kn_user_apply_skip_tainted;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_restore(void) {
+    return kn_user_delta_restore_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_delta_validate(int enabled) {
+    kn_user_delta_validate_enabled = enabled ? 1 : 0;
+    rb.delta_validate_enabled = kn_user_delta_validate_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_validate(void) {
+    return kn_user_delta_validate_enabled;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_phase(void) {
+    return rb.delta_phase_in_match;
+}
+
+/* Returns 24 stat words:
+ *   [0..7]   = out-of-match save-side stats
+ *   [8..15]  = in-match save-side stats
+ *   [16..23] = restore-side + flag stats
+ * Save bucket layout (indices [0..7] / [8..15]):
+ *   +0: samples_taken
+ *   +1: dirty_blocks_total (low 32 bits)
+ *   +2: dirty_blocks_total (high 32 bits)
+ *   +3: max_dirty_blocks (out of KN_TAINT_BLOCKS=128)
+ *   +4: min_dirty_blocks (UINT32_MAX/sentinel if no samples)
+ *   +5: KN_TAINT_BLOCKS (= block count denominator)
+ *   +6: rdram_block_size (KB per block)
+ *   +7: 0 (reserved)
+ * Restore bucket [16..23]:
+ *   +0: delta_restore_count_delta
+ *   +1: delta_restore_count_full
+ *   +2: delta_restore_blocks_copied (low 32)
+ *   +3: delta_restore_blocks_copied (high 32)
+ *   +4: delta_restore_blocks_skipped (low 32)
+ *   +5: delta_restore_blocks_skipped (high 32)
+ *   +6: delta_validation_failures
+ *   +7: flags = (save<<0) | (restore<<1) | (validate<<2)
+ * Per-bucket avg_dirty% = (dirty_blocks_total / samples_taken) / KN_TAINT_BLOCKS. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_stats(uint32_t *out, int count) {
+    if (!out || count < 24) return 0;
+    const uint32_t block_kb = rb.split_rdram_size > 0
+        ? (rb.split_rdram_size / KN_TAINT_BLOCKS) / 1024u
+        : 0u;
+    for (int p = 0; p < 2; p++) {
+        const int base = p * 8;
+        out[base + 0] = rb.delta_samples_taken[p];
+        out[base + 1] = (uint32_t)(rb.delta_dirty_blocks_total[p] & 0xFFFFFFFFu);
+        out[base + 2] = (uint32_t)(rb.delta_dirty_blocks_total[p] >> 32);
+        out[base + 3] = rb.delta_max_dirty_blocks[p];
+        out[base + 4] = rb.delta_min_dirty_blocks[p];
+        out[base + 5] = (uint32_t)KN_TAINT_BLOCKS;
+        out[base + 6] = block_kb;
+        out[base + 7] = 0;
+    }
+    out[16] = rb.delta_restore_count_delta;
+    out[17] = rb.delta_restore_count_full;
+    out[18] = (uint32_t)(rb.delta_restore_blocks_copied & 0xFFFFFFFFu);
+    out[19] = (uint32_t)(rb.delta_restore_blocks_copied >> 32);
+    out[20] = (uint32_t)(rb.delta_restore_blocks_skipped & 0xFFFFFFFFu);
+    out[21] = (uint32_t)(rb.delta_restore_blocks_skipped >> 32);
+    out[22] = rb.delta_validation_failures;
+    out[23] = (uint32_t)(
+        (rb.delta_save_enabled ? 1 : 0) |
+        ((rb.delta_restore_enabled ? 1 : 0) << 1) |
+        ((rb.delta_validate_enabled ? 1 : 0) << 2));
+    return 24;
+}
+
+/* Per-block mismatch histogram. out[b] = times block b was found
+ * mismatched in any validation failure. KN_TAINT_BLOCKS bytes total.
+ * Lets JS pinpoint which RDRAM regions delta restore mishandles. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_mismatch_histogram(uint8_t *out, int count) {
+    if (!out || count < KN_TAINT_BLOCKS) return 0;
+    memcpy(out, rb.delta_mismatch_blocks_seen, KN_TAINT_BLOCKS);
+    return KN_TAINT_BLOCKS;
+}
+
+/* Last-mismatch metadata. out[0]=target_frame, [1]=block_count,
+ * [2]=first_block, [3]=last_block. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delta_last_mismatch(int32_t *out, int count) {
+    if (!out || count < 4) return 0;
+    out[0] = rb.delta_last_mismatch_target_frame;
+    out[1] = (int32_t)rb.delta_last_mismatch_block_count;
+    out[2] = rb.delta_last_mismatch_first_block;
+    out[3] = rb.delta_last_mismatch_last_block;
+    return 4;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count) {
+    if (!rb.initialized || !rb_using_split_state() || !out || count < 9) return 0;
+    int target = (frame < 0) ? (rb.frame - 1) : frame;
+    if (target < 0 || rb.ring_size <= 0) return 0;
+    int idx = target % rb.ring_size;
+    if (rb.ring_frames[idx] != target) return 0;
+    if (!rb.ring_rdram_bufs || !rb.ring_cpu_bufs || !rb.ring_cpu_sizes ||
+        !rb.ring_rdram_bufs[idx] || !rb.ring_cpu_bufs[idx] || rb.ring_cpu_sizes[idx] == 0) {
+        return 0;
+    }
+    /* Phase A3: when sparse save is on, the slot's RDRAM buffer is sparse.
+     * Reconstruct a full snapshot into reconstructed_slot_buf and expose
+     * THAT pointer instead — the worker reads as if from a regular slot. */
+    const uint8_t *rdram_ptr = rb.ring_rdram_bufs[idx];
+    if (rb.delta_save_sparse_enabled && rb.reconstructed_slot_buf
+        && rb.baseline_initialized) {
+        if (kn_reconstruct_slot_full_into(idx, rb.reconstructed_slot_buf,
+                                          rb.split_rdram_size) > 0) {
+            rdram_ptr = rb.reconstructed_slot_buf;
+        }
+    }
+    out[0] = (uint32_t)(uintptr_t)rdram_ptr;
+    out[1] = rb.split_rdram_size;
+    out[2] = (uint32_t)(uintptr_t)rb.ring_cpu_bufs[idx];
+    out[3] = rb.ring_cpu_sizes[idx];
+    out[4] = (uint32_t)(uintptr_t)(rb.ring_hidden_state ? rb.ring_hidden_state[idx] : NULL);
+    out[5] = rb.ring_hidden_state ? (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t)) : 0;
+    out[6] = (uint32_t)(uintptr_t)((rb.ring_hle_state && rb.ring_hle_state[idx]) ? rb.ring_hle_state[idx] : NULL);
+    out[7] = (rb.ring_hle_state && rb.ring_hle_state[idx] && rb.hle_state_size > 0) ? (uint32_t)rb.hle_state_size : 0;
+    out[8] = (uint32_t)target;
+    if (count >= 10) {
+        out[9] = (uint32_t)rb.ring_sf_state[idx];
+        return 10;
+    }
+    return 9;
+}
+
+/* ── Selective state adoption (worker-as-replay-coprocessor) ───────────
+ *
+ * Loads a split-state snapshot produced by another instance (typically
+ * the shadow worker via kn_get_split_state_for_shadow), but copies only
+ * the deterministic RDRAM blocks — those NOT marked tainted in this
+ * instance's kn_rdram_taint map. Tainted blocks (renderer/audio/kernel
+ * spillover that legitimately differs between workers running different
+ * RDP plugins) are left as-is so the local renderer's pending GL state
+ * stays consistent with its own framebuffer regions.
+ *
+ * CPU state is loaded in full because it's deterministic across renderer
+ * choices (R4300 + RSP register state, scheduler state, etc. — none of
+ * the rendering plugins touch CPU state).
+ *
+ * The aux-aware entry point also restores the per-slot sidecars that
+ * rb_restore_slot_state() restores on the local replay path: SoftFloat,
+ * hidden Remix state, and HLE state. Worker coproc must use that entry
+ * point; CPU/RDRAM alone is not a complete rollback state.
+ *
+ * Returns 0 on success, negative error codes on failure:
+ *   -1: rollback engine not initialized
+ *   -2: not using split-rdram backend (this function is split-state only)
+ *   -3: kn_sync_write_cpu rejected the CPU buffer
+ *   -4: RDRAM buffer size mismatch (caller's size != engine's split_rdram_size)
+ *   -5: rdram_base unavailable (rb_ensure_rdram_base failed)
+ *   -6: KN_TAINT_BLOCKS does not evenly divide split_rdram_size — refuse
+ *       the apply rather than do a full memcpy that would clobber renderer-
+ *       private blocks. JS recovers via local replay.
+ *   -7: hidden-state sidecar missing or wrong size
+ *   -8: HLE-state sidecar missing or wrong size
+ *
+ * After success, rb.frame is set to `frame` and rb.did_restore is raised
+ * so JS can call _refreshRunnerAfterRollbackRestore to re-capture the
+ * Emscripten rAF runner (retro_unserialize equivalent invalidation).
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_apply_split_state_partial_with_aux(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame,
+    int softfloat_state,
+    const uint32_t *hidden_state, uint32_t hidden_size,
+    const uint8_t *hle_state, uint32_t hle_size
+) {
+    if (!rb.initialized) return -1;
+    if (!rb_using_split_state()) return -2;
+    if (!cpu_bytes || cpu_size == 0) return -3;
+    if (!rdram_bytes || rdram_size == 0) return -4;
+    if (rdram_size != rb.split_rdram_size) return -4;
+    if (!rb_ensure_rdram_base() || !rb.rdram_base) return -5;
+    if (!hidden_state || hidden_size != (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t))) {
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: hidden sidecar invalid ptr=%p size=%u expected=%u",
+            (const void *)hidden_state, hidden_size, (uint32_t)(KN_HIDDEN_STATE_WORDS * sizeof(uint32_t)));
+        return -7;
+    }
+    if (!hle_state || hle_size == 0 || rb.hle_state_size <= 0 || hle_size != (uint32_t)rb.hle_state_size) {
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: hle sidecar invalid ptr=%p size=%u expected=%d",
+            (const void *)hle_state, hle_size, rb.hle_state_size);
+        return -8;
+    }
+
+    /* RDRAM: copy only non-tainted blocks. KN_TAINT_BLOCKS divides the
+     * 8 MB RDRAM into 128 × 64 KB blocks; the taint map flags blocks
+     * touched by audio/RSP/renderer code that legitimately diverges
+     * across worker/main. Blocks NOT flagged are deterministic game
+     * state and SHOULD be adopted. */
+    const uint32_t block_size = rdram_size / KN_TAINT_BLOCKS;
+    if (block_size == 0 || (block_size * KN_TAINT_BLOCKS) != rdram_size) {
+        /* split_rdram_size MUST divide evenly into KN_TAINT_BLOCKS or the
+         * taint map can't address per-block ranges. A full memcpy here
+         * would clobber renderer-private blocks (e.g. GLideN64's pending
+         * GL state) with the worker's ANGRYLION bytes — exactly the
+         * corruption split-state exists to prevent. Refuse the apply so
+         * JS can fall back to local replay (_coprocRecover). */
+        rb_log("FATAL kn_apply_split_state_partial_with_aux: rdram_size=%u not divisible by KN_TAINT_BLOCKS=%d (block_size=%u) — refusing apply",
+            rdram_size, (int)KN_TAINT_BLOCKS, block_size);
+        return -6;
+    }
+
+    /* CPU state: full adoption. Worker's CPU state at frame F is bit-
+     * identical to what main's would be at the same frame (verified
+     * by gp/game hash matches in the determinism check). Validate all
+     * sidecars and taint geometry first so error returns do not leave a
+     * half-applied state behind. */
+    if (kn_sync_write_cpu(cpu_bytes, cpu_size) != 0) return -3;
+    if (kn_user_apply_skip_tainted) {
+        /* Legacy: skip tainted blocks (preserves main's audio FIFO timing
+         * but leaves renderer-relevant bytes inconsistent). */
+        for (int b = 0; b < KN_TAINT_BLOCKS; b++) {
+            if (kn_rdram_taint[b]) continue;
+            const uint32_t offset = (uint32_t)b * block_size;
+            memcpy(rb.rdram_base + offset, rdram_bytes + offset, block_size);
+        }
+    } else {
+        /* Experimental (default): apply EVERYTHING from worker's reply.
+         * Renderer state stays consistent. Audio may pop briefly. */
+        memcpy(rb.rdram_base, rdram_bytes, rdram_size);
+    }
+    sf_restore(softfloat_state);
+    if (rb.ring_hidden_state) kn_restore_hidden_state_impl(hidden_state);
+    if (rb.ring_hle_state) kn_hle_restore_from(hle_state);
+
+    rb.frame = frame;
+    rb.did_restore = 1;
+    /* Clear any in-flight rollback state. The caller (worker
+     * coprocessor) just delivered the corrected state at `frame`, so
+     * any pending_rollback or replay_remaining values from earlier
+     * pre_tick calls on this instance are stale. */
+    rb.pending_rollback = -1;
+    rb.replay_remaining = 0;
+    rb.replay_depth = 0;
+    /* Phase A3: external state apply invalidates baseline_rdram (we
+     * don't know what just got written) — force re-init on next save. */
+    rb.baseline_initialized = 0;
+    rb_log("kn_apply_split_state_partial_with_aux: frame=%d cpu_size=%u rdram_size=%u hidden=%u hle=%u sf=0x%x tainted_blocks_skipped=%d",
+        frame, cpu_size, rdram_size, hidden_size, hle_size, softfloat_state, kn_get_tainted_block_count());
+    return 0;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_apply_split_state_partial(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame
+) {
+    (void)cpu_bytes;
+    (void)cpu_size;
+    (void)rdram_bytes;
+    (void)rdram_size;
+    (void)frame;
+    rb_log("kn_apply_split_state_partial: refused legacy CPU/RDRAM-only apply; use kn_apply_split_state_partial_with_aux");
+    return -7;
+}
+
+/* Clear pending rollback / active replay without applying any state.
+ * Used by the worker-coprocessor JS path: when main detects catchingUp
+ * and decides to delegate the replay to the worker, it calls this to
+ * tell the C engine "stop trying to do the replay yourself; corrected
+ * state will arrive shortly via kn_apply_split_state_partial_with_aux."
+ *
+ * Without this, the next kn_pre_tick re-enters the replay branch
+ * because replay_remaining > 0, which would cause main to do the work
+ * we're trying to off-load to the worker. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_clear_replay_state(void) {
+    const int old_pending = rb.pending_rollback;
+    const int old_remaining = rb.replay_remaining;
+    const int old_depth = rb.replay_depth;
+    rb.pending_rollback = -1;
+    rb.replay_remaining = 0;
+    rb.replay_depth = 0;
+    rb_log("kn_clear_replay_state: cleared (was pending_rollback=%d replay_remaining=%d replay_depth=%d)",
+        old_pending, old_remaining, old_depth);
+}
+
+/* Save the current emulator state into the ring at rb.frame.
+ *
+ * Used by the shadow worker after its replay loop completes. The loop
+ * runs depth iterations of pre_tick + step + post_tick, ending with
+ * rb.frame = targetFrame and the live state = "entering-targetFrame"
+ * (i.e., post-frame-(targetFrame-1)). Pre_tick saves BEFORE stepping,
+ * so the most recently saved ring slot is targetFrame-1; the slot at
+ * targetFrame has not yet been written.
+ *
+ * Without this call, kn_get_split_state_for_shadow can only return
+ * state-entering-(targetFrame-1) — main applies that and the next
+ * stepOneFrame paints frame targetFrame-1, which is the SAME frame the
+ * user already saw before the rollback. Calling kn_save_endpoint_state
+ * after the loop populates ring[targetFrame] = state-entering-target,
+ * so the next stepOneFrame in main paints frame targetFrame for the
+ * first time — eliminating the one-frame skip in the visible output.
+ *
+ * Returns 0 on success, -1 if not initialized.
+ */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_save_endpoint_state(void) {
+    if (!rb.initialized) return -1;
+    if (rb.ring_size <= 0) return -2;
+    int idx = rb.frame % rb.ring_size;
+    int rc = rb_save_slot(idx, rb.frame, 1);
+    rb_log("kn_save_endpoint_state: frame=%d idx=%d rc=%d", rb.frame, idx, rc);
+    return rc == 1 ? 0 : -3;
 }
 
 /* ── Stat getters ──────────────────────────────────────────────────── */
@@ -1821,6 +3297,74 @@ int kn_get_mispred_breakdown(int *out, int out_count) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_tolerance_hits(void) { return rb.tolerance_hits; }
+
+/* True rollback netcode capability. Always 1 in builds shipped with the
+ * split-input replay path (kn_pre_tick replay branch reads rb.true_rollback
+ * to decide whether to write local at rb.frame vs replay_apply). JS reads
+ * this to fill the cross-peer capability handshake; old cores without this
+ * export report undefined → treated as 0 → cross-peer mismatch refusal. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_true_rollback_capability(void) { return 2; }
+
+/* Set the true-rollback flag at game-start. JS pushes the negotiated value
+ * (capability bit AND'd with the URL/localStorage opt-out flag) so the C
+ * replay path matches the JS forward path. Mismatched modes between JS and
+ * C produce silent state divergence on every replay. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_set_true_rollback(int enable) {
+    rb.true_rollback = enable ? 1 : 0;
+    rb_log("kn_set_true_rollback %d", rb.true_rollback);
+}
+
+/* Update rb.delay_frames at runtime so JS can size the prediction window
+ * to RTT/2 + jitter when the network slider moves mid-match. When delay
+ * covers the actual round-trip lag, peer inputs always arrive in front of
+ * the apply frame and the engine never has to roll back — eliminating
+ * the visible replay pauses at high RTT.
+ *
+ * Safety: refuse during an active replay (rb.replay_remaining > 0). The
+ * apply_frame = rb.frame - rb.delay_frames calculation is in flight and
+ * shifting delay would corrupt the replay's frame math. JS callers should
+ * gate on kn_get_replay_depth() == 0 before invoking. Returns the actual
+ * delay that took effect (old value if rejected, new value on success).
+ *
+ * Range: clamped to [1, 16]. The ring buffer was sized at init for
+ * delay+10, so this update path doesn't reallocate the ring — values
+ * higher than init_delay+ring_max may push apply_frame outside the
+ * available history. We still cap so callers can't accidentally request
+ * absurd delays; the JS-level cap (LOCKSTEP_MAX_DELAY=9 / ROLLBACK_MAX=12)
+ * is the user-facing limit. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_set_delay_frames(int new_delay) {
+    if (rb.replay_remaining > 0) {
+        rb_log("kn_set_delay_frames %d rejected (replay in progress, remaining=%d)",
+            new_delay, rb.replay_remaining);
+        return rb.delay_frames;
+    }
+    if (new_delay < 1) new_delay = 1;
+    // Cap at 20 — covers ~528 ms RTT (delay*16.67=333ms minus 1f safety
+    // = ~316 ms = RTT/2 + jitter envelope). Above that the ring would
+    // need to grow further than init reserved.
+    if (new_delay > 20) new_delay = 20;
+    if (new_delay == rb.delay_frames) return rb.delay_frames;
+    int old_delay = rb.delay_frames;
+    rb.delay_frames = new_delay;
+    rb_log("kn_set_delay_frames %d -> %d (frame=%d)", old_delay, new_delay, rb.frame);
+    return rb.delay_frames;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_delay_frames(void) {
+    return rb.delay_frames;
+}
 
 /* Get SoftFloat globals packed: high byte = roundingMode, low byte = exceptionFlags */
 #ifdef __EMSCRIPTEN__

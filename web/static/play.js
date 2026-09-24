@@ -4564,6 +4564,9 @@
     try {
       _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizardKeyMap));
     } catch (_) {}
+    // Tell the netplay engine to re-read its cached keymap so the
+    // wizard's binding changes actually reach readLocalInput.
+    window.NetplayRollback?.refreshKeyMap?.();
 
     cancelWizard();
 
@@ -4579,6 +4582,7 @@
     try {
       _safeRemove('localStorage', 'keyboard-mapping');
     } catch (_) {}
+    window.NetplayRollback?.refreshKeyMap?.();
     updateGamepadUI();
   };
 

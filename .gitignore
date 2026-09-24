@@ -72,3 +72,12 @@ build/test/
 tools/dl-recorder/
 web/smash64r-test/
 web/webgpu-pivot-test/
+
+# Local gameplay test output (scripts/test-gameplay.sh)
+test-results/
+
+# Built static demo (scripts/build_demo.py)
+/dist/
+
+# Wrangler local dev state
+.wrangler/

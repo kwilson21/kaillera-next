@@ -204,6 +204,10 @@
 
   const saveKeyboardMap = (map) => {
     localStorage.setItem('keyboard-mapping', JSON.stringify(map));
+    // Tell the netplay engine to re-read its cached keymap. Without
+    // this, _p1KeyMap stays at whatever was loaded at emulator-ready
+    // and the remap doesn't reach readLocalInput.
+    window.NetplayRollback?.refreshKeyMap?.();
   };
 
   // Invert { keyCode: bitIndex } → { bitIndex: keyCode }
@@ -848,6 +852,9 @@
       if (hash) localStorage.removeItem(`kn-gamepad:${hash}:${k}`);
     }
     localStorage.removeItem('keyboard-mapping');
+    // Same propagation as saveKeyboardMap — the engine caches
+    // _p1KeyMap, so clearing localStorage isn't enough on its own.
+    window.NetplayRollback?.refreshKeyMap?.();
     const activeProfile = GamepadManager.getActiveProfile(0);
     if (activeProfile) GamepadManager.clearGamepadProfile(activeProfile.id);
     rebuildPanel();

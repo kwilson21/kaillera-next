@@ -84,16 +84,31 @@
         if (!_glPixelBuf || _glPixelBuf.length !== totalBytes) {
           _glPixelBuf = new Uint8Array(totalBytes);
         }
-        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
-        // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
-        let hash = 2166136261;
-        const stride = 16 * 4;
-        for (let i = 0; i < totalBytes; i += stride) {
-          hash = Math.imul(hash ^ (_glPixelBuf[i] >> 4), 16777619) >>> 0;
-          hash = Math.imul(hash ^ (_glPixelBuf[i + 1] >> 4), 16777619) >>> 0;
-          hash = Math.imul(hash ^ (_glPixelBuf[i + 2] >> 4), 16777619) >>> 0;
+        // GLideN64's color-buffer-to-RDRAM readback path can leave a
+        // PIXEL_PACK_BUFFER bound across the Emscripten event-loop yield.
+        // WebGL2 forbids the typed-array form of readPixels while a pack
+        // buffer is bound — calling it spams INVALID_OPERATION every frame.
+        // Probe the binding (synchronous read of cached driver state, no
+        // GPU sync, no mutation) and fall through to the 2D-canvas path
+        // for those frames. We can't unbind/restore the PBO ourselves —
+        // mutating GL state while the C core is suspended mid-frame at
+        // _emscripten_sleep corrupts the core's GL pipeline and surfaces
+        // as a WASM OOB trap on match start (see commits 51b180c, 0ed1399).
+        const pboBound = gl.PIXEL_PACK_BUFFER_BINDING ? gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) : null;
+        if (!pboBound) {
+          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
+          // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
+          let hash = 2166136261;
+          const stride = 16 * 4;
+          for (let i = 0; i < totalBytes; i += stride) {
+            hash = Math.imul(hash ^ (_glPixelBuf[i] >> 4), 16777619) >>> 0;
+            hash = Math.imul(hash ^ (_glPixelBuf[i + 1] >> 4), 16777619) >>> 0;
+            hash = Math.imul(hash ^ (_glPixelBuf[i + 2] >> 4), 16777619) >>> 0;
+          }
+          return hash;
         }
-        return hash;
+        // PBO bound — drop through to the 2D-canvas fallback below, which
+        // doesn't share GL state with the core.
       }
       // No GL context at all (extremely rare) — fall back to a 2D copy.
       if (!_offscreenCanvas || _offscreenCanvas.width !== canvas.width || _offscreenCanvas.height !== canvas.height) {
@@ -371,7 +386,8 @@
 
   function checkFreeze(localInput) {
     const frameNum = _getFrame();
-    if (frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
+    // Canvas readbacks are GPU sync points; ?knperf=light skips them all.
+    if (!window._knPerfLight && frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
       checkCanvasHealth(frameNum, 'early');
     }
     if (frameNum % 60 !== 0 || frameNum <= 300) return;

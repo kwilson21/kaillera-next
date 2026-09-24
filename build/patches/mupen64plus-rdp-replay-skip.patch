@@ -1,0 +1,235 @@
+diff --git a/GLideN64/src/GraphicsDrawer.cpp b/GLideN64/src/GraphicsDrawer.cpp
+index a2fb0af..e71f66e 100644
+--- a/GLideN64/src/GraphicsDrawer.cpp
++++ b/GLideN64/src/GraphicsDrawer.cpp
+@@ -26,6 +26,16 @@
+ 
+ using namespace graphics;
+ 
++#ifdef __EMSCRIPTEN__
++extern "C" int kn_skip_rdp_replay;
++static inline bool kn_should_skip_rdp_raster()
++{
++	return kn_skip_rdp_replay != 0;
++}
++#else
++static inline bool kn_should_skip_rdp_raster() { return false; }
++#endif
++
+ GraphicsDrawer::GraphicsDrawer()
+ {
+ 	memset(m_rect, 0, sizeof(m_rect));
+@@ -848,6 +858,12 @@ bool GraphicsDrawer::_canDraw() const
+ 
+ void GraphicsDrawer::drawTriangles()
+ {
++	if (kn_should_skip_rdp_raster()) {
++		triangles.num = 0;
++		triangles.maxElement = 0;
++		return;
++	}
++
+ 	if (triangles.num == 0 || !_canDraw()) {
+ 		triangles.num = 0;
+ 		triangles.maxElement = 0;
+@@ -892,6 +908,11 @@ void GraphicsDrawer::drawTriangles()
+ 
+ void GraphicsDrawer::drawScreenSpaceTriangle(u32 _numVtx, graphics::DrawModeParam _mode)
+ {
++	if (kn_should_skip_rdp_raster()) {
++		m_dmaVerticesNum = 0;
++		return;
++	}
++
+ 	if (_numVtx == 0 || !_canDraw())
+ 		return;
+ 
+@@ -946,6 +967,11 @@ void GraphicsDrawer::drawScreenSpaceTriangle(u32 _numVtx, graphics::DrawModeParam _mode)
+ 
+ void GraphicsDrawer::drawDMATriangles(u32 _numVtx)
+ {
++	if (kn_should_skip_rdp_raster()) {
++		m_dmaVerticesNum = 0;
++		return;
++	}
++
+ 	if (_numVtx == 0 || !_canDraw())
+ 		return;
+ 	_prepareDrawTriangle(DrawingState::Triangle);
+@@ -1072,6 +1098,11 @@ void GraphicsDrawer::_drawThickLine(u32 _v0, u32 _v1, float _width, u32 _flag)
+ 
+ void GraphicsDrawer::drawLine(u32 _v0, u32 _v1, float _width, u32 _flag)
+ {
++	if (kn_should_skip_rdp_raster()) {
++		m_statistics.lines++;
++		return;
++	}
++
+ 	m_texrectDrawer.draw();
+ 	m_statistics.lines++;
+ 
+@@ -1108,6 +1139,11 @@ void GraphicsDrawer::drawLine(u32 _v0, u32 _v1, float _width, u32 _flag)
+ 
+ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
+ {
++	if (kn_should_skip_rdp_raster()) {
++		m_statistics.fillRects++;
++		return;
++	}
++
+ 	m_texrectDrawer.draw();
+ 	m_statistics.fillRects++;
+ 
+@@ -1321,6 +1357,11 @@ static bool(*texturedRectSpecial)(const GraphicsDrawer::TexturedRectParams & _params) = nullptr;
+ 
+ void GraphicsDrawer::drawTexturedRect(const TexturedRectParams & _params)
+ {
++	if (kn_should_skip_rdp_raster()) {
++		m_statistics.texRects++;
++		return;
++	}
++
+ 	gSP.changed &= ~CHANGED_GEOMETRYMODE; // Don't update cull mode
+ 	m_drawingState = DrawingState::TexRect;
+ 	m_statistics.texRects++;
+diff --git a/GLideN64/src/gDP.cpp b/GLideN64/src/gDP.cpp
+index adf9d4a..e94d93e 100644
+--- a/GLideN64/src/gDP.cpp
++++ b/GLideN64/src/gDP.cpp
+@@ -25,6 +25,16 @@
+ 
+ using namespace std;
+ 
++#ifdef __EMSCRIPTEN__
++extern "C" int kn_skip_rdp_replay;
++static inline bool kn_should_skip_rdp_raster()
++{
++	return kn_skip_rdp_replay != 0;
++}
++#else
++static inline bool kn_should_skip_rdp_raster() { return false; }
++#endif
++
+ gDPInfo gDP;
+ 
+ // angrylion's macro
+@@ -801,6 +811,11 @@ void gDPFillRectangle( s32 ulx, s32 uly, s32 lrx, s32 lry )
+ 	} else if (lry == uly)
+ 		++lry;
+ 
++	if (kn_should_skip_rdp_raster()) {
++		gSP.tri_num += 2;
++		return;
++	}
++
+ 	enum {
+ 		dbNone,
+ 		dbFound,
+@@ -931,6 +946,13 @@ void gDPTextureRectangle(f32 ulx, f32 uly, f32 lrx, f32 lry, s32 tile, s16 s, s16 t, f32 dsdx, f32 dtdy , bool flip)
+ 		gDP.m_texCoordBounds.lrt = fmax(ult, lrt);
+ 	}
+ 
++	if (kn_should_skip_rdp_raster()) {
++		gSP.textureTile[0] = textureTileOrg[0];
++		gSP.textureTile[1] = textureTileOrg[1];
++		gSP.tri_num += 2;
++		return;
++	}
++
+ 	GraphicsDrawer & drawer = dwnd().getDrawer();
+ 	GraphicsDrawer::TexturedRectParams params(ulx, uly, lrx, lry, dsdx, dtdy, s, t,
+ 		flip, false, true, frameBufferList().getCurrent());
+@@ -969,29 +991,31 @@ void gDPFullSync()
+ 		DPC_STATUS_START_VALID = 0x400,		// Bit 10: Start valid
+ 	};
+ 
+-	if (config.frameBufferEmulation.copyAuxToRDRAM != 0) {
+-		frameBufferList().copyAux();
+-		frameBufferList().removeAux();
+-	}
++	if (!kn_should_skip_rdp_raster()) {
++		if (config.frameBufferEmulation.copyAuxToRDRAM != 0) {
++			frameBufferList().copyAux();
++			frameBufferList().removeAux();
++		}
+ 
+-	dwnd().getDrawer().flush();
+-	dwnd().getDrawer().dropRenderState();
++		dwnd().getDrawer().flush();
++		dwnd().getDrawer().dropRenderState();
+ 
+-	frameBufferList().updateCurrentBufferEndAddress();
++		frameBufferList().updateCurrentBufferEndAddress();
+ 
+-	FrameBuffer * pCurrentBuffer = frameBufferList().getCurrent();
+-	if (pCurrentBuffer != nullptr)
+-		pCurrentBuffer->copyDepthTexture();
+-	if ((config.frameBufferEmulation.copyToRDRAM != Config::ctDisable || (config.generalEmulation.hacks & hack_subscreen) != 0) &&
+-		!FBInfo::fbInfo.isSupported() &&
+-		pCurrentBuffer != nullptr &&
+-		!pCurrentBuffer->isAuxiliary()
+-	)
+-		FrameBuffer_CopyToRDRAM(gDP.colorImage.address, config.frameBufferEmulation.copyToRDRAM == Config::ctSync);
++		FrameBuffer * pCurrentBuffer = frameBufferList().getCurrent();
++		if (pCurrentBuffer != nullptr)
++			pCurrentBuffer->copyDepthTexture();
++		if ((config.frameBufferEmulation.copyToRDRAM != Config::ctDisable || (config.generalEmulation.hacks & hack_subscreen) != 0) &&
++			!FBInfo::fbInfo.isSupported() &&
++			pCurrentBuffer != nullptr &&
++			!pCurrentBuffer->isAuxiliary()
++		)
++			FrameBuffer_CopyToRDRAM(gDP.colorImage.address, config.frameBufferEmulation.copyToRDRAM == Config::ctSync);
+ 
+-	if (RSP.LLE) {
+-		if (config.frameBufferEmulation.copyDepthToRDRAM != Config::cdDisable && !FBInfo::fbInfo.isSupported())
+-			FrameBuffer_CopyDepthBuffer(gDP.colorImage.address);
++		if (RSP.LLE) {
++			if (config.frameBufferEmulation.copyDepthToRDRAM != Config::cdDisable && !FBInfo::fbInfo.isSupported())
++				FrameBuffer_CopyDepthBuffer(gDP.colorImage.address);
++		}
+ 	}
+ 
+ 	*REG.MI_INTR |= MI_INTR_DP;
+@@ -1071,6 +1095,9 @@ void LLETriangle::draw(bool _shade, bool _texture, bool _zbuffer, u32 * _pData)
+ 	DebugMsg(DEBUG_NORMAL, "gDPLLETriangle shade: %d, texture: %d, zbuffer: %d\n",
+ 		int(_shade), int(_texture), int(_zbuffer));
+ 
++	if (kn_should_skip_rdp_raster())
++		return;
++
+ 	gSP.texture.level = _SHIFTR(_pData[0], 19, 3);
+ 	const u32 tile = _SHIFTR(_pData[0], 16, 3);
+ 	if (tile != m_tile)
+diff --git a/GLideN64/src/gSP.cpp b/GLideN64/src/gSP.cpp
+index d6662d9..43906e5 100644
+--- a/GLideN64/src/gSP.cpp
++++ b/GLideN64/src/gSP.cpp
+@@ -22,6 +22,16 @@
+ using namespace std;
+ using namespace graphics;
+ 
++#ifdef __EMSCRIPTEN__
++extern "C" int kn_skip_rdp_replay;
++static inline bool kn_should_skip_rdp_raster()
++{
++	return kn_skip_rdp_replay != 0;
++}
++#else
++static inline bool kn_should_skip_rdp_raster() { return false; }
++#endif
++
+ #define INDEXMAP_SIZE 80U
+ 
+ #ifdef __VEC4_OPT
+@@ -69,6 +79,11 @@ void gSPCombineMatrices(u32 _mode)
+ void gSPTriangle(u32 v0, u32 v1, u32 v2)
+ {
+ 	GraphicsDrawer & drawer = dwnd().getDrawer();
++	if (kn_should_skip_rdp_raster()) {
++		gSP.tri_num++;
++		return;
++	}
++
+ 	if ((v0 < INDEXMAP_SIZE) && (v1 < INDEXMAP_SIZE) && (v2 < INDEXMAP_SIZE)) {
+ 		if (drawer.isClipped(v0, v1, v2)) {
+ 			DebugMsg(DEBUG_NORMAL, "Triangle clipped (%i, %i, %i)\n", v0, v1, v2);

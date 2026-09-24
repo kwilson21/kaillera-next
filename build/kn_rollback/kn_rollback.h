@@ -32,6 +32,23 @@ int kn_post_tick(void);
  */
 int kn_get_pending_rollback(void);
 
+/* Non-clearing peek: returns rb.pending_rollback without resetting it.
+ * Use this for read-only checks; use kn_get_pending_rollback to consume. */
+int kn_peek_pending_rollback(void);
+
+/* Deferred-rollback mode (Mode 2 deferred / "true GGPO with worker"):
+ * When enabled, kn_pre_tick will NOT execute the rewind+replay branch
+ * even if pending_rollback is set. The flag is preserved so JS can
+ * read it (via kn_peek_pending_rollback) and dispatch to the shadow
+ * worker. Main keeps predicting forward. When the worker reply arrives,
+ * JS applies the corrected state via kn_apply_split_state_partial_with_aux
+ * and then runs a local fast-forward replay to converge from the
+ * corrected frame to where main was when the apply landed.
+ *
+ * Default OFF (legacy synchronous-rewind behavior). Setter is idempotent. */
+void kn_set_deferred_rollback(int enable);
+int kn_get_deferred_rollback(void);
+
 /* Get pointer to saved state for a given frame.
  * Returns NULL if frame not in ring buffer.
  */
@@ -97,6 +114,18 @@ int kn_get_mispred_breakdown(int *out, int out_count);
  * stick tolerance window). Returns cumulative count since rollback init. */
 int kn_get_tolerance_hits(void);
 
+/* True rollback netcode capability + flag. See kn_rollback.c. */
+int kn_get_true_rollback_capability(void);
+void kn_set_true_rollback(int enable);
+
+/* Runtime delay update so JS can size DELAY_FRAMES to RTT/2 + jitter as
+ * the network changes. Eliminates rollback pauses at high RTT by keeping
+ * peer inputs in front of the apply-frame deadline. Refused mid-replay
+ * (apply_frame math would corrupt). Clamped to [1, 16]. Returns the
+ * delay that took effect. See kn_rollback.c for safety details. */
+int kn_set_delay_frames(int new_delay);
+int kn_get_delay_frames(void);
+
 /* Region hashes for a specific frame's saved state (RB-CHECK divergence
  * diagnosis). Like kn_state_region_hashes but operates on the ring slot
  * for `frame` instead of the most recent. Returns count on success, 0 if
@@ -107,6 +136,43 @@ int kn_state_region_hashes_frame(int frame, uint32_t *out_hashes, int count);
  * total state buffer size. Lets JS map region indices back to subsystems. */
 int kn_get_rdram_offset_in_state(void);
 int kn_get_state_buffer_size(void);
+int kn_get_split_state_for_shadow(int frame, uint32_t *out, int count);
+
+/* Phase A1 diagnostic — RDRAM dirty-block sampling per save. */
+void kn_set_delta_phase(int in_match);
+int kn_get_delta_phase(void);
+int kn_get_delta_stats(uint32_t *out, int count);
+
+/* Phase A2 — runtime toggles for delta restore + validation harness. */
+void kn_set_delta_restore(int enabled);
+int kn_get_delta_restore(void);
+void kn_set_delta_validate(int enabled);
+int kn_get_delta_validate(void);
+int kn_get_delta_mismatch_histogram(uint8_t *out, int count);
+int kn_get_delta_last_mismatch(int32_t *out, int count);
+
+/* Phase A3 — sparse save (write only dirty blocks per save). */
+void kn_set_delta_save_sparse(int enabled);
+int kn_get_delta_save_sparse(void);
+uint32_t kn_reconstruct_slot_full_into(int idx, uint8_t *out, uint32_t out_size);
+
+/* Mode 2 apply experiment — toggle whether apply_split_state_partial_with_aux
+ * skips tainted blocks. 0 = apply everything (default, renderer-consistent).
+ * 1 = legacy skip (preserves audio FIFO, breaks renderer). */
+void kn_set_apply_skip_tainted(int enabled);
+int kn_get_apply_skip_tainted(void);
+
+int kn_apply_split_state_partial_with_aux(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame,
+    int softfloat_state,
+    const uint32_t *hidden_state, uint32_t hidden_size,
+    const uint8_t *hle_state, uint32_t hle_size);
+int kn_apply_split_state_partial(
+    const uint8_t *cpu_bytes, uint32_t cpu_size,
+    const uint8_t *rdram_bytes, uint32_t rdram_size,
+    int frame);
 
 /* Full state hash — hashes the saved state for a specific frame from the
  * ring buffer. Pass -1 to hash the most recent saved state. */

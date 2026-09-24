@@ -68,7 +68,7 @@ def test_strict_menu_resend_cadence_is_per_slot():
     assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
     assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
     assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
-    assert "_requestStrictMenuResends(\n                  bootInputPeers,\n                  missingSlots," in src
+    assert re.search(r"_requestStrictMenuResends\(\s*bootInputPeers,\s*missingSlots,", src)
     assert "_requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu')" in src
 
 
@@ -90,7 +90,12 @@ def test_rollback_delay_inputs_are_clamped_to_engine_window():
         in src
     )
     assert (
-        "return Math.min(ROLLBACK_MAX_DELAY_FRAMES, Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));"
+        "return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));"
+        in src
+    )
+    # Ceiling depends on mode: lockstep (predictions paused) vs true rollback.
+    assert (
+        "const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);"
         in src
     )
     assert "const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);" in src
@@ -245,8 +250,11 @@ def test_failed_frame_step_does_not_advance_bookkeeping():
     assert "STEP-NORUN f=${_frameNum} branch=${branch}" in src
     assert "_syncLog(_formatStepThrew(branch, e));" in src
 
-    assert "if (!_runStepOneFrame('replay')) return;" in src
-    assert "if (!_runStepOneFrame('normal')) return;" in src
+    # A step that did not run must never reach _kn_post_tick: each branch
+    # bails out (replay helper returns false and the burst loop stops).
+    assert "if (!_runStepOneFrame('replay')) return false;" in src
+    assert "if (!_runCReplayFrame(tickMod)) break;" in src
+    assert re.search(r"if \(!_runStepOneFrame\('normal'\)\) \{\s*_markTickReturn\('skip:step-norun'\);\s*return;", src)
     assert "if (!_runStepOneFrame('fallback')) return;" in src
 
     fallback_idx = src.index("if (!_runStepOneFrame('fallback')) return;")

@@ -63,6 +63,7 @@
         LOCAL_CORE_URL = info.url;
         CORE_HASH = info.hash || '';
         window._knCoreHash = CORE_HASH;
+        window._knCoreWorkerHash = info.workerHash || '';
         console.log(`[core-redirector] Core URL resolved: ${LOCAL_CORE_URL} (size=${info.size}, hash=${CORE_HASH})`);
       } else {
         console.warn('[core-redirector] /api/core-info returned no URL — using fallback');

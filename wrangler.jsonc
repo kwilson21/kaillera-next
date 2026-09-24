@@ -1,0 +1,17 @@
+// Cloudflare deploy for the static rollback demo.
+//   python scripts/build_demo.py && npx wrangler deploy
+// Everything under dist/ is served as-is; there is no server-side code.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kaillera-next",
+  "compatibility_date": "2026-09-01",
+  // Cloudflare creates the DNS record and certificate for this hostname.
+  // It refuses if any other DNS record already exists for the name.
+  "routes": [{ "pattern": "kaillera-next.thesuperhuman.us", "custom_domain": true }],
+  // One canonical URL: no <name>.<account>.workers.dev address (or preview URLs).
+  "workers_dev": false,
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page",
+  },
+}

@@ -165,3 +165,24 @@ deploy-dry:
         fi
         echo "  $current → $major.$minor.$patch ($bump)"
     fi
+
+# Build the static rollback demo (dist/) and deploy it to Cloudflare.
+# Needs `npx wrangler login` once, or CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID.
+demo-deploy:
+    python3 scripts/build_demo.py
+    npx wrangler deploy
+
+# Serve the built demo locally exactly as Cloudflare will (http://localhost:8787)
+# The demo is static files, so don't load the repo's .env secrets into it.
+demo-dev port="8787":
+    python3 scripts/build_demo.py
+    CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false npx wrangler dev --port {{port}}
+
+# Smoke-check a running demo (default: local demo-dev). Needs `npx playwright install chromium` once.
+demo-check url="http://localhost:8787/":
+    node scripts/check_demo.mjs {{url}}
+
+# Two-player rollback match in two local browsers against a running server
+# (`just serve`). Needs the SSB64 US ROM; see tests/rb-two-player.mjs.
+two-player-test rom latency="50" seconds="60":
+    KN_ROM="{{rom}}" LAT={{latency}} BATTLE_SECONDS={{seconds}} node tests/rb-two-player.mjs

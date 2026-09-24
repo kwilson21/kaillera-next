@@ -45,7 +45,7 @@ diff --git a/mupen64plus-core/src/main/main.c b/mupen64plus-core/src/main/main.c
 index 3ef61a2..d755552 100644
 --- a/mupen64plus-core/src/main/main.c
 +++ b/mupen64plus-core/src/main/main.c
-@@ -129,6 +129,146 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
+@@ -129,6 +129,158 @@ uint32_t g_start_address = UINT32_C(0xa4000040);
  
  struct device g_dev;
  
@@ -147,6 +147,18 @@ index 3ef61a2..d755552 100644
 + * for desync diagnosis. Read-only — JS must not write through this view. */
 +EMSCRIPTEN_KEEPALIVE void *kn_get_rdram_ptr(void) { return g_dev.rdram.dram; }
 +EMSCRIPTEN_KEEPALIVE uint32_t kn_get_rdram_size(void) { return RDRAM_MAX_SIZE; }
++/* kaillera-next: VI register accessors for shadow worker frame readback.
++ * Used by the worker to read the active framebuffer from RDRAM directly
++ * (see web/static/rollback-shadow-worker.js readFramebuffer). The N64
++ * VI registers tell us where the framebuffer lives (VI_ORIGIN_REG),
++ * how wide it is (VI_WIDTH_REG), and what pixel format it uses
++ * (VI_STATUS_REG bits 0-1: 0=blank, 2=16-bit RGBA5551, 3=32-bit RGBA8888). */
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_origin(void) { return g_dev.vi.regs[VI_ORIGIN_REG]; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_width(void)  { return g_dev.vi.regs[VI_WIDTH_REG]; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_status(void) { return g_dev.vi.regs[VI_STATUS_REG]; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_x_scale(void) { return g_dev.vi.regs[VI_X_SCALE_REG]; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_y_scale(void) { return g_dev.vi.regs[VI_Y_SCALE_REG]; }
++EMSCRIPTEN_KEEPALIVE uint32_t kn_get_vi_v_sync(void)  { return g_dev.vi.regs[VI_V_SYNC_REG]; }
 +/* kaillera-next: Expose emulator struct addresses for JS-level state
 + * capture via HEAPU8. Called once at startup — no runtime malloc. */
 +EMSCRIPTEN_KEEPALIVE void kn_get_state_ptrs(uint32_t *out) {
@@ -192,7 +204,7 @@ index 3ef61a2..d755552 100644
  m64p_media_loader g_media_loader;
  
  int g_gs_vi_counter = 0;
-@@ -1687,7 +1830,7 @@ m64p_error main_run(void)
+@@ -1687,7 +1842,7 @@ m64p_error main_run(void)
                  no_compiled_jump,
                  randomize_interrupt,
                  g_start_address,

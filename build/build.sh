@@ -100,7 +100,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     cd "${SRC_DIR}/RetroArch"
     git checkout -- . 2>/dev/null || true
     if [ -f "${PATCHES_DIR}/retroarch-deterministic-timing.patch" ]; then
-        git apply "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
+        git apply --recount "${PATCHES_DIR}/retroarch-deterministic-timing.patch" && \
             echo "    Applied RetroArch patch" || \
             { echo "FATAL: RetroArch deterministic timing patch failed"; exit 1; }
     fi
@@ -112,14 +112,67 @@ if [ -d "${PATCHES_DIR}" ]; then
     # from that stack can turn a normal loading-frame fiber switch into a WASM
     # `unreachable` abort.
     # Override the Makefile variable directly instead of sed-patching the flags.
-    KN_ASYNCIFY_REMOVE='["retro_serialize","retro_unserialize","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
+    KN_ASYNCIFY_REMOVE='["retro_serialize","retro_unserialize","kn_pre_tick","kn_post_tick","kn_live_gameplay_hash","kn_sync_read_cpu","kn_sync_write_cpu","kn_rdram_block_hashes","kn_eventqueue_hash","kn_pack_hidden_state_impl","kn_post_state_load_cleanup","kn_hle_save_to","kn_hle_restore_from","kn_set_skip_audio_output","kn_get_skip_audio_output","kn_hash_registry_post_tick","kn_hash_on_replay_enter","kn_hash_on_replay_exit"]'
     sed -i "s|^ASYNCIFY_REMOVE ?=.*|ASYNCIFY_REMOVE ?= ${KN_ASYNCIFY_REMOVE}|" Makefile.emulatorjs
     echo "    Set ASYNCIFY_REMOVE=${KN_ASYNCIFY_REMOVE}"
 
     # Add C-level rollback exports to EXPORTED_FUNCTIONS
     if grep -q "_kn_sync_write_cpu" Makefile.emulatorjs && ! grep -q "_kn_rollback_init" Makefile.emulatorjs; then
-        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_rollback_slot_reset,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller,_kn_set_controller_present_mask, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
+        sed -i 's|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu|_kn_get_state_ptrs,_kn_sync_read_cpu,_kn_sync_write_cpu, \\\n                     _kn_rollback_init,_kn_feed_input,_kn_pre_tick,_kn_post_tick, \\\n                     _kn_get_pending_rollback,_kn_peek_pending_rollback,_kn_get_replay_depth,_kn_get_replay_start,_kn_get_state_for_frame,_kn_get_state_size,_kn_get_input,_kn_restore_frame, \\\n                     _kn_get_frame,_kn_get_rollback_count,_kn_get_prediction_count, \\\n                     _kn_get_correct_predictions,_kn_get_max_depth, \\\n                     _kn_rollback_self_test,_kn_get_debug_log,_kn_rollback_shutdown,_kn_rollback_slot_reset,_kn_set_rng_sync,_kn_set_num_players, \\\n                     _kn_full_state_hash,_kn_get_last_state,_kn_state_region_hashes,_kn_get_failed_rollbacks,_kn_get_softfloat_state,_kn_get_hidden_state_fingerprint,_kn_write_controller,_kn_set_controller_present_mask, \\\n                     _kn_game_state_hash,_kn_gameplay_hash,_kn_taint_rdram,_kn_get_taint_blocks,_kn_get_tainted_block_count,_kn_reset_taint,_kn_replay_self_test,_kn_get_rdram_ptr,_kn_get_rdram_size,_kn_get_mispred_breakdown,_kn_state_region_hashes_frame,_kn_get_rdram_offset_in_state,_kn_get_state_buffer_size,_kn_get_tolerance_hits,_kn_set_rdram_preserve,_kn_set_frame,_kn_set_rng_netplay_ptr,_kn_get_serialize_skip_count, \\\n                     _kn_rollback_did_restore,_kn_get_fatal_stale,_kn_get_live_mismatch,_kn_live_gameplay_hash,_kn_rdram_block_hashes,_kn_hle_save,_kn_hle_restore, \\\n                     _kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot,_kn_hle_save_to,_kn_hle_restore_from,_kn_hle_state_size,_kn_set_audio_fifo_state,_kn_get_audio_fifo_state,_kn_set_skip_audio_output,_kn_get_skip_audio_output|' Makefile.emulatorjs
         echo "    Added C-level rollback WASM exports"
+    fi
+    if grep -q "_kn_get_state_buffer_size" Makefile.emulatorjs && ! grep -q "_kn_set_state_backend" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_state_buffer_size,|_kn_get_state_buffer_size,_kn_set_state_backend,_kn_get_state_backend,_kn_get_split_state_stats,_kn_get_split_state_for_shadow,|' Makefile.emulatorjs
+        echo "    Added split-RDRAM state backend WASM exports"
+    elif grep -q "_kn_get_split_state_stats" Makefile.emulatorjs && ! grep -q "_kn_get_split_state_for_shadow" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_split_state_stats,|_kn_get_split_state_stats,_kn_get_split_state_for_shadow,|' Makefile.emulatorjs
+        echo "    Added shadow split-state WASM export"
+    fi
+    if grep -q "_kn_get_split_state_for_shadow" Makefile.emulatorjs && ! grep -q "_kn_apply_split_state_partial_with_aux" Makefile.emulatorjs; then
+        if grep -q "_kn_apply_split_state_partial" Makefile.emulatorjs; then
+            sed -i 's|_kn_apply_split_state_partial,|_kn_apply_split_state_partial_with_aux,_kn_apply_split_state_partial,|' Makefile.emulatorjs
+            echo "    Added aux selective state-adopt WASM export"
+        else
+            sed -i 's|_kn_get_split_state_for_shadow,|_kn_get_split_state_for_shadow,_kn_apply_split_state_partial_with_aux,_kn_apply_split_state_partial,_kn_clear_replay_state,|' Makefile.emulatorjs
+            echo "    Added selective state-adopt + replay-clear WASM exports"
+        fi
+    fi
+    if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_save_endpoint_state" Makefile.emulatorjs; then
+        sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_save_endpoint_state,|' Makefile.emulatorjs
+        echo "    Added save-endpoint WASM export"
+    fi
+    # Phase A1 delta-save measurement exports (diagnostic only).
+    # Anchored on _kn_get_split_state_stats — added by an earlier sed above.
+    if grep -q "_kn_get_split_state_stats" Makefile.emulatorjs && ! grep -q "_kn_get_delta_stats" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_split_state_stats,|_kn_get_split_state_stats,_kn_set_delta_phase,_kn_get_delta_phase,_kn_get_delta_stats,|' Makefile.emulatorjs
+        echo "    Added delta-save measurement WASM exports"
+    fi
+    # Phase A2 delta-restore + validation toggles. Anchored on _kn_get_delta_stats.
+    if grep -q "_kn_get_delta_stats" Makefile.emulatorjs && ! grep -q "_kn_set_delta_restore" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_delta_stats,|_kn_get_delta_stats,_kn_set_delta_restore,_kn_get_delta_restore,_kn_set_delta_validate,_kn_get_delta_validate,_kn_get_delta_mismatch_histogram,_kn_get_delta_last_mismatch,|' Makefile.emulatorjs
+        echo "    Added delta-restore + validation WASM exports"
+    fi
+    # Phase A3 sparse save toggle + slot reconstructor. Anchored on _kn_get_delta_last_mismatch.
+    if grep -q "_kn_get_delta_last_mismatch" Makefile.emulatorjs && ! grep -q "_kn_set_delta_save_sparse" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_delta_last_mismatch,|_kn_get_delta_last_mismatch,_kn_set_delta_save_sparse,_kn_get_delta_save_sparse,_kn_reconstruct_slot_full_into,|' Makefile.emulatorjs
+        echo "    Added sparse-save WASM exports"
+    fi
+    # Mode 2 apply experiment: toggle for skip-tainted-blocks behavior.
+    if grep -q "_kn_reconstruct_slot_full_into" Makefile.emulatorjs && ! grep -q "_kn_set_apply_skip_tainted" Makefile.emulatorjs; then
+        sed -i 's|_kn_reconstruct_slot_full_into,|_kn_reconstruct_slot_full_into,_kn_set_apply_skip_tainted,_kn_get_apply_skip_tainted,|' Makefile.emulatorjs
+        echo "    Added Mode 2 apply-skip-tainted toggle WASM exports"
+    fi
+    # Deferred-rollback mode for Mode 2 "true GGPO with worker" architecture.
+    # Anchored on _kn_clear_replay_state which is added by an earlier sed above.
+    if grep -q "_kn_clear_replay_state" Makefile.emulatorjs && ! grep -q "_kn_set_deferred_rollback" Makefile.emulatorjs; then
+        sed -i 's|_kn_clear_replay_state,|_kn_clear_replay_state,_kn_set_deferred_rollback,_kn_get_deferred_rollback,|' Makefile.emulatorjs
+        echo "    Added deferred-rollback WASM exports"
+    fi
+    # VI register accessors for shadow-worker framebuffer readback.
+    # Anchored on _kn_get_rdram_size which is already in the export list.
+    if grep -q "_kn_get_rdram_size" Makefile.emulatorjs && ! grep -q "_kn_get_vi_origin" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_rdram_size,|_kn_get_rdram_size,_kn_get_vi_origin,_kn_get_vi_width,_kn_get_vi_status,_kn_get_vi_x_scale,_kn_get_vi_y_scale,_kn_get_vi_v_sync,|' Makefile.emulatorjs
+        echo "    Added VI register WASM exports"
     fi
     if grep -q "_kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot" Makefile.emulatorjs && ! grep -q "_kn_restore_hidden_state_impl" Makefile.emulatorjs; then
         sed -i 's|_kn_pack_hidden_state_impl,_kn_restore_hidden_state_boot|_kn_pack_hidden_state_impl,_kn_restore_hidden_state_impl,_kn_restore_hidden_state_boot|' Makefile.emulatorjs
@@ -147,6 +200,23 @@ if [ -d "${PATCHES_DIR}" ]; then
     if grep -q "_kn_rdram_block_hashes" Makefile.emulatorjs && ! grep -q "_kn_get_diag_ksw_section" Makefile.emulatorjs; then
         sed -i 's|_kn_sync_write,_kn_rdram_block_hashes|_kn_sync_write,_kn_rdram_block_hashes,_kn_get_diag_ksw_section,_kn_get_diag_ksw_offset|' Makefile.emulatorjs
         echo "    Added kn_sync_write probe diagnostic exports"
+    fi
+
+    # True rollback netcode exports. Capability bit + flag setter; gates the
+    # split-input replay path in kn_pre_tick (LOCAL at rb.frame, REMOTE at
+    # replay_apply). JS uses the capability for cross-peer handshake.
+    if grep -q "_kn_get_tolerance_hits" Makefile.emulatorjs && ! grep -q "_kn_get_true_rollback_capability" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_tolerance_hits|_kn_get_tolerance_hits,_kn_get_true_rollback_capability,_kn_set_true_rollback|' Makefile.emulatorjs
+        echo "    Added true-rollback netcode WASM exports"
+    fi
+
+    # Runtime delay update — JS sizes DELAY_FRAMES to RTT/2 + jitter live so
+    # peer inputs land in front of the apply-frame deadline; no mispredict,
+    # no rollback, no replay pause. Without these exports the C engine ignores
+    # JS-side delay changes after kn_rollback_init.
+    if grep -q "_kn_set_true_rollback" Makefile.emulatorjs && ! grep -q "_kn_set_delay_frames" Makefile.emulatorjs; then
+        sed -i 's|_kn_set_true_rollback|_kn_set_true_rollback,_kn_set_delay_frames,_kn_get_delay_frames|' Makefile.emulatorjs
+        echo "    Added runtime delay-frames update WASM exports"
     fi
 
     # 2026-04-29 rollback-engine OOB-throw localization probes. Exports the
@@ -303,6 +373,32 @@ GLideN64/%.o ./GLideN64/%.o custom/GLideN64/%.o ./custom/GLideN64/%.o: CXXFLAGS 
         echo "    Keeping GLideN64 WASM SIMD (set KN_DISABLE_GLIDEN64_SIMD=1 to disable)"
     fi
 
+    # Rollback engine and state capture: always scalar WASM. The --denan pass
+    # (Stage 1b) wraps every v128 value in a check that zeroes the whole
+    # vector when any lane, read as f32, is NaN, and every negative int32 or
+    # 0xffffffff word is a NaN bit pattern. Inlined struct copies and
+    # memcpys become v128 loads/stores, so:
+    #   - kn_rollback.c: a remote input with a negative stick axis read back
+    #     as all zeros; the predictor mispredicted every frame (flicker).
+    #   - main.c kn_sync_read_cpu: the 64-byte PIF RAM copy dropped the
+    #     controller command bytes (0xff padding), so every rollback restore
+    #     started from a PIF state the original run never had and the first
+    #     replayed frame diverged. savestates.c has the same copies.
+    # Everything in src/main/ is state capture/admin code, not the hot loop.
+    if grep -q 'rollback engine scalar WASM' Makefile; then
+        echo "    Rollback engine SIMD already disabled"
+    elif grep -q '^CFLAGS      += $(CPUOPTS)' Makefile; then
+        sed -i '/^CFLAGS      += $(CPUOPTS)/a\
+\
+# kaillera-next: rollback engine scalar WASM (--denan zeroes int SIMD lanes), all of src/main.\
+mupen64plus-core/src/main/%.o ./mupen64plus-core/src/main/%.o: CFLAGS := $(filter-out -msimd128,$(CFLAGS)) -mno-simd128\
+' Makefile && \
+            echo "    Disabled WASM SIMD for src/main objects (rollback engine, state capture)" || \
+            { echo "FATAL: rollback engine SIMD disable sed failed"; exit 1; }
+    else
+        echo "FATAL: rollback engine SIMD disable anchor missing"; exit 1
+    fi
+
     # Diagnostic escape hatch: scalar WASM fixed one WebKit CSS rendering probe,
     # but it later reproduced a WebKit abort/freeze during recorded navigation.
     # Keep SIMD as the default path and only disable it for targeted graphics
@@ -379,6 +475,14 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
         git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
             echo "    WARN: headless tick patch failed"
+    fi
+
+    # Replay RDP skip: keep RSP/core/GL cadence alive, but skip GLideN64
+    # raster submission and framebuffer/depth copybacks while replay is masked.
+    if [ -f "${PATCHES_DIR}/mupen64plus-rdp-replay-skip.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-rdp-replay-skip.patch" && \
+            echo "    Applied GLideN64 replay RDP-skip patch" || \
+            echo "    WARN: GLideN64 replay RDP-skip patch failed"
     fi
     if grep -q "kn_apply_controller_present" libretro/libretro.c && \
         ! grep -q "kn_controller_present_mask" libretro/libretro.c; then
@@ -608,6 +712,23 @@ KNHLE_EOF
             || { echo "FATAL: inject-ksw-probes.py failed"; exit 1; }
     fi
 
+    # Diagnostic: bisect kn_sync_read_cpu by stamping kn_diag_rb_phase
+    # before each memcpy/sub-call so JS can pinpoint which one OOBs.
+    # Remove this hook and build/inject-sync-cpu-probes.py once the
+    # post-coproc-apply trap is fixed.
+    if [ -f "${SCRIPT_DIR}/inject-sync-cpu-probes.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-sync-cpu-probes.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-sync-cpu-probes.py failed"; exit 1; }
+    fi
+
+    # FIX: ensure kn_sync_write_cpu's savestates_load_set_pc actually
+    # updates r4300->pc. Cleared skip_jump+delay_slot pre-call, validates
+    # post-call and falls back to interp_PC if pc is past 2GB.
+    if [ -f "${SCRIPT_DIR}/inject-sync-cpu-write-fix.py" ]; then
+        python3 "${SCRIPT_DIR}/inject-sync-cpu-write-fix.py" "${SRC_DIR}/mupen64plus-libretro-nx" \
+            || { echo "FATAL: inject-sync-cpu-write-fix.py failed"; exit 1; }
+    fi
+
     # static save scratch: replace malloc/free in savestates_save_m64p with
     # a static reusable buffer. retro_serialize is called 60×/sec by the
     # rollback engine; the malloc was suspected to cause WASM heap growth.
@@ -640,7 +761,7 @@ KNHLE_EOF
     if [ -f "${PATCHES_DIR}/gliden64-pbo-scope.patch" ]; then
         git apply "${PATCHES_DIR}/gliden64-pbo-scope.patch" && \
             echo "    Applied GLideN64 PBO scope patch" || \
-            echo "    WARN: GLideN64 PBO scope patch failed"
+            { echo "FATAL: GLideN64 PBO scope patch failed"; exit 1; }
     fi
 
     # C-level rollback engine: copy kn_rollback.c/h into the source tree
