@@ -88,10 +88,21 @@ def main() -> None:
     # core-redirector.js asks /api/core-info for a content-hashed core URL so
     # browsers never run a stale core. Compute it once at build time instead.
     core_hash = hashlib.sha256((WEB / CORE).read_bytes()).hexdigest()[:16]
+    # The Mode 2 worker loads the standalone core; version it by all three
+    # files (same as server/src/api/app.py).
+    worker = hashlib.sha256()
+    for name in ("mupen64plus_next-wasm.data", "mupen64plus_next_libretro.js", "mupen64plus_next_libretro.wasm"):
+        worker.update((WEB / CORE).with_name(name).read_bytes())
     (DIST / "api").mkdir()
     (DIST / "api" / "core-info").write_text(
         json.dumps(
-            {"url": f"/{CORE}?h={core_hash}", "hash": core_hash, "size": (WEB / CORE).stat().st_size, "available": True}
+            {
+                "url": f"/{CORE}?h={core_hash}",
+                "hash": core_hash,
+                "workerHash": worker.hexdigest()[:16],
+                "size": (WEB / CORE).stat().st_size,
+                "available": True,
+            }
         )
     )
 
