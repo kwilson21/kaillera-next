@@ -575,7 +575,8 @@
 
   // No input-lag simulation here: the engine applies every player's input,
   // yours included, `delay` frames after it's read, so each mode's delay is
-  // real — rollback's small jitter-sized delay, lockstep's RTT/2 + jitter.
+  // real — rollback's small delay (the trip minus the rollback budget),
+  // lockstep's whole trip.
 
   // Wrap KNShared.readLocalInput once. In record mode, capture inputs to a
   // buffer indexed by current engine frame. Otherwise, replay scripted inputs

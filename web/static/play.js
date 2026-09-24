@@ -122,6 +122,40 @@
     return 'ssb64'; // default fallback
   };
 
+  // ROM drop-zone status line. Every "Loaded: …" update goes through
+  // _setRomStatus so a ROM missing from the known_roms table is flagged no
+  // matter how it was loaded (drop, library, host transfer). Only SHA-256
+  // hashes can be checked (the FNV fallback on insecure origins never
+  // matches), and nothing is flagged until the table has loaded.
+  let _romStatusText = '';
+  let _warnedRomHash = null; // toast once per ROM
+
+  const _isUnsupportedRom = () =>
+    !!_romHash && _romHash[0] === 'S' && Object.keys(_knownRoms).length > 0 && !_knownRoms[_romHash];
+
+  const _supportedRomNames = () =>
+    [...new Set(Object.values(_knownRoms).map((r) => (r.region ? `${r.game} (${r.region})` : r.game)))].join(', ');
+
+  const _renderRomStatus = () => {
+    const statusEl = document.getElementById('rom-status');
+    const unsupported = _isUnsupportedRom();
+    if (statusEl) {
+      statusEl.textContent = unsupported
+        ? `${_romStatusText} \u2014 not a supported ROM, it may not work`
+        : _romStatusText;
+      statusEl.classList.toggle('rom-unsupported', unsupported);
+    }
+    if (unsupported && _warnedRomHash !== _romHash) {
+      _warnedRomHash = _romHash;
+      showToast(`Unsupported ROM \u2014 supported: ${_supportedRomNames()}`);
+    }
+  };
+
+  const _setRomStatus = (text) => {
+    _romStatusText = text;
+    _renderRomStatus();
+  };
+
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
   let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
   let _romTransferState = 'idle'; // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
@@ -2247,7 +2281,7 @@
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.add('loaded');
-    if (statusEl) statusEl.textContent = `Loaded: ${displayName} (from host)`;
+    if (statusEl) _setRomStatus(`Loaded: ${displayName} (from host)`);
 
     updateRomSharingUI();
 
@@ -2757,7 +2791,7 @@
         });
         if (ok) {
           ctx.drop.classList.add('loaded');
-          if (ctx.statusEl) ctx.statusEl.textContent = `Loaded: ${name} (drop to change)`;
+          if (ctx.statusEl) _setRomStatus(`Loaded: ${name} (drop to change)`);
           if (_pendingLateJoin) dismissLateJoinPrompt();
         } else if (ctx.savedRom && ctx.statusEl) {
           ctx.statusEl.textContent = `Last used: ${ctx.savedRom} (file not cached — drop again)`;
@@ -2817,7 +2851,12 @@
     const drop = document.getElementById('rom-drop');
     if (drop) drop.classList.add('loaded');
     const statusEl = document.getElementById('rom-status');
-    if (statusEl) statusEl.textContent = `Loaded: ${displayName}`;
+    _romStatusText = `Loaded: ${displayName}`;
+    if (statusEl) {
+      // _romHash still belongs to the previous ROM here; re-rendered once hashed
+      statusEl.textContent = _romStatusText;
+      statusEl.classList.remove('rom-unsupported');
+    }
 
     // Enable ROM sharing checkbox if host
     const romShareCb = document.getElementById('opt-rom-sharing');
@@ -2862,6 +2901,7 @@
         if (isHost && _gameId && _gameId !== 'ssb64') {
           socket.emit('set-game-id', { game_id: _gameId });
         }
+        _renderRomStatus();
       } catch (err) {
         console.log('[play] hash failed:', err);
         KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
@@ -2956,7 +2996,7 @@
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
-    if (statusEl) statusEl.textContent = 'Drop or click to load ROM';
+    if (statusEl) _setRomStatus('Drop or click to load ROM');
   };
 
   // Hashes are prefixed with 'S' (SHA-256) or 'F' (FNV-1a).
@@ -3204,7 +3244,7 @@
               const drop = document.getElementById('rom-drop');
               const statusEl = document.getElementById('rom-status');
               if (drop) drop.classList.add('loaded');
-              if (statusEl) statusEl.textContent = `Loaded: ${name}`;
+              if (statusEl) _setRomStatus(`Loaded: ${name}`);
               renderRomLibrary();
             }
           });
@@ -3271,7 +3311,7 @@
         const drop = document.getElementById('rom-drop');
         const statusEl = document.getElementById('rom-status');
         if (drop) drop.classList.add('loaded');
-        if (statusEl) statusEl.textContent = `Loaded: ${displayName}`;
+        if (statusEl) _setRomStatus(`Loaded: ${displayName}`);
         if (_pendingLateJoin) dismissLateJoinPrompt();
       }
     });
@@ -5056,6 +5096,7 @@
         if (_romHash) {
           _gameId = _gameIdFromHash(_romHash);
           KNState.gameId = _gameId;
+          if (_romStatusText) _renderRomStatus();
         }
         updateHostRomInfo();
         // Retroactively verify any cached ROMs that were stored before

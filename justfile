@@ -181,3 +181,8 @@ demo-dev port="8787":
 # Smoke-check a running demo (default: local demo-dev). Needs `npx playwright install chromium` once.
 demo-check url="http://localhost:8787/":
     node scripts/check_demo.mjs {{url}}
+
+# Two-player rollback match in two local browsers against a running server
+# (`just serve`). Needs the SSB64 US ROM; see tests/rb-two-player.mjs.
+two-player-test rom latency="50" seconds="60":
+    KN_ROM="{{rom}}" LAT={{latency}} BATTLE_SECONDS={{seconds}} node tests/rb-two-player.mjs
