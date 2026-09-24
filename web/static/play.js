@@ -1840,7 +1840,8 @@
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
   const startRomTransferTo = (peerSid) => {
-    if (!_romBlob || !isHost) return;
+    // A server with ROM sharing off never sends a ROM, on any connection.
+    if (!_ROM_SHARING_FEATURE || !_romBlob || !isHost) return;
     if (_romBlob.size > ROM_MAX_SIZE) {
       console.log('[play] ROM too large to share:', _romBlob.size);
       return;
@@ -1996,7 +1997,7 @@
 
   const onExtraDataChannel = (remoteSid, channel) => {
     if (channel.label !== 'rom-transfer') return;
-    if (_romSharingDecision !== 'accepted') {
+    if (!_ROM_SHARING_FEATURE || _romSharingDecision !== 'accepted') {
       channel.close();
       return;
     }

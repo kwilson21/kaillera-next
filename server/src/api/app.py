@@ -44,6 +44,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
 from src import db, state, state_cache
+from src.api import turn
 from src.api.og import (
     _ROM_SHARING_RAW,
     _inject_kn_config,
@@ -631,7 +632,7 @@ def create_app(lifespan=None) -> FastAPI:
         return {"version": _asset_version()}
 
     @app.get("/ice-servers")
-    def ice_servers(request: Request) -> list:
+    async def ice_servers(request: Request) -> list:
         if not check_ip(_client_ip(request), "ice-servers"):
             raise HTTPException(status_code=429, detail="Rate limited")
 
@@ -655,6 +656,13 @@ def create_app(lifespan=None) -> FastAPI:
                 return json.loads(legacy)
             except json.JSONDecodeError:
                 log.warning("ICE_SERVERS env var contains invalid JSON")
+
+        # Cloudflare Realtime TURN (managed): short-lived generated credentials.
+        # If Cloudflare can't supply any, fall through to the HMAC TURN path.
+        if turn.configured():
+            cf_turn = await turn.ice_servers()
+            if cf_turn:
+                return stun_servers + cf_turn
 
         # Generate HMAC time-limited TURN credentials
         turn_secret = os.environ.get("TURN_SECRET", "")

@@ -67,6 +67,7 @@ import socketio
 
 from src import db, state
 from src.api import desync_vision
+from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
     ClaimSlotPayload,
     DeviceTypePayload,
@@ -328,7 +329,7 @@ def _players_payload(room: Room) -> dict:
             for pid, info in room.spectators.items()
         },
         "owner": room.owner,
-        "romSharing": room.rom_sharing,
+        "romSharing": _room_rom_sharing(room),
         "romHash": room.rom_hash,
         "romName": room.rom_name,
         "rom_name": room.rom_name,
@@ -537,6 +538,9 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 
+_sid_host: dict[str, str] = {}  # sid -> Host header it connected with
+
+
 @sio.event
 async def connect(sid: str, environ: dict) -> None:
     ip = extract_ip(environ)
@@ -545,6 +549,7 @@ async def connect(sid: str, environ: dict) -> None:
     if not check_ip(ip, "connect"):
         raise socketio.exceptions.ConnectionRefusedError("Rate limited")
     register_sid(sid, ip)
+    _sid_host[sid] = environ.get("HTTP_HOST", "")
     log.info("SIO connect %s (ip=%s)", sid, ip)
 
 
@@ -706,7 +711,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         resp["status"] = room.status
         resp["mode"] = room.mode
         resp["rom_hash"] = room.rom_hash
-        resp["rom_sharing"] = room.rom_sharing
+        resp["rom_sharing"] = _room_rom_sharing(room)
         if room.match_id:
             resp["matchId"] = room.match_id
         return (None, resp)
@@ -745,7 +750,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     resp["status"] = room.status
     resp["mode"] = room.mode
     resp["rom_hash"] = room.rom_hash
-    resp["rom_sharing"] = room.rom_sharing
+    resp["rom_sharing"] = _room_rom_sharing(room)
     if room.match_id:
         resp["matchId"] = room.match_id
     return (None, resp)
@@ -856,7 +861,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
 
     # Streaming: host runs the only emulator; guests don't need a ROM.
     # Rollback: every player must have a ROM loaded (or host is sharing).
-    if mode != "streaming" and not room.rom_sharing:
+    if mode != "streaming" and not _room_rom_sharing(room):
         for info in room.players.values():
             if info["socketId"] not in room.rom_ready:
                 return "Not all players have a ROM loaded"
@@ -1008,6 +1013,26 @@ async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
     return None
 
 
+def _rom_sharing_allowed(sid: str | None) -> bool:
+    """Whether ROM_SHARING_ENABLED allows P2P ROM transfer for this socket.
+
+    Same rule the page uses (feature_enabled_for_host on the Host the socket
+    connected with), enforced here too: a client could send the events even
+    though the page hides the toggle. "false" refuses everywhere.
+    """
+    raw = os.environ.get("ROM_SHARING_ENABLED", "true")
+    return feature_enabled_for_host(raw, _sid_host.get(sid or "", ""))
+
+
+def _room_rom_sharing(room: Room) -> bool:
+    """room.rom_sharing, unless this server doesn't allow it for the host.
+
+    A room restored from Redis can carry a flag set before sharing was
+    turned off; it must not advertise sharing or skip the ROM check.
+    """
+    return room.rom_sharing and _rom_sharing_allowed(room.owner)
+
+
 @sio.on("rom-sharing-toggle")
 @validated(RomSharingTogglePayload)
 async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str | None:
@@ -1020,6 +1045,8 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
         session_id, room = result
         if room.owner != sid:
             return "Only the host can toggle ROM sharing"
+        if payload.enabled and not _rom_sharing_allowed(sid):
+            return "ROM sharing is disabled on this server"
 
         room.rom_sharing = payload.enabled
         await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
@@ -1157,6 +1184,13 @@ async def webrtc_signal(sid: str, data: dict) -> None:
 
 @sio.on("rom-signal")
 async def rom_signal(sid: str, data: dict) -> None:
+    # Relay only while the sender's room is actually sharing (host enabled it
+    # on a host this server allows). Keyed on the room, not the sender, so a
+    # guest on another hostname can still answer the host's offer.
+    entry = _sid_to_room.get(sid)
+    room = rooms.get(entry[0]) if entry else None
+    if room is None or not _room_rom_sharing(room):
+        return
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
@@ -1472,6 +1506,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
 async def disconnect(sid: str) -> None:
     log.info("SIO disconnect %s", sid)
     unregister_sid(sid)
+    _sid_host.pop(sid, None)
     _drop_byte_history(sid)
     if _shutting_down:
         return

@@ -33,6 +33,10 @@ _LIMITS: dict[str, tuple[int, float]] = {
     # unknown room codes burns through the miss budget fast, while
     # legitimate polling of an existing room stays under "room-lookup".
     "room-lookup-miss": (5, 60),
+    # A page fetches ICE servers once per room join. Generous because players
+    # can share an IP (LAN, carrier NAT); Cloudflare calls are bounded by
+    # turn.py's cache and failure backoff, not by this.
+    "ice-servers": (60, 60),
     "webrtc-signal": (60, 1),
     "input": (120, 1),
     "rom-signal": (60, 1),
