@@ -97,7 +97,14 @@ INSTRUMENTED = """EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read_cpu(uint8_t *buf, u
     kn_diag_rb_phase = 223; memcpy(p, dev->dp.dpc_regs, sizeof(dev->dp.dpc_regs)); p += sizeof(dev->dp.dpc_regs);
     kn_diag_rb_phase = 224; memcpy(p, dev->dp.dps_regs, sizeof(dev->dp.dps_regs)); p += sizeof(dev->dp.dps_regs);
     kn_diag_rb_phase = 225; { uint8_t dp_unf = dev->dp.do_on_unfreeze; *p++ = dp_unf; }
-    kn_diag_rb_phase = 226;
+    /* PIF channel table (tx offset into pif.ram per channel, -1 = off),
+     * as savestates.c stores it. kn_sync_write_cpu used to rebuild it with
+     * setup_channels_format() from the saved PIF RAM, which by then holds
+     * the previous responses and parses to a different table (ports 3-4
+     * dropped). The next controller poll then diverged from the original
+     * run on the first frame after every rollback restore. */
+    kn_diag_rb_phase = 226; for (i = 0; i < PIF_CHANNELS_COUNT; ++i) { *p++ = (uint8_t)((dev->pif.channels[i].tx == NULL) ? (int8_t)-1 : (int8_t)(dev->pif.channels[i].tx - dev->pif.ram)); }
+    kn_diag_rb_phase = 227;
     /* Diagnostic: verify r4300->pc is a sane host pointer before returning.
      * If it's an N64-virtual-address-shaped value (high bit set, looks like
      * 0x80...), kn_sync_write_cpu's savestates_load_set_pc (called via

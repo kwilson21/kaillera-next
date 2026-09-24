@@ -373,22 +373,27 @@ GLideN64/%.o ./GLideN64/%.o custom/GLideN64/%.o ./custom/GLideN64/%.o: CXXFLAGS 
         echo "    Keeping GLideN64 WASM SIMD (set KN_DISABLE_GLIDEN64_SIMD=1 to disable)"
     fi
 
-    # Rollback engine: always scalar WASM. The --denan pass (Stage 1b) wraps
-    # every v128 value in a check that zeroes the whole vector when any lane,
-    # read as f32, is NaN. Every negative int32 is a NaN bit pattern, so a
-    # vectorized copy of an input struct holding a negative stick axis came
-    # back as all zeros. The engine's predictor then guessed a released stick
-    # for a held one, mispredicted every frame, and rolled back repeatedly
-    # (visible as character flicker). Integer data only needs scalar code.
+    # Rollback engine and state capture: always scalar WASM. The --denan pass
+    # (Stage 1b) wraps every v128 value in a check that zeroes the whole
+    # vector when any lane, read as f32, is NaN, and every negative int32 or
+    # 0xffffffff word is a NaN bit pattern. Inlined struct copies and
+    # memcpys become v128 loads/stores, so:
+    #   - kn_rollback.c: a remote input with a negative stick axis read back
+    #     as all zeros; the predictor mispredicted every frame (flicker).
+    #   - main.c kn_sync_read_cpu: the 64-byte PIF RAM copy dropped the
+    #     controller command bytes (0xff padding), so every rollback restore
+    #     started from a PIF state the original run never had and the first
+    #     replayed frame diverged. savestates.c has the same copies.
+    # Everything in src/main/ is state capture/admin code, not the hot loop.
     if grep -q 'rollback engine scalar WASM' Makefile; then
         echo "    Rollback engine SIMD already disabled"
     elif grep -q '^CFLAGS      += $(CPUOPTS)' Makefile; then
         sed -i '/^CFLAGS      += $(CPUOPTS)/a\
 \
-# kaillera-next: rollback engine scalar WASM (--denan zeroes int SIMD lanes).\
-mupen64plus-core/src/main/kn_%.o ./mupen64plus-core/src/main/kn_%.o: CFLAGS := $(filter-out -msimd128,$(CFLAGS)) -mno-simd128\
+# kaillera-next: rollback engine scalar WASM (--denan zeroes int SIMD lanes), all of src/main.\
+mupen64plus-core/src/main/%.o ./mupen64plus-core/src/main/%.o: CFLAGS := $(filter-out -msimd128,$(CFLAGS)) -mno-simd128\
 ' Makefile && \
-            echo "    Disabled WASM SIMD for rollback engine objects" || \
+            echo "    Disabled WASM SIMD for src/main objects (rollback engine, state capture)" || \
             { echo "FATAL: rollback engine SIMD disable sed failed"; exit 1; }
     else
         echo "FATAL: rollback engine SIMD disable anchor missing"; exit 1

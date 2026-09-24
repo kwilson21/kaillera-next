@@ -33,6 +33,14 @@ ORIGINAL_TAIL = (
 # string to avoid Python parsing C syntax inside the literal.
 INSTRUMENTED_TAIL = (
     "setup_channels_format(&dev->pif); "
+    "/* SYNC-CPU-WRITE-FIX: restore the saved PIF channel table (written by "
+    "kn_sync_read_cpu after do_on_unfreeze) instead of the one re-parsed "
+    "from PIF RAM, as savestates.c does. Older buffers without it keep "
+    "the re-parsed table. */ "
+    "if (p + PIF_CHANNELS_COUNT <= buf + size) { for (i = 0; i < PIF_CHANNELS_COUNT; ++i) { "
+    "int8_t off = (int8_t)*p++; "
+    "if (off >= 0) setup_pif_channel(&dev->pif.channels[i], dev->pif.ram + off); "
+    "else disable_pif_channel(&dev->pif.channels[i]); } } "
     "{ uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); "
     "set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); "
     "update_x86_rounding_mode(&dev->r4300.cp1); "
