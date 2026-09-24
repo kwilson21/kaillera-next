@@ -5,9 +5,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "kaillera-next",
   "compatibility_date": "2026-09-01",
-  // Cloudflare creates the DNS record and certificate for this hostname.
-  // It refuses if any other DNS record already exists for the name.
-  "routes": [{ "pattern": "kaillera-next.thesuperhuman.us", "custom_domain": true }],
+  // No routes: kaillera-next.thesuperhuman.us belongs to the game server
+  // (deploy/vps, via Cloudflare Tunnel), which serves the site, /play and
+  // the API. A custom-domain route here would take the whole hostname back.
   // One canonical URL: no <name>.<account>.workers.dev address (or preview URLs).
   "workers_dev": false,
   "assets": {

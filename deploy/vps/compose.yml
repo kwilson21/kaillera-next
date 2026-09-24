@@ -1,0 +1,65 @@
+# Single-VPS production stack: `docker compose` (not swarm), built from this
+# checkout. No port is published: the only way in is the Cloudflare Tunnel
+# (cloudflared dials out), so the VPS firewall allows no inbound traffic.
+#
+# Secrets come from /etc/kaillera-next/env (root-only, written on the VPS by
+# cloud-init; see deploy/vps/README.md), passed as
+#   docker compose --env-file /etc/kaillera-next/env -f deploy/vps/compose.yml ...
+# Each service gets only the values it needs. Nothing secret lives here.
+name: kaillera-next
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: sh -c 'exec redis-server --save 60 1 --loglevel warning --requirepass "$$REDIS_PASSWORD"'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    mem_limit: 256m
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ../..
+    environment:
+      ADMIN_KEY: ${ADMIN_KEY:?}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+      IP_HASH_SALT: ${IP_HASH_SALT:?}
+      CF_TURN_KEY_ID: ${CF_TURN_KEY_ID:-}
+      CF_TURN_API_TOKEN: ${CF_TURN_API_TOKEN:-}
+      ALLOWED_ORIGIN: https://${KN_HOSTNAME:-kaillera-next.thesuperhuman.us}
+      REDIS_HOST: redis
+      DB_PATH: /app/server/data/kn.db
+      # Only cloudflared can reach the app, so its forwarded headers are trusted.
+      TRUSTED_PROXY_IPS: '*'
+      # Hard rule: the public site never transfers ROMs between players.
+      ROM_SHARING_ENABLED: 'false'
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - kaillera-logs:/app/server/logs
+      - kaillera-data:/app/server/data
+    stop_grace_period: 30s
+    mem_limit: 2g
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?}
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  kaillera-logs:
+  kaillera-data:
+  redis-data:

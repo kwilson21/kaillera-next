@@ -1,0 +1,65 @@
+#cloud-config
+# First boot of the kaillera-next VPS (Ubuntu 24.04). Rendered by
+# deploy/vps/deploy.py, which fills the @@...@@ values from its own
+# environment; the template itself holds no secrets.
+#
+# Result: Docker, a clone of the repo at /opt/kaillera-next, the stack from
+# deploy/vps/compose.yml running, and kn-update.timer pulling main every
+# 5 minutes. Server-only secrets (ADMIN_KEY, REDIS_PASSWORD, IP_HASH_SALT)
+# are generated here and never leave the machine.
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/kaillera-next/delivered.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      TUNNEL_TOKEN=@@TUNNEL_TOKEN@@
+      CF_TURN_KEY_ID=@@CF_TURN_KEY_ID@@
+      CF_TURN_API_TOKEN=@@CF_TURN_API_TOKEN@@
+      KN_HOSTNAME=@@KN_HOSTNAME@@
+  - path: /etc/systemd/system/kn-update.service
+    content: |
+      [Unit]
+      Description=Deploy kaillera-next main if it moved
+      After=docker.service network-online.target
+      Wants=network-online.target
+      Requires=docker.service
+      [Service]
+      Type=oneshot
+      Environment=KN_BRANCH=@@KN_BRANCH@@
+      ExecStart=/bin/sh /opt/kaillera-next/deploy/vps/kn-update.sh
+  - path: /etc/systemd/system/kn-update.timer
+    content: |
+      [Unit]
+      Description=Check kaillera-next for updates every 5 minutes
+      [Timer]
+      OnBootSec=1min
+      OnUnitActiveSec=5min
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - [sh, -c, 'curl -fsSL https://get.docker.com | sh']
+  - [git, clone, --branch, '@@KN_BRANCH@@', 'https://github.com/kwilson21/kaillera-next.git', /opt/kaillera-next]
+  - - sh
+    - -c
+    - |
+      set -eu
+      umask 077
+      gen() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+      {
+        cat /etc/kaillera-next/delivered.env
+        echo "ADMIN_KEY=$(gen)"
+        echo "REDIS_PASSWORD=$(gen)"
+        echo "IP_HASH_SALT=$(gen)"
+      } > /etc/kaillera-next/env
+      rm /etc/kaillera-next/delivered.env
+  - [systemctl, daemon-reload]
+  - [/bin/sh, /opt/kaillera-next/deploy/vps/kn-update.sh, --force]
+  - [systemctl, enable, --now, kn-update.timer]
