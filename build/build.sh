@@ -1004,7 +1004,7 @@ echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 # (see Stage 1b below). Here we only run fix-denan.py to change
 # NaN→0 replacements to NaN→canonical NaN (preserving isnan() semantics).
 echo "==> Stage 4b: Patching denan sites (NaN→0 → NaN→canonical)"
-python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
+KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD}" python3 "${SCRIPT_DIR}/fix-denan.py" "${WASM_FILE}"
 
 # ============================================================
 # Stage 5: Package into 7z .data archive

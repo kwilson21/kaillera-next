@@ -17,6 +17,7 @@ so the stock helper zeroed that data and canonical NaN would clobber it
 input unchanged. Floats that can reach game state go through SoftFloat, and
 GLideN64 is compiled without SIMD, so no v128 float NaN needs canonicalizing.
 """
+import os
 import sys
 
 def patch_denan(data):
@@ -40,8 +41,10 @@ def patch_denan(data):
     # (if (result v128) <all four f32 lanes == themselves> (then local.get 0)
     # (else v128.const 0)))`. Replace its else branch with `local.get 0` plus
     # 16 nops (same byte length), so the helper is the identity. Match it by
-    # its lane-check prefix so no other `else v128.const 0` is touched, and
-    # fail the build if it is not found exactly once.
+    # its lane-check prefix so no other `else v128.const 0` is touched. A
+    # scalar build (KN_DISABLE_WASM_SIMD=1, passed by build.sh) has no v128
+    # values and no helper. Otherwise the build fails unless it finds
+    # exactly one.
     lane_check = bytes([0x20, 0x00, 0xFD, 0x1F, 0x00, 0x20, 0x00, 0xFD, 0x1F, 0x00, 0x5B])
     v128_identity = bytes([0x05, 0x20, 0x00] + [0x01] * 16 + [0x0B])
     hits = []
@@ -51,10 +54,12 @@ def patch_denan(data):
         if j >= 0:
             hits.append(j)
         i = result.find(lane_check, i + 1)
-    if len(hits) != 1:
-        raise SystemExit(f"fix-denan.py: expected 1 v128 denan helper, found {len(hits)}")
-    result[hits[0]:hits[0] + len(v128_identity)] = v128_identity
-    counts['v128'] = 1
+    expected = 0 if os.environ.get("KN_DISABLE_WASM_SIMD") == "1" else 1
+    if len(hits) != expected:
+        raise SystemExit(f"fix-denan.py: expected {expected} v128 denan helper(s), found {len(hits)}")
+    for h in hits:
+        result[h:h + len(v128_identity)] = v128_identity
+    counts['v128'] = len(hits)
 
     for name, pat, rep in [('f32', f32_pat, f32_rep),
                             ('f64', f64_pat, f64_rep)]:
