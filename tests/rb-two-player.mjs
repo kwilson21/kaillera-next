@@ -247,9 +247,26 @@ fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
 await browser.close();
 // A freeze makes deep mispredictions and skipped rollbacks expected before
-// the resync; what must hold is that the resync happened and fixed it.
+// the resync; what must hold is that the resync happened, fixed it, and held:
+// no integrity events once recovery settled (each peer's lines after its last
+// recovery marker, 30+ frames past the resync; late pre-resync inputs can
+// still land just after it), and a meaningful window of matching frames.
+const POST_RECOVERY_MIN_FRAMES = 120;
+const integrityAfterRecovery = (log, marker) => {
+  const lines = log.split('\n');
+  let from = -1;
+  lines.forEach((l, i) => { if (marker.test(l)) from = i; });
+  return from < 0 ? 0 : lines.slice(from + 1).filter((l) => {
+    const f = +(l.split('\t')[2] || '').replace('f=', '');
+    return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
+  }).length;
+};
+const postRecoveryIntegrity = FREEZE_MS > 0
+  ? integrityAfterRecovery(H.sync, /coord sync dispatch/) + integrityAfterRecovery(G.sync, /sync #\d+ applied/)
+  : 0;
+if (FREEZE_MS > 0) console.log('post-recovery integrity events:', postRecoveryIntegrity, 'battle frames compared:', battleCompared);
 const integrityFailed = FREEZE_MS > 0
-  ? !Number.isFinite(recoveredAt)
+  ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
   : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
 const failed = gpMis > 0 || gsMis > 0 || integrityFailed
   || H.inBattleAt < 0 || G.inBattleAt < 0 || battleCoverage < 0.8;

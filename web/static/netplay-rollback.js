@@ -12486,16 +12486,18 @@
   // in rollback mode `sync-request(-full)-at:` requests (peer-recovery
   // resync) were scheduled and never sent.
   //
-  // `confirmed`: the host's state at this frame is final, not built on
+  // `isConfirmed()`: the host's state at this frame is final, not built on
   // predicted inputs that a later rollback would change. A guest that
-  // applied a speculative state would diverge again.
+  // applied a speculative state would diverge again. Only called when a
+  // request is pending.
   //
   // I1 (MF3): each request has a wall-clock deadline. If the target frame
   // (or a confirmed state) can't be reached before it, the request is
   // dispatched NOW at the current frame instead. This closes the
   // coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
-  const _dispatchScheduledSyncs = (confirmed) => {
+  const _dispatchScheduledSyncs = (isConfirmed) => {
     if (_playerSlot !== 0 || _scheduledSyncRequests.length === 0 || _pushingSyncState) return;
+    const confirmed = isConfirmed();
     const _coordNow = performance.now();
     const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
     const due = _scheduledSyncRequests.filter((r) => (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r));
@@ -12522,15 +12524,26 @@
 
   // True when the host's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
-  // before _frameNum applied inputs up to _frameNum - 1 - DELAY_FRAMES, so
-  // each live peer's input must have arrived through that frame and been
-  // fed to C (a queued one could still trigger a rollback).
+  // before _frameNum applied inputs up to _frameNum - 1 - DELAY_FRAMES. An
+  // input older than the rollback window can no longer change the state, so
+  // each live peer needs every input in the window up to that frame present
+  // (the newest received frame alone can hide a gap) and fed to C (a queued
+  // one could still trigger a rollback).
   const _hostStateConfirmed = (mod) => {
     if (mod?._kn_get_replay_depth?.() > 0) return false;
-    if (mod?._kn_get_pending_rollback?.() >= 0) return false;
+    if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
-    return getInputPeers().every((p) => _peerPhantom[p.slot] || (_lastRemoteFramePerSlot[p.slot] ?? -1) >= lastUsed);
+    const firstInWindow = Math.max(0, lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES);
+    for (const p of getInputPeers()) {
+      if (_peerPhantom[p.slot]) continue;
+      const got = _remoteInputs[p.slot];
+      if (!got) return false;
+      for (let f = firstInWindow; f <= lastUsed; f++) {
+        if (got[f] === undefined || got[f] === KNShared.ZERO_INPUT) return false;
+      }
+    }
+    return true;
   };
 
   // Our own tick loop freezing (both tabs of a busy machine, a debugger, a
@@ -12564,6 +12577,10 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    // Deadline-only pass: a tick that stalls returns before the per-frame
+    // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
+    // mid-replay, where the live state isn't at a frame boundary.
+    if (!(window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0)) _dispatchScheduledSyncs(() => false);
     if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');
     _checkStateTransition();
     _chk('post-state-transition');
@@ -14399,7 +14416,7 @@
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
         _flushPendingMatchInputReset('post-c-tick');
-        _dispatchScheduledSyncs(_hostStateConfirmed(tickMod));
+        _dispatchScheduledSyncs(() => _hostStateConfirmed(tickMod));
         const _tTotal = performance.now();
         _pushTickProfile({
           f: _frameNum,
@@ -15757,7 +15774,7 @@
       KNEvent('milestone_reached', '', { frame: 1800 });
     }
 
-    _dispatchScheduledSyncs(true);
+    _dispatchScheduledSyncs(() => true);
 
     // (Deferred sync check removed — frame hash computes live, no deferral needed.)
 
