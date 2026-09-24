@@ -12539,8 +12539,17 @@
       }
       return ok;
     };
+    // A follow-up (below) goes out only with a confirmed state; past its
+    // deadline it is dropped instead (I1).
+    for (const r of _scheduledSyncRequests) {
+      if (r.confirmedOnly && pastDeadline(r)) _syncLog(`coord sync follow-up dropped: never confirmed`);
+    }
+    _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !(r.confirmedOnly && pastDeadline(r)));
     const due = _scheduledSyncRequests.filter(
-      (r) => ((confirmed && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
+      (r) =>
+        (r.confirmedOnly
+          ? confirmed && r.targetFrame <= _frameNum
+          : (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
     );
     if (due.length === 0) return;
     for (const r of due) {
@@ -12561,6 +12570,21 @@
       `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
     );
     pushSyncState(targetSid);
+    // A state sent unconfirmed at the deadline can still change here through
+    // a later rollback, leaving the guest on a state the host no longer has.
+    // Send one follow-up once the host's state is confirmed.
+    if (!confirmed) {
+      for (const r of due) {
+        if (r.confirmedOnly) continue;
+        _scheduledSyncRequests.push({
+          targetFrame: _frameNum,
+          targetSid: r.targetSid,
+          forceFull: true,
+          confirmedOnly: true,
+          deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        });
+      }
+    }
   };
 
   // True when the host's live state at the start of _frameNum is final: no
