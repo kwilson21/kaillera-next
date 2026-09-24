@@ -11196,7 +11196,9 @@
     const localInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
-          _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput()),
+          _cloneInput(
+            _deadbandStick(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput()),
+          ),
         );
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
@@ -12948,12 +12950,14 @@
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
           _cloneInput(
-            menuStartBarrier.suppressInput ||
-              suppressLateJoinBootstrapInput ||
-              suppressEjsPausedInput ||
-              suppressResumeGuardInput
-              ? KNShared.ZERO_INPUT
-              : readLocalInput(),
+            _deadbandStick(
+              menuStartBarrier.suppressInput ||
+                suppressLateJoinBootstrapInput ||
+                suppressEjsPausedInput ||
+                suppressResumeGuardInput
+                ? KNShared.ZERO_INPUT
+                : readLocalInput(),
+            ),
           ),
         );
     if (!hadLocalInputForFrame) {
@@ -15811,6 +15815,26 @@
 
   const readLocalInput = () => KNShared.readLocalInput(_playerSlot, _p1KeyMap, _heldKeys);
 
+  // Stick dead-band. The C engine only accepts an exact prediction, and a
+  // held analog stick jitters by a unit or two every frame, so each frame
+  // would mispredict and roll back. Each axis keeps its previous value until
+  // the stick moves STICK_DEADBAND units away from it, then takes the exact
+  // new value; centering always returns 0. The filtered value is what's
+  // recorded, sent, and applied on every peer, so it stays deterministic.
+  // A grid would move SSB64's stick thresholds (53, 56, 26, ...): the core
+  // maps JS axes to N64 bytes in polar form, so no per-axis grid lines up.
+  const STICK_DEADBAND = 2;
+  const _stickHeld = { lx: 0, ly: 0, cx: 0, cy: 0 };
+  const _deadbandStick = (input) => {
+    const out = { ...input };
+    for (const axis of ['lx', 'ly', 'cx', 'cy']) {
+      const raw = input[axis] | 0;
+      if (raw === 0 || Math.abs(raw - _stickHeld[axis]) >= STICK_DEADBAND) _stickHeld[axis] = raw;
+      out[axis] = _stickHeld[axis];
+    }
+    return out;
+  };
+
   window.debugInput = () => {
     window._debugInputUntil = performance.now() + 3000;
     console.log('[input-debug] Logging input for 3 seconds — press buttons now');
@@ -16556,6 +16580,7 @@
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
     _resetInputAudit();
+    Object.assign(_stickHeld, { lx: 0, ly: 0, cx: 0, cy: 0 });
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
