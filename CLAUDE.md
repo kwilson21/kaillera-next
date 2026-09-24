@@ -205,6 +205,39 @@ invariants doc before proposing any watchdog that *acts* on stalls.
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 
+## Lessons for agents
+
+Hard-won rules from past sessions. Follow them unless the user says otherwise.
+
+- **Keep PRs small and check size before merging.** Retargeting a stacked PR
+  to `main` pulls in every unmerged commit of its base (#11 grew from ~3k to
+  ~19k lines by absorbing #9). Look at the diff against `main` right before
+  merging and flag anything unexpectedly large to the user.
+- **Don't commit agent scratch work.** Iteration prompts, notes and one-off
+  experiment scripts stay out of `docs/` and `tests/`. Scripts that are
+  committed read paths from env vars, never a hardcoded `/Users/...`.
+- **Netplay changes need a real two-player run.** `tests/rb-two-player.mjs`
+  with `JITTER=20` must pass (all gameplay and game-state hashes match)
+  before merging anything that touches the tick loop, sync, input or core.
+  Headless single-page demo metrics are not enough.
+- **Don't edit files under a running test.** `version-guard.js` reloads pages
+  when served files change, which kills in-flight two-player runs. Make
+  unrelated edits in a separate `git worktree`.
+- **The cloud container distorts results.** Two headless emulators run at
+  ~7–11 fps with software GL; canvas readbacks take seconds (use
+  `?knperf=light`), measured RTT is inflated (so negotiated delay is too), and
+  the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
+  multi-second freezes and menu timeouts there as environment first; confirm
+  real bugs from the logs.
+- **Which hash to trust.** `kn_game_state_hash` (taint-filtered RDRAM + CPU)
+  is the determinism signal. `kn_full_state_hash` includes framebuffer/audio
+  blocks that legitimately differ after headless replays.
+- **Core artifacts ship together.** The `.data` archive and the standalone
+  `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
+  from the same build; URLs are content-hashed via `/api/core-info`.
+- **Never tolerate a prediction mismatch.** Any "close enough" input match
+  leaves peers with different state that nothing corrects.
+
 ## Dev environment
 
 - macOS (primary dev machine)
