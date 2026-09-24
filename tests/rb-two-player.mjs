@@ -48,18 +48,27 @@ const browser = await chromium.launch({
 const initScript = ({ lat, jitter }) => {
   // Simulated network: delay every outgoing DataChannel message.
   // Jitter never reorders a channel: real SCTP data channels deliver in
-  // order, and chunked transfers (compressed save states) rely on it.
+  // order, and chunked transfers (compressed save states) rely on it. Each
+  // channel drains one FIFO queue; a timer per message could reorder a burst,
+  // because setTimeout truncates fractional delays.
   const orig = RTCDataChannel.prototype.send;
-  const lastAt = new WeakMap();
-  RTCDataChannel.prototype.send = function (data) {
-    const ch = this;
-    const at = Math.max(performance.now() + lat + (jitter ? Math.random() * jitter : 0), lastAt.get(ch) || 0);
-    lastAt.set(ch, at);
-    setTimeout(() => {
+  const queues = new WeakMap();
+  const pump = (ch, q) => {
+    q.timer = null;
+    while (q.items.length && q.items[0].at <= performance.now()) {
+      const { data } = q.items.shift();
       try {
         if (ch.readyState === 'open') orig.call(ch, data);
       } catch (_) {}
-    }, at - performance.now());
+    }
+    if (q.items.length) q.timer = setTimeout(() => pump(ch, q), Math.max(0, q.items[0].at - performance.now()));
+  };
+  RTCDataChannel.prototype.send = function (data) {
+    let q = queues.get(this);
+    if (!q) queues.set(this, (q = { items: [], timer: null }));
+    const last = q.items.length ? q.items[q.items.length - 1].at : 0;
+    q.items.push({ data, at: Math.max(performance.now() + lat + (jitter ? Math.random() * jitter : 0), last) });
+    if (!q.timer) q.timer = setTimeout(() => pump(this, q), Math.max(0, q.items[0].at - performance.now()));
   };
 };
 

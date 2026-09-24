@@ -16528,11 +16528,20 @@
       _syncLog(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     }
 
-    // Purge stale remote inputs above the new frame
+    // Purge stale remote inputs above the new frame. The host's real inputs
+    // are keyed in the host's frame numbering, which the state we just loaded
+    // uses too, so they stay valid. A boot sync that rewinds the guest
+    // (151 -> 134) would otherwise delete host inputs it already received;
+    // the host doesn't resend them, so the guest stalls on the gap until the
+    // peer is marked phantom and the match desyncs. Only fabricated
+    // placeholders (KNShared.ZERO_INPUT) from the host are dropped.
     for (const [slot, inputs] of Object.entries(_remoteInputs)) {
       if (!inputs) continue;
+      const fromHost = slot === '0';
       for (const f of Object.keys(inputs)) {
-        if (parseInt(f, 10) > _frameNum + DELAY_FRAMES) delete inputs[f];
+        if (parseInt(f, 10) <= _frameNum + DELAY_FRAMES) continue;
+        if (fromHost && inputs[f] !== KNShared.ZERO_INPUT) continue;
+        delete inputs[f];
       }
     }
 
