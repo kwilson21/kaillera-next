@@ -461,9 +461,8 @@ static struct {
     int button_mispredictions; /* btn differed, sticks matched */
     int stick_mispredictions;  /* sticks differed, btn matched */
     int both_mispredictions;   /* both differed */
-    /* Tolerance hits: predicted/actual stick bytes differed but within
-     * KN_STICK_TOLERANCE, so we skipped the rollback. Tracks how often
-     * the tolerance window is absorbing what would have been rollbacks. */
+    /* Always 0: prediction matching is exact now, so no misprediction is
+     * absorbed. Kept so kn_get_tolerance_hits() and its JS readers work. */
     int tolerance_hits;
 
     /* RF1 (R1): did_restore flag — set by the rollback branch immediately
@@ -1418,97 +1417,21 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
      * buffer at idx may contain stale predictions from 256 frames ago. */
     if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
-        /* Tolerant prediction match: buttons must match exactly (they're
-         * discrete and affect gameplay logic directly), but stick axes can
-         * differ by up to KN_STICK_TOLERANCE units without triggering a
-         * rollback. Reasoning: an 83-unit N64 stick range is quantized so
-         * finely that a ±4 unit difference in a single frame produces no
-         * visible game-state change (position delta under 0.5 pixels),
-         * but the rollback system currently treats byte inequality as a
-         * misprediction and replays. On unstable networks this causes
-         * cascading-rollback spiral. Tolerance here converts the most
-         * common "fast stick jitter" false-positives into no-ops while
-         * still catching real action changes via the button check. */
-        /* Fix 2: Deadzone-aware tolerance.
-         *
-         * N64 games treat stick values below ~16 as "centered" — inside
-         * the deadzone, the game doesn't react to movement at all. So
-         * peers can have DIFFERENT raw stick bytes within the deadzone
-         * and the game will behave identically on both sides.
-         *
-         * KN_STICK_TOLERANCE = 4 catches small jitter
-         * KN_STICK_DEADZONE_TOL = 16 catches deadzone divergence
-         *
-         * If BOTH predicted and actual values are below deadzone,
-         * they're considered a match regardless of exact bytes.
-         * Above deadzone, we fall back to the tight ±4 tolerance. */
-        /* Zone-based analog prediction comparison (inspired by fighting
-         * game input quantization). The full-precision analog value is
-         * always applied to the emulator — zones only affect whether a
-         * misprediction is detected. Both predicted and real values are
-         * mapped to a zone; if same zone, no rollback fires.
-         *
-         * N64 stick range: -83 to +83. Zone size 12 gives ~14 zones
-         * per axis. Deadzone (±16) maps entirely to zone 0. This means
-         * smooth stick motion within a zone doesn't trigger rollbacks,
-         * but real direction changes (crossing zone boundaries) do.
-         *
-         * Why this matters: GGPO works because fighting games use 8-way
-         * digital input. We're emulating a full analog stick — every
-         * frame of stick movement is a unique value that the "repeat
-         * last input" predictor gets wrong. Zones reduce the effective
-         * input space from 166×166 to ~14×14, matching the prediction
-         * accuracy that GGPO was designed for. */
-        #define KN_STICK_ZONE_SIZE 12
-        #define KN_STICK_ZONE(v) ((v) / KN_STICK_ZONE_SIZE)
-        /* Boundary hysteresis. The zone-only match treats values 11 and 12
-         * as different (zones 0 vs 1) even though they're 1 stick unit
-         * apart and produce indistinguishable game state. Adjacent-zone
-         * matches with a small absolute diff (≤3 units) absorb that
-         * boundary jitter. Within-zone matching is unchanged; values two
-         * or more zones apart never match. Effective behaviour: same-zone
-         * diff up to 11 = match, cross-boundary diff up to 3 = match,
-         * diff ≥ ~12 between non-adjacent zones = mispredict.
-         *
-         * The actual input is always applied to the emulator regardless of
-         * this gate — this only affects whether a rollback fires. So a
-         * widened tolerance can't desync local state; the only cost is
-         * cross-peer state drift if a missed mispredict produced different
-         * game state on the two peers. With the band tight at 3 units that
-         * drift stays well under the deadzone (~16 units) for active-stick
-         * values and is guaranteed-zero for in-deadzone values. */
-        #define KN_STICK_ZONE_BOUNDARY_BAND 3
-        #define KN_AXIS_ABS_DIFF(a, b) ((a) > (b) ? (a) - (b) : (b) - (a))
-        #define KN_AXIS_ZONE_ADJACENT(a, b) \
-            (KN_STICK_ZONE(a) == KN_STICK_ZONE(b) + 1 || KN_STICK_ZONE(a) + 1 == KN_STICK_ZONE(b))
-        #define KN_AXIS_ZONE_MATCH(a, b) ( \
-            KN_STICK_ZONE(a) == KN_STICK_ZONE(b) || \
-            (KN_AXIS_ABS_DIFF(a, b) <= KN_STICK_ZONE_BOUNDARY_BAND && KN_AXIS_ZONE_ADJACENT(a, b)) \
-        )
-        int btn_match = (pred->buttons == buttons);
-        int lxd = pred->lx - lx; if (lxd < 0) lxd = -lxd;
-        int lyd = pred->ly - ly; if (lyd < 0) lyd = -lyd;
-        int cxd = pred->cx - cx; if (cxd < 0) cxd = -cxd;
-        int cyd = pred->cy - cy; if (cyd < 0) cyd = -cyd;
-        int exact_stick = (lxd == 0 && lyd == 0 && cxd == 0 && cyd == 0);
-        int stick_within_zone = (KN_AXIS_ZONE_MATCH(pred->lx, lx) && KN_AXIS_ZONE_MATCH(pred->ly, ly)
-                                && KN_AXIS_ZONE_MATCH(pred->cx, cx) && KN_AXIS_ZONE_MATCH(pred->cy, cy));
-        int exact_match = btn_match && exact_stick;
-        int match = btn_match && stick_within_zone;
+        /* Exact prediction match. A predicted stick value that differs from
+         * the real one by any amount leaves different game state on the
+         * peer that predicted it (SSB64 stores raw stick bytes, and walk
+         * speed, air drift and DI all scale with them), so every
+         * difference must roll back. This replaced a zone tolerance that
+         * accepted differences up to 11 units without a rollback and let
+         * peers drift. Local stick jitter is filtered at the source instead
+         * (dead-band in netplay-rollback.js), so held sticks repeat exact
+         * values and predict correctly. */
+        int exact_match = (pred->buttons == buttons) && pred->lx == lx && pred->ly == ly
+                          && pred->cx == cx && pred->cy == cy;
         rb.predicted[slot][idx] = 0;
 
-        if (match) {
+        if (exact_match) {
             rb.correct_predictions++;
-            /* Tolerance hit: we're absorbing a small stick jitter that
-             * would have been a rollback. Log the first few so we can
-             * see it working without flooding the log. */
-            if (!exact_match) {
-                rb.tolerance_hits++;
-                if (rb.tolerance_hits <= 20 || rb.tolerance_hits % 100 == 0) {
-                    rb_log("TOLERANCE-HIT slot=%d f=%d lx_d=%d ly_d=%d cx_d=%d cy_d=%d (total=%d)",
-                        slot, frame, pred->lx - lx, pred->ly - ly, pred->cx - cx, pred->cy - cy, rb.tolerance_hits);
-                }
-            }
         } else if (frame < rb.frame) {
             /* T1/T2: categorize the misprediction for logging + aggregate stats */
             int btn_xor = pred->buttons ^ buttons;

@@ -907,6 +907,50 @@
     };
   };
 
+  // ── Stick dead-band ────────────────────────────────────────────────────
+  // The rollback engine only accepts an exact stick prediction, and a held
+  // analog stick jitters by a unit or so every frame, so each frame would
+  // mispredict and roll back. The filter holds each axis's last value until
+  // the stick either moves `band` units away from it or settles on a new
+  // value for `settleFrames` consecutive reads; then it takes the exact
+  // value. Centering always returns 0. Alternating jitter never settles, but
+  // a deliberate one-unit change (e.g. onto an SSB64 threshold like 53) goes
+  // through after settleFrames, so no value is held indefinitely. Whatever
+  // it returns is what gets recorded, sent, and applied on every peer.
+  // A fixed grid would move SSB64's thresholds (53, 56, 26, ...): the core
+  // maps JS axes to N64 bytes in polar form, so no per-axis grid lines up.
+  const STICK_AXES = ['lx', 'ly', 'cx', 'cy'];
+  const createStickDeadband = ({ band = 2, settleFrames = 4 } = {}) => {
+    const held = { lx: 0, ly: 0, cx: 0, cy: 0 };
+    const cand = { lx: 0, ly: 0, cx: 0, cy: 0 };
+    const count = { lx: 0, ly: 0, cx: 0, cy: 0 };
+    const filter = (input) => {
+      const out = { ...input };
+      for (const axis of STICK_AXES) {
+        const raw = input[axis] | 0;
+        if (raw === held[axis]) {
+          count[axis] = 0;
+        } else if (raw === 0 || Math.abs(raw - held[axis]) >= band) {
+          held[axis] = raw;
+          count[axis] = 0;
+        } else {
+          count[axis] = raw === cand[axis] ? count[axis] + 1 : 1;
+          cand[axis] = raw;
+          if (count[axis] >= settleFrames) {
+            held[axis] = raw;
+            count[axis] = 0;
+          }
+        }
+        out[axis] = held[axis];
+      }
+      return out;
+    };
+    filter.reset = () => {
+      for (const axis of STICK_AXES) held[axis] = cand[axis] = count[axis] = 0;
+    };
+    return filter;
+  };
+
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     SSB64_HASH: SSB64_HASH,
@@ -925,6 +969,7 @@
     waitForEmulator: waitForEmulator,
     resetBootState: resetBootState,
     readLocalInput: readLocalInput,
+    createStickDeadband,
     disableEJSInput: disableEJSInput,
     applyInputToWasm: applyInputToWasm,
     N64_MAX,
