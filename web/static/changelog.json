@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.51.0",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "static Cloudflare deploy + rollback correctness and FPS fixes (#11)"
+      }
+    ]
+  },
+  {
     "version": "0.50.0",
     "date": "2026-09-23",
     "changes": [
