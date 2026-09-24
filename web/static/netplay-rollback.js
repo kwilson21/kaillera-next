@@ -12592,6 +12592,9 @@
       due.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
+        // The guest asked again while this push was in flight; its newer
+        // request replaces this one.
+        if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
         if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
