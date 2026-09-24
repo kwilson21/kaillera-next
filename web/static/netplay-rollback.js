@@ -341,13 +341,10 @@
   // of time to deliver their input before we need it.
   const DEFAULT_DELAY_FRAMES = 2;
   let DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
-  // True-rollback model: DELAY_FRAMES is just the remote-input prediction
-  // window (jitter buffer). It does NOT govern local input lag any more,
-  // so we can safely sit at 1 frame. Legacy "lockstep with rollback recovery"
-  // model (?trueRollback=0 / pre-update peers) still observes this clamp,
-  // but ROLLBACK_MIN_DELAY_FRAMES=1 is fine there too because the delay
-  // negotiation falls through to the auto-formula's natural floor (~RTT/2 + jitter
-  // for legacy, just jitter for true-rollback).
+  // Every input, local included, applies at frame + DELAY_FRAMES, so delay
+  // is input lag. With predictions live it is sized small (see
+  // RB_ROLLBACK_BUDGET_FRAMES) and rollback absorbs the rest of the network
+  // trip; lockstep sizes it to the whole trip. Floor is 1 frame either way.
   //
   // Two ceilings, picked at clamp time by the active mode:
   // - Lockstep (predictions paused): DELAY_FRAMES IS input lag the player feels.
@@ -372,12 +369,17 @@
     return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, parsed));
   };
 
-  // IQR-filtered RTT-to-delay formula. Shared by initial negotiation and the
-  // public recomputeDelay() API so the demo's slider can re-tune mid-match.
-  // Returns delay-frame integer (clamped to [MIN, current ceiling]).
-  // useHalfRtt=true folds RTT/2 into local input lag (legacy lockstep-with-rollback
-  // path); false treats delay as a pure remote-prediction window (true rollback).
-  const _delayFromRttSamples = (samples, useHalfRtt) => {
+  // Frames of lateness rollback absorbs before delay has to cover the rest.
+  // Every input (local too) applies at frame + delay, so delay is input lag
+  // the player feels; a remote input arriving L frames after it was made
+  // rewinds L - delay frames. GGPO-style split: keep delay small and let
+  // rollback take up to this many frames, well under the engine's visible
+  // cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH = 7) so jitter spikes still fit.
+  // At ~100 ms RTT this gives delay 1; at 200 ms, 4.
+  const RB_ROLLBACK_BUDGET_FRAMES = 4;
+
+  // IQR-filtered RTT stats: median and jitter (filtered max - median).
+  const _rttStats = (samples) => {
     if (!samples || samples.length === 0) return null;
     const sorted = samples.slice().sort((a, b) => a - b);
     const q1 = sorted[Math.floor(sorted.length * 0.25)];
@@ -389,10 +391,23 @@
     const filtered = sorted.filter((s) => s >= lower && s <= upper);
     const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
     const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
-    const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
-    const effectiveMs = useHalfRtt ? filteredMedian / 2 + jitterMargin + 16.67 : jitterMargin + 16.67;
-    return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
+    return { median: filteredMedian, jitter: Math.max(filteredMax - filteredMedian, 0), q1, q3, n: sorted.length };
   };
+
+  // RTT-to-delay formula, shared by the handshake and recomputeDelay() so
+  // both pick the same value. Returns a delay-frame integer clamped to
+  // [MIN, current ceiling], or null with no samples. `lockstep` is true when
+  // nothing is predicted (demo lockstep, ?trueRollback=0): delay must then
+  // cover the whole one-way trip. Otherwise rollback covers
+  // RB_ROLLBACK_BUDGET_FRAMES of it.
+  const _delayFromRttSamples = (samples, lockstep) => {
+    const s = _rttStats(samples);
+    if (!s) return null;
+    const arrivalFrames = Math.ceil((s.median / 2 + s.jitter + 16.67) / 16.67);
+    const delay = lockstep ? arrivalFrames : arrivalFrames - RB_ROLLBACK_BUDGET_FRAMES;
+    return Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, delay));
+  };
+  const _delayIsLockstep = () => _predictionsPaused || !RB_TRUE_ROLLBACK;
 
   // Re-runs delay negotiation against the CURRENT per-peer RTT samples and
   // ceiling. The global _rttSamples is frozen at game start so reading it
@@ -400,13 +415,9 @@
   // peer.rttSamples (which seedSyntheticRtt and the production WebRTC ping
   // path both keep fresh).
   //
-  // useHalfRtt picks the formula:
-  // - True rollback w/ predictions live: jitterMargin only — local input
-  //   applies at current frame, RTT/2 doesn't show up as input lag.
-  // - True rollback w/ predictions paused (demo lockstep) OR legacy mode:
-  //   RTT/2 + jitterMargin — engine waits for remote input, so half the
-  //   round-trip IS the input lag the player feels. At 40ms RTT, low
-  //   jitter, this gives delay=3 (lockstep) vs delay=1 (rollback).
+  // The formula is mode-aware (see _delayFromRttSamples): rollback covers
+  // RB_ROLLBACK_BUDGET_FRAMES of the trip when predictions are live;
+  // lockstep sizes delay to the whole trip.
   // Live RTT-driven delay re-tune is opt-in. Default OFF so production keeps
   // the original "negotiate once at handshake, freeze for the match" behavior
   // (real WANs drift by a few ms but not enough to justify mid-match delay
@@ -430,24 +441,13 @@
     for (const p of players) if (p.rttSamples?.length) liveSamples.push(...p.rttSamples);
     if (liveSamples.length === 0) return;
     liveSamples.sort((a, b) => a - b);
-    // Mode-aware formula (see comment block above). When predictions are
-    // live (true rollback), local input applies at the current frame so
-    // RTT/2 isn't input lag — use jitterMargin only. When predictions are
-    // paused (demo lockstep / legacy path), the engine waits for remote
-    // input and RTT/2 IS the input lag the player feels.
-    const useHalfRtt = _predictionsPaused;
-    const ownDelay = _delayFromRttSamples(liveSamples, useHalfRtt);
+    const lockstep = _delayIsLockstep();
+    const ownDelay = _delayFromRttSamples(liveSamples, lockstep);
     if (ownDelay == null) return;
     let maxDelay = ownDelay;
-    // Per-peer view uses the SAME formula choice as own — peer.rttSamples
-    // are MY measurements of MY ping to that peer (not the peer's own
-    // self-measurement), so the active mode determines whether RTT/2 folds
-    // in for the peer view too. Old code always used RTT/2 for peer formula
-    // even in true rollback, which leaked the "lockstep input-lag tax"
-    // back into rollback's negotiated delay (rollback never felt instant
-    // at typical RTTs because peerDelay dominated ownDelay).
+    // The worst peer link sets the delay.
     for (const p of players) {
-      const peerDelay = _delayFromRttSamples(p.rttSamples, useHalfRtt);
+      const peerDelay = _delayFromRttSamples(p.rttSamples, lockstep);
       if (peerDelay != null && peerDelay > maxDelay) maxDelay = peerDelay;
     }
     _delayRetunePending = false;
@@ -8937,72 +8937,28 @@
     }
 
     // Negotiate delay: ceiling of all players.
-    // Rollback mode: both players independently compute from RTT/2, then take max.
-    // Peer delay values from lockstep-ready handshake use the old lockstep formula,
-    // so we recalculate them using peer RTT samples with the rollback formula.
+    // Rollback mode: each player computes from its own RTT samples with
+    // _delayFromRttSamples and the host broadcasts the max. Peer delay values
+    // from the lockstep-ready handshake use the old lockstep formula, so they
+    // are recomputed here from peer RTT samples.
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     let ownDelay;
     if (soloMode) {
       ownDelay = 0;
       _syncLog('solo delay: no player peers, effective delay=0');
     } else if (hasRollback && _rttMedian > 0) {
-      // Fix #1: Adaptive jitter buffer.
-      //
-      // Rollback delay sets the input prediction window — peers wait this
-      // many frames before applying any input, giving the network time to
-      // deliver. Setting it correctly is the difference between "feels
-      // smooth on bad network" and "constant rollbacks/desync".
-      //
-      // Old formula: delay = ceil((median/2 + jitter) / 16.67), CAPPED AT 9.
-      // The cap was the problem — networks with 100ms+ jitter need delay
-      // 12+ frames but were silently clamped to 9, leaving every spike
-      // uncovered. Match 34d3299e ran with delay=9 on a 110ms-jitter
-      // network and desynced after 10 seconds because every jitter spike
-      // arrived past the delay budget and triggered a deep misprediction
-      // that the new depth-3 cap couldn't recover from.
-      //
-      // New formula: take a 95th-percentile-style jitter measure (max of
-      // recent samples MINUS median, not max-min — more robust to one
-      // outlier sample), add a 1-frame safety margin, and let delay go
-      // up to 15 frames. The cap matches the rollback ring size so we
-      // never have a delay larger than the rollback can absorb.
-      //
-      // The cost: higher delay = more input lag. Worth it because the
-      // alternative is rollbacks that feel like rewinds OR full desyncs.
-      // User feedback explicitly accepted "slight extra latency" over
-      // "snap rollback feel" — this is enacting that preference at the
-      // delay-budget level.
-      const sorted = _rttSamples.slice().sort((a, b) => a - b);
-      const q1 = sorted[Math.floor(sorted.length * 0.25)];
-      const q3 = sorted[Math.floor(sorted.length * 0.75)];
-      const iqr = q3 - q1;
-      const median = sorted[Math.floor(sorted.length / 2)];
-      // Filter outliers: keep only samples within [Q1 - 1.5*IQR, Q3 + 1.5*IQR]
-      const lower = q1 - 1.5 * iqr;
-      const upper = q3 + 1.5 * iqr;
-      const filtered = sorted.filter((s) => s >= lower && s <= upper);
-      const filteredMedian = filtered[Math.floor(filtered.length / 2)] || median;
-      const filteredMax = filtered[filtered.length - 1] || sorted[sorted.length - 1];
-      const jitterMargin = Math.max(filteredMax - filteredMedian, 0);
-      // Size DELAY_FRAMES to cover RTT/2 + jitter + 1f safety in BOTH
-      // modes. Original true-rollback formula was jitter-only on the
-      // theory that delay was just a prediction-window buffer and RTT/2
-      // would inflate input lag — but in true rollback local input
-      // applies at currentFrame regardless of delay, so there's no input-
-      // lag cost from a larger window. What jitter-only DOES cost: every
-      // peer input change arrives ~RTT/2 frames past the apply deadline,
-      // triggering a rollback at depth ~RTT/2. At 200ms RTT that's a
-      // ~10-frame rollback every input change → visible replay pauses.
-      // Sizing delay to actually cover RTT/2 keeps peer inputs in front
-      // of the deadline → no mispredict → no rollback → no pause.
-      // Pushed live to C via kn_set_delay_frames after this fires.
-      const effectiveMs = filteredMedian / 2 + jitterMargin + 16.67;
-      ownDelay = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(effectiveMs / 16.67)));
+      // Delay is input lag every player feels (all inputs apply at
+      // frame + delay), so keep it small and let rollback absorb up to
+      // RB_ROLLBACK_BUDGET_FRAMES of network lateness. The previous formula
+      // sized delay to the whole one-way trip plus jitter (8-12 frames at
+      // typical RTTs), which avoided rollbacks at the cost of lag.
+      const lockstep = _delayIsLockstep();
+      const s = _rttStats(_rttSamples);
+      ownDelay = _delayFromRttSamples(_rttSamples, lockstep);
       _syncLog(
-        `rollback delay: RTT=${filteredMedian.toFixed(1)}ms jitter=${jitterMargin.toFixed(1)}ms ` +
-          `IQR=[${q1.toFixed(1)},${q3.toFixed(1)}] samples=${sorted.length} ` +
-          `mode=${RB_TRUE_ROLLBACK ? 'true' : 'legacy'} ` +
-          `effective=${effectiveMs.toFixed(1)}ms -> ${ownDelay}f`,
+        `rollback delay: RTT=${s.median.toFixed(1)}ms jitter=${s.jitter.toFixed(1)}ms ` +
+          `IQR=[${s.q1.toFixed(1)},${s.q3.toFixed(1)}] samples=${s.n} ` +
+          `mode=${lockstep ? 'lockstep' : 'rollback'} budget=${lockstep ? 0 : RB_ROLLBACK_BUDGET_FRAMES}f -> ${ownDelay}f`,
       );
     } else {
       ownDelay = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
@@ -9010,24 +8966,10 @@
     if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);
     let maxDelay = ownDelay;
     if (hasRollback && !soloMode) {
-      // Recalculate peer delay from their RTT+jitter using IQR-filtered formula
+      // The worst peer link sets the delay (same formula).
       for (const p of Object.values(_peers)) {
-        if (p.rttSamples?.length > 0) {
-          const pSorted = p.rttSamples.slice().sort((a, b) => a - b);
-          const pQ1 = pSorted[Math.floor(pSorted.length * 0.25)];
-          const pQ3 = pSorted[Math.floor(pSorted.length * 0.75)];
-          const pIqr = pQ3 - pQ1;
-          const pMedian = pSorted[Math.floor(pSorted.length / 2)];
-          const pLower = pQ1 - 1.5 * pIqr;
-          const pUpper = pQ3 + 1.5 * pIqr;
-          const pFiltered = pSorted.filter((s) => s >= pLower && s <= pUpper);
-          const fMedian = pFiltered[Math.floor(pFiltered.length / 2)] || pMedian;
-          const fMax = pFiltered[pFiltered.length - 1] || pSorted[pSorted.length - 1];
-          const pJitter = Math.max(fMax - fMedian, 0);
-          const peerMs = fMedian / 2 + pJitter + 16.67;
-          const peerDelay = Math.min(_delayCeiling(), Math.max(ROLLBACK_MIN_DELAY_FRAMES, Math.ceil(peerMs / 16.67)));
-          if (peerDelay > maxDelay) maxDelay = peerDelay;
-        }
+        const peerDelay = _delayFromRttSamples(p.rttSamples, _delayIsLockstep());
+        if (peerDelay != null && peerDelay > maxDelay) maxDelay = peerDelay;
       }
     } else if (!soloMode) {
       for (const p of Object.values(_peers)) {
@@ -11126,6 +11068,11 @@
     }
   };
   const PEER_DEAD_MS = 5000; // 5s without frame advance → peer is dead
+  // A gap this long between our own ticks means our loop was frozen (busy
+  // machine, debugger, throttled tab), not that a peer went quiet: its
+  // inputs couldn't have been processed either. See _creditLocalFreeze.
+  const LOCAL_FREEZE_CREDIT_MS = 1000;
+  let _lastTickEnterAt = 0;
   // Rollback-mode hard stall threshold. Faster than PEER_DEAD_MS because
   // rollback's frame-advantage ring fills up within ~10 frames (~167ms at
   // 60fps) once inputs stop arriving. Anything past 500ms of silence means
@@ -12519,15 +12466,37 @@
     });
   }
 
+  // Our own tick loop freezing (both tabs of a busy machine, a debugger, a
+  // throttled tab) stops the peer-staleness clocks from being meaningful:
+  // we weren't processing their inputs either. Without this, a shared
+  // freeze ends with PEER-PHANTOM on a live peer, we predict past it, and
+  // its late inputs land deeper than the rollback cap
+  // (DEEP-MISPREDICT-SKIP). Shift those clocks forward by the gap, never
+  // past now. I1 still holds: a peer that stays quiet after we resume
+  // times out on the normal schedule.
+  const _creditLocalFreeze = () => {
+    const now = performance.now();
+    const gap = _lastTickEnterAt > 0 ? now - _lastTickEnterAt : 0;
+    _lastTickEnterAt = now;
+    if (gap < LOCAL_FREEZE_CREDIT_MS) return;
+    for (const s of Object.keys(_peerLastAdvanceTime)) {
+      _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
+    }
+    if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
+  };
+
   const tick = () => {
     _tickEnteredCount = (_tickEnteredCount || 0) + 1;
     _tickReplayOnly = false;
     _chk('enter');
     if (_phase !== PHASE_RUNNING) {
+      _lastTickEnterAt = 0;
       _markTickReturn('skip:phase');
       return;
     }
     _chk('post-phase');
+    _creditLocalFreeze();
     if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');
     _checkStateTransition();
     _chk('post-state-transition');
@@ -16972,8 +16941,7 @@
     // Synthetic-peer RTT seeding for the demo: pre-populates peer.rttSamples
     // BEFORE injectRemoteInput starts firing, so the match-start delay
     // negotiation at checkAllLockstepReady sees a non-empty sample buffer
-    // and can compute an RTT-tuned delay (jitter+1 frame for true rollback,
-    // RTT/2+jitter+1 for legacy). Without this, demo runs always fall back
+    // and can compute an RTT-tuned delay (see _delayFromRttSamples). Without this, demo runs always fall back
     // to DEFAULT_DELAY_FRAMES=2 regardless of the simulated network, so
     // ?fakePeerJitter / KNFakePeer.setNetwork never affect the delay budget
     // and rollback-rate is artificially high. Production peers fill their
@@ -16982,9 +16950,8 @@
       const peer = ensureSyntheticPeer(slot);
       if (!peer) return false;
       // Accept rttMs (preferred) or legacy latencyMs (one-way, doubled).
-      // peer.rttSamples is consumed by the delay formula at lockstep-ready
-      // (peerMs = fMedian/2 + jitter + 16.67) which expects RTT, so we
-      // store RTT values directly.
+      // peer.rttSamples is consumed by _delayFromRttSamples at lockstep-ready,
+      // which expects RTT, so we store RTT values directly.
       const baseRtt = rttMs != null ? Math.max(0, Number(rttMs) || 0) : Math.max(0, Number(latencyMs) || 0) * 2;
       const jitter = Math.max(0, Number(jitterMs) || 0);
       const samples = [];
@@ -17027,8 +16994,8 @@
       const changed = _predictionsPaused !== next;
       if (changed) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
-      // Re-tune delay using the new mode's formula. Lockstep needs
-      // RTT/2 + jitter coverage; rollback needs jitter only. Without
+      // Re-tune delay using the new mode's formula. Lockstep needs the
+      // whole trip covered; rollback absorbs RB_ROLLBACK_BUDGET_FRAMES. Without
       // this, toggling rollback→lockstep at high RTT leaves DELAY_FRAMES
       // pinned at rollback's lower value, the HUD reports the wrong
       // delay, and the JS-level lockstep stall waits for inputs that

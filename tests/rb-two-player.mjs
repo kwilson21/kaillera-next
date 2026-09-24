@@ -149,7 +149,7 @@ const install = async (p, role) => {
       const r = post.apply(this, a);
       if ((m._kn_get_replay_depth?.() ?? 0) === 0 && r > 40) {
         const f = r - 12;
-        if (!(f in W.hashes)) W.hashes[f] = [m._kn_gameplay_hash(f) >>> 0, m._kn_full_state_hash(f) >>> 0];
+        if (!(f in W.hashes)) W.hashes[f] = [m._kn_gameplay_hash(f) >>> 0, m._kn_full_state_hash(f) >>> 0, (m._kn_game_state_hash?.(f) ?? 0) >>> 0];
       }
       return r;
     };
@@ -160,17 +160,21 @@ await install(guest, 'guest');
 
 // Wait for the battle, then play.
 const tb = Date.now();
+const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
 let lastLog = 0;
-while (Date.now() - tb < 900000) {
+let inBattle = false;
+for (;;) {
   const s = await Promise.all([host, guest].map((p) => p.evaluate(() => ({ f: window.NetplayRollback.getHudCounters().currentFrame, sc: window.__tp.scene, b: window.__tp.inBattleAt, fail: window.__tp.pilotFail }))));
   if (Date.now() - lastLog > 15000) { console.log('menus', JSON.stringify(s)); lastLog = Date.now(); }
-  if (s[0].b > 0 && s[1].b > 0) break;
+  if (s[0].b > 0 && s[1].b > 0) { inBattle = true; break; }
   if (s[0].fail || s[1].fail) { console.log('autopilot failed', s[0].fail, s[1].fail); break; }
-  if (Date.now() - tb > 600000) { console.log('MENUS TIMED OUT (peers desynced or autopilot stuck)'); await host.screenshot({ path: `${OUT}/host-stuck.png` }); break; }
+  if (Date.now() - tb > MENU_MS) { console.log('MENUS TIMED OUT (peers desynced or autopilot stuck)'); await host.screenshot({ path: `${OUT}/host-stuck.png` }); break; }
   await host.waitForTimeout(1000);
 }
-console.log('in battle; playing', BATTLE_SECONDS, 's');
-await host.waitForTimeout(BATTLE_SECONDS * 1000);
+if (inBattle) {
+  console.log('in battle; playing', BATTLE_SECONDS, 's');
+  await host.waitForTimeout(BATTLE_SECONDS * 1000);
+}
 
 const collect = (p) => p.evaluate(() => {
   const m = window.EJS_emulator.gameManager.Module;
@@ -190,7 +194,7 @@ await guest.screenshot({ path: `${OUT}/guest.png` });
 fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog); fs.writeFileSync(`${OUT}/guest-clog.txt`, G.clog);
 fs.writeFileSync(`${OUT}/host-sync.txt`, H.sync); fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
-let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null, battleCompared = 0;
+let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null, battleCompared = 0, gsMis = 0, firstGs = null;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f], b = G.hashes[f];
@@ -199,6 +203,7 @@ for (const f of Object.keys(H.hashes)) {
   if (battleFrom > 0 && +f >= battleFrom) battleCompared++;
   if (a[0] !== b[0]) { gpMis++; if (firstGp === null) firstGp = +f; }
   if (a[1] !== b[1]) { fullMis++; if (firstFull === null) firstFull = +f; }
+  if (a[2] !== b[2]) { gsMis++; if (firstGs === null) firstGs = +f; }
 }
 const count = (log, re) => (log.match(re) || []).length;
 const INTEGRITY = /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
@@ -215,7 +220,7 @@ const summary = {
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
   integrityEvents: { host: bad(H.clog) + bad(H.sync), guest: bad(G.clog) + bad(G.sync) },
   tickStuck: { host: count(H.sync, /TICK-STUCK/g), guest: count(G.sync, /TICK-STUCK/g) },
-  hashCompare: { framesCompared: both, battleFramesCompared: battleCompared, battleCoverage: +battleCoverage.toFixed(3), gameplayMismatches: gpMis, firstGameplayMismatch: firstGp, fullStateMismatches: fullMis, firstFullMismatch: firstFull },
+  hashCompare: { framesCompared: both, battleFramesCompared: battleCompared, battleCoverage: +battleCoverage.toFixed(3), gameplayMismatches: gpMis, firstGameplayMismatch: firstGp, gameStateMismatches: gsMis, firstGameStateMismatch: firstGs, fullStateMismatches: fullMis, firstFullMismatch: firstFull },
 };
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));

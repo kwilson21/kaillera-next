@@ -386,7 +386,8 @@
 
   function checkFreeze(localInput) {
     const frameNum = _getFrame();
-    if (frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
+    // Canvas readbacks are GPU sync points; ?knperf=light skips them all.
+    if (!window._knPerfLight && frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
       checkCanvasHealth(frameNum, 'early');
     }
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
