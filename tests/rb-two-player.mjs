@@ -226,6 +226,6 @@ fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
 await browser.close();
-const failed = gpMis > 0 || (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0
+const failed = gpMis > 0 || gsMis > 0 || (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0
   || H.inBattleAt < 0 || G.inBattleAt < 0 || battleCoverage < 0.8;
 process.exit(failed ? 1 : 0);

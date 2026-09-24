@@ -7946,7 +7946,6 @@
               handleDelayPong(msg.ts, peer);
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
-              peer.extraDelay = Number.isFinite(msg.extraDelay) ? msg.extraDelay : 0;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
