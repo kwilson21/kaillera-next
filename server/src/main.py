@@ -171,7 +171,8 @@ def run() -> None:
 
     uvicorn.run(
         socket_app,
-        host="0.0.0.0",
+        # HOST=127.0.0.1 keeps it off the LAN when only a local tunnel should reach it.
+        host=os.environ.get("HOST", "0.0.0.0"),
         port=port,
         log_level="info",
         # Trust X-Forwarded-For/Proto from reverse proxy so logs show real

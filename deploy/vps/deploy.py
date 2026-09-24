@@ -15,6 +15,9 @@ is never printed:
   python deploy/vps/deploy.py status    # server state, tunnel connections
   python deploy/vps/deploy.py dns       # point the hostname at the tunnel
                                         # (DNS change: only with the owner's OK)
+  python deploy/vps/deploy.py tunnel --service http://127.0.0.1:27890
+                                        # tunnel only, for a home machine
+                                        # (deploy/home); no HCLOUD_TOKEN needed
 
 The server has no SSH and no open inbound port. It updates itself from the
 repo's main branch every 5 minutes (deploy/vps/kn-update.sh).
@@ -78,8 +81,8 @@ def acct() -> str:
     return f"/accounts/{env('CLOUDFLARE_ACCOUNT_ID')}"
 
 
-def tunnel(hostname: str) -> tuple[str, str]:
-    """Find or create the tunnel, route hostname -> app. Returns (id, token)."""
+def tunnel(hostname: str, service: str = "http://app:27888") -> tuple[str, str]:
+    """Find or create the tunnel, route hostname -> service. Returns (id, token)."""
     found = cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []
     if found:
         tid = found[0]["id"]
@@ -90,7 +93,7 @@ def tunnel(hostname: str) -> tuple[str, str]:
         )["id"]
         print(f"tunnel: created {NAME} ({tid})")
     ingress = [
-        {"hostname": hostname, "service": "http://app:27888"},
+        {"hostname": hostname, "service": service},
         {"service": "http_status:404"},
     ]
     cf(
@@ -164,8 +167,19 @@ def cmd_up(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_tunnel(args: argparse.Namespace) -> None:
+    # The token is never printed: the machine running cloudflared gets it from
+    # the Cloudflare dashboard (deploy/home/README.md).
+    tid, _ = tunnel(args.hostname, args.service)
+    print(f"tunnel: {args.hostname} -> {args.service} (tunnel {tid}); DNS unchanged")
+
+
 def cmd_status(args: argparse.Namespace) -> None:
-    servers = hc("GET", f"/servers?name={NAME}")["servers"]
+    servers = (
+        hc("GET", f"/servers?name={NAME}")["servers"]
+        if env("HCLOUD_TOKEN", False)
+        else []
+    )
     if not servers:
         print(f"server: no server named {NAME}")
     for s in servers:
@@ -233,7 +247,7 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("command", choices=["up", "status", "dns"])
+    p.add_argument("command", choices=["up", "status", "dns", "tunnel"])
     p.add_argument("--hostname", default="kaillera-next.thesuperhuman.us")
     p.add_argument(
         "--branch", default="main", help="branch the server deploys and follows"
@@ -246,8 +260,19 @@ def main() -> None:
     p.add_argument(
         "--type", default="cpx21", help="Hetzner server type (cpx21: 3 vCPU, 4 GB)"
     )
+    p.add_argument(
+        "--service",
+        default="http://app:27888",
+        help="origin the tunnel forwards to (tunnel command)",
+    )
     args = p.parse_args()
-    {"up": cmd_up, "status": cmd_status, "dns": cmd_dns}[args.command](args)
+    commands = {
+        "up": cmd_up,
+        "status": cmd_status,
+        "dns": cmd_dns,
+        "tunnel": cmd_tunnel,
+    }
+    commands[args.command](args)
 
 
 if __name__ == "__main__":
