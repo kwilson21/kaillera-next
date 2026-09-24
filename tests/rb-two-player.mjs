@@ -206,7 +206,7 @@ const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
-const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - battleFrom : 0;
+const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - battleFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 const summary = {
   room, latencyMs: LAT, jitterMs: JITTER,
