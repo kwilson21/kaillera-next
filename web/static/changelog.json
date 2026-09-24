@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.51.1",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "send peer-recovery resyncs in rollback mode, both directions (#15)"
+      }
+    ]
+  },
+  {
+    "version": "0.51.0",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "static Cloudflare deploy + rollback correctness and FPS fixes (#11)"
+      }
+    ]
+  },
+  {
+    "version": "0.50.0",
+    "date": "2026-09-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "show supported ROMs in lobby and warn on unsupported ROM (#12)"
+      }
+    ]
+  },
+  {
     "version": "0.49.1",
     "date": "2026-05-01",
     "changes": [

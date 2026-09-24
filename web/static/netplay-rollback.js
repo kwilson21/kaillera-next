@@ -7321,6 +7321,20 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
           }
+        } else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {
+          // The host ran on predicted inputs for this guest while it was a
+          // phantom, and its late real inputs landed past the rollback cap,
+          // so the two timelines have split. The host is authoritative:
+          // push its state to the guest once it is final (the guest's real
+          // inputs have caught up), or at the I1 deadline.
+          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+          _scheduledSyncRequests.push({
+            targetFrame: _frameNum,
+            targetSid: remoteSid,
+            forceFull: true,
+            deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+          });
+          _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
         }
       }
     }
@@ -7950,7 +7964,6 @@
               handleDelayPong(msg.ts, peer);
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
-              peer.extraDelay = Number.isFinite(msg.extraDelay) ? msg.extraDelay : 0;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
               checkAllLockstepReady();
@@ -12472,6 +12485,96 @@
     });
   }
 
+  // I1: a sync state waits for an in-flight replay at most this long; then
+  // the replay is dropped (the state being loaded supersedes it).
+  const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
+  let _syncApplyDeferredAt = 0;
+  const _replayBlocksSyncApply = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+    if (!busy) {
+      _syncApplyDeferredAt = 0;
+      return false;
+    }
+    const now = performance.now();
+    if (!_syncApplyDeferredAt) {
+      _syncApplyDeferredAt = now;
+      _syncLog(`SYNC-APPLY-DEFERRED f=${_frameNum} — rollback replay in flight`);
+    }
+    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return true;
+    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — dropping replay to load state`);
+    mod?._kn_clear_replay_state?.();
+    _syncApplyDeferredAt = 0;
+    return false;
+  };
+
+  // Coordinated sync dispatch (host): when the host reaches a scheduled
+  // target frame, capture and send state. Coalesces multiple guests (4P)
+  // into a single broadcast push. Runs at the end of both the C rollback
+  // tick and the fallback tick; it used to run only in the fallback path, so
+  // in rollback mode `sync-request(-full)-at:` requests (peer-recovery
+  // resync) were scheduled and never sent.
+  //
+  // `isConfirmed()`: the host's state at this frame is final, not built on
+  // predicted inputs that a later rollback would change. A guest that
+  // applied a speculative state would diverge again. Only called when a
+  // request is pending.
+  //
+  // I1 (MF3): each request has a wall-clock deadline. If the target frame
+  // (or a confirmed state) can't be reached before it, the request is
+  // dispatched NOW at the current frame instead. This closes the
+  // coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
+  const _dispatchScheduledSyncs = (isConfirmed) => {
+    if (_playerSlot !== 0 || _scheduledSyncRequests.length === 0 || _pushingSyncState) return;
+    const confirmed = isConfirmed();
+    const _coordNow = performance.now();
+    const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
+    const due = _scheduledSyncRequests.filter((r) => (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r));
+    if (due.length === 0) return;
+    for (const r of due) {
+      if (r.targetFrame > _frameNum || !confirmed) {
+        _syncLog(
+          `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} confirmed=${confirmed} ` +
+            `elapsed=${Math.round(_coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
+            `dispatching at current frame instead`,
+        );
+      }
+    }
+    _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !due.includes(r));
+    const forceFull = due.some((r) => r.forceFull);
+    if (forceFull) _setLastSyncState(null, 'coord-full');
+    // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
+    const targetSid = due.length === 1 ? due[0].targetSid : null;
+    _syncLog(
+      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
+    );
+    pushSyncState(targetSid);
+  };
+
+  // True when the host's live state at the start of _frameNum is final: no
+  // replay in flight or pending, and every input it consumed is real. Frames
+  // before _frameNum applied inputs up to _frameNum - 1 - DELAY_FRAMES. An
+  // input older than the rollback window can no longer change the state, so
+  // each live peer needs every input in the window up to that frame present
+  // (the newest received frame alone can hide a gap) and fed to C (a queued
+  // one could still trigger a rollback).
+  const _hostStateConfirmed = (mod) => {
+    if (mod?._kn_get_replay_depth?.() > 0) return false;
+    if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
+    const lastUsed = _frameNum - 1 - DELAY_FRAMES;
+    if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
+    const firstInWindow = Math.max(0, lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES);
+    for (const p of getInputPeers()) {
+      if (_peerPhantom[p.slot]) continue;
+      const got = _remoteInputs[p.slot];
+      if (!got) return false;
+      for (let f = firstInWindow; f <= lastUsed; f++) {
+        if (got[f] === undefined || got[f] === KNShared.ZERO_INPUT) return false;
+      }
+    }
+    return true;
+  };
+
   // Our own tick loop freezing (both tabs of a busy machine, a debugger, a
   // throttled tab) stops the peer-staleness clocks from being meaningful:
   // we weren't processing their inputs either. Without this, a shared
@@ -12503,6 +12606,10 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    // Deadline-only pass: a tick that stalls returns before the per-frame
+    // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
+    // mid-replay, where the live state isn't at a frame boundary.
+    if (!(window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() > 0)) _dispatchScheduledSyncs(() => false);
     if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');
     _checkStateTransition();
     _chk('post-state-transition');
@@ -12639,9 +12746,16 @@
       if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     }
 
+    // A state can't be loaded while a rollback replay is in flight: C refuses
+    // kn_set_frame then, so JS would rewind its frame counter while C kept
+    // its own and finished the old replay over the new state (the peers
+    // split from that frame). Hold the state until the replay finishes.
+    const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
       if (_frameNum >= _syncTargetFrame) {
-        if (_pendingResyncState) {
+        if (_pendingResyncState && syncApplyBlocked) {
+          // Replay in flight: apply on a later tick (bounded, see above).
+        } else if (_pendingResyncState) {
           // State arrived on time — apply at the agreed frame
           const pending = _pendingResyncState;
           _pendingResyncState = null;
@@ -12659,7 +12773,7 @@
         // next tick that has _pendingResyncState will apply it above and resume.
       }
       // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
-    } else if (_pendingResyncState) {
+    } else if (_pendingResyncState && !syncApplyBlocked) {
       // Non-coordinated (proactive push, reconnect, visibility/network-change): apply now
       const pending = _pendingResyncState;
       _pendingResyncState = null;
@@ -14340,6 +14454,7 @@
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
         _flushPendingMatchInputReset('post-c-tick');
+        _dispatchScheduledSyncs(() => _hostStateConfirmed(tickMod));
         const _tTotal = performance.now();
         _pushTickProfile({
           f: _frameNum,
@@ -15697,42 +15812,7 @@
       KNEvent('milestone_reached', '', { frame: 1800 });
     }
 
-    // Coordinated sync dispatch: when host reaches a scheduled target frame, capture
-    // and send state. Coalesces multiple guests (4P) into a single broadcast push.
-    //
-    // I1 (MF3): each request has a wall-clock deadline. If frame
-    // pacing prevents reaching targetFrame before the deadline, the
-    // request is dispatched NOW at current frame instead. This closes
-    // the coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
-    if (_playerSlot === 0 && _scheduledSyncRequests.length > 0 && !_pushingSyncState) {
-      const _coordNow = performance.now();
-      const due = _scheduledSyncRequests.filter(
-        (r) => r.targetFrame <= _frameNum || (r.deadlineAt && _coordNow > r.deadlineAt),
-      );
-      if (due.length > 0) {
-        const timedOut = due.filter((r) => r.targetFrame > _frameNum);
-        if (timedOut.length > 0) {
-          for (const r of timedOut) {
-            _syncLog(
-              `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} ` +
-                `elapsed=${Math.round(_coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
-                `dispatching at current frame instead`,
-            );
-          }
-        }
-        _scheduledSyncRequests = _scheduledSyncRequests.filter(
-          (r) => r.targetFrame > _frameNum && (!r.deadlineAt || _coordNow <= r.deadlineAt),
-        );
-        const forceFull = due.some((r) => r.forceFull);
-        if (forceFull) _setLastSyncState(null, 'coord-full');
-        // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
-        const targetSid = due.length === 1 ? due[0].targetSid : null;
-        _syncLog(
-          `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
-        );
-        pushSyncState(targetSid);
-      }
-    }
+    _dispatchScheduledSyncs(() => true);
 
     // (Deferred sync check removed — frame hash computes live, no deferral needed.)
 
@@ -16474,6 +16554,10 @@
         _frameNum = frame;
         KNState.frameNum = frame;
         mod._kn_set_frame(frame);
+        const cFrame = mod._kn_get_frame?.();
+        if (cFrame !== undefined && cFrame !== frame) {
+          _syncLog(`SYNC-FRAME-MISMATCH js=${frame} c=${cFrame} — kn_set_frame refused`);
+        }
         _bootStallFrame = -1;
         _bootStallStartTime = 0;
         _resetStrictMenuResends();

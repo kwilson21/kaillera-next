@@ -1039,6 +1039,10 @@ button:hover {
   margin-top: 4px;
 }
 
+.rom-status.rom-unsupported {
+  color: #e8a33d;
+}
+
 .host-rom-info {
   border: 1px solid #2a2a40;
   border-radius: 6px;
