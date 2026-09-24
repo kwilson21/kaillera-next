@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.52.0",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "single-VPS deploy on Hetzner behind a Cloudflare Tunnel (#19)"
+      }
+    ]
+  },
+  {
     "version": "0.51.3",
     "date": "2026-09-24",
     "changes": [
