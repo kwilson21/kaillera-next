@@ -1008,6 +1008,15 @@ async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
     return None
 
 
+def _rom_sharing_disabled() -> bool:
+    """ROM_SHARING_ENABLED=false turns P2P ROM transfer off server-side too.
+
+    The page hides the toggle for such a server, but a client could still
+    send the events; refuse them so no ROM data is ever relayed.
+    """
+    return os.environ.get("ROM_SHARING_ENABLED", "true").strip().lower() in ("false", "0")
+
+
 @sio.on("rom-sharing-toggle")
 @validated(RomSharingTogglePayload)
 async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str | None:
@@ -1020,6 +1029,8 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
         session_id, room = result
         if room.owner != sid:
             return "Only the host can toggle ROM sharing"
+        if payload.enabled and _rom_sharing_disabled():
+            return "ROM sharing is disabled on this server"
 
         room.rom_sharing = payload.enabled
         await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
@@ -1157,6 +1168,8 @@ async def webrtc_signal(sid: str, data: dict) -> None:
 
 @sio.on("rom-signal")
 async def rom_signal(sid: str, data: dict) -> None:
+    if _rom_sharing_disabled():
+        return
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
