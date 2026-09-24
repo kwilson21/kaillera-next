@@ -12550,7 +12550,9 @@
     const due = _scheduledSyncRequests.filter(
       (r) =>
         (r.confirmedOnly
-          ? confirmed && r.targetFrame <= _frameNum
+          ? // Confirmation skips phantom peers, so it proves nothing about
+            // a target that is currently a phantom.
+            confirmed && r.targetFrame <= _frameNum && !_peerPhantom[_peers[r.targetSid]?.slot]
           : (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
     );
     if (due.length === 0) return;
