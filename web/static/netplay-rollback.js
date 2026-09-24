@@ -12483,6 +12483,29 @@
     });
   }
 
+  // I1: a sync state waits for an in-flight replay at most this long; then
+  // the replay is dropped (the state being loaded supersedes it).
+  const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
+  let _syncApplyDeferredAt = 0;
+  const _replayBlocksSyncApply = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+    if (!busy) {
+      _syncApplyDeferredAt = 0;
+      return false;
+    }
+    const now = performance.now();
+    if (!_syncApplyDeferredAt) {
+      _syncApplyDeferredAt = now;
+      _syncLog(`SYNC-APPLY-DEFERRED f=${_frameNum} — rollback replay in flight`);
+    }
+    if (now - _syncApplyDeferredAt < SYNC_APPLY_REPLAY_WAIT_MS) return true;
+    _syncLog(`SYNC-APPLY-DEFERRED timeout f=${_frameNum} — dropping replay to load state`);
+    mod?._kn_clear_replay_state?.();
+    _syncApplyDeferredAt = 0;
+    return false;
+  };
+
   // Coordinated sync dispatch (host): when the host reaches a scheduled
   // target frame, capture and send state. Coalesces multiple guests (4P)
   // into a single broadcast push. Runs at the end of both the C rollback
@@ -12721,9 +12744,16 @@
       if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
     }
 
+    // A state can't be loaded while a rollback replay is in flight: C refuses
+    // kn_set_frame then, so JS would rewind its frame counter while C kept
+    // its own and finished the old replay over the new state (the peers
+    // split from that frame). Hold the state until the replay finishes.
+    const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
       if (_frameNum >= _syncTargetFrame) {
-        if (_pendingResyncState) {
+        if (_pendingResyncState && syncApplyBlocked) {
+          // Replay in flight: apply on a later tick (bounded, see above).
+        } else if (_pendingResyncState) {
           // State arrived on time — apply at the agreed frame
           const pending = _pendingResyncState;
           _pendingResyncState = null;
@@ -12741,7 +12771,7 @@
         // next tick that has _pendingResyncState will apply it above and resume.
       }
       // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
-    } else if (_pendingResyncState) {
+    } else if (_pendingResyncState && !syncApplyBlocked) {
       // Non-coordinated (proactive push, reconnect, visibility/network-change): apply now
       const pending = _pendingResyncState;
       _pendingResyncState = null;
@@ -16516,6 +16546,10 @@
         _frameNum = frame;
         KNState.frameNum = frame;
         mod._kn_set_frame(frame);
+        const cFrame = mod._kn_get_frame?.();
+        if (cFrame !== undefined && cFrame !== frame) {
+          _syncLog(`SYNC-FRAME-MISMATCH js=${frame} c=${cFrame} — kn_set_frame refused`);
+        }
         _bootStallFrame = -1;
         _bootStallStartTime = 0;
         _resetStrictMenuResends();
