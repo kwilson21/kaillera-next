@@ -19,7 +19,7 @@
  * of the finalized battle frames were compared.
  *
  *   just serve        # the real server on :27888, in another terminal
- *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] \
+ *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
  *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
@@ -34,6 +34,12 @@ const ROM = process.env.KN_ROM;
 const LAT = Number(process.env.LAT || 50); // one-way ms
 const JITTER = Number(process.env.JITTER || 0);
 const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 60);
+// Block the host's (or guest's) main thread this long mid-battle (a frozen
+// tab). The other side drops it as a phantom; when it returns, the guest
+// must be resynced to the host.
+const FREEZE_HOST_MS = Number(process.env.FREEZE_HOST_MS || 0);
+const FREEZE_GUEST_MS = Number(process.env.FREEZE_GUEST_MS || 0);
+const FREEZE_MS = FREEZE_HOST_MS || FREEZE_GUEST_MS;
 const OUT = process.env.OUT || '/tmp/two-player';
 const QUERY = process.env.KN_QUERY || '';
 fs.mkdirSync(OUT, { recursive: true });
@@ -173,7 +179,15 @@ for (;;) {
 }
 if (inBattle) {
   console.log('in battle; playing', BATTLE_SECONDS, 's');
-  await host.waitForTimeout(BATTLE_SECONDS * 1000);
+  if (FREEZE_MS > 0) {
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+    const frozen = FREEZE_HOST_MS > 0 ? host : guest;
+    console.log('freezing', FREEZE_HOST_MS > 0 ? 'host' : 'guest', 'for', FREEZE_MS, 'ms');
+    await frozen.evaluate((ms) => { const t = performance.now(); while (performance.now() - t < ms); }, FREEZE_MS);
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else {
+    await host.waitForTimeout(BATTLE_SECONDS * 1000);
+  }
 }
 
 const collect = (p) => p.evaluate(() => {
@@ -194,13 +208,17 @@ await guest.screenshot({ path: `${OUT}/guest.png` });
 fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog); fs.writeFileSync(`${OUT}/guest-clog.txt`, G.clog);
 fs.writeFileSync(`${OUT}/host-sync.txt`, H.sync); fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
+// Freeze mode: peers legitimately diverge while the host is a phantom, so
+// only frames from the guest's last applied resync onward must match.
+const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
+const recoveredAt = FREEZE_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : 0;
 let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null, battleCompared = 0, gsMis = 0, firstGs = null;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f], b = G.hashes[f];
-  if (!b || !a[0] || !b[0]) continue;
+  if (!b || !a[0] || !b[0] || +f < recoveredAt) continue;
   both++;
-  if (battleFrom > 0 && +f >= battleFrom) battleCompared++;
+  if (battleFrom > 0 && +f >= Math.max(battleFrom, recoveredAt)) battleCompared++;
   if (a[0] !== b[0]) { gpMis++; if (firstGp === null) firstGp = +f; }
   if (a[1] !== b[1]) { fullMis++; if (firstFull === null) firstFull = +f; }
   if (a[2] !== b[2]) { gsMis++; if (firstGs === null) firstGs = +f; }
@@ -211,10 +229,12 @@ const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
-const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - battleFrom + 1 : 0;
+const spanFrom = Math.max(battleFrom, recoveredAt);
+const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - spanFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 const summary = {
   room, latencyMs: LAT, jitterMs: JITTER,
+  ...(FREEZE_MS > 0 ? { freezeHostMs: FREEZE_HOST_MS, freezeGuestMs: FREEZE_GUEST_MS, guestResyncs: resyncs, comparedFrom: recoveredAt } : {}),
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks }, failedRollbacks: { host: H.failed, guest: G.failed },
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
@@ -226,6 +246,42 @@ fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
 await browser.close();
-const failed = gpMis > 0 || gsMis > 0 || (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0
+// A freeze makes deep mispredictions and skipped rollbacks expected before
+// the resync; what must hold is that the resync happened, fixed it, and held:
+// no integrity events once recovery settled (each peer's lines after its last
+// recovery marker, 30+ frames past the resync; late pre-resync inputs can
+// still land just after it), and a meaningful window of matching frames.
+const POST_RECOVERY_MIN_FRAMES = 120;
+const integrityAfterRecovery = (log, marker) => {
+  const lines = log.split('\n');
+  let from = -1;
+  lines.forEach((l, i) => { if (marker.test(l)) from = i; });
+  return from < 0 ? 0 : lines.slice(from + 1).filter((l) => {
+    const f = +(l.split('\t')[2] || '').replace('f=', '');
+    return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
+  }).length;
+};
+// The C debug log has no frame column; its entries name the frame they
+// concern (f= / myF=). The guest's last `kn_set_frame:` is its resync; the
+// host never rewinds, so its frames alone place an entry.
+const cIntegrityAfterRecovery = (clog, marker) => {
+  const lines = clog.split('\n');
+  let from = -1;
+  if (marker) lines.forEach((l, i) => { if (marker.test(l)) from = i; });
+  return lines.slice(from + 1).filter((l) => {
+    if (count(l, INTEGRITY) === 0) return false;
+    const m = l.match(/myF=(\d+)/) || l.match(/\bf=(\d+)/);
+    return !m || +m[1] >= recoveredAt + 30;
+  }).length;
+};
+const postRecoveryIntegrity = FREEZE_MS > 0
+  ? integrityAfterRecovery(H.sync, /coord sync dispatch/) + integrityAfterRecovery(G.sync, /sync #\d+ applied/)
+    + cIntegrityAfterRecovery(H.clog, null) + cIntegrityAfterRecovery(G.clog, /kn_set_frame: \d+/)
+  : 0;
+if (FREEZE_MS > 0) console.log('post-recovery integrity events:', postRecoveryIntegrity, 'battle frames compared:', battleCompared);
+const integrityFailed = FREEZE_MS > 0
+  ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
+  : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
+const failed = gpMis > 0 || gsMis > 0 || integrityFailed
   || H.inBattleAt < 0 || G.inBattleAt < 0 || battleCoverage < 0.8;
 process.exit(failed ? 1 : 0);
