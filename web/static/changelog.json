@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.51.1",
+    "date": "2026-09-24",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "send peer-recovery resyncs in rollback mode, both directions (#15)"
+      }
+    ]
+  },
+  {
     "version": "0.51.0",
     "date": "2026-09-24",
     "changes": [
