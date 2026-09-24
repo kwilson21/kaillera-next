@@ -1184,7 +1184,12 @@ async def webrtc_signal(sid: str, data: dict) -> None:
 
 @sio.on("rom-signal")
 async def rom_signal(sid: str, data: dict) -> None:
-    if not _rom_sharing_allowed(sid):
+    # Relay only while the sender's room is actually sharing (host enabled it
+    # on a host this server allows). Keyed on the room, not the sender, so a
+    # guest on another hostname can still answer the host's offer.
+    entry = _sid_to_room.get(sid)
+    room = rooms.get(entry[0]) if entry else None
+    if room is None or not _room_rom_sharing(room):
         return
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 

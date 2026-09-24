@@ -195,10 +195,14 @@ def sig(monkeypatch):
     )
     monkeypatch.setattr(signaling, "check", lambda sid, event: True)
     monkeypatch.setattr(signaling, "_get_room", lambda sid: ("ROOM1", room))
+    monkeypatch.setitem(signaling.rooms, "ROOM1", room)
+    for s in ("host", "guest"):
+        monkeypatch.setitem(signaling._sid_to_room, s, ("ROOM1", s, False))
     monkeypatch.setattr(signaling.sio, "emit", emit)
     monkeypatch.setattr(signaling.state, "save_room", save_room)
     monkeypatch.setattr(signaling, "_relay_signal", relay)
     monkeypatch.setitem(signaling._sid_host, "host", "play.example")
+    monkeypatch.setitem(signaling._sid_host, "guest", "other.example")
     return signaling, room, emitted, relayed
 
 
@@ -231,3 +235,13 @@ def test_restored_room_flag_is_not_advertised_when_off(sig, monkeypatch):
     assert signaling._players_payload(room)["romSharing"] is False
     monkeypatch.setenv("ROM_SHARING_ENABLED", "true")
     assert signaling._players_payload(room)["romSharing"] is True
+
+
+def test_guest_on_unlisted_host_can_answer_an_allowed_host(sig, monkeypatch):
+    signaling, room, _, relayed = sig
+    monkeypatch.setenv("ROM_SHARING_ENABLED", "play.example")
+    asyncio.run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
+    assert relayed == []  # host hasn't enabled sharing yet
+    assert asyncio.run(signaling.rom_sharing_toggle("host", {"enabled": True})) is None
+    asyncio.run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
+    assert relayed == ["rom-signal"]
