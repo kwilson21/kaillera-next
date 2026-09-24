@@ -9,10 +9,13 @@ main() {
   REPO=/opt/kaillera-next
   BRANCH="${KN_BRANCH:-main}"
   ENV_FILE=/etc/kaillera-next/env
+  # The last commit that deployed successfully. Compared instead of HEAD so a
+  # failed build is retried on the next run rather than looking up to date.
+  DEPLOYED=/var/lib/kaillera-next/deployed-rev
   cd "$REPO"
 
   git fetch --quiet origin "$BRANCH"
-  if [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$BRANCH")" ] && [ "${1:-}" != "--force" ] \
+  if [ "$(cat "$DEPLOYED" 2>/dev/null)" = "$(git rev-parse "origin/$BRANCH")" ] && [ "${1:-}" != "--force" ] \
     && docker compose --env-file "$ENV_FILE" -f deploy/vps/compose.yml ps --status running -q app | grep -q .; then
     exit 0
   fi
@@ -20,6 +23,8 @@ main() {
   git reset --quiet --hard "origin/$BRANCH"
   echo "kn-update: deploying $(git log -1 --format='%h %s')"
   docker compose --env-file "$ENV_FILE" -f deploy/vps/compose.yml up -d --build --remove-orphans
+  mkdir -p "$(dirname "$DEPLOYED")"
+  git rev-parse HEAD > "$DEPLOYED"
   docker image prune -f >/dev/null
 }
 main "$@"

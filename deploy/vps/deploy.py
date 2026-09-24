@@ -210,7 +210,19 @@ def cmd_dns(args: argparse.Namespace) -> None:
             sys.exit(
                 f"{host} has other DNS records {[r['type'] for r in records]}; resolve by hand"
             )
-        cf("PUT", f"/zones/{zid}/dns_records/{records[0]['id']}", record)
+        existing = records[0]
+        # Only replace a record this script made (a previous tunnel of ours);
+        # a CNAME for some other service is left for a human to decide.
+        if existing.get("comment") != NAME or not existing["content"].endswith(
+            ".cfargotunnel.com"
+        ):
+            sys.exit(
+                f"{host} is a CNAME to {existing['content']} not made by this script; resolve by hand"
+            )
+        if existing["content"] == target:
+            print(f"dns: {host} already -> {target}")
+            return
+        cf("PUT", f"/zones/{zid}/dns_records/{existing['id']}", record)
         print(f"dns: {host} CNAME updated -> {target} (proxied)")
     else:
         cf("POST", f"/zones/{zid}/dns_records", record)
