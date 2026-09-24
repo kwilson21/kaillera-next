@@ -657,9 +657,12 @@ def create_app(lifespan=None) -> FastAPI:
             except json.JSONDecodeError:
                 log.warning("ICE_SERVERS env var contains invalid JSON")
 
-        # Cloudflare Realtime TURN (managed): short-lived generated credentials
+        # Cloudflare Realtime TURN (managed): short-lived generated credentials.
+        # If Cloudflare can't supply any, fall through to the HMAC TURN path.
         if turn.configured():
-            return stun_servers + await turn.ice_servers()
+            cf_turn = await turn.ice_servers()
+            if cf_turn:
+                return stun_servers + cf_turn
 
         # Generate HMAC time-limited TURN credentials
         turn_secret = os.environ.get("TURN_SECRET", "")
