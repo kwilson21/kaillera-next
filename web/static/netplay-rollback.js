@@ -6352,6 +6352,10 @@
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
+  // host: in-flight state pushes don't requeue after the queue was cleared,
+  // per sid (resetPeerState) or for the whole match (stop).
+  const _syncQueueGen = {};
+  let _syncQueueEpoch = 0;
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
@@ -8142,7 +8146,8 @@
    *
    * Shared queues filtered to remove entries for this slot:
    *   - _pendingCInputs (by slot)
-   *   - _scheduledSyncRequests (by targetSid if sid provided)
+   *   - _scheduledSyncRequests (by targetSid if sid provided; bumps
+   *     _syncQueueGen so an in-flight push can't requeue for it)
    *
    * Boot-stall tracking cleared if currently stalled:
    *   - _bootStallFrame / _bootStallStartTime / _bootStallRecoveryFired
@@ -8186,6 +8191,9 @@
     }
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
+      // A state push still in flight for this sid must not requeue into
+      // the new peer session.
+      _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
     }
 
     // Stall tracking — if we were stalled waiting on this slot's apply
@@ -12529,7 +12537,24 @@
     const confirmed = isConfirmed();
     const _coordNow = performance.now();
     const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
-    const due = _scheduledSyncRequests.filter((r) => (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r));
+    // A request whose target has no open channel stays queued: sending now
+    // would be skipped and the request lost. It goes out once the channel
+    // opens, or resetPeerState drops it when that peer disconnects (I2).
+    const reachable = (r) => {
+      const p = _peers[r.targetSid];
+      const ok = [p?.syncDc, p?.dc].some((ch) => ch?.readyState === 'open');
+      if (!ok && !r.unreachableLogged) {
+        r.unreachableLogged = true;
+        _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
+      }
+      return ok;
+    };
+    // Confirmation skips phantom peers, so for a follow-up (below) it proves
+    // nothing while the follow-up's own target is a phantom.
+    const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
+    const due = _scheduledSyncRequests.filter(
+      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
+    );
     if (due.length === 0) return;
     for (const r of due) {
       if (r.targetFrame > _frameNum || !confirmed) {
@@ -12548,8 +12573,47 @@
     _syncLog(
       `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
     );
-    pushSyncState(targetSid);
+    const requeue = (r, followUp) =>
+      _scheduledSyncRequests.push({
+        targetFrame: _frameNum,
+        targetSid: r.targetSid,
+        forceFull: true,
+        followUp,
+        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+      });
+    // Confirmation skips phantom peers, so a state sent while a target is a
+    // phantom is not confirmed for that target.
+    const unconfirmedFor = new Set(
+      due.filter((r) => !confirmed || _peerPhantom[_peers[r.targetSid]?.slot]).map((r) => r.targetSid),
+    );
+    const epoch = _syncQueueEpoch;
+    const gens = due.map((r) => _syncQueueGen[r.targetSid] || 0);
+    pushSyncState(targetSid).then((skipped) => {
+      due.forEach((r, i) => {
+        // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
+        if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
+        // The guest asked again while this push was in flight; its newer
+        // request replaces this one.
+        if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
+        if (skipped === null || skipped?.includes(r.targetSid)) {
+          // A channel can close while the state is being compressed; the
+          // send then skips that target. Put its request back unchanged so
+          // it goes out when reachable.
+          _syncLog(`coord sync re-queued: send to ${r.targetSid} did not go out`);
+          requeue(r, r.followUp || 0);
+        } else if (unconfirmedFor.has(r.targetSid)) {
+          // A state sent unconfirmed can still change here through a later
+          // rollback, leaving the guest on a state the host no longer has.
+          // Follow up with a fresh sync; each goes out once confirmed or at
+          // its deadline, at most SYNC_FOLLOW_UP_MAX in a row (I1).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) requeue(r, n);
+          else _syncLog(`coord sync follow-ups exhausted for ${r.targetSid}`);
+        }
+      });
+    });
   };
+  const SYNC_FOLLOW_UP_MAX = 3;
 
   // True when the host's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
@@ -12588,6 +12652,10 @@
     const gap = _lastTickEnterAt > 0 ? now - _lastTickEnterAt : 0;
     _lastTickEnterAt = now;
     if (gap < LOCAL_FREEZE_CREDIT_MS) return;
+    // A hidden tab ticks about once a second by design, while its message
+    // handlers keep running and record peer activity, so its gaps aren't a
+    // freeze. Crediting them would keep a dead peer from ever timing out.
+    if (typeof document !== 'undefined' && document.hidden) return;
     for (const s of Object.keys(_peerLastAdvanceTime)) {
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
@@ -16135,6 +16203,8 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
+  // Resolves to the sids a DC send skipped (closed channel), [] when sent,
+  // or null when no state went out at all.
   const pushSyncState = async (targetSid, isProactive = false, options = {}) => {
     // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
@@ -16143,7 +16213,7 @@
     if (isProactive ? _proactivePushInFlight : _pushingSyncState) return;
 
     const gm = window.EJS_emulator?.gameManager;
-    if (!gm) return;
+    if (!gm) return null;
     if (isProactive) {
       _proactivePushInFlight = true;
     } else {
@@ -16163,7 +16233,7 @@
         _syncLog('kn_sync_read returned 0');
         if (isProactive) _proactivePushInFlight = false;
         else _pushingSyncState = false;
-        return;
+        return null;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
       _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
@@ -16282,23 +16352,28 @@
           _syncLog(
             `socket sync too large (${b64KB}KB b64 > ${Math.round(SOCKET_SYNC_B64_SOFT_LIMIT / 1024)}KB), falling back to DC chunks`,
           );
-          await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive);
+          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive);
         }
       } else {
         const compressed = await compressState(toCompress);
         const sizeKB = Math.round(compressed.length / 1024);
         _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-        await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive);
+        return await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive);
       }
+      return [];
     } catch (err) {
       _syncLog(`sync compress failed: ${err}`);
+      return null;
     } finally {
       if (isProactive) _proactivePushInFlight = false;
       else _pushingSyncState = false;
     }
   };
 
+  // Returns the sids of targets that were skipped because their channel
+  // wasn't open.
   const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false) => {
+    const skipped = [];
     // Host: send compressed state/delta via DC in 64KB chunks.
     // Chunks are sent with yields between them so input messages can
     // interleave — prevents DataChannel saturation that causes mutual
@@ -16320,6 +16395,8 @@
       const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
       if (!dc || dc.readyState !== 'open') {
         _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
+        const sid = Object.keys(_peers).find((k) => _peers[k] === target);
+        if (sid) skipped.push(sid);
         continue;
       }
       // Proactive flood prevention: if the DataChannel is already backed up
@@ -16351,6 +16428,7 @@
     _syncLog(
       `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`,
     );
+    return skipped;
   };
 
   async function _handleDecodedSyncPayload({ decompressed, frame, isFull, isProactive, isRegions, wireSize, source }) {
@@ -16876,6 +16954,7 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _syncQueueEpoch++;
     _lastResyncTime = 0;
     _heldKeys.clear();
     _p1KeyMap = null;

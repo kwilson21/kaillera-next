@@ -153,7 +153,14 @@ const install = async (p, role) => {
     const post = m._kn_post_tick;
     m._kn_post_tick = function (...a) {
       const r = post.apply(this, a);
-      if ((m._kn_get_replay_depth?.() ?? 0) === 0 && r > 40) {
+      const idle = (m._kn_get_replay_depth?.() ?? 0) === 0;
+      // A sync rewind (frame goes down with no replay running) makes hashes
+      // already recorded at or after the new frame stale; re-record them.
+      if (idle && W.lastR !== undefined && r < W.lastR) {
+        for (const k of Object.keys(W.hashes)) if (+k >= r - 12) delete W.hashes[k];
+      }
+      if (idle) W.lastR = r;
+      if (idle && r > 40) {
         const f = r - 12;
         if (!(f in W.hashes)) W.hashes[f] = [m._kn_gameplay_hash(f) >>> 0, m._kn_full_state_hash(f) >>> 0, (m._kn_game_state_hash?.(f) ?? 0) >>> 0];
       }
