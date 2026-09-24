@@ -844,7 +844,8 @@
       installWorkerDomStubs();
       installManualRAF();
 
-      importScripts(message.coreScript || `${coreBase}mupen64plus_next_libretro.js`);
+      const coreQuery = message.coreVersion ? `?h=${encodeURIComponent(message.coreVersion)}` : '';
+      importScripts(`${message.coreScript || `${coreBase}mupen64plus_next_libretro.js`}${coreQuery}`);
       const runtime = self.EJS_Runtime;
       if (typeof runtime !== 'function') throw new Error('EJS_Runtime unavailable');
 
@@ -867,7 +868,7 @@
           if (message.verbose) post({ type: 'stderr', line: String(line) });
         },
         totalDependencies: 0,
-        locateFile: (file) => `${coreBase}${file}`,
+        locateFile: (file) => `${coreBase}${file}${coreQuery}`,
         getSavExt: () => '.srm',
       });
 
