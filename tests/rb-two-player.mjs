@@ -19,7 +19,7 @@
  * of the finalized battle frames were compared.
  *
  *   just serve        # the real server on :27888, in another terminal
- *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0] \
+ *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
  *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
@@ -34,9 +34,12 @@ const ROM = process.env.KN_ROM;
 const LAT = Number(process.env.LAT || 50); // one-way ms
 const JITTER = Number(process.env.JITTER || 0);
 const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 60);
-// Block the host's main thread this long mid-battle (a frozen tab). The
-// guest drops the host as a phantom, then must resync when it returns.
+// Block the host's (or guest's) main thread this long mid-battle (a frozen
+// tab). The other side drops it as a phantom; when it returns, the guest
+// must be resynced to the host.
 const FREEZE_HOST_MS = Number(process.env.FREEZE_HOST_MS || 0);
+const FREEZE_GUEST_MS = Number(process.env.FREEZE_GUEST_MS || 0);
+const FREEZE_MS = FREEZE_HOST_MS || FREEZE_GUEST_MS;
 const OUT = process.env.OUT || '/tmp/two-player';
 const QUERY = process.env.KN_QUERY || '';
 fs.mkdirSync(OUT, { recursive: true });
@@ -176,10 +179,11 @@ for (;;) {
 }
 if (inBattle) {
   console.log('in battle; playing', BATTLE_SECONDS, 's');
-  if (FREEZE_HOST_MS > 0) {
+  if (FREEZE_MS > 0) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
-    console.log('freezing host for', FREEZE_HOST_MS, 'ms');
-    await host.evaluate((ms) => { const t = performance.now(); while (performance.now() - t < ms); }, FREEZE_HOST_MS);
+    const frozen = FREEZE_HOST_MS > 0 ? host : guest;
+    console.log('freezing', FREEZE_HOST_MS > 0 ? 'host' : 'guest', 'for', FREEZE_MS, 'ms');
+    await frozen.evaluate((ms) => { const t = performance.now(); while (performance.now() - t < ms); }, FREEZE_MS);
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
@@ -207,7 +211,7 @@ fs.writeFileSync(`${OUT}/host-sync.txt`, H.sync); fs.writeFileSync(`${OUT}/guest
 // Freeze mode: peers legitimately diverge while the host is a phantom, so
 // only frames from the guest's last applied resync onward must match.
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
-const recoveredAt = FREEZE_HOST_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : 0;
+const recoveredAt = FREEZE_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : 0;
 let both = 0, gpMis = 0, fullMis = 0, firstGp = null, firstFull = null, battleCompared = 0, gsMis = 0, firstGs = null;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
@@ -230,7 +234,7 @@ const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - spanFrom +
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 const summary = {
   room, latencyMs: LAT, jitterMs: JITTER,
-  ...(FREEZE_HOST_MS > 0 ? { freezeHostMs: FREEZE_HOST_MS, guestResyncs: resyncs, comparedFrom: recoveredAt } : {}),
+  ...(FREEZE_MS > 0 ? { freezeHostMs: FREEZE_HOST_MS, freezeGuestMs: FREEZE_GUEST_MS, guestResyncs: resyncs, comparedFrom: recoveredAt } : {}),
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks }, failedRollbacks: { host: H.failed, guest: G.failed },
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
@@ -244,7 +248,7 @@ console.log(JSON.stringify(summary, null, 1));
 await browser.close();
 // A freeze makes deep mispredictions and skipped rollbacks expected before
 // the resync; what must hold is that the resync happened and fixed it.
-const integrityFailed = FREEZE_HOST_MS > 0
+const integrityFailed = FREEZE_MS > 0
   ? !Number.isFinite(recoveredAt)
   : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
 const failed = gpMis > 0 || gsMis > 0 || integrityFailed
