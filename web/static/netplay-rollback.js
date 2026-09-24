@@ -11213,7 +11213,9 @@
     const localInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
-          _cloneInput(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput()),
+          _cloneInput(
+            _deadbandStick(suppressEjsPausedInput || suppressResumeGuardInput ? KNShared.ZERO_INPUT : readLocalInput()),
+          ),
         );
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
@@ -13066,12 +13068,14 @@
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
           _cloneInput(
-            menuStartBarrier.suppressInput ||
-              suppressLateJoinBootstrapInput ||
-              suppressEjsPausedInput ||
-              suppressResumeGuardInput
-              ? KNShared.ZERO_INPUT
-              : readLocalInput(),
+            _deadbandStick(
+              menuStartBarrier.suppressInput ||
+                suppressLateJoinBootstrapInput ||
+                suppressEjsPausedInput ||
+                suppressResumeGuardInput
+                ? KNShared.ZERO_INPUT
+                : readLocalInput(),
+            ),
           ),
         );
     if (!hadLocalInputForFrame) {
@@ -15895,6 +15899,10 @@
 
   const readLocalInput = () => KNShared.readLocalInput(_playerSlot, _p1KeyMap, _heldKeys);
 
+  // See KNShared.createStickDeadband: held-stick jitter would otherwise
+  // mispredict every frame now that the C engine matches predictions exactly.
+  const _deadbandStick = KNShared.createStickDeadband();
+
   window.debugInput = () => {
     window._debugInputUntil = performance.now() + 3000;
     console.log('[input-debug] Logging input for 3 seconds — press buttons now');
@@ -16644,6 +16652,7 @@
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
     _resetInputAudit();
+    _deadbandStick.reset();
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
