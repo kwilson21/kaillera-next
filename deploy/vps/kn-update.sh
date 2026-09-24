@@ -22,7 +22,10 @@ main() {
 
   git reset --quiet --hard "origin/$BRANCH"
   echo "kn-update: deploying $(git log -1 --format='%h %s')"
-  docker compose --env-file "$ENV_FILE" -f deploy/vps/compose.yml up -d --build --remove-orphans
+  # --wait: fails unless every service is running and healthy (the app's
+  # /health check), so an unhealthy deploy isn't recorded and is retried.
+  docker compose --env-file "$ENV_FILE" -f deploy/vps/compose.yml up -d --build --remove-orphans \
+    --wait --wait-timeout 180
   mkdir -p "$(dirname "$DEPLOYED")"
   git rev-parse HEAD > "$DEPLOYED"
   docker image prune -f >/dev/null

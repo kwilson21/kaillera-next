@@ -219,7 +219,7 @@ def cmd_dns(args: argparse.Namespace) -> None:
             sys.exit(
                 f"{host} is a CNAME to {existing['content']} not made by this script; resolve by hand"
             )
-        if existing["content"] == target:
+        if existing["content"] == target and existing.get("proxied") is True:
             print(f"dns: {host} already -> {target}")
             return
         cf("PUT", f"/zones/{zid}/dns_records/{existing['id']}", record)
