@@ -16534,10 +16534,13 @@
     // (151 -> 134) would otherwise delete host inputs it already received;
     // the host doesn't resend them, so the guest stalls on the gap until the
     // peer is marked phantom and the match desyncs. Only fabricated
-    // placeholders (KNShared.ZERO_INPUT) from the host are dropped.
+    // placeholders (KNShared.ZERO_INPUT) from the host are dropped. This only
+    // holds when the guest's counter now matches the host's sync frame; the
+    // loadState fallback doesn't realign it, so it keeps the plain purge.
+    const timelineAligned = frame != null && _frameNum === frame;
     for (const [slot, inputs] of Object.entries(_remoteInputs)) {
       if (!inputs) continue;
-      const fromHost = slot === '0';
+      const fromHost = timelineAligned && slot === '0';
       for (const f of Object.keys(inputs)) {
         if (parseInt(f, 10) <= _frameNum + DELAY_FRAMES) continue;
         if (fromHost && inputs[f] !== KNShared.ZERO_INPUT) continue;
