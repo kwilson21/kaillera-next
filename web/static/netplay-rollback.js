@@ -12527,7 +12527,21 @@
     const confirmed = isConfirmed();
     const _coordNow = performance.now();
     const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
-    const due = _scheduledSyncRequests.filter((r) => (confirmed && r.targetFrame <= _frameNum) || pastDeadline(r));
+    // A request whose target has no open channel stays queued: sending now
+    // would be skipped and the request lost. It goes out once the channel
+    // opens, or resetPeerState drops it when that peer disconnects (I2).
+    const reachable = (r) => {
+      const p = _peers[r.targetSid];
+      const ok = [p?.syncDc, p?.dc].some((ch) => ch?.readyState === 'open');
+      if (!ok && !r.unreachableLogged) {
+        r.unreachableLogged = true;
+        _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
+      }
+      return ok;
+    };
+    const due = _scheduledSyncRequests.filter(
+      (r) => ((confirmed && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
+    );
     if (due.length === 0) return;
     for (const r of due) {
       if (r.targetFrame > _frameNum || !confirmed) {
@@ -12586,6 +12600,10 @@
     const gap = _lastTickEnterAt > 0 ? now - _lastTickEnterAt : 0;
     _lastTickEnterAt = now;
     if (gap < LOCAL_FREEZE_CREDIT_MS) return;
+    // A hidden tab ticks about once a second by design, while its message
+    // handlers keep running and record peer activity, so its gaps aren't a
+    // freeze. Crediting them would keep a dead peer from ever timing out.
+    if (typeof document !== 'undefined' && document.hidden) return;
     for (const s of Object.keys(_peerLastAdvanceTime)) {
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
