@@ -3422,10 +3422,10 @@
             statusSab: _rbShadowStatusSab,
             coreBase: '/static/ejs/cores/',
             coreScript: '/static/ejs/cores/mupen64plus_next_libretro.js',
-            // Cores are served immutable for a year; the .data URL is
-            // versioned by content hash (core-redirector.js), and the
-            // standalone .js/.wasm ship from the same build, so reuse it.
-            coreVersion: window._knCoreHash || '',
+            // Cores are served immutable for a year, so the worker's URLs
+            // carry a content hash of every core file it loads
+            // (/api/core-info workerHash; .data hash as a fallback).
+            coreVersion: window._knCoreWorkerHash || window._knCoreHash || '',
             coreSettings,
             controllerMask: _shadowControllerMask(),
             verbose: _urlParams.get('shadowVerbose') === '1',
