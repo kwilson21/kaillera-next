@@ -333,8 +333,16 @@ def _asset_version() -> str:
 
 _CORE_RELATIVE_PATH = "static/ejs/cores/mupen64plus_next-wasm.data"
 _core_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "web", _CORE_RELATIVE_PATH)
+# The Mode 2 shadow worker loads the standalone core, not the .data archive.
+# `workerHash` covers everything it loads, so its URLs change whenever any
+# of these files does.
+_WORKER_CORE_PATHS = [
+    _core_path,
+    os.path.join(os.path.dirname(_core_path), "mupen64plus_next_libretro.js"),
+    os.path.join(os.path.dirname(_core_path), "mupen64plus_next_libretro.wasm"),
+]
 _core_info_cache: dict | None = None
-_core_info_mtime: float = 0.0
+_core_info_mtime: tuple = ()
 
 
 def _compute_core_info() -> dict:
@@ -353,21 +361,27 @@ def _compute_core_info() -> dict:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     hash_prefix = h.hexdigest()[:16]
+    wh = hashlib.sha256()
+    for path in _WORKER_CORE_PATHS:
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    wh.update(chunk)
+        except FileNotFoundError:
+            wh.update(b"missing:" + os.path.basename(path).encode())
     return {
         "url": f"/{_CORE_RELATIVE_PATH}?h={hash_prefix}",
         "hash": hash_prefix,
+        "workerHash": wh.hexdigest()[:16],
         "size": st.st_size,
         "available": True,
     }
 
 
 def _get_core_info() -> dict:
-    """Returns cached core info, recomputing if the WASM file's mtime changes."""
+    """Returns cached core info, recomputing if any core file's mtime changes."""
     global _core_info_cache, _core_info_mtime
-    try:
-        mtime = os.stat(_core_path).st_mtime
-    except FileNotFoundError:
-        mtime = 0.0
+    mtime = tuple(os.stat(p).st_mtime if os.path.exists(p) else 0.0 for p in _WORKER_CORE_PATHS)
     if _core_info_cache is None or mtime != _core_info_mtime:
         _core_info_cache = _compute_core_info()
         _core_info_mtime = mtime
