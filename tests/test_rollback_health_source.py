@@ -189,6 +189,34 @@ def test_gameplay_to_menu_schedules_per_match_input_reset():
     assert transition_idx < schedule_idx < shutdown_idx
 
 
+def test_gameplay_to_menu_c_shutdown_keeps_frame_timeline():
+    # Smash Remix pause (scene 22, status 2) tears down the C engine. The
+    # tick must stop right there: running on into _kn_post_tick resets
+    # _frameNum to -1 on only the peer that got that far, and the other
+    # peer's lockstep waits on frames that never come.
+    src = LOCKSTEP_JS.read_text()
+    transition_idx = src.index("GAMEPLAY→MENU transition")
+    branch_src = src[transition_idx : src.index("MENU-LOCKSTEP armed at", transition_idx)]
+
+    guard = "if (!_shutdownCRollback) {"
+    assert guard in branch_src
+    assert branch_src.index(guard) < branch_src.index("_scheduleMatchInputReset(`gameplay-menu")
+
+    shutdown_idx = branch_src.index("C-ROLLBACK shutdown on GAMEPLAY→MENU")
+    after_shutdown = branch_src[shutdown_idx:]
+    assert "_markTickReturn('skip:rb-shutdown');" in after_shutdown
+    assert after_shutdown.index("return;") < after_shutdown.index("\n          }\n")
+
+
+def test_rollback_gap_check_ignores_frames_before_c_init():
+    # Legacy lockstep deletes consumed remote inputs, so before a deferred
+    # init the window edge would look like a lost packet.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const gapAtEdge =")
+    gap_src = src[idx : src.index(";", idx)]
+    assert "windowEdge >= Math.max(0, _rbInitFrame)" in gap_src
+
+
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
     src = LOCKSTEP_JS.read_text()
 
