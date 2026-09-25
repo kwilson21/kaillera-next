@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2a (ports, filling up) is the working pick; round 4 explores A1 as an animated d-pad/stick (§5.7e). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo/motion: A2a is the working mark; rounds 4–5 add animated input marks and five motion graphics (KO, match start, rollback timeline, interactive stick, letters arrive) (§5.7e–f). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1912,8 +1912,28 @@ Rule for any animated mark: motion in the header lockup only; static in the
 tab icon and in any place motion would fight the board's own live dot;
 `prefers-reduced-motion` gets the still frame.
 
-_Owner's pick from round 4 (and whether A1 and A2 both get a job, e.g. A2
-as the mark and A1 as the "watch instead" / no-ROM glyph): pending._
+**Owner (2026-09-25): "One more time, be more creative: add animations,
+cool graphics that you create with SVGs (they could even move), be
+creative!"**
+
+### 5.7f Round 5 — Motion graphics (mockup, Screen → Logo, bottom)
+
+Five pieces, all SVG + CSS, no images, no generator. Some are marks, some
+are section graphics, one is a control.
+
+| # | Piece | What happens | Where it would live |
+|---|---|---|---|
+| 1 | **KO** | A stick flicks forward, a hit ring pops, the opponent's block spins off the top corner with a trail and a star burst, one of their stocks blinks out; 3.6 s loop | Header mark (animated lockup), or the hero of a "how it feels" moment |
+| 2 | **Match start** | Three ports fill one by one, the fourth arrives (the A2a fill), all four bounce once (ready), then the ports collapse into the row of slot squares used on every board row | The empty-state or waking-state board, or a page-load moment above the board |
+| 3 | **Rollback** | A playhead steps through frames; one turns red (wrong guess); it rewinds three frames, replays them in blue, continues; labels "wrong guess" and "rewind · replay" | "Why it feels close to the couch", beside the demo button; the explainer video's diagram |
+| 4 | **The stick is real** | Not an animation: a control. Drag or hover and the stick follows within the octagonal gate; push far and the direction lights; release and it springs back; tap to press | Header mark: the first thing on the page you can play with |
+| 5 | **Players arrive** | The wordmark's letters drop in one by one wearing the player colours, then settle to white, like a lobby filling | Page-load animation for the name (runs once, not looped) |
+
+All five honour `prefers-reduced-motion` (still frame). None uses a
+Nintendo shape: an octagon, circles, squares and bars.
+
+_Owner's picks from round 5 (which pieces get a job, and which mark is the
+site's): pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2387,3 +2407,4 @@ Surprises (one line):
 | 2026-09-25 | Logo family A (four seats, one open) preferred by owner and his wife; the 2×2 grid echoes the Windows logo, so round 2 rearranges it (cross, four ports, board row) | Owner + wife feedback | 5 |
 | 2026-09-25 | Logo A2 (four ports, fourth open) chosen; motion on the fourth port ("the last player is joining") in the lockup only; tab icon static; reduced-motion honoured in build | Owner's pick + motion idea | 5 |
 | 2026-09-25 | A2a (fourth port filling up) is the working mark; A1 re-read as a d-pad/stick with fighting-game input motion (quarter circle, smash flick, 360) for a possible second job | Owner: "A2a is cool" + input-motion idea | 5 |
+| 2026-09-25 | Round 5 motion graphics drawn (KO, match start → board marker, rollback timeline, interactive stick, letters arrive) as SVG/CSS for the header, the board's empty/waking states and the rollback section | Owner: "be more creative" | 5 |
