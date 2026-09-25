@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 5 (Shot list) — no narration, solo captures decided; Q1–Q3 restated plainly, awaiting answers. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 5 — photo, silent videos, solo captures decided; logo prompts delivered (§5.7); awaiting the link-preview decision (a/b/c) and the logo images. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1712,7 +1712,26 @@ the desktop behind the browser.
 - Questions 1–3 were asked in shorthand and not understood; restated
   plainly below with defaults.
 
-### 5.6a Questions for the owner, restated plainly
+### 5.6b Owner's answers, second pass (2026-09-25)
+
+- **Third "How it works" picture → a photo.** *"I'll have to take a picture
+  when I get a chance."* S3 is a camera photo of the laptop and phone on a
+  table, both showing the same moment of the same match; no hands; browser
+  bar and status bar visible.
+- **Link-preview image.** Owner: *"You sure you know what 'sketchy' looks
+  like?"* Fair: the "sketchy ROM site" claim was a pattern guess, not
+  something I verified, and it's withdrawn. The reason that stands is IP:
+  the box art is Nintendo's copyrighted artwork and trademarks used to
+  promote the site, the only place on the page that would show their art
+  rather than a player's gameplay, under the owner's own "no legal gray
+  areas" rule. Options: **(a)** keep the box art; **(b)** our own card only
+  (name, invite text, player-colour slots); **(c)** our own card with a real
+  in-match frame as the picture, same category as the live frames.
+  Recommendation: (c). *Awaiting a / b / c.*
+- **Logo: yes, via GPT.** *"A logo would be cool, we can pass a prompt to
+  GPT for it."* Prompts in §5.7.
+
+### 5.6a Questions for the owner, restated plainly (superseded by 5.6b)
 - **Q1. The third "How it works" picture ("both screens in a match").**
   A camera photo of the laptop and phone on a table showing the same moment,
   or two screenshots (laptop + phone) placed side by side in one image?
@@ -1732,6 +1751,73 @@ the desktop behind the browser.
   of ideas (no Nintendo content) is the one remaining use for GPT images.
   *Default: no logo for now; the direction A name treatment is the wordmark
   and the "kn" icon gets the new colours.*
+
+### 5.7 Logo prompts for GPT (ready to paste)
+
+Three concepts grounded in the project, not in anyone's IP: the four
+player colours, the rollback idea, the existing "kn" monogram. One concept
+per run; paste the shared rules at the end of every prompt.
+
+**Shared rules (paste at the end of each prompt):**
+
+> Flat vector logo, solid shapes, no gradients, no 3D, no shadows, no glow.
+> No mockups: no business cards, signage or app-store frames. No mascots, no
+> characters, nothing resembling Nintendo logos, Nintendo characters, the
+> Smash Bros. emblem or the N64 controller shape. No pixel-art font, no
+> neon, no chrome. Present four things in one square 1024×1024 image on a
+> dark charcoal-navy background #0e1218: the mark alone; the mark with the
+> wordmark "kaillera-next" in a tall condensed bold uppercase sans (Barlow
+> Condensed feel), off-white #e8ecf1; a 32×32 favicon version; and the mark
+> in plain white on black.
+
+**Concept 1 — Four slots**
+
+> Logo for kaillera-next, a browser site where up to four people play a
+> 1999 four-player fighting game online together. The mark is four small
+> rounded squares in the four player colours: red #e5484d, blue #3b82f6,
+> yellow #f5c518, green #3fb950. VARIATION: [V1] arranged in a 2×2 grid with
+> one square nudged slightly outward, like a slot that just opened. [V2] a
+> horizontal row of four with the last square drawn as a hollow outline, an
+> open slot. [V3] the four squares plus two thin stems forming a capital K.
+> Mood: a console-era online lobby: composed, quiet, confident, a place
+> rather than a product. The hyphen in the wordmark may be the only accent
+> in electric blue #5aa8ff.
+
+**Concept 2 — Run and rewind**
+
+> Logo for kaillera-next, a browser netplay site whose engine runs the game
+> ahead and quietly rewinds when a prediction misses. The mark is a single
+> monoline symbol in electric blue #5aa8ff that combines a play triangle
+> with a rewind loop; even stroke weight, slightly rounded corners, must
+> read at 32 pixels. VARIATION: [V1] a play triangle whose left edge
+> continues into a circular arrow. [V2] two rounded rectangles (frames)
+> offset by a few pixels with a small arrow between them. [V3] one
+> continuous stroke that draws a play triangle and loops back under it.
+> Mood: composed, technical without jargon, quiet confidence.
+
+**Concept 3 — The kn monogram**
+
+> Logo for kaillera-next, a browser netplay site continuing Kaillera
+> (2001). The mark is the letters "kn" as one geometric lettermark, the n
+> sharing the k's stem, tall and condensed, off-white #e8ecf1 on a rounded
+> square of #151b25 with a thin #242c39 border; one small electric-blue
+> #5aa8ff bar or dot is the only colour. VARIATION: [V1] kn inside the
+> rounded square, favicon first. [V2] kn drawn as one continuous stroke.
+> [V3] the k's upper arm becomes a small forward arrow, for "next". Mood:
+> composed, quiet, could have been the icon of a 2007 console lobby.
+
+**What to look for when the images come back**
+1. Shrink each to 32 px. If the mark turns to mud, it fails.
+2. The white-on-black version: if it needs colour to work, it fails.
+3. Anything echoing the N64 "N" cube, the Smash emblem or a three-prong
+   controller is out.
+4. Gradient orbs, swooshes, shields, hexagons, "tech" rings: AI-logo tropes,
+   out.
+5. Put the mark next to the mockup header. Does it belong with the
+   condensed type?
+6. Say in one sentence what the mark means. If you can't, nobody will.
+
+_Owner's logo picks and critique: pending._
 
 ## 6. Phase 6 — Testing with real players
 _Not started._
@@ -1839,3 +1925,6 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Restyle the room overlay and the demo page to direction A in the same build | Owner: "restyle everything accordingly" | 4 |
 | 2026-09-25 | Wireframes accepted; invite-waking copy changed to "We'll check on Kaz's room"; build item: rooms with no live sockets are not joinable by new players | Owner: no complaints; zombie-room analysis of the restart path | 4 |
 | 2026-09-25 | Phase 5 is a shot list: 7 stills (incl. OG cards, favicon), 2 videos, recording checklist, critique tests | Owner: no generated imagery | 5 |
+| 2026-09-25 | Videos are silent with on-screen text cards; captures are the owner solo on two devices with real handles; third picture is a photo | Owner, Phase 5 answers | 5 |
+| 2026-09-25 | "Sketchy ROM site" claim about box art withdrawn (unverified); the IP reason stands; link-preview options a/b/c, (c) recommended | Owner challenged the claim | 5 |
+| 2026-09-25 | A logo will be explored via three GPT prompt concepts (four slots, run-and-rewind, kn monogram), no Nintendo IP | Owner: "a logo would be cool" | 5 |
