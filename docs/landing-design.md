@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 2 — narrative, copy and directions written; live mockup + direction image prompts delivered (§2.7). Awaiting owner's direction pick and Q1–Q8. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 2 — direction A (pending one-word confirm); live-previews concept added (§2.8); GPT imagery rejected. Awaiting Q1, Q9–Q11 and the open Q2–Q8. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -931,7 +931,88 @@ three variations by swapping the bracketed line.
    already know, or like a new brand?
 7. *Cost:* which elements would need real art (Phase 5) versus CSS alone?
 
-_Owner's first reaction to the mockup (2026-09-25): "A looks great." Provisional; generating GPT images (Prompt A variations 1–3, plus Mix) before the final pick._
+_Owner's first reaction to the mockup (2026-09-25): "A looks great."_
+
+**GPT images, reviewed (2026-09-25).** Owner ran Prompt A three times and
+*"didn't care for the GPT generated images."* Looking at them against the
+brief: the layout of A translated fine, but every image invented content:
+Mario Kart 64 and GoldenEye rooms, "Stock 4 / Final Destination" modes,
+taglines like "same games, more friends, further together" and "good games
+travel far". That is the AI-slop anti-reference made visible. Two decisions
+follow:
+- **Direction A is the direction** (owner to confirm in one word).
+- **No generated imagery on the page.** Real product screenshots and real
+  game frames instead. Phase 5 changes from "GPT prompts" to a **shot list**
+  of real captures (Q10 below).
+
+### 2.8 Live previews: Twitch, but you can walk in (added 2026-09-25)
+
+Owner: *"What could improve this is actual screenshots and playing a stream of
+the game. Similar to when you go to Twitch or YouTube, it invites you to join
+in, but you'll actually be able to join in instead of watching someone else
+without being able to interact with them."*
+
+This is the arcade floor made literal: the cabinet's attract mode. The mockup
+now has a **Live previews** toggle (default on): a featured "Now playing"
+match with a frame, **Watch** and **Join · 1 slot open**, and a small frame
+per room row. Frame boxes are placeholders; no game imagery is included.
+https://claude.ai/artifact/9pPt7Vtvxtxjs5csq7ErM3
+
+**What is already shipped that this stands on**
+- Spectators receive the host's canvas as video over WebRTC; no ROM needed;
+  up to 20 per room (`MAX_SPECTATORS`).
+- Late join mid-game: a joiner takes an open slot and syncs state (needs
+  their own ROM). Spectators can claim a vacated slot (`claim-slot`).
+- A `game-screenshot` Socket.IO event already posts periodic gameplay
+  screenshots (matchId, slot, frame, data) to the server in debug mode, and
+  the admin API stores and serves them. The plumbing for "a frame every few
+  seconds" exists; it needs a non-debug, listed-rooms-only variant.
+
+**Three levels of "live", smallest first**
+
+| Level | What the visitor sees | What it costs | Verdict |
+|---|---|---|---|
+| **L1 Frames** | A real frame per listed room, refreshed every ~10 s; the newest in-game room is the featured panel. Click **Watch** → the room's existing spectator view; **Join** when a slot is open. | Host of a listed room uploads one small JPEG (~320×240, 10–20 KB) every ~10 s. Server keeps only the latest frame per room in memory, drops it when the room closes. `GET /list` adds a frame URL + age. Stale >30 s dims. | **Recommended for launch.** Small, honest, and it is already "Twitch but you can walk in": the frame invites, Watch drops you in, Join takes the slot. |
+| **L2 Featured stream** | The featured panel plays real video in place when clicked (not autoplay), by connecting the visitor as a spectator to that room from the landing page. | A spectator slot and the host's upload bandwidth per viewer; counts against the 20 cap; signaling round-trip. | Polish for later, only if L1 shows people click Watch. |
+| **L3 Autoplay streams for every room** | Every row is live video. | Host upload × every landing visitor; spectator caps; consent. | Rejected. |
+
+**Consent and privacy.** Frames come from the emulator canvas only, never the
+host's screen. The host's listing checkbox must say what it does: *"List this
+room on the front page (shows a live preview)"*. Player names are visible on
+the board, as they already are in the room.
+
+**Empty state with previews.** No in-game rooms → no featured panel; the
+board shows the empty state. A *recorded* clip as attract mode when nothing
+is live would need a clear "recorded" label, or it fakes presence (Q11).
+
+**"How it works" with real screenshots.** The intro video stays click-to-play,
+but the first thing seen in beat 3 becomes three real screenshots: the room
+page with the invite link, a phone joining, both screens playing.
+
+**Intellectual property, said plainly.** Live frames and streams of a game a
+player owns are the same category as Twitch and YouTube streams of that game:
+widespread and tolerated, not risk-free. Static screenshots of the game used
+to promote the site are a step further. Neither is ROM distribution, and the
+"no ROMs hosted" line stays true. I am not a lawyer; this is the owner's call
+(Q9), and the Phase 5 rule "no Nintendo IP" stays for any generated art.
+
+### 2.9 Open questions after the owner's image review
+
+- **Q1 (revised). Direction A: confirmed?** One word.
+- **Q9. Game imagery on the page.** (a) live frames from listed rooms (L1),
+  (b) real screenshots in "How it works", (c) both, (d) neither. If (d), the
+  board shows names and status only and "How it works" uses UI-only crops.
+- **Q10. Phase 5 becomes a shot list** of real captures (which screens, which
+  moments, what to hide), with no generated images. OK?
+- **Q11. Attract mode when nothing is live:** a recorded clip labelled
+  "recorded", or nothing (empty state only)? Recommendation: nothing at
+  launch; honesty first.
+- **Still open from §2.6:** Q2 (drop the name field from the landing page),
+  Q3 (link to the official Smash Remix project), Q4 (which real number),
+  Q5 (wake the server on every page load), Q6 (game footage in the videos:
+  same answer as Q9?), Q7 (Bluetooth controller on a phone tested?),
+  Q8 (sentence case or lowercase).
+
 
 ## 3. Phase 3 — User flows
 _Not started._
@@ -1033,3 +1114,5 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Server-waking state = the input-lag visualizer inline as an interactive loading screen | Already built, static, on-topic; console-era callback | 2 |
 | 2026-09-25 | Two videos scripted (intro ≈50 s, rollback ≈60 s) under launch-copy rules | Owner: separate videos | 2 |
 | 2026-09-25 | Directions are chosen from images, not descriptions: live mockup artifact + GPT prompts per direction | Owner: needs to see it before picking | 2 |
+| 2026-09-25 | No generated imagery on the page; real screenshots and real game frames instead; Phase 5 becomes a shot list | Owner didn't care for GPT images; they invented games and taglines (AI-slop anti-reference) | 2 |
+| 2026-09-25 | Board carries live previews: a frame per listed room + a featured "Now playing" match with Watch and Join (level L1 recommended) | Owner: "Twitch, but you can actually join"; builds on shipped spectate, late join and game-screenshot plumbing | 2 |
