@@ -13404,7 +13404,14 @@
             _syncLog(`GAMEPLAY→MENU transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
             _inGameplayLoggedAt = _frameNum;
           }
-          _scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);
+          const _shutdownCRollback = _useCRollback && _rbReinitClosure;
+          // With a C teardown, keep the frame timeline continuous instead: a
+          // reset only lands on a peer that reaches _kn_post_tick this tick,
+          // and a peer stalled on input keeps its frame numbers, which
+          // deadlocks both sides.
+          if (!_shutdownCRollback) {
+            _scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);
+          }
           // Tear down C rollback when leaving gameplay so menu state isn't
           // serialized — Smash Remix specifically defers init to avoid this
           // (see line ~7099). Without teardown, the engine keeps running
@@ -13413,7 +13420,7 @@
           // the first (no fresh init, polluted prediction/stat state).
           // Re-arm the deferred-init closure so the next gameplay transition
           // re-fires init cleanly.
-          if (_useCRollback && _rbReinitClosure) {
+          if (_shutdownCRollback) {
             const tickMod = window.EJS_emulator?.gameManager?.Module;
             if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
             if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
@@ -13432,7 +13439,20 @@
             // but the init frame is per-match.
             if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
             window._rbDeferredForGameplay = _rbReinitClosure;
+            // No match reset here, so drop the finished match's input
+            // history, keeping the same ~600-frame resend window the
+            // legacy path keeps for _localInputs.
+            const keepFrom = _frameNum - 600;
+            for (const f of Object.keys(_localInputs)) if (Number(f) < keepFrom) delete _localInputs[f];
+            for (const frames of Object.values(_remoteInputs)) {
+              for (const f of Object.keys(frames || {})) if (Number(f) < keepFrom) delete frames[f];
+            }
             _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
+            // The engine is gone: running the rest of this C tick would call
+            // _kn_post_tick on it and reset _frameNum to -1 on this peer
+            // only. The next tick steps this frame on the lockstep path.
+            _markTickReturn('skip:rb-shutdown');
+            return;
           }
         }
         // Menu lockstep arming: once a real controllable menu is visible, never
@@ -13688,8 +13708,17 @@
             if (_peerPhantom[p.slot]) continue;
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+            // Apply frames before init - delay ran in lockstep on the legacy
+            // path, which deletes each remote input once applied. They can
+            // never be rolled back, so an absent entry there is not a gap.
+            // Without this, a deferred init (Smash Remix, at MENU→GAMEPLAY)
+            // stalls both peers for the full timeout on each of the first
+            // delay+cap frames.
             const gapAtEdge =
-              RB_TRUE_ROLLBACK && windowEdge >= 0 && windowEdge < peerFrame && !_remoteInputs[p.slot]?.[windowEdge];
+              RB_TRUE_ROLLBACK &&
+              windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES) &&
+              windowEdge < peerFrame &&
+              !_remoteInputs[p.slot]?.[windowEdge];
             if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
               // Input missing — check how far ahead we are
               const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;

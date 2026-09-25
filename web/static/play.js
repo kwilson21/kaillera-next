@@ -801,7 +801,11 @@
     const title = document.getElementById('menu-wait-title');
     const detailEl = document.getElementById('menu-wait-detail');
     if (title) title.textContent = `Waiting on ${formatMenuWaitNames(detail)}`;
-    if (detailEl) detailEl.textContent = 'Character select is paused to stay in sync.';
+    // The same wait covers menus and the match (scene 22 = battle).
+    if (detailEl) {
+      detailEl.textContent =
+        Number(detail?.scene) === 22 ? 'The match is paused to stay in sync.' : 'The menu is paused to stay in sync.';
+    }
     overlay.classList.remove('hidden');
   };
   const hideMenuLockstepWait = () => {
