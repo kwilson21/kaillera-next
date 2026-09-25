@@ -73,29 +73,45 @@ def ip_hash_for_sid(sid: str) -> str:
     return ip_hash(ip)
 
 
+# Render sets RENDER=true in every service. Render runs all services behind
+# Cloudflare, whose edge sets True-Client-IP / CF-Connecting-IP to the real
+# visitor, including for direct *.onrender.com requests. X-Forwarded-For's
+# first entry is whatever the client sent (Render only appends), so it is
+# never used there.
+_ON_RENDER = os.environ.get("RENDER") == "true"
+
+
 def extract_ip(source: object) -> str:
     """Extract client IP from a FastAPI Request or ASGI environ dict.
 
     Checks Cloudflare, then X-Forwarded-For, then falls back to the
-    direct connection address.
+    direct connection address. On Render, only the Cloudflare-set headers.
     """
     if isinstance(source, dict):
         # ASGI environ dict (Socket.IO connect handler)
-        cf_ip = source.get("HTTP_CF_CONNECTING_IP", "")
-        if cf_ip:
-            return cf_ip.strip()
-        forwarded = source.get("HTTP_X_FORWARDED_FOR", "")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return source.get("REMOTE_ADDR", "unknown")
-    # FastAPI Request object
-    cf_ip = source.headers.get("cf-connecting-ip")
+        def header(name: str) -> str:
+            return source.get("HTTP_" + name.upper().replace("-", "_"), "")
+
+        peer = source.get("REMOTE_ADDR", "unknown")
+    else:
+        # FastAPI Request object
+        def header(name: str) -> str:
+            return source.headers.get(name, "")
+
+        peer = source.client.host if source.client else "unknown"
+
+    if _ON_RENDER:
+        for name in ("true-client-ip", "cf-connecting-ip"):
+            if header(name):
+                return header(name).strip()
+        return "unknown"
+    cf_ip = header("cf-connecting-ip")
     if cf_ip:
         return cf_ip.strip()
-    forwarded = source.headers.get("x-forwarded-for")
+    forwarded = header("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return source.client.host if source.client else "unknown"
+    return peer
 
 
 MAX_CONNECTIONS_PER_IP = 20
