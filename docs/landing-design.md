@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 4 — wireframes answered and rendered into the mockup (landing, invite link, room, demo). Awaiting owner's critique. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 4 closed. Phase 5 (Shot list) v1 written — awaiting owner's answers Q1–Q5. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1591,10 +1591,124 @@ Direction stays switchable for comparison; A is the default.
 - *Demo:* does the restyle keep the demo readable at a glance (Result, RTT,
   Rollback toggle), or did the look eat the function?
 
-_Owner's critique: pending._
+**Owner's critique (2026-09-25): "I have no complaints."** Plus one logic
+point: *"I'm not sure how you could reach the state where the system is
+waking up when you receive an invite and join it, since the server needs to
+be awake for the owner to send it. We'd have to fix the persistence bug
+there; I think currently you essentially join a closed game and you'd take
+over as the owner, which is probably not good for bookkeeping."*
 
-## 5. Phase 5 — Image prompts
-_Not started._
+Checked against signaling.py:
+- A join to a missing code returns "Room not found"; joins never create rooms.
+- Last person leaves → room deleted at once. Host leaves with others present
+  → ownership transfers to the next player (intended).
+- **The real bug is the restart path.** With Redis persistence, a restart or
+  wake reloads rooms whose sockets are all dead ("zombies"), kept up to
+  5 minutes by the cleanup loop. A friend opening the link in that window
+  joins a room whose host is a ghost and nobody is the live owner. Without
+  Redis the room is simply gone.
+- So the invite-waking state is reachable only when the server went down
+  between the host sending the link and the friend opening it. It stays in
+  the design as the transitional screen (the page can't know the outcome
+  until the server answers), but its copy no longer promises the room:
+  **"We'll check on Kaz's room the moment it answers."** It then resolves to
+  the room (host's open tab reconnected and revived it) or to "Kaz's room
+  has closed."
+- **Build item (server):** a room with no live sockets is not joinable by a
+  *new* player; only a returning player (known persistent id, within grace)
+  may re-enter. New joiners get "room closed". Keeps bookkeeping honest and
+  removes the ghost-owner case.
+
+Phase 4 closed.
+
+## 5. Phase 5 — Shot list (replaces image prompts; v1 for owner review)
+
+Decided in Phase 2: no generated imagery on the page. Every picture is a
+real capture of the real product, plus two videos. This is the list of what
+to capture, how, what to keep out of frame, and how to judge the results.
+
+### 5.1 Principles for every capture
+- **Real product, real match, consenting people.** Names shown are the
+  owner's and one friend who has agreed. No surnames, emails, IPs, passwords.
+- **Flat crops, no device mockups.** No floating phone frames, no
+  perspective tilts, no drop shadows. A phone screenshot keeps its real
+  status bar and browser bar, because "in your browser" is the point.
+- **In-match frames only.** No boot screens, no title or copyright screens,
+  no character-select close-ups. The game is context, the product is the
+  subject.
+- **Clean state.** No debug overlays or query flags, no toasts other than the
+  one a shot needs, no "rotate to landscape" prompt, no version-mismatch
+  reload risk (don't deploy while recording).
+- **2× resolution** for stills; 1080p60 for gameplay video.
+- **Same zoom, theme and names** across all stills and both videos.
+
+### 5.2 Stills
+
+| ID | Used in | What's in frame | Device / size | Notes |
+|---|---|---|---|---|
+| **S1** | How it works, shot 1 | The restyled room overlay, host view: room code, **Invite** with the "Link copied" toast showing, two players listed (Kaz ✓ ROM, friend ✓ ROM), Start enabled | Desktop 1440×900 at 2×, cropped to the card with margin | The link is the subject |
+| **S2** | How it works, shot 2 | The invite-link page on a phone: "Kaz invited you to play Super Smash Bros. 64", Join / Watch visible, Safari bar included | iPhone, portrait, native screenshot | Shows "no install" without saying it |
+| **S3** | How it works, shot 3 | Two devices in the **same match on the same frame** | Either a composite of a desktop capture + phone capture side by side (1600×600), or one photo of both devices on a table | Photo is warmer (people, devices, the arcade); composite is cleaner. Owner picks (Q1) |
+| **S4** | Board frames, "no frame yet" | Not a capture: a CSS placeholder tile in the tokens ("waiting…") for rooms with no frame | — | Build item |
+| **S5** | OG card, landing | 1200×630: name in direction A type, the one line, "Free · No install · Bring your own ROM" | Pre-rendered with the existing `scripts/generate_og_cards.py` | Refresh to direction A |
+| **S6** | OG card, invite link | 1200×630: "Kaz invited you to play Super Smash Bros. 64 · 2 of 4 · kaillera-next" | Static card + dynamic text | Today's cards can carry per-game images (`web/static/og/ssb64.jpg`, `smash-remix.jpg`). Provenance check (Q2): if they are Nintendo art, replace with a UI-only card |
+| **S7** | Favicon + wordmark | Wordmark = the direction A name treatment (condensed uppercase). Favicon: the existing "kn" SVG recoloured to the A palette (#0e1218 / #5aa8ff) | SVG | No logo illustration unless the owner wants an exploration (Q3) |
+
+### 5.3 Videos
+
+**V1 — Intro (≈50 s), script §2.4.** Eight shots, in order: landing page
+with cursor on Create → click, room page with the invite link → link pasted
+into a chat → a phone opening it, landing in the room → both drop a ROM →
+host presses Start, split screen booting → a few seconds of play side by
+side → URL card. The phone shots are iOS screen recordings; the desktop
+shots are browser captures; the split screen is edited, both recordings
+started from the same Start.
+
+**V2 — Rollback explained (≈60 s), script §2.4.** Two simple timeline
+diagrams (lockstep: each frame waits; rollback: run, predict, short rewind)
+made in the direction A tokens as animated SVG or slides, never generated
+art; then the demo page: slider to 200 ms, rollback off, stall; rollback on,
+smooth; URL card.
+
+**Recording checklist (both):** browser window 1440×900, zoom 110–125% for
+legibility; a fresh profile with no bookmarks bar or extensions; mute system
+sounds; capture at 60 fps; hold each shot 1–3 s longer than the script for
+editing; export 1080p; narration by TTS, one neutral unhurried voice at
+~140 words per minute (Q4: voice, or the owner's own); upload the script as
+captions so the video works muted in a Discord embed.
+
+### 5.4 Keep out of frame
+Real surnames, emails, IPs, room passwords · the debug toolbar and any
+diagnostics · error toasts · boot, title and copyright screens ·
+character-select close-ups · other people's usernames without consent ·
+the desktop behind the browser.
+
+### 5.5 What to look for when the captures come back
+1. **Truth test.** Each still shows exactly what its caption says: the link
+   is visible in S1, a phone is joining in S2, the same frame is on both
+   screens in S3. If a shot needs an arrow to be understood, retake it.
+2. **Anti-reference test.** Anything that looks like a stock product
+   mockup (device frames, tilts, glows) is rejected. Flat crops only.
+3. **Small-size test.** At 160 px wide (the phone swipe row) can you tell
+   S1, S2 and S3 apart by shape alone?
+4. **Consistency.** Same zoom, theme, names, and the same match across
+   S1–S3 and V1.
+5. **OG test.** Paste the landing link and an invite link into Discord and
+   iMessage. The preview must say who invited you and to what, uncropped.
+6. **Video test.** Watch V1 muted with captions: still clear? Read every V2
+   sentence against docs/launch-copy.md: no "zero lag", no "fixes lag".
+7. **Brief test.** Cover the captions: does the page still feel like a place
+   with people in it?
+
+### 5.6 Questions for the owner
+- **Q1.** S3 as a photo of two real devices, or a clean composite?
+- **Q2.** What are `web/static/og/ssb64.jpg` and `smash-remix.jpg`? If they
+  are Nintendo box art or official screenshots, the OG cards go UI-only.
+- **Q3.** Wordmark only (the type treatment), or do you want a logo
+  exploration? If yes, that is the one place a generated concept could be
+  tried, under the no-Nintendo-IP rule.
+- **Q4.** Narration: a TTS voice (which kind), or your own voice?
+- **Q5.** Who is the consenting friend whose name appears in S1–S3 and V1?
 
 ## 6. Phase 6 — Testing with real players
 _Not started._
@@ -1700,3 +1814,5 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Wireframes W1–W5 drafted (landing desktop/phone, invite-link, ROM-needed, waking) with per-element goal annotations | Phase 4 v1 | 4 |
 | 2026-09-25 | Section order as drawn; featured = newest match with an open slot; code field collapses to a link on phones; invite URL `/join?room=CODE` on the static site (routing decided in build) | Owner answers + defaults | 4 |
 | 2026-09-25 | Restyle the room overlay and the demo page to direction A in the same build | Owner: "restyle everything accordingly" | 4 |
+| 2026-09-25 | Wireframes accepted; invite-waking copy changed to "We'll check on Kaz's room"; build item: rooms with no live sockets are not joinable by new players | Owner: no complaints; zombie-room analysis of the restart path | 4 |
+| 2026-09-25 | Phase 5 is a shot list: 7 stills (incl. OG cards, favicon), 2 videos, recording checklist, critique tests | Owner: no generated imagery | 5 |
