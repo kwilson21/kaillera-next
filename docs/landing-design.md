@@ -1702,8 +1702,15 @@ the desktop behind the browser.
 
 ### 5.6 Questions for the owner
 - **Q1.** S3 as a photo of two real devices, or a clean composite?
-- **Q2.** What are `web/static/og/ssb64.jpg` and `smash-remix.jpg`? If they
-  are Nintendo box art or official screenshots, the OG cards go UI-only.
+- **Q2.** Checked: `web/static/og/ssb64.jpg` is the **official N64 box
+  art** (Mario, Pikachu, Samus, Fox, the "Only for N64" mark, ESRB badge).
+  `home.png` is the current generic card (Inter Bold on navy, "Play retro
+  games online with friends · no install needed · up to 4 players", a big
+  "kn" watermark). Recommendation: **OG cards go UI-only**, in direction A
+  type, for the landing page and every invite. Box art next to "bring your
+  own ROM" is exactly the look of the sketchy-ROM-site anti-reference, and
+  it is trademark art we don't need. `GAME_IMAGES_ENABLED=false` already
+  turns the per-game images off without a code change. Confirm?
 - **Q3.** Wordmark only (the type treatment), or do you want a logo
   exploration? If yes, that is the one place a generated concept could be
   tried, under the no-Nintendo-IP rule.
