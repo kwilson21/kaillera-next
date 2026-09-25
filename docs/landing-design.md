@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo/motion: A2a is the working mark; rounds 4–5 add animated input marks and five motion graphics (KO, match start, rollback timeline, interactive stick, letters arrive) (§5.7e–f). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2a is the mark; wordmark = the ports inside the name (round 6, §5.7g); motion system in §7.11. Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1932,8 +1932,45 @@ are section graphics, one is a control.
 All five honour `prefers-reduced-motion` (still frame). None uses a
 Nintendo shape: an octagon, circles, squares and bars.
 
-_Owner's picks from round 5 (which pieces get a job, and which mark is the
-site's): pending._
+**Owner (2026-09-25): "I like everything from round 5. The bars are the
+winner for the logo; the motion from 5 (players arrive) is a must keep;
+perhaps we can combine them. I'd love to see the bars incorporated into the
+kaillera text. The other three are probably worth adding to the interactive
+404 pages, I hope those still exist. There's a lot of ways to make the
+overall existing screens more alive with motion in general."**
+
+Decisions:
+- **Mark: A2a** (four ports, the fourth filling). Tab icon: the static four
+  bars with the fourth hollow.
+- **Wordmark: the ports inside the name** (round 6 below), combined with
+  "players arrive": letters drop in left to right, then the last port fills.
+  Runs once on load; still frame for reduced motion.
+- **404 pages exist** (`web/error.html`, served for 404/500/429, three
+  interactive themes: an arcade high-score board, a "CARTRIDGE NOT FOUND"
+  glitch screen, a playable canvas game). KO, Match start and the Rollback
+  timeline are assigned there as later polish, plus the Rollback timeline
+  keeps its place in the landing page's netcode section. Not designed
+  further now, by the owner's request.
+- **Motion system** (build plan §7.11): a short list of where motion lives
+  across the existing screens, so it stays one language.
+
+### 5.7g Round 6 — The ports inside the name (mockup, Screen → Logo, bottom)
+
+KAILLERA has four consecutive vertical stems: **I · L · L · E**. Those
+stems are the four ports, in player colours; the E's stem is the hollow one
+that fills last. The letters are drawn as monoline strokes with round ends,
+the same shape language as the bars, so the ports are the letters rather
+than a sticker on a font. The hyphen is the one blue stroke.
+
+Shown three ways: animated (letters arrive, the last port fills; loops in
+the mockup, once on the real page), at rest (the still frame), and small
+(room-page header size). "Apply to header" puts it on the Landing name.
+
+Known risk: drawn letters can read as a "logo font" rather than the page's
+type. Fallback if so: the typed wordmark in Barlow Condensed with the four
+stems overlaid at the I·L·L·E positions (font-metrics work in the build).
+
+_Owner's verdict on round 6: pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2240,6 +2277,24 @@ only; no Google Analytics or any tracker. If declined, the brief's numeric
 signals are dropped and only the player tests remain. **Owner to confirm**
 before build.
 
+### 7.11 Motion system (added 2026-09-25)
+One language across screens, all SVG/CSS, all with a still frame under
+`prefers-reduced-motion`:
+- **Name on load:** letters arrive left to right, the E-port fills last
+  (§5.7g). Once per page load, never looped.
+- **Board:** the live dot breathes; the featured frame refreshes with a
+  soft crossfade; a room going live gets one bounce of its slot markers.
+- **Empty board:** "Match start" (§5.7f #2) plays once when the state
+  appears, then rests.
+- **Waking:** the progress bar and the lag visualizer as designed (§4 W5).
+- **Netcode section:** the Rollback timeline (§5.7f #3), looping slowly.
+- **Invite page:** the room's slot markers fill in as the lookup answers.
+- **Room overlay:** a player's port fills when they become ROM-ready.
+- **Error pages (later):** KO, Match start and the Rollback timeline join
+  the existing three themes in `web/error.html`.
+- **Never:** motion on text people are reading, autoplaying video, anything
+  that competes with the game canvas.
+
 ### 7.9 Explicitly not in this build
 Hover-to-stream (L2), chat, profiles, records, rankings, avatars, a
 roadmap, any mention of AI assistance, the personal story on the page,
@@ -2408,3 +2463,4 @@ Surprises (one line):
 | 2026-09-25 | Logo A2 (four ports, fourth open) chosen; motion on the fourth port ("the last player is joining") in the lockup only; tab icon static; reduced-motion honoured in build | Owner's pick + motion idea | 5 |
 | 2026-09-25 | A2a (fourth port filling up) is the working mark; A1 re-read as a d-pad/stick with fighting-game input motion (quarter circle, smash flick, 360) for a possible second job | Owner: "A2a is cool" + input-motion idea | 5 |
 | 2026-09-25 | Round 5 motion graphics drawn (KO, match start → board marker, rollback timeline, interactive stick, letters arrive) as SVG/CSS for the header, the board's empty/waking states and the rollback section | Owner: "be more creative" | 5 |
+| 2026-09-25 | Mark = A2a; wordmark = KAILLERA-NEXT drawn with the I·L·L·E stems as the four ports, combined with letters-arrive; KO / match start / rollback go to the existing 404 pages later; motion system listed in the build plan | Owner's round-5 verdict | 5 |
