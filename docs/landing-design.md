@@ -1823,7 +1823,12 @@ per run; paste the shared rules at the end of every prompt.
    condensed type?
 6. Say in one sentence what the mark means. If you can't, nobody will.
 
-_Owner's logo picks and critique: pending._
+**Owner (2026-09-25): "I don't like any of the logos GPT generated."**
+All rejected. Options offered: (1) no logo: the direction A name treatment
+is the wordmark, the "kn" tab icon recoloured; (2) a few flat vector marks
+drawn by hand into the mockup header and at favicon size, same three
+concepts, judged in context. Recommendation: (2), because every decision so
+far came from the mockup, not from generated images. _Awaiting the pick._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2124,7 +2129,11 @@ The brief's signals (create/join/watch within 60 s, invite openers reaching
 "in game", demo starts, 7-day returns) need counts. Proposal: log them
 through the existing `POST /api/client-event` endpoint, server-side counts
 only, no third-party analytics, no cookies beyond what the room already
-uses. **Owner to confirm** before build.
+uses. In plain words: the page reports a handful of events ("invite
+opened", "joined", "in game", "demo started") to our own server; counts
+only; no Google Analytics or any tracker. If declined, the brief's numeric
+signals are dropped and only the player tests remain. **Owner to confirm**
+before build.
 
 ### 7.9 Explicitly not in this build
 Hover-to-stream (L2), chat, profiles, records, rankings, avatars, a
