@@ -33,10 +33,12 @@ in the served checkout makes open game pages reload (`version-guard.js`).
 1. **The tunnel** (once). It must exist with its route to
    `http://127.0.0.1:27890`. From a session that has `CLOUDFLARE_API_TOKEN`:
    `python deploy/vps/deploy.py tunnel --service http://127.0.0.1:27890`.
-   This creates the tunnel and its route and changes no DNS.
+   This creates the `kaillera-next-home` tunnel and its route and changes no
+   DNS. It's separate from the VPS tunnel, so neither setup can break the
+   other.
 2. **The tunnel token.** In the Cloudflare dashboard, go to **Networking →
-   Tunnels** (or **Zero Trust → Networks → Tunnels**), open `kaillera-next`
-   and find the connector install command. Copy only the long token after
+   Tunnels** (or **Zero Trust → Networks → Tunnels**), open
+   `kaillera-next-home` and find the connector install command. Copy only the long token after
    `--token` (it starts with `eyJ`). Keep it out of chats and files. The
    installer asks for it at a hidden prompt.
 3. **Install** from any clone of the repo:
@@ -47,21 +49,27 @@ in the served checkout makes open game pages reload (`version-guard.js`).
    - installs `uv` and `cloudflared` with Homebrew if they're missing;
    - clones `~/kaillera-next-live`;
    - generates `ADMIN_KEY` and `IP_HASH_SALT`;
-   - asks for the tunnel token, then the optional TURN key ID and API token
-     (players on strict networks need TURN; press Enter to skip);
+   - asks for the tunnel token, then the optional TURN key ID and API token.
+     Players on strict networks need TURN. Enter both, press Enter twice to
+     skip, or type `-` twice to clear a stored pair;
    - starts the services and checks that the server and tunnel are up.
 4. **Check** http://localhost:27890/ on the Mac.
 5. **Go live (DNS, owner's call).** The hostname is still attached to the demo
    Worker as a custom domain. Detach it (Workers & Pages → `kaillera-next` →
-   Settings → Domains & Routes), then run `python deploy/vps/deploy.py dns`.
+   Settings → Domains & Routes), then run
+   `python deploy/vps/deploy.py dns --tunnel kaillera-next-home`.
 
-Re-run `sh deploy/home/install.sh --tokens` to replace the tokens.
+Re-run `sh deploy/home/install.sh --tokens` to replace the tokens. A re-run
+restarts the server, so it refuses while players are online (or the server
+doesn't answer) unless you add `--force`.
 
 ## Day to day
 
 - **Updates:** merges to `main` go live within 5 minutes. Rooms live in memory
   (no Redis here), so a restart ends every match. An update waits until
-  nobody is in a room. `sh ~/kaillera-next-live/deploy/home/update.sh --force`
+  nobody is in a room, or while the server doesn't answer. It goes ahead if
+  the server isn't running at all. If installing a new version's
+  dependencies fails, the checkout goes back to the running version. `sh ~/kaillera-next-live/deploy/home/update.sh --force`
   deploys immediately.
 - **Admin key:** `grep ADMIN_KEY ~/Library/Application\ Support/kaillera-next/env`
 - **Status:** `launchctl list | grep kn` and the logs above.

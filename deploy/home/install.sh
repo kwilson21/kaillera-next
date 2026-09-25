@@ -3,6 +3,8 @@
 #
 #   sh deploy/home/install.sh            # first install, or re-run to repair
 #   sh deploy/home/install.sh --tokens   # re-enter the tunnel / TURN tokens
+#   ... --force                          # re-run even while players are online
+#                                        # (restarting ends their matches)
 #
 # Sets up, all under your user (no sudo):
 #   ~/kaillera-next-live                         clean checkout of main (not your dev clone)
@@ -30,6 +32,30 @@ die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname)" = Darwin ] || die "this installer is for macOS"
 
+TOKENS=0
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --tokens) TOKENS=1 ;;
+    --force) FORCE=1 ;;
+    *) die "unknown option $arg" ;;
+  esac
+done
+
+# ── Players online? ───────────────────────────────────────────────────────────
+# A re-run restarts the server, and rooms live in memory: don't end matches
+# unless asked to. Connection refused means nothing is running yet.
+rc=0
+health=$(curl -fsS --max-time 5 http://127.0.0.1:27890/health 2>/dev/null) || rc=$?
+players=$(printf '%s' "$health" | sed -n 's/.*"players":\([0-9]*\).*/\1/p')
+if [ "$FORCE" = 0 ] && [ "$rc" -ne 7 ]; then
+  if [ -z "$players" ]; then
+    die "the running server didn't answer /health; re-run with --force to restart it anyway"
+  elif [ "$players" -gt 0 ]; then
+    die "$players player(s) online; re-run later, or with --force to end their matches"
+  fi
+fi
+
 # ── Tools ─────────────────────────────────────────────────────────────────────
 say "Checking tools"
 for tool in uv cloudflared; do
@@ -40,6 +66,9 @@ for tool in uv cloudflared; do
   fi
 done
 command -v git >/dev/null 2>&1 || die "git is missing (run: xcode-select --install)"
+# launchd doesn't read your shell profile: give the agents the directories
+# these tools were actually found in.
+PATH_FOR_AGENTS="$(dirname "$(command -v uv)"):$(dirname "$(command -v cloudflared)"):$PATH_FOR_AGENTS"
 echo "uv, cloudflared, git: ok"
 
 # ── Live checkout ─────────────────────────────────────────────────────────────
@@ -74,22 +103,37 @@ ask_secret() { # ask_secret KEY "prompt" required|optional
   stty echo 2>/dev/null || true
   printf '\n'
   case "$val" in
-    '') [ "$3" = required ] && die "$1 is required" || return 0 ;;
+    '') [ "$3" = required ] && die "$1 is required" ;;
     *[!A-Za-z0-9._=+/-]*) die "$1 has unexpected characters; copy just the token" ;;
   esac
-  put "$1" "$val"
+  case "$1" in
+    *_NEW) eval "$1=\$val" ;; # held for a paired decision
+    *) [ -z "$val" ] || put "$1" "$val" ;;
+  esac
 }
 trap 'stty echo 2>/dev/null || true' EXIT INT
 
 for key in ADMIN_KEY IP_HASH_SALT; do
   [ -n "$(get $key)" ] || put "$key" "$(openssl rand -hex 32)"
 done
-if [ -z "$(get TUNNEL_TOKEN)" ] || [ "${1:-}" = --tokens ]; then
+if [ -z "$(get TUNNEL_TOKEN)" ] || [ "$TOKENS" = 1 ]; then
   echo "Paste the tunnel token (Cloudflare dashboard, see deploy/home/README.md). Input is hidden."
   ask_secret TUNNEL_TOKEN "Tunnel token: " required
-  echo "Optional: Cloudflare TURN key id and API token (Enter to skip; players on strict networks need them)."
-  ask_secret CF_TURN_KEY_ID "TURN key id: " optional
-  ask_secret CF_TURN_API_TOKEN "TURN API token: " optional
+  # The TURN key id and token only work as a pair: set both, keep both, or
+  # clear both.
+  echo "Optional: Cloudflare TURN key id and API token; players on strict networks need them."
+  echo "Enter both, press Enter twice to keep the current pair, or type - twice to clear it."
+  ask_secret TURN_ID_NEW "TURN key id: " optional
+  ask_secret TURN_TOKEN_NEW "TURN API token: " optional
+  if [ "$TURN_ID_NEW" = - ] && [ "$TURN_TOKEN_NEW" = - ]; then
+    put CF_TURN_KEY_ID ""
+    put CF_TURN_API_TOKEN ""
+  elif [ -n "$TURN_ID_NEW" ] && [ -n "$TURN_TOKEN_NEW" ]; then
+    put CF_TURN_KEY_ID "$TURN_ID_NEW"
+    put CF_TURN_API_TOKEN "$TURN_TOKEN_NEW"
+  elif [ -n "$TURN_ID_NEW$TURN_TOKEN_NEW" ]; then
+    die "enter both TURN values (or neither); nothing was changed for TURN"
+  fi
 fi
 echo "stored (values not shown)"
 
@@ -97,6 +141,11 @@ echo "stored (values not shown)"
 say "Background services"
 mkdir -p "$AGENTS"
 chmod +x "$LIVE"/deploy/home/*.sh
+
+xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+X_LIVE=$(xml "$LIVE")
+X_LOGS=$(xml "$LOGS")
+X_PATH=$(xml "$PATH_FOR_AGENTS")
 
 agent() { # agent NAME SCRIPT KIND   (KIND: service | every5min)
   label="us.thesuperhuman.kn.$1"
@@ -113,13 +162,13 @@ agent() { # agent NAME SCRIPT KIND   (KIND: service | every5min)
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/sh</string><string>$LIVE/deploy/home/$2</string></array>
+  <array><string>/bin/sh</string><string>$X_LIVE/deploy/home/$2</string></array>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>$PATH_FOR_AGENTS</string></dict>
+  <dict><key>PATH</key><string>$X_PATH</string></dict>
   <key>RunAtLoad</key><true/>
   $extra
-  <key>StandardOutPath</key><string>$LOGS/$1.log</string>
-  <key>StandardErrorPath</key><string>$LOGS/$1.log</string>
+  <key>StandardOutPath</key><string>$X_LOGS/$1.log</string>
+  <key>StandardErrorPath</key><string>$X_LOGS/$1.log</string>
 </dict>
 </plist>
 EOF

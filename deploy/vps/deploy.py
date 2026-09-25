@@ -16,8 +16,10 @@ is never printed:
   python deploy/vps/deploy.py dns       # point the hostname at the tunnel
                                         # (DNS change: only with the owner's OK)
   python deploy/vps/deploy.py tunnel --service http://127.0.0.1:27890
-                                        # tunnel only, for a home machine
-                                        # (deploy/home); no HCLOUD_TOKEN needed
+                                        # the home tunnel (kaillera-next-home),
+                                        # for deploy/home; no HCLOUD_TOKEN needed
+  python deploy/vps/deploy.py dns --tunnel kaillera-next-home
+                                        # point the hostname at the home tunnel
 
 The server has no SSH and no open inbound port. It updates itself from the
 repo's main branch every 5 minutes (deploy/vps/kn-update.sh).
@@ -36,6 +38,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 NAME = "kaillera-next"
+# The home setup gets its own tunnel, so re-routing one never points the
+# other's connector at an origin it can't reach.
+HOME_TUNNEL = "kaillera-next-home"
 HCLOUD = "https://api.hetzner.cloud/v1"
 CF = "https://api.cloudflare.com/client/v4"
 # Tunnel tokens, TURN ids and API tokens are all within this set; anything
@@ -81,17 +86,23 @@ def acct() -> str:
     return f"/accounts/{env('CLOUDFLARE_ACCOUNT_ID')}"
 
 
-def tunnel(hostname: str, service: str = "http://app:27888") -> tuple[str, str]:
+def find_tunnels(name: str) -> list[dict]:
+    return cf("GET", f"{acct()}/cfd_tunnel?name={name}&is_deleted=false") or []
+
+
+def tunnel(
+    hostname: str, service: str = "http://app:27888", name: str = NAME
+) -> tuple[str, str]:
     """Find or create the tunnel, route hostname -> service. Returns (id, token)."""
-    found = cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []
+    found = find_tunnels(name)
     if found:
         tid = found[0]["id"]
-        print(f"tunnel: using existing {NAME} ({tid})")
+        print(f"tunnel: using existing {name} ({tid})")
     else:
         tid = cf(
-            "POST", f"{acct()}/cfd_tunnel", {"name": NAME, "config_src": "cloudflare"}
+            "POST", f"{acct()}/cfd_tunnel", {"name": name, "config_src": "cloudflare"}
         )["id"]
-        print(f"tunnel: created {NAME} ({tid})")
+        print(f"tunnel: created {name} ({tid})")
     ingress = [
         {"hostname": hostname, "service": service},
         {"service": "http_status:404"},
@@ -170,23 +181,24 @@ def cmd_up(args: argparse.Namespace) -> None:
 def cmd_tunnel(args: argparse.Namespace) -> None:
     # The token is never printed: the machine running cloudflared gets it from
     # the Cloudflare dashboard (deploy/home/README.md).
-    tid, _ = tunnel(args.hostname, args.service)
-    print(f"tunnel: {args.hostname} -> {args.service} (tunnel {tid}); DNS unchanged")
+    name = args.tunnel or HOME_TUNNEL
+    tid, _ = tunnel(args.hostname, args.service, name)
+    print(f"tunnel: {name}: {args.hostname} -> {args.service} ({tid}); DNS unchanged")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    servers = (
-        hc("GET", f"/servers?name={NAME}")["servers"]
-        if env("HCLOUD_TOKEN", False)
-        else []
-    )
-    if not servers:
+    if not env("HCLOUD_TOKEN", False):
+        print("server: not checked (no HCLOUD_TOKEN)")
+        servers = None
+    else:
+        servers = hc("GET", f"/servers?name={NAME}")["servers"]
+    if servers == []:
         print(f"server: no server named {NAME}")
-    for s in servers:
+    for s in servers or []:
         print(
             f"server: {s['name']} {s['status']} {s['server_type']['name']} {s['datacenter']['name']}"
         )
-    for t in cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []:
+    for t in find_tunnels(NAME) + find_tunnels(HOME_TUNNEL):
         print(
             f"tunnel: {t['name']} status={t.get('status')} connections={len(t.get('connections') or [])}"
         )
@@ -199,7 +211,7 @@ def cmd_dns(args: argparse.Namespace) -> None:
     if not zones:
         sys.exit(f"zone {zone_name} not found for this token")
     zid = zones[0]["id"]
-    tunnels = cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []
+    tunnels = find_tunnels(args.tunnel or NAME)
     if not tunnels:
         sys.exit("no tunnel yet; run `up` first")
     target = f"{tunnels[0]['id']}.cfargotunnel.com"
@@ -259,6 +271,10 @@ def main() -> None:
     )
     p.add_argument(
         "--type", default="cpx21", help="Hetzner server type (cpx21: 3 vCPU, 4 GB)"
+    )
+    p.add_argument(
+        "--tunnel",
+        help=f"tunnel name (default {NAME}; {HOME_TUNNEL} for the tunnel command)",
     )
     p.add_argument(
         "--service",

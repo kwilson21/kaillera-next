@@ -19,21 +19,33 @@ main() {
 
   git fetch --quiet origin main
   want=$(git rev-parse origin/main)
-  health=$(curl -fsS --max-time 5 "$HEALTH" 2>/dev/null || true)
   if [ "$FORCE" != "--force" ]; then
-    if [ "$(cat "$DEPLOYED" 2>/dev/null)" = "$want" ] && [ -n "$health" ]; then
+    [ "$(cat "$DEPLOYED" 2>/dev/null)" = "$want" ] && exit 0
+    rc=0
+    health=$(curl -fsS --max-time 5 "$HEALTH" 2>/dev/null) || rc=$?
+    players=$(printf '%s' "$health" | sed -n 's/.*"players":\([0-9]*\).*/\1/p')
+    if [ "$rc" -eq 7 ]; then
+      players=0 # connection refused: the server is down, so nobody is playing
+    elif [ -z "$players" ]; then
+      # Occupancy unknown (slow or odd response) counts as occupied.
+      echo "$(date '+%F %T') update waiting: /health didn't answer (curl $rc)"
       exit 0
     fi
-    players=$(printf '%s' "$health" | sed -n 's/.*"players":\([0-9]*\).*/\1/p')
-    if [ "${players:-0}" -gt 0 ]; then
+    if [ "$players" -gt 0 ]; then
       echo "$(date '+%F %T') update to ${want%"${want#???????}"} waiting: $players player(s) online"
       exit 0
     fi
   fi
 
+  old=$(git rev-parse HEAD)
   git reset --quiet --hard "$want"
   echo "$(date '+%F %T') deploying $(git log -1 --format='%h %s')"
-  (cd server && uv sync --frozen --quiet)
+  if ! (cd server && uv sync --frozen --quiet); then
+    # Don't leave new pages served by the old server: put the checkout back.
+    git reset --quiet --hard "$old"
+    echo "$(date '+%F %T') uv sync failed; stayed on ${old%"${old#???????}"}, will retry"
+    exit 1
+  fi
   launchctl kickstart -k "$AGENT"
 
   # Record the revision only once the new server answers /health, so a
