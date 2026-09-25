@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Outstanding from the owner: player-test tables (§6, Appendix C), logo images (§5.7), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Four hand-drawn logo candidates in the mockup (§5.7b). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1828,7 +1828,28 @@ All rejected. Options offered: (1) no logo: the direction A name treatment
 is the wordmark, the "kn" tab icon recoloured; (2) a few flat vector marks
 drawn by hand into the mockup header and at favicon size, same three
 concepts, judged in context. Recommendation: (2), because every decision so
-far came from the mockup, not from generated images. _Awaiting the pick._
+far came from the mockup, not from generated images.
+**Owner: "Try drawing some yourself I guess."**
+
+### 5.7b Hand-drawn candidates (in the mockup, Screen → Logo)
+
+https://claude.ai/artifact/9pPt7Vtvxtxjs5csq7ErM3#logo — four flat SVG
+marks, each shown large, in the header lockup, at 32 px and 16 px on a dark
+and a light tab bar, and in plain white; "Apply to header" puts the mark on
+the Landing and Invite headers so it's judged in place.
+
+| | Mark | Means | Known risk |
+|---|---|---|---|
+| **A** | Four slots: 2×2 rounded squares in the player colours, the fourth hollow | Four players, one seat open. The same shape already sits on every board row, so the logo *is* the UI. A 1×4 row form doubles as a wordmark underline | Reads as "colour swatches" to someone who hasn't seen the board |
+| **B** | Run and rewind: a play triangle inside a three-quarter arc with an arrowhead | The game runs ahead and loops back when a guess misses | Can read as a "refresh" icon |
+| **C** | kn monogram: geometric k and n strokes in a rounded square, the k's upper arm in blue | The initials; the blue arm is a small "next" | Monograms are common; lives or dies on the letterforms |
+| **D** | Wordmark only: the name in the condensed face with a blue hyphen; tab icon = "KN" recoloured | Nothing but the name | No symbol to carry alone (e.g. a Discord server icon) |
+
+How to judge (same six tests as §5.7): 16 px first, white-on-black second,
+no Nintendo echoes, no AI-logo tropes, belongs with the condensed type, can
+be explained in one sentence.
+
+_Owner's pick: pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2298,3 +2319,4 @@ Surprises (one line):
 | 2026-09-25 | Link-preview card: box art while waiting, real in-match frame once in game (composed at request time; unlisted or frameless rooms fall back to box art) | Owner's decision after the IP note | 5 |
 | 2026-09-25 | Phase 6 guide: 3–5 people, nine steps, no leading questions, verbatim records, 2-of-5 rule | Phase 6 v1 | 6 |
 | 2026-09-25 | Build plan v1: five milestones (M0 plumbing → M1 landing → M2 invite → M3 restyle → M4 assets → M5 launch), full state list, final copy, tokens, accessibility, slow-phone budget; provisional until Phase 6 | Owner asked "what's next" while tests are pending | 7 |
+| 2026-09-25 | GPT logos rejected; four hand-drawn SVG candidates (four slots, run-and-rewind, kn monogram, wordmark-only) added to the mockup for in-context judgement | Owner: "Try drawing some yourself" | 5 |
