@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2 (four ports) chosen; round 3 adds motion variants A2a–c and tightened A1a–b (§5.7d). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2a (ports, filling up) is the working pick; round 4 explores A1 as an animated d-pad/stick (§5.7e). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1888,7 +1888,32 @@ static fallback; the mockup uses SMIL to run through `<use>`).
 | **A1a** | With a centre | Static: a muted centre square (the screen everyone faces) ties the seats into one object; tighter gaps | Answers "disjointed" |
 | **A1b** | One silhouette | Static: seats nearly touch so the whole reads as a rounded plus with the centre cut out | Simplest at 16 px of the A1 family |
 
-_Owner's pick from round 3: pending._
+**Owner (2026-09-25): "A2a is cool, but A1 can be enhanced if it had super
+realistic d-pad-like motion: perhaps it spins and grows and shrinks, has an
+animation like the button is pressed with a popular fighting-game move, or
+an N64-looking analog stick that moves in the motion of a smash attack."**
+→ A2a is the working pick for the ports family. A1 is re-read as an input
+device (the plus is a d-pad), which is on-brief: fighting-game inputs are
+the most arcade thing there is.
+
+### 5.7e Round 4 — A1 as an input device, with motion (mockup, below round 3)
+
+All abstract shapes: a plus of four squares, an octagon and a circle.
+Nothing resembles the N64 controller silhouette; the octagonal gate is a
+generic stick gate. Tab icon stays static (A1a) for A1c/A1e.
+
+| | Mark | Motion | Note |
+|---|---|---|---|
+| **A1c** | Quarter circle | Every 3 s: down, down-forward, forward pressed in turn (nudge + white edge), then the centre button fires with a ring | The most famous input in fighting games |
+| **A1d** | Smash flick | An analog stick in an octagonal gate, four player colours at the cardinals; it snaps forward with overshoot, springs back; the forward notch flashes and a burst ring fires | The Smash 64 forward smash |
+| **A1e** | Full circle | The whole d-pad rolls 360° (seats light in order as the stick passes), swells at the top of the roll, settles, then the centre fires | The owner's "spins and grows and shrinks"; a grappler's input |
+
+Rule for any animated mark: motion in the header lockup only; static in the
+tab icon and in any place motion would fight the board's own live dot;
+`prefers-reduced-motion` gets the still frame.
+
+_Owner's pick from round 4 (and whether A1 and A2 both get a job, e.g. A2
+as the mark and A1 as the "watch instead" / no-ROM glyph): pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2361,3 +2386,4 @@ Surprises (one line):
 | 2026-09-25 | GPT logos rejected; four hand-drawn SVG candidates (four slots, run-and-rewind, kn monogram, wordmark-only) added to the mockup for in-context judgement | Owner: "Try drawing some yourself" | 5 |
 | 2026-09-25 | Logo family A (four seats, one open) preferred by owner and his wife; the 2×2 grid echoes the Windows logo, so round 2 rearranges it (cross, four ports, board row) | Owner + wife feedback | 5 |
 | 2026-09-25 | Logo A2 (four ports, fourth open) chosen; motion on the fourth port ("the last player is joining") in the lockup only; tab icon static; reduced-motion honoured in build | Owner's pick + motion idea | 5 |
+| 2026-09-25 | A2a (fourth port filling up) is the working mark; A1 re-read as a d-pad/stick with fighting-game input motion (quarter circle, smash flick, 360) for a possible second job | Owner: "A2a is cool" + input-motion idea | 5 |
