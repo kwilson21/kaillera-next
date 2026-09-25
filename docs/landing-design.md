@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Four hand-drawn logo candidates in the mockup (§5.7b). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: family A chosen in meaning; round 2 (A1–A3) drawn to remove the Windows echo (§5.7c). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1849,7 +1849,25 @@ How to judge (same six tests as §5.7): 16 px first, white-on-black second,
 no Nintendo echoes, no AI-logo tropes, belongs with the condensed type, can
 be explained in one sentence.
 
-_Owner's pick: pending._
+**Owner (2026-09-25): "A reminds me of the Windows logo; my wife doesn't
+like the white, but she likes A the most."** Two data points from two
+people: the meaning of A (four seats, one open) lands; the 2×2 arrangement
+echoes Microsoft's logo (a 2×2 of the same four colours), which is a
+trademark we must not resemble. "The white" is read as the white-on-black
+one-colour version; to be confirmed.
+
+### 5.7c Round 2 — A without the Windows echo (in the mockup, below round 1)
+
+Same meaning, no 2×2 grid. One-colour versions left out.
+
+| | Mark | Means | Known risk |
+|---|---|---|---|
+| **A1** | Around the cabinet: four squares in a plus arrangement around an empty centre, the east one hollow | Four seats around one machine (or couch, or table); the open seat; also reads as a plus: join in | Plus shapes can read as "add" or medical |
+| **A2** | Four ports: four upright bars side by side, the fourth hollow | The N64's signature was four controller ports on the front; one is free | Can read as an equaliser |
+| **A3** | The board's row: the exact slot marker from every room row, in a tile | The logo is literally the interface; strongest as the wordmark underline | Weakest at 16 px, the squares get tiny |
+
+_Owner's pick from round 2: pending. If none, say what's wrong with the
+closest and round 3 starts from it._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2320,3 +2338,4 @@ Surprises (one line):
 | 2026-09-25 | Phase 6 guide: 3–5 people, nine steps, no leading questions, verbatim records, 2-of-5 rule | Phase 6 v1 | 6 |
 | 2026-09-25 | Build plan v1: five milestones (M0 plumbing → M1 landing → M2 invite → M3 restyle → M4 assets → M5 launch), full state list, final copy, tokens, accessibility, slow-phone budget; provisional until Phase 6 | Owner asked "what's next" while tests are pending | 7 |
 | 2026-09-25 | GPT logos rejected; four hand-drawn SVG candidates (four slots, run-and-rewind, kn monogram, wordmark-only) added to the mockup for in-context judgement | Owner: "Try drawing some yourself" | 5 |
+| 2026-09-25 | Logo family A (four seats, one open) preferred by owner and his wife; the 2×2 grid echoes the Windows logo, so round 2 rearranges it (cross, four ports, board row) | Owner + wife feedback | 5 |
