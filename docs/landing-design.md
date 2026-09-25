@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 5 — photo, silent videos, solo captures decided; logo prompts delivered (§5.7); awaiting the link-preview decision (a/b/c) and the logo images. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 5 decided (logo images and the photo still to come). Phase 6 test guide written (§6, Appendix C) — awaiting the owner's return with player feedback. Kaillera-player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1727,7 +1727,13 @@ the desktop behind the browser.
   areas" rule. Options: **(a)** keep the box art; **(b)** our own card only
   (name, invite text, player-colour slots); **(c)** our own card with a real
   in-match frame as the picture, same category as the live frames.
-  Recommendation: (c). *Awaiting a / b / c.*
+  Recommendation: (c). **Owner's decision (2026-09-25): (a) while the room
+  is waiting, (c) once the game is in progress.** Build implications: the
+  in-game invite card is composed at request time from the room's latest
+  frame (today's cards are pre-rendered files; a small server-side compose
+  with Pillow, 1200×630, name + "Kaz's room · in game" + the frame); frames
+  exist only for rooms listed on the front page, so an unlisted room's
+  in-game link falls back to (a); no frame yet → (a).
 - **Logo: yes, via GPT.** *"A logo would be cool, we can pass a prompt to
   GPT for it."* Prompts in §5.7.
 
@@ -1819,8 +1825,100 @@ per run; paste the shared rules at the end of every prompt.
 
 _Owner's logo picks and critique: pending._
 
-## 6. Phase 6 — Testing with real players
-_Not started._
+## 6. Phase 6 — Put it in front of people (v1)
+
+A short guide for testing the chosen design with 3–5 real people. The point
+is to watch what they do and write down what they say, not to convince them.
+
+### 6.1 Who
+- 1–2 **old Kaillera / Smash 64 players** (the "feel at home" test)
+- 1–2 **friends you'd actually send a link to** (the invite test)
+- 1 **person who has never used an emulator** (the newcomer test)
+Mix devices: at least two on their own phone, at least one on a desktop.
+
+### 6.2 Setup (per person, 20–30 minutes, one at a time)
+- Remote screen-share or in person. They use **their own device**.
+- Say only this: *"I'm testing a web page, not you. There are no wrong
+  answers. Please think out loud: say what you're looking at and what you'd
+  do. I won't help unless you're truly stuck."*
+- Record with permission, or type notes **verbatim**. Don't paraphrase.
+- Don't explain the project first. Don't say "rollback", "netcode",
+  "ROM" or "Kaillera" before they do.
+- Materials: the live mockup (direction A) at
+  https://claude.ai/artifact/9pPt7Vtvxtxjs5csq7ErM3 (share it with them
+  first; it's private by default), set to Landing · Live · previews on.
+
+### 6.3 The session, in order
+
+**1. Five-second test.** Show the Landing screen for five seconds, then hide
+it. Ask: *"What is this?" "What can you do here?" "Who is it for?"* Then
+show it again for as long as they want and ask if anything changed.
+
+**2. Task: play with a friend.** *"You want to play with a friend tonight.
+Show me what you'd do."* Watch: do they find Create? Do they read the ROM
+line? What do they say when they see it?
+
+**3. Task: the invite.** Switch to the Invite link screen (Waiting for
+players). *"A friend just sent you this. What do you do?"* Watch: Join or
+Watch, and whether they understand what Join needs before pressing.
+
+**4. Task: no game file.** *"Suppose you don't have the game file. What
+now?"* Then switch to the Room · ROM needed screen: *"You've pressed Join
+and this is what you see. What next?"* Watch what "Watch instead" means to
+them.
+
+**5. Task: waking.** Landing screen, Board set to Waking. *"You've just
+opened the page and this is what you see. What's happening? What would you
+do?"* Watch: wait, reload, or leave? Do they press SPACE or tap?
+
+**6. Veterans only: since 2001.** Scroll to the "Since 2001" section.
+*"What does this make you feel?" "Anything wrong or missing?"* Record
+names they mention.
+
+**7. Phone only.** On their phone, Landing screen: *"Find how to start a
+room."* then *"Find how to watch a match."* Watch thumb reach, scrolling,
+and whether "Have a code?" is found when asked *"A friend gives you a code
+over voice. Where does it go?"*
+
+**8. Optional, the real thing.** If they're willing, send them a real
+invite link from the current site in the app they normally use. Record:
+which app, whether it opened inside the app or in Safari/Chrome, whether
+the file picker found a ROM, first words. (This is the Phase 3 test; it is
+the most valuable thing on this list.)
+
+**9. Wrap-up, open questions only.**
+- *"Describe this site to a friend in one sentence."*
+- *"What would stop you from using it?"*
+- *"What did you expect to find that wasn't there?"*
+- *"Does it remind you of anything?"* (If they name something: *"What about
+  it?"*)
+
+### 6.4 What not to ask, what not to do
+- No leading questions: not "isn't it clear that…", not "do you like the
+  arcade feel?", not "does it feel like Kaillera?"
+- No yes/no questions when an open one will do.
+- No "would you use this?" (people say yes to be kind) and no questions
+  about features that don't exist.
+- Don't explain, defend, or apologise for anything on the page.
+- Help only after 60 seconds of being stuck, then write it down as a
+  failure of the page, not of the person.
+
+### 6.5 How to record (one table per person, Appendix C)
+For each task: what they did, in order · time to the first right action ·
+where they got stuck · their words, verbatim · one line of surprises. Then
+the wrap-up answers verbatim.
+
+### 6.6 How we'll read it
+- A problem seen with **2 or more of 5 people** is real and gets fixed.
+- Success signals from the brief, checked per person: could they say what
+  the site is in one sentence after five seconds; did a veteran say
+  "Kaillera" or "this is like…" unprompted; did anyone call it a startup,
+  an AI page, or a ROM site; did anyone ask where to get the game without
+  finding the answer on the page.
+- Bring the filled tables back here; I tally the patterns and propose the
+  revisions, and we iterate the mockup before the build plan.
+
+_Awaiting the owner's return with feedback._
 
 ## 7. Build plan
 _Not started._
@@ -1881,6 +1979,50 @@ Don't correct them. Their wrong answers are the data.
 ## Appendix B — What real people said
 _Empty until answers arrive. Verbatim, one block per person._
 
+## Appendix C — Session record template (copy once per person)
+
+```
+Person: <handle or initials>   Group: vet / friend / newcomer   Device: phone / desktop   Date:
+
+1. Five-second test
+   What is this?            "<verbatim>"
+   What can you do here?    "<verbatim>"
+   Who is it for?           "<verbatim>"
+   After a longer look, what changed?  "<verbatim>"
+
+2. Play with a friend
+   Actions in order:  …
+   Time to Create:    …s     Stuck at: …
+   Said about the ROM line:  "<verbatim>"
+
+3. The invite
+   Pressed: Join / Watch / other     Understood what Join needs before pressing? y/n
+   Said: "<verbatim>"
+
+4. No game file
+   Said / did:  "<verbatim>"     "Watch instead" means to them: "<verbatim>"
+
+5. Waking
+   Did: wait / reload / leave / pressed SPACE or tapped     Said: "<verbatim>"
+
+6. Since 2001 (vets)
+   Feels: "<verbatim>"     Wrong or missing: "<verbatim>"
+
+7. Phone
+   Start a room: found in …s   Watch a match: …s   Code field: found? y/n
+
+8. Real link (optional)
+   App: …   Opened in-app / real browser   File picker found ROM? y/n/n-a   First words: "<verbatim>"
+
+9. Wrap-up
+   One sentence:      "<verbatim>"
+   Would stop them:   "<verbatim>"
+   Expected, missing: "<verbatim>"
+   Reminds them of:   "<verbatim>"
+
+Surprises (one line):
+```
+
 ---
 
 ## Decision log
@@ -1928,3 +2070,5 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Videos are silent with on-screen text cards; captures are the owner solo on two devices with real handles; third picture is a photo | Owner, Phase 5 answers | 5 |
 | 2026-09-25 | "Sketchy ROM site" claim about box art withdrawn (unverified); the IP reason stands; link-preview options a/b/c, (c) recommended | Owner challenged the claim | 5 |
 | 2026-09-25 | A logo will be explored via three GPT prompt concepts (four slots, run-and-rewind, kn monogram), no Nintendo IP | Owner: "a logo would be cool" | 5 |
+| 2026-09-25 | Link-preview card: box art while waiting, real in-match frame once in game (composed at request time; unlisted or frameless rooms fall back to box art) | Owner's decision after the IP note | 5 |
+| 2026-09-25 | Phase 6 guide: 3–5 people, nine steps, no leading questions, verbatim records, 2-of-5 rule | Phase 6 v1 | 6 |
