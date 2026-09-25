@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: KN is the logo; the header rotates a set of seven motion marks (§5.8); placements for Match start and Rollback proposed (§5.9). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Phases 1–5 closed. Build plan v1 written (§7), provisional until Phase 6 feedback. Outstanding from the owner: player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8, default: own-server counts). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -2048,7 +2048,16 @@ marker)
 - (d) The lag visualizer page header.
 - (e) The 404 pages, per the owner.
 
-_Owner's picks for 2 and 3: pending._
+**Owner (2026-09-25): "Both recommendations are fine. Phase 5 is closed."**
+- Match start → the room page's boot/sync overlay, driven by real ready
+  states (also once on the landing board's empty state).
+- Rollback → the demo page's Result card, driven by the engine's rollback
+  count and mode; and the landing page's netcode section, looping slowly.
+
+**Phase 5 closed.** Deliverables: shot list (§5.2–5.5), the KN logo and the
+seven-mark header set (§5.8), motion placements (§5.9), the motion system
+(§7.11). Still to arrive from the owner, not blocking: the two-device photo
+(S3) and the stem-cut number if the ports-in-name wordmark is ever used.
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2216,6 +2225,10 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
   as poster; **no hover-to-stream in this build** (first follow-up).
 - Three screenshot slots + click-to-play intro video (lite-embed: poster
   image, the YouTube iframe injected on click); explainer video the same.
+- Header: the KN logo is not in the header; the header shows one of the
+  seven motion marks (§5.8), picked per visit, click to advance; the
+  name's letters arrive once on load. The netcode section carries the
+  Rollback timeline, looping slowly.
 - Footer as today plus the ROM disclaimer; Ko-fi stays a text link.
 
 **M2 — Invite-link page** (`/join?room=CODE`, static)
@@ -2240,8 +2253,14 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
   "or Watch instead" when WebRTC exists.
 - Spectator slot-claim button reads "Join · needs your ROM"; spectators-full
   message: "This room is full for spectators."
+- Boot/sync loading overlay: replace the spinner with **Match start**
+  (§5.7f #2) driven by real state: each port fills as that peer reports
+  ROM-ready and connected, all bounce when everyone's in, ports collapse
+  into the marker as the game boots. Still frame under reduced motion.
 - Demo page: same layout and copy, new tokens; the "Play with friends" card
-  points at the front page.
+  points at the front page. The Result card gets the **Rollback timeline**
+  (§5.7f #3) driven live: rewinds on each engine-reported rollback in
+  rollback mode; the playhead waits per tick in lockstep mode.
 - Name: "Player" allowed; the overlay prompts gently.
 
 **M4 — Assets** (§5)
@@ -2545,3 +2564,4 @@ Surprises (one line):
 | 2026-09-25 | Mark = A2a; wordmark = KAILLERA-NEXT drawn with the I·L·L·E stems as the four ports, combined with letters-arrive; KO / match start / rollback go to the existing 404 pages later; motion system listed in the build plan | Owner's round-5 verdict | 5 |
 | 2026-09-25 | Drawn-alphabet wordmark rejected and withdrawn; replaced by the real typeface with the I·L·L·E stems coloured as the ports (colour clipped to the glyphs), E stem filling last | Owner: "I don't like this at all" | 5 |
 | 2026-09-25 | Logo = KN tile; landing header rotates a set of seven motion marks per visit (A with motion, A2a, A1c, A1e, KO, the stick, letters arrive); click advances | Owner: "cycle through a set, keep KN as the main logo" | 5 |
+| 2026-09-25 | Match start → boot/sync overlay (real ready states); Rollback timeline → demo Result card (live) + landing netcode section. Phase 5 closed | Owner: "Both recommendations are fine" | 5 |
