@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.53.4",
+    "date": "2026-09-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "hold the Remix C shutdown until pending corrections land (#27)"
+      }
+    ]
+  },
+  {
     "version": "0.53.3",
     "date": "2026-09-25",
     "changes": [
