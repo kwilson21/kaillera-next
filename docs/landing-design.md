@@ -931,7 +931,7 @@ three variations by swapping the bracketed line.
    already know, or like a new brand?
 7. *Cost:* which elements would need real art (Phase 5) versus CSS alone?
 
-_Owner's pick and reasons: pending._
+_Owner's first reaction to the mockup (2026-09-25): "A looks great." Provisional; generating GPT images (Prompt A variations 1–3, plus Mix) before the final pick._
 
 ## 3. Phase 3 — User flows
 _Not started._
