@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 3 closed (defaults). Phase 4 (Wireframes) v1 written — awaiting owner feedback on W1–W5 and six questions. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 4 — wireframes answered and rendered into the mockup (landing, invite link, room, demo). Awaiting owner's critique. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1555,6 +1555,44 @@ Reload, or come back in a bit."
 Real players: show one friend W3 as plain text (no styling) and ask "what
 would you tap, and why?" Log the answer in Appendix B.
 
+### Phase 4 — owner's answers (2026-09-25) and the rendered wireframes
+
+| Question | Answer | Effect |
+|---|---|---|
+| Section order | As drawn | Door → ROM → How → Why → Since 2001 → footer |
+| Featured-match rule | OK | Newest match with an open slot first, else newest |
+| "Have a code?" on phones | "Does it matter?" | A little, only on the first phone screen: an open input invites typing and pushes Create down. Collapsed to a link; one line to flip after the phone test |
+| Invite URL scheme + domain | Not answered | Default taken: `/join?room=CODE` on the static site. Build session decides single-domain routing (Cloudflare in front: static landing + join at the edge, everything else to the API) vs two domains with a JS hand-off. Reversible |
+| Restyle scope | "Yes, restyle everything accordingly, likely the demo page as well if it's not too much effort" | The room overlay (W4) and the demo page are restyled to direction A in the same build; the lag visualizer inherits the tokens by being embedded |
+| Render W3/W4 in the mockup | "Yes please add everything into the mockup so I can critique it" | Done, see below |
+
+**Mockup, updated:** https://claude.ai/artifact/9pPt7Vtvxtxjs5csq7ErM3
+Toolbar now has a **Screen** switcher:
+- **Landing** (W1/W2/W5): Board Live / Empty / Waking; Live previews on/off;
+  the "How it works" block now shows three screenshot slots above the video.
+- **Invite link** (W3): six states — waiting for players, room full, room
+  closed, in-app browser, server waking (with the visualizer moved in),
+  spectator link.
+- **Room · ROM needed** (W4): needs ROM, wrong ROM (both games named), cached
+  ROM library (auto-matched).
+- **Demo**: today's /demo.html layout (stage + sidebar, same copy) in the
+  direction's tokens, to judge the restyle.
+Direction stays switchable for comparison; A is the default.
+
+**How to critique it (per screen):**
+- *Landing:* is Create where your thumb lands on a phone? Does "Watch" read
+  as "for me" when you imagine having no ROM? Does the empty state feel like
+  opening time or closing time?
+- *Invite link:* imagine you're the friend with no ROM: which button do you
+  press, and do you understand what happens next before pressing it? Is the
+  in-app banner clear enough to make you leave Discord's browser?
+- *Room:* with the wrong ROM, do you know exactly which file to find? Does
+  "Watch instead" feel like an exit or like staying in the room?
+- *Demo:* does the restyle keep the demo readable at a glance (Result, RTT,
+  Rollback toggle), or did the look eat the function?
+
+_Owner's critique: pending._
+
 ## 5. Phase 5 — Image prompts
 _Not started._
 
@@ -1660,3 +1698,5 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | New states required by the flows: in-app-browser notice, unsupported-browser screen, "Watch instead" inside the room overlay, room-closed message, spectators-full message | Today these are logged or unspecified | 3 |
 | 2026-09-25 | Flow defaults accepted: "Player" allowed, unsupported ROM allowed with warning, Watch is the only no-ROM path advertised, named room-closed message, per-tab identity, no last-room shortcut, slot-claim says "needs your ROM", 20 spectators, ROM-sharing wording removed; free-tier sleep and TURN become build checks | Owner: "Defaults are fine for all 11" | 3 |
 | 2026-09-25 | Wireframes W1–W5 drafted (landing desktop/phone, invite-link, ROM-needed, waking) with per-element goal annotations | Phase 4 v1 | 4 |
+| 2026-09-25 | Section order as drawn; featured = newest match with an open slot; code field collapses to a link on phones; invite URL `/join?room=CODE` on the static site (routing decided in build) | Owner answers + defaults | 4 |
+| 2026-09-25 | Restyle the room overlay and the demo page to direction A in the same build | Owner: "restyle everything accordingly" | 4 |
