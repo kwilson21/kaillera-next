@@ -123,6 +123,74 @@ Questions are asked a few at a time. Answers are recorded verbatim-ish with
 the date, then distilled into the Design Brief below.
 
 #### Batch 1 (asked 2026-09-25) — audience, first 60 seconds, two structural facts
+
+**Q1. Who is this for, in priority order?**
+Owner: *New gamers who enjoy an unserious fighting game that has a unique
+structure and style. They're looking to easily play with other people, make
+friends and form a community around it.* Added: *not just new players — Super
+Smash Bros. vets should feel at home too, especially those who used the old
+Kaillera.*
+
+→ Two co-primary audiences, not a ranked list:
+  - **Newcomers** — drawn by an unserious, distinctive fighting game; want
+    people to play with, friends, a community. Have likely never used an
+    emulator.
+  - **Smash 64 veterans**, above all **old Kaillera users** — must feel at
+    home, recognised, not talked down to.
+  Not named by the owner (so not primary): competitive netcode scrutineers,
+  HN/dev crowd, stream/Discord spectators. Friends-from-an-invite-link are a
+  *mode of arrival* for either group rather than a separate audience.
+  (Confirm in batch 2.)
+
+**Q2. First 60 seconds / what makes them leave?**
+Owner (for everyone, not per group): *If they can't easily figure out what
+this product is, how it serves them and how to jump in and use it in the first
+60 seconds, it's gonna be bad. What would make them leave is selling them a
+false hope or dream or a bunch of hype. We want them to be excited, but they
+should be able to skip the hype and jump directly into a game if they're a
+curious veteran or just someone who wants to play. All options should be easy.*
+
+→ Design rules derived:
+  - In 60 seconds a visitor must know **what it is, what it does for them, and
+    how to start** — with no scrolling required for the "how to start".
+  - **No hype, no false promises.** Excitement comes from honesty and the
+    thing itself (a real game, a real demo), not adjectives. This reinforces
+    docs/launch-copy.md.
+  - **Skippable story.** A "just play" path is always visible and one action
+    away; the narrative is there for people who want it.
+  - Per-group first-60-second goals are still unvalidated → ask real players
+    in Phase 6 (newcomer: "what do you think this is / what would you do
+    first?"; veteran: "what do you expect to happen when you click Create
+    Room?").
+
+**Q3. Where is the landing page served from?**
+Owner: *The landing page should be static, as waiting >1 minute just to see
+anything is bad UX. We could use both: an interactive loading page. The
+machine boots up in the background while the user figures out what the product
+is and how to use it. A nice callback to long loading screens in the early
+console days.*
+
+→ Decision: **landing page on always-up static hosting.** The sleeping server
+  is woken in the background the moment the page loads (or on first intent),
+  and the ~1-minute wake becomes an **interactive loading screen** the visitor
+  can read/play through — framed as a deliberate nod to console-era load
+  screens, not an apology. This becomes a named state in Phases 3–4
+  ("server-waking") and a build-plan item (static host + background wake ping
+  + honest progress). Invite links must work from the static page too
+  (Phase 3 question).
+
+**Q4. Host-to-guest ROM sharing?**
+Owner: *Has to be disabled for copyrighted games like SSB. In the future, if we
+add games into our ecosystem that we can allow distribution for, we will.*
+
+→ Decision: the public story is strictly **"bring your own ROM"**. The landing
+  page never mentions transfer/sharing. Smash Remix is a patch on the SSB64
+  ROM, so it falls under the same rule. Build-plan note (outside this page):
+  the in-room "Share ROM with players" option must be disabled for the known
+  copyrighted ROMs before launch, so the page and the product tell the same
+  story.
+
+#### Batch 2 (asked 2026-09-25) — feelings, story, audience confirmation
 _Awaiting answers._
 
 ### Design Brief
@@ -155,3 +223,7 @@ _Not started._
 | Date | Decision | Why | Phase |
 |---|---|---|---|
 | 2026-09-25 | Design-only session; single doc at docs/landing-design.md updated per phase | Owner's process; keep reasons with decisions | 0 |
+| 2026-09-25 | Two co-primary audiences: newcomers seeking people/community, and Smash 64 / old-Kaillera veterans who must feel at home | Owner, batch 1 | 1 |
+| 2026-09-25 | 60-second rule: what it is, what it does for you, how to start — no hype, "just play" always one action away | Owner: hype and false hope make people leave | 1 |
+| 2026-09-25 | Landing page is static/always-up; server wake happens in the background behind an interactive, console-style loading screen | Owner: >1 min blank page is bad UX; loading screen as a callback | 1 |
+| 2026-09-25 | Public story is strictly "bring your own ROM"; ROM sharing never mentioned; sharing to be disabled for copyrighted ROMs | Owner: no distribution of copyrighted games; only future redistributable games | 1 |
