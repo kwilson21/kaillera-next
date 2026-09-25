@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 1 (Intent and people) — interview in progress.
+> **Status:** Phase 1 (Intent and people) — Design Brief v1 awaiting owner review.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -252,10 +252,167 @@ page should not promise any of it until it's actually been delivered.*
     acceptable evidence of activity; a roadmap is not.)
 
 #### Batch 3 (asked 2026-09-25) — references, the one action, video, name
-_Awaiting answers._
 
-### Design Brief
-_Pending — written after the interview, then reviewed by the owner._
+**Q1. What exactly is "arcade" for you?**
+Owner: *All of those [sound and light at the door, attract-mode cabinets,
+people around a good match, next-up coin, everyone's here to play, CSS
+energy]. It's a feeling of community — joining and seeing moving parts,
+interactions happening, but feeling like you are a part of it. Twitch streams
+are the opposite of this; we want the opposite of that. You join and can
+easily view other people's live matches and are allowed to spectate or join
+them live if the owner allows; you hop into the game seamlessly. You can join
+waiting rooms and chat with other people; you can easily see people's names,
+profiles, records, playstyles, favourite character. Ideally in the future you
+control an avatar and walk around, but that's just an idea.*
+→ The arcade is **presence + permeability**: other people are visibly here,
+  and you can walk over. Twitch is the anti-model because you watch from
+  outside the glass. **Reality check (code, 2026-09-25):** rooms are joined by
+  code/link only; `GET /list` exists server-side (room name, host, game,
+  players x/max, status, password flag) but returns no join code and no page
+  calls it; there is no chat, no profiles, no records; spectators need no ROM
+  (host streams video to them); up to 20 spectators per room; late join and
+  slot-claiming exist. → Gating question G1 below.
+
+**Q2. References you love, and why.**
+Owner: *Metal Gear Online (MGS4), Tekken 5 Dark Resurrection online, Call of
+Duty 4 and Modern Warfare 2 on PS3, Halo 3 on Xbox 360 — this rolls the best
+of those combined experiences up where possible. Old Kaillera was cool because
+you could just join chat rooms and talk; half the time we weren't playing, we
+were hanging out in a room with random people. Joining and leaving games at
+will was fun; the atmosphere was inviting. The idea is to bring back that
+inviting atmosphere.*
+→ Reference family: **console-era online lobbies (2005–2010)** — a pre-game
+  room with people in it, party-up, hop in/out, see who's here — plus
+  Kaillera's chat-room culture. The design cue is *lobby*, not *storefront*
+  and not *stream*.
+
+**Q3. References you hate, and why.**
+Owner: *Dragon Ball FighterZ and Street Fighter 6 — they do something similar
+but microtransactions and constant money grabs ruin the idea. We're not
+selling you anything, nor advertising characters or cosmetics to buy. All you
+need is to own a copy of the game so you can legally obtain the ROM. If you
+don't own the game you can still hop in, chat with people and spectate. I've
+never played Club Penguin but I imagine it's like that.*
+→ **Nothing for sale, nothing to unlock, nothing gated but the ROM you
+  already own.** "Don't own it? You can still watch" is a real, shipped hook
+  (spectators need no ROM) — the one honest thing the page can offer the
+  ROM-less visitor today. (Chat is not shipped → not promised.)
+
+**Q4. The one action the page must drive.**
+Owner: *Each action is not necessarily the best, because you must own a ROM
+to experience it, so we likely want the arcade experience. In the future I
+may develop my own Smash 64-style fighting game that runs in the kaillera-next
+environment.*
+→ The one action is **"walk into the arcade"**: arrive, see what's happening,
+  and then Play (have a ROM) or Watch (don't). Create/Join/Demo/Video are the
+  cabinets, not the door. Future own game = redistributable, no ROM barrier —
+  out of scope for this page.
+
+**Q5. Video.**
+Owner: *Separate videos. This is enough information that a separate YouTube
+channel may be in the works; explaining how everything works is worth dev
+vlogs or informational videos.*
+→ Two videos: (a) intro — what it is, lobby → invite → friend joins → both
+  screens; (b) rollback explainer — what it is, why it beats lockstep, under
+  launch-copy rules. Lag visualizer link: not answered → small question S3.
+
+**Q6. Name and address.**
+Owner: *The name is kaillera-next; current domain kaillera-next.thesuperhuman.us;
+it may get its own domain later if it's worth it.*
+→ "kaillera" in the name carries the veteran signal; the page must not depend
+  on the domain (it may change).
+
+### Design Brief (v1 — for owner review)
+
+**Product in one line.** Open a link, play Super Smash Bros. 64 or Smash Remix
+online with friends in your browser. No install. Bring your own ROM.
+
+**Audience.** Two co-primary groups, one secondary.
+1. **Newcomers** who like an unserious, distinctive fighting game and want
+   people to play with and a community to belong to. Have never used an
+   emulator; may arrive on a phone with no ROM.
+2. **Smash 64 veterans, especially old Kaillera players.** Must feel at home
+   within seconds: the name, the lineage, the "just join a room" directness.
+3. *Secondary, served not centred:* competitive players and developers who
+   will scrutinise the netcode claims. Served by honesty and the demo.
+Arrival modes for any of them: cold from a community post, from a friend's
+invite link, or returning.
+
+**Goals (in order).**
+- G1 **Presence.** Within 60 seconds a visitor knows what this is, that
+  people are (or can be) here, and how to walk in. The page is the arcade
+  door, not a brochure.
+- G2 **Permeability.** Play and Watch are both first-class and one action
+  away. "No ROM? Watch." is real today and stated plainly.
+- G3 **Home for veterans.** A visible call to Kaillera (2001) and its lineage.
+- G4 **Honest proof of the netcode.** The demo and a short explainer video,
+  under docs/launch-copy.md rules. Numbers only with sources.
+- G5 **No dead air.** The sleeping server never shows a blank page: static
+  landing, background wake, console-style loading screen.
+
+**Emotional targets.** Walking into an arcade: locked-in, engaged, ready to
+have fun. Moving parts, other people, and the sense you can join them. The
+inviting atmosphere of Kaillera chat rooms and 2005–2010 console lobbies
+(MGO, Tekken 5 DR, CoD4/MW2, Halo 3). On leaving: "I'll be back, and I'll
+bring someone."
+
+**Must not feel like.** A startup/SaaS landing page; a sketchy ROM site; an
+AI-generated or AI-slop product page; a retro pixel-art/CRT theme park; a
+tech demo for engineers; a 2005 forum; a Twitch stream (watching from outside
+the glass); a fighting game's cash shop.
+
+**Non-goals (for this page).**
+- No promise or hint of unshipped features: friends list, lobbies with chat,
+  voice, persistent identity, records, rankings, avatars.
+- No ROM downloads, sharing, or hints where to get one. No legal hand-waving.
+- No mention of AI assistance. Personal story stays behind About.
+- Nothing for sale. No feature grids, testimonials, or "get started" rhythm.
+- Not a general N64 site: three supported ROMs, said plainly.
+
+**Constraints.** Static hosting with the API on a sleeping free tier (~1 min
+wake); rollback needs HTTPS + cross-origin isolation; phones are first-class
+(touch controls exist) but a phone-with-no-ROM visitor needs a Watch path;
+launch-copy framing rules; name may outlive the domain.
+
+**Success signals.**
+- *Quantitative (page analytics, privacy-respecting):* share of first-time
+  visitors who create, join or watch a room within 60 s; share of invite-link
+  openers who reach "in game"; demo starts; return visits within 7 days.
+- *Qualitative (Phase 6 tests):* a newcomer says what the site is in one
+  sentence after 10 seconds; a veteran says "this is Kaillera" unprompted;
+  nobody describes it as a startup, an AI page or a ROM site; no one asks
+  "where do I download the game?" without finding the answer on the page.
+
+**Gating questions (owner) — the brief cannot be final without these.**
+- **G1. Does the arcade floor ship with the page?** The one action is
+  "walk in and see what's happening", but today no page shows live rooms.
+  Option A: scope a minimal *live rooms board* into the launch — host opts a
+  room in as "open" (spectate / join), `GET /list` returns a join code for
+  open rooms, page shows game · host · players x/4 · status · Watch/Join.
+  Option B: design the page around today's product (create / join by link)
+  and design the board as a state that appears once shipped. *My
+  recommendation: A. Without it the page can only describe the arcade, not
+  be it — and it forces us to design the honest empty state ("nobody's
+  playing right now — start a room, share the link"), which is the most
+  common state a new site is in.*
+- **G2. Empty-state honesty.** May the page show a real aggregate number
+  (e.g. "N matches played this week" from the server's session logs) so an
+  empty board doesn't read as a dead site? Or no numbers at all?
+- **G3. Ko-fi "Support" link.** Keep it quietly in the footer as today, or
+  off the landing page entirely, given "we're not selling you anything"?
+
+**Small questions (say "ok" or correct me).**
+- S1. Password-protected rooms exist; on the board they'd show a lock and
+  not be joinable. Fine?
+- S2. The two videos are hosted on YouTube and embedded (not self-hosted).
+- S3. The lag visualizer gets a secondary link under the rollback section,
+  the demo gets the primary one.
+
+**Ask real people (before Phase 3 if possible).** Two or three old Kaillera
+players, in their words, no mention of this project: "What do you remember
+liking about playing on Kaillera?" and "What was the worst part?" One or two
+newcomers, shown today's lobby for 10 seconds: "What do you think this is,
+and what would you do first?" — a baseline to beat.
 
 ---
 
@@ -293,3 +450,8 @@ _Not started._
 | 2026-09-25 | No mention of AI assistance on the page; personal story stays behind About; Kaillera history is visible on the page | Owner: don't call attention to AI unnecessarily; history "would be cool" | 1 |
 | 2026-09-25 | Rollback is shown as proof (demo + short explainer video), not taught in prose | Owner: demo people can investigate themselves | 1 |
 | 2026-09-25 | Community vision (friends, lobbies, voice, identity, rankings) is a page non-goal until shipped | Owner: never promise what isn't delivered | 1 |
+| 2026-09-25 | The one action is "walk into the arcade": arrive, see what's happening, then Play or Watch | Owner, batch 3: no single CTA wins because a ROM is required to play | 1 |
+| 2026-09-25 | Arcade = presence + permeability; Twitch is the anti-model; reference family is 2005–2010 console lobbies + Kaillera chat rooms | Owner, batch 3 | 1 |
+| 2026-09-25 | Nothing for sale, nothing to unlock; "No ROM? You can still watch" is the honest ROM-less hook | Owner hates DBFZ/SF6 money grabs; spectators need no ROM (shipped) | 1 |
+| 2026-09-25 | Two separate videos (intro; rollback explainer) | Owner, batch 3 | 1 |
+| 2026-09-25 | Name kaillera-next; domain kaillera-next.thesuperhuman.us may change; design must not depend on it | Owner, batch 3 | 1 |
