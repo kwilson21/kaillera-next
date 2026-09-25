@@ -26,11 +26,20 @@ HOME_PNG = ROOT / "web" / "static" / "og" / "home.png"
 
 async def render(html: str, out_path: Path, browser) -> None:
     page = await browser.new_page(viewport={"width": 1200, "height": 630})
+    # Load the card from a file:// URL, not set_content(): the card's font and
+    # background are file:// URLs, which Chromium won't load into an
+    # about:blank page. Without the font, the fallback is wider and the text
+    # overflows the card.
+    tmp = out_path.parent / f".{out_path.stem}.html"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(html, encoding="utf-8")
     try:
-        await page.set_content(html, wait_until="networkidle")
+        await page.goto(tmp.as_uri(), wait_until="networkidle")
+        await page.evaluate("document.fonts.ready")
         png = await page.screenshot(type="png")
     finally:
         await page.close()
+        tmp.unlink(missing_ok=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(png)
     print(f"  wrote {out_path.relative_to(ROOT)} ({len(png)} bytes)")
