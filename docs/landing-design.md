@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 2 — direction A (pending one-word confirm); live-previews concept added (§2.8); GPT imagery rejected. Awaiting Q1, Q9–Q11 and the open Q2–Q8. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 2 — direction A confirmed; live previews L1 at launch, hover-to-stream as first follow-up (§2.10). Seven plain questions open (§2.10). Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1007,11 +1007,64 @@ to promote the site are a step further. Neither is ROM distribution, and the
 - **Q11. Attract mode when nothing is live:** a recorded clip labelled
   "recorded", or nothing (empty state only)? Recommendation: nothing at
   launch; honesty first.
-- **Still open from §2.6:** Q2 (drop the name field from the landing page),
-  Q3 (link to the official Smash Remix project), Q4 (which real number),
-  Q5 (wake the server on every page load), Q6 (game footage in the videos:
-  same answer as Q9?), Q7 (Bluetooth controller on a phone tested?),
-  Q8 (sentence case or lowercase).
+- **Still open from §2.6:** restated plainly in §2.10.
+
+### 2.10 Owner's answers (2026-09-25) and the hover-to-stream assessment
+
+- **Direction A: confirmed.** ("Yes.")
+- **Game imagery: both** live frames on the board and real screenshots in
+  "How it works". Owner's goal: *"the screenshot, to mouse-hover that
+  automatically starts the stream, would be the goal, but only if it's not
+  too crazy to implement."*
+- **Phase 5 is a shot list** of real captures. ("Ok.")
+- **Nothing live → empty state only.** No recorded attract clip.
+
+**Hover-to-stream, assessed against the code.** Today a spectator opens the
+room page with `spectate=1`; the host starts a canvas video stream lazily
+when that spectator connects (`startSpectatorStream`, netplay-rollback.js),
+and the spectator receives it via WebRTC `ontrack` into a `<video>`. So
+hover-to-stream on the landing page is: a *receive-only* version of that
+path, embedded in the static page, started by hover. No emulator, no ROM, no
+SharedArrayBuffer needed on the visitor's side.
+
+Not crazy, not free. Verdict: **medium, roughly a few days of build**, with
+these rules to keep it sane:
+1. **Featured panel only.** Rows keep the 10-second frame (L1). One hover
+   target per page means at most one preview connection per visitor.
+2. **Frame is the poster; video replaces it.** Hover starts after ~500 ms,
+   the connection lingers ~20 s after the mouse leaves, so a wandering cursor
+   doesn't churn the host with connect/disconnect.
+3. **Phones have no hover:** tap = Watch (opens the room as a spectator).
+4. **Preview spectators count against the room's 20-spectator cap** and are
+   marked `preview` so the room's list can show them as "peeking" or hide
+   them (small server change; decide in Phase 3).
+5. **Ship L1 first, hover-stream as the first follow-up.** The panel is
+   designed for both from day one; the video layer is added when L1 is live
+   and people demonstrably click Watch. Reason: host upload bandwidth is the
+   one cost nobody on the page pays but the host, and L1 proves demand before
+   spending it.
+
+**The remaining questions, asked plainly** (a recommended default on each;
+"defaults" accepts all):
+- **Name box.** The front page currently asks for your name before "Create a
+  room". Should the front page stop asking and let the room ask instead? The
+  room already has a name box and remembers it. *Default: yes, stop asking
+  on the front page.*
+- **Smash Remix link.** May the page link to the official Smash Remix site?
+  It publishes patches you apply to your own ROM, not ROMs. *Default: yes,
+  one link, in "You bring the game".*
+- **The one number.** Which real number goes on the board header and the
+  empty state: "N matches this week", "N rooms opened this week", or "last
+  match N minutes ago"? *Default: matches this week.*
+- **Waking the server.** Every visit to the front page will wake the
+  sleeping server, because the board needs it. Fine? *Default: yes.*
+- **Phone controllers.** Have you tested a Bluetooth controller on a phone
+  with the site? If not, the page claims on-screen controls only. *Default:
+  claim on-screen only until tested.*
+- **Tone.** Page copy in sentence case ("Create a room") or all lowercase
+  like the name ("create a room")? *Default: sentence case.*
+- **Game footage in the two videos.** Same answer as the imagery decision,
+  so the videos show the game running? *Default: yes.*
 
 
 ## 3. Phase 3 — User flows
@@ -1116,3 +1169,7 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Directions are chosen from images, not descriptions: live mockup artifact + GPT prompts per direction | Owner: needs to see it before picking | 2 |
 | 2026-09-25 | No generated imagery on the page; real screenshots and real game frames instead; Phase 5 becomes a shot list | Owner didn't care for GPT images; they invented games and taglines (AI-slop anti-reference) | 2 |
 | 2026-09-25 | Board carries live previews: a frame per listed room + a featured "Now playing" match with Watch and Join (level L1 recommended) | Owner: "Twitch, but you can actually join"; builds on shipped spectate, late join and game-screenshot plumbing | 2 |
+| 2026-09-25 | Direction A (The Lobby) is the direction | Owner: "Yes" | 2 |
+| 2026-09-25 | Game imagery: live frames on the board and real screenshots in "How it works"; no recorded attract clip when nothing is live | Owner: "Both"; "An empty state" | 2 |
+| 2026-09-25 | Hover-to-stream on the featured panel only, desktop hover / phone tap, debounced and lingering; ship L1 first, hover-stream as first follow-up | Owner's goal "if not too crazy"; assessed medium; host upload is the cost | 2 |
+| 2026-09-25 | Phase 5 = shot list of real captures, no generated images | Owner: "Ok" | 2 |
