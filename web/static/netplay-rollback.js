@@ -13700,15 +13700,15 @@
             if (_peerPhantom[p.slot]) continue;
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
-            // Frames before C init ran in lockstep on the legacy path, which
-            // deletes each remote input once applied. They can never be
-            // rolled back, so an absent entry there is not a gap. Without
-            // this, a deferred init (Smash Remix, at MENU→GAMEPLAY) stalls
-            // both peers for the full timeout on each of the first
+            // Apply frames before init - delay ran in lockstep on the legacy
+            // path, which deletes each remote input once applied. They can
+            // never be rolled back, so an absent entry there is not a gap.
+            // Without this, a deferred init (Smash Remix, at MENU→GAMEPLAY)
+            // stalls both peers for the full timeout on each of the first
             // delay+cap frames.
             const gapAtEdge =
               RB_TRUE_ROLLBACK &&
-              windowEdge >= Math.max(0, _rbInitFrame) &&
+              windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
             if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {

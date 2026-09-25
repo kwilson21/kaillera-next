@@ -214,7 +214,7 @@ def test_rollback_gap_check_ignores_frames_before_c_init():
     src = LOCKSTEP_JS.read_text()
     idx = src.index("const gapAtEdge =")
     gap_src = src[idx : src.index(";", idx)]
-    assert "windowEdge >= Math.max(0, _rbInitFrame)" in gap_src
+    assert "windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES)" in gap_src
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
