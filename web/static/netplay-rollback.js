@@ -1733,6 +1733,22 @@
     _pendingCInputs.length = 0;
     if (typeof _syncLog === 'function') _syncLog(`C-INPUT-DRAIN reason=${reason} count=${count}`);
   };
+  // Feed queued remote inputs to the C engine. WebRTC callbacks push to
+  // _pendingCInputs instead of calling kn_feed_input directly; feeding at a
+  // tick boundary, before kn_pre_tick, gives C a consistent input snapshot
+  // per frame (no race between async DC delivery and the prediction/serialize
+  // logic inside kn_pre_tick). Sorted in place by (frame, slot) so frames feed
+  // monotonically and duplicates land adjacent (last write wins in C's
+  // slot:frame store), without allocating per tick at 60 Hz.
+  const _drainPendingCInputs = (tickMod) => {
+    if (_pendingCInputs.length === 0 || !tickMod._kn_feed_input) return;
+    if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+    for (let i = 0; i < _pendingCInputs.length; i++) {
+      const qi = _pendingCInputs[i];
+      tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
+    }
+    _pendingCInputs.length = 0;
+  };
   const _formatSlotMap = (obj) => {
     const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
     return keys.length ? keys.map((k) => `${k}:${obj[k]}`).join(',') : 'none';
@@ -11483,6 +11499,9 @@
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
       const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
+        // A fresh engine has nothing to hold for; a hold left from a disabled
+        // engine would otherwise shut this one down on its first menu tick.
+        _rbShutdownHold = null;
         if (!detMod?._kn_rollback_init) {
           _useCRollback = false;
           return;
@@ -12662,7 +12681,7 @@
   // init, polluted prediction/stat state). Re-arm the deferred-init closure
   // so the next gameplay transition re-fires init cleanly. The caller must
   // end the tick right after: the engine is gone.
-  const _shutdownCRollbackForMenu = (tickMod, heldFrom) => {
+  const _shutdownCRollbackForMenu = (tickMod, heldMs) => {
     if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
     if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
     if (_rbInputPtr && tickMod?._free) {
@@ -12675,6 +12694,9 @@
     }
     _useCRollback = false;
     _rbInitFrame = -1;
+    // Queued inputs were for the engine just shut down; the next init
+    // backfills C from _remoteInputs.
+    _clearPendingCInputs('rb-shutdown');
     // Guests must wait for the host's fresh rb-init-frame broadcast
     // for the next match. Host's delay is unchanged across matches,
     // but the init frame is per-match.
@@ -12689,7 +12711,7 @@
       for (const f of Object.keys(frames || {})) if (Number(f) < keepFrom) delete frames[f];
     }
     _syncLog(
-      `C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} (held ${_frameNum - heldFrom}f) — re-armed for next match`,
+      `C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} (held ${Math.round(heldMs)}ms) — re-armed for next match`,
     );
   };
 
@@ -13448,7 +13470,7 @@
             _syncLog(`RB-SHUTDOWN-HOLD cancelled at f=${_frameNum} (held since f=${_rbShutdownHold.frame})`);
             _rbShutdownHold = null;
           }
-          // Smash Remix defers rollback init until here — see line ~6900.
+          // Smash Remix defers rollback init until here — see tryInitRollback.
           // Both peers fire on their own local transition; doRollbackInit
           // calls _kn_set_frame(_frameNum) so per-peer frame-skew at init
           // time is handled the same way as late-join.
@@ -13475,13 +13497,15 @@
           // Shut the C engine down (see _shutdownCRollbackForMenu), but only
           // once the frames already stepped are final: a correction still in
           // flight would otherwise be lost, and the lockstep path never
-          // repairs the difference. Until then the engine keeps running in
-          // strict menu lockstep, feeding late inputs and replaying.
+          // repairs the difference.
           if (_shutdownCRollback) {
             _rbShutdownHold = { since: performance.now(), frame: _frameNum };
           }
         }
         if (_rbShutdownHold) {
+          // Feed what has arrived before judging, so inputs that landed
+          // during a stalled tab count before the deadline does.
+          _drainPendingCInputs(tickMod);
           const confirmed = _liveStateConfirmed(tickMod);
           const heldMs = performance.now() - _rbShutdownHold.since;
           if (confirmed || heldMs >= RB_SHUTDOWN_HOLD_MS) {
@@ -13493,13 +13517,24 @@
                   `queued=${_pendingCInputs.length} — shutting down unconfirmed`,
               );
             }
-            const heldFrom = _rbShutdownHold.frame;
             _rbShutdownHold = null;
-            _shutdownCRollbackForMenu(tickMod, heldFrom);
+            _shutdownCRollbackForMenu(tickMod, heldMs);
             // The engine is gone: running the rest of this C tick would call
             // _kn_post_tick on it and reset _frameNum to -1 on this peer
             // only. The next tick steps this frame on the lockstep path.
             _markTickReturn('skip:rb-shutdown');
+            return;
+          }
+          // Hold the frame while waiting: stepping on would let an old gap
+          // age out of the confirmation window, run the engine through the
+          // pause or results screen, and let an unpause cancel the hold on
+          // this peer only. Only a replay (queued by an input just fed, or
+          // already running) moves the tick on, in strict lockstep below —
+          // the same rule as the predictions-paused path.
+          const replayDue =
+            (tickMod._kn_get_replay_depth?.() ?? 0) > 0 || (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
+          if (!replayDue) {
+            _markTickReturn('skip:rb-shutdown-hold');
             return;
           }
         }
@@ -13521,7 +13556,9 @@
         // Lockstep stall during controllable menus. During boot, intro, and
         // battle loading, run freely; once scene_curr reaches Title/Mode
         // Select/menus, never fabricate missing remote input.
-        const _menuLockstepActive = strictInputLockstep;
+        // A held C shutdown (match end: scene 22, gameStatus 5 is not a strict
+        // phase) must not predict either; a prediction would need another hold.
+        const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;
         const _rbBootConverged = _bootDone && !_menuLockstepActive;
         const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
         const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
@@ -13814,25 +13851,7 @@
         if (_delayRetunePending && !(tickMod._kn_get_replay_depth?.() > 0)) _recomputeDelay();
 
         // ── Drain queued remote inputs into C engine ──────────────────────
-        // WebRTC callbacks push to _pendingCInputs instead of calling
-        // kn_feed_input directly. Draining here — at the tick boundary,
-        // before kn_pre_tick — guarantees the C engine sees a consistent
-        // input snapshot per frame. No race between async DC delivery and
-        // the sync prediction/serialize logic inside kn_pre_tick.
-        if (_pendingCInputs.length > 0 && tickMod._kn_feed_input) {
-          // Sort in place by (frame, slot) so frames feed monotonically and
-          // duplicates land adjacent (last write wins inside C's slot:frame
-          // store). Avoids the prior Map + [...spread] + template-literal
-          // keys that allocated per tick at 60 Hz; the in-place sort uses
-          // a stable closure (allocated once at module scope) and feeds
-          // directly without an intermediate Array.
-          if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
-          for (let i = 0; i < _pendingCInputs.length; i++) {
-            const qi = _pendingCInputs[i];
-            tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
-          }
-          _pendingCInputs.length = 0;
-        }
+        _drainPendingCInputs(tickMod);
 
         // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
         // When the demo orchestrator pauses predictions to simulate lockstep
@@ -15563,6 +15582,7 @@
         }
         if (consecutiveThrows >= 3 && _useCRollback) {
           _useCRollback = false;
+          _rbShutdownHold = null;
           try {
             _syncLog(
               `C-ROLLBACK-FALLBACK consecutive throws=${consecutiveThrows} at f=${_frameNum} ` +

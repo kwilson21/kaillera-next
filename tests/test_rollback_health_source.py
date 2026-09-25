@@ -225,12 +225,30 @@ def test_gameplay_to_menu_c_shutdown_waits_for_confirmed_state():
 
     assert "const RB_SHUTDOWN_HOLD_MS = " in src
     assert "_rbShutdownHold = { since: performance.now(), frame: _frameNum };" in branch_src
+    drain_idx = branch_src.index("_drainPendingCInputs(tickMod);")
     confirm_idx = branch_src.index("_liveStateConfirmed(tickMod)")
     deadline_idx = branch_src.index("RB_SHUTDOWN_HOLD_MS")
     call_idx = branch_src.index("_shutdownCRollbackForMenu(tickMod")
-    assert confirm_idx < call_idx and deadline_idx < call_idx
+    # Arrived inputs are fed before judging, so a stalled tab can't time out
+    # on inputs that are already here.
+    assert drain_idx < confirm_idx < call_idx and deadline_idx < call_idx
     assert "RB-SHUTDOWN-HOLD-TIMEOUT" in branch_src
     assert "RB-SHUTDOWN-HOLD-TIMEOUT" in doc and "RB_SHUTDOWN_HOLD_MS" in doc
+
+    # While held the frame doesn't advance unless a replay is due, and any
+    # step it does take is strict lockstep (no prediction at match end).
+    hold_wait = branch_src[call_idx:]
+    assert "_kn_peek_pending_rollback" in hold_wait
+    assert hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');") > hold_wait.index("const replayDue =")
+    assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
+
+    # A hold never outlives the engine it was for.
+    init_idx = src.index("const doRollbackInit = (effectiveDelay")
+    assert "_rbShutdownHold = null;" in src[init_idx : src.index("if (!detMod?._kn_rollback_init)", init_idx)]
+    fallback_idx = src.index("if (consecutiveThrows >= 3 && _useCRollback) {")
+    assert "_rbShutdownHold = null;" in src[fallback_idx : src.index("C-ROLLBACK-FALLBACK", fallback_idx)]
+    helper_idx = src.index("const _shutdownCRollbackForMenu = (tickMod")
+    assert "_clearPendingCInputs('rb-shutdown');" in src[helper_idx : src.index("\n  };\n", helper_idx)]
 
     # Back in gameplay before the hold ends: the engine never stopped.
     menu_to_gameplay = src[src.index("MENU→GAMEPLAY transition at") : transition_idx]
@@ -241,8 +259,8 @@ def test_gameplay_to_menu_c_shutdown_waits_for_confirmed_state():
     assert "_dispatchScheduledSyncs(() => _liveStateConfirmed(tickMod));" in src
 
     # Match stop clears a hold left over from the finished match.
-    stop_idx = src.index("_rbReinitClosure = null;\n")
-    assert "_rbShutdownHold = null;" in src[stop_idx - 400 : stop_idx + 200]
+    stop_idx = src.index("const stopSync = () => {")
+    assert "_rbShutdownHold = null;" in src[stop_idx : src.index("\n  };\n", stop_idx)]
 
 
 def test_rollback_gap_check_ignores_frames_before_c_init():
