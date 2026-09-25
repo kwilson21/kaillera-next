@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 1 (Intent and people) — Design Brief v1 awaiting owner review.
+> **Status:** Phase 1 complete (Design Brief v1 accepted). Player outreach in progress (Appendix A/B). Phase 2 next.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -409,10 +409,37 @@ launch-copy framing rules; name may outlive the domain.
   the demo gets the primary one.
 
 **Ask real people (before Phase 3 if possible).** Two or three old Kaillera
-players, in their words, no mention of this project: "What do you remember
-liking about playing on Kaillera?" and "What was the worst part?" One or two
-newcomers, shown today's lobby for 10 seconds: "What do you think this is,
-and what would you do first?" — a baseline to beat.
+players and one or two newcomers. Scripts are in Appendix A; answers go in
+Appendix B verbatim.
+
+### Brief review — owner answers (2026-09-25)
+
+- **G1 → Option A, small scope.** Owner: *"Option A seems reasonable, we just
+  want to keep the scope small since there's no guarantee anyone would
+  actually use this."* Minimal scope, so it can't grow:
+  1. Host has one checkbox in the pre-game overlay: **"List this room on the
+     front page"**. Password-protected rooms are never listed. (Default value
+     is a Phase 3 question: default-on gives presence, default-off gives an
+     always-empty board.)
+  2. `GET /list` gains the room code for listed rooms only; unlisted rooms
+     keep today's behaviour (no code).
+  3. The landing page renders: game · host name · players x/max · status
+     (waiting / in game) · **Watch** · **Join** (Join only while a slot is
+     open; Watch while spectator slots are open). Nothing else: no chat, no
+     profiles, no sorting, no filters.
+  4. The board's empty state is designed as carefully as the full one.
+- **G2 → Real numbers allowed.** Owner: *"Sure, we can show real numbers."*
+  Candidates (Phase 2 picks): matches played this week / rooms opened this
+  week from session logs; "last match N minutes ago". Never a fake or padded
+  number; if the number is embarrassing, show it anyway or show none.
+- **G3 → Ko-fi stays.** Owner: *"The footer is quiet enough that it's not
+  distracting."* Keep as today: footer, text link, no callout.
+- **S1–S3** not answered → treated as provisional "ok" (locked rooms shown
+  with a lock and not joinable; videos on YouTube, embedded; demo primary,
+  lag visualizer secondary). Owner can correct at any time.
+
+**Brief status: v1 accepted with G1–G3 resolved.** Phase 2 may begin; real-
+player answers (Appendix B) are folded in as they arrive.
 
 ---
 
@@ -436,6 +463,62 @@ _Not started._
 
 ---
 
+## Appendix A — Research scripts (send as written)
+
+Rules for the sender: don't describe the project, don't send the link, don't
+ask "would you use…", don't ask leading questions ("wasn't the lag awful?").
+Allowed follow-ups only: "what do you mean?" and "can you give me an example?"
+If they ask why: *"working on something, I'll show you when it's real — didn't
+want to colour your answers."* Copy answers verbatim into Appendix B.
+
+### A1. Old Kaillera players — direct message (one person at a time)
+
+> hey — random one. been thinking about the old Kaillera days lately (SSB64,
+> the servers, all of that). got a few minutes for 3 questions? no wrong
+> answers, I just want your honest memory of it.
+>
+> 1. what do you actually remember liking about playing on Kaillera?
+> 2. what was the worst part?
+> 3. if you can, walk me through a typical night on there — from opening the
+>    client to logging off.
+>
+> (and if you still play 64 online anywhere these days — where?)
+
+### A2. Old Kaillera players — group / Discord post
+
+> quick one for anyone who played SSB64 on Kaillera back in the day. I'm
+> trying to remember what it was actually like, not the nostalgia version.
+> reply here or DM me, whichever:
+>
+> 1. what did you like about playing on Kaillera?
+> 2. what was the worst part?
+> 3. what did a typical night on there look like, start to finish?
+>
+> no wrong answers. thanks.
+
+### A3. Newcomers — 10-second baseline (optional, 1–2 people)
+
+Show them the current lobby (kaillera-next.thesuperhuman.us) for about ten
+seconds, on their own phone if possible, then take it away and ask:
+
+> 1. what do you think this is?
+> 2. what would you do first?
+> 3. is there anything you'd need before you could use it?
+
+Don't correct them. Their wrong answers are the data.
+
+### What to record for each person
+
+- handle or initials · roughly which years they played · how (Project64k,
+  Mupen, other) · desktop or phone today
+- their answers **verbatim** (paste, don't paraphrase)
+- anything they said unprompted after the questions
+
+## Appendix B — What real people said
+_Empty until answers arrive. Verbatim, one block per person._
+
+---
+
 ## Decision log
 
 | Date | Decision | Why | Phase |
@@ -455,3 +538,7 @@ _Not started._
 | 2026-09-25 | Nothing for sale, nothing to unlock; "No ROM? You can still watch" is the honest ROM-less hook | Owner hates DBFZ/SF6 money grabs; spectators need no ROM (shipped) | 1 |
 | 2026-09-25 | Two separate videos (intro; rollback explainer) | Owner, batch 3 | 1 |
 | 2026-09-25 | Name kaillera-next; domain kaillera-next.thesuperhuman.us may change; design must not depend on it | Owner, batch 3 | 1 |
+| 2026-09-25 | Live rooms board ships with the page, minimal scope (host "list on front page" checkbox, join code for listed rooms, game/host/players/status/Watch/Join, designed empty state) | Owner: Option A, keep scope small — no guarantee of use | 1 |
+| 2026-09-25 | Real aggregate activity numbers may be shown; never fake or padded | Owner, brief review | 1 |
+| 2026-09-25 | Ko-fi link stays as a quiet footer link | Owner: footer is quiet enough | 1 |
+| 2026-09-25 | Design Brief v1 accepted; Phase 2 may start while player answers arrive | Owner, brief review | 1 |
