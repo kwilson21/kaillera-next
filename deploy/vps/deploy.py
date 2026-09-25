@@ -15,6 +15,9 @@ is never printed:
   python deploy/vps/deploy.py status    # server state, tunnel connections
   python deploy/vps/deploy.py dns       # point the hostname at the tunnel
                                         # (DNS change: only with the owner's OK)
+  python deploy/vps/deploy.py dns --target render --render-host NAME.onrender.com
+                                        # ... or at the Render fallback
+                                        # (deploy/render/README.md)
 
 The server has no SSH and no open inbound port. It updates itself from the
 repo's main branch every 5 minutes (deploy/vps/kn-update.sh).
@@ -185,10 +188,18 @@ def cmd_dns(args: argparse.Namespace) -> None:
     if not zones:
         sys.exit(f"zone {zone_name} not found for this token")
     zid = zones[0]["id"]
-    tunnels = cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []
-    if not tunnels:
-        sys.exit("no tunnel yet; run `up` first")
-    target = f"{tunnels[0]['id']}.cfargotunnel.com"
+    if args.target == "render":
+        # Render (deploy/render): its certificate is issued over plain DNS,
+        # so the record starts DNS-only; add --proxied once Render shows the
+        # certificate as issued.
+        if not args.render_host or not args.render_host.endswith(".onrender.com"):
+            sys.exit("--target render needs --render-host <name>.onrender.com")
+        target, proxied = args.render_host, args.proxied
+    else:
+        tunnels = cf("GET", f"{acct()}/cfd_tunnel?name={NAME}&is_deleted=false") or []
+        if not tunnels:
+            sys.exit("no tunnel yet; run `up` first")
+        target, proxied = f"{tunnels[0]['id']}.cfargotunnel.com", True
     # A Worker custom domain on the same hostname owns its DNS record; it has
     # to be detached (in the dashboard, or `wrangler` without the route)
     # before the tunnel record can exist. Don't remove it from here.
@@ -202,7 +213,7 @@ def cmd_dns(args: argparse.Namespace) -> None:
         "type": "CNAME",
         "name": host,
         "content": target,
-        "proxied": True,
+        "proxied": proxied,
         "comment": NAME,
     }
     if records:
@@ -211,22 +222,22 @@ def cmd_dns(args: argparse.Namespace) -> None:
                 f"{host} has other DNS records {[r['type'] for r in records]}; resolve by hand"
             )
         existing = records[0]
-        # Only replace a record this script made (a previous tunnel of ours);
-        # a CNAME for some other service is left for a human to decide.
+        # Only replace a record this script made (our tunnel or our Render
+        # service); a CNAME for some other service is left for a human.
         if existing.get("comment") != NAME or not existing["content"].endswith(
-            ".cfargotunnel.com"
+            (".cfargotunnel.com", ".onrender.com")
         ):
             sys.exit(
                 f"{host} is a CNAME to {existing['content']} not made by this script; resolve by hand"
             )
-        if existing["content"] == target and existing.get("proxied") is True:
+        if existing["content"] == target and existing.get("proxied") is proxied:
             print(f"dns: {host} already -> {target}")
             return
         cf("PUT", f"/zones/{zid}/dns_records/{existing['id']}", record)
-        print(f"dns: {host} CNAME updated -> {target} (proxied)")
+        print(f"dns: {host} CNAME updated -> {target} (proxied={proxied})")
     else:
         cf("POST", f"/zones/{zid}/dns_records", record)
-        print(f"dns: {host} CNAME created -> {target} (proxied)")
+        print(f"dns: {host} CNAME created -> {target} (proxied={proxied})")
 
 
 def main() -> None:
@@ -235,6 +246,18 @@ def main() -> None:
     )
     p.add_argument("command", choices=["up", "status", "dns"])
     p.add_argument("--hostname", default="kaillera-next.thesuperhuman.us")
+    p.add_argument(
+        "--target",
+        choices=["tunnel", "render"],
+        default="tunnel",
+        help="dns: where the hostname points (default: the tunnel)",
+    )
+    p.add_argument("--render-host", help="dns --target render: NAME.onrender.com")
+    p.add_argument(
+        "--proxied",
+        action="store_true",
+        help="dns --target render: proxy through Cloudflare (after Render issued its certificate)",
+    )
     p.add_argument(
         "--branch", default="main", help="branch the server deploys and follows"
     )
