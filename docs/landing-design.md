@@ -191,6 +191,67 @@ add games into our ecosystem that we can allow distribution for, we will.*
   story.
 
 #### Batch 2 (asked 2026-09-25) — feelings, story, audience confirmation
+
+**Q1. Audience confirmation (competitive netcode scrutineers, HN/dev crowd)?**
+Owner: *Yes, that could be a part of the audience.*
+→ Secondary audience, served but not designed around: the page must survive
+  their scrutiny (honest claims, the demo as proof) without turning into a
+  tech demo for them.
+
+**Q2. What should someone feel (arrival / first match / leaving)?**
+Owner: *Locked-in, engaged, ready to have fun — similar to walking into an
+arcade. The site should bring back similar feelings to arcades.*
+→ Emotional target: **walking into an arcade.** Energy, focus, anticipation;
+  you came here to play and everything around you says "go". The same feeling
+  is wanted at all three moments; the owner did not split them. What
+  specifically evokes "arcade" for the owner is asked in batch 3 (references),
+  because it must be achieved *without* the pixel-art theme park (see Q3).
+
+**Q3. What must it NOT feel like?**
+Owner: *Pretty much all of these — a startup landing page, a sketchy ROM site,
+an AI-generated product page, a retro-pixel-art theme park, a tech demo for
+engineers, a 2005 forum. But also some shitty SaaS site or some AI slop site.*
+→ Anti-references (all are hard "no"s):
+  1. Startup / SaaS landing page (hero-benefits-testimonials-pricing rhythm,
+     gradient blobs, feature grids with icons, "Get started" everywhere)
+  2. Sketchy ROM site (download buttons, ads, mystery links, "free ROMs")
+  3. AI-generated / AI-slop product page (generic copy, stock illustration,
+     empty superlatives, uncanny consistency)
+  4. Retro pixel-art theme park (8-bit fonts, CRT scanline filters, neon
+     "INSERT COIN" everywhere as decoration)
+  5. Tech demo for engineers (metrics-first, jargon in the hero)
+  6. 2005 forum (dense links, badges, visitor counters)
+  → **Design tension to solve in Phase 2:** "arcade feeling" (Q2) without
+  "retro pixel-art theme park" (Q3). The arcade is a *feeling* (energy,
+  people, ready to play), not a costume.
+
+**Q4. The story.**
+Owner: *Avoid calling attention to it being AI-assisted unnecessarily. No
+need to add the personal story unless it makes sense. A call to Kaillera's
+history would be cool. Point to the demo as proof people can investigate
+themselves; a simple video explaining what rollback is and why it's more
+advantageous than the traditional route would be cool. Friends list, lobbies,
+voice, persistent identity, rankings all relate to my vision — the landing
+page should not promise any of it until it's actually been delivered.*
+→ Decisions:
+  - **AI assistance is not mentioned on the page.** It stays in the About
+    modal where it already is. Reason: it adds nothing for a player and
+    pattern-matches to the AI-slop anti-reference.
+  - **Personal story stays behind About** unless a single line earns its
+    place in Phase 2 (e.g. one sentence of "why"). Default: off the page.
+  - **Kaillera's history is on the page** — a short, visible "call" to it
+    (the 2001 lineage), doubling as the "you are home" signal for veterans.
+  - **Rollback: proof, not lecture.** The page points to `/demo.html` as
+    self-verifiable proof, plus a short explainer video (what rollback is,
+    why it beats lockstep), written under docs/launch-copy.md rules. Whether
+    this is a segment of the intro video or a second video is a batch 3
+    question.
+  - **The community vision is a non-goal for the page.** No friends list,
+    lobbies, voice, identity or rankings are promised or hinted until
+    shipped. Only delivered features appear. (The real changelog is
+    acceptable evidence of activity; a roadmap is not.)
+
+#### Batch 3 (asked 2026-09-25) — references, the one action, video, name
 _Awaiting answers._
 
 ### Design Brief
@@ -227,3 +288,8 @@ _Not started._
 | 2026-09-25 | 60-second rule: what it is, what it does for you, how to start — no hype, "just play" always one action away | Owner: hype and false hope make people leave | 1 |
 | 2026-09-25 | Landing page is static/always-up; server wake happens in the background behind an interactive, console-style loading screen | Owner: >1 min blank page is bad UX; loading screen as a callback | 1 |
 | 2026-09-25 | Public story is strictly "bring your own ROM"; ROM sharing never mentioned; sharing to be disabled for copyrighted ROMs | Owner: no distribution of copyrighted games; only future redistributable games | 1 |
+| 2026-09-25 | Emotional target: walking into an arcade (locked-in, engaged, ready to have fun) — achieved without pixel-art/CRT costume | Owner, batch 2; anti-references include "retro pixel-art theme park" | 1 |
+| 2026-09-25 | Hard anti-references: startup/SaaS page, sketchy ROM site, AI-slop page, pixel-art theme park, engineer tech demo, 2005 forum | Owner, batch 2 | 1 |
+| 2026-09-25 | No mention of AI assistance on the page; personal story stays behind About; Kaillera history is visible on the page | Owner: don't call attention to AI unnecessarily; history "would be cool" | 1 |
+| 2026-09-25 | Rollback is shown as proof (demo + short explainer video), not taught in prose | Owner: demo people can investigate themselves | 1 |
+| 2026-09-25 | Community vision (friends, lobbies, voice, identity, rankings) is a page non-goal until shipped | Owner: never promise what isn't delivered | 1 |
