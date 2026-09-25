@@ -117,23 +117,28 @@ for key in ADMIN_KEY IP_HASH_SALT; do
   [ -n "$(get $key)" ] || put "$key" "$(openssl rand -hex 32)"
 done
 if [ -z "$(get TUNNEL_TOKEN)" ] || [ "$TOKENS" = 1 ]; then
+  # Everything is read and checked first; nothing is written if any answer
+  # is rejected.
   echo "Paste the tunnel token (Cloudflare dashboard, see deploy/home/README.md). Input is hidden."
-  ask_secret TUNNEL_TOKEN "Tunnel token: " required
+  ask_secret TUNNEL_NEW "Tunnel token: " required
+  [ "$TUNNEL_NEW" != - ] || die "the tunnel token can't be cleared; nothing was changed"
   # The TURN key id and token only work as a pair: set both, keep both, or
   # clear both.
   echo "Optional: Cloudflare TURN key id and API token; players on strict networks need them."
   echo "Enter both, press Enter twice to keep the current pair, or type - twice to clear it."
   ask_secret TURN_ID_NEW "TURN key id: " optional
   ask_secret TURN_TOKEN_NEW "TURN API token: " optional
-  if [ "$TURN_ID_NEW" = - ] && [ "$TURN_TOKEN_NEW" = - ]; then
-    put CF_TURN_KEY_ID ""
-    put CF_TURN_API_TOKEN ""
-  elif [ -n "$TURN_ID_NEW" ] && [ -n "$TURN_TOKEN_NEW" ]; then
-    put CF_TURN_KEY_ID "$TURN_ID_NEW"
-    put CF_TURN_API_TOKEN "$TURN_TOKEN_NEW"
-  elif [ -n "$TURN_ID_NEW$TURN_TOKEN_NEW" ]; then
-    die "enter both TURN values (or neither); nothing was changed for TURN"
-  fi
+  case "$TURN_ID_NEW|$TURN_TOKEN_NEW" in
+    '-|-') turn=clear ;;
+    '|') turn=keep ;;
+    -\|* | *\|- | \|* | *\|) die "enter both TURN values, Enter twice, or - twice; nothing was changed" ;;
+    *) turn=set ;;
+  esac
+  put TUNNEL_TOKEN "$TUNNEL_NEW"
+  case "$turn" in
+    clear) put CF_TURN_KEY_ID "" && put CF_TURN_API_TOKEN "" ;;
+    set) put CF_TURN_KEY_ID "$TURN_ID_NEW" && put CF_TURN_API_TOKEN "$TURN_TOKEN_NEW" ;;
+  esac
 fi
 echo "stored (values not shown)"
 

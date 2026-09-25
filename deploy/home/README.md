@@ -32,7 +32,7 @@ in the served checkout makes open game pages reload (`version-guard.js`).
 
 1. **The tunnel** (once). It must exist with its route to
    `http://127.0.0.1:27890`. From a session that has `CLOUDFLARE_API_TOKEN`:
-   `python deploy/vps/deploy.py tunnel --service http://127.0.0.1:27890`.
+   `python deploy/vps/deploy.py tunnel`.
    This creates the `kaillera-next-home` tunnel and its route and changes no
    DNS. It's separate from the VPS tunnel, so neither setup can break the
    other.

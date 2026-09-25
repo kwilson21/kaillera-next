@@ -41,6 +41,7 @@ NAME = "kaillera-next"
 # The home setup gets its own tunnel, so re-routing one never points the
 # other's connector at an origin it can't reach.
 HOME_TUNNEL = "kaillera-next-home"
+HOME_ORIGIN = "http://127.0.0.1:27890"
 HCLOUD = "https://api.hetzner.cloud/v1"
 CF = "https://api.cloudflare.com/client/v4"
 # Tunnel tokens, TURN ids and API tokens are all within this set; anything
@@ -182,8 +183,11 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     # The token is never printed: the machine running cloudflared gets it from
     # the Cloudflare dashboard (deploy/home/README.md).
     name = args.tunnel or HOME_TUNNEL
-    tid, _ = tunnel(args.hostname, args.service, name)
-    print(f"tunnel: {name}: {args.hostname} -> {args.service} ({tid}); DNS unchanged")
+    # The home tunnel's origin is the Mac's own loopback port (deploy/home).
+    default = HOME_ORIGIN if name == HOME_TUNNEL else "http://app:27888"
+    service = args.service or default
+    tid, _ = tunnel(args.hostname, service, name)
+    print(f"tunnel: {name}: {args.hostname} -> {service} ({tid}); DNS unchanged")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -278,7 +282,6 @@ def main() -> None:
     )
     p.add_argument(
         "--service",
-        default="http://app:27888",
         help="origin the tunnel forwards to (tunnel command)",
     )
     args = p.parse_args()
