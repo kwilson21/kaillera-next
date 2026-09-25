@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 5 decided (logo images and the photo still to come). Phase 6 test guide written (§6, Appendix C) — awaiting the owner's return with player feedback. Kaillera-player outreach in progress (Appendix A/B).
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Outstanding from the owner: player-test tables (§6, Appendix C), logo images (§5.7), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1920,8 +1920,224 @@ the wrap-up answers verbatim.
 
 _Awaiting the owner's return with feedback._
 
-## 7. Build plan
-_Not started._
+## 7. Build plan (v1, provisional until Phase 6 feedback is in)
+
+For a separate build session. Everything below was decided in Phases 1–5;
+items marked **⚠** may change after the player tests (§6). Read the Design
+Brief (§1) and the flows (§3) first; this section is the checklist.
+
+### 7.1 Scope in one paragraph
+A static landing page in direction A (the console-era lobby) whose hero is
+a live board of open rooms with frames, a featured match you can Watch or
+Join, Create, a code field, one honest ROM line, then four short sections
+(You bring the game · How it works · Why it feels close to the couch · Since
+2001) and a quiet footer. A static invite-link page with six states. The
+room overlay and the demo page restyled to the same tokens. Server work to
+make the board real: listed rooms, join codes, frames, a weekly number, the
+zombie-room rule, ROM sharing off for the known ROMs. No chat, profiles,
+rankings, avatars, roadmap, AI mention or personal story on the page.
+
+### 7.2 Milestones, in build order
+
+**M0 — Server and hosting plumbing** (nothing visible yet)
+1. `ROM_SHARING_ENABLED=false` in production for the known copyrighted ROMs
+   (flag already exists in `signaling.py` / `og.py`). Remove "enable ROM
+   sharing" from every client error string.
+2. Zombie-room rule: a room with no live sockets is not joinable by a new
+   player; returning players (known persistent id, within grace) may
+   re-enter; new joiners get `Room closed` (distinct from `Room not found`).
+3. Rooms board data: host checkbox **"List this room on the front page
+   (shows a live preview)"** → `room.listed`; never true for password rooms.
+   `GET /list` returns, for listed rooms only: `room_code`, `game`,
+   `host_name`, `player_count`, `max_players`, `status`, `started_at`,
+   `frame_url`, `frame_age_s`. Unlisted rooms keep today's shape (no code).
+4. Frames (L1): host of a *listed, in-game* room posts a ≤20 KB JPEG
+   (~320×240) every ~10 s (reuse the `game-screenshot` path with a
+   non-debug, listed-only variant). Server keeps only the latest per room
+   in memory, drops it when the room closes. Served at `frame_url` with
+   `Cache-Control: no-store`. **Build check:** cost per listed room is one
+   small upload per 10 s; confirm on the free tier.
+5. Weekly number: `GET /api/stats/public` → `{ "matches_this_week": N,
+   "people_playing_now": M }` from session logs + live rooms. Real or
+   absent; never padded.
+6. Public health for the waking state: `GET /health` already exists; make
+   sure it answers fast and CORS-allows the static origin.
+7. OG cards: landing card in direction A type (UI-only); invite card =
+   box art while waiting (`GAME_IMAGES_ENABLED` stays on), **composed at
+   request time from the latest frame once in game** (Pillow, 1200×630:
+   name + "Kaz's room · in game" + the frame). No frame or unlisted → the
+   waiting card.
+8. **Build checks (facts unknown at design time):** does the free tier stay
+   awake while a host holds a Socket.IO connection? Is TURN configured
+   (`TURN_SERVERS`/`TURN_SECRET` or Cloudflare TURN)? Record both answers
+   in this doc; adjust copy in 7.4 if TURN is absent (never "just works").
+9. Hosting: static landing + `/join` on an always-up host; the API on the
+   sleeping tier. Preferred: one domain with Cloudflare in front (static at
+   the edge for `/` and `/join`, everything else to the API). Acceptable:
+   two domains with a JS hand-off from `/join` to `/play.html`. Invite
+   links copied from a room must point at the static `/join?room=CODE`.
+
+**M1 — Landing page** (`web/index.html` replaced; static, no framework)
+- Beats 1–6 as §2.1/§4 W1–W2, copy from 7.4.
+- Board states: **live** (poll `/list` every 10 s, back off to 30 s when
+  the tab is hidden; rows update in place; featured = newest in-game room
+  with an open slot, else newest), **empty**, **waking** (health ping on
+  load with a 2 s timeout; poll every 3 s; the lag visualizer inline; past
+  120 s the "still powering on" line), **error** (health answers but `/list`
+  fails: "Couldn't load rooms. Reload." with Create still enabled).
+- No name field. "Have a code?" inline on desktop, a link that opens the
+  field on phones ⚠.
+- Live previews: a 72 px frame per row, the featured panel with the frame
+  as poster; **no hover-to-stream in this build** (first follow-up).
+- Three screenshot slots + click-to-play intro video (lite-embed: poster
+  image, the YouTube iframe injected on click); explainer video the same.
+- Footer as today plus the ROM disclaimer; Ko-fi stays a text link.
+
+**M2 — Invite-link page** (`/join?room=CODE`, static)
+- Looks the room up via `GET /room/{code}` (already exists; add `host_name`
+  and `listed`), wakes the server if needed (same waking block).
+- States: waiting for players · room full (Watch primary) · room closed
+  (named host if known) · in-app browser banner (UA detection for Discord,
+  Instagram, Facebook/Messenger, TikTok, Twitter; copy-link button; Watch
+  still offered) · server waking ("We'll check on Kaz's room…") ·
+  spectator link (`&spectate=1`: Watch primary, "Join if a slot opens ·
+  needs your ROM").
+- Hands off to `/play.html?room=CODE[&spectate=1]` on the API host.
+
+**M3 — Room overlay and demo restyle** (`play.html`/`play.css`, `demo.html`)
+- Tokens from 7.5; layout as W4: host ✓ ROM visible; dropzone names the
+  host's exact game; **"Watch instead"** switches to spectator without
+  leaving; wrong-ROM message names both games; cached ROM auto-matched with
+  the library visible; unsupported ROM warns and still allows Start.
+- New **unsupported-browser screen** before anything loads when
+  `RTCPeerConnection`, `WebAssembly` or `crossOriginIsolated` is missing:
+  what's missing in plain words, "Open in Safari or Chrome", copy-link, and
+  "or Watch instead" when WebRTC exists.
+- Spectator slot-claim button reads "Join · needs your ROM"; spectators-full
+  message: "This room is full for spectators."
+- Demo page: same layout and copy, new tokens; the "Play with friends" card
+  points at the front page.
+- Name: "Player" allowed; the overlay prompts gently.
+
+**M4 — Assets** (§5)
+- S1, S2 (screenshots), S3 (the owner's two-device photo), S5/S6 OG cards,
+  S7 favicon recolour (+ the chosen logo once picked from §5.7), V1/V2
+  silent videos with text cards, uploaded to YouTube with captions.
+- Screenshots as WebP ≤ 60 KB each with `width`/`height` set; the photo
+  ≤ 120 KB.
+
+**M5 — Launch checklist**
+- Phase 6 revisions folded in ⚠.
+- Real invite-link test from three apps on phones (§3 Flow 2) passed.
+- Two-player `tests/rb-two-player.mjs` with `JITTER=20` still passes
+  (CLAUDE.md rule: the restyle touches play.html, not the tick loop, but
+  run it).
+- Launch order per docs/launch-copy.md: r/Smash64 → r/smashbros →
+  r/emulation → X → r/fightinggames → Show HN last.
+
+### 7.3 States, complete list
+| Page | States |
+|---|---|
+| Landing board | live · empty · waking · error · (waking > 120 s) |
+| Landing featured | present (in-game room exists) · absent |
+| Invite | waiting · full · closed · in-app browser · waking · spectator · unsupported browser |
+| Room overlay | needs ROM · wrong ROM · cached ROM · unsupported ROM · watching instead · unsupported browser |
+| Global | server unreachable after wake timeout |
+
+### 7.4 Copy, final (supersedes §2.2 where different)
+- Line: "Super Smash Bros. 64 online with friends. In your browser. No
+  install." Sub: "Free and open source. Continuing Kaillera, 2001."
+- Board: "Open rooms · N people playing right now · N matches this week".
+  Empty: "The floor is quiet. N matches were played this week. Open a room
+  and send the link. First one in picks the stage."
+- Under Create: "Playing needs your own SSB64 or Smash Remix ROM. Watching
+  doesn't."
+- Featured caption: "Watch drops you in as a spectator. Join takes the open
+  slot, mid-game, with your own ROM."
+- Waking: as §2.2; invite variant: "We'll check on Kaz's room the moment it
+  answers."
+- You bring the game: as §2.2, with one link on "Smash Remix" to the
+  official project.
+- How it works: as §2.2 plus "On a phone, an Xbox controller over Bluetooth
+  works too."
+- Why it feels close to the couch: as §2.2 (checked against
+  docs/launch-copy.md). If TURN is absent (7.2 M0.8), add nothing that
+  implies every pair can connect.
+- Since 2001, footer: as §2.2. Footer adds "kaillera-next does not host,
+  distribute or link to ROMs."
+- Room closed: "Kaz's room has closed. Rooms live only while someone's in
+  them. Ask Kaz for a new link, or open your own."
+- Wrong ROM: "Your ROM doesn't match. Kaz is playing Super Smash Bros.
+  (US); you dropped Smash Remix 2.0.1."
+- Connection failure: "Couldn't connect to Kaz. This usually means a strict
+  network on one side. Try a phone hotspot or another network."
+- Unsupported browser: "This browser can't run the game. It needs a feature
+  (SharedArrayBuffer) that in-app browsers and some privacy modes turn off.
+  Open this link in Safari or Chrome."
+- Sentence case throughout; no exclamation marks; no "zero lag", "no input
+  delay", "fixes lag", "eliminates rollbacks", "faster than offline".
+
+### 7.5 Tokens (direction A)
+```
+--bg #0e1218  --bg2 #151b25  --line #242c39  --text #e8ecf1  --muted #8b95a5
+--accent #5aa8ff  --accent-ink #061020  --radius 4px
+--p1 #e5484d  --p2 #3b82f6  --p3 #f5c518  --p4 #3fb950
+display/labels: Barlow Condensed 600/700 (uppercase, tracking .04–.12em)
+body: IBM Plex Sans 400/500/600 · tabular numerals on the board
+```
+Fonts self-hosted, subset to Latin, `font-display: swap`, preloaded; two
+families, five weights total. The demo, room overlay and lag visualizer
+inherit the same variables.
+
+### 7.6 Accessibility
+- Contrast: muted on bg ≈ 5.5:1, accent on bg ≈ 7:1, accent-ink on accent
+  ≥ 10:1; verify after any token change.
+- Board updates announced via `aria-live="polite"` on the header count
+  only (not every row); waking state is `role="status"`.
+- Every frame has alt text: "Live frame from Kaz's room"; placeholder tiles
+  are `aria-hidden`.
+- Slot markers never the only signal: the "3/4" count sits beside them.
+- 44 px minimum targets on phones; visible focus rings (2 px accent).
+- `prefers-reduced-motion` disables the breathing dot, progress bar and
+  visualizer pulses.
+- Videos: captions uploaded; no autoplay anywhere.
+- Headings in order (h1 name, h2 per beat); `lang="en"`; the code input
+  has a label; buttons say what they do ("Join · needs your ROM").
+
+### 7.7 Performance on slow phones
+- Static HTML + CSS + ~6 KB inline JS (board poll, waking, visualizer,
+  lite-embed). No framework, no third-party scripts, no analytics SDK.
+- Budget for the first view: ≤ 150 KB transferred (HTML + CSS + fonts),
+  LCP under 2.5 s on a mid-range Android on 4G, zero layout shift (the
+  board area has a `min-height` in every state).
+- Frames: ≤ 20 KB JPEG, `loading="lazy"` below the featured one, fetched
+  only while the tab is visible.
+- Screenshots WebP ≤ 60 KB with dimensions set; the photo ≤ 120 KB; videos
+  never load until clicked (poster + click → iframe).
+- Polling: `/list` every 10 s visible, 30 s hidden, stop after 10 minutes
+  idle until the next interaction.
+- The waking-state visualizer is the same inline JS as `/lag-test.html`,
+  no extra download.
+
+### 7.8 Measuring the success signals (needs one decision)
+The brief's signals (create/join/watch within 60 s, invite openers reaching
+"in game", demo starts, 7-day returns) need counts. Proposal: log them
+through the existing `POST /api/client-event` endpoint, server-side counts
+only, no third-party analytics, no cookies beyond what the room already
+uses. **Owner to confirm** before build.
+
+### 7.9 Explicitly not in this build
+Hover-to-stream (L2), chat, profiles, records, rankings, avatars, a
+roadmap, any mention of AI assistance, the personal story on the page,
+streaming mode on the join page, a "your last room" shortcut, generated
+imagery.
+
+### 7.10 Open items carried into the build session
+- ⚠ Phase 6 player-test revisions (§6).
+- Logo pick from §5.7 images; the two-device photo (S3).
+- Kaillera-player answers (Appendix B) may adjust the "Since 2001" copy.
+- 7.2 M0.8 build checks (free-tier sleep, TURN).
+- 7.8 analytics decision.
 
 ---
 
@@ -2072,3 +2288,4 @@ Surprises (one line):
 | 2026-09-25 | A logo will be explored via three GPT prompt concepts (four slots, run-and-rewind, kn monogram), no Nintendo IP | Owner: "a logo would be cool" | 5 |
 | 2026-09-25 | Link-preview card: box art while waiting, real in-match frame once in game (composed at request time; unlisted or frameless rooms fall back to box art) | Owner's decision after the IP note | 5 |
 | 2026-09-25 | Phase 6 guide: 3–5 people, nine steps, no leading questions, verbatim records, 2-of-5 rule | Phase 6 v1 | 6 |
+| 2026-09-25 | Build plan v1: five milestones (M0 plumbing → M1 landing → M2 invite → M3 restyle → M4 assets → M5 launch), full state list, final copy, tokens, accessibility, slow-phone budget; provisional until Phase 6 | Owner asked "what's next" while tests are pending | 7 |
