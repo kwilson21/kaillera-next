@@ -37,6 +37,10 @@ async def render(html: str, out_path: Path, browser) -> None:
         try:
             await page.goto(card.as_uri(), wait_until="networkidle")
             await page.evaluate("document.fonts.ready")
+            # fonts.ready also resolves when a font fails; saving then would
+            # bake the wider fallback into the card, so stop instead.
+            if not await page.evaluate("document.fonts.check('bold 16px Inter')"):
+                raise RuntimeError(f"Inter didn't load for {out_path.name}; not saving")
             png = await page.screenshot(type="png")
         finally:
             await page.close()
