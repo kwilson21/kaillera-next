@@ -25,9 +25,6 @@ web/static/roms/
 
 # Dev artifacts
 *.png
-# ...except the Open Graph cards the site serves (link previews)
-!web/static/og/*.png
-!web/static/og/cards/*.png
 *.cht
 web/static/ejs/cores/*.backup
 web/static/ejs/cores/*.forked

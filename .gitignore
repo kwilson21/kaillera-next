@@ -49,7 +49,6 @@ tests/diag-screenshots/
 # Screenshots (dev artifacts)
 *.png
 !web/static/og/*.png
-!web/static/og/cards/
 !web/static/og/cards/*.png
 tests/vgp-screenshots/
 logs/*.log
