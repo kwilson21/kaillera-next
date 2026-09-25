@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 4 closed. Phase 5 (Shot list) v1 written — awaiting owner's answers Q1–Q5. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 5 (Shot list) — no narration, solo captures decided; Q1–Q3 restated plainly, awaiting answers. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1700,9 +1700,25 @@ the desktop behind the browser.
 7. **Brief test.** Cover the captions: does the page still feel like a place
    with people in it?
 
-### 5.6 Questions for the owner
-- **Q1.** S3 as a photo of two real devices, or a clean composite?
-- **Q2.** Checked: `web/static/og/ssb64.jpg` is the **official N64 box
+### 5.6 Owner's answers (2026-09-25), first pass
+
+- **Narration: none.** *"Preferably no voice for now, just use text to
+  explain it."* → Both videos are silent with short on-screen text cards
+  (the script lines, shortened, burned in). Bonus: they work as muted
+  autoplay embeds in Discord.
+- **Consenting friend: none for now.** → Captures are the owner alone on two
+  devices. The second player name is a real handle of the owner's, never
+  "Player 2": proposed "Kaz" (laptop) and "Agent 21" (phone).
+- Questions 1–3 were asked in shorthand and not understood; restated
+  plainly below with defaults.
+
+### 5.6a Questions for the owner, restated plainly
+- **Q1. The third "How it works" picture ("both screens in a match").**
+  A camera photo of the laptop and phone on a table showing the same moment,
+  or two screenshots (laptop + phone) placed side by side in one image?
+  *Default: side by side screenshots (solo-friendly, no photo setup).*
+- **Q2. The link-preview image** (what Discord / iMessage / Twitter show
+  when a link is pasted). Checked: `web/static/og/ssb64.jpg` is the **official N64 box
   art** (Mario, Pikachu, Samus, Fox, the "Only for N64" mark, ESRB badge).
   `home.png` is the current generic card (Inter Bold on navy, "Play retro
   games online with friends · no install needed · up to 4 players", a big
@@ -1711,11 +1727,11 @@ the desktop behind the browser.
   own ROM" is exactly the look of the sketchy-ROM-site anti-reference, and
   it is trademark art we don't need. `GAME_IMAGES_ENABLED=false` already
   turns the per-game images off without a code change. Confirm?
-- **Q3.** Wordmark only (the type treatment), or do you want a logo
-  exploration? If yes, that is the one place a generated concept could be
-  tried, under the no-Nintendo-IP rule.
-- **Q4.** Narration: a TTS voice (which kind), or your own voice?
-- **Q5.** Who is the consenting friend whose name appears in S1–S3 and V1?
+- **Q3. A logo.** The site has none today (the name as text + a tiny "kn"
+  tab icon). Do you want a symbol/mark designed? If yes, a generated sketch
+  of ideas (no Nintendo content) is the one remaining use for GPT images.
+  *Default: no logo for now; the direction A name treatment is the wordmark
+  and the "kn" icon gets the new colours.*
 
 ## 6. Phase 6 — Testing with real players
 _Not started._
