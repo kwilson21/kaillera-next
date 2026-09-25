@@ -456,5 +456,66 @@ README is updated. New dependency: `boto3` (declared directly in
 8. `feat(admin)`: admin page badges, filters and buttons.
 9. `chore(deploy)`: `render.yaml` env entries, README setup, cutover and the
    production check.
+10. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
+    filter, `admin_actions.actor`, triage display on the admin page (§9).
+    Then create the daily routine.
 
 Before each merge, check the diff size against `main` (CLAUDE.md).
+
+---
+
+## 9. Daily feedback routine (follow-up after PR 9)
+
+Once feedback persists, a scheduled cloud agent processes new feedback every
+day. It is set up only after the cutover (PR 9); before that, prod wipes
+feedback on every restart.
+
+### API additions (PR 10)
+
+- Migration: `feedback` gains `triaged_at`, `triage_category`, `triage_note`
+  (≤ 4 KB).
+- `POST /admin/api/feedback/{id}/triage` with body `{category, note}`.
+  `category` is one of `bug`, `crash`, `desync`, `ux`, `spam`, `duplicate`,
+  `other`. Idempotent: `triaged_at` is set only on the first call, and later
+  calls update category and note.
+- `GET /admin/api/feedback` gains the filter `triaged=false`.
+- `admin_actions` gains `actor`, taken from an optional `X-Admin-Actor`
+  header (e.g. `routine`). The header is informational only and grants no
+  access.
+- The admin page shows the triage category and note on each feedback entry.
+
+Unresolved is not used as the "needs processing" marker, because real bugs
+stay unresolved until fixed and would be re-investigated every day.
+
+### Routine behavior
+
+A scheduled cloud agent runs daily. It has a checkout of this repo, and the
+prod admin key comes from its environment, never its prompt. Each run:
+
+1. Fetch feedback with `triaged=false`.
+2. For each report, look up the linked match (`context.matchId`, else room +
+   time) with its `tier` and `flag_reasons`.
+3. Categorize:
+   - **Spam or duplicate:** triage, then resolve with a note (e.g.
+     `duplicate of #123`). A duplicate is the same match, or the same
+     `ip_hash` with near-identical text within 24 h. Only resolve when
+     confident; uncertain reports stay unresolved.
+   - **Crash or desync with a linked match:** run `tools/analyze_match.py`
+     against the prod admin API and store a diagnosis of ≤ 2 KB in
+     `triage_note`. At most 5 investigations per run; the rest are left for
+     the next run.
+   - **Everything else:** triage only, left unresolved for the owner.
+4. Send one push notification: counts per category, the top issues in one
+   line each, and any reports skipped because of the cap. It never includes
+   emails or IP hashes.
+
+### Guardrails
+
+- Feedback text is untrusted input to an agent that holds the admin key. The
+  routine prompt treats it strictly as data. The routine calls only the
+  triage and resolve endpoints.
+- A wrong resolve can be undone for `LOG_RETENTION_DAYS`, and every action
+  is recorded in `admin_actions` with `actor=routine`.
+- When creating the routine, confirm that a cloud routine can hold the key as
+  a secret and send push notifications. If it cannot send push
+  notifications, the digest is the routine run's own output.
