@@ -205,6 +205,8 @@ def test_gameplay_to_menu_c_shutdown_keeps_frame_timeline():
     shutdown_idx = branch_src.index("C-ROLLBACK shutdown on GAMEPLAY→MENU")
     after_shutdown = branch_src[shutdown_idx:]
     assert "_markTickReturn('skip:rb-shutdown');" in after_shutdown
+    # Skipping the reset must not keep a whole match of input history alive.
+    assert "const keepFrom = _frameNum - 600;" in branch_src
     assert after_shutdown.index("return;") < after_shutdown.index("\n          }\n")
 
 

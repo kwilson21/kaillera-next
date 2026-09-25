@@ -13439,6 +13439,14 @@
             // but the init frame is per-match.
             if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
             window._rbDeferredForGameplay = _rbReinitClosure;
+            // No match reset here, so drop the finished match's input
+            // history, keeping the same ~600-frame resend window the
+            // legacy path keeps for _localInputs.
+            const keepFrom = _frameNum - 600;
+            for (const f of Object.keys(_localInputs)) if (Number(f) < keepFrom) delete _localInputs[f];
+            for (const frames of Object.values(_remoteInputs)) {
+              for (const f of Object.keys(frames || {})) if (Number(f) < keepFrom) delete frames[f];
+            }
             _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
             // The engine is gone: running the rest of this C tick would call
             // _kn_post_tick on it and reset _frameNum to -1 on this peer
