@@ -6,9 +6,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install dependencies first (layer caching)
-COPY server/pyproject.toml server/
-RUN pip install --no-cache-dir server/
+# Install dependencies first (layer caching), at the exact versions in
+# server/uv.lock: the versions the tests ran against. Resolving from
+# pyproject.toml alone picked up whatever was newest on build day.
+COPY server/pyproject.toml server/uv.lock server/
+RUN pip install --no-cache-dir uv==0.8.17 \
+    && uv export --quiet --project server --frozen --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && pip uninstall -y uv && rm /tmp/requirements.txt
 
 # Copy application code
 COPY server/ server/
