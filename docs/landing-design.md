@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 2 (Experience and content) v1 written — awaiting owner's direction pick and Q1–Q8. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 2 — narrative, copy and directions written; live mockup + direction image prompts delivered (§2.7). Awaiting owner's direction pick and Q1–Q8. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -792,6 +792,147 @@ whether the "Since 2001" paragraph lands (show it to one vet and ask "what
 does this make you feel?"); whether "You bring the game" is clear to a
 newcomer (ask "what would you need before you could play?").
 
+### 2.7 Seeing the directions before choosing (added 2026-09-25)
+
+Owner: *"I'd have to see images of the design before picking a direction."*
+Two ways to see them, both design artifacts, neither product code, neither in
+the repo:
+
+**1. Live mockup (private, opens on desktop and phone):**
+https://claude.ai/artifact/9pPt7Vtvxtxjs5csq7ErM3
+Same draft copy in all four (A Lobby, B Floor, C Clubhouse, Mix), with the
+board's Live / Empty / Waking states. The Waking state has a working copy of
+the input-lag visualizer (press SPACE or tap) so the loading-screen idea can
+be felt, not imagined. Fake rooms and numbers; no game footage; no
+illustration (B's floor art would come from Phase 5 prompts).
+Deep links: `#A` `#B` `#C` `#M`.
+
+**2. GPT image prompts — direction exploration (hero, desktop).** These are
+atmosphere shots to choose *by*, not final assets (final prompts come in
+Phase 5 after wireframes). Image models garble text: judge mood, light,
+type feel and layout, not the words. Paste one prompt per run; make the
+three variations by swapping the bracketed line.
+
+*Shared rules for every prompt below (paste verbatim at the end of each):*
+
+> UI mockup, flat, no device frame, no browser chrome, no hands, no people's
+> faces. Dark interface. No pixel-art fonts, no CRT scanlines, no "insert
+> coin" text, no neon signage clichés. No Nintendo characters, logos, game
+> screenshots or recognisable game art; evoke the era with light, materials
+> and layout only. Text can be approximate. Aspect ratio 16:10, 1600×1000.
+
+**Prompt A — The Lobby**
+
+> Landing page hero for a browser-based retro-console netplay site, in the
+> visual language of a 2007 console online pre-game lobby (think a
+> military-clean roster screen). Layout, top to bottom: site name
+> "kaillera-next" top-left in a tall condensed sans, uppercase, one line
+> under it "Super Smash Bros. 64 online with friends. In your browser. No
+> install." Below that, a full-width roster panel titled "OPEN ROOMS" with
+> three rows: game name, host name, four small square slot markers in red /
+> blue / yellow / green, "2/4", status text, and two small buttons "Watch"
+> and "Join" at the right. Under the panel a single bright button "Create a
+> room" and a small "Have a code?" field. Palette: charcoal-navy background
+> (#0e1218), off-white text, one electric-blue accent (#5aa8ff) for the live
+> status dot and the primary button, nothing else coloured except the slot
+> markers. Mood: composed, quiet confidence, a place where people are
+> present; not a dashboard, not a SaaS page. Typography feel: condensed
+> grotesk headings, tabular numbers, plain humanist body text.
+> [Variation 1: as described. Variation 2: the roster panel fills the whole
+> first screen edge to edge, name reduced to a small header. Variation 3:
+> add a faint horizontal scanning highlight across the live row only, no
+> other motion cues.]
+> + shared rules
+
+**Prompt B — The Floor**
+
+> Landing page hero for a browser-based retro-console netplay site that
+> feels like walking into an arcade at night: a dark room lit from above by
+> warm marquee light, screens glowing in a row. Layout, top to bottom: site
+> name "kaillera-next" centred-left in a wide, heavy geometric display face
+> with a soft amber glow around the letters; one line under it "Super Smash
+> Bros. 64 online with friends. In your browser. No install." Below, three
+> upright "cabinet" cards side by side, each with a small dark status strip
+> on top ("WAITING FOR PLAYERS" or "IN GAME · 6 MIN"), a game name, a host
+> name, four small slot markers in red / blue / yellow / green, and Watch /
+> Join buttons; the middle card is live and glows softly in red light, the
+> others sit dim. Under the cards, one amber button "Create a room". Behind
+> everything, a very dark illustrated arcade floor: suggestion of more
+> cabinets receding, reflections on a dark floor, warm amber and cool cyan
+> light spill, all at low contrast so the UI stays readable. Palette: warm
+> near-black (#0b0908), cream text (#f3e9d8), amber accent (#ffb347), red and
+> cyan light only as glow. Mood: energy, anticipation, other people are here,
+> you can walk over. Typography feel: wide bold display for the name, plain
+> sans for everything else.
+> [Variation 1: as described. Variation 2: no illustrated floor, only the
+> light: a single warm radial glow at the top edge and the cabinet glows.
+> Variation 3: cabinets shown as a horizontal strip along the bottom of the
+> hero like a row of machines seen from the door, name and line above them
+> in the dark.]
+> + shared rules
+
+**Prompt C — The Clubhouse**
+
+> Landing page hero for a browser-based retro-console netplay site that
+> feels like a friend's basement game room or an early-2000s chat room:
+> friendly, hand-made, unpolished on purpose. Layout, top to bottom: site
+> name "kaillera-next" in a rounded, heavy, friendly sans (not childish),
+> one line under it "Super Smash Bros. 64 online with friends. In your
+> browser. No install." Below, a simple list panel with rounded corners
+> titled "Open rooms" and three rows: game name in large text, host name,
+> four flat round slot markers in red / blue / yellow / green, "2/4", and a
+> big rounded "Join" button. A large rounded amber button "Create a room"
+> underneath. Small flat-vector touches in the four player colours: a
+> controller outline, a cabinet outline, a couch; drawn simply, like
+> stickers, in the corners, not dominating. Palette: deep warm brown-grey
+> background (#1f1a17), warm off-white text, amber accent (#f2a93b), flat
+> player colours. Mood: come hang out; a person made this; nothing is being
+> sold. Typography feel: rounded humanist sans throughout, generous sizes.
+> [Variation 1: as described. Variation 2: cream/paper background (#f4efe4)
+> with dark text and the same flat colours, to test a light version.
+> Variation 3: remove all illustration; friendliness carried by type, radius
+> and colour alone.]
+> + shared rules
+
+**Prompt M — Mix (B's door on A's floor)**
+
+> Landing page hero for a browser-based retro-console netplay site. The top
+> of the page is lit like an arcade door at night: a single warm amber
+> radial glow from the top edge on a warm near-black background, the site
+> name "kaillera-next" in a wide, heavy geometric display face with a soft
+> amber glow, one line under it "Super Smash Bros. 64 online with friends.
+> In your browser. No install." Below the light, the page becomes composed
+> and quiet: a full-width roster panel titled "OPEN ROOMS" with three rows
+> (game, host, four small square slot markers in red / blue / yellow /
+> green, "2/4", status, Watch / Join buttons), thin dividers, tabular
+> numbers, condensed uppercase labels; one live row marked with a small
+> amber dot. Under it, one amber button "Create a room" and a small "Have a
+> code?" field. Palette: near-black (#0d0c0b), warm off-white text, amber
+> (#ffb347) as the only accent. Mood: warmth at the door, calm on the floor.
+> Typography feel: wide display for the name only, condensed labels, plain
+> humanist body.
+> [Variation 1: as described. Variation 2: glow shifted to cool cyan with
+> amber only on the button. Variation 3: the roster rendered as low, wide
+> cabinet cards in one row instead of table rows.]
+> + shared rules
+
+**What to look for when comparing (mockup or images), against the brief:**
+1. *Ten-second test:* cover the copy with your hand. Does it still feel like
+   a place with people in it (arcade, lobby) or like a product page?
+2. *Anti-reference check:* does anything read as SaaS, ROM site, AI page,
+   theme park, engineer demo, or forum? Name the element, not the vibe.
+3. *Empty state:* switch the board to Empty. Does the direction survive
+   with nobody home? (This is the state most visitors will meet at first.)
+4. *Waking state:* is the loading screen something you'd stay on for a
+   minute, or does it feel like an error?
+5. *Phone:* open the mockup on your phone. Is Create one thumb away? Does
+   Watch read as "for me" to someone with no ROM?
+6. *Veteran signal:* does the name treatment feel like a place you'd
+   already know, or like a new brand?
+7. *Cost:* which elements would need real art (Phase 5) versus CSS alone?
+
+_Owner's pick and reasons: pending._
+
 ## 3. Phase 3 — User flows
 _Not started._
 
@@ -891,3 +1032,4 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Page narrative: door (board as hero) → you bring the game → how it works (video) → why it feels close to the couch (proof) → since 2001 → footer | Phase 2 proposal, pending review | 2 |
 | 2026-09-25 | Server-waking state = the input-lag visualizer inline as an interactive loading screen | Already built, static, on-topic; console-era callback | 2 |
 | 2026-09-25 | Two videos scripted (intro ≈50 s, rollback ≈60 s) under launch-copy rules | Owner: separate videos | 2 |
+| 2026-09-25 | Directions are chosen from images, not descriptions: live mockup artifact + GPT prompts per direction | Owner: needs to see it before picking | 2 |
