@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.53.1",
+    "date": "2026-09-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "install the locked dependency versions; declare httpx directly (#22)"
+      }
+    ]
+  },
+  {
     "version": "0.53.0",
     "date": "2026-09-25",
     "changes": [
