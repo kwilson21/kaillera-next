@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 2 — direction A confirmed; live previews L1 at launch, hover-to-stream as first follow-up (§2.10). Seven plain questions open (§2.10). Player outreach in progress (Appendix A/B).
+> **Status:** Phase 2 closed (§2.11). Phase 3 (User flows) v1 written — awaiting owner's answers to the 11 flow questions. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1066,9 +1066,204 @@ these rules to keep it sane:
 - **Game footage in the two videos.** Same answer as the imagery decision,
   so the videos show the game running? *Default: yes.*
 
+### 2.11 Phase 2 closed — owner's answers (2026-09-25)
 
-## 3. Phase 3 — User flows
-_Not started._
+| Question | Answer | Effect |
+|---|---|---|
+| Name box on the front page | Default: stop asking; the room asks | Landing has no form field except "Have a code?" |
+| Smash Remix link | Yes, one link | In "You bring the game", to the official project (patches only) |
+| The one number | "Matches this week" | Board header + empty state, from session logs |
+| Wake the server on every visit | Yes | Static page pings the API on load; waking state if asleep |
+| Phone controllers | "I've tested my Xbox controller and it works, idk about anything else" | Copy: "On-screen controls; an Xbox controller over Bluetooth works too." Assumed tested on a phone (flagged to owner). No broader claim. |
+| Tone | Sentence case | As drafted |
+| Game footage in the videos | Yes | Videos show the game running |
+
+Phase 2 is closed. Direction A; narrative and copy as §2.1–2.2 with the
+previews of §2.8; two videos; shot list in Phase 5.
+
+
+## 3. Phase 3 — User flows (v1, for owner review)
+
+Grounded in what the product does today (play.js, signaling.py, checked
+2026-09-25), with the landing-page changes from Phase 2 marked **new**.
+Feelings are the target feeling per step; failure paths are what happens
+when it goes wrong and what the person should see. Questions at the end of
+each flow are the ones only the owner or real players can answer.
+
+Facts the flows rely on:
+- Rooms are ephemeral; empty rooms are cleaned up periodically. A room code is
+  only valid while its room is alive.
+- The play page (`/play.html?room=CODE`) is served by the sleeping server.
+  Invite links therefore must land on the **static** site first (**new**),
+  which wakes the server and hands off.
+- Guests auto-join from the link. Room full → the client retries as a
+  spectator and shows a "room is full" banner. Unknown code → "Room not found
+  — it may have expired or the code may be incorrect".
+- Host's Start is disabled until every player is ROM-ready. Wrong ROM → "Your
+  ROM doesn't match the host's game." The ROM library (IndexedDB) auto-picks a
+  cached ROM matching the host's hash.
+- Refresh mid-game: a per-tab identity + reconnect token reclaim the slot
+  within a 30-second grace; lobby host has a 5-second grace.
+- Spectators need no ROM; up to 20; host streams canvas video lazily when
+  the first spectator connects; a spectator can claim a vacated slot.
+- Mobile: portrait shows a "rotate to landscape" toast; a tap-to-start
+  gesture unlocks audio; on-screen controls; an Xbox controller over
+  Bluetooth works.
+- Unsupported browser (no WebRTC, no WebAssembly, or no cross-origin
+  isolation): only logged today. Nothing is shown to the person.
+- TURN relay is supported if configured (`TURN_SERVERS`/`TURN_SECRET` or
+  Cloudflare TURN); whether production has it is unknown (owner question).
+
+### Flow 1 — First-time visitor → understands → video / demo → creates a room
+
+| # | They see | They do | They feel | If it goes wrong |
+|---|---|---|---|---|
+| 1 | Static front page: name, one line, the board (live / empty / waking) | Read for 5–10 s | "Oh. Smash 64. In the browser." | Server asleep → waking state with the visualizer; the rest of the page is readable meanwhile |
+| 2 | Board: rooms with frames, or the empty state with "N matches this week" | Scan who's here | Presence: an arcade at opening time, not a closed one | Nothing listed and a low number → must still read as alive: the number is real, the copy hands them the next move |
+| 3a | **Watch** on a live row | Click | Behind the glass, with a door | Room closes mid-watch → "This room closed" + back to the front page |
+| 3b | "You bring the game" | Read | Relief or a plan: "I have it" / "I need it" / "I'll watch" | Person has no ROM and expected a download → the section must pre-empt this before they invest |
+| 3c | Intro video / demo / lag visualizer | Click one | "Show me" satisfied without a friend | Demo needs a ROM → its own dropzone says so; visualizer needs nothing |
+| 4 | **Create a room** | Click | Momentum; no form to fill (**new**: no name box) | Server asleep → button says "ready in a moment"; the waking state is already on screen |
+| 5 | Room page, pre-game overlay: Invite (copy link / share), ROM dropzone, player list, controller setup, host options incl. **"List this room on the front page (shows a live preview)"** (**new**), Start (disabled) | Drop the ROM | "It took my file and it knows what it is" (status shows the game name) | Unknown file → "not a supported ROM, it may not work"; wrong type → nothing loads: needs a clear line. Name defaults to "Player" until changed |
+| 6 | Invite button | Copy the link, send it | Anticipation | Waiting alone with nothing to do → suggest: controller setup and a one-line "what your friend needs" reminder next to the link |
+| 7 | Friend appears in the list; both ROM-ready; Start enables | Press Start | "Here we go" | Friend never comes → host leaves; room cleaned up. Friend arrives without a ROM → Start stays disabled; the host sees why ("waiting for ROMs") |
+| 8 | Loading overlay (boot + sync) → game menus → match | Play | "It just worked" | Boot stall, desync, disconnect → Flow 5c |
+
+**Open questions (Flow 1).**
+- Owner: is the default name "Player" acceptable at the door, or should the
+  room overlay insist on a name before Invite? (Recommendation: allow
+  "Player", prompt gently in the overlay.)
+- Owner: should Start be allowed with an *unsupported* ROM (today it warns
+  but may proceed)? For the landing page's honesty it only matters that the
+  warning is explicit.
+- Real players (newcomers, Phase 6): after the front page, "what do you
+  think happens when you press Create a room?" and "what would you need
+  before your friend can play?"
+
+### Flow 2 — A friend opens an invite link cold (phone, no ROM yet) → joins
+
+| # | They see | They do | They feel | If it goes wrong |
+|---|---|---|---|---|
+| 1 | The link in Discord / iMessage / WhatsApp | Tap | Curiosity, or duty | Opens in the app's **in-app browser**, which may lack cross-origin isolation → the game can't run there. **New:** the join page detects the common in-app browsers and says "Open in Safari or Chrome for the game to run" with a copy-link button |
+| 2 | **New: invite-link landing state** on the static site: "Kaz invited you to play Super Smash Bros. 64 · 2/4 in the room · waiting for players", **Join** and **Watch**, one line on what Join needs (your own ROM) and what Watch doesn't | Read, pick | "I know what this is and what it wants from me" | Server asleep → waking state on this page too, with the room lookup retried until it answers. Room gone → "This room closed. Ask for a new link, or open your own." Room full → Watch offered first, "you'll be able to join if a slot opens" |
+| 3 | Room page overlay: name (defaults "Player"), ROM dropzone "Tap to choose ROM file", player list with the host's name, controller status | Change name; choose ROM from Files / Drive | On a phone, this is the wall: "I need a file?" | No ROM on the phone → they should already know from step 2; the overlay offers **Watch instead** without leaving (**new** line), so they stay in the room while the friend talks them through it. Wrong ROM → "Your ROM doesn't match the host's game" naming both games (**new** wording). Cached ROM → auto-picked from the library, no drop needed |
+| 4 | "Tap to start" gesture prompt; "rotate to landscape" if portrait | Tap, rotate | Small ritual, fine | Audio still silent → the prompt must be the only way in, so it can't be skipped |
+| 5 | Loading overlay → game; on-screen controls appear; controller detected if paired | Play | Delight if smooth; if the ROM step was a surprise, resentment that arrived one screen too late | Connection fails → Flow 5c |
+
+**Open questions (Flow 2).**
+- Owner: **streaming mode** (host runs the only emulator, guests send inputs)
+  needs no ROM on the guest and no cross-origin isolation. Should the join
+  page mention it as the no-ROM way to *play* ("ask the host to switch the
+  room to streaming"), or is Watch the only no-ROM path we advertise, keeping
+  rollback the single story? (Recommendation: Watch only on the page;
+  streaming stays a host option inside the room.)
+- Owner: what is the exact wording you'd want a friend to see when the room
+  has closed? ("Kaz's room closed" vs neutral.)
+- Real players (2–3 friends of the owner, on their own phones): send them a
+  real invite link in the apps they actually use. Record: which app, whether
+  it opened in-app or in Safari/Chrome, whether the file picker found their
+  ROM, and the first thing they said. This is the single most valuable test
+  in the whole plan.
+
+### Flow 3 — A returning player → back in a room fast
+
+| # | They see | They do | They feel | If it goes wrong |
+|---|---|---|---|---|
+| 1 | Front page; board shows their friends' listed rooms (if any) | Click **Join** on a friend's room, or **Create** | "My people are here" / two clicks to a room | Nothing listed → Create, send link again |
+| 2 | Room overlay: name remembered, ROM auto-picked from the library | Nothing | "My stuff is still here" | Browser data cleared → back to Flow 1 step 5; the overlay says "drop your ROM again" plainly |
+| 3 (hot return) | Mid-game refresh or tab crash → "Reconnecting…" overlay | Wait | "Phew" | Within 30 s → same slot, state resynced. After 30 s → slot vacated: rejoin takes an open slot as a late-joiner, else spectate with "your slot was taken while you were away" |
+
+**Open questions (Flow 3).**
+- Owner: the reconnect identity lives in *sessionStorage* (per tab). Opening
+  the same link in a new tab makes a new identity and can't reclaim the slot.
+  Accept, or move the identity to localStorage in the build plan?
+- Owner: a "your last room" shortcut on the front page is cheap but rooms
+  die within minutes; worth it? (Recommendation: no.)
+
+### Flow 4 — A spectator link
+
+| # | They see | They do | They feel | If it goes wrong |
+|---|---|---|---|---|
+| 1 | Link (`…&spectate=1`) or **Watch** on the board / featured panel | Tap | "Let me see" | In-app browser without WebRTC → nothing plays: show "open in Safari/Chrome" (same detection as Flow 2) |
+| 2 | Invite-link landing state in spectator form: "Watch Kaz's room" + what they'll see | Watch | No ROM asked, no wall | Room not started yet → the room overlay with the player list and "the host hasn't started" |
+| 3 | Game as video with audio; player list; **Join** appears when a slot opens | Watch; maybe claim a slot | Behind the glass, with a door | 20 spectators already → "This room is full for spectators" (**new** wording; today's message is unspecified). Host leaves → room closes → back to the front page |
+
+**Open questions (Flow 4).**
+- Owner: when a spectator claims a slot they then need a ROM. Should the
+  claim button say so ("Join · needs your ROM")? (Recommendation: yes.)
+- Owner: is 20 spectators the right public cap for launch given host upload?
+  (The featured hover-stream would add to it later.)
+
+### Flow 5 — Rough moments
+
+**5a. Server waking (~1 min).** Static page loads instantly → it pings the
+API (`/health`) with a short timeout → no answer → **waking state**: honest
+line, elapsed counter, indeterminate bar, the lag visualizer to play with;
+Create / Join / Watch disabled with "ready in a moment"; poll every ~3 s;
+on the first answer the board fills and buttons enable. Past ~2 minutes:
+"Still powering on. If this takes more than a couple of minutes, something's
+wrong on our side. Reload, or come back in a bit." Same state on the
+invite-link page. Feeling to hit: a machine booting, not a broken site.
+*Owner question:* does the free tier stay awake while a host sits in a room
+with an open Socket.IO connection, or can the server sleep under a live
+room? (Determines whether the friend's invite can ever hit a sleeping server
+while the host is waiting.)
+
+**5b. ROM missing or wrong.** Missing: the room overlay's dropzone plus the
+new "Watch instead" line; the supported list; the Smash Remix link. Wrong:
+"Your ROM doesn't match the host's game. The host is playing Super Smash
+Bros. (US). You dropped Smash Remix 2.0.1." Unsupported: "Not a supported
+ROM. It may not work. Supported: …". Never: where to get one. *Owner
+question:* keep "enable ROM sharing" out of every error message now that
+sharing is disabled for these games? (Today one message still says it.)
+
+**5c. Connection trouble.** Can't connect at all (symmetric NAT, no relay):
+"Couldn't connect to Kaz. This usually means a strict network on one side."
+plus one thing to try (phone hotspot, another network). Drops mid-game: the
+existing "Waiting on peer" overlay with a countdown to the 30-second grace,
+then "X left the game; their slot is open." Reconnect attempts are
+automatic. *Owner question:* is TURN configured in production? Without it,
+some pairs can never connect and the page should not claim "just works"
+anywhere.
+
+**5d. Unsupported browser.** Today only logged. **New:** a real screen before
+anything loads: "This browser can't run the game. It needs a feature
+(SharedArrayBuffer) that in-app browsers and some privacy modes turn off.
+Open this link in Safari or Chrome." With a copy-link button and, if WebRTC
+exists, "or Watch instead". *Real-player question:* which apps do your
+friends actually open links from? (Discord, iMessage, WhatsApp, Instagram
+DMs each behave differently.)
+
+**5e. Mobile controls.** Portrait → toast "rotate to landscape"; on-screen
+controls over the 4:3 canvas; Xbox controller over Bluetooth works; the
+controller settings panel exists. *Real-player question (2 phone players):*
+after five minutes of play, "which action was hardest to do on the screen?"
+and "did you find the controller settings?" We list the answers; we don't
+lead.
+
+### Flow questions only the owner can answer, collected
+
+1. Default name "Player" at the door: fine, or insist on a name in the room?
+2. Start with an unsupported ROM: allowed with a warning, or blocked?
+3. Streaming mode on the join page as the no-ROM way to play, or Watch only?
+4. Wording when a room has closed: named ("Kaz's room closed") or neutral?
+5. Reconnect identity: keep per-tab, or move to localStorage?
+6. "Your last room" shortcut on the front page: yes/no? (Recommend no.)
+7. Slot-claim button for spectators says "needs your ROM"?
+8. Spectator cap of 20 at launch?
+9. Does the free tier stay awake while a host waits in a room?
+10. Is TURN configured in production?
+11. Remove "enable ROM sharing" from error copy?
+
+### What to ask real players (before Phase 6 if possible)
+
+- **Invite-link test (3 friends, their own phones, the apps they use):**
+  send a real link; record app, in-app vs real browser, whether the file
+  picker found a ROM, first words. Nothing else.
+- **Newcomer front-page test (1–2 people):** "What happens when you press
+  Create a room?" "What would your friend need?"
+- **Phone play test (2 people, 5 minutes):** "Which action was hardest on the
+  screen?" "Did you find the controller settings?"
 
 ## 4. Phase 4 — Wireframes
 _Not started._
@@ -1173,3 +1368,6 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Game imagery: live frames on the board and real screenshots in "How it works"; no recorded attract clip when nothing is live | Owner: "Both"; "An empty state" | 2 |
 | 2026-09-25 | Hover-to-stream on the featured panel only, desktop hover / phone tap, debounced and lingering; ship L1 first, hover-stream as first follow-up | Owner's goal "if not too crazy"; assessed medium; host upload is the cost | 2 |
 | 2026-09-25 | Phase 5 = shot list of real captures, no generated images | Owner: "Ok" | 2 |
+| 2026-09-25 | No name box on the landing page; the room asks. One Smash Remix link. "Matches this week" is the number. Wake on every visit. Sentence case. Videos show the game. Phone copy: on-screen controls + Xbox controller over Bluetooth | Owner, Phase 2 close-out | 2 |
+| 2026-09-25 | Invite and spectator links land on the static site first (invite-link landing state), which wakes the server and hands off to the room | Play page is on the sleeping server; a cold friend must never see a blank page | 3 |
+| 2026-09-25 | New states required by the flows: in-app-browser notice, unsupported-browser screen, "Watch instead" inside the room overlay, room-closed message, spectators-full message | Today these are logged or unspecified | 3 |
