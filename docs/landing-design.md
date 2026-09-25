@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2a is the mark; wordmark = the ports inside the name (round 6, §5.7g); motion system in §7.11. Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: KN is the logo; the header rotates a set of seven motion marks (§5.8); placements for Match start and Rollback proposed (§5.9). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1990,7 +1990,65 @@ and E (default 38 %), to be dialled in on the real font and then fixed as a
 number for the build. Shown beside the alternative: the four-bar mark as a
 separate symbol next to the plain name.
 
-_Owner's verdict: pending._
+**Owner (2026-09-25): "We can just cycle through a set of logos for the
+website and keep the KN as the main logo. Having different headers is
+pretty cool. Let's go with A with motion added, A2a, A1c, A1e, 1 KO, 4 the
+stick is real, and 5. 2 match start and 3 rollback would be nice somewhere,
+but idk where."**
+
+### 5.8 Logo decision (final)
+
+- **The logo is KN**: the condensed "KN" on the dark rounded tile (the D
+  favicon). Used wherever a single still symbol is needed: tab icon, Discord
+  server icon, link-preview card, README.
+- **The landing header is the attract mode.** One mark from the set is
+  shown per visit; clicking the mark advances to the next; the name's
+  letters arrive on every load (once, not looped). The set:
+  1. **A with motion** (new): the 2×2 seats join one by one, the open seat
+     pulses, then fills green. Motion turns the static grid into a lobby
+     filling and drops the Windows echo.
+  2. **A2a** four ports, the fourth filling.
+  3. **A1c** quarter circle (d-pad input, button fires).
+  4. **A1e** full circle (rolls, swells, fires).
+  5. **KO** (flick, launch, lost stock).
+  6. **The stick is real** (interactive; drag, tap).
+  7. **Letters arrive**, no mark.
+- The mockup's toolbar has **Header · Rotate the set (8 s)** so the cycle
+  can be watched on the Landing screen; the real site rotates per visit.
+- Not chosen: the ports-inside-the-name wordmark (§5.7h) stays available
+  as an option, not in the set.
+- Build: the set ships as one SVG sprite (~12 KB), SMIL/CSS, reduced-motion
+  still frames; the pick is `hash(day + visitor) mod 7` so a returning
+  visitor sees a different one tomorrow and the same one on a reload.
+
+### 5.9 Where "Match start" (2) and "Rollback" (3) live — proposals
+
+**2 · Match start** (ports fill one by one, bounce, collapse into the board
+marker)
+- **(a) The room page's boot/sync loading overlay — recommended.** When
+  the host presses Start, today's overlay is a spinner. Instead: each port
+  fills as that peer reports ready (real data: P1–P4 ROM-ready and
+  connected), all bounce when everyone's in, and the ports collapse into
+  the marker as the game boots. It is literally match start, it replaces a
+  spinner with the truth, and it's the moment of highest anticipation.
+- (b) The landing board's empty state, played once when the state appears.
+- (c) The intro video's title card.
+
+**3 · Rollback** (frames advance, one is wrong, rewind, replay)
+- **(a) The demo page's Result card, driven live — recommended.** The demo
+  already counts rollbacks and knows the mode. In rollback mode the
+  timeline rewinds whenever the engine reports a rollback; in lockstep mode
+  the playhead visibly waits at each tick for the round trip. The diagram
+  becomes an instrument, and it's the one place the motion can be true
+  rather than illustrative.
+- (b) The landing page's "Why it feels close to the couch" section, looping
+  slowly beside the demo button (already planned; keep).
+- (c) The room's "Waiting on peer" overlay: a stalled timeline with "waiting
+  for Kaz's input", which says honestly what a stall is.
+- (d) The lag visualizer page header.
+- (e) The 404 pages, per the owner.
+
+_Owner's picks for 2 and 3: pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2188,8 +2246,9 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
 
 **M4 — Assets** (§5)
 - S1, S2 (screenshots), S3 (the owner's two-device photo), S5/S6 OG cards,
-  S7 favicon recolour (+ the chosen logo once picked from §5.7), V1/V2
-  silent videos with text cards, uploaded to YouTube with captions.
+  S7 the KN logo (tile + favicon) and the header mark set as one SVG sprite
+  (§5.8), V1/V2 silent videos with text cards, uploaded to YouTube with
+  captions.
 - Screenshots as WebP ≤ 60 KB each with `width`/`height` set; the photo
   ≤ 120 KB.
 
@@ -2485,3 +2544,4 @@ Surprises (one line):
 | 2026-09-25 | Round 5 motion graphics drawn (KO, match start → board marker, rollback timeline, interactive stick, letters arrive) as SVG/CSS for the header, the board's empty/waking states and the rollback section | Owner: "be more creative" | 5 |
 | 2026-09-25 | Mark = A2a; wordmark = KAILLERA-NEXT drawn with the I·L·L·E stems as the four ports, combined with letters-arrive; KO / match start / rollback go to the existing 404 pages later; motion system listed in the build plan | Owner's round-5 verdict | 5 |
 | 2026-09-25 | Drawn-alphabet wordmark rejected and withdrawn; replaced by the real typeface with the I·L·L·E stems coloured as the ports (colour clipped to the glyphs), E stem filling last | Owner: "I don't like this at all" | 5 |
+| 2026-09-25 | Logo = KN tile; landing header rotates a set of seven motion marks per visit (A with motion, A2a, A1c, A1e, KO, the stick, letters arrive); click advances | Owner: "cycle through a set, keep KN as the main logo" | 5 |
