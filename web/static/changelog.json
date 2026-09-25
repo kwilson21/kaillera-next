@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.53.0",
+    "date": "2026-09-25",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "Render free tier as the fallback host; enforce ALLOWED_ORIGIN on sockets (#21)"
+      }
+    ]
+  },
+  {
     "version": "0.52.0",
     "date": "2026-09-24",
     "changes": [
