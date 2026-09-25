@@ -1970,7 +1970,27 @@ Known risk: drawn letters can read as a "logo font" rather than the page's
 type. Fallback if so: the typed wordmark in Barlow Condensed with the four
 stems overlaid at the I·L·L·E positions (font-metrics work in the build).
 
-_Owner's verdict on round 6: pending._
+**Owner (2026-09-25): "I don't like this at all and I don't know what you
+were going for."** Withdrawn. Two failures, recorded so they aren't
+repeated: (1) the letters were redrawn as a rounded monoline alphabet,
+which threw away the condensed face the owner had chosen for the page and
+read as a toy font; (2) the animated version was broken (a CSS transform
+animation overrode the letters' SVG positions, so all thirteen piled up at
+the left as a white block).
+
+### 5.7h Round 6, second attempt — the ports inside the *real* wordmark
+
+Nothing redrawn. The name is set in the page's face (Barlow Condensed
+700); the colour is clipped to the glyphs themselves, so the stems of
+I · L · L · E carry the four port colours exactly where the font puts the
+stems. The E's stem starts grey (an empty port) and fills green from the
+bottom, after the letters have arrived left to right. Still frame: all four
+in. A "stem cut" slider in the mockup sets where the colour stops inside L
+and E (default 38 %), to be dialled in on the real font and then fixed as a
+number for the build. Shown beside the alternative: the four-bar mark as a
+separate symbol next to the plain name.
+
+_Owner's verdict: pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2464,3 +2484,4 @@ Surprises (one line):
 | 2026-09-25 | A2a (fourth port filling up) is the working mark; A1 re-read as a d-pad/stick with fighting-game input motion (quarter circle, smash flick, 360) for a possible second job | Owner: "A2a is cool" + input-motion idea | 5 |
 | 2026-09-25 | Round 5 motion graphics drawn (KO, match start → board marker, rollback timeline, interactive stick, letters arrive) as SVG/CSS for the header, the board's empty/waking states and the rollback section | Owner: "be more creative" | 5 |
 | 2026-09-25 | Mark = A2a; wordmark = KAILLERA-NEXT drawn with the I·L·L·E stems as the four ports, combined with letters-arrive; KO / match start / rollback go to the existing 404 pages later; motion system listed in the build plan | Owner's round-5 verdict | 5 |
+| 2026-09-25 | Drawn-alphabet wordmark rejected and withdrawn; replaced by the real typeface with the I·L·L·E stems coloured as the ports (colour clipped to the glyphs), E stem filling last | Owner: "I don't like this at all" | 5 |
