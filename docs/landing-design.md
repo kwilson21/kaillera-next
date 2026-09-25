@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 2 closed (§2.11). Phase 3 (User flows) v1 written — awaiting owner's answers to the 11 flow questions. Player outreach in progress (Appendix A/B).
+> **Status:** Phase 3 closed (defaults). Phase 4 (Wireframes) v1 written — awaiting owner feedback on W1–W5 and six questions. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1265,8 +1265,295 @@ lead.
 - **Phone play test (2 people, 5 minutes):** "Which action was hardest on the
   screen?" "Did you find the controller settings?"
 
-## 4. Phase 4 — Wireframes
-_Not started._
+### Phase 3 closed — owner: "Defaults are fine for all 11" (2026-09-25)
+
+| # | Decision | Note |
+|---|---|---|
+| 1 | "Player" allowed at the door; the room overlay prompts gently for a name | |
+| 2 | Start with an unsupported ROM stays allowed, with an explicit warning | Today's behaviour, made explicit |
+| 3 | Watch is the only no-ROM path advertised; streaming stays a host option inside the room | |
+| 4 | Room-closed message is named when the host is known ("Kaz's room has closed"), neutral otherwise | My pick under the delegation: a person, not a system |
+| 5 | Reconnect identity stays per tab | Two tabs sharing one identity would be worse |
+| 6 | No "your last room" shortcut | |
+| 7 | Spectator slot-claim button says "Join · needs your ROM" | |
+| 8 | Spectator cap stays 20 at launch | |
+| 9 | Free tier under a live room: **unknown fact** → the invite page always carries the waking state; verify in build | Build-plan check |
+| 10 | TURN in production: **unknown fact** → copy never says "just works"; the connection-failure message ships; verify/configure TURN in build (Cloudflare TURN is already supported by the server code) | Build-plan check |
+| 11 | "Enable ROM sharing" removed from all error copy | |
+
+## 4. Phase 4 — Wireframes (v1, for owner feedback)
+
+Low-fidelity. Boxes show placement and hierarchy, not style (style is
+direction A, see the mockup). Each numbered element carries the reason it
+exists and the Phase 1 goal it serves: **G1** Presence · **G2** Permeability
+· **G3** Home for veterans · **G4** Honest proof · **G5** No dead air ·
+**H** Honesty (the ROM rule and the no-hype rule) · **N** Newcomer clarity.
+
+### W1 — Landing page, desktop (≥ 900 px)
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ (1) kaillera-next                                                      │
+│ (2) Super Smash Bros. 64 online with friends. In your browser. No install.
+│ (3) Free and open source. Continuing Kaillera, 2001.                   │
+│                                                                        │
+│ ┌ (4) OPEN ROOMS · ● 6 people playing right now · 41 matches this week ┐
+│ │ ┌──────────────┐ (5) NOW PLAYING                                    │ │
+│ │ │  live frame  │     Super Smash Bros.                              │ │
+│ │ │  [LIVE]      │     hosted by Moose · ■■■□ 3/4 · ● in game · 6 min │ │
+│ │ │              │     [ Watch ]  [ Join · 1 slot open ]              │ │
+│ │ └──────────────┘     Watch drops you in as a spectator. Join takes  │ │
+│ │                      the open slot, mid-game, with your own ROM.    │ │
+│ ├────────────────────────────────────────────────────────────────────┤ │
+│ │ (6) [frame] Smash Remix 2.0.1  Kaz    ■■□□ 2/4  waiting   [Watch][Join]
+│ │     [LIVE ] Super Smash Bros.  Moose  ■■■□ 3/4  ● in game [Watch][Join]
+│ │     [frame] Smash Remix 2.0.0  Firo   ■□□□ 1/4  waiting   [Watch][Join]
+│ └────────────────────────────────────────────────────────────────────┘ │
+│                                                                        │
+│ (7) [ Create a room ]      Have a code? [______] [Join] [Watch]        │
+│ (8) Playing needs your own SSB64 or Smash Remix ROM. Watching doesn't. │
+├────────────────────────────────────────────────────────────────────────┤
+│ (9) You bring the game                                                 │
+│     three short paragraphs · one link: the Smash Remix project         │
+├────────────────────────────────────────────────────────────────────────┤
+│ (10) How it works                     ┌─────────┐ ┌─────────┐ ┌──────┐ │
+│      Create a room and send the link. │ shot 1  │ │ shot 2  │ │shot 3│ │
+│      Friends open it on a laptop or a │ room +  │ │ phone   │ │ both │ │
+│      phone. Everyone drops their own  │ invite  │ │ joining │ │screens│ │
+│      ROM. The host presses Start.     └─────────┘ └─────────┘ └──────┘ │
+│      Up to 4 players. Spectators      [ ▶ Intro video · 0:50 ]         │
+│      welcome. Keyboard, gamepad or on-screen controls.                 │
+├────────────────────────────────────────────────────────────────────────┤
+│ (11) Why it feels close to the couch          ┌──────────────────────┐ │
+│      four sentences, launch-copy rules        │ ▶ Rollback explained │ │
+│      Don't take our word for it.              │        1:00          │ │
+│      [Try the demo · needs your ROM]          └──────────────────────┘ │
+│      [Lag visualizer · no ROM]                                         │
+├────────────────────────────────────────────────────────────────────────┤
+│ (12) Since 2001                                                        │
+│      paragraph · Kaillera → EmuLinker → … → kaillera-next (ribbon)     │
+│      Free and open source (GPL-2). GitHub                              │
+├────────────────────────────────────────────────────────────────────────┤
+│ (13) by Kazon Wilson (Agent 21) · Inspired by Kaillera by C. Thibault  │
+│      GitHub · Support · About · v0.53.0                                │
+│      kaillera-next does not host, distribute or link to ROMs.          │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+| # | Why it's there | Goal |
+|---|---|---|
+| 1 | The name carries "Kaillera"; veterans recognise it before reading anything | G3 |
+| 2 | One line answers "what is this" in the first second; no adjectives | N, H |
+| 3 | "Free, open source, continuing Kaillera" in one breath; also the first no-sale signal | G3, H |
+| 4 | Board header: people right now (live) + the one real number (weekly) | G1 |
+| 5 | Featured match: the attract mode. Watch and Join side by side, and the caption says what each one costs, so nobody discovers the ROM rule after clicking | G1, G2, H |
+| 6 | Rows: a frame per room, slots in player colours, status, Watch / Join. Rows update in place | G1, G2 |
+| 7 | Create is the "play" cabinet; the code field serves veterans sharing a code by voice; no name box | G2 |
+| 8 | The ROM rule, one line, under the buttons, before anyone commits | H |
+| 9 | The full ROM story: nothing hosted, file stays local, the three ROMs, the Remix link, "no ROM? watch" | H, G2 |
+| 10 | Three real screenshots first (fast on phones), video second (click to play); newcomer's mental model in one glance | N |
+| 11 | Proof, not lecture: the demo and the visualizer, labelled by what they need; the explainer video | G4 |
+| 12 | The "you're home" paragraph and the lineage; open source | G3 |
+| 13 | Credit, quiet Support, About (personal story lives here), version, and the ROM disclaimer | H, non-goals |
+
+**Board states in the same frame:** *Live* (as drawn). *Empty*: (5)–(6) are
+replaced by "The floor is quiet. 41 matches were played this week. Open a
+room and send the link. First one in picks the stage." *Waking*: see W5.
+When several rooms are in game, the featured one is the most recently
+started match **with an open slot** (joinable beats watchable), else the
+newest.
+
+### W2 — Landing page, phone (≤ 720 px)
+
+```
+┌──────────────────────────┐
+│ (1) kaillera-next        │
+│ (2) Super Smash Bros. 64 │
+│     online with friends. │
+│     In your browser.     │
+│     No install.          │
+│ (4) OPEN ROOMS ● 6 now   │
+│ ┌──────────────────────┐ │
+│ │ (5) live frame [LIVE]│ │
+│ │ NOW PLAYING          │ │
+│ │ Super Smash Bros.    │ │
+│ │ Moose · ■■■□ 3/4     │ │
+│ │ ● in game · 6 min    │ │
+│ │ [     Watch        ] │ │
+│ │ [ Join · 1 slot open]│ │
+│ └──────────────────────┘ │
+│ ┌──────────────────────┐ │
+│ │[frm] Smash Remix 2.0.1│ │
+│ │      Kaz · ■■□□ 2/4  │ │
+│ │      waiting [Watch] │ │
+│ │              [Join ] │ │
+│ └──────────────────────┘ │
+│ … more rows …            │
+│ (7) [   Create a room  ] │
+│     Have a code? ▸       │
+│ (8) Playing needs your   │
+│     own ROM. Watching    │
+│     doesn't.             │
+├──────────────────────────┤
+│ (9) You bring the game   │
+│ (10) How it works        │
+│   ◂ shot1 · shot2 · shot3 ▸ (swipe)
+│   [▶ Intro · 0:50]       │
+│ (11) Why it feels close… │
+│   [Try the demo]         │
+│   [Lag visualizer]       │
+│   [▶ Rollback · 1:00]    │
+│ (12) Since 2001 (ribbon  │
+│   scrolls sideways)      │
+│ (13) footer              │
+└──────────────────────────┘
+```
+
+Phone rules: (3) is dropped above the fold and reappears in (12); Create is
+full width and one thumb from the top after the board; "Have a code?" is a
+link that opens the field, so the first screen has no empty input; frames
+are 72 px wide, never full-width rows (data); videos are thumbnails only;
+nothing autoplays; the featured panel shows **Watch** first because a phone
+visitor is the likeliest to have no ROM (G2).
+
+### W3 — Invite-link landing state (static site; desktop and phone alike)
+
+URL: the invite copied from a room becomes a static-site URL
+(e.g. `/join?room=ABC123`; the exact scheme is a build decision) that looks
+the room up, wakes the server if needed, and hands off to the room page.
+
+```
+┌────────────────────────────────────────────────┐
+│ (1) kaillera-next                              │
+│                                                │
+│ (2) Kaz invited you to play                    │
+│     Super Smash Bros. 64                       │
+│ (3) ■■□□ 2 of 4 in the room · waiting for players
+│                                                │
+│ (4) [        Join the room         ]           │
+│ (5) needs your own SSB64 ROM (.z64/.n64/.v64/.zip)
+│ (6) [        Watch instead         ]  no ROM needed
+│                                                │
+│ (7) What happens next: pick a name, drop your  │
+│     ROM, wait for Kaz to press Start.          │
+│ (8) Not sure what a ROM is? → You bring the game
+│ ────────────────────────────────────────────── │
+│ (9) First time here? What this is ↓            │
+└────────────────────────────────────────────────┘
+```
+
+| # | Why | Goal |
+|---|---|---|
+| 2 | A person invited you, by name, to a named game: the arcade friend waving you over | G1, N |
+| 3 | Live room facts from the server: it's real and it's now | G1 |
+| 4–6 | Join and Watch side by side with their costs, before the wall | G2, H |
+| 7 | Removes the fear of the next screen | N |
+| 8 | The ROM explanation is one tap away, never forced | H |
+| 9 | Curious friends can learn; nobody has to | N |
+
+Variants of W3:
+- **Room full:** (4) becomes secondary "Join when a slot opens", (6) becomes
+  primary. Line: "The room is full right now. Watch, and you'll be able to
+  join if a slot opens."
+- **Room closed:** (2)–(6) replaced by "Kaz's room has closed. Ask for a new
+  link, or [Open your own room]."
+- **In-app browser detected** (Discord, Instagram, Messenger, etc.): banner
+  above (2): "You're in Discord's built-in browser. Open this link in Safari
+  or Chrome for the game to run. [Copy link]". Watch may still work; Join is
+  shown but the banner stays.
+- **Server waking:** (2)–(6) replaced by the W5 block with the line "We'll
+  show Kaz's room the moment the server answers."
+- **Spectator link:** (2) reads "Watch Kaz's room", (6) is primary, (4)
+  becomes "Join if a slot opens · needs your ROM".
+
+### W4 — ROM-needed state (inside the room page's pre-game overlay)
+
+Not the landing page, but the first thing a joiner meets after it, so it
+must keep the same promises.
+
+```
+┌────────────────────────────────────────────────┐
+│ (1) Room ABC123 · [Invite]         You: [Player]
+│ (2) Players  ■ Kaz (host) ✓ ROM   ■ Player (you)
+│ ┌────────────────────────────────────────────┐ │
+│ │ (3) Drop your ROM here, or tap to choose   │ │
+│ │ (4) Kaz is playing Super Smash Bros. (US). │ │
+│ │     .z64 / .n64 / .v64 / .zip ·            │ │
+│ │     stays on this device                   │ │
+│ └────────────────────────────────────────────┘ │
+│ (5) Don't have it? [Watch instead] — you stay  │
+│     in the room and see the game when it starts│
+│ (6) Controller: none detected · [Set up]       │
+│ (7) Waiting for Kaz to start…                  │
+└────────────────────────────────────────────────┘
+```
+
+| # | Why | Goal |
+|---|---|---|
+| 2 | The host's ✓ ROM shows what "ready" looks like | N |
+| 4 | Names the exact game the host has, so the joiner picks the right file first time | H |
+| 5 | The no-ROM path without leaving the room; spectate is one tap, the friend is still on the line | G2 |
+| 6 | Something useful to do while waiting | G5 |
+
+Variants: **wrong ROM** → red line under (3): "Your ROM doesn't match. Kaz
+is playing Super Smash Bros. (US); you dropped Smash Remix 2.0.1. [Choose
+another]". **Cached ROMs** → (3) shows the library ("Use Super Smash Bros.
+(US)") and the matching one is auto-picked. **Unsupported ROM** → amber line:
+"Not a supported ROM. It may not work. Supported: …"
+
+### W5 — Server-waking state (board area of W1; the same block on W3)
+
+```
+┌ OPEN ROOMS · powering on ─────────────────────────────────────────┐
+│ (1) Powering on…  0:23                                            │
+│ (2) The room server naps when nobody's around. Your visit woke it │
+│     up; it takes up to a minute. Press SPACE (tap on a phone)     │
+│     while you wait. This is what rollback does to lag.            │
+│ (3) ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬  │
+│ (4) ┌ INPUT      (●)────────────────────────────  0 ms ┐          │
+│     │ RESPONSE        (●)─────────────────────  +240 ms │          │
+│     │            240 ms WAIT PER INPUT                  │          │
+│     │ Network lag [====|-----] 120 ms   [x] Rollback on │          │
+│     └───────────────────────────────────────────────────┘          │
+│ (5) [ Create a room · ready in a moment ]   Have a code? [____]    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+| # | Why | Goal |
+|---|---|---|
+| 1 | Honest state name and a real elapsed counter: a machine booting, not a hang | G5, H |
+| 2 | Says why, how long, and what to do meanwhile; the console-era callback is in the tone, not in a costume | G5 |
+| 3 | Indeterminate bar: motion without a fake percentage | H |
+| 4 | The lag visualizer: on-topic, needs nothing, and teaches the netcode while they wait | G4, G5 |
+| 5 | Actions visible but disabled with a reason; they enable in place the moment the server answers | G5 |
+
+Behaviour: page pings `/health` on load (short timeout); waking state on
+failure; poll every ~3 s; on first answer the board fills in place and the
+buttons enable, no reload. Past ~2 minutes (2) becomes: "Still powering on.
+If this takes more than a couple of minutes, something's wrong on our side.
+Reload, or come back in a bit."
+
+### Phase 4 questions for the owner
+
+1. **Section order:** as drawn (door → ROM → how → why → since 2001), or
+   move "Since 2001" up under the board for veterans? (Recommendation: as
+   drawn; veterans get the name in (1) and (3) immediately.)
+2. **Featured pick rule:** most recently started match *with an open slot*
+   first, else the newest. OK?
+3. **"Have a code?" on phone** collapses to a link. OK, or always show the
+   field?
+4. **Invite URL scheme:** `/join?room=CODE` on the static site (works on any
+   static host) versus a prettier `/r/CODE` (needs rewrite rules). Also:
+   should the static host proxy the room page so both live on one domain?
+   (Build decision; your preference decides.)
+5. **W4 lives on the room page,** which has its own current design. Do you
+   want the room overlay restyled to direction A in the same build, or only
+   the copy and the "Watch instead" line changed now?
+6. **Render these in the mockup** before Phase 5 (W3 invite-link and W4
+   ROM-needed, in direction A), or go straight to the shot list?
+
+Real players: show one friend W3 as plain text (no styling) and ask "what
+would you tap, and why?" Log the answer in Appendix B.
 
 ## 5. Phase 5 — Image prompts
 _Not started._
@@ -1371,3 +1658,5 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | No name box on the landing page; the room asks. One Smash Remix link. "Matches this week" is the number. Wake on every visit. Sentence case. Videos show the game. Phone copy: on-screen controls + Xbox controller over Bluetooth | Owner, Phase 2 close-out | 2 |
 | 2026-09-25 | Invite and spectator links land on the static site first (invite-link landing state), which wakes the server and hands off to the room | Play page is on the sleeping server; a cold friend must never see a blank page | 3 |
 | 2026-09-25 | New states required by the flows: in-app-browser notice, unsupported-browser screen, "Watch instead" inside the room overlay, room-closed message, spectators-full message | Today these are logged or unspecified | 3 |
+| 2026-09-25 | Flow defaults accepted: "Player" allowed, unsupported ROM allowed with warning, Watch is the only no-ROM path advertised, named room-closed message, per-tab identity, no last-room shortcut, slot-claim says "needs your ROM", 20 spectators, ROM-sharing wording removed; free-tier sleep and TURN become build checks | Owner: "Defaults are fine for all 11" | 3 |
+| 2026-09-25 | Wireframes W1–W5 drafted (landing desktop/phone, invite-link, ROM-needed, waking) with per-element goal annotations | Phase 4 v1 | 4 |
