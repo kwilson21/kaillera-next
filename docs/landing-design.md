@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: family A chosen in meaning; round 2 (A1–A3) drawn to remove the Windows echo (§5.7c). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
+> **Status:** Build plan v1 written (§7), provisional until Phase 6 feedback. Logo: A2 (four ports) chosen; round 3 adds motion variants A2a–c and tightened A1a–b (§5.7d). Outstanding from the owner: logo pick, player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8). Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -1866,8 +1866,29 @@ Same meaning, no 2×2 grid. One-colour versions left out.
 | **A2** | Four ports: four upright bars side by side, the fourth hollow | The N64's signature was four controller ports on the front; one is free | Can read as an equaliser |
 | **A3** | The board's row: the exact slot marker from every room row, in a tile | The logo is literally the interface; strongest as the wordmark underline | Weakest at 16 px, the squares get tiny |
 
-_Owner's pick from round 2: pending. If none, say what's wrong with the
-closest and round 3 starts from it._
+**Owner (2026-09-25): "A2 is the one, but I'd love to see another
+refinement of A1 and A2. A1 seems a little disjointed. A2 would look cool
+with motion added, to look like loading: the last player hasn't joined yet
+but is joining."**
+
+### 5.7d Round 3 — A2 refined with motion; A1 tightened (mockup, below round 2)
+
+The motion idea is right for the brief: it says exactly what the board
+says (a seat is open, someone is on the way), it's the arcade's attract
+mode at logo scale, and it costs nothing (SVG, no image). Rules: the tab
+icon stays static (fourth port hollow); motion runs in the header lockup
+only; the build must honour `prefers-reduced-motion` (CSS animation with a
+static fallback; the mockup uses SMIL to run through `<use>`).
+
+| | Mark | Motion | Note |
+|---|---|---|---|
+| **A2a** | Filling up | The fourth port fills from the bottom in green (P4), holds, fades, repeats (2.6 s) | Reads as a loading bar in the empty seat |
+| **A2b** | Plugging in | Four sockets, three plugged; the fourth plug slides up from below and seats, then repeats (3 s) | Most literal console front; needs the tile at small sizes |
+| **A2c** | Breathing | The hollow fourth port pulses green on a baseline that ties the four together | Quietest; same rhythm as the board's live dot |
+| **A1a** | With a centre | Static: a muted centre square (the screen everyone faces) ties the seats into one object; tighter gaps | Answers "disjointed" |
+| **A1b** | One silhouette | Static: seats nearly touch so the whole reads as a rounded plus with the centre cut out | Simplest at 16 px of the A1 family |
+
+_Owner's pick from round 3: pending._
 
 ## 6. Phase 6 — Put it in front of people (v1)
 
@@ -2339,3 +2360,4 @@ Surprises (one line):
 | 2026-09-25 | Build plan v1: five milestones (M0 plumbing → M1 landing → M2 invite → M3 restyle → M4 assets → M5 launch), full state list, final copy, tokens, accessibility, slow-phone budget; provisional until Phase 6 | Owner asked "what's next" while tests are pending | 7 |
 | 2026-09-25 | GPT logos rejected; four hand-drawn SVG candidates (four slots, run-and-rewind, kn monogram, wordmark-only) added to the mockup for in-context judgement | Owner: "Try drawing some yourself" | 5 |
 | 2026-09-25 | Logo family A (four seats, one open) preferred by owner and his wife; the 2×2 grid echoes the Windows logo, so round 2 rearranges it (cross, four ports, board row) | Owner + wife feedback | 5 |
+| 2026-09-25 | Logo A2 (four ports, fourth open) chosen; motion on the fourth port ("the last player is joining") in the lockup only; tab icon static; reduced-motion honoured in build | Owner's pick + motion idea | 5 |
