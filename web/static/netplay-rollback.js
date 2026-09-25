@@ -12655,6 +12655,12 @@
     if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
+    return _missingConsumedInputs().length === 0;
+  };
+  // The earliest consumed remote input each live peer still lacks (absent,
+  // or fabricated as ZERO_INPUT) in the window _liveStateConfirmed checks.
+  const _missingConsumedInputs = () => {
+    const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     // Frames applied before a deferred init ran on the lockstep path, which
     // deletes each remote input once applied (same floor as the gap check).
     const firstInWindow = Math.max(
@@ -12662,15 +12668,22 @@
       _rbInitFrame - DELAY_FRAMES,
       lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES,
     );
+    const missing = [];
     for (const p of getInputPeers()) {
       if (_peerPhantom[p.slot]) continue;
       const got = _remoteInputs[p.slot];
-      if (!got) return false;
+      if (!got) {
+        missing.push({ peer: p, frame: firstInWindow });
+        continue;
+      }
       for (let f = firstInWindow; f <= lastUsed; f++) {
-        if (got[f] === undefined || got[f] === KNShared.ZERO_INPUT) return false;
+        if (got[f] === undefined || got[f] === KNShared.ZERO_INPUT) {
+          missing.push({ peer: p, frame: f });
+          break;
+        }
       }
     }
-    return true;
+    return missing;
   };
 
   // Tear down C rollback when leaving gameplay so menu state isn't
@@ -13502,6 +13515,7 @@
             _rbShutdownHold = { since: performance.now(), frame: _frameNum };
           }
         }
+        let holdReplayDue = false;
         if (_rbShutdownHold) {
           // Feed what has arrived before judging, so inputs that landed
           // during a stalled tab count before the deadline does.
@@ -13529,11 +13543,19 @@
           // age out of the confirmation window, run the engine through the
           // pause or results screen, and let an unpause cancel the hold on
           // this peer only. Only a replay (queued by an input just fed, or
-          // already running) moves the tick on, in strict lockstep below —
-          // the same rule as the predictions-paused path.
-          const replayDue =
+          // already running) moves the tick on, and the strict stalls below
+          // let it through, as on the predictions-paused path. A frame it
+          // steps without a real input is one more prediction the
+          // confirmation still waits on.
+          holdReplayDue =
             (tickMod._kn_get_replay_depth?.() ?? 0) > 0 || (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
-          if (!replayDue) {
+          if (!holdReplayDue) {
+            // Ask for what's missing instead of waiting for the deadline
+            // (rate-limited per slot and frame like the menu resends).
+            const nowMs = performance.now();
+            for (const m of _missingConsumedInputs()) {
+              _requestStrictMenuResends([m.peer], [m.peer.slot], m.frame, nowMs, 'rb-hold');
+            }
             _markTickReturn('skip:rb-shutdown-hold');
             return;
           }
@@ -13571,7 +13593,7 @@
             _phaseLockLastWaitLogAt = 0;
           }
           const stallMs = _tickNow - _phaseLockStallStartTime;
-          if (phaseWaitSlots.length) {
+          if (phaseWaitSlots.length && !holdReplayDue) {
             if (stallMs >= MAX_STALL_MS && _tickNow - _phaseLockLastWaitLogAt >= RESEND_TIMEOUT_MS) {
               _phaseLockLastWaitLogAt = _tickNow;
               _syncLog(
@@ -13700,7 +13722,8 @@
                 _bootStallRecoveryFired = false;
               }
               const stallDuration = nowWall - _bootStallStartTime;
-              if (_menuLockstepActive) {
+              // A held shutdown's pending replay must run (see holdReplayDue).
+              if (_menuLockstepActive && !holdReplayDue) {
                 if (stallDuration >= MAX_STALL_MS) {
                   const sentSlots = _requestStrictMenuResends(
                     bootInputPeers,

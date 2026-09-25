@@ -125,7 +125,7 @@ def test_phase_lock_deadline_tracks_intermittent_phase_mismatch():
     assert "phaseMismatchSlots," in src
     assert "const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);" in src
     assert "mismatchPeers=[${phaseLockSlots.join(',')}]" in src
-    assert "if (phaseWaitSlots.length) {" in src
+    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
 
 
 def test_resync_state_load_clears_pending_c_inputs():
@@ -239,8 +239,16 @@ def test_gameplay_to_menu_c_shutdown_waits_for_confirmed_state():
     # step it does take is strict lockstep (no prediction at match end).
     hold_wait = branch_src[call_idx:]
     assert "_kn_peek_pending_rollback" in hold_wait
-    assert hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');") > hold_wait.index("const replayDue =")
+    assert hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');") > hold_wait.index("holdReplayDue =")
     assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
+    # Missing inputs are requested, not just waited on until the deadline.
+    resend = "_requestStrictMenuResends([m.peer], [m.peer.slot], m.frame, nowMs, 'rb-hold');"
+    assert "for (const m of _missingConsumedInputs()) {" in hold_wait
+    assert hold_wait.index(resend) < hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');")
+    # A due replay is never blocked by the strict phase/menu stalls.
+    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
+    assert "if (_menuLockstepActive && !holdReplayDue) {" in src
+    assert "return _missingConsumedInputs().length === 0;" in src
 
     # A hold never outlives the engine it was for.
     init_idx = src.index("const doRollbackInit = (effectiveDelay")
