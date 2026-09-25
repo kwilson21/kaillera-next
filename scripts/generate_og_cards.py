@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from pathlib import Path
 
 # Make the server package importable when running from repo root
@@ -26,11 +27,23 @@ HOME_PNG = ROOT / "web" / "static" / "og" / "home.png"
 
 async def render(html: str, out_path: Path, browser) -> None:
     page = await browser.new_page(viewport={"width": 1200, "height": 630})
-    try:
-        await page.set_content(html, wait_until="networkidle")
-        png = await page.screenshot(type="png")
-    finally:
-        await page.close()
+    # Load the card from a file:// URL, not set_content(): the card's font is
+    # a file:// URL, which Chromium won't load into an about:blank page.
+    # Without it, the wider fallback font overflows the card. The page lives
+    # in a temp directory so nothing is left in the served static tree.
+    with tempfile.TemporaryDirectory() as tmp:
+        card = Path(tmp) / "card.html"
+        card.write_text(html, encoding="utf-8")
+        try:
+            await page.goto(card.as_uri(), wait_until="networkidle")
+            await page.evaluate("document.fonts.ready")
+            # fonts.ready also resolves when a font fails; saving then would
+            # bake the wider fallback into the card, so stop instead.
+            if not await page.evaluate("document.fonts.check('bold 16px Inter')"):
+                raise RuntimeError(f"Inter didn't load for {out_path.name}; not saving")
+            png = await page.screenshot(type="png")
+        finally:
+            await page.close()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(png)
     print(f"  wrote {out_path.relative_to(ROOT)} ({len(png)} bytes)")

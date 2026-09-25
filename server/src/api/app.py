@@ -561,12 +561,20 @@ def create_app(lifespan=None) -> FastAPI:
     # Pre-compute allowed hosts set once at app creation time
     _raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
     _allowed_hosts: set[str] | None = None
+    # Host for absolute URLs (og:image, og:url) when the request's Host isn't
+    # allowed: the first configured origin, e.g. the public domain. A set
+    # has no stable order, so picking from it could yield "localhost".
+    _fallback_host = "localhost"
     if _raw_origin and _raw_origin != "*":
         _allowed_hosts = set()
         for _origin in _raw_origin.split(","):
             _origin = _origin.strip().rstrip("/")
             if "://" in _origin:
                 _origin = _origin.split("://", 1)[1]
+            if not _origin:
+                continue
+            if not _allowed_hosts:
+                _fallback_host = _origin
             _allowed_hosts.add(_origin)
             if ":" in _origin:
                 _allowed_hosts.add(_origin.split(":")[0])
@@ -579,7 +587,7 @@ def create_app(lifespan=None) -> FastAPI:
             return host
         if host in _allowed_hosts:
             return host
-        return next(iter(_allowed_hosts))
+        return _fallback_host
 
     @app.get("/favicon.ico", include_in_schema=False)
     @app.get("/apple-touch-icon.png", include_in_schema=False)
