@@ -75,6 +75,14 @@ def run() -> None:
     else:
         print("[startup] vision DISABLED (no ANTHROPIC_API_KEY env var)")
 
+    # On Render, also accept the service's own URL (e.g. https://x.onrender.com),
+    # so the deployment works before and after the custom domain points at it.
+    # Written back to the env var because create_app() reads it too.
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    configured = os.environ.get("ALLOWED_ORIGIN", "").strip()
+    if render_url and configured and configured != "*" and render_url not in configured.split(","):
+        os.environ["ALLOWED_ORIGIN"] = f"{configured},{render_url}"
+
     raw_origin = os.environ.get("ALLOWED_ORIGIN", "").strip()
     if not raw_origin:
         raw_origin = "*"

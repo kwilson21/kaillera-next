@@ -229,7 +229,11 @@ def _sanitize_str(value: str, max_len: int) -> str:
 
 
 def configure_cors(origin: str | list[str]) -> None:
-    sio.cors_allowed_origins = origin
+    # The origin check lives in the Engine.IO layer. This used to set
+    # sio.cors_allowed_origins, which nothing reads: Engine.IO kept the
+    # constructor's [] (no check), so ALLOWED_ORIGIN was never enforced for
+    # sockets.
+    sio.eio.cors_allowed_origins = origin
 
 
 def set_shutting_down() -> None:
