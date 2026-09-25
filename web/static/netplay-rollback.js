@@ -590,6 +590,10 @@
   // rb-delay DC broadcast never arrives, the guest falls back to a
   // locally-computed delay instead of freezing forever.
   const RB_INIT_TIMEOUT_MS = 3000;
+  // I1: the GAMEPLAY→MENU C-rollback shutdown waits at most this long for
+  // the live state to be confirmed (every consumed input real, no replay
+  // pending), then shuts down anyway and logs RB-SHUTDOWN-HOLD-TIMEOUT.
+  const RB_SHUTDOWN_HOLD_MS = 3000;
   // I1 (MF5): late-join state transfer + decompression deadline.
   // Host pauses tick loop for up to LATE_JOIN_TIMEOUT_MS waiting for
   // joiner's ready signal; joiner wraps decompression in a
@@ -1683,6 +1687,9 @@
   // so the GAMEPLAY→MENU shutdown can re-arm window._rbDeferredForGameplay
   // for the next match without needing a full engine restart.
   let _rbReinitClosure = null;
+  // {since, frame} while a GAMEPLAY→MENU shutdown waits for the live state
+  // to be confirmed; null otherwise.
+  let _rbShutdownHold = null;
   // P2/T4: host-negotiated transport mode for rollback input packets.
   //  'reliable'   — use ordered lockstep DC (default, lockstep mode)
   //  'unreliable' — use unordered rollback-input DC (rollback mode, host's call)
@@ -12300,6 +12307,7 @@
     // closure and double-calls _kn_rollback_init, breaking GL/main-loop state.
     window._rbDeferredForGameplay = null;
     _rbReinitClosure = null;
+    _rbShutdownHold = null;
     // Clear host-broadcast init params so a back-to-back match doesn't fire
     // its tryInitRollback with stale values from the previous match's host
     // before the new rb-delay/rb-init-frame broadcasts arrive.
@@ -12615,19 +12623,26 @@
   };
   const SYNC_FOLLOW_UP_MAX = 3;
 
-  // True when the host's live state at the start of _frameNum is final: no
+  // True when this peer's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
   // before _frameNum applied inputs up to _frameNum - 1 - DELAY_FRAMES. An
   // input older than the rollback window can no longer change the state, so
   // each live peer needs every input in the window up to that frame present
   // (the newest received frame alone can hide a gap) and fed to C (a queued
-  // one could still trigger a rollback).
-  const _hostStateConfirmed = (mod) => {
+  // one could still trigger a rollback). Used by the host's sync dispatch and
+  // by the GAMEPLAY→MENU C-rollback shutdown.
+  const _liveStateConfirmed = (mod) => {
     if (mod?._kn_get_replay_depth?.() > 0) return false;
     if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
-    const firstInWindow = Math.max(0, lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES);
+    // Frames applied before a deferred init ran on the lockstep path, which
+    // deletes each remote input once applied (same floor as the gap check).
+    const firstInWindow = Math.max(
+      0,
+      _rbInitFrame - DELAY_FRAMES,
+      lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES,
+    );
     for (const p of getInputPeers()) {
       if (_peerPhantom[p.slot]) continue;
       const got = _remoteInputs[p.slot];
@@ -12637,6 +12652,45 @@
       }
     }
     return true;
+  };
+
+  // Tear down C rollback when leaving gameplay so menu state isn't
+  // serialized — Smash Remix specifically defers init to avoid this (see
+  // tryInitRollback). Without teardown, the engine keeps running through
+  // every subsequent menu in the session, making the second match's first
+  // MENU→GAMEPLAY transition behave differently from the first (no fresh
+  // init, polluted prediction/stat state). Re-arm the deferred-init closure
+  // so the next gameplay transition re-fires init cleanly. The caller must
+  // end the tick right after: the engine is gone.
+  const _shutdownCRollbackForMenu = (tickMod, heldFrom) => {
+    if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
+    if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
+    if (_rbInputPtr && tickMod?._free) {
+      tickMod._free(_rbInputPtr);
+      _rbInputPtr = 0;
+    }
+    if (_rbRegionsBufPtr && tickMod?._free) {
+      tickMod._free(_rbRegionsBufPtr);
+      _rbRegionsBufPtr = 0;
+    }
+    _useCRollback = false;
+    _rbInitFrame = -1;
+    // Guests must wait for the host's fresh rb-init-frame broadcast
+    // for the next match. Host's delay is unchanged across matches,
+    // but the init frame is per-match.
+    if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
+    window._rbDeferredForGameplay = _rbReinitClosure;
+    // No match reset here, so drop the finished match's input
+    // history, keeping the same ~600-frame resend window the
+    // legacy path keeps for _localInputs.
+    const keepFrom = _frameNum - 600;
+    for (const f of Object.keys(_localInputs)) if (Number(f) < keepFrom) delete _localInputs[f];
+    for (const frames of Object.values(_remoteInputs)) {
+      for (const f of Object.keys(frames || {})) if (Number(f) < keepFrom) delete frames[f];
+    }
+    _syncLog(
+      `C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} (held ${_frameNum - heldFrom}f) — re-armed for next match`,
+    );
   };
 
   // Our own tick loop freezing (both tabs of a busy machine, a debugger, a
@@ -13388,6 +13442,12 @@
         if (!_inGameplay && localGameplay && _bootDone) {
           _inGameplay = true;
           _syncLog(`MENU→GAMEPLAY transition at f=${_frameNum} gameStatus=${gameStatus} scene=${sceneCurr}`);
+          // Back in gameplay (unpaused, or a replay undid the pause) before
+          // a held shutdown ran: the engine never stopped, so keep it.
+          if (_rbShutdownHold) {
+            _syncLog(`RB-SHUTDOWN-HOLD cancelled at f=${_frameNum} (held since f=${_rbShutdownHold.frame})`);
+            _rbShutdownHold = null;
+          }
           // Smash Remix defers rollback init until here — see line ~6900.
           // Both peers fire on their own local transition; doRollbackInit
           // calls _kn_set_frame(_frameNum) so per-peer frame-skew at init
@@ -13412,42 +13472,30 @@
           if (!_shutdownCRollback) {
             _scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);
           }
-          // Tear down C rollback when leaving gameplay so menu state isn't
-          // serialized — Smash Remix specifically defers init to avoid this
-          // (see line ~7099). Without teardown, the engine keeps running
-          // through every subsequent menu in the session, making the second
-          // match's first MENU→GAMEPLAY transition behave differently from
-          // the first (no fresh init, polluted prediction/stat state).
-          // Re-arm the deferred-init closure so the next gameplay transition
-          // re-fires init cleanly.
+          // Shut the C engine down (see _shutdownCRollbackForMenu), but only
+          // once the frames already stepped are final: a correction still in
+          // flight would otherwise be lost, and the lockstep path never
+          // repairs the difference. Until then the engine keeps running in
+          // strict menu lockstep, feeding late inputs and replaying.
           if (_shutdownCRollback) {
-            const tickMod = window.EJS_emulator?.gameManager?.Module;
-            if (tickMod?._kn_set_deferred_rollback) tickMod._kn_set_deferred_rollback(0);
-            if (tickMod?._kn_rollback_shutdown) tickMod._kn_rollback_shutdown();
-            if (_rbInputPtr && tickMod?._free) {
-              tickMod._free(_rbInputPtr);
-              _rbInputPtr = 0;
+            _rbShutdownHold = { since: performance.now(), frame: _frameNum };
+          }
+        }
+        if (_rbShutdownHold) {
+          const confirmed = _liveStateConfirmed(tickMod);
+          const heldMs = performance.now() - _rbShutdownHold.since;
+          if (confirmed || heldMs >= RB_SHUTDOWN_HOLD_MS) {
+            if (!confirmed) {
+              _syncLog(
+                `RB-SHUTDOWN-HOLD-TIMEOUT f=${_frameNum} heldMs=${Math.round(heldMs)} ` +
+                  `replay=${tickMod._kn_get_replay_depth?.() ?? -1} ` +
+                  `pendingRb=${tickMod._kn_peek_pending_rollback?.() ?? -1} ` +
+                  `queued=${_pendingCInputs.length} — shutting down unconfirmed`,
+              );
             }
-            if (_rbRegionsBufPtr && tickMod?._free) {
-              tickMod._free(_rbRegionsBufPtr);
-              _rbRegionsBufPtr = 0;
-            }
-            _useCRollback = false;
-            _rbInitFrame = -1;
-            // Guests must wait for the host's fresh rb-init-frame broadcast
-            // for the next match. Host's delay is unchanged across matches,
-            // but the init frame is per-match.
-            if (_playerSlot !== 0) window._rbHostInitFrame = undefined;
-            window._rbDeferredForGameplay = _rbReinitClosure;
-            // No match reset here, so drop the finished match's input
-            // history, keeping the same ~600-frame resend window the
-            // legacy path keeps for _localInputs.
-            const keepFrom = _frameNum - 600;
-            for (const f of Object.keys(_localInputs)) if (Number(f) < keepFrom) delete _localInputs[f];
-            for (const frames of Object.values(_remoteInputs)) {
-              for (const f of Object.keys(frames || {})) if (Number(f) < keepFrom) delete frames[f];
-            }
-            _syncLog(`C-ROLLBACK shutdown on GAMEPLAY→MENU at f=${_frameNum} — re-armed for next match`);
+            const heldFrom = _rbShutdownHold.frame;
+            _rbShutdownHold = null;
+            _shutdownCRollbackForMenu(tickMod, heldFrom);
             // The engine is gone: running the rest of this C tick would call
             // _kn_post_tick on it and reset _frameNum to -1 on this peer
             // only. The next tick steps this frame on the lockstep path.
@@ -14551,7 +14599,7 @@
         KNState.frameNum = _frameNum;
         if (window.KNDesync) KNDesync.tick(_frameNum);
         _flushPendingMatchInputReset('post-c-tick');
-        _dispatchScheduledSyncs(() => _hostStateConfirmed(tickMod));
+        _dispatchScheduledSyncs(() => _liveStateConfirmed(tickMod));
         const _tTotal = performance.now();
         _pushTickProfile({
           f: _frameNum,
