@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phase 1 complete (Design Brief v1 accepted). Player outreach in progress (Appendix A/B). Phase 2 next.
+> **Status:** Phase 2 (Experience and content) v1 written — awaiting owner's direction pick and Q1–Q8. Player outreach in progress (Appendix A/B).
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -443,8 +443,354 @@ player answers (Appendix B) are folded in as they arrive.
 
 ---
 
-## 2. Phase 2 — Experience and content
-_Not started._
+## 2. Phase 2 — Experience and content (v1, for owner review)
+
+Everything here follows the brief: the page is the arcade door; the one action
+is walk in, see what's happening, then Play or Watch; nothing promised that
+isn't shipped; docs/launch-copy.md rules on every netcode sentence.
+
+### 2.1 The narrative, top to bottom
+
+One page, six beats. Desktop and phone share the order; the phone differences
+are called out per beat. Sections are short: a newcomer reaches "how to start"
+without scrolling, and a veteran can leave the page inside ten seconds by
+clicking Create.
+
+| # | Beat | What they see | What they read | What they do | Brief goal |
+|---|---|---|---|---|---|
+| 1 | **The door** | Name, one line, and the *Open rooms* board directly beneath, with Create / Join / Watch | What it is, who's here, what you need | Create a room · Watch or Join an open one · enter a code | G1 Presence, G2 Permeability |
+| 2 | **You bring the game** | A short plain-text block, no imagery | Bring your own ROM; never uploaded; the three supported ROMs; watching needs none | Nothing, or click Watch | Honesty, G2 |
+| 3 | **How it works** | The intro video (click-to-play) with a three-line caption | Create → send link → everyone drops their ROM → Start. Up to 4 players, spectators welcome, phones OK | Watch 50 s, or skip | Newcomer clarity |
+| 4 | **Why it feels close to the couch** | Two proof buttons and the explainer video | Rollback explained in four sentences under the framing rules | Try the demo (ROM) · Lag visualizer (no ROM) | G4 Proof |
+| 5 | **Since 2001** | One paragraph and the lineage ribbon | Kaillera's history and that this continues it; free, open source | Click GitHub or About | G3 Home for veterans |
+| 6 | **Footer** | As today, quiet | Credit, GitHub, Support, About, version, and the ROM disclaimer | — | Non-goals |
+
+**Beat 1 in detail — the door.** The hero has no marketing image. The board
+*is* the hero: it's the moving part that makes the page a place rather than a
+brochure. Three states, all designed with equal care (Phase 4 wireframes):
+
+- *Live (server awake, rooms listed):* header "Open rooms · N people playing
+  right now"; one row per listed room: game · host · players x/4 · status
+  (waiting / in game, N min) · **Watch** · **Join** (Join only while a slot is
+  open). Rows update live (polling `GET /list`, every ~10 s). Below the board:
+  **Create a room** (primary), and a small "Have a code?" input with Join /
+  Watch.
+- *Empty (server awake, nothing listed):* the board area says so plainly, gives
+  the real weekly number (G2), and hands you the next move: create one and send
+  the link. This is the most common state for a new site; it must feel like an
+  arcade at opening time, not a closed one.
+- *Waking (server asleep, first visit after idle):* the board area becomes the
+  **loading screen**. Honest line about the nap, a real progress cue, and
+  something to do: the input-lag visualizer (already built, pure static JS,
+  works on tap) runs *inside* the board area. You're pressing a button and
+  feeling rollback vs lockstep while the machine powers on. That's the
+  console-era loading screen callback, and it's on-topic. Create / Join / Watch
+  are shown but disabled with "ready in a moment" until the server answers.
+  Wake is triggered on page load (the board needs the server anyway); every
+  visit also resets the idle timer.
+
+**Phone (beat 1).** Name and line, then the board (rows become cards: game,
+host, x/4, status, one Watch/Join button), then a full-width **Create a room**.
+"Have a code?" collapses to a link that opens the input. The waking state uses
+"tap" instead of "press SPACE". The one-line ROM note sits under Create so a
+phone visitor with no ROM immediately sees Watch is for them.
+
+**Name field.** Today the lobby asks for your name before Create. Proposal:
+drop it from the landing page; the room's pre-game overlay already has a name
+input and remembers it. One fewer field between the door and the floor
+(question Q2 below).
+
+**Beat 3 — how it works.** This is where SaaS creeps in (three icons in a
+grid). Instead: the video is the cabinet's attract mode, and the caption is
+three short lines of plain text under it, no icons. Click-to-play thumbnail on
+every device; no autoplay (autoplay hero video is an AI-page tell and costs
+data on phones).
+
+**Beat 4 — proof.** Two buttons, clearly labelled by what they need: "Try the
+demo (needs your ROM)" and "Lag visualizer (no ROM)". The explainer video
+sits beside them. Numbers only with sources; the ~150 ms threshold is the one
+number we cite.
+
+**Beat 5 — since 2001.** For veterans this is the "you're home" signal. Short
+paragraph plus a single-line lineage ribbon (the same list as the About modal)
+so the names are on the page without becoming a wall. Ends with "free, open
+source, GPL-2 · GitHub".
+
+**Not on the page (by decision).** ROM sharing, chat, profiles, records,
+rankings, avatars, roadmap, AI assistance, the personal story (About link
+only), pricing of any kind, feature grids, testimonials, download buttons.
+
+### 2.2 Draft copy (v1)
+
+Voice: plain, second person, short sentences, no exclamation marks, no
+superlatives. Sentence case (the brand name stays lowercase). Every netcode
+line checked against docs/launch-copy.md.
+
+**Beat 1 — the door**
+
+> # kaillera-next
+> Super Smash Bros. 64 online with friends. In your browser. No install.
+>
+> **Open rooms** · 3 people playing right now
+> | Smash Remix 2.0.1 | hosted by Kaz | 2/4 | waiting for players | Watch · Join |
+> | Super Smash Bros. | hosted by Moose | 4/4 | in game · 6 min | Watch |
+>
+> [ Create a room ]
+> Have a code? [________] Join · Watch
+>
+> Playing needs your own SSB64 or Smash Remix ROM. Watching doesn't.
+
+*Empty state:*
+
+> **Open rooms** · nobody's in a room right now
+> 41 matches were played this week. Open a room and send the link — the first
+> one in picks the stage.
+> [ Create a room ]
+
+*Waking state:*
+
+> **Powering on…**
+> The room server naps when nobody's around. Your visit woke it up; it takes
+> up to a minute. Press SPACE (tap on a phone) while you wait — this is what
+> rollback does to lag.
+> [ input-lag visualizer, inline ]
+> Create · Join · Watch — ready in a moment.
+
+*If the wake takes longer than expected (Phase 3 sets the deadline):*
+
+> Still powering on. If this takes more than a couple of minutes, something's
+> wrong on our side — reload, or come back in a bit.
+
+**Beat 2 — you bring the game**
+
+> ## You bring the game
+> kaillera-next doesn't host, share or link to ROMs. You drop your own copy of
+> Super Smash Bros. 64 onto the page. It's read in your browser and never
+> uploaded anywhere.
+>
+> Works right now: Super Smash Bros. (US) · Smash Remix 2.0.0 (US) · Smash
+> Remix 2.0.1 (US). Files: .z64, .n64, .v64 or .zip. Smash Remix is a free
+> community mod you apply to your own SSB64 copy.
+>
+> No ROM? You can still watch any open room.
+
+**Beat 3 — how it works**
+
+> ## How it works
+> [ intro video, 50 s ]
+> Create a room and send the link. Friends open it on a laptop or a phone.
+> Everyone drops their own ROM, the host presses Start.
+> Up to 4 players. Spectators welcome. Keyboard, gamepad or on-screen controls.
+
+**Beat 4 — why it feels close to the couch**
+
+> ## Why it feels close to the couch
+> Rollback netplay runs the game at full speed on your machine and predicts
+> what your opponent pressed. When a prediction misses, it rewinds a few
+> frames and replays, quietly. The network lag is still there; rollback hides
+> it from you. Under about 150 ms of round trip, it feels like playing
+> offline. Lockstep, the old way, waits the full round trip on every frame.
+>
+> Don't take our word for it.
+> [ Try the demo — needs your ROM ]  [ Lag visualizer — no ROM ]
+> [ explainer video, 60 s ]
+
+Checked: "hides", not "fixes"; no "zero lag"; no "no input delay"; the 150 ms
+figure is the sourced one; "rewinds… quietly" describes the mechanism without
+calling rollbacks a failure.
+
+**Beat 5 — since 2001**
+
+> ## Since 2001
+> Kaillera, by Christophe Thibault, let a generation play N64 online. A dozen
+> servers and clients carried it for twenty years. kaillera-next is the same
+> idea with nothing to install and rollback netcode.
+> Kaillera → EmuLinker → EmuLinker SF → SupraClient → n02 → Project64k →
+> AQZ NetPlay → Ownasaurus Client → EmuLinker X → EmuLinker-K → Kaillera Reborn
+> → kaillera-next
+> Free and open source (GPL-2). [GitHub]
+
+**Beat 6 — footer**
+
+> by Kazon Wilson (Agent 21) · Inspired by Kaillera by Christophe Thibault
+> GitHub · Support · About · v0.53.0
+> kaillera-next does not host, distribute or link to ROMs.
+
+### 2.3 "You need your own ROM" — honest, low-friction, no gray areas
+
+- **Say it twice, plainly.** One line under Create (beat 1) so nobody starts
+  a room and hits a wall; one short block (beat 2) with the specifics.
+- **Say what happens to the file.** "Read in your browser, never uploaded."
+  True (IndexedDB cache) and it answers the newcomer's fear.
+- **Say exactly which three ROMs** and the formats. The current lobby already
+  does; keep it.
+- **Never** link to ROM sites, explain dumping, or say "find it online". The
+  page says "your own copy" and stops. (Q3 asks whether one link to the
+  official Smash Remix project, which distributes patches only, is allowed.)
+- **Give the ROM-less visitor a real path:** Watch. It's shipped, needs no
+  file, and it's the arcade behaviour (stand behind the cabinet).
+- **In-room states** (wrong ROM, unsupported ROM, friend has no ROM) are
+  Phase 3 flows; the landing page's job is only that nobody is surprised.
+
+### 2.4 Video scripts — first cut for TTS narration
+
+Both under 60 s, both narrated in the same plain voice as the page. Screen
+recordings only; no Nintendo assets outside what the emulator itself renders
+in the recording (Q6 asks whether even that is acceptable in a public video).
+
+**Video 1 — Intro (≈50 s)**
+
+```
+[0:00] landing page, cursor on Create
+       "This is kaillera-next. Super Smash Bros. 64, online, in your browser."
+[0:05] click Create → room page, invite link visible
+       "Create a room. You get a link."
+[0:10] link pasted into a chat
+       "Send it to a friend."
+[0:14] friend opens it on a phone, lands in the room
+       "They open it. Nothing to install, on a laptop or a phone."
+[0:20] both drop a ROM file onto the page
+       "Everyone drops their own copy of the ROM. It stays on your device."
+[0:28] host presses Start; split screen, both devices boot into the game
+       "Press Start. Both screens run the same game at the same time."
+[0:38] a few seconds of play, side by side
+       "Underneath it's rollback netplay, so it feels close to playing on
+        the same couch. The next video shows why."
+[0:47] URL on screen
+       "Free. No account. kaillera-next."
+```
+
+**Video 2 — Rollback explained (≈60 s)**
+
+```
+[0:00] two devices, a line between them
+       "Every online game has the same problem: your opponent's button press
+        takes time to reach you."
+[0:08] lockstep diagram: each frame waits for the far input
+       "The old way, lockstep, waits for it. Every frame. So every press you
+        make shows up late, by the whole round trip."
+[0:18] rollback diagram: local game runs, prediction, then a short rewind
+       "Rollback doesn't wait. It runs your game at full speed and predicts
+        what your opponent did. If the real input matches, nothing happens.
+        If it doesn't, the game quietly rewinds a few frames and replays
+        with the correct input."
+[0:35] "The lag is still on the wire. Rollback hides it from you. Under about
+        150 milliseconds of round trip, it feels like playing offline."
+[0:45] demo page: lag slider to 200, rollback toggled off, game stalls;
+       toggled on, smooth
+       "Don't take my word for it. The demo lets you drop a ROM, set the lag
+        and switch rollback off and on. Same game, same opponent. Feel the
+        difference."
+[0:58] URL
+```
+
+Both scripts checked against the framing rules: hides, not fixes; round-trip
+language; no "zero lag"; rollbacks described as the mechanism.
+
+### 2.5 Three directions
+
+All three share the same narrative and copy. They differ in what "arcade"
+means visually. None uses pixel fonts, CRT scanlines, neon "INSERT COIN", or
+any Nintendo asset. The one visual system they all share: the four player
+colours (P1 red, P2 blue, P3 yellow, P4 green), an N64-era convention, not
+anyone's IP, used for player slots on the board and in the room.
+
+**Direction A — The Lobby** *(console-era online lobby, 2005–2010)*
+- *Mood:* the pre-game lobby in Halo 3 or MGO. Dark, composed, slightly
+  military-grade. A list of people, a status per row, one glowing "ready"
+  colour. Quiet confidence; nothing is trying to sell you anything.
+- *Hero:* the board fills the first screen like a lobby roster. Name top-left
+  in a condensed face, one line under it, Create as the single bright button.
+- *Colour:* charcoal to deep navy background, off-white text, one accent
+  (electric blue or the current #6af) for ready/live states, player colours
+  only in slot markers.
+- *Type:* condensed grotesk for headings (Barlow Condensed or Saira Condensed
+  feel), a plain humanist sans for body. Tabular numerals on the board.
+- *Motion:* rows slide in as rooms appear; the live dot breathes; nothing else.
+- *Why it's arcade:* presence. A roster of people right now, and a "ready"
+  state you can walk into.
+- *Trade-offs:* strongest "home" signal for veterans of that console era;
+  cheapest to build (no illustration); coldest for newcomers; with zero rooms
+  it's the emptiest of the three; easiest to slide into "engineer tech demo"
+  if the type gets too technical.
+
+**Direction B — The Floor** *(the arcade as a place: light, warmth, cabinets)*
+- *Mood:* the moment you walk through the door: a dark room lit by screens,
+  marquee light on the ceiling, sound you can almost hear. Rooms are cabinets
+  in a row; each shows its attract-mode status. Warm, saturated, alive.
+- *Hero:* the board rendered as a row of cabinet cards, each lit in its own
+  player-colour glow when live and dim when waiting. The name sits above like
+  a marquee, in a wide, bold display face (marquee lettering, not 8-bit).
+- *Colour:* near-black with warm light: amber, red and cyan glows at low
+  saturation on surfaces, cream text. Backgrounds could be a single
+  photographic/illustrated "floor" that is dark enough to never fight the UI.
+- *Type:* wide geometric display for the name and section titles, neutral
+  sans for everything else.
+- *Motion:* cabinet cards glow up when a room goes live; the waking-state
+  visualizer pulses in the same light. Restrained; light does the work.
+- *Why it's arcade:* literally. The light and the row of machines.
+- *Trade-offs:* biggest emotional hit and the furthest from SaaS; strongest
+  at the empty state (a lit, quiet arcade still feels like a place); highest
+  cost (an illustrated floor, more art direction in Phase 5); highest risk of
+  tipping into theme park if the decoration grows; needs care on cheap phones
+  (glows and large images cost battery and bandwidth).
+
+**Direction C — The Clubhouse** *(Kaillera chat-room warmth; hand-made)*
+- *Mood:* a friend's basement with a couch and a console, or the Kaillera
+  chat room where half the night was talking. Friendly, low-key, unpolished
+  on purpose. The opposite of a product page because it looks like a person
+  made it.
+- *Hero:* a plain, warm surface; the board is a simple list with names in
+  big type; Create is a big friendly button. Hand-drawn or flat-vector
+  touches (a cabinet outline, a controller) in the four player colours.
+- *Colour:* warm dark (deep brown-grey) or, riskier, a cream background
+  with bold flat player colours. Light backgrounds fight the black game
+  canvas on the next page, so dark-warm is the safer version.
+- *Type:* a friendly humanist sans with some character (Nunito-like, not
+  Comic Sans), generous size.
+- *Motion:* almost none. Stillness is part of the friendliness.
+- *Why it's arcade:* the people, not the machines. It reads "come hang out".
+- *Trade-offs:* most welcoming to newcomers and most convincingly not-AI;
+  weakest "locked-in" energy; veterans who loved MGO/Halo lobbies may find it
+  soft; the least differentiated visually (many indie sites look like this).
+
+**Recommendation.** A mix: **B's door on A's floor.** The name, the first
+screen and the waking state carry B's warmth and light (that's where the
+arcade feeling is made or lost); the board rows, the copy blocks and the
+proof section use A's composure so it stays readable and cheap on phones.
+C's lesson is kept as a rule: never look machine-made. Phase 4 wireframes
+would follow this mix unless you pick otherwise.
+
+### 2.6 Questions for the owner (Phase 2 gate)
+
+- **Q1. Direction:** A, B, C, or the recommended mix? If mix, anything from C
+  you'd carry over?
+- **Q2. Name field:** drop it from the landing page and let the room ask?
+  (Fewer steps at the door; costs nothing for returning players since the
+  room remembers the name.)
+- **Q3. Smash Remix link:** may the page link once to the official Smash
+  Remix project page (it distributes patches, not ROMs)? Without it,
+  "a free community mod you apply to your own copy" is the whole sentence.
+- **Q4. Weekly number:** "N matches this week" (from session logs) as the
+  single real number on the page, shown in the header and the empty state,
+  and nothing else. OK, or would you rather "rooms opened" or "last match N
+  min ago"?
+- **Q5. Wake on load:** the board needs the server awake, so every landing
+  visit pings it. Fine on the free tier's terms?
+- **Q6. Video footage:** the intro and explainer videos will show the game
+  running on screen (it's a recording of the product). Acceptable for public
+  videos, or do you want the recordings cropped/blurred to UI only?
+- **Q7. Phone claim:** "Keyboard, gamepad or on-screen controls" — has a
+  Bluetooth controller been tested on a phone? If not, I'll write "on-screen
+  controls" only.
+- **Q8. Copy tone:** the drafts are sentence case, plain, no exclamation
+  marks. Your own messages are lowercase-casual. Keep sentence case for the
+  page, or go lowercase throughout to match the name?
+
+**What only real players can answer (log in Appendix B when it arrives):**
+whether the "Since 2001" paragraph lands (show it to one vet and ask "what
+does this make you feel?"); whether "You bring the game" is clear to a
+newcomer (ask "what would you need before you could play?").
 
 ## 3. Phase 3 — User flows
 _Not started._
@@ -542,3 +888,6 @@ _Empty until answers arrive. Verbatim, one block per person._
 | 2026-09-25 | Real aggregate activity numbers may be shown; never fake or padded | Owner, brief review | 1 |
 | 2026-09-25 | Ko-fi link stays as a quiet footer link | Owner: footer is quiet enough | 1 |
 | 2026-09-25 | Design Brief v1 accepted; Phase 2 may start while player answers arrive | Owner, brief review | 1 |
+| 2026-09-25 | Page narrative: door (board as hero) → you bring the game → how it works (video) → why it feels close to the couch (proof) → since 2001 → footer | Phase 2 proposal, pending review | 2 |
+| 2026-09-25 | Server-waking state = the input-lag visualizer inline as an interactive loading screen | Already built, static, on-topic; console-era callback | 2 |
+| 2026-09-25 | Two videos scripted (intro ≈50 s, rollback ≈60 s) under launch-copy rules | Owner: separate videos | 2 |
