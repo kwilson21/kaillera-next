@@ -1,8 +1,10 @@
 # Threaded WASM core (`PROXY_TO_PTHREAD`) — experiment notes
 
-**Branch:** `experiment/proxy-to-pthread` (March 26–27, 2026), archived as tag
-`archive/proxy-to-pthread`. It predates the April 29 history restart of
-`main`, so it shares no commits with `main` and cannot be merged.
+**Branch:** `experiment/proxy-to-pthread` (March 26–27, 2026). It predates
+the April 29 history restart of `main`, so it shares no commits with `main`
+and cannot be merged. The commits cited below exist only on that history:
+push the tag `archive/proxy-to-pthread` before deleting the branch, or they
+become unreachable.
 **Outcome:** abandoned. The core on `main` is single-threaded (`ASYNC=1`,
 asyncify, no pthreads).
 
@@ -65,11 +67,13 @@ GC, DOM, WebRTC) cannot steal frame time from the emulator.
   build already avoids nondeterministic SIMD paths (`-fno-tree-vectorize`,
   scalar `src/main`; see #24). A threaded core would need a determinism audit
   first; see also `cross-engine-determinism-investigation.md`.
-- **Worker offload exists now.** The Mode 2 rollback worker
-  (`rollback-shadow-worker.js`, from #9/#11) runs rollback replays in a
-  separate emulator instance on a worker without threading the core. This
-  gets the main benefit, keeping replay work off the page thread, and leaves
-  the core single-threaded.
+- **Replay offload exists, live-loop offload does not.** The Mode 2 rollback
+  worker (`rollback-shadow-worker.js`, from #9/#11) runs rollback replays in a
+  second emulator instance on a worker, without threading the core. It does
+  not move the live emulator loop: live frames still run on the page thread
+  and still compete with page work, which was this experiment's goal. Mode 2
+  is also opt-in (`?rollbackMode=2`), and its default parallel setting still
+  replays on the page thread alongside the worker.
 - **Scope.** A worker-hosted main loop means OffscreenCanvas rendering, audio
   and input plumbing across threads, and a forked EmulatorJS loader.
 
