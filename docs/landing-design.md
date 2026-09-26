@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Phases 1–5 closed. Build plan v1 written (§7), provisional until Phase 6 feedback. Outstanding from the owner: player-test tables (§6, Appendix C), the two-device photo (S3), Kaillera-player answers (Appendix B), the analytics decision (§7.8, default: own-server counts). Build starts only when the owner says so, in a separate session.
+> **Status:** Design complete (2026-09-26). Phases 1–5 closed; Phase 6 runs on the built page before launch. Build plan final (§7). Nothing outstanding blocks the build. Build starts only when the owner says so, in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -2152,13 +2152,17 @@ the wrap-up answers verbatim.
 - Bring the filled tables back here; I tally the patterns and propose the
   revisions, and we iterate the mockup before the build plan.
 
-_Awaiting the owner's return with feedback._
+**Owner (2026-09-26): "Do we really need 1–4?"** No. Phase 6 as a mockup
+test is replaced by the same test on the real page, after the build and
+before launch (§7.2 M5). The record template (Appendix C) and the rules
+(§6.3–6.6) apply unchanged; the object under test is the built page, not
+the mockup. Phase 6 closed as a plan; executed at launch.
 
-## 7. Build plan (v1, provisional until Phase 6 feedback is in)
+## 7. Build plan (final, 2026-09-26)
 
-For a separate build session. Everything below was decided in Phases 1–5;
-items marked **⚠** may change after the player tests (§6). Read the Design
-Brief (§1) and the flows (§3) first; this section is the checklist.
+For a separate build session. Everything below was decided in Phases 1–5.
+The player test (§6) runs on the built page before launch (M5). Read the
+Design Brief (§1) and the flows (§3) first; this section is the checklist.
 
 ### 7.1 Scope in one paragraph
 A static landing page in direction A (the console-era lobby) whose hero is
@@ -2220,7 +2224,7 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
   120 s the "still powering on" line), **error** (health answers but `/list`
   fails: "Couldn't load rooms. Reload." with Create still enabled).
 - No name field. "Have a code?" inline on desktop, a link that opens the
-  field on phones ⚠.
+  field on phones.
 - Live previews: a 72 px frame per row, the featured panel with the frame
   as poster; **no hover-to-stream in this build** (first follow-up).
 - Three screenshot slots + click-to-play intro video (lite-embed: poster
@@ -2272,8 +2276,9 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
   ≤ 120 KB.
 
 **M5 — Launch checklist**
-- Phase 6 revisions folded in ⚠.
-- Real invite-link test from three apps on phones (§3 Flow 2) passed.
+- The Phase 6 test, run on the built page (§6.3, Appendix C): 3–5 people,
+  at least two on phones, including the real invite-link step (§6.3 #8).
+  Anything 2 of 5 hit gets fixed before launch.
 - Two-player `tests/rb-two-player.mjs` with `JITTER=20` still passes
   (CLAUDE.md rule: the restyle touches play.html, not the tick loop, but
   run it).
@@ -2400,11 +2405,14 @@ streaming mode on the join page, a "your last room" shortcut, generated
 imagery.
 
 ### 7.10 Open items carried into the build session
-- ⚠ Phase 6 player-test revisions (§6).
-- Logo pick from §5.7 images; the two-device photo (S3).
-- Kaillera-player answers (Appendix B) may adjust the "Since 2001" copy.
-- 7.2 M0.8 build checks (free-tier sleep, TURN).
-- 7.8 analytics decision.
+- 7.2 M0.8 build checks (free-tier sleep, TURN): facts to establish, not
+  decisions.
+- S3: the owner's two-device photo, or the solo two-screenshot composite if
+  the photo doesn't happen. Either is fine.
+- Appendix B (Kaillera-player answers): fold in if they arrive; nothing
+  depends on them.
+- 7.8 analytics: own-server counts, no third-party trackers, unless the
+  owner objects.
 
 ---
 
@@ -2565,3 +2573,4 @@ Surprises (one line):
 | 2026-09-25 | Drawn-alphabet wordmark rejected and withdrawn; replaced by the real typeface with the I·L·L·E stems coloured as the ports (colour clipped to the glyphs), E stem filling last | Owner: "I don't like this at all" | 5 |
 | 2026-09-25 | Logo = KN tile; landing header rotates a set of seven motion marks per visit (A with motion, A2a, A1c, A1e, KO, the stick, letters arrive); click advances | Owner: "cycle through a set, keep KN as the main logo" | 5 |
 | 2026-09-25 | Match start → boot/sync overlay (real ready states); Rollback timeline → demo Result card (live) + landing netcode section. Phase 5 closed | Owner: "Both recommendations are fine" | 5 |
+| 2026-09-26 | Nothing outstanding blocks the build: the player test moves to the built page (M5); the photo has a solo fallback; Kaillera-player answers are optional; analytics defaulted. Build plan marked final | Owner: "Do we really need 1–4?" | 7 |
