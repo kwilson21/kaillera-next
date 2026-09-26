@@ -1,9 +1,11 @@
 # Static landing page: hosting proposal
 
-**Status: option A chosen by the owner (2026-09-26). The Worker is built
-(M2) but not deployed and has no route.** The route is switched on in
-Cloudflare at launch, with the owner. Until then the game server serves
-`/` and `/join` itself, exactly as the Worker would.
+**Status: live since 2026-09-26 (owner's OK).** The `kaillera-next-landing`
+Worker serves `/` and `/join` on `kaillera-next.thesuperhuman.us` and
+passes everything else to Render. Both proxy secrets are set, and the
+server logs real visitor IPs (`SIO connect … (ip=<visitor>)`). Rolling back
+is removing the route; the game server still serves `/` and `/join` itself,
+exactly as the Worker does.
 
 ## The problem
 

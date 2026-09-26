@@ -23,6 +23,7 @@
     // Where the game server answers. Render's own URL works before any DNS change.
     "ORIGIN": "https://kaillera-next.onrender.com",
   },
-  // Off until the owner's OK (docs/landing-design.md §7.2 M0.9):
-  // "routes": [{ "pattern": "kaillera-next.thesuperhuman.us/*", "zone_name": "thesuperhuman.us" }],
+  // On since 2026-09-26 (owner's OK). Rolling back is removing this route
+  // (here and in the dashboard): the hostname then reaches Render directly.
+  "routes": [{ "pattern": "kaillera-next.thesuperhuman.us/*", "zone_name": "thesuperhuman.us" }],
 }
