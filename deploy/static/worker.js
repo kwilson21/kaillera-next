@@ -107,6 +107,10 @@ async function previewPage(request, env, url) {
 // Worker's own address, so the game server would see every visitor as one IP
 // (one connection limit, one rate limit). Pass the visitor's IP along with a
 // shared secret the server checks (KN_PROXY_SECRET there, PROXY_SECRET here).
+// Logged once per isolate (not per request) so a busy Worker without
+// PROXY_SECRET doesn't flood the tail log; never logs header values.
+let _warnedNoProxySecret = false;
+
 function forwardedHeaders(request, env, headers) {
   // Strip any spelling of these a visitor could send (headers are
   // case-insensitive, and engineio folds '-'/'_' together server-side), so
@@ -117,6 +121,13 @@ function forwardedHeaders(request, env, headers) {
     if (norm === 'x-kn-client-ip' || norm === 'x-kn-proxy-auth') toDelete.push(name);
   }
   for (const name of toDelete) headers.delete(name);
+  if (!env.PROXY_SECRET && !_warnedNoProxySecret) {
+    _warnedNoProxySecret = true;
+    console.error(
+      "PROXY_SECRET is not set — every visitor will reach the origin as this Worker's own address " +
+        '(one connection limit and one rate limit for the whole site)',
+    );
+  }
   const ip = request.headers.get('CF-Connecting-IP');
   if (env.PROXY_SECRET && ip) {
     headers.set('X-KN-Client-IP', ip);

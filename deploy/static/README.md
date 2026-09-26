@@ -118,10 +118,24 @@ server's connect log (`server/src/api/signaling.py`):
 SIO connect <sid> (ip=<visitor IP>)
 ```
 
-If it instead shows the Worker's address (or `unknown`), `KN_PROXY_SECRET`
-doesn't match between the Worker and the server; the server logs a warning
-(`X-KN-Client-IP present but ...`) when the header arrives without a valid
-secret or a parseable IP, without ever logging the secret itself.
+If it instead shows the Worker's address (or `unknown`), the two secrets
+are out of sync in one of two ways, and each side warns about its own half
+— neither ever logs the secret itself:
+
+- **The Worker has no `PROXY_SECRET`.** It never sends `X-KN-Client-IP` at
+  all, and logs `PROXY_SECRET is not set` once per isolate (`wrangler
+  tail`). If `KN_PROXY_SECRET` *is* set on the server, the server notices
+  the Worker's own address coming back with no forwarded header and warns
+  once per process ("a request came from a Cloudflare Worker without
+  X-KN-Client-IP — is PROXY_SECRET set on the landing Worker?").
+- **The two secrets don't match, or the server has none configured.** The
+  Worker still sends `X-KN-Client-IP`, so the server warns
+  (`X-KN-Client-IP present but ...`) and falls back to the Worker's
+  address instead.
+
+Either way, until it's fixed every visitor is folded into the Worker's
+single address: one 20-connection limit and one set of rate limits for
+the entire site, not per visitor.
 
 **Visitor IPs.** Cloudflare sets `CF-Connecting-IP` on a Worker's
 subrequests to the Worker's own address, so without help the game server
