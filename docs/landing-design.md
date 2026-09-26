@@ -1,6 +1,6 @@
 # Landing page design — kaillera-next
 
-> **Status:** Design complete (2026-09-26). Phases 1–5 closed; Phase 6 runs on the built page before launch. Build plan final (§7). Nothing outstanding blocks the build. Build starts only when the owner says so, in a separate session.
+> **Status:** Design complete (2026-09-26). Build plan final (§7); build checks answered (§7.12); hand-off prompt in §7.13; mockup source at docs/landing-design.mockup.html. Build happens in a separate session.
 > Design only. No code, PRs or deploys until the owner says "move to build".
 >
 > This is the single record of what we decided about the public landing page
@@ -2398,15 +2398,116 @@ One language across screens, all SVG/CSS, all with a still frame under
 - **Never:** motion on text people are reading, autoplaying video, anything
   that competes with the game canvas.
 
+### 7.13 Hand-off prompt for the build session
+
+Paste this as the first message of a new session on this repository.
+
+```
+We're building the kaillera-next landing page redesign. The design is
+finished and decided; your job is to build it, not to redesign it.
+
+Read first, in this order:
+1. CLAUDE.md (project rules; the "Lessons for agents" section is binding).
+2. docs/landing-design.md: §1 Design Brief, §3 User flows, §4 Wireframes,
+   §7 Build plan (final). §7 is your checklist; §7.12 has the hosting and
+   TURN facts; §7.11 is the motion system; §7.4 is the final copy.
+3. docs/landing-design.mockup.html: the visual reference. Open it in a
+   browser. Lift the tokens (§7.5), the SVG mark sprite, the animations
+   and the board / invite / room / demo layouts from it directly.
+4. docs/launch-copy.md: framing rules for every netcode sentence. Never
+   "zero lag", "no input delay", "fixes lag", "eliminates rollbacks".
+
+Rules of the build:
+- Work on a new branch from main. One small PR per milestone (M0, M1, M2,
+  M3, M4), conventional-commit titles, never push to main. Check the diff
+  size against main before asking for a merge.
+- Order: M0 (server + hosting plumbing) first; nothing visible ships
+  before it. Then M1 landing, M2 invite page, M3 room overlay + demo
+  restyle, M4 assets, M5 launch checklist.
+- Anything touching play.html, play.js or the netplay engines must pass
+  tests/rb-two-player.mjs with JITTER=20 before merge. Don't edit served
+  files while a two-player run is in progress.
+- Hosting: propose the static-landing routing (§7.2 M0.9) in a README
+  and a PR; do not change DNS, Render settings or Cloudflare without the
+  owner's explicit OK in that session. Same for adding the Redis Key
+  Value instance and the keepalive (§7.12): implement behind config, ask
+  before switching it on in production.
+- First thing in M0: confirm in the Render dashboard whether
+  CF_TURN_KEY_ID and CF_TURN_API_TOKEN are set (§7.12). Record the answer
+  in docs/landing-design.md §7.12.
+- Where the doc is silent, choose the option that keeps the page honest
+  and the scope small, say what you assumed, and keep going. Ask the
+  owner only when two readings would produce materially different work.
+- Static page: no framework, no third-party scripts, budget in §7.7.
+  Accessibility in §7.6 is a requirement, not a nice-to-have.
+- Report outcomes plainly: what shipped, what's verified, what's not.
+
+Definition of done for the whole build: §7.2 M5, including the player
+test on the built page (§6.3, Appendix C) before launch.
+
+Start by reading the four files, then post a short plan for M0 as a
+checklist and begin.
+```
+
 ### 7.9 Explicitly not in this build
 Hover-to-stream (L2), chat, profiles, records, rankings, avatars, a
 roadmap, any mention of AI assistance, the personal story on the page,
 streaming mode on the join page, a "your last room" shortcut, generated
 imagery.
 
+### 7.12 Build checks, answered (2026-09-26)
+
+**Hosting tier.** `render.yaml` declares the service on Render's **free
+plan**, Docker, auto-deploy from `main`, health check `/health`. The repo's
+own notes (`deploy/render/README.md`) say: sleeps after 15 minutes with no
+traffic; Socket.IO heartbeats count as traffic; matches in progress keep
+playing because gameplay is peer to peer.
+
+**Can we guarantee it stays awake under a live room?** Not by heartbeats
+alone: Render's rule is "inbound traffic", and whether frames on a
+long-lived WebSocket count is not something to bet a match on. Layered
+answer, cheapest first:
+1. **Explicit keepalive from every connected client** (build item, M0):
+   while in a room, `fetch('/health')` every 5 minutes. An HTTP request is
+   unambiguously inbound traffic. The landing page's `/list` poll (10 s)
+   and the L1 frame uploads (10 s, listed in-game rooms) already do the
+   same while they run. With these, the service cannot sleep while anyone
+   is in a room or on the front page.
+2. **Rooms survive a nap anyway:** gameplay is P2P, so a sleeping server
+   costs a minute of signaling (late join, spectate, reconnect), not the
+   match. Clients auto-reconnect, and the reconnect handshake wakes it.
+   For rooms to survive the restart, set `REDIS_URL` to a Render **Key
+   Value** instance (free tier exists) and ship the zombie-room rule
+   (M0.2), so returning players reclaim their slots and nobody joins a
+   ghost. `render.yaml` has no Redis today: build item.
+3. **The actual guarantee is a paid instance** (Render Starter, no
+   spin-down). An external pinger every 10 minutes also works and fits in
+   the 750 free hours, but it's the tolerated trick, not the honest fix.
+   Recommendation: 1 + 2 now, and the waking UI as designed; upgrade when
+   there are real users.
+
+**TURN.** The server supports three ways, in this order: a static
+`ICE_SERVERS` JSON; **Cloudflare TURN** with short-lived credentials when
+`CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` are set (`server/src/api/turn.py`);
+an HMAC TURN pair via `TURN_SERVERS` + `TURN_SECRET`. Otherwise STUN only.
+`render.yaml` lists the two Cloudflare keys as `sync: false`, i.e. entered
+by hand in the Render dashboard. **Whether they are present in the live
+environment is unverified** from this session (the Render tool needs the
+owner's workspace confirmation). Check: Render dashboard → kaillera-next →
+Environment → both keys present. If absent, the page keeps the
+connection-failure copy and claims nothing about every pair connecting.
+
+**ROM sharing.** Already `ROM_SHARING_ENABLED='false'` in `render.yaml`
+(M0.1 is done on the server side; the client error copy still needs the
+wording change).
+
+**Mockup source in the repo:** `docs/landing-design.mockup.html` (the
+published artifact's source). Tokens, the SVG mark sprite, every animation,
+and the board/invite/room/demo layouts can be lifted from it directly.
+
 ### 7.10 Open items carried into the build session
-- 7.2 M0.8 build checks (free-tier sleep, TURN): facts to establish, not
-  decisions.
+- 7.2 M0.8 build checks: answered in §7.12; only the live presence of the
+  Cloudflare TURN keys remains to confirm in the Render dashboard.
 - S3: the owner's two-device photo, or the solo two-screenshot composite if
   the photo doesn't happen. Either is fine.
 - Appendix B (Kaillera-player answers): fold in if they arrive; nothing
@@ -2574,3 +2675,4 @@ Surprises (one line):
 | 2026-09-25 | Logo = KN tile; landing header rotates a set of seven motion marks per visit (A with motion, A2a, A1c, A1e, KO, the stick, letters arrive); click advances | Owner: "cycle through a set, keep KN as the main logo" | 5 |
 | 2026-09-25 | Match start → boot/sync overlay (real ready states); Rollback timeline → demo Result card (live) + landing netcode section. Phase 5 closed | Owner: "Both recommendations are fine" | 5 |
 | 2026-09-26 | Nothing outstanding blocks the build: the player test moves to the built page (M5); the photo has a solo fallback; Kaillera-player answers are optional; analytics defaulted. Build plan marked final | Owner: "Do we really need 1–4?" | 7 |
+| 2026-09-26 | Free tier confirmed from render.yaml; keepalive + Redis Key Value + zombie rule as the stay-awake answer, paid instance as the guarantee; TURN = Cloudflare keys entered by hand, live presence unverified; mockup source committed; hand-off prompt written | Owner's build-check questions | 7 |
