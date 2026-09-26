@@ -102,7 +102,8 @@ _PROXY_WARN_INTERVAL = 600.0
 
 def _warn_proxy_once(reason: str) -> None:
     now = time.monotonic()
-    if now - _proxy_warned.get(reason, 0) >= _PROXY_WARN_INTERVAL:
+    last = _proxy_warned.get(reason)
+    if last is None or now - last >= _PROXY_WARN_INTERVAL:  # monotonic can start near 0
         _proxy_warned[reason] = now
         log.warning("X-KN-Client-IP present but %s — falling back to the normal IP rule", reason)
 
