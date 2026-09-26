@@ -59,9 +59,19 @@ function withHeaders(res, isPage) {
   return out;
 }
 
-// The static pages carry generic preview tags with a host placeholder.
+// The static pages carry generic preview tags with a host placeholder. On
+// /join the canonical link keeps the invite (rebuilt from the validated room
+// code, never copied from the raw query).
 async function staticPage(res, url) {
-  const html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
+  let html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
+  const room = (url.searchParams.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (url.pathname === '/join' && room) {
+    const spectate = url.searchParams.get('spectate') === '1' ? '&amp;spectate=1' : '';
+    html = html.replace(
+      `property="og:url" content="https://${url.host}/join"`,
+      `property="og:url" content="https://${url.host}/join?room=${room}${spectate}"`,
+    );
+  }
   return withHeaders(new Response(html, res), true);
 }
 

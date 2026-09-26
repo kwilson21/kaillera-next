@@ -24,7 +24,8 @@ const env = {
   ASSETS: {
     fetch: async (req) => {
       const p = new URL(req.url).pathname;
-      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' : ''), { status: 200 });
+      const og = p === '/join.html' ? ' <meta property="og:url" content="https://__KN_HOST__/join" />' : '';
+      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' + og : ''), { status: 200 });
     },
   },
 };
@@ -41,6 +42,7 @@ const cases = [
   ['/index.html', 'GET', ''],
   ['/join?room=ABC', 'GET', ''],
   ['/join?room=ABC', 'GET', 'Discordbot/2.0'],
+  ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=ABC', 'POST', ''],
   ['/static/landing.js', 'GET', ''],
   ['/static/fonts/ibm-plex-sans-var-latin.woff2', 'GET', ''],
@@ -99,7 +101,7 @@ def test_pages_and_their_files_come_from_assets():
         assert "script-src 'self'" in r[(page, "GET", "")]["csp"]
         assert r[(page, "GET", "")]["cache"] == "no-store"
         # The static preview tags get the public host.
-        assert _body(r, page).endswith(" og=https://kn.example/og")
+        assert " og=https://kn.example/og" in _body(r, page)
     assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
     assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
@@ -124,7 +126,14 @@ def test_crawlers_get_the_room_preview_on_the_public_host_or_the_static_page():
     assert _body(up, *crawler) == "origin:/join?room=ABC og=https://kn.example/card"
     assert "script-src 'self'" in up[crawler]["csp"]
     down = _run(origin_up=False)
-    assert _body(down, *crawler) == "asset:/join.html og=https://kn.example/og"
+    # The static fallback keeps the invite in its canonical link.
+    fallback = _body(down, *crawler)
+    assert fallback.startswith("asset:/join.html og=https://kn.example/og")
+    assert 'content="https://kn.example/join?room=ABC"' in fallback
+    # Only the validated code goes in, whatever the query holds.
+    odd = _body(down, "/join?room=abc%22%3E%3Cx&spectate=1", "GET", "Discordbot/2.0")
+    assert 'content="https://kn.example/join?room=ABCX&amp;spectate=1"' in odd
+    assert "<x" not in odd
 
 
 def test_build_lists_exactly_the_files_the_pages_load():
