@@ -1,0 +1,1462 @@
+<title>kaillera-next Directions</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@700;800&family=Work+Sans:wght@400;500;600&family=Nunito:wght@500;700;800;900&display=swap">
+<style>
+  :root {
+    --ui-bg: #f3f1ec; --ui-fg: #1d1b18; --ui-muted: #6b665e; --ui-line: #d9d4ca;
+    --ui-chip: #ffffff; --ui-chip-on: #1d1b18; --ui-chip-on-fg: #f3f1ec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ui-bg: #17161a; --ui-fg: #ece8e0; --ui-muted: #9b958b; --ui-line: #2d2b30;
+      --ui-chip: #221f25; --ui-chip-on: #ece8e0; --ui-chip-on-fg: #17161a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ui-bg: #17161a; --ui-fg: #ece8e0; --ui-muted: #9b958b; --ui-line: #2d2b30;
+    --ui-chip: #221f25; --ui-chip-on: #ece8e0; --ui-chip-on-fg: #17161a;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--ui-bg); color: var(--ui-fg); font: 14px/1.5 "IBM Plex Sans", system-ui, sans-serif; }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+  /* ---------- review toolbar ---------- */
+  .bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--ui-bg); border-bottom: 1px solid var(--ui-line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+  .bar .grp { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .bar .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ui-muted); margin-right: 4px; }
+  .chip { border: 1px solid var(--ui-line); background: var(--ui-chip); color: var(--ui-fg); border-radius: 999px; padding: 5px 12px; font-size: 13px; }
+  .chip[aria-pressed="true"] { background: var(--ui-chip-on); color: var(--ui-chip-on-fg); border-color: var(--ui-chip-on); }
+  .note { padding: 8px 16px 0; color: var(--ui-muted); font-size: 13px; max-width: 78ch; }
+  .note b { color: var(--ui-fg); font-weight: 600; }
+
+  /* ---------- mock pages (all share one token set per direction) ---------- */
+  .mock { --p1: #e5484d; --p2: #3b82f6; --p3: #f5c518; --p4: #3fb950; margin: 12px 16px 40px; border: 1px solid var(--ui-line); border-radius: 8px; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font-body); }
+  .mock[data-dir="A"] { --bg: #0e1218; --bg2: #151b25; --line: #242c39; --text: #e8ecf1; --muted: #8b95a5; --accent: #5aa8ff; --accent-ink: #061020; --glow: transparent; --radius: 4px; --font-display: "Barlow Condensed", "Arial Narrow", sans-serif; --font-body: "IBM Plex Sans", system-ui, sans-serif; --font-label: "Barlow Condensed", "Arial Narrow", sans-serif; }
+  .mock[data-dir="B"] { --bg: #0b0908; --bg2: #17110e; --line: #2c211a; --text: #f3e9d8; --muted: #a08f7a; --accent: #ffb347; --accent-ink: #1d1206; --glow: rgba(255, 179, 71, .42); --radius: 6px; --font-display: "Syne", "Arial Black", sans-serif; --font-body: "Work Sans", system-ui, sans-serif; --font-label: "Work Sans", system-ui, sans-serif; }
+  .mock[data-dir="C"] { --bg: #1f1a17; --bg2: #2a2420; --line: #3a322c; --text: #f5efe6; --muted: #b3a596; --accent: #f2a93b; --accent-ink: #241a08; --glow: transparent; --radius: 16px; --font-display: "Nunito", "Trebuchet MS", sans-serif; --font-body: "Nunito", "Trebuchet MS", sans-serif; --font-label: "Nunito", "Trebuchet MS", sans-serif; }
+  .mock[data-dir="M"] { --bg: #0d0c0b; --bg2: #16151a; --line: #262429; --text: #efe9df; --muted: #9a9388; --accent: #ffb347; --accent-ink: #1d1206; --glow: rgba(255, 179, 71, .3); --radius: 4px; --font-display: "Syne", "Arial Black", sans-serif; --font-body: "IBM Plex Sans", system-ui, sans-serif; --font-label: "Barlow Condensed", "Arial Narrow", sans-serif; }
+
+  .wrap { width: min(1080px, 100%); margin: 0 auto; padding: 0 20px; }
+  .wrap.narrow { width: min(640px, 100%); }
+  .hero { position: relative; padding-block: 40px 28px; overflow: hidden; }
+  .hero::before { content: ""; position: absolute; left: 0; right: 0; top: -20%; height: 90%; background: radial-gradient(60% 65% at 50% 0%, var(--glow), transparent 70%); pointer-events: none; }
+  .hero > * { position: relative; }
+  .name { margin: 0; font-family: var(--font-display); font-weight: 800; letter-spacing: -.01em; font-size: clamp(34px, 5vw, 56px); line-height: 1; text-wrap: balance; }
+  .name.sm { font-size: clamp(26px, 3.4vw, 38px); }
+  .mock[data-dir="A"] .name { text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+  .mock[data-dir="B"] .name, .mock[data-dir="M"] .name { text-shadow: 0 0 24px var(--glow), 0 0 60px var(--glow); }
+  .mock[data-dir="C"] .name { font-weight: 900; }
+  .line { margin: 10px 0 0; font-size: clamp(16px, 1.6vw, 19px); color: var(--text); max-width: 42ch; }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+  .kicker { font-family: var(--font-label); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  .m { color: var(--muted); }
+  .brand-sm { font-family: var(--font-display); font-weight: 700; font-size: 18px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 26px; }
+  .mock[data-dir="C"] .brand-sm { text-transform: none; letter-spacing: 0; }
+
+  /* board */
+  .board { margin-top: 26px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); }
+  .board-h { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .board-h h2 { margin: 0; font-family: var(--font-label); font-size: 13px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; }
+  .mock[data-dir="C"] .board-h h2 { text-transform: none; letter-spacing: 0; font-size: 16px; font-weight: 800; }
+  .board-h .live { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .board-h .wk { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+  .rooms { display: grid; }
+  .room { display: grid; grid-template-columns: 1.4fr 1fr auto 1.2fr auto; gap: 8px 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .room:last-child { border-bottom: 0; }
+  .room .g { font-weight: 600; }
+  .room .h { color: var(--muted); }
+  .slots { display: inline-flex; gap: 4px; }
+  .slot { width: 10px; height: 10px; border-radius: 2px; border: 1px solid var(--muted); opacity: .55; display: inline-block; }
+  .slot.on { opacity: 1; border-color: transparent; }
+  .slot.p1 { background: var(--p1); } .slot.p2 { background: var(--p2); } .slot.p3 { background: var(--p3); } .slot.p4 { background: var(--p4); }
+  .cnt { font-variant-numeric: tabular-nums; margin-left: 8px; color: var(--muted); }
+  .st { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .st.ingame { color: var(--text); }
+  .st.ingame::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 7px; vertical-align: 1px; }
+  .acts { display: flex; gap: 6px; justify-content: flex-end; }
+  .btn { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: var(--radius); padding: 7px 12px; font-size: 13px; font-weight: 600; font-family: var(--font-body); }
+  .btn:hover { border-color: var(--text); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn.big { padding: 13px 22px; font-size: 16px; }
+  .btn.wide { width: 100%; }
+  .btn[disabled] { opacity: .45; cursor: default; }
+  .mock[data-dir="C"] .btn { border-width: 2px; }
+
+  /* B: cabinets */
+  .mock[data-dir="B"] .rooms { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; padding: 14px; }
+  .mock[data-dir="B"] .room { grid-template-columns: 1fr; grid-template-areas: "st" "g" "h" "sl" "acts"; gap: 6px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); overflow: hidden; }
+  .mock[data-dir="B"] .room .st { grid-area: st; padding: 12px 14px; background: var(--bg2); border-bottom: 1px solid var(--line); font-family: var(--font-label); letter-spacing: .06em; text-transform: uppercase; font-size: 12px; }
+  .mock[data-dir="B"] .room .g { grid-area: g; padding: 12px 14px 0; font-family: var(--font-display); font-size: 17px; }
+  .mock[data-dir="B"] .room .h { grid-area: h; padding: 0 14px; }
+  .mock[data-dir="B"] .room .sl { grid-area: sl; padding: 4px 14px 0; }
+  .mock[data-dir="B"] .room .acts { grid-area: acts; padding: 12px 14px 14px; justify-content: flex-start; }
+  .mock[data-dir="B"] .room.ingame { box-shadow: 0 0 0 1px var(--c), 0 0 34px -6px var(--c); border-color: transparent; }
+  .mock[data-dir="B"] .room.ingame .st { color: var(--c); background: color-mix(in srgb, var(--c) 12%, var(--bg2)); }
+  .mock[data-dir="B"] .room.p1 { --c: var(--p1); } .mock[data-dir="B"] .room.p2 { --c: var(--p2); } .mock[data-dir="B"] .room.p3 { --c: var(--p3); } .mock[data-dir="B"] .room.p4 { --c: var(--p4); }
+
+  .cta { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; margin-top: 18px; }
+  .code { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 14px; }
+  .code input { width: 120px; padding: 10px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); color: var(--text); font: inherit; letter-spacing: .12em; text-transform: uppercase; }
+  .code .btn { padding: 8px 10px; }
+  .code-link { display: none; color: var(--muted); background: none; border: 0; padding: 0; text-decoration: underline; font-size: 14px; }
+  .need { margin: 14px 0 0; color: var(--muted); font-size: 14px; }
+  .need b { color: var(--text); font-weight: 600; }
+
+  /* empty + waking */
+  .empty { padding: 26px 16px; }
+  .empty h3, .waking h3 { margin: 0; font-family: var(--font-display); font-size: 22px; font-weight: 700; }
+  .empty p, .waking p { margin: 8px 0 0; color: var(--muted); max-width: 60ch; }
+  .empty p b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .waking { padding: 18px 16px 20px; }
+  .waking h3 { display: flex; align-items: center; gap: 10px; }
+  .waking h3 small { font: 500 13px/1 var(--font-body); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .prog { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 14px 0; }
+  .prog i { display: block; height: 100%; width: 30%; background: var(--accent); animation: slide 1.6s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+  .viz { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); padding: 14px; cursor: pointer; user-select: none; }
+  .viz-row { display: grid; grid-template-columns: 78px 1fr 84px; gap: 12px; align-items: center; padding: 8px 0; }
+  .viz-row span { font-family: var(--font-label); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .track { position: relative; height: 28px; border-radius: 14px; background: var(--bg2); overflow: hidden; }
+  .pulse { position: absolute; left: 12px; top: 50%; width: 18px; height: 18px; border-radius: 50%; transform: translateY(-50%); background: var(--accent); opacity: 0; box-shadow: 0 0 18px var(--accent); }
+  .pulse.lit { animation: pfade .6s ease-out forwards; }
+  .pulse.late { background: var(--p1); box-shadow: 0 0 18px var(--p1); }
+  @keyframes pfade { 0% { opacity: 1; transform: translateY(-50%) scale(.5); } 50% { opacity: .85; transform: translateY(-50%) scale(1.35); } 100% { opacity: .25; transform: translateY(-50%) scale(1); } }
+  .viz-row b { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .verdict { margin-top: 8px; text-align: center; font-family: var(--font-display); font-size: 18px; font-weight: 700; }
+  .verdict.ok { color: var(--p4); } .verdict.bad { color: var(--p1); }
+  .verdict-sub { text-align: center; color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .viz-ctl { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; justify-content: center; margin-top: 12px; color: var(--muted); font-size: 13px; }
+  .viz-ctl label { display: inline-flex; align-items: center; gap: 8px; }
+  .viz-ctl input[type="range"] { width: 140px; accent-color: var(--accent); }
+  .viz-ctl input[type="checkbox"] { accent-color: var(--accent); }
+  .viz-ctl output { font-variant-numeric: tabular-nums; color: var(--text); min-width: 5ch; }
+  .waking .cta { margin-top: 16px; }
+
+  /* live previews */
+  .thumb { display: none; width: 72px; aspect-ratio: 4 / 3; border-radius: 3px; border: 1px solid var(--line); background: linear-gradient(135deg, #1c2431, #0a0d12); position: relative; overflow: hidden; align-self: center; }
+  .mock[data-preview="on"] .thumb { display: block; }
+  .thumb.live::after, .screen-box::after { content: "LIVE"; position: absolute; left: 5px; top: 5px; font: 700 9px/1 var(--font-label); letter-spacing: .1em; color: #fff; background: var(--p1); padding: 3px 4px; border-radius: 2px; }
+  .thumb.idle { opacity: .45; }
+  .mock[data-preview="on"] .room { grid-template-columns: 72px 1.4fr 1fr auto 1.2fr auto; }
+  .featured { display: none; }
+  .mock[data-preview="on"] #st-live .featured { display: grid; grid-template-columns: minmax(200px, 380px) 1fr; gap: 20px; padding: 16px; border-bottom: 1px solid var(--line); align-items: center; }
+  .screen-box { aspect-ratio: 4 / 3; max-width: 100%; border-radius: var(--radius); border: 1px solid var(--line); background: radial-gradient(80% 70% at 50% 40%, #243247, #0a0d12 85%); position: relative; overflow: hidden; }
+  .screen-box::after { font-size: 11px; padding: 4px 6px; left: 8px; top: 8px; }
+  .screen-box .fake { position: absolute; left: 10px; right: 10px; bottom: 8px; color: var(--muted); font-size: 12px; line-height: 1.3; }
+  .featured h3 { margin: 4px 0 2px; font-family: var(--font-display); font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .featured .meta { color: var(--muted); margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .featured .meta .cnt { margin-left: 0; }
+  .featured .acts { justify-content: flex-start; }
+  .featured .why { margin: 12px 0 0; color: var(--muted); font-size: 13px; max-width: 44ch; }
+  .mock[data-dir="B"][data-preview="on"] .room { grid-template-columns: 1fr; grid-template-areas: "th" "st" "g" "h" "sl" "acts"; }
+  .mock[data-dir="B"] .room .thumb { grid-area: th; width: 100%; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); }
+  .mock[data-dir="C"] .thumb, .mock[data-dir="C"] .screen-box { border-radius: 10px; }
+
+  /* sections */
+  .sec { padding-block: 34px; border-top: 1px solid var(--line); }
+  .sec h2 { margin: 0 0 12px; font-family: var(--font-display); font-size: clamp(22px, 2.6vw, 30px); font-weight: 700; text-wrap: balance; line-height: 1.1; }
+  .mock[data-dir="A"] .sec h2 { text-transform: uppercase; letter-spacing: .03em; }
+  .mock[data-dir="C"] .sec h2 { font-weight: 900; }
+  .sec p { margin: 0 0 10px; max-width: 62ch; color: var(--text); }
+  .sec p.m { color: var(--muted); }
+  .sec a { color: var(--accent); }
+  .two { display: grid; grid-template-columns: 1.1fr 1fr; gap: 28px; align-items: start; }
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  .shot { aspect-ratio: 4 / 3; max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(160deg, var(--bg2), var(--bg)); display: grid; place-items: end start; padding: 8px; color: var(--muted); font-size: 12px; line-height: 1.25; }
+  .video { aspect-ratio: 16 / 9; max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(160deg, var(--bg2), var(--bg)); display: grid; place-items: center; color: var(--muted); position: relative; }
+  .video.small { aspect-ratio: 16 / 9; }
+  .video .play { width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 22px; }
+  .video .cap { position: absolute; left: 12px; bottom: 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .proof { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0 16px; }
+  .ribbon { display: flex; gap: 10px; flex-wrap: nowrap; overflow-x: auto; padding: 10px 0 4px; color: var(--muted); font-family: var(--font-label); font-size: 13px; letter-spacing: .04em; white-space: nowrap; scrollbar-width: thin; }
+  .ribbon span::after { content: "→"; margin-left: 10px; color: var(--line); }
+  .ribbon span:last-child { color: var(--accent); }
+  .ribbon span:last-child::after { content: ""; }
+  .foot { padding-block: 20px 26px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; display: grid; gap: 4px; }
+  .glyph { display: inline-grid; grid-template-columns: repeat(3, 8px); gap: 3px; vertical-align: middle; margin-right: 10px; }
+  .glyph i { width: 8px; height: 8px; border-radius: 50%; }
+  .glyph i:nth-child(1) { background: var(--p1); } .glyph i:nth-child(2) { background: var(--p2); } .glyph i:nth-child(3) { background: var(--p3); } .glyph i:nth-child(4) { background: var(--p4); } .glyph i:nth-child(5) { background: var(--p1); } .glyph i:nth-child(6) { background: var(--p2); }
+  .mock:not([data-dir="C"]) .glyph { display: none; }
+
+  /* ---------- invite-link screen (W3) ---------- */
+  .inv-facts { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; color: var(--muted); margin: 10px 0 22px; font-variant-numeric: tabular-nums; }
+  .stack { display: grid; gap: 6px; max-width: 420px; }
+  .stack .hint { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+  .inv-next { margin: 22px 0 6px; color: var(--text); max-width: 52ch; }
+  .inv-sep { border: 0; border-top: 1px solid var(--line); margin: 24px 0 14px; }
+  .banner { border: 1px solid var(--p3); background: color-mix(in srgb, var(--p3) 12%, var(--bg2)); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; justify-content: space-between; }
+  .banner .btn { flex: none; }
+  .inv-closed h1 { margin: 0 0 8px; }
+  .inv-fullline { color: var(--muted); margin: 0 0 14px; max-width: 48ch; }
+
+  /* ---------- room overlay screen (W4) ---------- */
+  .roompage { padding: 32px 20px 40px; background: radial-gradient(70% 50% at 50% 0%, #121a26, var(--bg) 70%); display: grid; place-items: start center; }
+  .oc { width: min(640px, 100%); border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); }
+  .oc-head { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .oc-head .room-id { font-family: var(--font-label); letter-spacing: .1em; text-transform: uppercase; font-weight: 600; font-size: 13px; }
+  .oc-head .you { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+  .oc-head .you input { width: 110px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; }
+  .oc-players { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .pl { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  .pl .tag { color: var(--muted); font-size: 12px; }
+  .pl .ok { color: var(--p4); font-size: 12px; margin-left: auto; }
+  .pl .pend { color: var(--p3); font-size: 12px; margin-left: auto; }
+  .pl.open { color: var(--muted); }
+  .oc-body { padding: 16px; display: grid; gap: 14px; }
+  .dz { border: 1px dashed var(--muted); border-radius: var(--radius); padding: 22px 18px; text-align: center; background: var(--bg); }
+  .dz .dz-t { font-family: var(--font-display); font-size: 20px; font-weight: 700; }
+  .dz .dz-s { margin: 6px 0 0; color: var(--muted); font-size: 13px; max-width: 46ch; margin-inline: auto; }
+  .dz .dz-s b { color: var(--text); font-weight: 600; }
+  .dz-err { margin: 12px auto 0; padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--p1); background: color-mix(in srgb, var(--p1) 12%, var(--bg2)); color: var(--text); font-size: 13px; max-width: 46ch; text-align: left; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; }
+  .lib { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+  .lib-h { padding: 10px 14px; border-bottom: 1px solid var(--line); font-family: var(--font-label); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .lib-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .lib-row:last-child { border-bottom: 0; }
+  .lib-row b { font-weight: 600; }
+  .lib-row .btn { margin-left: auto; }
+  .watch-instead { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; color: var(--text); font-size: 14px; }
+  .watch-instead .m { font-size: 13px; }
+  .oc-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; color: var(--muted); font-size: 13px; }
+  .oc-foot { padding: 12px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+
+  /* ---------- demo screen (restyled to the direction) ---------- */
+  .demo-head { padding-block: 28px 14px; }
+  .demo-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; padding-bottom: 32px; }
+  .stage { aspect-ratio: 4 / 3; max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: #05070a; display: grid; place-items: center; }
+  .drop-inner { width: min(420px, calc(100% - 32px)); padding: 24px; border: 1px dashed var(--muted); border-radius: var(--radius); background: var(--bg2); text-align: center; }
+  .drop-inner .dz-t { font-family: var(--font-display); font-size: 20px; font-weight: 700; letter-spacing: .04em; }
+  .drop-inner p { margin: 6px 0 14px; color: var(--muted); font-size: 13px; }
+  .side { display: grid; gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); padding: 14px 16px; }
+  .card h2 { margin: 0 0 8px; font-family: var(--font-label); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .feel { padding: 12px 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); text-align: center; font-family: var(--font-display); font-size: 22px; font-weight: 700; color: var(--muted); }
+  .fd { margin-top: 10px; padding: 8px 10px; border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: 13px; text-align: center; font-variant-numeric: tabular-nums; }
+  .slider-h { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .slider-h b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .card input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .card .hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+  .emu { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; font-size: 12px; color: var(--muted); }
+  .keys dt { white-space: nowrap; color: var(--text); }
+  .keys dd { margin: 0; }
+  kbd { display: inline-block; min-width: 1.5em; padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--bg); font: 11px/1.4 ui-monospace, monospace; text-align: center; }
+  .explainer { margin: 14px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 76ch; }
+
+  /* ---------- logo candidates ---------- */
+  .hdr-mark { display: inline-block; width: .82em; height: .82em; vertical-align: -.06em; margin-right: .22em; }
+  .hdr-mark svg { width: 100%; height: 100%; display: block; }
+  .hdr-mark { transition: opacity .3s; }
+  .hdr-mark.fade { opacity: 0; }
+  .mock[data-logo="none"] .hdr-mark, .mock[data-logo="D"] .hdr-mark, .mock[data-logo="R55"] .hdr-mark, .mock[data-logo="R6B"] .hdr-mark { display: none; }
+  .mock[data-logo="D"] .hy { color: var(--accent); }
+  .brand-sm .hdr-mark { width: 1em; height: 1em; vertical-align: -.15em; }
+  .logo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; padding-block: 24px 36px; }
+  .lc { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg2); padding: 16px; display: grid; gap: 14px; align-content: start; }
+  .lc h3 { margin: 0; font-family: var(--font-display); font-size: 20px; font-weight: 700; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .lc h3 small { font: 500 12px/1.3 var(--font-body); color: var(--muted); text-align: right; }
+  .lc .big { display: grid; place-items: center; height: 120px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); }
+  .lc .big svg { width: 84px; height: 84px; }
+  .lockup { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .lockup svg { width: 34px; height: 34px; flex: none; }
+  .lockup .wm { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; font-size: 24px; line-height: 1; white-space: nowrap; min-width: 0; }
+  .lockup .wm.rowmark { display: grid; gap: 4px; }
+  .lockup .wm.rowmark svg { width: 100%; height: 6px; }
+  .favrow { display: flex; gap: 10px; align-items: stretch; }
+  .fav { flex: 1; display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px; border-radius: var(--radius); border: 1px solid var(--line); }
+  .fav.dark { background: #0e1218; } .fav.light { background: #f3f1ec; }
+  .fav svg.s32 { width: 32px; height: 32px; } .fav svg.s16 { width: 16px; height: 16px; }
+  .mono { display: grid; place-items: center; height: 64px; background: #000; border-radius: var(--radius); color: #fff; }
+  .mono svg { width: 40px; height: 40px; }
+  .lc .m { font-size: 13px; margin: 0; }
+  .lc .btn { justify-self: start; }
+  .lc.is-on { border-color: var(--accent); }
+
+  /* ---------- round 5: motion graphics ---------- */
+  .r5 .big { height: 160px; padding: 10px; }
+  .r5 .big svg { width: auto; height: 140px; max-width: 100%; overflow: visible; display: block; }
+  .r5 .big svg rect, .r5 .big svg g, .r5 .big svg circle, .r5 .big svg polygon { transform-box: fill-box; }
+  .hdr-mark.wide { width: 1.5em; }
+  .hdr-mark svg { overflow: visible; }
+  /* KO */
+  .ko .stick { transform-origin: center; animation: ko-stick 3.6s ease-out infinite; }
+  .ko .foe { transform-origin: center; animation: ko-fly 3.6s cubic-bezier(.3,0,.9,.6) infinite; }
+  .ko .foe.t1 { animation-delay: .06s; } .ko .foe.t2 { animation-delay: .12s; }
+  .ko .spark { transform-origin: center; animation: ko-spark 3.6s ease-out infinite; }
+  .ko .stock3 { animation: ko-stock 3.6s steps(1, end) infinite; }
+  .ko .hit { transform-origin: center; animation: ko-hit 3.6s ease-out infinite; }
+  @keyframes ko-stick { 0%, 11% { transform: translate(0, 0); } 14% { transform: translate(6px, 0); } 18% { transform: translate(5px, 0); } 26%, 100% { transform: translate(0, 0); } }
+  @keyframes ko-fly { 0%, 13% { transform: translate(0, 0) rotate(0deg); opacity: 1; } 34% { transform: translate(30px, -30px) rotate(540deg); opacity: 1; } 36% { transform: translate(33px, -33px) rotate(580deg); opacity: 0; } 80% { transform: translate(0, 0) rotate(0deg); opacity: 0; } 90%, 100% { transform: translate(0, 0) rotate(0deg); opacity: 1; } }
+  @keyframes ko-hit { 0%, 12% { transform: scale(0); opacity: 0; } 14% { transform: scale(1); opacity: 1; } 19% { transform: scale(1.6); opacity: 0; } 100% { transform: scale(0); opacity: 0; } }
+  @keyframes ko-spark { 0%, 30% { transform: scale(0) rotate(0deg); opacity: 0; } 34% { transform: scale(1.3) rotate(20deg); opacity: 1; } 42% { transform: scale(.4) rotate(40deg); opacity: 0; } 100% { transform: scale(0); opacity: 0; } }
+  @keyframes ko-stock { 0%, 37% { opacity: 1; } 40% { opacity: 0; } 43% { opacity: 1; } 46% { opacity: 0; } 95% { opacity: 0; } 100% { opacity: 1; } }
+  /* match start → board marker */
+  .ms .fill { transform-origin: bottom center; animation: ms-fill 4.8s ease-out infinite; }
+  .ms .f2 { animation-delay: .35s; } .ms .f3 { animation-delay: .7s; }
+  .ms .f4 { animation-name: ms-fill4; }
+  .ms .outline { animation: ms-outline 4.8s ease-in-out infinite; }
+  .ms .o2 { animation-delay: .35s; } .ms .o3 { animation-delay: .7s; }
+  @keyframes ms-fill { 0%, 3% { transform: scaleY(0); height: 20px; y: 6px; opacity: 1; } 9% { transform: scaleY(1); height: 20px; y: 6px; } 44% { transform: scaleY(1) translateY(0); height: 20px; y: 6px; } 47% { transform: scaleY(1) translateY(-3px); } 50% { transform: scaleY(1) translateY(0); } 56% { height: 20px; y: 6px; } 66%, 86% { height: 5px; y: 13.5px; transform: scaleY(1); opacity: 1; } 93% { opacity: 1; height: 5px; y: 13.5px; } 96%, 100% { opacity: 0; height: 5px; y: 13.5px; transform: scaleY(1); } }
+  @keyframes ms-fill4 { 0%, 26% { transform: scaleY(0); height: 20px; y: 6px; opacity: 1; } 36% { transform: scaleY(1); height: 20px; y: 6px; } 44% { transform: scaleY(1) translateY(0); height: 20px; y: 6px; } 47% { transform: scaleY(1) translateY(-3px); } 50% { transform: scaleY(1) translateY(0); } 56% { height: 20px; y: 6px; } 66%, 86% { height: 5px; y: 13.5px; transform: scaleY(1); opacity: 1; } 93% { opacity: 1; height: 5px; y: 13.5px; } 96%, 100% { opacity: 0; height: 5px; y: 13.5px; transform: scaleY(1); } }
+  @keyframes ms-outline { 0%, 56% { height: 20px; y: 6px; } 66%, 86% { height: 5px; y: 13.5px; } 96%, 100% { height: 20px; y: 6px; } }
+  /* rollback timeline */
+  .rb .head { animation: rb-head 4s infinite; }
+  .rb .t6 { animation: rb-bad 4s infinite; }
+  .rb .t4, .rb .t5 { animation: rb-replay 4s infinite; }
+  .rb .lbl { font: 600 4.2px/1 var(--font-label); letter-spacing: .08em; text-transform: uppercase; fill: var(--muted); }
+  .rb .lbl.bad { fill: #e5484d; animation: rb-lblbad 4s infinite; }
+  .rb .lbl.re { fill: #5aa8ff; animation: rb-lblre 4s infinite; }
+  @keyframes rb-head { 0% { transform: translateX(0); animation-timing-function: steps(6, end); } 36% { transform: translateX(36px); animation-timing-function: linear; } 40% { transform: translateX(36px); animation-timing-function: linear; } 43% { transform: translateX(18px); animation-timing-function: steps(3, end); } 55% { transform: translateX(36px); animation-timing-function: steps(4, end); } 79% { transform: translateX(60px); opacity: 1; } 88% { transform: translateX(60px); opacity: 1; } 90% { opacity: 0; transform: translateX(0); } 98% { opacity: 0; transform: translateX(0); } 100% { opacity: 1; transform: translateX(0); } }
+  @keyframes rb-bad { 0%, 35% { fill: #242c39; } 37%, 42% { fill: #e5484d; } 55%, 88% { fill: #5aa8ff; } 90%, 100% { fill: #242c39; } }
+  @keyframes rb-replay { 0%, 43% { fill: #242c39; } 55%, 88% { fill: #5aa8ff; } 90%, 100% { fill: #242c39; } }
+  @keyframes rb-lblbad { 0%, 35% { opacity: 0; } 37%, 43% { opacity: 1; } 46%, 100% { opacity: 0; } }
+  @keyframes rb-lblre { 0%, 43% { opacity: 0; } 45%, 56% { opacity: 1; } 60%, 100% { opacity: 0; } }
+  /* interactive stick */
+  .istick { touch-action: none; cursor: grab; }
+  .istick .cap { transform-origin: center; transition: transform .35s cubic-bezier(.2, 1.4, .3, 1); }
+  .istick .cd { transition: stroke-opacity .12s; }
+  .istick .ring { opacity: 0; transform-origin: center; }
+  .istick .ring.fire { animation: ifire .45s ease-out; }
+  @keyframes ifire { 0% { opacity: .9; transform: scale(.4); } 100% { opacity: 0; transform: scale(2.6); } }
+  /* letters arrive */
+  .arrive .L { display: inline-block; animation: arrive 6s ease-out infinite; animation-delay: calc(var(--i) * 70ms); }
+  @keyframes arrive { 0% { opacity: 0; transform: translateY(-.35em); color: var(--c); } 4% { opacity: 1; transform: translateY(0); color: var(--c); } 10% { color: var(--c-end, var(--text)); } 100% { opacity: 1; transform: translateY(0); color: var(--c-end, var(--text)); } }
+  .mock[data-logo="R55"] .name .hy { color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) { .ko *, .ms *, .rb *, .arrive .L { animation: none !important; } }
+
+
+  /* ---------- round 6b: the real wordmark with the ports inside the letters ---------- */
+  @property --p { syntax: '<percentage>'; inherits: false; initial-value: 100%; }
+  .ports { --cutL: 38%; --cutE: 36%; }
+  .ports .hy { color: var(--accent); }
+  .ports .pI { color: var(--p1); }
+  .ports .pL1, .ports .pL2, .ports .pE { -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; }
+  .ports .pL1 { background-image: linear-gradient(to right, var(--p2) var(--cutL), var(--text) var(--cutL)); }
+  .ports .pL2 { background-image: linear-gradient(to right, var(--p3) var(--cutL), var(--text) var(--cutL)); }
+  .ports .pE { --p: 100%; background-image: linear-gradient(to right, transparent var(--cutE), var(--text) var(--cutE)), linear-gradient(to top, var(--p4) var(--p), #6b7686 var(--p)); }
+  .ports.play .pE { animation: portfill 7s ease-out infinite; }
+  .ports.once .pE { --p: 0%; animation: portfill 7s ease-out 1 forwards; }
+  @keyframes portfill { 0%, 18% { --p: 0%; } 30%, 88% { --p: 100%; } 96%, 100% { --p: 0%; } }
+  .ports.still .pE { --p: 100%; animation: none; }
+  .r6 .lockup { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .r6 .lockup .cap { color: var(--muted); font-size: 12px; }
+  .r6 .lockup .wm { font-size: clamp(28px, 6vw, 56px); }
+  .r6 .lockup.withmark { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .r6 .lockup.withmark svg { width: 1.1em; height: 1.1em; font-size: clamp(28px, 6vw, 56px); flex: none; }
+  .r6 .tune { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; color: var(--muted); font-size: 13px; }
+  .r6 .tune input[type="range"] { width: 160px; accent-color: var(--accent); }
+  .r6 .tune output { color: var(--text); font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: reduce) { .ports .pE { animation: none !important; --p: 100%; } }
+
+  @media (max-width: 720px) {
+    .mock { margin: 10px 0 30px; border-radius: 0; border-left: 0; border-right: 0; }
+    .wrap { padding: 0 16px; }
+    .hero { padding-block: 28px 22px; }
+    .sub { display: none; }
+    .room { grid-template-columns: 1fr auto; grid-template-areas: "g acts" "h acts" "sl acts" "st acts"; gap: 4px 12px; }
+    .mock[data-preview="on"] .room { grid-template-columns: 72px 1fr auto; grid-template-areas: "th g acts" "th h acts" "th sl acts" "th st acts"; }
+    .room .thumb { grid-area: th; }
+    .mock[data-preview="on"] #st-live .featured { grid-template-columns: 1fr; }
+    .featured .acts { flex-direction: column; }
+    .featured .acts .btn { width: 100%; }
+    .room .g { grid-area: g; } .room .h { grid-area: h; } .room .sl { grid-area: sl; } .room .st { grid-area: st; } .room .acts { grid-area: acts; flex-direction: column; }
+    .cta { flex-direction: column; align-items: stretch; }
+    .cta .btn.big { width: 100%; }
+    .code { display: none; }
+    .code-link { display: inline; }
+    .two { grid-template-columns: 1fr; }
+    .shots { grid-template-columns: repeat(3, 160px); overflow-x: auto; scrollbar-width: thin; padding-bottom: 6px; }
+    .viz-row { grid-template-columns: 64px 1fr 64px; }
+    .oc-players { grid-template-columns: 1fr; }
+    .demo-grid { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot, .prog i, .pulse.lit { animation: none; } .pulse.lit { opacity: 1; } }
+</style>
+
+<div class="bar" role="toolbar" aria-label="Review controls">
+  <div class="grp" id="screens">
+    <span class="lbl">Screen</span>
+    <button class="chip" type="button" data-screen="landing" aria-pressed="true">Landing</button>
+    <button class="chip" type="button" data-screen="invite" aria-pressed="false">Invite link</button>
+    <button class="chip" type="button" data-screen="room" aria-pressed="false">Room · ROM needed</button>
+    <button class="chip" type="button" data-screen="demo" aria-pressed="false">Demo</button>
+    <button class="chip" type="button" data-screen="logo" aria-pressed="false">Logo</button>
+  </div>
+  <div class="grp" id="states" data-for="landing">
+    <span class="lbl">Board</span>
+    <button class="chip" type="button" data-state="live" aria-pressed="true">Live</button>
+    <button class="chip" type="button" data-state="empty" aria-pressed="false">Empty</button>
+    <button class="chip" type="button" data-state="waking" aria-pressed="false">Waking</button>
+  </div>
+  <div class="grp" id="previews" data-for="landing">
+    <span class="lbl">Live previews</span>
+    <button class="chip" type="button" data-preview="on" aria-pressed="true">On</button>
+    <button class="chip" type="button" data-preview="off" aria-pressed="false">Off</button>
+  </div>
+  <div class="grp" id="invvars" data-for="invite" hidden>
+    <span class="lbl">Invite state</span>
+    <button class="chip" type="button" data-inv="normal" aria-pressed="true">Waiting for players</button>
+    <button class="chip" type="button" data-inv="full" aria-pressed="false">Room full</button>
+    <button class="chip" type="button" data-inv="closed" aria-pressed="false">Room closed</button>
+    <button class="chip" type="button" data-inv="inapp" aria-pressed="false">In-app browser</button>
+    <button class="chip" type="button" data-inv="waking" aria-pressed="false">Server waking</button>
+    <button class="chip" type="button" data-inv="spectate" aria-pressed="false">Spectator link</button>
+  </div>
+  <div class="grp" id="roomvars" data-for="room" hidden>
+    <span class="lbl">Room state</span>
+    <button class="chip" type="button" data-room="needs" aria-pressed="true">Needs ROM</button>
+    <button class="chip" type="button" data-room="wrong" aria-pressed="false">Wrong ROM</button>
+    <button class="chip" type="button" data-room="cached" aria-pressed="false">Cached ROM</button>
+  </div>
+  <div class="grp" id="rot">
+    <span class="lbl">Header</span>
+    <button class="chip" type="button" data-rot="on" aria-pressed="false">Rotate the set (8 s)</button>
+    <button class="chip" type="button" data-rot="off" aria-pressed="true">Fixed</button>
+  </div>
+  <div class="grp" id="dirs">
+    <span class="lbl">Direction</span>
+    <button class="chip" type="button" data-dir="A" aria-pressed="true">A · Lobby</button>
+    <button class="chip" type="button" data-dir="B" aria-pressed="false">B</button>
+    <button class="chip" type="button" data-dir="C" aria-pressed="false">C</button>
+    <button class="chip" type="button" data-dir="M" aria-pressed="false">Mix</button>
+  </div>
+</div>
+<p class="note" id="dirnote"></p>
+
+<div class="mock" id="mock" data-dir="A" data-state="live" data-preview="on">
+
+  <!-- ===================== LANDING (W1 / W2 / W5) ===================== -->
+  <div class="screen" id="scr-landing">
+  <header class="hero">
+    <div class="wrap">
+      <h1 class="name" id="hdr-name"><span class="hdr-mark" aria-hidden="true"><svg><use class="hdr-use" href="#m-a"></use></svg></span><span class="L" style="--i:0;--c:var(--p1)">k</span><span class="L" style="--i:1;--c:var(--p2)">a</span><span class="L pI" style="--i:2;--c:var(--p1);--c-end:var(--p1)">i</span><span class="L pL1" style="--i:3;--c:var(--p2)">l</span><span class="L pL2" style="--i:4;--c:var(--p3)">l</span><span class="L pE" style="--i:5;--c:var(--p4)">e</span><span class="L" style="--i:6;--c:var(--p3)">r</span><span class="L" style="--i:7;--c:var(--p4)">a</span><span class="L hy" style="--i:8;--c:var(--accent)">-</span><span class="L" style="--i:9;--c:var(--p1)">n</span><span class="L" style="--i:10;--c:var(--p2)">e</span><span class="L" style="--i:11;--c:var(--p3)">x</span><span class="L" style="--i:12;--c:var(--p4)">t</span></h1>
+      <p class="line">Super Smash Bros. 64 online with friends. In your browser. No install.</p>
+      <p class="sub">Free and open source. Continuing Kaillera, 2001.</p>
+
+      <section class="board" aria-label="Open rooms">
+        <div id="st-live">
+          <div class="board-h">
+            <h2>Open rooms</h2>
+            <span class="live"><span class="dot" aria-hidden="true"></span>6 people playing right now</span>
+            <span class="wk">41 matches this week</span>
+          </div>
+          <div class="featured">
+            <div class="screen-box" role="img" aria-label="Live preview of the featured match"><span class="fake">real game frame here, refreshed every few seconds</span></div>
+            <div>
+              <div class="kicker">Now playing</div>
+              <h3>Super Smash Bros.</h3>
+              <div class="meta"><span>hosted by Moose</span><span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot p3 on"></i><i class="slot"></i></span><span class="cnt">3/4</span><span class="st ingame">in game · 6 min</span></div>
+              <div class="acts"><button class="btn primary" type="button">Watch</button><button class="btn" type="button">Join · 1 slot open</button></div>
+              <p class="why">Watch drops you in as a spectator. Join takes the open slot, mid-game, with your own ROM.</p>
+            </div>
+          </div>
+          <div class="rooms">
+            <div class="room p3 waiting">
+              <div class="thumb idle" aria-hidden="true"></div>
+              <div class="g">Smash Remix 2.0.1</div>
+              <div class="h">hosted by Kaz</div>
+              <div class="sl"><span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot"></i><i class="slot"></i></span><span class="cnt">2/4</span></div>
+              <div class="st">waiting for players</div>
+              <div class="acts"><button class="btn" type="button">Watch</button><button class="btn primary" type="button">Join</button></div>
+            </div>
+            <div class="room p1 ingame">
+              <div class="thumb live" aria-hidden="true"></div>
+              <div class="g">Super Smash Bros.</div>
+              <div class="h">hosted by Moose</div>
+              <div class="sl"><span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot p3 on"></i><i class="slot"></i></span><span class="cnt">3/4</span></div>
+              <div class="st ingame">in game · 6 min</div>
+              <div class="acts"><button class="btn" type="button">Watch</button><button class="btn primary" type="button">Join</button></div>
+            </div>
+            <div class="room p2 waiting">
+              <div class="thumb idle" aria-hidden="true"></div>
+              <div class="g">Smash Remix 2.0.0</div>
+              <div class="h">hosted by Firo</div>
+              <div class="sl"><span class="slots"><i class="slot p1 on"></i><i class="slot"></i><i class="slot"></i><i class="slot"></i></span><span class="cnt">1/4</span></div>
+              <div class="st">waiting for players</div>
+              <div class="acts"><button class="btn" type="button">Watch</button><button class="btn primary" type="button">Join</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="st-empty" hidden>
+          <div class="board-h">
+            <h2>Open rooms</h2>
+            <span class="st">nobody's in a room right now</span>
+            <span class="wk">41 matches this week</span>
+          </div>
+          <div class="empty">
+            <h3>The floor is quiet.</h3>
+            <p><b>41 matches</b> were played this week. Open a room and send the link. First one in picks the stage.</p>
+          </div>
+        </div>
+
+        <div id="st-waking" hidden>
+          <div class="board-h">
+            <h2>Open rooms</h2>
+            <span class="st">powering on</span>
+          </div>
+          <div class="waking" id="waking-landing">
+            <h3>Powering on… <small class="elapsed">0:00</small></h3>
+            <p>The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. Press SPACE (tap on a phone) while you wait. This is what rollback does to lag.</p>
+            <div class="prog" aria-hidden="true"><i></i></div>
+            <div class="viz" id="viz" role="button" tabindex="0" aria-label="Input lag visualizer. Press space or tap to send an input.">
+              <div class="viz-row"><span>Input</span><div class="track"><i class="pulse" id="p-in"></i></div><b id="v-in">--</b></div>
+              <div class="viz-row"><span>Response</span><div class="track"><i class="pulse" id="p-out"></i></div><b id="v-out">--</b></div>
+              <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
+              <div class="verdict-sub" id="verdict-sub">120 ms of lag on the wire. Rollback is on.</div>
+              <div class="viz-ctl">
+                <label for="lag">Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120"> <output id="lag-out" for="lag">120 ms</output></label>
+                <label for="rb"><input type="checkbox" id="rb" checked> Rollback on</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="cta" id="cta">
+        <button class="btn primary big" type="button" id="create">Create a room</button>
+        <span class="code">Have a code? <input id="code" type="text" placeholder="ABC123" aria-label="Room code" maxlength="8"> <button class="btn" type="button" id="join">Join</button> <button class="btn" type="button" id="watch">Watch</button></span>
+        <button class="code-link" type="button" id="code-link">Have a code?</button>
+      </div>
+      <p class="need"><b>Playing needs your own SSB64 or Smash Remix ROM.</b> Watching doesn't.</p>
+    </div>
+  </header>
+
+  <section class="sec">
+    <div class="wrap">
+      <h2><span class="glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>You bring the game</h2>
+      <p>kaillera-next doesn't host, share or link to ROMs. You drop your own copy of Super Smash Bros. 64 onto the page. It's read in your browser and never uploaded anywhere.</p>
+      <p class="m">Works right now: Super Smash Bros. (US) · Smash Remix 2.0.0 (US) · Smash Remix 2.0.1 (US). Files: .z64, .n64, .v64 or .zip. <a href="#top">Smash Remix</a> is a free community mod you apply to your own SSB64 copy.</p>
+      <p>No ROM? You can still watch any open room.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap two">
+      <div>
+        <h2>How it works</h2>
+        <p>Create a room and send the link. Friends open it on a laptop or a phone.</p>
+        <p>Everyone drops their own ROM. The host presses Start.</p>
+        <p class="m">Up to 4 players. Spectators welcome. Keyboard, gamepad or on-screen controls. On a phone, an Xbox controller over Bluetooth works too.</p>
+      </div>
+      <div>
+        <div class="shots" aria-label="Three screenshots">
+          <div class="shot">screenshot 1: the room with its invite link</div>
+          <div class="shot">screenshot 2: a phone joining</div>
+          <div class="shot">screenshot 3: both screens in a match</div>
+        </div>
+        <div class="video small" aria-label="Intro video, 50 seconds"><span class="play" aria-hidden="true">▶</span><span class="cap">Intro · 0:50</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap two">
+      <div>
+        <h2>Why it feels close to the couch</h2>
+        <p>Rollback netplay runs the game at full speed on your machine and predicts what your opponent pressed. When a prediction misses, it rewinds a few frames and replays, quietly. The network lag is still there; rollback hides it from you. Under about 150 ms of round trip, it feels like playing offline. Lockstep, the old way, waits the full round trip on every frame.</p>
+        <p class="m">Don't take our word for it.</p>
+        <div class="proof"><button class="btn primary" type="button">Try the demo · needs your ROM</button><button class="btn" type="button">Lag visualizer · no ROM</button></div>
+      </div>
+      <div class="video" aria-label="Rollback explained, 60 seconds"><span class="play" aria-hidden="true">▶</span><span class="cap">Rollback explained · 1:00</span></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <h2>Since 2001</h2>
+      <p>Kaillera, by Christophe Thibault, let a generation play N64 online. A dozen servers and clients carried it for twenty years. kaillera-next is the same idea with nothing to install and rollback netcode.</p>
+      <div class="ribbon" aria-label="Lineage"><span>Kaillera</span><span>EmuLinker</span><span>EmuLinker SF</span><span>SupraClient</span><span>n02</span><span>Project64k</span><span>AQZ NetPlay</span><span>Ownasaurus Client</span><span>EmuLinker X</span><span>EmuLinker-K</span><span>Kaillera Reborn</span><span>kaillera-next</span></div>
+      <p class="m">Free and open source (GPL-2). GitHub</p>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <div class="wrap">
+      <div>by Kazon Wilson (Agent 21) · Inspired by Kaillera by Christophe Thibault</div>
+      <div>GitHub · Support · About · v0.53.0</div>
+      <div>kaillera-next does not host, distribute or link to ROMs.</div>
+    </div>
+  </footer>
+  </div>
+
+  <!-- ===================== INVITE LINK (W3) ===================== -->
+  <div class="screen" id="scr-invite" hidden>
+    <header class="hero">
+      <div class="wrap narrow">
+        <div class="brand-sm"><span class="hdr-mark" aria-hidden="true"><svg><use class="hdr-use" href="#m-a"></use></svg></span>kaillera<span class="hy">-</span>next</div>
+
+        <div class="banner" id="inv-banner" hidden>
+          <span>You're in Discord's built-in browser. Open this link in Safari or Chrome for the game to run.</span>
+          <button class="btn" type="button">Copy link</button>
+        </div>
+
+        <div id="inv-main">
+          <div class="kicker" id="inv-kicker">Kaz invited you to play</div>
+          <h1 class="name sm">Super Smash Bros. 64</h1>
+          <div class="inv-facts" id="inv-facts"><span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot"></i><i class="slot"></i></span><span>2 of 4 in the room</span><span>·</span><span>waiting for players</span></div>
+          <p class="inv-fullline" id="inv-fullline" hidden>The room is full right now. Watch, and you'll be able to join if a slot opens.</p>
+          <div class="stack" id="inv-stack">
+            <button class="btn primary big" type="button" id="inv-join">Join the room</button>
+            <p class="hint" id="inv-join-hint">needs your own SSB64 ROM (.z64 / .n64 / .v64 / .zip)</p>
+            <button class="btn big" type="button" id="inv-watch">Watch instead</button>
+            <p class="hint" id="inv-watch-hint">no ROM needed</p>
+          </div>
+          <p class="inv-next" id="inv-next">What happens next: pick a name, drop your ROM, wait for Kaz to press Start.</p>
+          <p class="m">Not sure what a ROM is? <a href="#top">You bring the game</a></p>
+        </div>
+
+        <div id="inv-closed" class="inv-closed" hidden>
+          <h1 class="name sm">Kaz's room has closed.</h1>
+          <p class="m">Rooms live only while someone's in them. Ask Kaz for a new link, or open your own.</p>
+          <div class="stack"><button class="btn primary big" type="button">Open your own room</button></div>
+        </div>
+
+        <div id="inv-waking" class="waking" hidden style="padding: 0">
+          <h3>Powering on… <small class="elapsed">0:00</small></h3>
+          <p>The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. We'll check on Kaz's room the moment it answers. Press SPACE (tap on a phone) while you wait. This is what rollback does to lag.</p>
+          <div class="prog" aria-hidden="true"><i></i></div>
+          <div id="inv-viz-slot"></div>
+        </div>
+
+        <hr class="inv-sep">
+        <p class="m">First time here? <a href="#top">What this is ↓</a></p>
+      </div>
+    </header>
+  </div>
+
+  <!-- ===================== ROOM OVERLAY (W4) ===================== -->
+  <div class="screen" id="scr-room" hidden>
+    <div class="roompage">
+      <div class="oc" role="dialog" aria-label="Room ABC123">
+        <div class="oc-head">
+          <span class="room-id">Room ABC123</span>
+          <button class="btn" type="button">Invite</button>
+          <span class="you">You: <input type="text" value="Player" aria-label="Your name" id="room-name"></span>
+        </div>
+        <div class="oc-players">
+          <div class="pl"><i class="slot p1 on"></i> Kaz <span class="tag">host</span> <span class="ok">✓ ROM</span></div>
+          <div class="pl"><i class="slot p2 on"></i> Player <span class="tag">you</span> <span class="pend" id="room-you">needs ROM</span></div>
+          <div class="pl open"><i class="slot"></i> open</div>
+          <div class="pl open"><i class="slot"></i> open</div>
+        </div>
+        <div class="oc-body">
+          <div class="dz" id="room-dz">
+            <div class="dz-t">Drop your ROM here, or tap to choose</div>
+            <p class="dz-s"><b>Kaz is playing Super Smash Bros. (US).</b> .z64 / .n64 / .v64 / .zip · stays on this device</p>
+            <div class="dz-err" id="room-err" hidden><span>Your ROM doesn't match. Kaz is playing <b>Super Smash Bros. (US)</b>; you dropped <b>Smash Remix 2.0.1</b>.</span><button class="btn" type="button">Choose another</button></div>
+          </div>
+          <div class="lib" id="room-lib" hidden>
+            <div class="lib-h">Your ROMs on this device</div>
+            <div class="lib-row"><b>Super Smash Bros. (US)</b><span class="m">matches Kaz's game</span><button class="btn primary" type="button">Use this</button></div>
+            <div class="lib-row"><b>Smash Remix 2.0.1 (US)</b><button class="btn" type="button">Use</button></div>
+          </div>
+          <div class="watch-instead"><span>Don't have it?</span><button class="btn" type="button">Watch instead</button><span class="m">You stay in the room and see the game when it starts.</span></div>
+          <div class="oc-row"><span>Controller: none detected</span><button class="btn" type="button">Set up</button></div>
+        </div>
+        <div class="oc-foot"><span class="dot" aria-hidden="true"></span>Waiting for Kaz to start…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== LOGO CANDIDATES ===================== -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="m-a" viewBox="0 0 32 32">
+      <rect x="3" y="3" width="12" height="12" rx="2.5" fill="#e5484d"/>
+      <rect x="17" y="3" width="12" height="12" rx="2.5" fill="#3b82f6"/>
+      <rect x="3" y="17" width="12" height="12" rx="2.5" fill="#f5c518"/>
+      <rect x="17.75" y="17.75" width="10.5" height="10.5" rx="2" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="m-am" viewBox="0 0 32 32">
+      <rect x="3" y="3" width="12" height="12" rx="2.5" fill="#e5484d" opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;1;0;0" keyTimes="0;0.08;0.14;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="0;0;3;3;3;3;3" keyTimes="0;0.08;0.14;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="17" y="3" width="12" height="12" rx="2.5" fill="#3b82f6" opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;1;0;0" keyTimes="0;0.20;0.26;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="0;0;3;3;3;3;3" keyTimes="0;0.20;0.26;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="3" y="17" width="12" height="12" rx="2.5" fill="#f5c518" opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;1;0;0" keyTimes="0;0.32;0.38;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="14;14;17;17;17;17;17" keyTimes="0;0.32;0.38;0.88;0.92;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="17.75" y="17.75" width="10.5" height="10.5" rx="2" fill="none" stroke="#8b95a5" stroke-width="1.5" opacity="0">
+        <animate attributeName="opacity" values="0;0;0.35;1;0.35;1;0.35;1;1;0;0" keyTimes="0;0.38;0.42;0.48;0.54;0.60;0.66;0.72;0.88;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="17" y="29" width="12" height="0" rx="2.5" fill="#3fb950">
+        <animate attributeName="y" values="29;29;17;17;17;29" keyTimes="0;0.70;0.78;0.88;0.92;1" dur="3.6s" repeatCount="indefinite"/>
+        <animate attributeName="height" values="0;0;12;12;12;0" keyTimes="0;0.70;0.78;0.88;0.92;1" dur="3.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="1;1;1;1;0;0" keyTimes="0;0.70;0.78;0.90;0.96;1" dur="3.6s" repeatCount="indefinite"/>
+      </rect>
+    </symbol>
+    <symbol id="m-a-mono" viewBox="0 0 32 32">
+      <rect x="3" y="3" width="12" height="12" rx="2.5" fill="currentColor"/>
+      <rect x="17" y="3" width="12" height="12" rx="2.5" fill="currentColor"/>
+      <rect x="3" y="17" width="12" height="12" rx="2.5" fill="currentColor"/>
+      <rect x="17.75" y="17.75" width="10.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="m-a-row" viewBox="0 0 30 6">
+      <rect x="0" y="0" width="6" height="6" rx="1.2" fill="#e5484d"/>
+      <rect x="8" y="0" width="6" height="6" rx="1.2" fill="#3b82f6"/>
+      <rect x="16" y="0" width="6" height="6" rx="1.2" fill="#f5c518"/>
+      <rect x="24.5" y="0.5" width="5" height="5" rx="1" fill="none" stroke="#8b95a5" stroke-width="1"/>
+    </symbol>
+    <symbol id="m-b" viewBox="0 0 32 32">
+      <path d="M 23.42 8.58 A 10.5 10.5 0 1 0 26.5 16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+      <path d="M 26.5 10.5 L 22.3 17 L 30.7 17 Z" fill="currentColor"/>
+      <path d="M 12 10.5 L 12 21.5 L 22 16 Z" fill="currentColor"/>
+    </symbol>
+    <symbol id="m-c" viewBox="0 0 32 32">
+      <rect x="1" y="1" width="30" height="30" rx="7" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <path d="M 9 7.5 V 24.5" stroke="#e8ecf1" stroke-width="3" stroke-linecap="round"/>
+      <path d="M 9 17.5 L 15.5 11" stroke="#5aa8ff" stroke-width="3" stroke-linecap="round"/>
+      <path d="M 9 17.5 L 15.5 24.5" stroke="#e8ecf1" stroke-width="3" stroke-linecap="round"/>
+      <path d="M 19 24.5 V 13.5 M 19 15.5 Q 19 12.5 22.5 12.5 Q 26 12.5 26 15.5 V 24.5" stroke="#e8ecf1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </symbol>
+    <symbol id="m-c-mono" viewBox="0 0 32 32">
+      <path d="M 9 7.5 V 24.5 M 9 17.5 L 15.5 11 M 9 17.5 L 15.5 24.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>
+      <path d="M 19 24.5 V 13.5 M 19 15.5 Q 19 12.5 22.5 12.5 Q 26 12.5 26 15.5 V 24.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </symbol>
+    <symbol id="m-a1" viewBox="0 0 32 32">
+      <rect x="11.5" y="2" width="9" height="9" rx="2" fill="#e5484d"/>
+      <rect x="2" y="11.5" width="9" height="9" rx="2" fill="#3b82f6"/>
+      <rect x="11.5" y="21" width="9" height="9" rx="2" fill="#f5c518"/>
+      <rect x="21.75" y="12.25" width="7.5" height="7.5" rx="1.6" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="m-a2" viewBox="0 0 32 32">
+      <rect x="3.5" y="7" width="4.5" height="18" rx="2" fill="#e5484d"/>
+      <rect x="10.5" y="7" width="4.5" height="18" rx="2" fill="#3b82f6"/>
+      <rect x="17.5" y="7" width="4.5" height="18" rx="2" fill="#f5c518"/>
+      <rect x="25.25" y="7.75" width="3" height="16.5" rx="1.5" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="m-a3" viewBox="0 0 32 32">
+      <rect x="1" y="1" width="30" height="30" rx="7" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <rect x="4" y="13.5" width="5" height="5" rx="1.2" fill="#e5484d"/>
+      <rect x="10.5" y="13.5" width="5" height="5" rx="1.2" fill="#3b82f6"/>
+      <rect x="17" y="13.5" width="5" height="5" rx="1.2" fill="#f5c518"/>
+      <rect x="24" y="14" width="4" height="4" rx="1" fill="none" stroke="#8b95a5" stroke-width="1"/>
+    </symbol>
+    <!-- round 3: A1 tightened -->
+    <symbol id="m-a1a" viewBox="0 0 32 32">
+      <rect x="12" y="12" width="8" height="8" rx="1.8" fill="#242c39"/>
+      <rect x="12" y="2.5" width="8" height="8" rx="1.8" fill="#e5484d"/>
+      <rect x="2.5" y="12" width="8" height="8" rx="1.8" fill="#3b82f6"/>
+      <rect x="12" y="21.5" width="8" height="8" rx="1.8" fill="#f5c518"/>
+      <rect x="22.25" y="12.75" width="6.5" height="6.5" rx="1.4" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="m-a1b" viewBox="0 0 32 32">
+      <rect x="11" y="1.5" width="10" height="10" rx="3" fill="#e5484d"/>
+      <rect x="1.5" y="11" width="10" height="10" rx="3" fill="#3b82f6"/>
+      <rect x="11" y="20.5" width="10" height="10" rx="3" fill="#f5c518"/>
+      <rect x="21.25" y="11.75" width="8.5" height="8.5" rx="2.6" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+      <rect x="11" y="11" width="10" height="10" rx="3" fill="#0e1218"/>
+    </symbol>
+    <!-- round 3: A2 with motion (SMIL so it also runs through <use>) -->
+    <symbol id="m-a2a" viewBox="0 0 32 32">
+      <rect x="3" y="7" width="5" height="18" rx="2.2" fill="#e5484d"/>
+      <rect x="10" y="7" width="5" height="18" rx="2.2" fill="#3b82f6"/>
+      <rect x="17" y="7" width="5" height="18" rx="2.2" fill="#f5c518"/>
+      <rect x="24.75" y="7.75" width="3.5" height="16.5" rx="1.6" fill="none" stroke="#8b95a5" stroke-width="1.5"/>
+      <rect x="24.75" y="24.25" width="3.5" height="0" rx="1.6" fill="#3fb950">
+        <animate attributeName="y" values="24.25;7.75;7.75;7.75;24.25" keyTimes="0;0.45;0.7;0.85;1" dur="2.6s" repeatCount="indefinite"/>
+        <animate attributeName="height" values="0;16.5;16.5;16.5;0" keyTimes="0;0.45;0.7;0.85;1" dur="2.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="1;1;1;0.35;0" keyTimes="0;0.45;0.7;0.85;1" dur="2.6s" repeatCount="indefinite"/>
+      </rect>
+    </symbol>
+    <symbol id="m-a2b" viewBox="0 0 32 32">
+      <rect x="2" y="5" width="7" height="22" rx="3" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <rect x="9.5" y="5" width="7" height="22" rx="3" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <rect x="17" y="5" width="7" height="22" rx="3" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <rect x="24.5" y="5" width="7" height="22" rx="3" fill="#151b25" stroke="#242c39" stroke-width="1"/>
+      <rect x="3.5" y="6.5" width="4" height="19" rx="2" fill="#e5484d"/>
+      <rect x="11" y="6.5" width="4" height="19" rx="2" fill="#3b82f6"/>
+      <rect x="18.5" y="6.5" width="4" height="19" rx="2" fill="#f5c518"/>
+      <rect x="26" y="34" width="4" height="19" rx="2" fill="#3fb950">
+        <animate attributeName="y" values="34;6.5;6.5;6.5;34" keyTimes="0;0.4;0.7;0.85;1" dur="3s" repeatCount="indefinite" calcMode="spline" keySplines="0.2 0.8 0.2 1;0 0 1 1;0 0 1 1;0.6 0 1 0.4"/>
+        <animate attributeName="opacity" values="0.9;1;1;0.4;0" keyTimes="0;0.4;0.7;0.85;1" dur="3s" repeatCount="indefinite"/>
+      </rect>
+    </symbol>
+    <symbol id="m-a2c" viewBox="0 0 32 32">
+      <rect x="3" y="6" width="5" height="17" rx="2.2" fill="#e5484d"/>
+      <rect x="10" y="6" width="5" height="17" rx="2.2" fill="#3b82f6"/>
+      <rect x="17" y="6" width="5" height="17" rx="2.2" fill="#f5c518"/>
+      <rect x="24.75" y="6.75" width="3.5" height="15.5" rx="1.6" fill="none" stroke="#3fb950" stroke-width="1.5">
+        <animate attributeName="opacity" values="0.25;1;0.25" dur="1.6s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="3" y="26" width="26" height="2.5" rx="1.25" fill="#242c39"/>
+    </symbol>
+    <!-- round 4: A1 as an input device, with motion -->
+    <symbol id="m-a1c" viewBox="0 0 32 32">
+      <rect x="12" y="12" width="8" height="8" rx="1.8" fill="#242c39">
+        <animate attributeName="fill" values="#242c39;#242c39;#5aa8ff;#5aa8ff;#242c39;#242c39" keyTimes="0;0.30;0.31;0.38;0.43;1" dur="3s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="12" y="2.5" width="8" height="8" rx="1.8" fill="#e5484d"/>
+      <rect x="2.5" y="12" width="8" height="8" rx="1.8" fill="#3b82f6"/>
+      <rect x="12" y="21.5" width="8" height="8" rx="1.8" fill="#f5c518" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;0;1;1;0;0" keyTimes="0;0.10;0.12;0.20;0.23;1" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="21.5;21.5;22.2;22.2;21.5;21.5" keyTimes="0;0.10;0.12;0.20;0.23;1" dur="3s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="21.5" y="12" width="8" height="8" rx="1.8" fill="#3fb950" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;0;1;1;0;0" keyTimes="0;0.18;0.20;0.30;0.33;1" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="x" values="21.5;21.5;22.2;22.2;21.5;21.5" keyTimes="0;0.18;0.20;0.30;0.33;1" dur="3s" repeatCount="indefinite"/>
+      </rect>
+      <circle cx="16" cy="16" r="5" fill="none" stroke="#5aa8ff" stroke-width="1.5" opacity="0">
+        <animate attributeName="r" values="5;5;15;15" keyTimes="0;0.31;0.48;1" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;0;0.9;0;0" keyTimes="0;0.31;0.32;0.48;1" dur="3s" repeatCount="indefinite"/>
+      </circle>
+    </symbol>
+    <symbol id="m-a1d" viewBox="0 0 32 32">
+      <polygon points="27.09,11.41 27.09,20.59 20.59,27.09 11.41,27.09 4.91,20.59 4.91,11.41 11.41,4.91 20.59,4.91" fill="#151b25" stroke="#242c39" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="16" cy="5.4" r="1.7" fill="#e5484d"/>
+      <circle cx="5.4" cy="16" r="1.7" fill="#3b82f6"/>
+      <circle cx="16" cy="26.6" r="1.7" fill="#f5c518"/>
+      <circle cx="26.6" cy="16" r="1.7" fill="#3fb950" stroke="#ffffff" stroke-width="1.2" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;0;1;1;0;0" keyTimes="0;0.20;0.22;0.32;0.36;1" dur="2.6s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="26.6" cy="16" r="3" fill="none" stroke="#3fb950" stroke-width="1.2" opacity="0">
+        <animate attributeName="r" values="3;3;9;9" keyTimes="0;0.22;0.40;1" dur="2.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;0;0.9;0;0" keyTimes="0;0.22;0.23;0.40;1" dur="2.6s" repeatCount="indefinite"/>
+      </circle>
+      <g>
+        <animateTransform attributeName="transform" type="translate" values="0 0;0 0;8.2 0;7 0;0 0;0 0" keyTimes="0;0.17;0.22;0.28;0.42;1" dur="2.6s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;0.1 0.9 0.2 1;0.4 0 0.6 1;0.3 0 0.2 1;0 0 1 1"/>
+        <circle cx="16" cy="16" r="5.6" fill="#5aa8ff"/>
+        <circle cx="14.4" cy="14.4" r="1.9" fill="#a9d3ff"/>
+      </g>
+    </symbol>
+    <symbol id="m-a1e" viewBox="0 0 32 32">
+      <g transform="translate(16 16)">
+        <g>
+          <animateTransform attributeName="transform" type="scale" values="1;1;1.16;1;1;1" keyTimes="0;0.15;0.35;0.55;0.6;1" dur="3.2s" repeatCount="indefinite"/>
+          <g>
+            <animateTransform attributeName="transform" type="rotate" values="0;0;360;360" keyTimes="0;0.15;0.55;1" dur="3.2s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;0.3 0 0.2 1;0 0 1 1"/>
+            <g transform="translate(-16 -16)">
+              <rect x="12" y="12" width="8" height="8" rx="1.8" fill="#242c39">
+                <animate attributeName="fill" values="#242c39;#242c39;#5aa8ff;#5aa8ff;#242c39;#242c39" keyTimes="0;0.60;0.61;0.70;0.76;1" dur="3.2s" repeatCount="indefinite"/>
+              </rect>
+              <rect x="12" y="2.5" width="8" height="8" rx="1.8" fill="#e5484d" opacity="0.75"><animate attributeName="opacity" values="0.75;0.75;1;1;0.75;0.75" keyTimes="0;0.15;0.16;0.25;0.28;1" dur="3.2s" repeatCount="indefinite"/></rect>
+              <rect x="21.5" y="12" width="8" height="8" rx="1.8" fill="#3fb950" opacity="0.75"><animate attributeName="opacity" values="0.75;0.75;1;1;0.75;0.75" keyTimes="0;0.25;0.26;0.35;0.38;1" dur="3.2s" repeatCount="indefinite"/></rect>
+              <rect x="12" y="21.5" width="8" height="8" rx="1.8" fill="#f5c518" opacity="0.75"><animate attributeName="opacity" values="0.75;0.75;1;1;0.75;0.75" keyTimes="0;0.35;0.36;0.45;0.48;1" dur="3.2s" repeatCount="indefinite"/></rect>
+              <rect x="2.5" y="12" width="8" height="8" rx="1.8" fill="#3b82f6" opacity="0.75"><animate attributeName="opacity" values="0.75;0.75;1;1;0.75;0.75" keyTimes="0;0.45;0.46;0.55;0.58;1" dur="3.2s" repeatCount="indefinite"/></rect>
+            </g>
+          </g>
+        </g>
+      </g>
+      <circle cx="16" cy="16" r="5" fill="none" stroke="#5aa8ff" stroke-width="1.5" opacity="0">
+        <animate attributeName="r" values="5;5;15;15" keyTimes="0;0.61;0.80;1" dur="3.2s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;0;0.9;0;0" keyTimes="0;0.61;0.62;0.80;1" dur="3.2s" repeatCount="indefinite"/>
+      </circle>
+    </symbol>
+    <symbol id="m-d" viewBox="0 0 32 32">
+      <rect width="32" height="32" rx="6" fill="#0e1218"/>
+      <text x="16" y="22" text-anchor="middle" font-family="Barlow Condensed, Arial Narrow, sans-serif" font-weight="700" font-size="19" fill="#5aa8ff" letter-spacing="0.5">KN</text>
+    </symbol>
+  </svg>
+
+  <div class="screen" id="scr-logo" hidden>
+    <div class="wrap">
+      <header class="demo-head">
+        <h1 class="name sm">Logo candidates</h1>
+        <p class="line">Four flat marks, drawn by hand. Each shown large, in the header lockup, at tab-icon size on a dark and a light tab bar, and in plain white. "Apply to header" puts it on the Landing and Invite screens.</p>
+      </header>
+      <div class="lc" style="margin-bottom: 16px; border-color: var(--accent)">
+        <h3>Decision · KN is the logo; the header rotates a set <small>owner, 2026-09-25</small></h3>
+        <div class="favrow" style="max-width: 420px"><div class="fav dark"><svg class="s32"><use href="#m-d"></use></svg><svg class="s16"><use href="#m-d"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-d"></use></svg><svg class="s16"><use href="#m-d"></use></svg></div></div>
+        <p class="m">The KN tile is the site's logo: tab icon, Discord icon, link-preview card, anywhere a single still symbol is needed. The landing header is the attract mode: one of the marks below is shown per visit, and the name's letters arrive on load.</p>
+        <div class="favrow" style="flex-wrap: wrap">
+          <div class="fav dark" style="flex: none; gap: 14px; padding: 10px 14px">
+            <svg class="s32"><use href="#m-am"></use></svg><svg class="s32"><use href="#m-a2a"></use></svg><svg class="s32"><use href="#m-a1c"></use></svg><svg class="s32"><use href="#m-a1e"></use></svg>
+            <span class="m" style="font-size: 12px">+ KO · the stick · letters arrive</span>
+          </div>
+        </div>
+        <p class="m">The set: <b>A with motion</b> (seats join one by one, the open seat pulses, then fills), <b>A2a</b> (ports), <b>A1c</b> (quarter circle), <b>A1e</b> (full circle), <b>KO</b>, <b>the stick is real</b>, and <b>letters arrive</b> with no mark. Use the toolbar's <b>Header · Rotate the set</b> to watch them cycle on the Landing screen; on the real site it's one per visit, and a click on the mark advances to the next.</p>
+        <button class="btn primary" type="button" id="watch-rotation">Watch the rotation on the landing page</button>
+      </div>
+
+      <div class="logo-grid" id="logo-grid">
+
+        <div class="lc" data-logo="A">
+          <h3>A · Four slots <small>the board's slot markers, one open</small></h3>
+          <div class="big"><svg><use href="#m-a"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="lockup"><span class="wm rowmark">kaillera-next<svg><use href="#m-a-row"></use></svg></span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a"></use></svg><svg class="s16"><use href="#m-a"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a"></use></svg><svg class="s16"><use href="#m-a"></use></svg></div></div>
+          <div class="mono"><svg><use href="#m-a-mono"></use></svg></div>
+          <p class="m">Means: four players, one seat open. Owner: "reminds me of the Windows logo"; later: "A with motion added" is in the header set. With motion the seats join one by one, the open seat pulses, then fills: it stops being a static 2×2 and becomes a lobby filling.</p>
+          <div class="big" style="height: 90px"><svg style="width: 60px; height: 60px"><use href="#m-am"></use></svg></div>
+          <button class="btn" type="button" data-apply="AM">Apply to header (with motion)</button>
+        </div>
+
+        <div class="lc" data-logo="B">
+          <h3>B · Run and rewind <small>play, then loop back</small></h3>
+          <div class="big" style="color: var(--accent)"><svg><use href="#m-b"></use></svg></div>
+          <div class="lockup" style="color: var(--accent)"><svg><use href="#m-b"></use></svg><span class="wm" style="color: var(--text)">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark" style="color:#5aa8ff"><svg class="s32"><use href="#m-b"></use></svg><svg class="s16"><use href="#m-b"></use></svg></div><div class="fav light" style="color:#1d4f8f"><svg class="s32"><use href="#m-b"></use></svg><svg class="s16"><use href="#m-b"></use></svg></div></div>
+          <div class="mono"><svg><use href="#m-b"></use></svg></div>
+          <p class="m">Means: the game runs ahead and rewinds when a guess misses. Risk, said up front: it can read as a "refresh" icon.</p>
+          <button class="btn" type="button" data-apply="B">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="C">
+          <h3>C · kn monogram <small>the current tab icon, grown up</small></h3>
+          <div class="big"><svg><use href="#m-c"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-c"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-c"></use></svg><svg class="s16"><use href="#m-c"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-c"></use></svg><svg class="s16"><use href="#m-c"></use></svg></div></div>
+          <div class="mono"><svg><use href="#m-c-mono"></use></svg></div>
+          <p class="m">Means: the initials, with the k's upper arm in blue as the only colour, a small "next". Geometric strokes, favicon first.</p>
+          <button class="btn" type="button" data-apply="C">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="D">
+          <h3>D · Wordmark only <small>no mark; the type is the logo</small></h3>
+          <div class="big"><svg><use href="#m-d"></use></svg></div>
+          <div class="lockup"><span class="wm">kaillera<span class="hy" style="color: var(--accent)">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-d"></use></svg><svg class="s16"><use href="#m-d"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-d"></use></svg><svg class="s16"><use href="#m-d"></use></svg></div></div>
+          <div class="mono"><span style="font-family: var(--font-display); font-weight:700; text-transform:uppercase; letter-spacing:.04em; font-size:26px">kaillera-next</span></div>
+          <p class="m">Means: nothing but the name, hyphen in blue. The tab icon is today's "kn" recoloured and set in the condensed face. What most console lobbies did.</p>
+          <button class="btn" type="button" data-apply="D">Apply to header</button>
+        </div>
+
+      </div>
+
+      <header class="demo-head" style="padding-top: 0">
+        <h2 class="name sm" style="font-size: 26px">Round 2 · A without the Windows echo</h2>
+        <p class="line">Same meaning (four seats, one open), different arrangement. No 2×2 grid. One-colour versions left out for now.</p>
+      </header>
+      <div class="logo-grid" id="logo-grid-2" style="padding-top: 0">
+
+        <div class="lc" data-logo="A1">
+          <h3>A1 · Around the cabinet <small>four seats around one machine</small></h3>
+          <div class="big"><svg><use href="#m-a1"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1"></use></svg><svg class="s16"><use href="#m-a1"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1"></use></svg><svg class="s16"><use href="#m-a1"></use></svg></div></div>
+          <p class="m">Four seats around an empty centre (the machine, the couch, the table). The east seat is open. Also reads as a plus: join in.</p>
+          <button class="btn" type="button" data-apply="A1">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A2">
+          <h3>A2 · Four ports <small>the N64's signature: four controller ports</small></h3>
+          <div class="big"><svg><use href="#m-a2"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a2"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div></div>
+          <p class="m">Four upright ports side by side, the fourth empty. The console that made four-player a standard had exactly this on its front. Owner: "A2 is the one." Refined with motion in Round 3 below.</p>
+          <button class="btn" type="button" data-apply="A2">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A3">
+          <h3>A3 · The board's row <small>exactly the marker on every room row</small></h3>
+          <div class="big"><svg><use href="#m-a3"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a3"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="lockup"><span class="wm rowmark">kaillera-next<svg><use href="#m-a-row"></use></svg></span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a3"></use></svg><svg class="s16"><use href="#m-a3"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a3"></use></svg><svg class="s16"><use href="#m-a3"></use></svg></div></div>
+          <p class="m">The slot row from the board, in a tile. The logo is literally the UI. Weakest at 16 px (the squares get tiny); strongest as the wordmark underline.</p>
+          <button class="btn" type="button" data-apply="A3">Apply to header</button>
+        </div>
+
+      </div>
+
+      <header class="demo-head" style="padding-top: 0">
+        <h2 class="name sm" style="font-size: 26px">Round 3 · A2 chosen, refined; A1 tightened</h2>
+        <p class="line">Owner: "A2 is the one. A1 seems a little disjointed. A2 would look cool with motion, like the last player hasn't joined yet but is joining." Three motions to compare; the tab icon stays static (the fourth port hollow).</p>
+      </header>
+      <div class="logo-grid" id="logo-grid-3" style="padding-top: 0">
+
+        <div class="lc" data-logo="A2a">
+          <h3>A2a · Filling up <small>the fourth port fills from the bottom, holds, resets</small></h3>
+          <div class="big"><svg><use href="#m-a2a"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a2a"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div></div>
+          <p class="m">Reads as a loading bar in the empty seat: someone is on the way. Green = player 4's colour. Calm, 2.6 s loop. Owner: "A2a is cool."</p>
+          <button class="btn" type="button" data-apply="A2a">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A2b">
+          <h3>A2b · Plugging in <small>sockets and plugs; the fourth plug slides in</small></h3>
+          <div class="big"><svg><use href="#m-a2b"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a2b"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a2b"></use></svg><svg class="s16"><use href="#m-a2b"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a2b"></use></svg><svg class="s16"><use href="#m-a2b"></use></svg></div></div>
+          <p class="m">Closest to the literal console front: four sockets, three plugged, the fourth plug arriving from below and seating. More detail, so it needs the tile at small sizes.</p>
+          <button class="btn" type="button" data-apply="A2b">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A2c">
+          <h3>A2c · Breathing <small>the fourth port pulses green on a baseline</small></h3>
+          <div class="big"><svg><use href="#m-a2c"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a2c"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a2c"></use></svg><svg class="s16"><use href="#m-a2c"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a2c"></use></svg><svg class="s16"><use href="#m-a2c"></use></svg></div></div>
+          <p class="m">The quietest motion: the open port breathes, the way the live dot does on the board. A baseline ties the four together (the console's front edge).</p>
+          <button class="btn" type="button" data-apply="A2c">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A1a">
+          <h3>A1a · With a centre <small>the machine in the middle</small></h3>
+          <div class="big"><svg><use href="#m-a1a"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1a"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div></div>
+          <p class="m">A muted centre square (the screen everyone faces) ties the four seats into one object. Tighter gaps.</p>
+          <button class="btn" type="button" data-apply="A1a">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A1b">
+          <h3>A1b · One silhouette <small>a rounded plus with the centre cut out</small></h3>
+          <div class="big"><svg><use href="#m-a1b"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1b"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1b"></use></svg><svg class="s16"><use href="#m-a1b"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1b"></use></svg><svg class="s16"><use href="#m-a1b"></use></svg></div></div>
+          <p class="m">The seats nearly touch, so the whole reads as one rounded plus. The east seat is the outline. Simplest at 16 px of the A1 family.</p>
+          <button class="btn" type="button" data-apply="A1b">Apply to header</button>
+        </div>
+
+      </div>
+
+      <header class="demo-head" style="padding-top: 0">
+        <h2 class="name sm" style="font-size: 26px">Round 4 · A1 as an input device</h2>
+        <p class="line">Owner: "A2a is cool. A1 could be enhanced with super realistic d-pad-like motion: spins, grows and shrinks, a button press with a popular fighting-game move, or an N64-looking analog stick doing a smash attack." Three inputs, all abstract shapes; the tab icon would stay static.</p>
+      </header>
+      <div class="logo-grid" id="logo-grid-4" style="padding-top: 0">
+
+        <div class="lc" data-logo="A1c">
+          <h3>A1c · Quarter circle <small>down, down-forward, forward, button</small></h3>
+          <div class="big"><svg><use href="#m-a1c"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1c"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div></div>
+          <p class="m">The plus is a d-pad. Every three seconds it plays the most famous input in fighting games: down, down-forward, forward, then the centre button fires with a ring. Directions press in (a nudge and a white edge).</p>
+          <button class="btn" type="button" data-apply="A1c">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A1d">
+          <h3>A1d · Smash flick <small>stick in an octagonal gate, flicked forward</small></h3>
+          <div class="big"><svg><use href="#m-a1d"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1d"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1d"></use></svg><svg class="s16"><use href="#m-a1d"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1d"></use></svg><svg class="s16"><use href="#m-a1d"></use></svg></div></div>
+          <p class="m">An analog stick seen from above, in an octagonal gate with the four player colours at the cardinals. It snaps forward with a small overshoot and springs back; the forward notch flashes and a burst ring fires: a forward smash. Abstract enough not to be any one controller.</p>
+          <button class="btn" type="button" data-apply="A1d">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="A1e">
+          <h3>A1e · Full circle <small>rolls 360, swells, then presses</small></h3>
+          <div class="big"><svg><use href="#m-a1e"></use></svg></div>
+          <div class="lockup"><svg><use href="#m-a1e"></use></svg><span class="wm">kaillera<span class="hy">-</span>next</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a1a"></use></svg><svg class="s16"><use href="#m-a1a"></use></svg></div></div>
+          <p class="m">The spin-and-grow one: the whole d-pad rolls a full turn (the seats light up in order as the stick passes them), swells a little at the top of the roll, settles, and the centre fires. The 360 motion is a grappler's input.</p>
+          <button class="btn" type="button" data-apply="A1e">Apply to header</button>
+        </div>
+
+      </div>
+
+      <header class="demo-head" style="padding-top: 0">
+        <h2 class="name sm" style="font-size: 26px">Round 5 · Motion graphics</h2>
+        <p class="line">Owner: "be more creative: animations, cool graphics, they could even move." Five pieces drawn as SVG and CSS, no images. Some are marks, some are section graphics, one is a toy.</p>
+      </header>
+      <div class="logo-grid r5" id="logo-grid-5" style="padding-top: 0">
+
+        <div class="lc" data-logo="R51">
+          <h3>1 · KO <small>flick, launch, lose a stock</small></h3>
+          <div class="big">
+            <svg viewBox="-2 -6 68 48" class="ko" aria-label="A stick flicks forward; a block is launched off the top corner and a stock is lost">
+              <polygon points="25.09,11.41 25.09,20.59 18.59,27.09 9.41,27.09 2.91,20.59 2.91,11.41 9.41,4.91 18.59,4.91" fill="#151b25" stroke="#242c39" stroke-width="1.5" stroke-linejoin="round"/>
+              <circle cx="14" cy="5.4" r="1.5" fill="#e5484d"/><circle cx="3.4" cy="16" r="1.5" fill="#3b82f6"/><circle cx="14" cy="26.6" r="1.5" fill="#f5c518"/><circle cx="24.6" cy="16" r="1.5" fill="#3fb950"/>
+              <g class="stick"><circle cx="14" cy="16" r="5.4" fill="#5aa8ff"/><circle cx="12.5" cy="14.5" r="1.8" fill="#a9d3ff"/></g>
+              <g class="foe t2"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d" fill-opacity=".22"/></g>
+              <g class="foe t1"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d" fill-opacity=".45"/></g>
+              <g class="foe"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d"/></g>
+              <circle class="hit" cx="37" cy="16" r="7" fill="none" stroke="#ffffff" stroke-width="1.2"/>
+              <g class="spark"><path d="M 60 -2 l 1.6 4.4 4.4 1.6 -4.4 1.6 -1.6 4.4 -1.6 -4.4 -4.4 -1.6 4.4 -1.6 z" fill="#f5c518"/></g>
+              <rect x="33" y="32" width="4" height="4" rx="1" fill="#e5484d"/><rect x="39" y="32" width="4" height="4" rx="1" fill="#e5484d"/><rect class="stock3" x="45" y="32" width="4" height="4" rx="1" fill="#e5484d"/>
+            </svg>
+          </div>
+          <p class="m">The Smash moment with no Smash in it: a forward flick, a hit ring, the opponent's block spins off the top corner with a trail and a star burst, and one of their stocks blinks out. Loops every 3.6 s.</p>
+          <button class="btn" type="button" data-apply="R51">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="R52">
+          <h3>2 · Match start <small>ports fill, players ready, ports become the board</small></h3>
+          <div class="big">
+            <svg viewBox="0 0 48 32" class="ms" aria-label="Four ports fill one by one, bounce, then turn into the board's row of slot markers">
+              <rect class="outline o1" x="6" y="6" width="5" height="20" rx="2.2" fill="none" stroke="#242c39" stroke-width="1.2"/>
+              <rect class="outline o2" x="16" y="6" width="5" height="20" rx="2.2" fill="none" stroke="#242c39" stroke-width="1.2"/>
+              <rect class="outline o3" x="26" y="6" width="5" height="20" rx="2.2" fill="none" stroke="#242c39" stroke-width="1.2"/>
+              <rect class="outline o4" x="36" y="6" width="5" height="20" rx="2.2" fill="none" stroke="#8b95a5" stroke-width="1.2"/>
+              <rect class="fill f1" x="6" y="6" width="5" height="20" rx="2.2" fill="#e5484d"/>
+              <rect class="fill f2" x="16" y="6" width="5" height="20" rx="2.2" fill="#3b82f6"/>
+              <rect class="fill f3" x="26" y="6" width="5" height="20" rx="2.2" fill="#f5c518"/>
+              <rect class="fill f4" x="36" y="6" width="5" height="20" rx="2.2" fill="#3fb950"/>
+            </svg>
+          </div>
+          <p class="m">Three players plug in, the fourth arrives (the A2a fill), everyone bounces once (ready), and the four ports collapse into the row of slot squares that sits on every board row. The logo turning into the interface, literally.</p>
+        </div>
+
+        <div class="lc" data-logo="R53">
+          <h3>3 · Rollback <small>the mechanism, as a timeline</small></h3>
+          <div class="big">
+            <svg viewBox="-2 0 70 30" class="rb" aria-label="A playhead steps through frames; one frame is wrong, the playhead rewinds three frames and replays them, then continues">
+              <rect x="0" y="17" width="64" height="1" fill="#242c39"/>
+              <rect class="t0" x="2" y="8" width="2" height="8" fill="#242c39"/><rect class="t1" x="8" y="8" width="2" height="8" fill="#242c39"/><rect class="t2" x="14" y="8" width="2" height="8" fill="#242c39"/><rect class="t3" x="20" y="8" width="2" height="8" fill="#242c39"/><rect class="t4" x="26" y="8" width="2" height="8" fill="#242c39"/><rect class="t5" x="32" y="8" width="2" height="8" fill="#242c39"/><rect class="t6" x="38" y="8" width="2" height="8" fill="#242c39"/><rect class="t7" x="44" y="8" width="2" height="8" fill="#242c39"/><rect class="t8" x="50" y="8" width="2" height="8" fill="#242c39"/><rect class="t9" x="56" y="8" width="2" height="8" fill="#242c39"/><rect class="t10" x="62" y="8" width="2" height="8" fill="#242c39"/>
+              <rect class="head" x="1" y="5" width="4" height="14" rx="1" fill="#5aa8ff"/>
+              <text class="lbl bad" x="39" y="26" text-anchor="middle">wrong guess</text>
+              <text class="lbl re" x="27" y="26" text-anchor="middle">rewind · replay</text>
+            </svg>
+          </div>
+          <p class="m">Frames advance. One turns red: the opponent didn't do what we guessed. The playhead snaps back three frames, replays them in blue, and carries on. That's the whole engine in four seconds; meant for the "Why it feels close to the couch" section, next to the demo button.</p>
+        </div>
+
+        <div class="lc" data-logo="R54">
+          <h3>4 · The stick is real <small>move it; tap to press</small></h3>
+          <div class="big">
+            <svg viewBox="0 0 32 32" class="istick" role="img" aria-label="An analog stick you can move with the pointer">
+              <polygon points="27.09,11.41 27.09,20.59 20.59,27.09 11.41,27.09 4.91,20.59 4.91,11.41 11.41,4.91 20.59,4.91" fill="#151b25" stroke="#242c39" stroke-width="1.5" stroke-linejoin="round"/>
+              <circle class="cd" data-dir="n" cx="16" cy="5.4" r="1.7" fill="#e5484d" stroke="#fff" stroke-width="1.2" stroke-opacity="0"/>
+              <circle class="cd" data-dir="w" cx="5.4" cy="16" r="1.7" fill="#3b82f6" stroke="#fff" stroke-width="1.2" stroke-opacity="0"/>
+              <circle class="cd" data-dir="s" cx="16" cy="26.6" r="1.7" fill="#f5c518" stroke="#fff" stroke-width="1.2" stroke-opacity="0"/>
+              <circle class="cd" data-dir="e" cx="26.6" cy="16" r="1.7" fill="#3fb950" stroke="#fff" stroke-width="1.2" stroke-opacity="0"/>
+              <circle class="ring" cx="16" cy="16" r="6" fill="none" stroke="#5aa8ff" stroke-width="1.4"/>
+              <g class="cap"><circle cx="16" cy="16" r="5.6" fill="#5aa8ff"/><circle cx="14.4" cy="14.4" r="1.9" fill="#a9d3ff"/></g>
+            </svg>
+          </div>
+          <p class="m">Not an animation: a control. Drag or hover and the stick follows within the gate; push far enough and the direction lights; let go and it springs back; tap to press. In the header it makes the logo the first thing on the page you can play with.</p>
+          <button class="btn" type="button" data-apply="R54">Apply to header</button>
+        </div>
+
+        <div class="lc" data-logo="R55">
+          <h3>5 · Players arrive <small>the wordmark joins one letter at a time</small></h3>
+          <div class="big" style="height: auto; padding: 22px 12px">
+            <div class="arrive" style="font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; font-size: 34px; line-height: 1; white-space: nowrap"><span class="L" style="--i:0;--c:var(--p1)">k</span><span class="L" style="--i:1;--c:var(--p2)">a</span><span class="L" style="--i:2;--c:var(--p3)">i</span><span class="L" style="--i:3;--c:var(--p4)">l</span><span class="L" style="--i:4;--c:var(--p1)">l</span><span class="L" style="--i:5;--c:var(--p2)">e</span><span class="L" style="--i:6;--c:var(--p3)">r</span><span class="L" style="--i:7;--c:var(--p4)">a</span><span class="L" style="--i:8;--c:var(--accent);color:var(--accent)">-</span><span class="L" style="--i:9;--c:var(--p1)">n</span><span class="L" style="--i:10;--c:var(--p2)">e</span><span class="L" style="--i:11;--c:var(--p3)">x</span><span class="L" style="--i:12;--c:var(--p4)">t</span></div>
+          </div>
+          <p class="m">Each letter drops in wearing a player colour, then settles to white, left to right, like a lobby filling. On the real page this would run once on load, not loop. Pairs with any mark, or with none.</p>
+          <button class="btn" type="button" data-apply="R55">Apply to header</button>
+        </div>
+
+      </div>
+
+      <header class="demo-head" style="padding-top: 0">
+        <h2 class="name sm" style="font-size: 26px">Round 6 · The ports inside the real wordmark</h2>
+        <p class="line">The name stays in the page's own face. Inside the letters, the stems of I · L · L · E are the four ports: red, blue, yellow, and the E's stem is the green one that fills last. Letters arrive left to right (once on load on the real page). The first attempt, a redrawn rounded alphabet, is withdrawn.</p>
+      </header>
+      <div class="logo-grid r6" id="logo-grid-6" style="padding-top: 0; grid-template-columns: 1fr">
+
+        <div class="lc" data-logo="R6B">
+          <h3>6 · KAILLERA-NEXT with the ports in it <small>same typeface as the page; the stems are the bars</small></h3>
+          <div class="lockup"><span class="cap">Animated: letters arrive, then the last port fills (loops here every 7 s; once on load on the real page)</span><span class="wm ports play arrive" style="font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; line-height: 1; white-space: nowrap"><span class="L" style="--i:0;--c:var(--p1)">k</span><span class="L" style="--i:1;--c:var(--p2)">a</span><span class="L pI" style="--i:2;--c:var(--p1);--c-end:var(--p1)">i</span><span class="L pL1" style="--i:3;--c:var(--p2)">l</span><span class="L pL2" style="--i:4;--c:var(--p3)">l</span><span class="L pE" style="--i:5;--c:var(--p4)">e</span><span class="L" style="--i:6;--c:var(--p3)">r</span><span class="L" style="--i:7;--c:var(--p4)">a</span><span class="L hy" style="--i:8;--c:var(--accent);--c-end:var(--accent)">-</span><span class="L" style="--i:9;--c:var(--p1)">n</span><span class="L" style="--i:10;--c:var(--p2)">e</span><span class="L" style="--i:11;--c:var(--p3)">x</span><span class="L" style="--i:12;--c:var(--p4)">t</span></span></div>
+          <div class="lockup"><span class="cap">At rest: all four ports in (the still frame and the reduced-motion version)</span><span class="wm ports still" style="font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; line-height: 1; white-space: nowrap"><span class="L" style="--i:0;--c:var(--p1)">k</span><span class="L" style="--i:1;--c:var(--p2)">a</span><span class="L pI" style="--i:2;--c:var(--p1);--c-end:var(--p1)">i</span><span class="L pL1" style="--i:3;--c:var(--p2)">l</span><span class="L pL2" style="--i:4;--c:var(--p3)">l</span><span class="L pE" style="--i:5;--c:var(--p4)">e</span><span class="L" style="--i:6;--c:var(--p3)">r</span><span class="L" style="--i:7;--c:var(--p4)">a</span><span class="L hy" style="--i:8;--c:var(--accent);--c-end:var(--accent)">-</span><span class="L" style="--i:9;--c:var(--p1)">n</span><span class="L" style="--i:10;--c:var(--p2)">e</span><span class="L" style="--i:11;--c:var(--p3)">x</span><span class="L" style="--i:12;--c:var(--p4)">t</span></span></div>
+          <div class="lockup withmark"><span class="cap" style="width: 100%">For comparison: the bars as a separate mark beside the plain name</span><svg><use href="#m-a2a"></use></svg><span class="wm" style="font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; line-height: 1; white-space: nowrap">kaillera<span class="hy" style="color: var(--accent)">-</span>next</span></div>
+          <div class="tune"><label for="cut">Stem cut (where the colour stops inside L and E)</label><input type="range" id="cut" min="28" max="48" value="38"><output id="cut-out">38%</output><span>· dial it in on the real font, then it's a number for the build</span></div>
+          <div class="favrow"><div class="fav dark"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div><div class="fav light"><svg class="s32"><use href="#m-a2"></use></svg><svg class="s16"><use href="#m-a2"></use></svg></div></div>
+          <p class="m">Nothing is redrawn: the colour is clipped to the glyphs themselves, so the ports sit exactly where the font puts the stems. The E's stem starts grey (an empty port) and fills green from the bottom. The tab icon stays the four bars.</p>
+          <button class="btn" type="button" data-apply="R6B">Apply to header</button>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===================== DEMO (restyled) ===================== -->
+  <div class="screen" id="scr-demo" hidden>
+    <div class="wrap">
+      <header class="demo-head">
+        <h1 class="name sm">Rollback demo</h1>
+        <p class="line">Drop a ROM. Crank the lag. Toggle rollback off. Feel the difference.</p>
+        <p class="sub" style="display:block">Waiting for ROM</p>
+      </header>
+      <div class="demo-grid">
+        <div>
+          <div class="stage" aria-label="Emulator">
+            <div class="drop-inner">
+              <div class="dz-t">Drop ROM here</div>
+              <p>Raw .z64, .n64 or .v64 files. Stays on this device.</p>
+              <button class="btn primary" type="button">Choose ROM</button>
+            </div>
+          </div>
+          <p class="explainer">Rollback netplay runs your game locally without waiting on the network. Every player's input, yours included, takes effect after a small fixed delay (a frame or two, just enough to absorb jitter), so both machines apply it on the same frame. For the rest of the round-trip, the engine predicts what the opponent pressed and keeps going, then rewinds and replays if the guess was wrong.</p>
+          <p class="explainer">The proof is the contrast: at the same simulated RTT, rollback keeps your input delay small while lockstep makes every press arrive noticeably later. The rollback button switches between them, and auto-compare switches every 6 seconds.</p>
+        </div>
+        <aside class="side" aria-label="Demo controls">
+          <div class="card">
+            <div class="kicker">Play with friends</div>
+            <p class="m" style="margin: 4px 0 10px">No installs. Free. Share a link.</p>
+            <button class="btn primary wide" type="button">Open the front page →</button>
+          </div>
+          <div class="card">
+            <h2>Result</h2>
+            <div class="feel">CRANK THE LAG →</div>
+            <p class="hint" style="text-align:center">No lag — both modes feel the same.</p>
+            <div class="fd">Connection: — · Frame delay: 0</div>
+          </div>
+          <div class="card">
+            <div class="slider-h"><label for="demo-lag">Network RTT</label><b>0 ms RTT</b></div>
+            <input type="range" id="demo-lag" min="0" max="110" step="5" value="0">
+            <p class="hint">Round-trip time, like a real ping reading. Typical: ~30 ms LAN, ~60 ms regional, ~150 ms cross-country.</p>
+          </div>
+          <button class="btn primary big wide" type="button" aria-pressed="true">Rollback: ON</button>
+          <button class="btn wide" type="button">▶ Auto-compare every 6s</button>
+          <div class="emu">
+            <button class="btn" type="button">🎮 Controls</button>
+            <button class="btn" type="button" disabled>🔄 Reset</button>
+            <button class="btn" type="button" disabled>⏸ Pause</button>
+            <button class="btn" type="button" disabled>⏹ Stop</button>
+          </div>
+          <div class="card">
+            <h2>Keyboard (P1)</h2>
+            <dl class="keys">
+              <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move (analog stick)</dd>
+              <dt><kbd>C</kbd></dt><dd>A: attack, confirm</dd>
+              <dt><kbd>X</kbd></dt><dd>B: special, back</dd>
+              <dt><kbd>I</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd></dt><dd>C buttons: jump</dd>
+              <dt><kbd>Z</kbd></dt><dd>Z: shield</dd>
+              <dt><kbd>Enter</kbd></dt><dd>Start</dd>
+            </dl>
+            <p class="hint">Remap in 🎮 Controls. A gamepad works too.</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var mock = document.getElementById('mock');
+  var notes = {
+    landing: '<b>Landing (W1 desktop / W2 phone).</b> The board is the hero. Switch Board to Empty and Waking; Waking has a working lag visualizer (press SPACE or tap). Frame boxes stand in for real game frames; the three screenshot boxes stand in for real captures.',
+    invite: '<b>Invite link (W3).</b> What a friend sees after tapping a link, before the room. Six states in the toolbar. Phones: same layout, stacked.',
+    room: '<b>Room · ROM needed (W4).</b> The room page’s pre-game overlay restyled to the direction. Three states: needs ROM, wrong ROM, cached ROM library.',
+    demo: '<b>Demo page</b> restyled to the direction. Same layout as today’s /demo.html (stage + sidebar), same copy; only the look changes.',
+    logo: '<b>Logo candidates.</b> Hand-drawn flat SVG, no generator. Judge each at 16 px first (the tab icon), then in the lockup, then in white. Apply one to see it on the Landing and Invite headers.'
+  };
+  var dirnotes = { A: '', B: ' Direction B shown for comparison only.', C: ' Direction C shown for comparison only.', M: ' Mix shown for comparison only.' };
+  var screen = 'landing', dir = 'A';
+
+  function pressed(groupId, attr, val) {
+    document.querySelectorAll('#' + groupId + ' .chip').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset[attr] === val)); });
+  }
+  function note() { document.getElementById('dirnote').innerHTML = (notes[screen] || '') + (dirnotes[dir] || ''); }
+
+  function setScreen(sc) {
+    screen = sc;
+    ['landing', 'invite', 'room', 'demo', 'logo'].forEach(function (k) { document.getElementById('scr-' + k).hidden = (k !== sc); });
+    document.querySelectorAll('.bar .grp[data-for]').forEach(function (g) { g.hidden = (g.dataset.for !== sc); });
+    pressed('screens', 'screen', sc);
+    if (sc === 'landing') placeViz(document.getElementById('waking-landing'), document.getElementById('st-waking').hidden);
+    if (sc === 'invite') setInv(inv);
+    note();
+    try { localStorage.setItem('kn-screen', sc); } catch (e) {}
+  }
+  function setDir(d) {
+    dir = d;
+    mock.setAttribute('data-dir', d);
+    pressed('dirs', 'dir', d);
+    note();
+    try { localStorage.setItem('kn-dir', d); } catch (e) {}
+  }
+  function initStick(svg) {
+    var cap = svg.querySelector('.cap'), ring = svg.querySelector('.ring'), dots = svg.querySelectorAll('.cd');
+    function move(e) {
+      var r = svg.getBoundingClientRect(); var sc = 32 / r.width;
+      var dx = (e.clientX - r.left) * sc - 16, dy = (e.clientY - r.top) * sc - 16;
+      var d = Math.hypot(dx, dy), m = Math.min(d, 8);
+      if (d > 0) { dx = dx / d * m; dy = dy / d * m; }
+      cap.style.transition = 'none'; cap.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+      var dir = m > 5 ? (Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'e' : 'w') : (dy > 0 ? 's' : 'n')) : '';
+      dots.forEach(function (c) { c.setAttribute('stroke-opacity', c.dataset.dir === dir ? '1' : '0'); });
+    }
+    function leave() { cap.style.transition = ''; cap.style.transform = 'translate(0,0)'; dots.forEach(function (c) { c.setAttribute('stroke-opacity', '0'); }); }
+    svg.addEventListener('pointermove', move);
+    svg.addEventListener('pointerleave', leave);
+    svg.addEventListener('pointerup', leave);
+    svg.addEventListener('pointerdown', function (e) { move(e); ring.classList.remove('fire'); void ring.getBoundingClientRect(); ring.classList.add('fire'); });
+  }
+  document.querySelectorAll('.istick').forEach(initStick);
+  var cut = document.getElementById('cut');
+  cut.addEventListener('input', function () {
+    var v = Number(cut.value); document.getElementById('cut-out').textContent = v + '%';
+    document.querySelectorAll('.ports').forEach(function (el) { el.style.setProperty('--cutL', v + '%'); el.style.setProperty('--cutE', (v - 2) + '%'); });
+  });
+  var marks = { A: '#m-a', AM: '#m-am', B: '#m-b', C: '#m-c', A1: '#m-a1', A2: '#m-a2', A3: '#m-a3', A2a: '#m-a2a', A2b: '#m-a2b', A2c: '#m-a2c', A1a: '#m-a1a', A1b: '#m-a1b', A1c: '#m-a1c', A1d: '#m-a1d', A1e: '#m-a1e' };
+  function setLogo(id) {
+    mock.setAttribute('data-logo', id);
+    var hdr = document.getElementById('hdr-name');
+    hdr.classList.remove('arrive'); void hdr.offsetWidth; if (id === 'R55') hdr.classList.add('arrive');
+    hdr.classList.toggle('ports', id === 'R6B');
+    hdr.classList.toggle('play', id === 'R6B');
+    if (id === 'R6B') hdr.classList.add('arrive');
+    document.querySelectorAll('.hdr-mark').forEach(function (m) {
+      m.classList.toggle('wide', id === 'R51');
+      if (id === 'R51' || id === 'R54') {
+        var src = document.querySelector('.lc[data-logo="' + id + '"] .big svg');
+        m.innerHTML = ''; var clone = src.cloneNode(true); m.appendChild(clone);
+        if (id === 'R54') initStick(clone);
+      } else if (!m.querySelector('.hdr-use')) {
+        m.innerHTML = '<svg><use class="hdr-use" href="#m-a"></use></svg>';
+      }
+    });
+    document.querySelectorAll('.hdr-use').forEach(function (u) { u.setAttribute('href', marks[id] || '#m-a'); });
+    document.querySelectorAll('.hdr-mark').forEach(function (m) { m.style.color = (id === 'B') ? 'var(--accent)' : ''; });
+    document.querySelectorAll('.lc').forEach(function (c) { c.classList.toggle('is-on', c.dataset.logo === id); });
+    try { localStorage.setItem('kn-logo', id); } catch (e) {}
+  }
+  ['logo-grid', 'logo-grid-2', 'logo-grid-3', 'logo-grid-4', 'logo-grid-5', 'logo-grid-6'].forEach(function (id) { document.getElementById(id).addEventListener('click', function (e) { var b = e.target.closest('[data-apply]'); if (b) setLogo(b.dataset.apply); }); });
+  function setPreview(v) {
+    mock.setAttribute('data-preview', v);
+    pressed('previews', 'preview', v);
+    try { localStorage.setItem('kn-preview', v); } catch (e) {}
+  }
+
+  // waking timer + visualizer placement (one visualizer, moved between containers)
+  var wakeTimer = 0, wakeStart = 0;
+  function startWakeTimer(container) {
+    clearInterval(wakeTimer);
+    wakeStart = Date.now();
+    var el = container.querySelector('.elapsed');
+    el.textContent = '0:00';
+    wakeTimer = setInterval(function () {
+      var t = Math.floor((Date.now() - wakeStart) / 1000);
+      el.textContent = Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+    }, 1000);
+  }
+  function placeViz(container, hidden) {
+    var viz = document.getElementById('viz');
+    if (hidden) return;
+    var slot = container.querySelector('#inv-viz-slot') || container;
+    if (viz.parentNode !== slot) slot.appendChild(viz);
+  }
+  function setState(s) {
+    mock.setAttribute('data-state', s);
+    ['live', 'empty', 'waking'].forEach(function (k) { document.getElementById('st-' + k).hidden = (k !== s); });
+    pressed('states', 'state', s);
+    var waking = s === 'waking';
+    ['create', 'join', 'watch', 'code'].forEach(function (id) { document.getElementById(id).disabled = waking; });
+    document.getElementById('create').textContent = waking ? 'Create a room · ready in a moment' : 'Create a room';
+    if (waking) { placeViz(document.getElementById('waking-landing'), false); startWakeTimer(document.getElementById('waking-landing')); }
+    else clearInterval(wakeTimer);
+    try { localStorage.setItem('kn-state', s); } catch (e) {}
+  }
+
+  // invite variants
+  var inv = 'normal';
+  function setInv(v) {
+    inv = v;
+    pressed('invvars', 'inv', v);
+    var main = document.getElementById('inv-main'), closed = document.getElementById('inv-closed'), waking = document.getElementById('inv-waking');
+    main.hidden = (v === 'closed' || v === 'waking');
+    closed.hidden = (v !== 'closed');
+    waking.hidden = (v !== 'waking');
+    document.getElementById('inv-banner').hidden = (v !== 'inapp');
+    var full = (v === 'full'), spec = (v === 'spectate');
+    document.getElementById('inv-fullline').hidden = !full;
+    document.getElementById('inv-kicker').textContent = spec ? 'Watch Kaz’s room' : 'Kaz invited you to play';
+    document.getElementById('inv-facts').innerHTML = full
+      ? '<span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot p3 on"></i><i class="slot p4 on"></i></span><span>4 of 4 in the room</span><span>·</span><span class="st ingame">in game · 6 min</span>'
+      : '<span class="slots"><i class="slot p1 on"></i><i class="slot p2 on"></i><i class="slot"></i><i class="slot"></i></span><span>2 of 4 in the room</span><span>·</span><span>waiting for players</span>';
+    var join = document.getElementById('inv-join'), watch = document.getElementById('inv-watch'), stack = document.getElementById('inv-stack');
+    var jh = document.getElementById('inv-join-hint'), wh = document.getElementById('inv-watch-hint');
+    join.className = 'btn big' + ((full || spec) ? '' : ' primary');
+    watch.className = 'btn big' + ((full || spec) ? ' primary' : '');
+    join.textContent = full ? 'Join when a slot opens' : (spec ? 'Join if a slot opens' : 'Join the room');
+    jh.textContent = spec ? 'needs your own SSB64 ROM' : 'needs your own SSB64 ROM (.z64 / .n64 / .v64 / .zip)';
+    watch.textContent = (full || spec) ? 'Watch' : 'Watch instead';
+    // order: primary first
+    if (full || spec) { stack.append(join, jh); stack.prepend(watch, wh); stack.insertBefore(wh, join); stack.insertBefore(watch, wh); }
+    else { stack.prepend(join, jh); stack.append(watch, wh); }
+    document.getElementById('inv-next').textContent = spec
+      ? 'What happens next: you’ll see the game as it plays, with sound. If a slot opens, you can take it with your own ROM.'
+      : 'What happens next: pick a name, drop your ROM, wait for Kaz to press Start.';
+    if (v === 'waking') { placeViz(waking, false); startWakeTimer(waking); }
+    try { localStorage.setItem('kn-inv', v); } catch (e) {}
+  }
+
+  // room variants
+  function setRoom(v) {
+    pressed('roomvars', 'room', v);
+    document.getElementById('room-err').hidden = (v !== 'wrong');
+    document.getElementById('room-lib').hidden = (v !== 'cached');
+    document.getElementById('room-dz').hidden = (v === 'cached');
+    var you = document.getElementById('room-you');
+    you.textContent = v === 'wrong' ? 'wrong ROM' : (v === 'cached' ? '✓ ROM · Super Smash Bros. (US)' : 'needs ROM');
+    you.className = v === 'cached' ? 'ok' : 'pend';
+    try { localStorage.setItem('kn-room', v); } catch (e) {}
+  }
+
+  var ROT = ['AM', 'A2a', 'A1c', 'A1e', 'R51', 'R54', 'R55'], rotTimer = 0, rotIdx = 0;
+  function setRotate(on) {
+    clearInterval(rotTimer); rotTimer = 0;
+    pressed('rot', 'rot', on ? 'on' : 'off');
+    if (on) {
+      rotIdx = 0; setLogo(ROT[0]);
+      rotTimer = setInterval(function () {
+        rotIdx = (rotIdx + 1) % ROT.length;
+        var ms = document.querySelectorAll('.hdr-mark');
+        ms.forEach(function (m) { m.classList.add('fade'); });
+        setTimeout(function () { setLogo(ROT[rotIdx]); ms.forEach(function (m) { m.classList.remove('fade'); }); }, 300);
+      }, 8000);
+    }
+    try { localStorage.setItem('kn-rot', on ? 'on' : 'off'); } catch (e) {}
+  }
+  document.getElementById('rot').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setRotate(b.dataset.rot === 'on'); });
+  document.getElementById('watch-rotation').addEventListener('click', function () { setRotate(true); setScreen('landing'); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+  document.getElementById('screens').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setScreen(b.dataset.screen); });
+  document.getElementById('dirs').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setDir(b.dataset.dir); });
+  document.getElementById('states').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setState(b.dataset.state); });
+  document.getElementById('previews').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setPreview(b.dataset.preview); });
+  document.getElementById('invvars').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setInv(b.dataset.inv); });
+  document.getElementById('roomvars').addEventListener('click', function (e) { var b = e.target.closest('.chip'); if (b) setRoom(b.dataset.room); });
+  document.getElementById('code-link').addEventListener('click', function () { var c = document.querySelector('.code'); c.style.display = 'inline-flex'; this.style.display = 'none'; document.getElementById('code').focus(); });
+
+  // input-lag visualizer (same mechanics as /lag-test.html)
+  var lag = 120, rollback = true;
+  var lagEl = document.getElementById('lag'), rbEl = document.getElementById('rb');
+  function verdict() {
+    var v = document.getElementById('verdict'), sub = document.getElementById('verdict-sub');
+    if (lag === 0) { v.textContent = 'No network lag'; v.className = 'verdict ok'; sub.textContent = 'Nothing to hide. Raise the slider.'; return; }
+    if (rollback) { v.textContent = 'Round trip hidden'; v.className = 'verdict ok'; sub.textContent = lag + ' ms each way is still on the wire. Rollback predicts past it locally, so you don’t wait.'; }
+    else { v.textContent = (lag * 2) + ' ms wait per input'; v.className = 'verdict bad'; sub.textContent = 'Lockstep waits a full round trip on every input. ' + lag + ' ms each way = ' + (lag * 2) + ' ms before you see the response.'; }
+  }
+  function flash(el, late) { el.classList.remove('lit', 'late'); void el.offsetHeight; if (late) el.classList.add('late'); el.classList.add('lit'); }
+  function press() {
+    var t0 = performance.now();
+    flash(document.getElementById('p-in'), false);
+    document.getElementById('v-in').textContent = '0 ms';
+    var out = document.getElementById('v-out'), pout = document.getElementById('p-out');
+    var wait = rollback ? 0 : lag * 2;
+    if (wait === 0) { flash(pout, false); out.textContent = '0 ms'; return; }
+    out.textContent = 'wait…';
+    setTimeout(function () { flash(pout, wait > 50); out.textContent = '+' + Math.round(performance.now() - t0) + ' ms'; }, wait);
+  }
+  lagEl.addEventListener('input', function () { lag = Number(lagEl.value) || 0; document.getElementById('lag-out').textContent = lag + ' ms'; verdict(); });
+  rbEl.addEventListener('change', function () { rollback = rbEl.checked; verdict(); });
+  var viz = document.getElementById('viz');
+  viz.addEventListener('click', function (e) { if (e.target.closest('input, label')) return; press(); });
+  viz.addEventListener('keydown', function (e) { if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); press(); } });
+  document.addEventListener('keydown', function (e) {
+    if (e.code === 'Space' && !e.repeat && viz.offsetParent !== null && !e.target.closest('input, button')) { e.preventDefault(); press(); }
+  });
+  verdict();
+
+  // init: hash tokens pick a screen or a direction; localStorage remembers the rest
+  var st = 'live', pv = 'on', rv = 'needs', sc = 'landing', d = 'A', iv = 'normal', lg = 'none';
+  try {
+    sc = localStorage.getItem('kn-screen') || sc; d = localStorage.getItem('kn-dir') || d; st = localStorage.getItem('kn-state') || st;
+    pv = localStorage.getItem('kn-preview') || pv; iv = localStorage.getItem('kn-inv') || iv; rv = localStorage.getItem('kn-room') || rv; lg = localStorage.getItem('kn-logo') || lg;
+  } catch (e) {}
+  var h = (location.hash || '').slice(1).toLowerCase();
+  if (['landing', 'invite', 'room', 'demo', 'logo'].indexOf(h) >= 0) sc = h;
+  if (['a', 'b', 'c', 'm'].indexOf(h) >= 0) d = h.toUpperCase();
+  if (['A', 'B', 'C', 'M'].indexOf(d) < 0) d = 'A';
+  if (['live', 'empty', 'waking'].indexOf(st) < 0) st = 'live';
+  if (['landing', 'invite', 'room', 'demo', 'logo'].indexOf(sc) < 0) sc = 'landing';
+  if (['A', 'B', 'C', 'D', 'A1', 'A2', 'A3', 'A2a', 'A2b', 'A2c', 'A1a', 'A1b', 'A1c', 'A1d', 'A1e', 'R51', 'R54', 'R55', 'R6B', 'AM', 'none'].indexOf(lg) < 0) lg = 'none';
+  if (['normal', 'full', 'closed', 'inapp', 'waking', 'spectate'].indexOf(iv) < 0) iv = 'normal';
+  if (['needs', 'wrong', 'cached'].indexOf(rv) < 0) rv = 'needs';
+  setPreview(pv === 'off' ? 'off' : 'on');
+  setDir(d);
+  setState(st);
+  setInv(iv);
+  setRoom(rv);
+  setLogo(lg);
+  setScreen(sc);
+  var rot = 'off'; try { rot = localStorage.getItem('kn-rot') || rot; } catch (e) {}
+  if (rot === 'on') setRotate(true);
+})();
+</script>

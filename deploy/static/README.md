@@ -1,7 +1,8 @@
 # Static landing page: hosting proposal
 
-**Status: proposal. Nothing here is live.** DNS, Render and Cloudflare
-settings change only with the owner's OK (docs/landing-design.md §7.2 M0.9).
+**Status: option A chosen by the owner (2026-09-26). Nothing here is live
+yet.** The Worker config lands with the landing page (M1/M2); the route is
+switched on in Cloudflare at launch, with the owner.
 
 ## The problem
 
