@@ -2178,9 +2178,12 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
 ### 7.2 Milestones, in build order
 
 **M0 — Server and hosting plumbing** (nothing visible yet)
-1. `ROM_SHARING_ENABLED=false` in production for the known copyrighted ROMs
-   (flag already exists in `signaling.py` / `og.py`). Remove "enable ROM
-   sharing" from every client error string.
+1. `ROM_SHARING_ENABLED=false` is already set in `render.yaml`. Remove
+   "enable ROM sharing" from every client error string.
+0. Keepalive + persistence (§7.12): a 5-minute `/health` fetch from every
+   connected client; a Render Key Value instance and `REDIS_URL`, behind
+   config, switched on only with the owner's OK; fix the misleading
+   "preserved in Redis" shutdown log when Redis is absent.
 2. Zombie-room rule: a room with no live sockets is not joinable by a new
    player; returning players (known persistent id, within grace) may
    re-enter; new joiners get `Room closed` (distinct from `Room not found`).
@@ -2432,9 +2435,11 @@ Rules of the build:
   owner's explicit OK in that session. Same for adding the Redis Key
   Value instance and the keepalive (§7.12): implement behind config, ask
   before switching it on in production.
-- First thing in M0: confirm in the Render dashboard whether
-  CF_TURN_KEY_ID and CF_TURN_API_TOKEN are set (§7.12). Record the answer
-  in docs/landing-design.md §7.12.
+- Facts already established (§7.12): the service is on Render's free
+  plan; TURN is configured and working (Cloudflare); there is no Redis, so
+  rooms die on every restart or nap. First thing in M0: the keepalive and
+  the REDIS_URL / Key Value proposal, behind config, with the ask to the
+  owner before it goes live.
 - Where the doc is silent, choose the option that keeps the page honest
   and the scope small, say what you assumed, and keep going. Ask the
   owner only when two readings would produce materially different work.
@@ -2491,11 +2496,22 @@ answer, cheapest first:
 `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` are set (`server/src/api/turn.py`);
 an HMAC TURN pair via `TURN_SERVERS` + `TURN_SECRET`. Otherwise STUN only.
 `render.yaml` lists the two Cloudflare keys as `sync: false`, i.e. entered
-by hand in the Render dashboard. **Whether they are present in the live
-environment is unverified** from this session (the Render tool needs the
-owner's workspace confirmation). Check: Render dashboard → kaillera-next →
-Environment → both keys present. If absent, the page keeps the
-connection-failure copy and claims nothing about every pair connecting.
+by hand in the Render dashboard. **Verified 2026-09-26 from the service
+logs (owner-confirmed workspace):** the server made successful credential
+requests to Cloudflare's TURN API (`…/credentials/generate-ice-servers`
+→ `201 Created`) on 2026-09-25 at 13:44, 13:57 and 13:58 UTC. **TURN is
+configured and working.** The connection-failure copy (§7.4) stays as the
+honest fallback for the pairs a relay still can't join.
+
+**Verified 2026-09-26, hosting:** the service `kaillera-next`
+(`srv-dar79re0tbcc7399r1mg`, Oregon, Docker, auto-deploy from `main`) is on
+the **free** plan. **No Key Value (Redis) instance exists in the
+workspace**, and every instance start logs `REDIS_URL not configured —
+rooms will not survive restarts`. The logs show a new instance roughly
+every one to two hours through 2026-09-25 (deploys and wake-ups), so today
+rooms die on every nap. One small bug seen on the way: the graceful
+shutdown line says "1 room(s) preserved in Redis" even when Redis is not
+configured; fix the message (M0).
 
 **ROM sharing.** Already `ROM_SHARING_ENABLED='false'` in `render.yaml`
 (M0.1 is done on the server side; the client error copy still needs the
@@ -2506,8 +2522,8 @@ published artifact's source). Tokens, the SVG mark sprite, every animation,
 and the board/invite/room/demo layouts can be lifted from it directly.
 
 ### 7.10 Open items carried into the build session
-- 7.2 M0.8 build checks: answered in §7.12; only the live presence of the
-  Cloudflare TURN keys remains to confirm in the Render dashboard.
+- 7.2 M0.8 build checks: fully answered in §7.12 (free plan; no Redis;
+  TURN configured and working).
 - S3: the owner's two-device photo, or the solo two-screenshot composite if
   the photo doesn't happen. Either is fine.
 - Appendix B (Kaillera-player answers): fold in if they arrive; nothing
@@ -2676,3 +2692,4 @@ Surprises (one line):
 | 2026-09-25 | Match start → boot/sync overlay (real ready states); Rollback timeline → demo Result card (live) + landing netcode section. Phase 5 closed | Owner: "Both recommendations are fine" | 5 |
 | 2026-09-26 | Nothing outstanding blocks the build: the player test moves to the built page (M5); the photo has a solo fallback; Kaillera-player answers are optional; analytics defaulted. Build plan marked final | Owner: "Do we really need 1–4?" | 7 |
 | 2026-09-26 | Free tier confirmed from render.yaml; keepalive + Redis Key Value + zombie rule as the stay-awake answer, paid instance as the guarantee; TURN = Cloudflare keys entered by hand, live presence unverified; mockup source committed; hand-off prompt written | Owner's build-check questions | 7 |
+| 2026-09-26 | Verified on Render (owner's workspace): free plan; TURN configured and working per successful Cloudflare credential requests in the logs; no Key Value instance and REDIS_URL unset, rooms die on every nap; instance churn every 1–2 h on 2026-09-25 | Owner: "use My Workspace" | 7 |
