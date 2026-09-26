@@ -421,7 +421,8 @@ button {
   padding: 26px 16px;
 }
 .empty h3,
-.waking h3 {
+.waking h3,
+.waking h1 {
   margin: 0;
   font-family: var(--font-display);
   font-size: 22px;
@@ -496,12 +497,14 @@ button {
 .waking {
   padding: 18px 16px 20px;
 }
-.waking h3 {
+.waking h3,
+.waking h1 {
   display: flex;
   align-items: center;
   gap: 10px;
 }
-.waking h3 small {
+.waking h3 small,
+.waking h1 small {
   font: 500 13px/1 var(--font-body);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
