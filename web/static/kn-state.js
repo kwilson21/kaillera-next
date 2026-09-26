@@ -27,6 +27,7 @@
     sessionStats: { reconnects: 0, desyncs: 0, stalls: 0 }, // play.js, lockstep.js → pagehide summary
     matchId: null, // signaling game-started → lockstep flush interval
     isLocalHost: false, // play.js → kn-desync-detector.js
+    boardFrame: false, // play.js → kn-diagnostics.js (host of a listed room: larger screenshots)
 
     // ── Constants ──
     DEFAULT_ICE_SERVERS: [{ urls: 'stun:stun.cloudflare.com:3478' }],

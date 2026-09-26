@@ -50,8 +50,11 @@ def sig(monkeypatch):
     async def insert_screenshot(*a):
         return 1
 
-    for name in ("rooms", "_sid_to_room", "_sid_host", "_room_frames"):
+    for name in ("rooms", "_sid_to_room", "_sid_host", "_room_frames", "_disconnect_grace_tasks"):
         monkeypatch.setattr(signaling, name, {})
+    from src.api import og_card
+
+    monkeypatch.setattr(og_card, "_cache", {})
     room = signaling.Room(owner="host", room_name="r", game_id="ssb64", password=None, max_players=4)
     room.players["p-host"] = {"socketId": "host", "playerName": "Kaz"}
     room.slots[0] = "p-host"
@@ -164,13 +167,13 @@ def test_frame_kept_only_for_listed_in_game_host(sig):
     room, _ = sig
     _start(room)
     _screenshot("host", room)
-    assert signaling.room_frame("ROOM1") is None  # not listed
+    assert "ROOM1" not in signaling._room_frames  # not listed: nothing stored
     room.listed = True
     _screenshot("host", room)
     assert signaling.room_frame("ROOM1")[0] == JPEG
 
 
-def test_frames_from_guests_oversized_or_non_jpeg_are_ignored(sig):
+def test_frames_from_guests_or_non_jpeg_are_ignored(sig):
     room, _ = sig
     _start(room)
     room.listed = True
@@ -262,12 +265,13 @@ def test_missing_frame_is_404(client):
 
 
 def test_public_stats_absent_until_a_full_week_is_recorded(client, sig, monkeypatch):
+    import time
+
     room, _ = sig
     _start(room)
     monkeypatch.setattr(stats, "_local", stats.deque())
-    monkeypatch.setattr(stats, "_process_start", 0.0)
-    now = stats.WEEK_SECONDS - 10
-    monkeypatch.setattr(stats.time, "time", lambda: now)
+    monkeypatch.setattr(stats.state, "_redis", None)
+    monkeypatch.setattr(stats, "_process_start", time.time() - 60)  # up for a minute
     body = client.get("/api/stats/public").json()
     assert body == {"matches_this_week": None, "people_playing_now": 1}
 
@@ -277,9 +281,10 @@ def test_matches_this_week_counts_only_the_window(monkeypatch):
     monkeypatch.setattr(stats, "_process_start", 0.0)
     monkeypatch.setattr(stats.state, "_redis", None)
     week = stats.WEEK_SECONDS
-    for t in (10.0, week + 5, week + 6):
+    for t in (10.0, 20.0, week - 5):
         _run_async(stats.record_match(t))
-    assert _run_async(stats.matches_this_week(now=week + 100)) == 2
+    # At week + 25 the cutoff is t=25: the matches at 10 and 20 have aged out.
+    assert _run_async(stats.matches_this_week(now=week + 25)) == 1
     assert _run_async(stats.matches_this_week(now=week - 1)) is None
 
 
@@ -341,7 +346,7 @@ def test_card_is_1200x630_and_cached_per_frame():
     jpeg = og_card.card_for("C1", (_real_jpeg(), 1.0), "Super Smash Bros. 64", "Kaz")
     assert Image.open(io.BytesIO(jpeg)).size == (1200, 630)
     assert og_card.card_for("C1", (b"not used", 1.0), "x", "y") is jpeg
-    og_card.forget(set())
+    og_card.forget("C1")
     assert og_card._cache == {}
 
 
@@ -418,11 +423,69 @@ def test_frame_declaring_huge_dimensions_is_refused_without_decoding(sig):
     room, _ = sig
     _start(room)
     room.listed = True
-    # A small file whose frame header claims 30000x30000 (900 megapixels).
+    # A small file whose frame header claims 1000x1000: over our 640x480
+    # bound but under Pillow's own decompression-bomb limit, so only our
+    # check can refuse it.
     small = bytearray(_jpeg())
     sof = small.index(b"\xff\xc0")
-    small[sof + 5 : sof + 9] = (30000).to_bytes(2, "big") * 2
+    small[sof + 5 : sof + 9] = (1000).to_bytes(2, "big") * 2
     big = bytes(small)
     assert len(big) < 20_000
     _screenshot("host", room, big)
     assert signaling.room_frame("ROOM1") is None
+
+
+# ── Second review round ──────────────────────────────────────────────────────
+
+
+def test_host_leaving_with_only_spectators_unlists_the_room(sig):
+    room, _ = sig
+    room.listed = True
+    room.spectators["p-watch"] = {"socketId": "watcher", "playerName": "W"}
+    signaling._sid_to_room["watcher"] = ("ROOM1", "p-watch", True)
+    signaling._sid_host["watcher"] = "example"
+    _run_async(signaling._leave("host", "leave"))
+    assert "ROOM1" in signaling.rooms and not room.listed
+
+
+def test_join_allowed_while_the_only_player_is_in_grace(sig):
+    room, _ = sig
+    del signaling._sid_host["host"]
+    signaling._disconnect_grace_tasks["p-host"] = object()  # lobby owner grace running
+    assert _join("guest", "p-guest")[0] is None
+    assert not signaling.room_frame("ROOM1")  # still nothing public
+
+
+def test_end_game_drops_the_frame(sig):
+    room, _ = sig
+    _start(room)
+    room.listed = True
+    _screenshot("host", room)
+    assert "ROOM1" in signaling._room_frames
+    assert _run_async(signaling.end_game("host", {})) is None
+    assert "ROOM1" not in signaling._room_frames and room.started_at is None
+
+
+def test_start_game_records_a_match(sig, monkeypatch):
+    room, _ = sig
+    recorded = []
+
+    async def record(ts):
+        recorded.append(ts)
+
+    monkeypatch.setattr(signaling.stats, "record_match", record)
+    room.rom_ready.add("host")
+
+    async def go():
+        err = await signaling.start_game("host", {"mode": "rollback"})
+        await asyncio.sleep(0)  # let the background stats task run
+        return err
+
+    assert _run_async(go()) is None
+    assert recorded == [room.started_at]
+
+
+def test_set_listed_is_rate_limited():
+    from src import ratelimit
+
+    assert "set-listed" in ratelimit._LIMITS

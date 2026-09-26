@@ -31,25 +31,17 @@ services:
         sync: false
       - key: CF_TURN_API_TOKEN
         sync: false
-      # ── Off until the owner's OK (docs/landing-design.md §7.12) ──────────
-      # Keepalive: every open play page fetches /health this often, so the
-      # free instance can't nap under a live room. Uncomment to switch on.
-      # - key: KEEPALIVE_SECONDS
-      #   value: '300'
-      # Rooms survive restarts and naps: point REDIS_URL at the Key Value
-      # instance below (uncomment both blocks together).
-      # - key: REDIS_URL
-      #   fromService:
-      #     type: keyvalue
-      #     name: kaillera-next-kv
-      #     property: connectionString
+      # Set by hand in the Render dashboard (2026-09-26); listed here so a
+      # Blueprint sync never overwrites them. See docs/landing-design.md §7.12.
+      # REDIS_URL: internal URL of the kaillera-next-kv Key Value instance
+      # (free plan), so rooms survive restarts and naps.
+      - key: REDIS_URL
+        sync: false
+      # Play pages fetch /health this often, so the free instance can't nap
+      # under a live room (300 in production).
+      - key: KEEPALIVE_SECONDS
+        sync: false
       # Static landing page on another origin (hosting option B in
-      # deploy/static/README.md): let it read /health, /list, /room/*.
+      # deploy/static/README.md; option A, the one chosen, doesn't need it).
       # - key: PUBLIC_ORIGINS
       #   value: https://<static-origin>
-
-  # Render Key Value (free): room persistence for REDIS_URL above.
-  # - type: keyvalue
-  #   name: kaillera-next-kv
-  #   plan: free
-  #   ipAllowList: []  # reachable only from services in this workspace

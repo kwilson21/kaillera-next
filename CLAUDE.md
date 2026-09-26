@@ -254,5 +254,8 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `PORT` (default 27888), `MAX_ROOMS` (default 100), `MAX_SPECTATORS` (default 20)
 - `KEEPALIVE_SECONDS` (default 0 = off): play pages ping `/health` this often
 - `PUBLIC_ORIGINS`: extra origins allowed to read `/health`, `/list`, `/room/*`,
-  `/api/stats/public` (a static landing page on another domain)
+  `/api/stats/public` (a static landing page on another domain); only matters
+  when `ALLOWED_ORIGIN` is a specific origin (with `*`, any origin may read them)
+- `IP_HASH_SALT`: salts IP hashes and also derives the room-token signing key,
+  so reconnect tokens stay valid across restarts (random per process if unset)
 - `.env` file supported via python-dotenv

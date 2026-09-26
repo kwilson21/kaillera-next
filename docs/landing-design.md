@@ -2523,8 +2523,9 @@ configured; fix the message (M0).
 
 **Owner decisions at build start (2026-09-26, M0):** keepalive on
 (`KEEPALIVE_SECONDS=300`) and a Render Key Value instance for `REDIS_URL`,
-both approved; to be set in the Render dashboard (the build session could
-not make Render changes). Hosting: **option A**, one domain with a
+both approved and set on 2026-09-26: Key Value instance `kaillera-next-kv`
+(free, Oregon, internal-only), `REDIS_URL` and `KEEPALIVE_SECONDS=300` on the
+service (`render.yaml` lists both as `sync: false`). Hosting: **option A**, one domain with a
 Cloudflare Worker serving `/` and `/join` and proxying everything else to
 the game server (deploy/static/README.md).
 

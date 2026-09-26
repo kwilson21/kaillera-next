@@ -64,16 +64,15 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 
 ## What M0 already ships for either option
 
-- `GET /health` answers fast and needs no database.
+- `GET /health` answers fast (with Redis on, it also pings Redis).
 - Public read-only CORS on `/health`, `/list`, `/room/*` and
   `/api/stats/public` for `ALLOWED_ORIGIN` plus `PUBLIC_ORIGINS`. Simple
   GETs only, no credentials. Needed for option B only; harmless for A.
-- Keepalive behind `KEEPALIVE_SECONDS` (off by default; `render.yaml` has
-  it commented out). With it on, each open play page fetches `/health`
-  every few minutes, so the server can't nap under a live room.
-- Room persistence behind `REDIS_URL` (commented out in `render.yaml`,
-  with the Key Value instance next to it). Without it, rooms end on every
-  restart or nap.
+- Keepalive: each open play page fetches `/health` every
+  `KEEPALIVE_SECONDS`, so the server can't nap under a live room. Set to
+  300 in the Render dashboard.
+- Room persistence: `REDIS_URL` points at the `kaillera-next-kv` Key Value
+  instance (set in the dashboard), so rooms survive restarts and naps.
 
 ## Not changed until the pages exist
 

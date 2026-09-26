@@ -1153,6 +1153,9 @@
       if (localRomLoaded()) notifyRomReady();
     }
 
+    // Only the host of a listed room sends board-sized screenshots.
+    KNState.boardFrame = isHost && !!data.listed;
+
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
       const prevMode = mode;

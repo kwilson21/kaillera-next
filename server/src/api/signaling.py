@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 import socketio
 
 from src import db, state, stats
-from src.api import desync_vision
+from src.api import desync_vision, og_card
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
     ClaimSlotPayload,
@@ -436,6 +436,7 @@ def _board_frame(jpeg: bytes) -> bytes | None:
 
 def _drop_room_frame(session_id: str) -> None:
     _room_frames.pop(session_id, None)
+    og_card.forget(session_id)
 
 
 def _clear_host_rom(room: Room) -> None:
@@ -599,14 +600,15 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     # AND so remaining peers continue play under a new owner. The previous behavior
     # of force-closing the room on any host disconnect punished tab backgrounding,
     # WiFi roams, and Playwright multi-tab orchestration.
+    if room.owner == sid:
+        # Listing was this host's consent; nobody who stays has given it.
+        room.listed = False
+        _drop_room_frame(session_id)
     if room.owner == sid and room.players:
         new_owner_pid, new_owner_info = next(iter(room.players.items()))
         new_owner_sid = new_owner_info["socketId"]
         room.owner = new_owner_sid
         room.rom_sharing = False
-        # Listing was the old host's consent; the new host hasn't given it.
-        room.listed = False
-        _drop_room_frame(session_id)
         if room.status != "playing":
             _clear_host_rom(room)
         # Move new owner to slot 0 (P1) only in lobby — never reshuffle slots mid-game
@@ -811,10 +813,11 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
             resp["matchId"] = room.match_id
         return (None, resp)
 
-    # Zombie rule: a room nobody is connected to (restored after a restart,
-    # or everyone mid-grace) only takes back its own members, above. A new
-    # joiner would otherwise walk into a room with a ghost for a host.
-    if not room_is_live(room):
+    # Zombie rule: a room no player is connected to (restored after a
+    # restart) only takes back its own members, above. A new joiner would
+    # otherwise walk into a room with a ghost for a host. A player inside a
+    # disconnect grace window is on their way back, so the room stays open.
+    if not room_is_live(room) and not any(pid in _disconnect_grace_tasks for pid in room.players):
         return ("Room closed", None)
 
     await _leave(sid)  # clean up if already in another room
@@ -982,7 +985,8 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.mode = mode
     room.match_id = str(uuid.uuid4())
     room.started_at = time.time()
-    await stats.record_match(room.started_at)
+    # Stats never hold up the room lock (Redis round trips).
+    asyncio.create_task(stats.record_match(room.started_at))
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
     await sio.emit(
@@ -1518,7 +1522,8 @@ async def game_screenshot(sid: str, data: dict) -> None:
     # The host's frame doubles as the room's preview on the front-page board
     # when the room is listed. Only the latest is kept, in memory.
     if room.listed and sid == room.owner and img_bytes[:2] == b"\xff\xd8":
-        board = _board_frame(img_bytes)
+        # Pillow work runs off the event loop so frames can't stall signaling.
+        board = await asyncio.to_thread(_board_frame, img_bytes)
         if board is not None:
             _room_frames[session_id] = (board, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)

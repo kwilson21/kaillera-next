@@ -844,7 +844,6 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="No card")
         info = GAME_INFO.get(room.game_id)
         game = info["name"] if info else (room.rom_name or room.game_id)
-        og_card.forget(set(rooms))
         try:
             jpeg = og_card.card_for(room_id, frame, game, room_host_name(room))
         except Exception:
@@ -902,8 +901,8 @@ def create_app(lifespan=None) -> FastAPI:
             "has_password": False,
             "listed": True,
             "started_at": room.started_at if room.status == "playing" else None,
-            # The timestamp changes the URL each time a new frame lands, so
-            # an <img> refresh is a cache miss only when there's something new.
+            # Frames are served no-store; the timestamp lets the page tell a
+            # new frame from the one it already shows without fetching it.
             "frame_url": f"/room/{code}/frame.jpg?t={int(frame[1])}" if frame else None,
             "frame_age_s": round(now - frame[1], 1) if frame else None,
         }

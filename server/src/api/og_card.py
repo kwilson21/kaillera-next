@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -25,6 +26,7 @@ _MUTED = (139, 149, 165)  # --muted
 _ACCENT = (90, 168, 255)  # --accent
 
 _cache: dict[str, tuple[float, bytes]] = {}  # room code -> (frame time, jpeg)
+_lock = threading.Lock()
 
 
 @lru_cache(maxsize=8)
@@ -68,15 +70,18 @@ def compose(frame_jpeg: bytes, game: str, host_name: str) -> bytes:
 
 
 def card_for(code: str, frame: tuple[bytes, float], game: str, host_name: str) -> bytes:
-    cached = _cache.get(code)
+    # Called from the threadpool (sync endpoint): guard the shared cache.
+    with _lock:
+        cached = _cache.get(code)
     if cached and cached[0] == frame[1]:
         return cached[1]
     jpeg = compose(frame[0], game, host_name)
-    _cache[code] = (frame[1], jpeg)
+    with _lock:
+        _cache[code] = (frame[1], jpeg)
     return jpeg
 
 
-def forget(live_codes: set[str]) -> None:
-    """Drop cached cards for rooms that no longer exist."""
-    for code in [c for c in _cache if c not in live_codes]:
+def forget(code: str) -> None:
+    """Drop a room's cached card (it closed, unlisted or ended its match)."""
+    with _lock:
         _cache.pop(code, None)
