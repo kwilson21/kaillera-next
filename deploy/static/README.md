@@ -104,8 +104,18 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 ```sh
 python scripts/build_landing.py
 npx wrangler deploy -c wrangler.landing.jsonc   # uploads; still no route
-# then uncomment "routes" (or add the route in the dashboard) and deploy again
+npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc   # same value as below
+# set KN_PROXY_SECRET to the same value on the game server (Render), then
+# uncomment "routes" (or add the route in the dashboard) and deploy again
 ```
+
+**Visitor IPs.** Cloudflare sets `CF-Connecting-IP` on a Worker's
+subrequests to the Worker's own address, so without help the game server
+would see every visitor as one IP: one connection limit and one rate limit
+for everyone. The Worker forwards the visitor's IP in `X-KN-Client-IP` with
+the shared secret in `X-KN-Proxy-Auth` (and strips any a visitor sends);
+the server trusts that header only when the secret matches
+(`server/src/ratelimit.py`). Set both secrets before the route goes on.
 
 Rolling back is removing the route. Deploy again after any change to
 `web/index.html`, `web/join.html` or the files they load, or the Worker

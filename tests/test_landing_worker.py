@@ -224,3 +224,39 @@ def test_real_runtime_serves_the_pages_without_redirects():
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+FORWARD_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const seen = [];
+globalThis.fetch = async (req) => {
+  const h = req instanceof Request ? req.headers : new Headers();
+  seen.push({ ip: h.get('X-KN-Client-IP'), auth: h.get('X-KN-Proxy-Auth') });
+  return new Response('ok');
+};
+const assets = { fetch: async () => new Response('asset') };
+const req = (headers) => new Request('https://kn.example/list', { headers });
+// With the secret: the visitor's IP is forwarded; spoofed copies are replaced.
+await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+// Without it: nothing is forwarded, and spoofed copies are dropped.
+await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
+  { ORIGIN: 'https://game.example', ASSETS: assets });
+console.log(JSON.stringify(seen));
+"""
+
+
+def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", FORWARD_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    with_secret, without = json.loads(res.stdout)
+    assert with_secret == {"ip": "5.6.7.8", "auth": "s3cret"}
+    assert without == {"ip": None, "auth": None}

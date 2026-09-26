@@ -1,6 +1,7 @@
 """In-memory per-IP rate limiting with rolling window."""
 
 import hashlib
+import hmac
 import logging
 import os
 import time
@@ -86,6 +87,12 @@ def ip_hash_for_sid(sid: str) -> str:
 # never used there.
 _ON_RENDER = os.environ.get("RENDER") == "true"
 
+# The landing Worker (deploy/static/worker.js) sits in front of the server.
+# Cloudflare sets CF-Connecting-IP on a Worker's subrequests to the Worker's
+# own address, so the Worker forwards the visitor's IP in X-KN-Client-IP with
+# a shared secret; the header counts only when the secret matches.
+_PROXY_SECRET = os.environ.get("KN_PROXY_SECRET", "")
+
 
 def extract_ip(source: object) -> str:
     """Extract client IP from a FastAPI Request or ASGI environ dict.
@@ -106,6 +113,9 @@ def extract_ip(source: object) -> str:
 
         peer = source.client.host if source.client else "unknown"
 
+    proxied_ip = header("x-kn-client-ip")
+    if _PROXY_SECRET and proxied_ip and hmac.compare_digest(header("x-kn-proxy-auth").encode(), _PROXY_SECRET.encode()):
+        return proxied_ip.strip()
     if _ON_RENDER:
         for name in ("true-client-ip", "cf-connecting-ip"):
             if header(name):

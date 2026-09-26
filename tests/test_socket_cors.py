@@ -101,3 +101,24 @@ def test_default_order_unchanged(monkeypatch):
     )
     assert ratelimit.extract_ip(request({})) == "10.0.0.1"
     assert ratelimit.extract_ip({"REMOTE_ADDR": "10.0.0.2"}) == "10.0.0.2"
+
+
+def test_landing_worker_ip_trusted_only_with_the_secret(monkeypatch):
+    # Through the landing Worker, CF-Connecting-IP is the Worker's own
+    # address; the visitor's IP arrives in X-KN-Client-IP with the secret.
+    monkeypatch.setattr(ratelimit, "_ON_RENDER", True)
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "s3cret")
+    worker_ip = "2a06:98c0:3600::103"
+    worker = {"cf-connecting-ip": worker_ip, "x-kn-client-ip": "5.6.7.8"}
+    good = {**worker, "x-kn-proxy-auth": "s3cret"}
+    assert ratelimit.extract_ip(request(good)) == "5.6.7.8"
+    environ = {"HTTP_X_KN_CLIENT_IP": "5.6.7.8", "HTTP_X_KN_PROXY_AUTH": "s3cret"}
+    assert ratelimit.extract_ip(environ) == "5.6.7.8"
+    # A wrong or missing secret: ignored, the usual rule applies.
+    bad = {**worker, "x-kn-proxy-auth": "guess"}
+    assert ratelimit.extract_ip(request(bad)) == worker_ip
+    assert ratelimit.extract_ip(request(worker)) == worker_ip
+    # No secret configured: never trusted, whatever the request carries.
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "")
+    empty = {**worker, "x-kn-proxy-auth": ""}
+    assert ratelimit.extract_ip(request(empty)) == worker_ip
