@@ -43,6 +43,7 @@ const cases = [
   ['/join?room=ABC', 'GET', ''],
   ['/join?room=ABC', 'GET', 'Discordbot/2.0'],
   ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
+  ['/join?room=Case30X&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=ABC', 'POST', ''],
   ['/static/landing.js', 'GET', ''],
   ['/static/fonts/ibm-plex-sans-var-latin.woff2', 'GET', ''],
@@ -130,10 +131,13 @@ def test_crawlers_get_the_room_preview_on_the_public_host_or_the_static_page():
     fallback = _body(down, *crawler)
     assert fallback.startswith("asset:/join.html og=https://kn.example/og")
     assert 'content="https://kn.example/join?room=ABC"' in fallback
-    # Only the validated code goes in, whatever the query holds.
+    # Room IDs are case-sensitive: kept exactly as they are.
+    mixed = _body(down, "/join?room=Case30X&spectate=1", "GET", "Discordbot/2.0")
+    assert 'content="https://kn.example/join?room=Case30X&amp;spectate=1"' in mixed
+    # A room ID that doesn't fit the server's pattern is left out, never echoed.
     odd = _body(down, "/join?room=abc%22%3E%3Cx&spectate=1", "GET", "Discordbot/2.0")
-    assert 'content="https://kn.example/join?room=ABCX&amp;spectate=1"' in odd
-    assert "<x" not in odd
+    assert 'content="https://kn.example/join"' in odd
+    assert "<x" not in odd and "abc" not in odd
 
 
 def test_build_lists_exactly_the_files_the_pages_load():
@@ -146,3 +150,77 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert (dist / "static" / "join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
     assert not (dist / "static" / "play.js").exists()
+
+
+def _wrangler():
+    """A local wrangler: $WRANGLER, else the repo's node_modules (npm install)."""
+    import os
+
+    for cand in (os.environ.get("WRANGLER"), str(REPO / "node_modules" / ".bin" / "wrangler")):
+        if cand and Path(cand).is_file():
+            return cand
+    return None
+
+
+def test_real_runtime_serves_the_pages_without_redirects():
+    """Cloudflare's asset layer redirects /index.html and /join.html by default,
+    which the fake ASSETS above can't show; run the real local runtime."""
+    import socket
+    import time
+    import urllib.error
+    import urllib.request
+
+    wrangler = _wrangler()
+    if not wrangler:
+        pytest.skip("wrangler not installed (npm install, or set WRANGLER)")
+    build = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "build_landing.py")], capture_output=True, timeout=60
+    )
+    assert build.returncode == 0
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen(
+        # ORIGIN points nowhere: pages must come from assets alone.
+        [wrangler, "dev", "-c", "wrangler.landing.jsonc", "--port", str(port), "--var", "ORIGIN:http://127.0.0.1:9"],
+        cwd=REPO,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+
+    def get(path):
+        try:
+            with opener.open(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+                return r.status, r.headers.get("content-type", ""), r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("content-type", ""), ""
+
+    try:
+        deadline = time.time() + 60
+        while True:
+            try:
+                get("/static/landing.css")
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.5)
+        for path, marker in [
+            ("/", 'id="board"'),
+            ("/index.html", 'id="board"'),
+            ("/join?room=ROOM1&spectate=1", 'id="inv-main"'),
+        ]:
+            status, ctype, body = get(path)
+            assert status == 200, (path, status)
+            assert ctype.startswith("text/html") and marker in body, path
+        status, _, body = get("/join?room=Case30X")
+        assert status == 200 and "join?room=Case30X" in body
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

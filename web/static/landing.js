@@ -488,8 +488,10 @@
   };
   const getCode = () => {
     const val = codeInput.value.trim();
+    // A pasted link keeps its room ID exactly (IDs are case-sensitive); a
+    // typed code is uppercased, since generated codes are.
     const m = val.match(/room=([A-Za-z0-9]+)/);
-    return (m ? m[1] : val).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return m ? m[1] : val.toUpperCase().replace(/[^A-Z0-9]/g, '');
   };
   const needCode = () => {
     codeInput.focus();

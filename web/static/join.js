@@ -31,7 +31,10 @@
   ];
 
   const params = new URLSearchParams(location.search);
-  const code = (params.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Room IDs are case-sensitive (the server's /^[A-Za-z0-9]{3,16}$/): take
+  // one that fits as is, and treat anything else as no code at all.
+  const raw = params.get('room') || '';
+  const code = /^[A-Za-z0-9]{3,16}$/.test(raw) ? raw : '';
   const spectate = params.get('spectate') === '1';
   const playUrl = (watch) => `${API}/play.html?room=${encodeURIComponent(code)}${watch ? '&spectate=1' : ''}`;
 
@@ -165,10 +168,17 @@
       ? `needs your own ${game.rom} ROM`
       : `needs your own ${game.rom} ROM (.z64 / .n64 / .v64 / .zip)`;
     // Primary first: Watch leads for a full room or a spectator link.
+    // Moving a node drops its focus, so the stack is only reordered when the
+    // order changes, and a focused action gets its focus back.
     const stack = $('inv-stack');
-    const joinPair = [join, $('inv-join-hint')];
-    const watchPair = [watch, $('inv-watch-hint')];
-    stack.replaceChildren(...(watchFirst ? [...watchPair, ...joinPair] : [...joinPair, ...watchPair]));
+    if (stack.firstElementChild !== (watchFirst ? watch : join)) {
+      const focused =
+        document.activeElement === join || document.activeElement === watch ? document.activeElement : null;
+      const joinPair = [join, $('inv-join-hint')];
+      const watchPair = [watch, $('inv-watch-hint')];
+      stack.replaceChildren(...(watchFirst ? [...watchPair, ...joinPair] : [...joinPair, ...watchPair]));
+      if (focused) focused.focus({ preventScroll: true });
+    }
     // No WebRTC: nothing on the room page can work, not even watching.
     join.hidden = $('inv-join-hint').hidden = !canPlay;
     watch.hidden = $('inv-watch-hint').hidden = !hasWebRTC;
@@ -186,6 +196,7 @@
   let refreshTimer = 0;
   let lookupSeq = 0;
   let shownSeq = 0;
+  let closedRecord = false; // closed, but the server still has the room
   function again(ms) {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(lookup, ms);
@@ -208,10 +219,16 @@
     if (seq < shownSeq) return;
     shownSeq = seq;
     stopClock();
-    if (!room) return showClosed('');
-    // A room nobody is connected to takes back only its own members (§7.2 M0.2).
-    if (room.closed) return showClosed(room.host_name);
-    showRoom(room);
+    closedRecord = false;
+    if (!room) return showClosed(''); // gone for good
+    // A room nobody is connected to takes back only its own members (§7.2
+    // M0.2), so it can come back: keep checking until it does.
+    if (room.closed) {
+      closedRecord = true;
+      showClosed(room.host_name);
+    } else {
+      showRoom(room);
+    }
     again(REFRESH_MS);
   }
 
@@ -269,7 +286,7 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state === 'inv-main') lookup();
+    if (!document.hidden && (state === 'inv-main' || (state === 'inv-closed' && closedRecord))) lookup();
   });
 
   start();

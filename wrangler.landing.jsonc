@@ -14,6 +14,10 @@
     // The Worker decides every request: pages and their files from assets,
     // everything else to the game server.
     "run_worker_first": true,
+    // The Worker maps / and /join to their files itself. Cloudflare's default
+    // HTML handling would answer /index.html and /join.html with redirects to
+    // / and /join, which loop back here.
+    "html_handling": "none",
   },
   "vars": {
     // Where the game server answers. Render's own URL works before any DNS change.

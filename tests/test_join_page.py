@@ -221,3 +221,80 @@ def test_an_older_room_answer_never_replaces_a_newer_one(page, server_url):
     held[0].fulfill(json=_room(players=2))
     page.wait_for_timeout(300)
     expect(page.locator("#inv-facts")).to_contain_text("4 of 4")
+
+
+def test_mixed_case_room_ids_are_kept_exactly(page, server_url):
+    asked = []
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+
+    def room(r):
+        asked.append(r.request.url.split("/room/")[1])
+        r.fulfill(json=_room())
+
+    page.route("**/room/*", room)
+    page.goto(f"{server_url}/join?room=Case30X")
+    expect(page.locator("#inv-main")).to_be_visible()
+    assert asked[0] == "Case30X"
+    assert page.locator("#inv-join").get_attribute("href").endswith("/play.html?room=Case30X")
+    assert page.locator("#inv-watch").get_attribute("href").endswith("/play.html?room=Case30X&spectate=1")
+
+
+def test_a_room_id_outside_the_server_pattern_is_not_looked_up(page, server_url):
+    calls = []
+    page.route("**/room/*", lambda r: (calls.append(r.request.url), r.fulfill(status=404)))
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+    page.goto(f"{server_url}/join?room=ab%3Cx%3E")
+    expect(page.locator("#closed-title")).to_have_text("This room has closed.")
+    assert calls == []
+
+
+def test_a_closed_room_that_comes_back_restores_the_invite(page, server_url):
+    room = _room(closed=True)
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+    page.route("**/room/*", lambda r: r.fulfill(json=room))
+    page.clock.install()
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#closed-title")).to_have_text("Kaz's room has closed.")
+    room["closed"] = False  # the host reconnected
+    page.clock.run_for(16000)
+    expect(page.locator("#inv-main")).to_be_visible()
+    expect(page.locator("#inv-join")).to_be_visible()
+    # And from the tab coming back, not only the timer.
+    room["closed"] = True
+    page.clock.run_for(16000)
+    expect(page.locator("#inv-closed")).to_be_visible()
+    room["closed"] = False
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(page.locator("#inv-main")).to_be_visible()
+
+
+def test_an_unknown_room_is_not_polled(page, server_url):
+    calls = []
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+    page.route("**/room/*", lambda r: (calls.append(1), r.fulfill(status=404, json={})))
+    page.clock.install()
+    page.goto(f"{server_url}/join?room=GONE1234")
+    expect(page.locator("#closed-title")).to_have_text("This room has closed.")
+    page.clock.run_for(40000)
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(300)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("action", ["inv-join", "inv-watch"])
+def test_refreshes_keep_focus_on_the_chosen_action(page, server_url, action):
+    room = _room(players=2)
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+    page.route("**/room/*", lambda r: r.fulfill(json=room))
+    page.clock.install()
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-main")).to_be_visible()
+    page.locator(f"#{action}").focus()
+    room["player_count"] = 3  # ordinary refresh: same order
+    page.clock.run_for(16000)
+    expect(page.locator("#inv-facts")).to_contain_text("3 of 4")
+    assert page.evaluate("document.activeElement.id") == action
+    room["player_count"] = 4  # full: Watch moves first
+    page.clock.run_for(16000)
+    expect(page.locator("#inv-stack > *").first).to_have_id("inv-watch")
+    assert page.evaluate("document.activeElement.id") == action

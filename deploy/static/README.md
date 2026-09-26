@@ -92,7 +92,12 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   doesn't list one of them.
 - `wrangler.landing.jsonc` is a separate Worker (`kaillera-next-landing`),
   so the demo Worker in `wrangler.jsonc` is untouched. `workers_dev` is off
-  and `routes` is commented out.
+  and `routes` is commented out. `html_handling` is `none`: the Worker maps
+  `/` and `/join` to their files itself, and Cloudflare's default would
+  answer those files with redirects that loop.
+- `tests/test_landing_worker.py` runs the Worker against fakes, and against
+  the real local runtime (`wrangler dev`) when wrangler is installed
+  (`npm install`, or point `WRANGLER` at a binary).
 
 **Deploying, on the owner's OK:**
 

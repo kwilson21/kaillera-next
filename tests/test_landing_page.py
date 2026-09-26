@@ -185,9 +185,18 @@ def test_list_failure_shows_error_and_keeps_create(landing):
 
 def test_code_field_accepts_a_pasted_invite_link(landing):
     page = landing()
-    page.fill("#room-code", "https://example.com/play.html?room=abc123&spectate=1")
+    # Pasted links keep the room ID's case (IDs are case-sensitive), from the
+    # old play links and the new invite links alike.
+    page.fill("#room-code", "https://example.com/join?room=Case30X&spectate=1")
     page.click("#watch-btn")
-    expect(page).to_have_url(re.compile(r"/play\.html\?room=ABC123&spectate=1$"))
+    expect(page).to_have_url(re.compile(r"/play\.html\?room=Case30X&spectate=1$"))
+
+
+def test_a_typed_code_is_uppercased(landing):
+    page = landing()
+    page.fill("#room-code", "abc123")
+    page.click("#join-btn")
+    expect(page).to_have_url(re.compile(r"/play\.html\?room=ABC123$"))
 
 
 def test_poll_does_not_steal_keyboard_focus(landing):

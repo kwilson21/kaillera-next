@@ -60,11 +60,12 @@ function withHeaders(res, isPage) {
 }
 
 // The static pages carry generic preview tags with a host placeholder. On
-// /join the canonical link keeps the invite (rebuilt from the validated room
-// code, never copied from the raw query).
+// /join the canonical link keeps the invite (only a room ID that fits the
+// server's pattern goes in; anything else is left out).
 async function staticPage(res, url) {
   let html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
-  const room = (url.searchParams.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const raw = url.searchParams.get('room') || '';
+  const room = /^[A-Za-z0-9]{3,16}$/.test(raw) ? raw : ''; // case-sensitive, like the server
   if (url.pathname === '/join' && room) {
     const spectate = url.searchParams.get('spectate') === '1' ? '&amp;spectate=1' : '';
     html = html.replace(
