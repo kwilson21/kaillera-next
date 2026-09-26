@@ -96,7 +96,7 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 ├── build/           # WASM core build system (Docker + patches)
-├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route off until launch)
+├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
 ├── docs/            # roadmap and MVP plan
 ├── Dockerfile       # production Docker image

@@ -1,11 +1,12 @@
-# Static landing page: hosting proposal
+# Static landing page: hosting (option A, live)
 
 **Status: live since 2026-09-26 (owner's OK).** The `kaillera-next-landing`
 Worker serves `/` and `/join` on `kaillera-next.thesuperhuman.us` and
 passes everything else to Render. Both proxy secrets are set, and the
 server logs real visitor IPs (`SIO connect … (ip=<visitor>)`). Rolling back
-is removing the route; the game server still serves `/` and `/join` itself,
-exactly as the Worker does.
+is removing the route, in both the dashboard and `wrangler.landing.jsonc`;
+the game server still serves `/` and `/join` itself, exactly as the Worker
+does, and DNS already points the hostname at Render.
 
 ## The problem
 
@@ -43,13 +44,13 @@ kaillera-next.thesuperhuman.us
   server for the room's Open Graph tags with a ~1.5 s timeout and fall
   back to the generic card if it doesn't answer. That is an M2 detail.
 
-**What the owner would change** (each step on your OK, in this order):
-1. Add a `routes` entry for the hostname to a landing Worker (a new
+**What the owner changed** (done, in this order):
+1. Added a `routes` entry for the hostname to a landing Worker (a new
    `wrangler.landing.jsonc`, so the demo Worker stays as it is), with
    `run_worker_first` for everything except the static paths.
 2. Set the Worker's origin variable to the Render URL (or the tunnel).
 3. Switching back is deleting the route: the hostname goes back to
-   pointing at the game server directly, as now.
+   pointing at the game server directly, as it did before.
 
 ## Option B (acceptable): two domains, a JS hand-off
 
@@ -94,25 +95,34 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   doesn't list one of them.
 - `wrangler.landing.jsonc` is a separate Worker (`kaillera-next-landing`),
   so the demo Worker in `wrangler.jsonc` is untouched. `workers_dev` is off
-  and `routes` is commented out. `html_handling` is `none`: the Worker maps
-  `/` and `/join` to their files itself, and Cloudflare's default would
-  answer those files with redirects that loop.
+  and `routes` binds `kaillera-next.thesuperhuman.us/*` (live since
+  2026-09-26). `html_handling` is `none`: the Worker maps `/` and `/join`
+  to their files itself, and Cloudflare's default would answer those files
+  with redirects that loop.
 - `tests/test_landing_worker.py` runs the Worker against fakes, and against
   the real local runtime (`wrangler dev`) when wrangler is installed
   (`npm install`, or point `WRANGLER` at a binary).
 
-**Deploying, on the owner's OK:**
+**Redeploying**, after any change to the landing pages or `worker.js`:
 
 ```sh
 python scripts/build_landing.py
-npx wrangler deploy -c wrangler.landing.jsonc   # uploads; still no route
-openssl rand -hex 32   # generate the shared secret once
-npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc   # same value as below
-# set KN_PROXY_SECRET to the same value on the game server (Render), then
-# uncomment "routes" (or add the route in the dashboard) and deploy again
+npx wrangler deploy -c wrangler.landing.jsonc   # keeps the route and secrets
 ```
 
-**After the route goes on**, confirm a real visitor IP — not the Worker's
+**First-time setup (done 2026-09-26):** the route was added and both proxy
+secrets were set once. To rotate them, or to reconfirm they match:
+
+```sh
+openssl rand -hex 32   # generate the shared secret
+npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc   # same value as below
+# set KN_PROXY_SECRET to the same value on the game server (Render)
+```
+
+Secrets persist across `wrangler deploy`, so a routine redeploy doesn't
+need to touch them.
+
+Confirm a real visitor IP — not the Worker's
 own Cloudflare address (something like `2a06:98c0:...`) — shows up in the
 server's connect log (`server/src/api/signaling.py`):
 
@@ -145,9 +155,13 @@ would see every visitor as one IP: one connection limit and one rate limit
 for everyone. The Worker forwards the visitor's IP in `X-KN-Client-IP` with
 the shared secret in `X-KN-Proxy-Auth` (and strips any a visitor sends);
 the server trusts that header only when the secret matches
-(`server/src/ratelimit.py`). Set both secrets before the route goes on.
+(`server/src/ratelimit.py`). Both secrets were set before the route went on.
 
-Rolling back is removing the route. Deploy again after any change to
+Rolling back is removing the route, in both the Cloudflare dashboard and
+`wrangler.landing.jsonc` — leaving it in the config only means the next
+deploy re-adds it. With the route gone, traffic reaches Render directly,
+since DNS for the hostname already points there (a proxied CNAME to
+`kaillera-next.onrender.com`). Deploy again after any change to
 `web/index.html`, `web/join.html` or the files they load, or the Worker
 serves the old copies while the game server has the new ones.
 
