@@ -15,7 +15,16 @@ from playwright.sync_api import expect
 NOW = time.time()
 
 
-def _room(code, host, status="lobby", players=2, max_players=4, spectators=0, started=None, frame=None):
+def _room(
+    code,
+    host,
+    status="lobby",
+    players=2,
+    max_players=4,
+    spectators=0,
+    started=None,
+    frame=None,
+):
     return {
         "room_code": code,
         "game": "Super Smash Bros. 64",
@@ -38,11 +47,17 @@ def _mock(page, rooms=(), stats=None, health=True, list_ok=True):
     )
     page.route(
         "**/list",
-        lambda r: r.fulfill(json=list(rooms)) if list_ok else r.fulfill(status=500, body="boom"),
+        lambda r: (
+            r.fulfill(json=list(rooms))
+            if list_ok
+            else r.fulfill(status=500, body="boom")
+        ),
     )
     page.route(
         "**/api/stats/public",
-        lambda r: r.fulfill(json=stats or {"matches_this_week": None, "people_playing_now": 0}),
+        lambda r: r.fulfill(
+            json=stats or {"matches_this_week": None, "people_playing_now": 0}
+        ),
     )
     page.route("**/room/*/frame.jpg*", lambda r: r.fulfill(status=404))
 
@@ -66,7 +81,9 @@ def test_empty_state_with_real_week_number(landing):
     page = landing(stats={"matches_this_week": 41, "people_playing_now": 0})
     assert _state(page) == "empty"
     expect(page.locator("#st-empty")).to_contain_text("The floor is quiet.")
-    expect(page.locator("#st-empty")).to_contain_text("41 matches were played this week.")
+    expect(page.locator("#st-empty")).to_contain_text(
+        "41 matches were played this week."
+    )
     expect(page.locator("#board-week")).to_have_text("41 matches this week")
 
 
@@ -79,7 +96,10 @@ def test_empty_state_shows_no_number_until_one_exists(landing):
 
 def test_live_board_rows_and_links(landing):
     page = landing(
-        rooms=[_room("KAZ12345", "Kaz"), _room("MOOSE123", "Moose", "playing", 3, started=NOW - 360)],
+        rooms=[
+            _room("KAZ12345", "Kaz"),
+            _room("MOOSE123", "Moose", "playing", 3, started=NOW - 360),
+        ],
         stats={"matches_this_week": 5, "people_playing_now": 3},
     )
     assert _state(page) == "live"
@@ -89,9 +109,9 @@ def test_live_board_rows_and_links(landing):
     expect(kaz).to_contain_text("hosted by Kaz")
     expect(kaz).to_contain_text("2/4")
     expect(kaz).to_contain_text("waiting for players")
-    assert kaz.get_by_role("link", name="Join Kaz's room, needs your ROM").get_attribute("href") == (
-        "/play.html?room=KAZ12345"
-    )
+    assert kaz.get_by_role(
+        "link", name="Join Kaz's room, needs your ROM"
+    ).get_attribute("href") == ("/play.html?room=KAZ12345")
     assert kaz.get_by_role("link", name="Watch Kaz's room").get_attribute("href") == (
         "/play.html?room=KAZ12345&spectate=1"
     )
@@ -117,7 +137,9 @@ def test_featured_prefers_newest_match_with_an_open_slot(landing):
     featured = page.locator("#featured")
     expect(featured).to_be_visible()
     expect(featured).to_contain_text("hosted by New")
-    expect(featured.get_by_role("link", name=re.compile("^Join"))).to_have_text("Join · 1 slot open")
+    expect(featured.get_by_role("link", name=re.compile("^Join"))).to_have_text(
+        "Join · 1 slot open"
+    )
 
 
 def test_no_featured_without_a_match_in_progress(landing):
@@ -145,12 +167,16 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     expect(page.locator("#board")).to_have_attribute("data-state", "waking")
     expect(page.locator("#st-waking")).to_have_attribute("role", "status")
     expect(page.locator("#create-btn")).to_be_disabled()
-    expect(page.locator("#create-btn")).to_have_text("Create a room · ready in a moment")
+    expect(page.locator("#create-btn")).to_have_text(
+        "Create a room · ready in a moment"
+    )
     # The visualizer answers SPACE while waking.
     page.keyboard.press("Space")
     expect(page.locator("#v-in")).to_have_text("0 ms")
     alive["up"] = True
-    expect(page.locator("#board")).to_have_attribute("data-state", "empty", timeout=10000)
+    expect(page.locator("#board")).to_have_attribute(
+        "data-state", "empty", timeout=10000
+    )
     expect(page.locator("#create-btn")).to_be_enabled()
 
 
@@ -172,9 +198,13 @@ def test_poll_does_not_steal_keyboard_focus(landing):
     page = landing(rooms=[_room("KAZ12345", "Kaz")])
     link = page.get_by_role("link", name="Join Kaz's room, needs your ROM")
     link.focus()
-    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")  # triggers a refresh
+    page.evaluate(
+        "document.dispatchEvent(new Event('visibilitychange'))"
+    )  # triggers a refresh
     page.wait_for_timeout(500)
-    assert page.evaluate("document.activeElement.getAttribute('aria-label')") == ("Join Kaz's room, needs your ROM")
+    assert page.evaluate("document.activeElement.getAttribute('aria-label')") == (
+        "Join Kaz's room, needs your ROM"
+    )
 
 
 def test_header_mark_is_stable_for_a_visitor_and_advances_on_click(landing):
@@ -195,7 +225,9 @@ def test_front_page_headers(server_url):
     csp = r.headers["content-security-policy"]
     assert "script-src 'self';" in csp  # still no inline script or eval
     assert "frame-src https://www.youtube-nocookie.com" in csp
-    assert "cross-origin-embedder-policy" not in r.headers  # only the game needs isolation
+    assert (
+        "cross-origin-embedder-policy" not in r.headers
+    )  # only the game needs isolation
     play = requests.get(server_url + "/play.html", timeout=5)
     assert play.headers["cross-origin-embedder-policy"] == "require-corp"
 
@@ -227,7 +259,9 @@ def test_focus_follows_the_same_action_when_a_row_changes(page, server_url):
     page.route("**/list", lambda r: r.fulfill(json=rooms["list"]))
     page.goto(server_url)
     page.get_by_role("link", name="Join Kaz's room, needs your ROM").focus()
-    rooms["list"] = [_room("KAZ12345", "Kaz", players=3)]  # someone joined: the row rebuilds
+    rooms["list"] = [
+        _room("KAZ12345", "Kaz", players=3)
+    ]  # someone joined: the row rebuilds
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
     expect(page.locator(".room .cnt")).to_have_text("3/4")
     assert page.evaluate("document.activeElement.dataset.act") == "join"
@@ -262,7 +296,10 @@ def test_index_html_gets_the_front_page_headers(server_url):
     import requests
 
     r = requests.get(server_url + "/index.html", timeout=5)
-    assert "frame-src https://www.youtube-nocookie.com" in r.headers["content-security-policy"]
+    assert (
+        "frame-src https://www.youtube-nocookie.com"
+        in r.headers["content-security-policy"]
+    )
     assert "cross-origin-embedder-policy" not in r.headers
 
 
@@ -285,6 +322,35 @@ def test_stats_refetched_when_the_tab_comes_back_and_after_a_failure(page, serve
     assert calls["stats"] == 1  # first poll, failed
     expect(page.locator("#board-week")).to_have_text("")  # absent, not stale
     fail["on"] = False
-    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")  # resumed: refetch
+    page.evaluate(
+        "document.dispatchEvent(new Event('visibilitychange'))"
+    )  # resumed: refetch
     page.wait_for_timeout(400)
     assert calls["stats"] == 2
+
+
+def test_an_older_stats_answer_never_replaces_a_newer_count(page, server_url):
+    held = []
+    answers = iter([2, None, 5])  # None: hold this one and answer it last
+    _mock(page, rooms=[_room("KAZ12345", "Kaz")])
+    page.unroute("**/api/stats/public")
+
+    def st(r):
+        n = next(answers)
+        if n is None:
+            held.append(r)
+        else:
+            r.fulfill(json={"matches_this_week": None, "people_playing_now": n})
+
+    page.route("**/api/stats/public", st)
+    page.goto(server_url)
+    expect(page.locator("#board-live")).to_have_text("2 people playing right now")
+    refresh = "document.dispatchEvent(new Event('visibilitychange'))"
+    page.evaluate(refresh)  # its stats request hangs
+    page.wait_for_timeout(300)
+    assert len(held) == 1
+    page.evaluate(refresh)  # a newer refresh answers first
+    expect(page.locator("#board-live")).to_have_text("5 people playing right now")
+    held[0].fulfill(json={"matches_this_week": None, "people_playing_now": 9})
+    page.wait_for_timeout(300)
+    expect(page.locator("#board-live")).to_have_text("5 people playing right now")

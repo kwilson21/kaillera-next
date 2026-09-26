@@ -299,6 +299,7 @@
   let pollTimer = 0;
   let pollCount = 0;
   let lastStats = null;
+  let refreshSeq = 0;
   const STATS_EVERY = 6;
   let lastInteraction = Date.now();
   let idleStopped = false;
@@ -335,27 +336,36 @@
     // polling resumes (fresh), and then about once a minute. A failed fetch
     // drops the numbers and is retried on the next poll. Optional; the list
     // is not.
+    // Only the newest refresh may touch the board: one that resumes polling
+    // can overlap one already in flight, and an older answer must not land last.
+    const seq = ++refreshSeq;
     if (fresh === true) pollCount = 0;
     const statsReq =
       pollCount++ % STATS_EVERY === 0
         ? getJSON('/api/stats/public', 8000)
-            .then((st) => (lastStats = st))
-            .catch(() => {
-              pollCount = 0; // retry on the next poll
-              return (lastStats = null); // real or absent: never a stale count
+            .then((st) => {
+              if (seq === refreshSeq) lastStats = st;
             })
-        : Promise.resolve(lastStats);
+            .catch(() => {
+              if (seq !== refreshSeq) return;
+              pollCount = 0; // retry on the next poll
+              lastStats = null; // real or absent: never a stale count
+            })
+        : Promise.resolve();
     let rooms;
     try {
       rooms = await getJSON('/list', 8000);
     } catch {
+      if (seq !== refreshSeq) return;
       // Health answered but the list didn't: say so, keep Create usable. A
       // failed poll under a board already on screen just keeps the board.
       if (state === 'loading' || state === 'waking') setState('error');
       schedule();
       return;
     }
-    const stats = await statsReq; // null: the board still renders, the numbers stay absent
+    await statsReq;
+    if (seq !== refreshSeq) return; // a newer refresh owns the board and the next poll
+    const stats = lastStats; // null: the board still renders, the numbers stay absent
     render(
       rooms.filter((r) => r.room_code),
       stats,
