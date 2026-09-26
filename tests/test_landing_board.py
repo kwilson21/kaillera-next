@@ -242,7 +242,7 @@ def test_list_gives_listed_rooms_code_and_frame(client, sig):
     frame = client.get(row["frame_url"])
     assert frame.status_code == 200 and frame.content == JPEG
     assert frame.headers["content-type"] == "image/jpeg"
-    assert "no-store" in frame.headers["cache-control"]
+    assert frame.headers["cache-control"] == "private, max-age=60"  # keyed by ?t=, see below
 
 
 def test_listed_zombie_room_is_not_on_the_board(client, sig):
@@ -526,3 +526,12 @@ def test_frame_not_stored_if_match_changed_while_it_was_processed(sig, monkeypat
     monkeypatch.setattr(signaling, "_board_frame", new_match_during_processing)
     _screenshot("host", room)
     assert "ROOM1" not in signaling._room_frames
+
+
+def test_board_frames_cache_briefly_by_url_in_production():
+    from src.api.app import SecurityHeadersMiddleware
+
+    prod = SecurityHeadersMiddleware(None, allow_cache=True)
+    assert prod._cache_control("/room/ROOM1/frame.jpg") == "private, max-age=60"
+    assert prod._cache_control("/list") == "no-store"
+    assert SecurityHeadersMiddleware(None)._cache_control("/room/ROOM1/frame.jpg").startswith("no-store")
