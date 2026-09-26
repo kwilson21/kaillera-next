@@ -27,13 +27,15 @@ def _room_id(prefix):
 def server_url():
     """Use the already-running dev server (user manages it)."""
     import requests
-    url = "http://localhost:27888"
+    # KN_TEST_PORT lets parallel checkouts each run their own test server.
+    port = os.environ.get("KN_TEST_PORT", "27888")
+    url = f"http://localhost:{port}"
     try:
         r = requests.get(f"{url}/health", timeout=2)
         if r.status_code != 200:
-            pytest.skip("Dev server not running on localhost:27888")
+            pytest.skip(f"Dev server not running on localhost:{port}")
     except Exception:
-        pytest.skip("Dev server not running on localhost:27888")
+        pytest.skip(f"Dev server not running on localhost:{port}")
     return url
 
 

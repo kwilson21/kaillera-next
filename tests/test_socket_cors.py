@@ -122,3 +122,75 @@ def test_landing_worker_ip_trusted_only_with_the_secret(monkeypatch):
     monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "")
     empty = {**worker, "x-kn-proxy-auth": ""}
     assert ratelimit.extract_ip(request(empty)) == worker_ip
+
+
+def test_landing_worker_rejects_non_single_ip_values(monkeypatch):
+    # engineio joins duplicate headers with ',' — a visitor sending their own
+    # x_kn_client_ip alongside the Worker's would otherwise smuggle a second
+    # value through. Only a single valid IP is ever trusted.
+    monkeypatch.setattr(ratelimit, "_ON_RENDER", True)
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "s3cret")
+    worker_ip = "2a06:98c0:3600::103"
+
+    # Right secret, wrong secret still falls back to the normal rule.
+    wrong_secret = {
+        "cf-connecting-ip": worker_ip,
+        "x-kn-client-ip": "5.6.7.8",
+        "x-kn-proxy-auth": "guess",
+    }
+    assert ratelimit.extract_ip(request(wrong_secret)) == worker_ip
+
+    # Comma-joined (duplicate header) value with the right secret: falls
+    # back rather than returning the joined string.
+    joined = {
+        "cf-connecting-ip": worker_ip,
+        "x-kn-client-ip": "5.6.7.8,9.9.9.9",
+        "x-kn-proxy-auth": "s3cret",
+    }
+    assert ratelimit.extract_ip(request(joined)) == worker_ip
+    environ_joined = {
+        "HTTP_CF_CONNECTING_IP": worker_ip,
+        "HTTP_X_KN_CLIENT_IP": "5.6.7.8,9.9.9.9",
+        "HTTP_X_KN_PROXY_AUTH": "s3cret",
+    }
+    assert ratelimit.extract_ip(environ_joined) == worker_ip
+
+    # A non-IP value: falls back too.
+    not_ip = {
+        "cf-connecting-ip": worker_ip,
+        "x-kn-client-ip": "not-an-ip",
+        "x-kn-proxy-auth": "s3cret",
+    }
+    assert ratelimit.extract_ip(request(not_ip)) == worker_ip
+
+    # A valid IPv6 value is accepted and normalized.
+    v6 = {
+        "cf-connecting-ip": worker_ip,
+        "x-kn-client-ip": "2001:db8::1",
+        "x-kn-proxy-auth": "s3cret",
+    }
+    assert ratelimit.extract_ip(request(v6)) == "2001:db8::1"
+
+
+def test_proxy_mismatch_warns_once_per_reason(monkeypatch, caplog):
+    # A silent secret mismatch would otherwise merge every visitor into the
+    # Worker's single IP without anyone noticing; make sure it's logged, but
+    # only once per reason so a flood of bad requests can't spam the log.
+    monkeypatch.setattr(ratelimit, "_ON_RENDER", True)
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "s3cret")
+    monkeypatch.setattr(ratelimit, "_proxy_warned", {})
+    worker_ip = "5.5.5.5"
+    bad = {
+        "cf-connecting-ip": worker_ip,
+        "x-kn-client-ip": "5.6.7.8",
+        "x-kn-proxy-auth": "guess",
+    }
+    with caplog.at_level("WARNING", logger=ratelimit.log.name):
+        ratelimit.extract_ip(request(bad))
+        ratelimit.extract_ip(request(bad))
+        ratelimit.extract_ip(request(bad))
+    warnings = [r for r in caplog.records if "proxy auth didn't match" in r.message]
+    assert len(warnings) == 1
+    for r in caplog.records:
+        assert "s3cret" not in r.message
+        assert "guess" not in r.message

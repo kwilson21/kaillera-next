@@ -229,9 +229,24 @@ def test_real_runtime_serves_the_pages_without_redirects():
 FORWARD_HARNESS = r"""
 const worker = (await import(process.argv[1])).default;
 const seen = [];
-globalThis.fetch = async (req) => {
-  const h = req instanceof Request ? req.headers : new Headers();
-  seen.push({ ip: h.get('X-KN-Client-IP'), auth: h.get('X-KN-Proxy-Auth') });
+globalThis.fetch = async (req, init) => {
+  // proxy() calls fetch(request); previewPage() calls fetch(url, init) —
+  // the harness must read headers from either shape.
+  const h = req instanceof Request ? req.headers : new Headers((init && init.headers) || {});
+  const upgrade = h.get('Upgrade');
+  seen.push({
+    ip: h.get('X-KN-Client-IP'),
+    auth: h.get('X-KN-Proxy-Auth'),
+    upgrade,
+    strayIp: h.get('x_kn_client_ip'),
+    strayAuth: h.get('x_kn_proxy_auth'),
+  });
+  if (req instanceof Request && req.url.includes('/join')) {
+    return new Response('<html><meta property="og:url" content="https://game.example/join" /></html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    });
+  }
   return new Response('ok');
 };
 const assets = { fetch: async () => new Response('asset') };
@@ -242,6 +257,32 @@ await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1
 // Without it: nothing is forwarded, and spoofed copies are dropped.
 await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
   { ORIGIN: 'https://game.example', ASSETS: assets });
+// Underscore-spelled visitor headers must be stripped too (engineio folds
+// '-' and '_' together server-side, so a visitor could try either).
+await worker.fetch(req({
+  'CF-Connecting-IP': '5.6.7.8',
+  'x_kn_client_ip': '1.1.1.1',
+  'x_kn_proxy_auth': 'x',
+}), { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+// The crawler preview path (previewPage -> fetch(url, init)) forwards too.
+await worker.fetch(
+  new Request('https://kn.example/join?room=ABC', {
+    headers: { 'CF-Connecting-IP': '5.6.7.8', 'User-Agent': 'Discordbot/2.0' },
+  }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+);
+// A Socket.IO WebSocket upgrade request is proxied with the same headers,
+// and the Upgrade header survives.
+await worker.fetch(
+  new Request('https://kn.example/socket.io/?EIO=4&transport=websocket', {
+    headers: {
+      'CF-Connecting-IP': '5.6.7.8',
+      Upgrade: 'websocket',
+      Connection: 'Upgrade',
+    },
+  }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+);
 console.log(JSON.stringify(seen));
 """
 
@@ -257,6 +298,15 @@ def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
         timeout=30,
     )
     assert res.returncode == 0, res.stderr
-    with_secret, without = json.loads(res.stdout)
-    assert with_secret == {"ip": "5.6.7.8", "auth": "s3cret"}
-    assert without == {"ip": None, "auth": None}
+    with_secret, without, underscored, preview, upgrade = json.loads(res.stdout)
+    base = {"strayIp": None, "strayAuth": None}
+    assert with_secret == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    assert without == {**base, "ip": None, "auth": None, "upgrade": None}
+    # Underscore-named spoofed headers are stripped just like hyphenated ones
+    # — not merely shadowed by the Worker's own correctly-cased header.
+    assert underscored == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    # previewPage's fetch(url, init) call also carries the forwarded headers.
+    assert preview == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    # The WebSocket upgrade path is proxied with the forwarded IP/auth and
+    # keeps its Upgrade header.
+    assert upgrade == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": "websocket"}

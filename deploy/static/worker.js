@@ -108,8 +108,15 @@ async function previewPage(request, env, url) {
 // (one connection limit, one rate limit). Pass the visitor's IP along with a
 // shared secret the server checks (KN_PROXY_SECRET there, PROXY_SECRET here).
 function forwardedHeaders(request, env, headers) {
-  headers.delete('X-KN-Client-IP'); // only this Worker sets them
-  headers.delete('X-KN-Proxy-Auth');
+  // Strip any spelling of these a visitor could send (headers are
+  // case-insensitive, and engineio folds '-'/'_' together server-side), so
+  // only this Worker's own values below ever reach the origin.
+  const toDelete = [];
+  for (const name of headers.keys()) {
+    const norm = name.toLowerCase().replace(/_/g, '-');
+    if (norm === 'x-kn-client-ip' || norm === 'x-kn-proxy-auth') toDelete.push(name);
+  }
+  for (const name of toDelete) headers.delete(name);
   const ip = request.headers.get('CF-Connecting-IP');
   if (env.PROXY_SECRET && ip) {
     headers.set('X-KN-Client-IP', ip);

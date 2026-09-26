@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import time
@@ -93,6 +94,18 @@ _ON_RENDER = os.environ.get("RENDER") == "true"
 # a shared secret; the header counts only when the secret matches.
 _PROXY_SECRET = os.environ.get("KN_PROXY_SECRET", "")
 
+# Warn at most once per (reason) per _PROXY_WARN_INTERVAL, so a misconfigured
+# secret or a spoofed header doesn't spam the log.
+_proxy_warned: dict[str, float] = {}
+_PROXY_WARN_INTERVAL = 600.0
+
+
+def _warn_proxy_once(reason: str) -> None:
+    now = time.monotonic()
+    if now - _proxy_warned.get(reason, 0) >= _PROXY_WARN_INTERVAL:
+        _proxy_warned[reason] = now
+        log.warning("X-KN-Client-IP present but %s — falling back to the normal IP rule", reason)
+
 
 def extract_ip(source: object) -> str:
     """Extract client IP from a FastAPI Request or ASGI environ dict.
@@ -114,8 +127,16 @@ def extract_ip(source: object) -> str:
         peer = source.client.host if source.client else "unknown"
 
     proxied_ip = header("x-kn-client-ip")
-    if _PROXY_SECRET and proxied_ip and hmac.compare_digest(header("x-kn-proxy-auth").encode(), _PROXY_SECRET.encode()):
-        return proxied_ip.strip()
+    if proxied_ip:
+        if not _PROXY_SECRET:
+            _warn_proxy_once("KN_PROXY_SECRET is unset")
+        elif not hmac.compare_digest(header("x-kn-proxy-auth").encode(), _PROXY_SECRET.encode()):
+            _warn_proxy_once("the proxy auth didn't match")
+        else:
+            try:
+                return str(ipaddress.ip_address(proxied_ip.strip()))
+            except ValueError:
+                _warn_proxy_once("the forwarded value wasn't a single IP address")
     if _ON_RENDER:
         for name in ("true-client-ip", "cf-connecting-ip"):
             if header(name):

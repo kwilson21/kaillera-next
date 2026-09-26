@@ -104,10 +104,24 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 ```sh
 python scripts/build_landing.py
 npx wrangler deploy -c wrangler.landing.jsonc   # uploads; still no route
+openssl rand -hex 32   # generate the shared secret once
 npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc   # same value as below
 # set KN_PROXY_SECRET to the same value on the game server (Render), then
 # uncomment "routes" (or add the route in the dashboard) and deploy again
 ```
+
+**After the route goes on**, confirm a real visitor IP — not the Worker's
+own Cloudflare address (something like `2a06:98c0:...`) — shows up in the
+server's connect log (`server/src/api/signaling.py`):
+
+```
+SIO connect <sid> (ip=<visitor IP>)
+```
+
+If it instead shows the Worker's address (or `unknown`), `KN_PROXY_SECRET`
+doesn't match between the Worker and the server; the server logs a warning
+(`X-KN-Client-IP present but ...`) when the header arrives without a valid
+secret or a parseable IP, without ever logging the secret itself.
 
 **Visitor IPs.** Cloudflare sets `CF-Connecting-IP` on a Worker's
 subrequests to the Worker's own address, so without help the game server
