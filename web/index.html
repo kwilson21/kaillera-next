@@ -11,6 +11,17 @@
       content="Super Smash Bros. 64 online with friends. In your browser. No install. Free and open source."
     />
     <meta name="theme-color" content="#0e1218" />
+    <!-- og:static: link-preview tags for the static copy (landing Worker). The
+         game server replaces this block with its own; the Worker fills in the host. -->
+    <meta property="og:title" content="kaillera-next" />
+    <meta property="og:description" content="Play retro games online with friends — no install needed" />
+    <meta property="og:image" content="https://__KN_HOST__/static/og/home.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:url" content="https://__KN_HOST__/" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <!-- /og:static -->
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="preload" href="/static/fonts/barlow-condensed-700-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/static/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin />
@@ -605,6 +616,7 @@
     <script src="/static/version-guard.js" defer></script>
     <script src="/static/storage.js" defer></script>
     <script src="/static/version.js" defer></script>
+    <script src="/static/lagviz.js" defer></script>
     <script src="/static/landing.js" defer></script>
     <script src="/static/feedback.js" defer></script>
   </body>

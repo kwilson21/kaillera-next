@@ -4085,13 +4085,11 @@
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
-  const _gameParam = () => {
-    // Include game_id in shared URLs so OG cards show the right background
-    // even if the room doesn't exist yet when the crawler fetches it
-    if (_gameId) return _gameId;
-    const params = new URLSearchParams(window.location.search);
-    return params.get('game') || 'ssb64';
-  };
+  // Invite links land on the invite page (landing-design §7.2 M2), which
+  // wakes the server if needed and says what Join and Watch need before
+  // handing off to this page.
+  const inviteUrl = (spectate) =>
+    `${window.location.origin}/join?room=${encodeURIComponent(roomCode)}${spectate ? '&spectate=1' : ''}`;
 
   const copyLink = () => {
     // Toggle overlay invite dropdown — positioned via JS to escape overflow:auto clipping
@@ -4132,8 +4130,8 @@
       return opt;
     };
 
-    const playUrl = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
-    const watchUrl = `${playUrl}&spectate=1`;
+    const playUrl = inviteUrl(false);
+    const watchUrl = inviteUrl(true);
     dropdown.append(
       makeOption('Play', playUrl, 'Join my game on Kaillera Next'),
       makeOption('Watch', watchUrl, 'Watch my game on Kaillera Next'),
@@ -5216,7 +5214,7 @@
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) {
       sharePlay.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}`;
+        const url = inviteUrl(false);
         shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
         closeMoreDropdown();
       });
@@ -5225,7 +5223,7 @@
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch) {
       shareWatch.addEventListener('click', () => {
-        const url = `${window.location.origin}/play.html?room=${roomCode}&game=${_gameParam()}&spectate=1`;
+        const url = inviteUrl(true);
         shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
         closeMoreDropdown();
       });

@@ -174,8 +174,9 @@ class SecurityHeadersMiddleware:
     # The front page adds one thing: its click-to-play videos
     # (youtube-nocookie, loaded only when a visitor presses play).
     _CSP_LANDING = _CSP_STRICT + "; frame-src https://www.youtube-nocookie.com"
-    # The front page: landing CSP, and no COEP (only the game page needs isolation).
-    _LANDING_PATHS = frozenset({"/", "/index.html"})
+    # The front page and the invite page: landing CSP, and no COEP (only the
+    # game page needs isolation). The landing Worker sends the same.
+    _LANDING_PATHS = frozenset({"/", "/index.html", "/join"})
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
@@ -1764,6 +1765,7 @@ def create_app(lifespan=None) -> FastAPI:
     _web_dir = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
     _play_html: str | None = None
     _index_html: str | None = None
+    _join_html: str | None = None
 
     def _get_play_html() -> str:
         nonlocal _play_html
@@ -1776,6 +1778,12 @@ def create_app(lifespan=None) -> FastAPI:
         if _index_html is None:
             _index_html = (_web_dir / "index.html").read_text()
         return _index_html
+
+    def _get_join_html() -> str:
+        nonlocal _join_html
+        if _join_html is None:
+            _join_html = (_web_dir / "join.html").read_text()
+        return _join_html
 
     def _owner_name(room) -> str:  # noqa: ANN001
         """Get room owner's display name."""
@@ -1809,6 +1817,30 @@ def create_app(lifespan=None) -> FastAPI:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)
         html = _inject_kn_config(html, rom_sharing_enabled=feature_enabled_for_host(_ROM_SHARING_RAW, host))
+        return Response(content=html, media_type="text/html")
+
+    @app.get("/join")
+    def join_page(request: Request) -> Response:
+        """Invite page (landing-design §7.2 M2). Static HTML; the room's link
+        preview tags are filled in here so chat apps show who is inviting."""
+        room_id = request.query_params.get("room")
+        spectate = request.query_params.get("spectate") == "1"
+        host = _validated_host(request)
+        valid_room = bool(room_id and _PUBLIC_ROOM_ID_RE.match(room_id))
+        room = rooms.get(room_id) if valid_room else None
+        if room:
+            tags = build_og_tags(
+                host,
+                room_id,
+                _owner_name(room),
+                room.game_id,
+                spectate,
+                image_url=_live_card_url(host, room_id, room),
+                join_page=True,
+            )
+        else:
+            tags = build_og_tags(host)
+        html = inject_og_tags(_get_join_html(), tags)
         return Response(content=html, media_type="text/html")
 
     @app.get("/")
