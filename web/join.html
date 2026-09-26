@@ -7,6 +7,17 @@
     <title>You're invited · kaillera-next</title>
     <meta name="description" content="Super Smash Bros. 64 online with friends. In your browser. No install." />
     <meta name="theme-color" content="#0e1218" />
+    <!-- og:static: link-preview tags for the static copy (landing Worker). The
+         game server replaces this block with its own; the Worker fills in the host. -->
+    <meta property="og:title" content="kaillera-next" />
+    <meta property="og:description" content="Play retro games online with friends — no install needed" />
+    <meta property="og:image" content="https://__KN_HOST__/static/og/home.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:url" content="https://__KN_HOST__/join" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <!-- /og:static -->
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="preload" href="/static/fonts/barlow-condensed-700-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/static/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin />
@@ -52,8 +63,8 @@
         <section id="inv-unsupported" class="inv-closed" hidden aria-labelledby="unsup-title">
           <h1 class="name sm" id="unsup-title">This browser can't run the game.</h1>
           <p class="m">
-            It needs a feature (SharedArrayBuffer) that in-app browsers and some privacy modes turn off. Open this link
-            in Safari or Chrome.
+            It needs WebRTC, which some in-app browsers and privacy settings turn off. Open this link in Safari or
+            Chrome.
           </p>
           <div class="stack">
             <button class="btn primary big" type="button" id="unsup-copy">Copy link</button>

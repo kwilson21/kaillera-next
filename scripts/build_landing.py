@@ -19,7 +19,11 @@ REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
 DIST = REPO / "dist-landing"
 PAGES = ["index.html", "join.html"]
-EXTRA = ["static/version.json", "static/changelog.json"]  # fetched at runtime, not referenced in HTML
+EXTRA = [
+    "static/version.json",  # fetched at runtime, not referenced in HTML
+    "static/changelog.json",
+    "static/og/home.png",  # the generic link-preview image (og:image)
+]
 
 
 def referenced(html: str) -> set[str]:

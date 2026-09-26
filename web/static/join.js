@@ -36,7 +36,7 @@
   const playUrl = (watch) => `${API}/play.html?room=${encodeURIComponent(code)}${watch ? '&spectate=1' : ''}`;
 
   const SECTIONS = ['inv-loading', 'inv-main', 'inv-closed', 'inv-unsupported', 'inv-waking'];
-  let state = 'loading';
+  let state = 'inv-loading';
   function show(id) {
     state = id;
     for (const s of SECTIONS) $(s).hidden = s !== id;
@@ -181,30 +181,48 @@
     if (state !== 'inv-main') show('inv-main');
   }
 
+  // Lookups can overlap (the tab comes back while a refresh is out). An
+  // answer older than the one on screen is dropped.
   let refreshTimer = 0;
+  let lookupSeq = 0;
+  let shownSeq = 0;
+  function again(ms) {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(lookup, ms);
+  }
   async function lookup() {
     clearTimeout(refreshTimer);
+    const seq = ++lookupSeq;
     let room;
     try {
       room = await getJSON(`/room/${encodeURIComponent(code)}`, 8000);
     } catch {
-      // The server answered /health but not this; try again shortly.
-      refreshTimer = setTimeout(lookup, WAKE_POLL_MS);
+      if (seq !== lookupSeq) return; // a newer lookup is out and retries itself
+      // The server answered /health but not this. A room already on screen
+      // stays; otherwise the waiting screen (with its clock and, after two
+      // minutes, the "something's wrong" line) shows while we retry.
+      if (state === 'inv-loading' || state === 'inv-waking') waitingScreen();
+      again(WAKE_POLL_MS);
       return;
     }
+    if (seq < shownSeq) return;
+    shownSeq = seq;
+    stopClock();
     if (!room) return showClosed('');
     // A room nobody is connected to takes back only its own members (§7.2 M0.2).
     if (room.closed) return showClosed(room.host_name);
     showRoom(room);
-    refreshTimer = setTimeout(lookup, REFRESH_MS);
+    again(REFRESH_MS);
   }
 
   // ── Waking ─────────────────────────────────────────────────────────────
 
-  function waking() {
-    show('inv-waking');
+  let clock = 0;
+  function waitingScreen() {
+    if (state !== 'inv-waking') show('inv-waking');
+    if (clock) return;
     const started = Date.now();
-    const clock = setInterval(() => {
+    clock = setInterval(() => {
       const s = Math.floor((Date.now() - started) / 1000);
       $('elapsed').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
       if (Date.now() - started > WAKE_SLOW_MS) {
@@ -212,6 +230,14 @@
           "Still powering on. If this takes more than a couple of minutes, something's wrong on our side. Reload, or come back in a bit.";
       }
     }, 1000);
+  }
+  function stopClock() {
+    clearInterval(clock);
+    clock = 0;
+  }
+
+  function waking() {
+    waitingScreen();
     // A slow link may need longer than a napping server does: each miss
     // gives the next ping more time, up to 10 s.
     let timeout = 2500;
@@ -223,8 +249,7 @@
         setTimeout(poll, WAKE_POLL_MS);
         return;
       }
-      clearInterval(clock);
-      lookup();
+      lookup(); // the clock runs until the room answers
     };
     setTimeout(poll, WAKE_POLL_MS);
   }

@@ -184,3 +184,40 @@ def test_room_invite_links_point_at_the_invite_page(browser, server_url, room):
         f"{server_url}/join?room={room}&spectate=1",
     ]
     ctx.close()
+
+
+def test_failing_room_lookups_show_the_waiting_screen_until_it_answers(page, server_url):
+    ok = {"on": False}
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+    page.route("**/room/*", lambda r: r.fulfill(json=_room()) if ok["on"] else r.fulfill(status=500))
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-waking")).to_be_visible()  # not a blank loading screen
+    expect(page.locator("#elapsed")).not_to_have_text("0:00", timeout=5000)  # the clock runs
+    ok["on"] = True
+    expect(page.locator("#inv-main")).to_be_visible(timeout=10000)
+
+
+def test_an_older_room_answer_never_replaces_a_newer_one(page, server_url):
+    held = []
+    answers = iter([2, None, 4])  # None: hold this one and answer it last
+    page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}))
+
+    def room(r):
+        n = next(answers)
+        if n is None:
+            held.append(r)
+        else:
+            r.fulfill(json=_room(players=n))
+
+    page.route("**/room/*", room)
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-facts")).to_contain_text("2 of 4")
+    refresh = "document.dispatchEvent(new Event('visibilitychange'))"
+    page.evaluate(refresh)  # this lookup hangs
+    page.wait_for_timeout(300)
+    assert len(held) == 1
+    page.evaluate(refresh)  # a newer one answers first
+    expect(page.locator("#inv-facts")).to_contain_text("4 of 4")
+    held[0].fulfill(json=_room(players=2))
+    page.wait_for_timeout(300)
+    expect(page.locator("#inv-facts")).to_contain_text("4 of 4")

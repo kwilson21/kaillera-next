@@ -31,6 +31,7 @@ const ASSET_FILES = new Set([
   '/static/version.json',
   '/static/changelog.json',
   '/static/favicon.svg',
+  '/static/og/home.png', // the generic link-preview image: crawlers fetch it while the server naps
 ]);
 
 // The same policy the game server sends for / and /join (server/src/api/app.py).
@@ -58,6 +59,12 @@ function withHeaders(res, isPage) {
   return out;
 }
 
+// The static pages carry generic preview tags with a host placeholder.
+async function staticPage(res, url) {
+  const html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
+  return withHeaders(new Response(html, res), true);
+}
+
 async function previewPage(request, env, url) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), PREVIEW_TIMEOUT_MS);
@@ -66,7 +73,13 @@ async function previewPage(request, env, url) {
       headers: { 'User-Agent': request.headers.get('User-Agent') || '', Accept: 'text/html' },
       signal: ctl.signal,
     });
-    if (res.ok) return withHeaders(res, true);
+    if (res.ok) {
+      // The game server builds absolute URLs from the host it was asked on
+      // (the origin's); point them at the public host so the card and the
+      // link go through this Worker.
+      const html = (await res.text()).replaceAll(`https://${new URL(env.ORIGIN).host}`, `https://${url.host}`);
+      return withHeaders(new Response(html, res), true);
+    }
   } catch {
     /* napping or slow: the static page's generic card is fine */
   } finally {
@@ -91,7 +104,7 @@ export default {
         if (preview) return preview;
       }
       const res = await env.ASSETS.fetch(new Request(new URL(page, url), request));
-      return withHeaders(res, true);
+      return staticPage(res, url);
     }
     if (ASSET_FILES.has(url.pathname) || ASSET_PREFIXES.some((p) => url.pathname.startsWith(p))) {
       return withHeaders(await env.ASSETS.fetch(request), false);

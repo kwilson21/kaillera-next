@@ -556,3 +556,12 @@ def test_join_page_previews_the_room_and_points_back_at_join(client, sig):
     for q in ("NOPE", "<b>", ""):
         res = client.get(f"/join?room={q}")
         assert res.status_code == 200 and "/room/" not in res.text.split("</head>")[0]
+
+
+def test_static_preview_block_is_replaced_not_duplicated(client, sig):
+    # The static pages carry generic tags for the landing Worker's copy; the
+    # server serves its own instead.
+    for path in ("/", "/join?room=ROOM1", "/join?room=NOPE"):
+        html = client.get(path).text
+        assert html.count('property="og:title"') == 1, path
+        assert "__KN_HOST__" not in html and "og:static" not in html, path

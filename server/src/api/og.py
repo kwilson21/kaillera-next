@@ -363,9 +363,16 @@ def build_og_tags(
     )
 
 
+# The static pages carry generic tags for the landing Worker's copy; the
+# server's own tags replace them.
+_STATIC_OG_RE = re.compile(r"[ \t]*<!-- og:static.*?<!-- /og:static -->\n?", re.DOTALL)
+
+
 def inject_og_tags(html: str, og_tags: str) -> str:
-    """Inject OG meta tags into cached HTML by inserting after <head> opening tag."""
-    return _HEAD_RE.sub(rf"\1\n    {og_tags}", html, count=1)
+    """Inject OG meta tags into cached HTML by inserting after <head> opening tag,
+    replacing the page's static fallback block if it has one."""
+    html = _STATIC_OG_RE.sub("", html, count=1)
+    return _HEAD_RE.sub(lambda m: f"{m.group(1)}\n    {og_tags}", html, count=1)
 
 
 def _keepalive_seconds() -> int:
