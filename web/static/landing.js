@@ -333,15 +333,16 @@
   async function refresh(fresh) {
     // The numbers change slowly: fetch them on the first poll, whenever
     // polling resumes (fresh), and then about once a minute. A failed fetch
-    // is retried on the next poll. Optional; the list is not.
+    // drops the numbers and is retried on the next poll. Optional; the list
+    // is not.
     if (fresh === true) pollCount = 0;
     const statsReq =
       pollCount++ % STATS_EVERY === 0
         ? getJSON('/api/stats/public', 8000)
             .then((st) => (lastStats = st))
             .catch(() => {
-              pollCount = 0;
-              return lastStats;
+              pollCount = 0; // retry on the next poll
+              return (lastStats = null); // real or absent: never a stale count
             })
         : Promise.resolve(lastStats);
     let rooms;

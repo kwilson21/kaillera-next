@@ -283,6 +283,7 @@ def test_stats_refetched_when_the_tab_comes_back_and_after_a_failure(page, serve
     page.goto(server_url)
     expect(page.locator("#board")).to_have_attribute("data-state", "empty")
     assert calls["stats"] == 1  # first poll, failed
+    expect(page.locator("#board-week")).to_have_text("")  # absent, not stale
     fail["on"] = False
     page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")  # resumed: refetch
     page.wait_for_timeout(400)
