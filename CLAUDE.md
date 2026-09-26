@@ -65,11 +65,14 @@ kaillera-next/
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
 │   ├── index.html           # front page: open-rooms board, create/join (static, no framework)
+│   ├── join.html            # invite page (/join?room=CODE): who invited you, Join vs Watch, waking
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # sync log management page
 │   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
+│       ├── join.js              # invite page: room lookup, full/closed/in-app states
+│       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
@@ -93,6 +96,7 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 ├── build/           # WASM core build system (Docker + patches)
+├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route off until launch)
 ├── tests/           # pytest + Playwright E2E tests
 ├── docs/            # roadmap and MVP plan
 ├── Dockerfile       # production Docker image

@@ -1,0 +1,103 @@
+<!doctype html>
+<!-- kaillera-next: the invite link lands here (docs/landing-design.md §7.2 M2, W3). -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>You're invited · kaillera-next</title>
+    <meta name="description" content="Super Smash Bros. 64 online with friends. In your browser. No install." />
+    <meta name="theme-color" content="#0e1218" />
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="preload" href="/static/fonts/barlow-condensed-700-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/landing.css" />
+  </head>
+  <body class="invite">
+    <main class="hero">
+      <div class="wrap narrow">
+        <a class="brand-sm" href="/">kaillera<span class="hy">-</span>next</a>
+
+        <div class="banner" id="inapp" role="note" hidden>
+          <span id="inapp-text"></span>
+          <button class="btn" type="button" id="inapp-copy">Copy link</button>
+        </div>
+
+        <div id="inv-loading" class="inv-loading" aria-hidden="true"></div>
+
+        <section id="inv-main" hidden aria-labelledby="inv-title">
+          <div class="kicker" id="inv-kicker"></div>
+          <h1 class="name sm" id="inv-title"></h1>
+          <p class="inv-facts" id="inv-facts" aria-live="polite"></p>
+          <p class="inv-fullline" id="inv-fullline" hidden>
+            The room is full right now. Watch, and you'll be able to join if a slot opens.
+          </p>
+          <div class="stack" id="inv-stack">
+            <a class="btn primary big" id="inv-join" href="#"></a>
+            <p class="hint" id="inv-join-hint"></p>
+            <a class="btn big" id="inv-watch" href="#"></a>
+            <p class="hint" id="inv-watch-hint">no ROM needed</p>
+          </div>
+          <p class="inv-next" id="inv-next"></p>
+          <p class="m">Not sure what a ROM is? <a href="/#h-rom">You bring the game</a></p>
+        </section>
+
+        <section id="inv-closed" class="inv-closed" hidden aria-labelledby="closed-title">
+          <h1 class="name sm" id="closed-title"></h1>
+          <p class="m" id="closed-line"></p>
+          <div class="stack">
+            <button class="btn primary big" type="button" id="open-own">Open your own room</button>
+          </div>
+        </section>
+
+        <section id="inv-unsupported" class="inv-closed" hidden aria-labelledby="unsup-title">
+          <h1 class="name sm" id="unsup-title">This browser can't run the game.</h1>
+          <p class="m">
+            It needs a feature (SharedArrayBuffer) that in-app browsers and some privacy modes turn off. Open this link
+            in Safari or Chrome.
+          </p>
+          <div class="stack">
+            <button class="btn primary big" type="button" id="unsup-copy">Copy link</button>
+          </div>
+        </section>
+
+        <section class="waking" id="inv-waking" role="status" hidden>
+          <h3>Powering on… <small class="elapsed" id="elapsed">0:00</small></h3>
+          <p id="waking-line">
+            The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. We'll check on
+            the room the moment it answers. Press SPACE (tap on a phone) while you wait. This is what rollback does to
+            lag.
+          </p>
+          <div class="prog" aria-hidden="true"><i></i></div>
+          <div class="viz" id="viz">
+            <div class="viz-row">
+              <span>Input</span>
+              <div class="track"><i class="pulse" id="p-in"></i></div>
+              <b id="v-in">--</b>
+            </div>
+            <div class="viz-row">
+              <span>Response</span>
+              <div class="track"><i class="pulse" id="p-out"></i></div>
+              <b id="v-out">--</b>
+            </div>
+            <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
+            <div class="verdict-sub" id="verdict-sub"></div>
+            <div class="viz-ctl">
+              <button class="btn" type="button" id="viz-send">Send an input</button>
+              <label for="lag"
+                >Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120" />
+                <output id="lag-out" for="lag">120 ms</output></label
+              >
+              <label for="rb"><input type="checkbox" id="rb" checked /> Rollback on</label>
+            </div>
+          </div>
+        </section>
+
+        <hr class="inv-sep" />
+        <p class="m">First time here? <a href="/">What this is</a></p>
+      </div>
+    </main>
+
+    <script src="/static/lagviz.js" defer></script>
+    <script src="/static/join.js" defer></script>
+  </body>
+</html>

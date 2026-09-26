@@ -1,8 +1,9 @@
 # Static landing page: hosting proposal
 
-**Status: option A chosen by the owner (2026-09-26). Nothing here is live
-yet.** The Worker config lands with the landing page (M1/M2); the route is
-switched on in Cloudflare at launch, with the owner.
+**Status: option A chosen by the owner (2026-09-26). The Worker is built
+(M2) but not deployed and has no route.** The route is switched on in
+Cloudflare at launch, with the owner. Until then the game server serves
+`/` and `/join` itself, exactly as the Worker would.
 
 ## The problem
 
@@ -23,7 +24,7 @@ background and show the waking state until it answers. Everything else
 kaillera-next.thesuperhuman.us
   ├─ /            ┐
   ├─ /join        ├─ Cloudflare Worker static assets (always up)
-  ├─ /landing/*   ┘   landing CSS, fonts, images
+  ├─ /static/…    ┘   only the files those two pages load
   └─ everything else ─→ proxied by the same Worker to the game server
                         (kaillera-next.onrender.com, or the VPS tunnel)
 ```
@@ -74,8 +75,38 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 - Room persistence: `REDIS_URL` points at the `kaillera-next-kv` Key Value
   instance (set in the dashboard), so rooms survive restarts and naps.
 
-## Not changed until the pages exist
+## The Worker (M2)
 
-Invite links copied from a room still point at `/play.html?room=CODE`.
-They switch to `/join?room=CODE` in M2, together with the invite page, so
-no link ever points at a page that isn't deployed.
+- `deploy/static/worker.js`: `/`, `/index.html` and `/join` come from the
+  Worker's assets with the same headers the game server sends (strict CSP,
+  no COEP, `no-store`). The static files those pages load come from assets
+  too: every one of them is listed in `ASSET_FILES`, because the pages'
+  scripts are `defer`red and one proxied script behind a napping server
+  would hold up the waking screen. Everything else, WebSocket upgrades
+  included, is passed to `ORIGIN` unchanged.
+- Link previews: a crawler fetching `/join` gets the game server's page
+  (room name, host, live card) if it answers within 1.5 s, else the static
+  page's generic tags.
+- `scripts/build_landing.py` copies the pages and exactly the files they
+  reference into `dist-landing/` (git-ignored), and fails if `worker.js`
+  doesn't list one of them.
+- `wrangler.landing.jsonc` is a separate Worker (`kaillera-next-landing`),
+  so the demo Worker in `wrangler.jsonc` is untouched. `workers_dev` is off
+  and `routes` is commented out.
+
+**Deploying, on the owner's OK:**
+
+```sh
+python scripts/build_landing.py
+npx wrangler deploy -c wrangler.landing.jsonc   # uploads; still no route
+# then uncomment "routes" (or add the route in the dashboard) and deploy again
+```
+
+Rolling back is removing the route. Deploy again after any change to
+`web/index.html`, `web/join.html` or the files they load, or the Worker
+serves the old copies while the game server has the new ones.
+
+## Invite links
+
+Room invite links point at `/join?room=CODE` (M2). The game server serves
+`/join` too, so the links work before, during and after the Worker switch.
