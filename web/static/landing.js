@@ -71,6 +71,7 @@
     const live = $('board-live');
     if (empty) {
       live.classList.remove('live');
+      live.dataset.text = '';
       setText(live, "nobody's in a room right now");
     } else if (people > 0) {
       live.classList.add('live');
@@ -112,12 +113,14 @@
     const watch = el('a', featured ? 'btn primary' : 'btn', 'Watch');
     watch.href = playUrl(r.room_code, true);
     watch.setAttribute('aria-label', `Watch ${host}'s room`);
+    watch.dataset.act = 'watch';
     if (r.spectator_count < r.max_spectators) acts.append(watch);
     if (open > 0) {
       const label = featured ? `Join · ${plural(open, 'slot', 'slots')} open` : 'Join';
       const join = el('a', featured ? 'btn' : 'btn primary', label);
       join.href = playUrl(r.room_code, false);
       join.setAttribute('aria-label', `Join ${host}'s room, needs your ROM`);
+      join.dataset.act = 'join';
       acts.append(join);
     }
     if (!acts.childElementCount) acts.append(el('span', 'st', 'Room full'));
@@ -137,7 +140,7 @@
     }
     box.removeAttribute('aria-hidden');
     if (current && current.dataset.src === url) return;
-    if (document.hidden && current) return; // frames are fetched only while the tab is visible
+    if (document.hidden) return; // frames are fetched only while the tab is visible
     const img = el('img');
     img.alt = `Live frame from ${r.host_name || 'a player'}'s room`;
     img.dataset.src = url;
@@ -161,6 +164,16 @@
 
   const rowEls = new Map(); // room_code -> row element
 
+  // Rebuilding a row replaces its links; if one had focus, give focus to the
+  // same action in the new row (or the row's first link if it's gone).
+  function keepFocus(container, rebuild) {
+    const had = container.contains(document.activeElement) ? document.activeElement.dataset.act || '' : null;
+    rebuild();
+    if (had === null) return;
+    const next = container.querySelector(`[data-act="${had}"]`) || container.querySelector('a, button');
+    if (next) next.focus({ preventScroll: true });
+  }
+
   // Rows rebuild only when what they show changes, so a poll never steals
   // keyboard focus; otherwise just the frame and the minutes update.
   const sigOf = (r) =>
@@ -181,13 +194,15 @@
     const slots = slotsEl(r.player_count, r.max_players);
     if (becameLive && !REDUCE) slots.classList.add('bounce'); // a room going live bounces once
     sl.append(slots, el('span', 'cnt', `${r.player_count}/${r.max_players}`));
-    row.replaceChildren(
-      row._thumb,
-      el('div', 'g', r.game || 'Unknown game'),
-      el('div', 'h', `hosted by ${r.host_name || 'a player'}`),
-      sl,
-      el('div', r.status === 'playing' ? 'st ingame' : 'st', statusText(r)),
-      actionsEl(r, false),
+    keepFocus(row, () =>
+      row.replaceChildren(
+        row._thumb,
+        el('div', 'g', r.game || 'Unknown game'),
+        el('div', 'h', `hosted by ${r.host_name || 'a player'}`),
+        sl,
+        el('div', r.status === 'playing' ? 'st ingame' : 'st', statusText(r)),
+        actionsEl(r, false),
+      ),
     );
   }
 
@@ -226,17 +241,19 @@
       el('span', 'st ingame', statusText(pick)),
     );
     const open = pick.player_count < pick.max_players;
-    info.replaceChildren(
-      el('div', 'kicker', 'Now playing'),
-      el('h3', null, pick.game || 'Unknown game'),
-      meta,
-      actionsEl(pick, true),
-      el(
-        'p',
-        'why',
-        open
-          ? 'Watch drops you in as a spectator. Join takes the open slot, mid-game, with your own ROM.'
-          : 'Watch drops you in as a spectator. Join opens up when a slot does.',
+    keepFocus(info, () =>
+      info.replaceChildren(
+        el('div', 'kicker', 'Now playing'),
+        el('h3', null, pick.game || 'Unknown game'),
+        meta,
+        actionsEl(pick, true),
+        el(
+          'p',
+          'why',
+          open
+            ? 'Watch drops you in as a spectator. Join takes the open slot, mid-game, with your own ROM.'
+            : 'Watch drops you in as a spectator. Join opens up when a slot does.',
+        ),
       ),
     );
   }
@@ -280,6 +297,9 @@
   // ── Polling, waking ─────────────────────────────────────────────────────
 
   let pollTimer = 0;
+  let pollCount = 0;
+  let lastStats = null;
+  const STATS_EVERY = 6;
   let lastInteraction = Date.now();
   let idleStopped = false;
 
@@ -311,8 +331,14 @@
   });
 
   async function refresh() {
-    // Both at once; the numbers are optional, the list is not.
-    const statsReq = getJSON('/api/stats/public', 8000).catch(() => null);
+    // The numbers change slowly: fetch them on the first poll and then about
+    // once a minute, alongside the list. Optional; the list is not.
+    const statsReq =
+      pollCount++ % STATS_EVERY === 0
+        ? getJSON('/api/stats/public', 8000)
+            .then((st) => (lastStats = st))
+            .catch(() => lastStats)
+        : Promise.resolve(lastStats);
     let rooms;
     try {
       rooms = await getJSON('/list', 8000);

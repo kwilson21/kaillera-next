@@ -198,3 +198,68 @@ def test_front_page_headers(server_url):
     assert "cross-origin-embedder-policy" not in r.headers  # only the game needs isolation
     play = requests.get(server_url + "/play.html", timeout=5)
     assert play.headers["cross-origin-embedder-policy"] == "require-corp"
+
+
+# ── Greptile round on #29 ────────────────────────────────────────────────────
+
+
+def test_live_header_count_survives_empty_and_back(page, server_url):
+    rooms = {"list": [_room("KAZ12345", "Kaz")]}
+    _mock(page, stats={"matches_this_week": None, "people_playing_now": 2})
+    page.unroute("**/list")
+    page.route("**/list", lambda r: r.fulfill(json=rooms["list"]))
+    page.goto(server_url)
+    expect(page.locator("#board-live")).to_have_text("2 people playing right now")
+    refresh = "document.dispatchEvent(new Event('visibilitychange'))"
+    rooms["list"] = []
+    page.evaluate(refresh)
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty")
+    rooms["list"] = [_room("KAZ12345", "Kaz")]
+    page.evaluate(refresh)
+    expect(page.locator("#board")).to_have_attribute("data-state", "live")
+    expect(page.locator("#board-live")).to_have_text("2 people playing right now")
+
+
+def test_focus_follows_the_same_action_when_a_row_changes(page, server_url):
+    rooms = {"list": [_room("KAZ12345", "Kaz", players=2)]}
+    _mock(page)
+    page.unroute("**/list")
+    page.route("**/list", lambda r: r.fulfill(json=rooms["list"]))
+    page.goto(server_url)
+    page.get_by_role("link", name="Join Kaz's room, needs your ROM").focus()
+    rooms["list"] = [_room("KAZ12345", "Kaz", players=3)]  # someone joined: the row rebuilds
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    expect(page.locator(".room .cnt")).to_have_text("3/4")
+    assert page.evaluate("document.activeElement.dataset.act") == "join"
+
+
+def test_stats_are_polled_less_often_than_the_list(page, server_url):
+    calls = {"list": 0, "stats": 0}
+    _mock(page)
+    page.unroute("**/list")
+    page.unroute("**/api/stats/public")
+
+    def lst(r):
+        calls["list"] += 1
+        r.fulfill(json=[])
+
+    def st(r):
+        calls["stats"] += 1
+        r.fulfill(json={"matches_this_week": None, "people_playing_now": 0})
+
+    page.route("**/list", lst)
+    page.route("**/api/stats/public", st)
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty")
+    for _ in range(4):
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_timeout(150)
+    assert calls["list"] >= 4 and calls["stats"] == 1
+
+
+def test_index_html_gets_the_front_page_headers(server_url):
+    import requests
+
+    r = requests.get(server_url + "/index.html", timeout=5)
+    assert "frame-src https://www.youtube-nocookie.com" in r.headers["content-security-policy"]
+    assert "cross-origin-embedder-policy" not in r.headers

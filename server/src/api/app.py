@@ -187,7 +187,7 @@ class SecurityHeadersMiddleware:
             return cls._CSP_PLAY.encode()
         if path.startswith("/static/ejs/cores/"):
             return cls._CSP_PLAY.encode()
-        if path == "/":
+        if path in ("/", "/index.html"):
             return cls._CSP_LANDING.encode()
         return cls._CSP_STRICT.encode()
 
@@ -213,7 +213,7 @@ class SecurityHeadersMiddleware:
                 # COOP/COEP breaks OG image fetches by crawlers. The front page
                 # doesn't need cross-origin isolation (only the game does), and
                 # COEP would block its click-to-play video.
-                if not path.startswith("/static/og/") and path != "/":
+                if not path.startswith("/static/og/") and path not in ("/", "/index.html"):
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
