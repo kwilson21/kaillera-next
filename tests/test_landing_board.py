@@ -535,3 +535,33 @@ def test_board_frames_cache_briefly_by_url_in_production():
     assert prod._cache_control("/room/ROOM1/frame.jpg") == "private, max-age=60"
     assert prod._cache_control("/list") == "no-store"
     assert SecurityHeadersMiddleware(None)._cache_control("/room/ROOM1/frame.jpg").startswith("no-store")
+
+
+def test_join_page_previews_the_room_and_points_back_at_join(client, sig):
+    room, _ = sig
+    res = client.get("/join?room=ROOM1")
+    html = res.text
+    # Same headers as the landing Worker sends: front-page CSP, no COEP.
+    assert "script-src 'self'" in res.headers["content-security-policy"]
+    assert "cross-origin-embedder-policy" not in res.headers
+    assert 'property="og:url" content="' in html and "/join?room=ROOM1" in html
+    assert "/play.html?room=ROOM1" not in html
+    _start(room)
+    room.listed = True
+    _screenshot("host", room, _real_jpeg())
+    assert "/room/ROOM1/card.jpg?t=" in client.get("/join?room=ROOM1").text
+    watch = client.get("/join?room=ROOM1&spectate=1").text
+    assert '/join?room=ROOM1&amp;spectate=1"' in watch  # escaped once, not twice
+    # Unknown or malformed codes get the generic card, never an error.
+    for q in ("NOPE", "<b>", ""):
+        res = client.get(f"/join?room={q}")
+        assert res.status_code == 200 and "/room/" not in res.text.split("</head>")[0]
+
+
+def test_static_preview_block_is_replaced_not_duplicated(client, sig):
+    # The static pages carry generic tags for the landing Worker's copy; the
+    # server serves its own instead.
+    for path in ("/", "/join?room=ROOM1", "/join?room=NOPE"):
+        html = client.get(path).text
+        assert html.count('property="og:title"') == 1, path
+        assert "__KN_HOST__" not in html and "og:static" not in html, path

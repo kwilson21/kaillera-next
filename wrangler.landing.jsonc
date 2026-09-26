@@ -1,0 +1,24 @@
+// Landing Worker (hosting option A): / and /join from static assets, the rest
+// passed through to the game server. See deploy/static/README.md.
+//   python scripts/build_landing.py && npx wrangler deploy -c wrangler.landing.jsonc
+// Not deployed from this repo automatically; the owner switches the route on.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kaillera-next-landing",
+  "main": "deploy/static/worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./dist-landing",
+    "binding": "ASSETS",
+    // The Worker decides every request: pages and their files from assets,
+    // everything else to the game server.
+    "run_worker_first": true,
+  },
+  "vars": {
+    // Where the game server answers. Render's own URL works before any DNS change.
+    "ORIGIN": "https://kaillera-next.onrender.com",
+  },
+  // Off until the owner's OK (docs/landing-design.md §7.2 M0.9):
+  // "routes": [{ "pattern": "kaillera-next.thesuperhuman.us/*", "zone_name": "thesuperhuman.us" }],
+}

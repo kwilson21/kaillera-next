@@ -311,6 +311,7 @@ def build_og_tags(
     game_id: str | None = None,
     spectate: bool = False,
     image_url: str | None = None,
+    join_page: bool = False,
 ) -> str:
     """Build OG meta tag HTML string for injection into <head>.
 
@@ -337,11 +338,14 @@ def build_og_tags(
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
-        page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
-        if game_id:
-            page_url += f"&amp;game={quote(game_id, safe='')}"
+        if join_page:
+            page_url = f"https://{host}/join?room={quote(room_id, safe='')}"
+        else:
+            page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
+        if game_id and not join_page:
+            page_url += f"&game={quote(game_id, safe='')}"
         if spectate:
-            page_url += "&amp;spectate=1"
+            page_url += "&spectate=1"
     else:
         title = "kaillera-next"
         description = "Play retro games online with friends \u2014 no install needed"
@@ -359,9 +363,16 @@ def build_og_tags(
     )
 
 
+# The static pages carry generic tags for the landing Worker's copy; the
+# server's own tags replace them.
+_STATIC_OG_RE = re.compile(r"[ \t]*<!-- og:static.*?<!-- /og:static -->\n?", re.DOTALL)
+
+
 def inject_og_tags(html: str, og_tags: str) -> str:
-    """Inject OG meta tags into cached HTML by inserting after <head> opening tag."""
-    return _HEAD_RE.sub(rf"\1\n    {og_tags}", html, count=1)
+    """Inject OG meta tags into cached HTML by inserting after <head> opening tag,
+    replacing the page's static fallback block if it has one."""
+    html = _STATIC_OG_RE.sub("", html, count=1)
+    return _HEAD_RE.sub(lambda m: f"{m.group(1)}\n    {og_tags}", html, count=1)
 
 
 def _keepalive_seconds() -> int:
