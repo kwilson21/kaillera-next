@@ -5,6 +5,8 @@ V1 endpoints:
   GET  /health
   GET  /list?game_id=...        EmulatorJS-Netplay room listing
   GET  /room/{room_id}          minimal room info (rate-limited)
+  GET  /room/{room_id}/frame.jpg latest board frame of a listed, in-game room
+  GET  /api/stats/public        front-page numbers (real or absent)
   GET  /ice-servers             WebRTC ICE server config
   GET  /play.html               play page with injected OG meta tags
   GET  /                        homepage with injected OG meta tags
@@ -38,15 +40,17 @@ import re
 import subprocess as _sp
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from src import db, state, state_cache
-from src.api import turn
+from src import db, state, state_cache, stats
+from src.api import og_card, turn
 from src.api.og import (
     _ROM_SHARING_RAW,
+    GAME_INFO,
     _inject_kn_config,
     build_og_tags,
     feature_enabled_for_host,
@@ -55,7 +59,11 @@ from src.api.og import (
 from src.api.payloads import FeedbackPayload
 from src.api.signaling import (
     MAX_ROOMS,
+    MAX_SPECTATORS,
     _sanitize_log_blob,
+    room_frame,
+    room_host_name,
+    room_is_live,
     rooms,
     verify_upload_token,
 )
@@ -224,6 +232,63 @@ class SecurityHeadersMiddleware:
             return "no-store"
         # API responses and everything else
         return "no-store"
+
+
+# ── Public read-only CORS ─────────────────────────────────────────────────────
+
+
+def public_origins() -> set[str] | None:
+    """Origins allowed to read the public endpoints; None means any origin.
+
+    ALLOWED_ORIGIN (the site itself) plus PUBLIC_ORIGINS, a comma-separated
+    list for a static landing page served from another origin (hosting
+    option B in deploy/static/README.md).
+    """
+    raw = os.environ.get("ALLOWED_ORIGIN", "*").strip()
+    if raw == "*" or not raw:
+        return None
+    extra = os.environ.get("PUBLIC_ORIGINS", "")
+    return {o.strip().rstrip("/") for o in f"{raw},{extra}".split(",") if o.strip()}
+
+
+class PublicCorsMiddleware:
+    """Lets the static landing page read the board and wake the server.
+
+    Only simple GETs on read-only endpoints, no credentials. Error responses
+    carry the header too, so the invite page can tell 404 from a network
+    failure while the server is waking.
+    """
+
+    _EXACT = ("/health", "/list", "/api/stats/public")
+    _PREFIX = "/room/"
+
+    def __init__(self, app) -> None:  # noqa: ANN001
+        self.app = app
+        self._origins = public_origins()
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http" or scope.get("method") not in ("GET", "HEAD"):
+            await self.app(scope, receive, send)
+            return
+        path: str = scope.get("path", "")
+        if path not in self._EXACT and not path.startswith(self._PREFIX):
+            await self.app(scope, receive, send)
+            return
+        origin = dict(scope.get("headers", [])).get(b"origin", b"").decode("latin-1").rstrip("/")
+        if not origin or (self._origins is not None and origin not in self._origins):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cors(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"access-control-allow-origin", origin.encode("latin-1")),
+                    (b"vary", b"Origin"),
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
 
 
 # ── Cache busting middleware ──────────────────────────────────────────────────
@@ -546,6 +611,7 @@ def create_app(lifespan=None) -> FastAPI:
     app.add_middleware(CacheBustMiddleware, version_fn=_asset_version)
     app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
+    app.add_middleware(PublicCorsMiddleware)
 
     # Load error page template
     _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
@@ -736,15 +802,72 @@ def create_app(lifespan=None) -> FastAPI:
             },
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,
+            "host_name": room_host_name(room),
+            "listed": room.listed,
+            # Nobody connected (restored after a restart): new joiners are
+            # refused with "Room closed"; its own members may still return.
+            "closed": not room_is_live(room),
         }
+
+    @app.get("/room/{room_id}/frame.jpg")
+    def get_room_frame(room_id: str, request: Request) -> Response:
+        if not check_ip(_client_ip(request), "room-frame"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        if not _PUBLIC_ROOM_ID_RE.match(room_id):
+            raise HTTPException(status_code=404, detail="No frame")
+        frame = room_frame(room_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="No frame")
+        return Response(
+            content=frame[0],
+            media_type="image/jpeg",
+            headers={"cross-origin-resource-policy": "cross-origin"},
+        )
+
+    def _live_card_url(host: str, code: str, room) -> str | None:  # noqa: ANN001
+        """Invite card from the latest frame, for listed in-game rooms that have one."""
+        frame = room_frame(code)
+        if frame is None:
+            return None
+        return f"https://{host}/room/{quote(code, safe='')}/card.jpg?t={int(frame[1])}"
+
+    @app.get("/room/{room_id}/card.jpg")
+    def get_room_card(room_id: str, request: Request) -> Response:
+        if not check_ip(_client_ip(request), "room-frame"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        if not _PUBLIC_ROOM_ID_RE.match(room_id):
+            raise HTTPException(status_code=404, detail="No card")
+        frame = room_frame(room_id)
+        room = rooms.get(room_id)
+        if frame is None or room is None:
+            raise HTTPException(status_code=404, detail="No card")
+        info = GAME_INFO.get(room.game_id)
+        game = info["name"] if info else (room.rom_name or room.game_id)
+        og_card.forget(set(rooms))
+        try:
+            jpeg = og_card.card_for(room_id, frame, game, room_host_name(room))
+        except Exception:
+            log.exception("og card: compose failed for room %s", room_id)
+            raise HTTPException(status_code=404, detail="No card") from None
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"cross-origin-resource-policy": "cross-origin"},
+        )
 
     @app.get("/list")
     def list_rooms(request: Request, game_id: str | None = None) -> list:
-        if not check_ip(_client_ip(request), "room-lookup"):
+        if not check_ip(_client_ip(request), "board"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        now = time.time()
         result = []
-        for room in rooms.values():
+        for code, room in rooms.items():
             if game_id and room.game_id != game_id:
+                continue
+            if room.listed and not room.password:
+                # Ghost rooms (nobody connected) never reach the board.
+                if room_is_live(room):
+                    result.append(_listed_row(code, room, now))
                 continue
             first_player = next(iter(room.players.values()), {})
             result.append(
@@ -759,6 +882,42 @@ def create_app(lifespan=None) -> FastAPI:
                 }
             )
         return result
+
+    def _listed_row(code: str, room, now: float) -> dict:  # noqa: ANN001
+        """Board row for a listed room: today's fields plus what the board needs."""
+        frame = room_frame(code)
+        info = GAME_INFO.get(room.game_id)
+        return {
+            "room_name": room.room_name,
+            "room_code": code,
+            "game_id": room.game_id,
+            "game": info["name"] if info else (room.rom_name or room.game_id),
+            "host_name": room_host_name(room),
+            "player_count": len(room.players),
+            "max_players": room.max_players,
+            "spectator_count": len(room.spectators),
+            "max_spectators": MAX_SPECTATORS,
+            "status": room.status,
+            "has_password": False,
+            "listed": True,
+            "started_at": room.started_at if room.status == "playing" else None,
+            # The timestamp changes the URL each time a new frame lands, so
+            # an <img> refresh is a cache miss only when there's something new.
+            "frame_url": f"/room/{code}/frame.jpg?t={int(frame[1])}" if frame else None,
+            "frame_age_s": round(now - frame[1], 1) if frame else None,
+        }
+
+    @app.get("/api/stats/public")
+    async def public_stats(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "board"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        return {
+            # None until a full week has been recorded; the page then shows no number.
+            "matches_this_week": await stats.matches_this_week(),
+            "people_playing_now": sum(
+                len(r.players) for r in rooms.values() if r.status == "playing" and room_is_live(r)
+            ),
+        }
 
     _ROM_HASH_RE = re.compile(r"^[SF]?[0-9a-fA-F]{16,64}$")
 
@@ -1629,7 +1788,9 @@ def create_app(lifespan=None) -> FastAPI:
         room = rooms.get(room_id) if valid_room else None
         if room:
             game_id = room.game_id or safe_game
-            tags = build_og_tags(host, room_id, _owner_name(room), game_id, spectate)
+            tags = build_og_tags(
+                host, room_id, _owner_name(room), game_id, spectate, image_url=_live_card_url(host, room_id, room)
+            )
         elif valid_room:
             tags = build_og_tags(host, room_id, room_id, safe_game, spectate)
         else:

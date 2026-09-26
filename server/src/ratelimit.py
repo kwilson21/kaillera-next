@@ -23,6 +23,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "set-name": (5, 10),
     "set-mode": (5, 10),
     "rom-sharing-toggle": (5, 10),
+    "set-listed": (5, 10),
     "rom-ready": (10, 10),
     "input-type": (5, 10),
     "device-type": (5, 10),
@@ -33,6 +34,11 @@ _LIMITS: dict[str, tuple[int, float]] = {
     # unknown room codes burns through the miss budget fast, while
     # legitimate polling of an existing room stays under "room-lookup".
     "room-lookup-miss": (5, 60),
+    # Front-page board: /list and /api/stats/public polled every 10 s by each
+    # open landing tab, frames fetched per listed room. Players behind one
+    # carrier NAT share these budgets, hence the headroom.
+    "board": (60, 60),
+    "room-frame": (240, 60),
     # A page fetches ICE servers once per room join. Generous because players
     # can share an IP (LAN, carrier NAT); Cloudflare calls are bounded by
     # turn.py's cache and failure backoff, not by this.

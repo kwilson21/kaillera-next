@@ -21,6 +21,8 @@ dependencies = [
     # Cloudflare TURN credentials (src/api/turn.py). Listed directly: it
     # used to arrive only through anthropic, which moved to httpx2.
     "httpx>=0.27",
+    # Invite cards composed from a listed room's live frame (src/api/og_card.py).
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +34,6 @@ dev = [
     # The runtime server has no browser dependency.
     "playwright>=1.40.0",
     "pytest-playwright>=0.5",
-    "Pillow>=10.0.0",
     "ruff>=0.8.0",
 ]
 analysis = [

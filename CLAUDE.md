@@ -136,6 +136,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
+| `set-listed` | client→server | `{listed}` | Host lists the room on the front-page board (never with a password) |
 | `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
@@ -251,4 +252,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - Docker for production builds
 - `ALLOWED_ORIGIN` env var controls CORS (default `*`, set to your domain in production)
 - `PORT` (default 27888), `MAX_ROOMS` (default 100), `MAX_SPECTATORS` (default 20)
+- `KEEPALIVE_SECONDS` (default 0 = off): play pages ping `/health` this often
+- `PUBLIC_ORIGINS`: extra origins allowed to read `/health`, `/list`, `/room/*`,
+  `/api/stats/public` (a static landing page on another domain)
 - `.env` file supported via python-dotenv

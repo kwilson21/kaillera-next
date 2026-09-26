@@ -456,8 +456,10 @@
 
   // -- Gameplay screenshot capture --
   const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
-  const SCREENSHOT_WIDTH = 160;
-  const SCREENSHOT_HEIGHT = 120;
+  // 320x240: also the host's live preview on the front-page board when the
+  // room is listed (the server keeps the latest one, ≤ 20 KB).
+  const SCREENSHOT_WIDTH = 320;
+  const SCREENSHOT_HEIGHT = 240;
   let _screenshotCanvas = null;
   let _screenshotCtx = null;
   let _lastScreenshotFrame = -1;

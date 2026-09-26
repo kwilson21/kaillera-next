@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 
 import socketio
 
-from src import db, state
+from src import db, state, stats
 from src.api import desync_vision
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
@@ -79,6 +79,7 @@ from src.api.payloads import (
     RomSharingTogglePayload,
     SessionLogPayload,
     SetGameIdPayload,
+    SetListedPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
@@ -283,6 +284,8 @@ class Room:
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
+    listed: bool = False  # host opted in to the front-page board; never true with a password
+    started_at: float | None = None  # wall-clock start of the current match, for the board
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -305,6 +308,11 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 _room_lock = asyncio.Lock()
 
 _shutting_down = False
+
+# Latest board frame per listed, in-game room: session_id -> (jpeg bytes, wall time).
+# Memory only, one per room; dropped when the room ends its match, unlists or closes.
+_room_frames: dict[str, tuple[bytes, float]] = {}
+_ROOM_FRAME_MAX_BYTES = 20_000
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -350,7 +358,39 @@ def _players_payload(room: Room) -> dict:
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
+        "listed": room.listed,
     }
+
+
+def room_is_live(room: Room) -> bool:
+    """True while at least one member's socket is connected to this server.
+
+    A room restored from Redis after a restart or nap keeps its members but
+    none of their sockets: a zombie until someone returns. Members sitting in
+    a disconnect grace window don't count either.
+    """
+    return any(info["socketId"] in _sid_host for info in (*room.players.values(), *room.spectators.values()))
+
+
+def room_host_name(room: Room) -> str:
+    """Display name of the room's current owner, or "" if unknown."""
+    for info in room.players.values():
+        if info.get("socketId") == room.owner:
+            return info.get("playerName", "")
+    first = next(iter(room.players.values()), None)
+    return first.get("playerName", "") if first else ""
+
+
+def room_frame(session_id: str) -> tuple[bytes, float] | None:
+    """Latest board frame for a room that may show one right now."""
+    room = rooms.get(session_id)
+    if room is None or not room.listed or room.status != "playing" or not room_is_live(room):
+        return None
+    return _room_frames.get(session_id)
+
+
+def _drop_room_frame(session_id: str) -> None:
+    _room_frames.pop(session_id, None)
 
 
 def _clear_host_rom(room: Room) -> None:
@@ -504,6 +544,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 
     if not room.players and not room.spectators:
         rooms.pop(session_id, None)
+        _drop_room_frame(session_id)
         await state.delete_room(session_id)
         log.info("Room %s deleted (empty)", session_id)
         return
@@ -585,6 +626,8 @@ async def _cleanup_empty_rooms() -> None:
                 _zombie_ages.pop(session_id, None)
                 await state.delete_room(session_id)
                 log.info("Cleanup: deleted room %s", session_id)
+            for session_id in [k for k in _room_frames if k not in rooms]:
+                _drop_room_frame(session_id)
         cleanup()
 
 
@@ -719,6 +762,12 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         if room.match_id:
             resp["matchId"] = room.match_id
         return (None, resp)
+
+    # Zombie rule: a room nobody is connected to (restored after a restart,
+    # or everyone mid-grace) only takes back its own members, above. A new
+    # joiner would otherwise walk into a room with a ghost for a host.
+    if not room_is_live(room):
+        return ("Room closed", None)
 
     await _leave(sid)  # clean up if already in another room
 
@@ -884,6 +933,8 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.started_at = time.time()
+    await stats.record_match(room.started_at)
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
     await sio.emit(
@@ -945,6 +996,8 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
         room.match_id = None
 
     room.status = "lobby"
+    room.started_at = None
+    _drop_room_frame(session_id)
     # mode persists for rematch convenience
     await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
@@ -1056,6 +1109,30 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
         await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
         await state.save_room(session_id, room)
         log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
+    return None
+
+
+@sio.on("set-listed")
+@validated(SetListedPayload)
+async def set_listed(sid: str, payload: SetListedPayload) -> str | None:
+    """Host lists the room on the front-page board, or takes it off."""
+    if not check(sid, "set-listed"):
+        return "Rate limited"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can list the room"
+        if payload.listed and room.password:
+            return "Rooms with a password can't be listed"
+        room.listed = payload.listed
+        if not room.listed:
+            _drop_room_frame(session_id)
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+        log.info("Room %s %s", session_id, "listed" if room.listed else "unlisted")
     return None
 
 
@@ -1390,6 +1467,10 @@ async def game_screenshot(sid: str, data: dict) -> None:
     # Cap at 50KB per screenshot
     if len(img_bytes) > 50_000:
         return
+    # The host's frame doubles as the room's preview on the front-page board
+    # when the room is listed. Only the latest is kept, in memory.
+    if room.listed and sid == room.owner and len(img_bytes) <= _ROOM_FRAME_MAX_BYTES and img_bytes[:2] == b"\xff\xd8":
+        _room_frames[session_id] = (img_bytes, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
