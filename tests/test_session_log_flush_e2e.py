@@ -25,7 +25,8 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-SERVER_URL = "https://localhost:27888"
+# KN_TEST_PORT lets parallel checkouts each run their own test server.
+SERVER_URL = f"https://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 ADMIN_KEY = "1234"
 
 

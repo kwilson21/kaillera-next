@@ -41,6 +41,10 @@ services:
       # under a live room (300 in production).
       - key: KEEPALIVE_SECONDS
         sync: false
+      # Shared with the landing Worker (its PROXY_SECRET): lets the server trust
+      # the visitor IP the Worker forwards in X-KN-Client-IP (ratelimit.py).
+      - key: KN_PROXY_SECRET
+        sync: false
       # Static landing page on another origin (hosting option B in
       # deploy/static/README.md; option A, the one chosen, doesn't need it).
       # - key: PUBLIC_ORIGINS

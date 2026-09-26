@@ -104,8 +104,46 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 ```sh
 python scripts/build_landing.py
 npx wrangler deploy -c wrangler.landing.jsonc   # uploads; still no route
-# then uncomment "routes" (or add the route in the dashboard) and deploy again
+openssl rand -hex 32   # generate the shared secret once
+npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc   # same value as below
+# set KN_PROXY_SECRET to the same value on the game server (Render), then
+# uncomment "routes" (or add the route in the dashboard) and deploy again
 ```
+
+**After the route goes on**, confirm a real visitor IP — not the Worker's
+own Cloudflare address (something like `2a06:98c0:...`) — shows up in the
+server's connect log (`server/src/api/signaling.py`):
+
+```
+SIO connect <sid> (ip=<visitor IP>)
+```
+
+If it instead shows the Worker's address (or `unknown`), the two secrets
+are out of sync in one of two ways, and each side warns about its own half
+— neither ever logs the secret itself:
+
+- **The Worker has no `PROXY_SECRET`.** It never sends `X-KN-Client-IP` at
+  all, and logs `PROXY_SECRET is not set` once per isolate (`wrangler
+  tail`). If `KN_PROXY_SECRET` *is* set on the server, the server notices
+  the Worker's own address coming back with no forwarded header and warns
+  once per process ("a request came from a Cloudflare Worker without
+  X-KN-Client-IP — is PROXY_SECRET set on the landing Worker?").
+- **The two secrets don't match, or the server has none configured.** The
+  Worker still sends `X-KN-Client-IP`, so the server warns
+  (`X-KN-Client-IP present but ...`) and falls back to the Worker's
+  address instead.
+
+Either way, until it's fixed every visitor is folded into the Worker's
+single address: one 20-connection limit and one set of rate limits for
+the entire site, not per visitor.
+
+**Visitor IPs.** Cloudflare sets `CF-Connecting-IP` on a Worker's
+subrequests to the Worker's own address, so without help the game server
+would see every visitor as one IP: one connection limit and one rate limit
+for everyone. The Worker forwards the visitor's IP in `X-KN-Client-IP` with
+the shared secret in `X-KN-Proxy-Auth` (and strips any a visitor sends);
+the server trusts that header only when the secret matches
+(`server/src/ratelimit.py`). Set both secrets before the route goes on.
 
 Rolling back is removing the route. Deploy again after any change to
 `web/index.html`, `web/join.html` or the files they load, or the Worker

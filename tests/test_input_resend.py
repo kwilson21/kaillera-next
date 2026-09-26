@@ -6,11 +6,13 @@ a resend request is sent and the peer re-sends from _localInputs.
 Expects the dev server to be running on localhost:27888.
 Run: pytest tests/test_input_resend.py -v -s --no-header
 """
+import os
 import time
 
 import pytest
 
-SERVER_URL = "http://localhost:27888"
+# KN_TEST_PORT lets parallel checkouts each run their own test server.
+SERVER_URL = f"http://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 

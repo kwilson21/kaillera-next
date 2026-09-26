@@ -1,4 +1,6 @@
 """Playwright tests for virtual gamepad layout, ROM declaration, and EJS gamepad replacement."""
+import os
+
 import pytest
 from playwright.sync_api import sync_playwright
 
@@ -9,7 +11,8 @@ IPHONE_SE_PORTRAIT = {"width": 375, "height": 667}
 PIXEL_7_PORTRAIT = {"width": 412, "height": 915}
 IPAD_PORTRAIT = {"width": 820, "height": 1180}
 
-SERVER = "http://localhost:27888"
+# KN_TEST_PORT lets parallel checkouts each run their own test server.
+SERVER = f"http://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 
 # Minimal page simulating play.html for a streaming guest
 STREAMING_GUEST_PAGE = """<!DOCTYPE html>

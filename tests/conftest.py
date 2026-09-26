@@ -12,7 +12,8 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-SERVER_URL = "http://localhost:27888"
+# KN_TEST_PORT lets parallel checkouts each run their own test server.
+SERVER_URL = f"http://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 SERVER_DIR = str(Path(__file__).parent.parent / "server")
 
 
@@ -77,7 +78,7 @@ def server_url():
             pass
 
     # No server running — start one
-    env = {**os.environ, "DISABLE_RATE_LIMIT": "1", "DISABLE_HTTPS": "1"}
+    env = {**os.environ, "DISABLE_RATE_LIMIT": "1", "DISABLE_HTTPS": "1", "PORT": os.environ.get("KN_TEST_PORT", "27888")}
     proc = subprocess.Popen(
         ["python", "-c", "from src.main import run; run()"],
         cwd=SERVER_DIR,

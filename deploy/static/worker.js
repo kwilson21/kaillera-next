@@ -81,7 +81,11 @@ async function previewPage(request, env, url) {
   const timer = setTimeout(() => ctl.abort(), PREVIEW_TIMEOUT_MS);
   try {
     const res = await fetch(new URL(url.pathname + url.search, env.ORIGIN), {
-      headers: { 'User-Agent': request.headers.get('User-Agent') || '', Accept: 'text/html' },
+      headers: forwardedHeaders(
+        request,
+        env,
+        new Headers({ 'User-Agent': request.headers.get('User-Agent') || '', Accept: 'text/html' }),
+      ),
       signal: ctl.signal,
     });
     if (res.ok) {
@@ -99,9 +103,44 @@ async function previewPage(request, env, url) {
   return null;
 }
 
+// Cloudflare sets CF-Connecting-IP on this Worker's subrequests to the
+// Worker's own address, so the game server would see every visitor as one IP
+// (one connection limit, one rate limit). Pass the visitor's IP along with a
+// shared secret the server checks (KN_PROXY_SECRET there, PROXY_SECRET here).
+// Logged once per isolate (not per request) so a busy Worker without
+// PROXY_SECRET doesn't flood the tail log; never logs header values.
+let _warnedNoProxySecret = false;
+
+function forwardedHeaders(request, env, headers) {
+  // Strip any spelling of these a visitor could send (headers are
+  // case-insensitive, and engineio folds '-'/'_' together server-side), so
+  // only this Worker's own values below ever reach the origin.
+  const toDelete = [];
+  for (const name of headers.keys()) {
+    const norm = name.toLowerCase().replace(/_/g, '-');
+    if (norm === 'x-kn-client-ip' || norm === 'x-kn-proxy-auth') toDelete.push(name);
+  }
+  for (const name of toDelete) headers.delete(name);
+  if (!env.PROXY_SECRET && !_warnedNoProxySecret) {
+    _warnedNoProxySecret = true;
+    console.error(
+      "PROXY_SECRET is not set — every visitor will reach the origin as this Worker's own address " +
+        '(one connection limit and one rate limit for the whole site)',
+    );
+  }
+  const ip = request.headers.get('CF-Connecting-IP');
+  if (env.PROXY_SECRET && ip) {
+    headers.set('X-KN-Client-IP', ip);
+    headers.set('X-KN-Proxy-Auth', env.PROXY_SECRET);
+  }
+  return headers;
+}
+
 function proxy(request, env, url) {
   const target = new URL(url.pathname + url.search, env.ORIGIN);
-  return fetch(new Request(target, request));
+  const req = new Request(target, request);
+  forwardedHeaders(request, env, req.headers);
+  return fetch(req);
 }
 
 export default {

@@ -224,3 +224,198 @@ def test_real_runtime_serves_the_pages_without_redirects():
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_real_runtime_forwards_the_visitor_ip_not_the_spoofed_header():
+    """Same as test_proxied_requests_carry_the_visitor_ip_only_with_the_secret,
+    but through the real workerd runtime (wrangler dev) instead of a mocked
+    fetch, against a real local HTTP origin that records what it received."""
+    import http.server
+    import socket
+    import threading
+    import time
+    import urllib.request
+
+    wrangler = _wrangler()
+    if not wrangler:
+        pytest.skip("wrangler not installed (npm install, or set WRANGLER)")
+    build = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "build_landing.py")], capture_output=True, timeout=60
+    )
+    assert build.returncode == 0
+
+    seen = []
+
+    class Recorder(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append({k.lower(): v for k, v in self.headers.items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"[]")
+
+        def log_message(self, *a):  # quiet
+            pass
+
+    def free_port():
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    origin_port = free_port()
+    origin = http.server.HTTPServer(("127.0.0.1", origin_port), Recorder)
+    origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+    origin_thread.start()
+
+    wrangler_port = free_port()
+    secret = "test-secret-not-real"
+    # --var works for local `wrangler dev`; no .dev.vars file is needed or
+    # written, so there's nothing to gitignore or clean up.
+    proc = subprocess.Popen(
+        [
+            wrangler,
+            "dev",
+            "-c",
+            "wrangler.landing.jsonc",
+            "--port",
+            str(wrangler_port),
+            "--var",
+            f"ORIGIN:http://127.0.0.1:{origin_port}",
+            "--var",
+            f"PROXY_SECRET:{secret}",
+        ],
+        cwd=REPO,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 60
+        while True:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{wrangler_port}/static/landing.css", timeout=5)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.5)
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{wrangler_port}/list",
+            headers={
+                "CF-Connecting-IP": "9.9.9.9",
+                # A visitor trying to smuggle their own value through, in
+                # both the hyphenated and underscore spellings.
+                "X-KN-Client-IP": "6.6.6.6",
+                "x_kn_client_ip": "7.7.7.7",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+
+        deadline = time.time() + 10
+        while not seen and time.time() < deadline:
+            time.sleep(0.1)
+        assert seen, "origin never received the proxied /list request"
+        headers = seen[0]
+
+        # wrangler dev's local workerd runs with no real Cloudflare edge in
+        # front of it, so nothing rewrites the CF-Connecting-IP the test
+        # sends — forwardedHeaders() sees exactly the value given here. (On
+        # the real edge, Cloudflare itself sets CF-Connecting-IP and a
+        # spoofed client value there is impossible in the first place.)
+        assert headers.get("x-kn-client-ip") == "9.9.9.9"
+        assert headers.get("x-kn-proxy-auth") == secret
+        # The visitor's spoofed copies never reach the origin.
+        assert "6.6.6.6" not in headers.values()
+        assert "7.7.7.7" not in headers.values()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        origin.shutdown()
+        origin_thread.join(timeout=5)
+
+
+FORWARD_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const seen = [];
+globalThis.fetch = async (req, init) => {
+  // proxy() calls fetch(request); previewPage() calls fetch(url, init) —
+  // the harness must read headers from either shape.
+  const h = req instanceof Request ? req.headers : new Headers((init && init.headers) || {});
+  const upgrade = h.get('Upgrade');
+  seen.push({
+    ip: h.get('X-KN-Client-IP'),
+    auth: h.get('X-KN-Proxy-Auth'),
+    upgrade,
+    strayIp: h.get('x_kn_client_ip'),
+    strayAuth: h.get('x_kn_proxy_auth'),
+  });
+  if (req instanceof Request && req.url.includes('/join')) {
+    return new Response('<html><meta property="og:url" content="https://game.example/join" /></html>', {
+      status: 200,
+      headers: { 'Content-Type': 'text/html' },
+    });
+  }
+  return new Response('ok');
+};
+const assets = { fetch: async () => new Response('asset') };
+const req = (headers) => new Request('https://kn.example/list', { headers });
+// With the secret: the visitor's IP is forwarded; spoofed copies are replaced.
+await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+// Without it: nothing is forwarded, and spoofed copies are dropped.
+await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
+  { ORIGIN: 'https://game.example', ASSETS: assets });
+// Underscore-spelled visitor headers must be stripped too (engineio folds
+// '-' and '_' together server-side, so a visitor could try either).
+await worker.fetch(req({
+  'CF-Connecting-IP': '5.6.7.8',
+  'x_kn_client_ip': '1.1.1.1',
+  'x_kn_proxy_auth': 'x',
+}), { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+// The crawler preview path (previewPage -> fetch(url, init)) forwards too.
+await worker.fetch(
+  new Request('https://kn.example/join?room=ABC', {
+    headers: { 'CF-Connecting-IP': '5.6.7.8', 'User-Agent': 'Discordbot/2.0' },
+  }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+);
+// A Socket.IO WebSocket upgrade request is proxied with the same headers,
+// and the Upgrade header survives.
+await worker.fetch(
+  new Request('https://kn.example/socket.io/?EIO=4&transport=websocket', {
+    headers: {
+      'CF-Connecting-IP': '5.6.7.8',
+      Upgrade: 'websocket',
+      Connection: 'Upgrade',
+    },
+  }),
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+);
+console.log(JSON.stringify(seen));
+"""
+
+
+def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", FORWARD_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    with_secret, without, underscored, preview, upgrade = json.loads(res.stdout)
+    base = {"strayIp": None, "strayAuth": None}
+    assert with_secret == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    assert without == {**base, "ip": None, "auth": None, "upgrade": None}
+    # Underscore-named spoofed headers are stripped just like hyphenated ones
+    # — not merely shadowed by the Worker's own correctly-cased header.
+    assert underscored == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    # previewPage's fetch(url, init) call also carries the forwarded headers.
+    assert preview == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": None}
+    # The WebSocket upgrade path is proxied with the forwarded IP/auth and
+    # keeps its Upgrade header.
+    assert upgrade == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": "websocket"}

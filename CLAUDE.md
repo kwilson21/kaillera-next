@@ -262,6 +262,9 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `PUBLIC_ORIGINS`: extra origins allowed to read `/health`, `/list`, `/room/*`,
   `/api/stats/public` (a static landing page on another domain); only matters
   when `ALLOWED_ORIGIN` is a specific origin (with `*`, any origin may read them)
+- `KN_PROXY_SECRET`: shared with the landing Worker (`PROXY_SECRET` there);
+  the server trusts the visitor IP the Worker forwards (`X-KN-Client-IP`)
+  only when this matches. Unset = never trusted
 - `IP_HASH_SALT`: salts IP hashes and also derives the room-token signing key,
   so reconnect tokens stay valid across restarts (random per process if unset)
 - `.env` file supported via python-dotenv
