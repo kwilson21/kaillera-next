@@ -460,7 +460,6 @@
   // room is listed (the server keeps the latest one, ≤ 20 KB).
   const SCREENSHOT_WIDTH = 320;
   const SCREENSHOT_HEIGHT = 240;
-  const SCREENSHOT_BOARD_MAX_B64 = Math.floor((20000 * 4) / 3); // 20 KB as base64
   let _screenshotCanvas = null;
   let _screenshotCtx = null;
   let _lastScreenshotFrame = -1;
@@ -503,12 +502,7 @@
         sy = Math.round((h - sh) / 2);
       }
       _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
-      let dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
-      // Board previews are capped at 20 KB (server _ROOM_FRAME_MAX_BYTES):
-      // re-encode a busy frame once at lower quality rather than lose it.
-      if (dataUrl && dataUrl.length > SCREENSHOT_BOARD_MAX_B64) {
-        dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.4);
-      }
+      const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
       if (!dataUrl || dataUrl.length < 100) {
         if (!_screenshotDebugLogged) {
           _screenshotDebugLogged = true;

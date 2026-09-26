@@ -165,7 +165,6 @@ def test_frames_from_guests_oversized_or_non_jpeg_are_ignored(sig):
     room.listed = True
     _join("guest", "p-guest")
     _screenshot("guest", room)
-    _screenshot("host", room, b"\xff\xd8" + b"\x00" * 25_000)
     _screenshot("host", room, b"\x89PNG" + b"\x00" * 100)
     assert signaling.room_frame("ROOM1") is None
 
@@ -384,3 +383,21 @@ def test_people_playing_now_counts_only_connected_players(client, sig):
     _start(room)
     del signaling._sid_host["guest"]  # in its 30 s grace window
     assert client.get("/api/stats/public").json()["people_playing_now"] == 1
+
+
+def test_busy_frame_is_shrunk_for_the_board_not_dropped(sig):
+    import io
+    import os
+
+    from PIL import Image
+
+    room, _ = sig
+    _start(room)
+    room.listed = True
+    out = io.BytesIO()
+    Image.frombytes("RGB", (320, 240), os.urandom(320 * 240 * 3)).save(out, "JPEG", quality=60)
+    busy = out.getvalue()
+    assert 20_000 < len(busy) <= 50_000
+    _screenshot("host", room, busy)
+    frame = signaling.room_frame("ROOM1")
+    assert frame is not None and len(frame[0]) <= 20_000 and frame[0][:2] == b"\xff\xd8"

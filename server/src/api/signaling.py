@@ -53,6 +53,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -402,6 +403,28 @@ def room_frame(session_id: str) -> tuple[bytes, float] | None:
     if room is None or not room.listed or room.status != "playing" or not room_is_live(room):
         return None
     return _room_frames.get(session_id)
+
+
+def _board_frame(jpeg: bytes) -> bytes | None:
+    """The board copy of a screenshot, at most _ROOM_FRAME_MAX_BYTES.
+
+    Busy frames are re-encoded here rather than in the browser, so the
+    diagnostic screenshot stored for desync triage keeps its quality.
+    """
+    if len(jpeg) <= _ROOM_FRAME_MAX_BYTES:
+        return jpeg
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        for quality in (45, 30):
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=quality)
+            if out.tell() <= _ROOM_FRAME_MAX_BYTES:
+                return out.getvalue()
+    except Exception:
+        log.warning("board frame: could not re-encode a %d-byte screenshot", len(jpeg))
+    return None
 
 
 def _drop_room_frame(session_id: str) -> None:
@@ -1487,8 +1510,10 @@ async def game_screenshot(sid: str, data: dict) -> None:
         return
     # The host's frame doubles as the room's preview on the front-page board
     # when the room is listed. Only the latest is kept, in memory.
-    if room.listed and sid == room.owner and len(img_bytes) <= _ROOM_FRAME_MAX_BYTES and img_bytes[:2] == b"\xff\xd8":
-        _room_frames[session_id] = (img_bytes, time.time())
+    if room.listed and sid == room.owner and img_bytes[:2] == b"\xff\xd8":
+        board = _board_frame(img_bytes)
+        if board is not None:
+            _room_frames[session_id] = (board, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
