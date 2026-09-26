@@ -174,6 +174,8 @@ class SecurityHeadersMiddleware:
     # The front page adds one thing: its click-to-play videos
     # (youtube-nocookie, loaded only when a visitor presses play).
     _CSP_LANDING = _CSP_STRICT + "; frame-src https://www.youtube-nocookie.com"
+    # The front page: landing CSP, and no COEP (only the game page needs isolation).
+    _LANDING_PATHS = frozenset({"/", "/index.html"})
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
@@ -187,7 +189,7 @@ class SecurityHeadersMiddleware:
             return cls._CSP_PLAY.encode()
         if path.startswith("/static/ejs/cores/"):
             return cls._CSP_PLAY.encode()
-        if path in ("/", "/index.html"):
+        if path in cls._LANDING_PATHS:
             return cls._CSP_LANDING.encode()
         return cls._CSP_STRICT.encode()
 
@@ -213,7 +215,7 @@ class SecurityHeadersMiddleware:
                 # COOP/COEP breaks OG image fetches by crawlers. The front page
                 # doesn't need cross-origin isolation (only the game does), and
                 # COEP would block its click-to-play video.
-                if not path.startswith("/static/og/") and path not in ("/", "/index.html"):
+                if not path.startswith("/static/og/") and path not in self._LANDING_PATHS:
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
@@ -238,6 +240,11 @@ class SecurityHeadersMiddleware:
         # HTML that has outdated ?v= cache-bust params on script tags.
         if path.endswith(".html") or path == "/":
             return "no-store"
+        # Board frames: the URL carries the frame's timestamp (/list), so a
+        # short private cache lets the featured panel and its row share one
+        # fetch without ever showing an old frame under a new URL.
+        if path.startswith("/room/") and path.endswith("/frame.jpg"):
+            return "private, max-age=60"
         # API responses and everything else
         return "no-store"
 
@@ -908,8 +915,8 @@ def create_app(lifespan=None) -> FastAPI:
             "has_password": False,
             "listed": True,
             "started_at": room.started_at if room.status == "playing" else None,
-            # Frames are served no-store; the timestamp lets the page tell a
-            # new frame from the one it already shows without fetching it.
+            # The timestamp lets the page tell a new frame from the one it
+            # already shows without fetching it, and keys the frame's cache.
             "frame_url": f"/room/{code}/frame.jpg?t={int(frame[1])}" if frame else None,
             "frame_age_s": round(now - frame[1], 1) if frame else None,
         }

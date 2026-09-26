@@ -76,13 +76,7 @@
               (tap on a phone) while you wait. This is what rollback does to lag.
             </p>
             <div class="prog" aria-hidden="true"><i></i></div>
-            <div
-              class="viz"
-              id="viz"
-              role="button"
-              tabindex="0"
-              aria-label="Input lag visualizer. Press space or tap to send an input."
-            >
+            <div class="viz" id="viz">
               <div class="viz-row">
                 <span>Input</span>
                 <div class="track"><i class="pulse" id="p-in"></i></div>
@@ -96,6 +90,7 @@
               <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
               <div class="verdict-sub" id="verdict-sub"></div>
               <div class="viz-ctl">
+                <button class="btn" type="button" id="viz-send">Send an input</button>
                 <label for="lag"
                   >Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120" />
                   <output id="lag-out" for="lag">120 ms</output></label

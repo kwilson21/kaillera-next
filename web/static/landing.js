@@ -69,11 +69,9 @@
 
   function renderHeader(people, matches, empty) {
     const live = $('board-live');
-    if (empty) {
-      live.classList.remove('live');
-      live.dataset.text = '';
-      setText(live, "nobody's in a room right now");
-    } else if (people > 0) {
+    // The count covers every match, listed or not, so it wins over an empty
+    // board; the empty line speaks only for the rooms the board can show.
+    if (people > 0) {
       live.classList.add('live');
       const text = `${plural(people, 'person', 'people')} playing right now`;
       if (live.dataset.text !== text) {
@@ -83,8 +81,9 @@
         live.firstChild.setAttribute('aria-hidden', 'true');
       }
     } else {
+      live.classList.remove('live');
       live.dataset.text = '';
-      setText(live, '');
+      setText(live, empty ? 'no open rooms right now' : '');
     }
     // Real or absent (§7.2 M0.5): null until a full week has been counted.
     setText($('board-week'), matches == null ? '' : `${plural(matches, 'match', 'matches')} this week`);
@@ -127,19 +126,28 @@
     return acts;
   }
 
-  // One <img> per frame box; a new frame fades in over the old one.
+  // One shown <img> per frame box, plus at most one loading behind it; a new
+  // frame fades in over the old one. The LIVE badge shows only over a frame
+  // that actually loaded.
   function setFrame(box, r, lazy) {
     const url = r.frame_url && r.status === 'playing' ? API + r.frame_url : '';
-    box.classList.toggle('live', !!url);
-    box.classList.toggle('stale', !!url && r.frame_age_s > STALE_FRAME_S);
-    const current = box.querySelector('img:last-of-type');
+    const shown = () => box.querySelector('img[data-loaded]');
+    const mark = () => {
+      const has = !!shown();
+      box.classList.toggle('live', has);
+      box.classList.toggle('stale', has && r.frame_age_s > STALE_FRAME_S);
+      if (has) box.removeAttribute('aria-hidden');
+      else box.setAttribute('aria-hidden', 'true');
+    };
     if (!url) {
       box.querySelectorAll('img').forEach((i) => i.remove());
-      box.setAttribute('aria-hidden', 'true');
-      return;
+      return mark();
     }
-    box.removeAttribute('aria-hidden');
-    if (current && current.dataset.src === url) return;
+    const latest = box.querySelector('img:last-of-type');
+    if (latest && latest.dataset.src === url) return mark();
+    // A frame still loading (off-screen lazy, slow link) is replaced, never stacked.
+    box.querySelectorAll('img:not([data-loaded])').forEach((i) => i.remove());
+    mark();
     if (document.hidden) return; // frames are fetched only while the tab is visible
     const img = el('img');
     img.alt = `Live frame from ${r.host_name || 'a player'}'s room`;
@@ -148,16 +156,22 @@
     if (lazy) img.loading = 'lazy';
     img.width = 320;
     img.height = 240;
-    if (current && !REDUCE) {
-      img.style.opacity = '0';
-      img.addEventListener('load', () => {
-        img.style.opacity = '';
-        setTimeout(() => current.remove(), 650);
-      });
-      img.addEventListener('error', () => img.remove());
-    } else if (current) {
-      current.remove();
-    }
+    const old = shown();
+    if (old && !REDUCE) img.style.opacity = '0';
+    img.addEventListener('load', () => {
+      img.dataset.loaded = '';
+      img.style.opacity = '';
+      for (const i of box.querySelectorAll('img[data-loaded]')) {
+        if (i === img) continue;
+        if (REDUCE) i.remove();
+        else setTimeout(() => i.remove(), 650);
+      }
+      mark();
+    });
+    img.addEventListener('error', () => {
+      img.remove();
+      mark();
+    });
     img.src = url;
     box.append(img);
   }
@@ -258,7 +272,44 @@
     );
   }
 
+  // A poll can move or remove the node that has focus (a row reordered, the
+  // featured room replaced). Put focus back on the same action for the same
+  // room (its row when it's no longer featured), else the row now in its
+  // place; never leave a keyboard user on <body>.
+  function focusedAction() {
+    const a = document.activeElement;
+    const box = a && a.closest?.('#featured, .room');
+    if (!box) return null;
+    const row = a.closest('.room');
+    return {
+      node: a,
+      code: box.dataset.code,
+      act: a.dataset.act || '',
+      index: row ? [...row.parentNode.children].indexOf(row) : 0,
+    };
+  }
+
+  function restoreFocus(f) {
+    if (!f || (f.node.isConnected && document.activeElement === f.node)) return;
+    if (document.activeElement && document.activeElement !== document.body && document.activeElement !== f.node) {
+      return; // already placed (keepFocus inside a rebuilt row or panel)
+    }
+    const featured = $('featured');
+    const box =
+      (!featured.hidden && featured.dataset.code === f.code && featured) ||
+      rowEls.get(f.code) ||
+      $('rooms').children[Math.min(f.index, $('rooms').children.length - 1)];
+    const next = box && (box.querySelector(`[data-act="${f.act}"]`) || box.querySelector('a, button'));
+    if (next) next.focus({ preventScroll: true });
+  }
+
   function render(rooms, stats) {
+    const f = focusedAction();
+    renderBoard(rooms, stats);
+    restoreFocus(f);
+  }
+
+  function renderBoard(rooms, stats) {
     const people = stats?.people_playing_now ?? 0;
     const matches = stats ? stats.matches_this_week : null;
     if (!rooms.length) {
@@ -274,24 +325,25 @@
     if (state !== 'live') setState('live');
     renderFeatured(rooms);
     const list = $('rooms');
-    const seen = new Set();
-    rooms.forEach((r, i) => {
-      seen.add(r.room_code);
-      let row = rowEls.get(r.room_code);
-      if (!row) {
-        row = el('div', 'room');
-        rowEls.set(r.room_code, row);
-      }
-      fillRow(row, r, i);
-      // Move a row only when its position changes: moving a node drops focus.
-      if (list.children[i] !== row) list.insertBefore(row, list.children[i] || null);
-    });
+    // Gone rooms leave first, so the rows below them don't have to move.
+    const seen = new Set(rooms.map((r) => r.room_code));
     for (const [code, row] of rowEls) {
       if (!seen.has(code)) {
         row.remove();
         rowEls.delete(code);
       }
     }
+    rooms.forEach((r, i) => {
+      let row = rowEls.get(r.room_code);
+      if (!row) {
+        row = el('div', 'room');
+        row.dataset.code = r.room_code;
+        rowEls.set(r.room_code, row);
+      }
+      fillRow(row, r, i);
+      // Move a row only when its position changes: moving a node drops focus.
+      if (list.children[i] !== row) list.insertBefore(row, list.children[i] || null);
+    });
   }
 
   // ── Polling, waking ─────────────────────────────────────────────────────
@@ -300,6 +352,8 @@
   let pollCount = 0;
   let lastStats = null;
   let refreshSeq = 0;
+  let statsSeq = 0;
+  let boardSeq = 0;
   const STATS_EVERY = 6;
   let lastInteraction = Date.now();
   let idleStopped = false;
@@ -336,18 +390,22 @@
     // polling resumes (fresh), and then about once a minute. A failed fetch
     // drops the numbers and is retried on the next poll. Optional; the list
     // is not.
-    // Only the newest refresh may touch the board: one that resumes polling
-    // can overlap one already in flight, and an older answer must not land last.
+    // A refresh that resumes polling can overlap one still in flight. An
+    // answer older than the one on screen is dropped; one that arrives first
+    // is used, even if a newer refresh is still out.
     const seq = ++refreshSeq;
     if (fresh === true) pollCount = 0;
     const statsReq =
       pollCount++ % STATS_EVERY === 0
         ? getJSON('/api/stats/public', 8000)
             .then((st) => {
-              if (seq === refreshSeq) lastStats = st;
+              if (seq < statsSeq) return;
+              statsSeq = seq;
+              lastStats = st;
             })
             .catch(() => {
-              if (seq !== refreshSeq) return;
+              if (seq < statsSeq) return;
+              statsSeq = seq;
               pollCount = 0; // retry on the next poll
               lastStats = null; // real or absent: never a stale count
             })
@@ -356,7 +414,7 @@
     try {
       rooms = await getJSON('/list', 8000);
     } catch {
-      if (seq !== refreshSeq) return;
+      if (seq < boardSeq) return;
       // Health answered but the list didn't: say so, keep Create usable. A
       // failed poll under a board already on screen just keeps the board.
       if (state === 'loading' || state === 'waking') setState('error');
@@ -364,13 +422,17 @@
       return;
     }
     await statsReq;
-    if (seq !== refreshSeq) return; // a newer refresh owns the board and the next poll
-    const stats = lastStats; // null: the board still renders, the numbers stay absent
-    render(
-      rooms.filter((r) => r.room_code),
-      stats,
-    );
-    schedule();
+    if (seq < boardSeq) return; // a newer answer is already on screen
+    boardSeq = seq;
+    try {
+      // null stats: the board still renders, the numbers stay absent
+      render(
+        (Array.isArray(rooms) ? rooms : []).filter((r) => r && r.room_code),
+        lastStats,
+      );
+    } finally {
+      schedule(); // a render bug must not stop the board for good (cf. invariant I1)
+    }
   }
 
   let wakeTimer = 0;
@@ -389,10 +451,14 @@
           "Still powering on. If this takes more than a couple of minutes, something's wrong on our side. Reload, or come back in a bit.";
       }
     }, 1000);
+    // A slow link may need longer than a napping server does: each miss
+    // gives the next ping more time, up to 10 s.
+    let timeout = 2500;
     const poll = async () => {
       try {
-        await getJSON('/health', 2500);
+        await getJSON('/health', timeout);
       } catch {
+        timeout = Math.min(timeout * 2, 10000);
         wakeTimer = setTimeout(poll, WAKE_POLL_MS);
         return;
       }
@@ -435,6 +501,12 @@
     btn.disabled = true;
     window.location.href = url;
   };
+
+  // Back from the room page (bfcache): the button we disabled on the way
+  // out comes back disabled; give the page its current state again.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) setState(state);
+  });
 
   $('create-btn').addEventListener('click', (e) =>
     go(e.currentTarget, `${API}/play.html?room=${randomCode()}&host=1&mode=rollback`),
@@ -547,14 +619,10 @@
     verdict();
   });
   const viz = $('viz');
+  // Tap anywhere on it; keyboard users have SPACE anywhere on the page and
+  // the Send button (a real button, so the controls aren't nested in one).
   viz.addEventListener('click', (e) => {
     if (!e.target.closest('input, label')) press();
-  });
-  viz.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' || e.code === 'Enter') {
-      e.preventDefault();
-      press();
-    }
   });
   document.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' || e.repeat || state !== 'waking') return;
@@ -571,15 +639,16 @@
   const STILL_AT = { seats: 3.0, ports: 1.5 };
 
   function visitorSeed() {
+    const S = window.KNStorage;
     try {
-      let v = localStorage.getItem('kn-visitor');
+      let v = S.get('localStorage', 'kn-visitor');
       if (!v) {
         v = Math.random().toString(36).slice(2, 10);
-        localStorage.setItem('kn-visitor', v);
+        S.set('localStorage', 'kn-visitor', v);
       }
       return v;
     } catch {
-      return 'anon';
+      return 'anon'; // storage.js missing, or a full store
     }
   }
   function hash(str) {
@@ -617,7 +686,6 @@
     svg.addEventListener('pointerleave', leave);
     svg.addEventListener('pointerup', leave);
     svg.addEventListener('pointerdown', (e) => {
-      e.stopPropagation(); // pressing the stick doesn't advance the mark
       move(e);
       ring.classList.remove('fire');
       void ring.getBoundingClientRect();
@@ -644,7 +712,8 @@
       svg.pauseAnimations();
     }
   }
-  $('name').addEventListener('click', () => {
+  $('name').addEventListener('click', (e) => {
+    if (e.target.closest?.('[data-mark="stick"]')) return; // pressing the stick plays with it
     markIdx = (markIdx + 1) % MARKS.length;
     if (REDUCE) {
       showMark(markIdx);

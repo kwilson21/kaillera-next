@@ -12,7 +12,10 @@ import time
 import pytest
 from playwright.sync_api import expect
 
-NOW = time.time()
+
+def _ago(seconds):
+    # Computed per test, not at import: the suite may run long after collection.
+    return time.time() - seconds
 
 
 def _room(
@@ -90,7 +93,7 @@ def test_live_board_rows_and_links(landing):
     page = landing(
         rooms=[
             _room("KAZ12345", "Kaz"),
-            _room("MOOSE123", "Moose", "playing", 3, started=NOW - 360),
+            _room("MOOSE123", "Moose", "playing", 3, started=_ago(360)),
         ],
         stats={"matches_this_week": 5, "people_playing_now": 3},
     )
@@ -111,7 +114,7 @@ def test_live_board_rows_and_links(landing):
 
 
 def test_full_room_offers_watch_only(landing):
-    page = landing(rooms=[_room("FULL1234", "Firo", "playing", 4, started=NOW - 60)])
+    page = landing(rooms=[_room("FULL1234", "Firo", "playing", 4, started=_ago(60))])
     row = page.locator(".room").first
     expect(row.get_by_role("link", name=re.compile("^Watch"))).to_have_count(1)
     expect(row.get_by_role("link", name=re.compile("^Join"))).to_have_count(0)
@@ -120,9 +123,9 @@ def test_full_room_offers_watch_only(landing):
 def test_featured_prefers_newest_match_with_an_open_slot(landing):
     page = landing(
         rooms=[
-            _room("OLDOPEN1", "Old", "playing", 2, started=NOW - 900),
-            _room("NEWFULL1", "Full", "playing", 4, started=NOW - 60),
-            _room("NEWOPEN1", "New", "playing", 3, started=NOW - 120),
+            _room("OLDOPEN1", "Old", "playing", 2, started=_ago(900)),
+            _room("NEWFULL1", "Full", "playing", 4, started=_ago(60)),
+            _room("NEWOPEN1", "New", "playing", 3, started=_ago(120)),
             _room("WAITING1", "Wait", "lobby", 1),
         ]
     )
@@ -160,6 +163,13 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     expect(page.locator("#create-btn")).to_have_text("Create a room · ready in a moment")
     # The visualizer answers SPACE while waking.
     page.keyboard.press("Space")
+    expect(page.locator("#v-in")).to_have_text("0 ms")
+    # ...and its Send button. The controls sit beside a real button, not
+    # inside a role="button" wrapper (axe: nested-interactive).
+    assert page.locator("#viz").get_attribute("role") is None
+    page.evaluate("document.getElementById('v-in').textContent = '--'")
+    page.locator("#viz-send").focus()
+    page.keyboard.press("Enter")
     expect(page.locator("#v-in")).to_have_text("0 ms")
     alive["up"] = True
     expect(page.locator("#board")).to_have_attribute("data-state", "empty", timeout=10000)
@@ -327,3 +337,148 @@ def test_an_older_stats_answer_never_replaces_a_newer_count(page, server_url):
     held[0].fulfill(json={"matches_this_week": None, "people_playing_now": 9})
     page.wait_for_timeout(300)
     expect(page.locator("#board-live")).to_have_text("5 people playing right now")
+
+
+# ── Review round 2 (Astra, Fable) ───────────────────────────────────────────
+
+REFRESH = "document.dispatchEvent(new Event('visibilitychange'))"
+
+
+def _live_list(page, server_url, rooms, stats=None):
+    """Board whose /list answer the test can change between refreshes."""
+    _mock(page, stats=stats)
+    page.unroute("**/list")
+    page.route("**/list", lambda r: r.fulfill(json=rooms["list"]))
+    page.goto(server_url)
+    expect(page.locator("#board")).not_to_have_attribute("data-state", "loading")
+
+
+@pytest.mark.parametrize("width", [320, 390])
+def test_long_host_name_keeps_actions_on_screen(browser, server_url, width):
+    ctx = browser.new_context(viewport={"width": width, "height": 800})
+    page = ctx.new_page()
+    _mock(page, rooms=[_room("LONG1234", "A" * 24)])
+    page.goto(server_url)
+    expect(page.locator(".room")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth") <= width
+    for act in ("join", "watch"):
+        box = page.locator(f'.room [data-act="{act}"]').bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width, (act, box)
+    ctx.close()
+
+
+def test_focus_stays_with_the_room_when_the_featured_room_changes(page, server_url):
+    rooms = {"list": [_room("ALICE123", "Alice", "playing", 2, started=_ago(300))]}
+    _live_list(page, server_url, rooms)
+    page.locator('#featured [data-act="join"]').focus()
+    rooms["list"] = [
+        _room("BOB12345", "Bob", "playing", 2, started=_ago(30)),  # newer, open slot: now featured
+        _room("ALICE123", "Alice", "playing", 2, started=_ago(300)),
+    ]
+    page.evaluate(REFRESH)
+    expect(page.locator("#featured h3")).to_be_visible()
+    expect(page.locator("#featured .meta")).to_contain_text("Bob")
+    assert page.evaluate("document.activeElement.dataset.act") == "join"
+    assert page.evaluate("document.activeElement.closest('.room')?.dataset.code") == "ALICE123"
+
+
+def test_focus_survives_a_room_above_it_leaving(page, server_url):
+    rooms = {"list": [_room("FIRST123", "First"), _room("SECOND12", "Second"), _room("THIRD123", "Third")]}
+    _live_list(page, server_url, rooms)
+    page.get_by_role("link", name="Join Third's room, needs your ROM").focus()
+    rooms["list"] = [_room("SECOND12", "Second"), _room("THIRD123", "Third")]
+    page.evaluate(REFRESH)
+    expect(page.locator(".room")).to_have_count(2)
+    assert page.evaluate("document.activeElement.getAttribute('aria-label')") == "Join Third's room, needs your ROM"
+
+
+def test_rollback_checkbox_toggles_from_the_keyboard(page, server_url):
+    _mock(page, health=False)
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "waking")
+    page.locator("#rb").focus()
+    page.keyboard.press("Space")
+    expect(page.locator("#rb")).not_to_be_checked()
+    expect(page.locator("#verdict")).to_have_text("240 ms wait per input")
+    expect(page.locator("#v-in")).to_have_text("--")  # the checkbox got the key, not the visualizer
+
+
+def test_empty_board_keeps_a_real_player_count(page, server_url):
+    unlisted = {k: v for k, v in _room("HIDDEN12", "Hidden", "playing").items() if k != "room_code"}
+    _mock(page, rooms=[unlisted], stats={"matches_this_week": None, "people_playing_now": 2})
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty")
+    expect(page.locator("#board-live")).to_have_text("2 people playing right now")
+
+
+def test_empty_board_without_players_says_no_open_rooms(landing):
+    page = landing()
+    expect(page.locator("#board-live")).to_have_text("no open rooms right now")
+
+
+def test_pressing_the_stick_mark_does_not_advance_it(landing):
+    page = landing()
+    for _ in range(8):
+        if page.locator('#hdr-mark [data-mark="stick"]').count():
+            break
+        page.click("#name")
+        page.wait_for_timeout(350)
+    stick = page.locator('#hdr-mark [data-mark="stick"]')
+    expect(stick).to_have_count(1)
+    stick.click()
+    page.wait_for_timeout(400)
+    expect(page.locator('#hdr-mark [data-mark="stick"]')).to_have_count(1)
+
+
+def test_offscreen_frames_are_replaced_not_stacked(browser, server_url):
+    ctx = browser.new_context(viewport={"width": 1280, "height": 500})
+    page = ctx.new_page()
+    t = {"n": 1}
+
+    def rooms():
+        return [
+            _room(
+                f"ROOM{i:04d}", f"H{i}", "playing", 2, started=_ago(60), frame=f"/room/ROOM{i:04d}/frame.jpg?t={t['n']}"
+            )
+            for i in range(6)
+        ]
+
+    _mock(page)
+    page.unroute("**/list")
+    page.route("**/list", lambda r: r.fulfill(json=rooms()))
+    held = []  # frames that never answer, like a lazy image that never loads
+    page.unroute("**/room/*/frame.jpg*")
+    page.route("**/room/*/frame.jpg*", lambda r: held.append(r))
+    page.goto(server_url)
+    expect(page.locator(".room")).to_have_count(6)
+    for n in range(2, 8):
+        t["n"] = n
+        page.evaluate(REFRESH)
+        page.wait_for_timeout(150)
+    counts = page.evaluate("[...document.querySelectorAll('.room .thumb')].map(b => b.querySelectorAll('img').length)")
+    assert max(counts) <= 1, counts  # the pending frame is replaced each poll, never stacked
+    ctx.close()
+
+
+def test_no_live_badge_without_a_frame(landing):
+    page = landing(
+        rooms=[_room("KAZ12345", "Kaz", "playing", 2, started=_ago(60), frame="/room/KAZ12345/frame.jpg?t=1")]
+    )
+    page.wait_for_timeout(300)  # the frame 404s
+    assert page.locator(".thumb.live, .screen-box.live").count() == 0
+
+
+def test_a_bad_list_answer_does_not_stop_the_board(page, server_url):
+    rooms = {"list": {"unexpected": "shape"}}
+    _live_list(page, server_url, rooms)
+    assert _state(page) == "empty"
+    rooms["list"] = [_room("KAZ12345", "Kaz")]
+    page.evaluate(REFRESH)
+    expect(page.locator("#board")).to_have_attribute("data-state", "live")
+
+
+def test_back_navigation_re_enables_create(landing):
+    page = landing()
+    page.evaluate("document.getElementById('create-btn').disabled = true")  # as go() leaves it
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))")
+    expect(page.locator("#create-btn")).to_be_enabled()

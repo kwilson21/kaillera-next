@@ -245,6 +245,15 @@ button {
 .room .h {
   color: var(--muted);
 }
+/* Host names and game titles can be one long word; wrap them rather than
+   push the actions off a phone screen. */
+.room .g,
+.room .h,
+.featured h3,
+.featured .meta {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
 .slots {
   display: inline-flex;
   gap: 4px;
@@ -1200,7 +1209,7 @@ button {
     display: none;
   }
   .room {
-    grid-template-columns: 72px 1fr auto;
+    grid-template-columns: 72px minmax(0, 1fr) auto;
     grid-template-areas: 'th g acts' 'th h acts' 'th sl acts' 'th st acts';
     gap: 4px 12px;
   }
