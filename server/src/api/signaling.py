@@ -114,8 +114,17 @@ _DISCONNECT_GRACE_SECONDS = 30
 # disconnects still leave immediately so room state stays responsive.
 _LOBBY_OWNER_GRACE_SECONDS = 5
 
-# Per-instance signing key for HMAC tokens (upload + reconnect).
-_TOKEN_KEY = secrets.token_bytes(32)
+
+# Signing key for HMAC tokens (upload + reconnect). Derived from the
+# deployment's IP_HASH_SALT when set, so tokens stay valid across restarts
+# and players can reclaim rooms restored from Redis; random otherwise.
+def _token_key(secret: str) -> bytes:
+    if not secret:
+        return secrets.token_bytes(32)
+    return hmac.new(secret.encode(), b"kaillera-next room tokens", hashlib.sha256).digest()
+
+
+_TOKEN_KEY = _token_key(os.environ.get("IP_HASH_SALT", ""))
 
 # Token TTLs. Both cover a normal match + reconnect window; on expiry the
 # client must rejoin to get a fresh token.
@@ -362,14 +371,20 @@ def _players_payload(room: Room) -> dict:
     }
 
 
+def connected_players(room: Room) -> int:
+    """Players (not spectators) whose socket is connected to this server right now."""
+    return sum(1 for info in room.players.values() if info["socketId"] in _sid_host)
+
+
 def room_is_live(room: Room) -> bool:
-    """True while at least one member's socket is connected to this server.
+    """True while at least one player's socket is connected to this server.
 
     A room restored from Redis after a restart or nap keeps its members but
-    none of their sockets: a zombie until someone returns. Members sitting in
-    a disconnect grace window don't count either.
+    none of their sockets: a zombie until someone returns. Players sitting in
+    a disconnect grace window don't count, and neither do spectators: a room
+    with nobody left to play in it has no host to join.
     """
-    return any(info["socketId"] in _sid_host for info in (*room.players.values(), *room.spectators.values()))
+    return connected_players(room) > 0
 
 
 def room_host_name(room: Room) -> str:
@@ -559,6 +574,9 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
         new_owner_sid = new_owner_info["socketId"]
         room.owner = new_owner_sid
         room.rom_sharing = False
+        # Listing was the old host's consent; the new host hasn't given it.
+        room.listed = False
+        _drop_room_frame(session_id)
         if room.status != "playing":
             _clear_host_rom(room)
         # Move new owner to slot 0 (P1) only in lobby — never reshuffle slots mid-game

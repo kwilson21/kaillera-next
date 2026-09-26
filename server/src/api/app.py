@@ -61,6 +61,7 @@ from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
     _sanitize_log_blob,
+    connected_players,
     room_frame,
     room_host_name,
     room_is_live,
@@ -914,9 +915,7 @@ def create_app(lifespan=None) -> FastAPI:
         return {
             # None until a full week has been recorded; the page then shows no number.
             "matches_this_week": await stats.matches_this_week(),
-            "people_playing_now": sum(
-                len(r.players) for r in rooms.values() if r.status == "playing" and room_is_live(r)
-            ),
+            "people_playing_now": sum(connected_players(r) for r in rooms.values() if r.status == "playing"),
         }
 
     _ROM_HASH_RE = re.compile(r"^[SF]?[0-9a-fA-F]{16,64}$")

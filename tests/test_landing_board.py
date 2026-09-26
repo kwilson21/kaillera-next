@@ -54,6 +54,8 @@ def sig(monkeypatch):
     monkeypatch.setattr(signaling.state, "save_room", noop)
     monkeypatch.setattr(signaling.db, "insert_screenshot", insert_screenshot)
     monkeypatch.setattr(signaling.db, "insert_client_event", noop)
+    monkeypatch.setattr(signaling.db, "set_session_ended", noop)
+    monkeypatch.setattr(signaling.state, "delete_room", noop)
     return room, emitted
 
 
@@ -345,3 +347,40 @@ def test_play_page_uses_live_card_only_for_listed_room_with_frame(client, sig):
     card = client.get("/room/ROOM1/card.jpg")
     assert card.status_code == 200 and card.headers["content-type"] == "image/jpeg"
     assert client.get("/room/NOPE/card.jpg").status_code == 404
+
+
+# ── Review fixes: restart recovery, spectator-only rooms, host transfer ──────
+
+
+def test_token_key_is_stable_across_restarts_when_salt_is_set():
+    assert signaling._token_key("salt") == signaling._token_key("salt")
+    assert signaling._token_key("salt") != signaling._token_key("other")
+    assert signaling._token_key("") != signaling._token_key("")  # random without a salt
+
+
+def test_spectator_only_room_is_not_live(sig):
+    room, _ = sig
+    room.spectators["p-watch"] = {"socketId": "watcher", "playerName": "W"}
+    signaling._sid_host["watcher"] = "example"
+    del signaling._sid_host["host"]
+    assert not signaling.room_is_live(room)
+    assert _join("guest", "p-guest") == ("Room closed", None)
+
+
+def test_host_transfer_takes_the_room_off_the_board(sig):
+    room, _ = sig
+    _join("guest", "p-guest")
+    _start(room)
+    room.listed = True
+    signaling._room_frames["ROOM1"] = (JPEG, 1.0)
+    _run_async(signaling._leave("host", "leave"))
+    assert room.owner == "guest"
+    assert not room.listed and "ROOM1" not in signaling._room_frames
+
+
+def test_people_playing_now_counts_only_connected_players(client, sig):
+    room, _ = sig
+    _join("guest", "p-guest")
+    _start(room)
+    del signaling._sid_host["guest"]  # in its 30 s grace window
+    assert client.get("/api/stats/public").json()["people_playing_now"] == 1
