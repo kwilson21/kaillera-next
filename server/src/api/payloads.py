@@ -139,6 +139,13 @@ class RomSharingTogglePayload(BaseModel):
     enabled: bool = False
 
 
+# ── set-listed ───────────────────────────────────────────────────────────────
+
+
+class SetListedPayload(BaseModel):
+    listed: bool = False
+
+
 # ── rom-ready ────────────────────────────────────────────────────────────────
 
 

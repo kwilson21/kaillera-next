@@ -53,6 +53,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -65,8 +66,8 @@ from dataclasses import dataclass, field
 
 import socketio
 
-from src import db, state
-from src.api import desync_vision
+from src import db, state, stats
+from src.api import desync_vision, og_card
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
     ClaimSlotPayload,
@@ -79,6 +80,7 @@ from src.api.payloads import (
     RomSharingTogglePayload,
     SessionLogPayload,
     SetGameIdPayload,
+    SetListedPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
@@ -113,8 +115,17 @@ _DISCONNECT_GRACE_SECONDS = 30
 # disconnects still leave immediately so room state stays responsive.
 _LOBBY_OWNER_GRACE_SECONDS = 5
 
-# Per-instance signing key for HMAC tokens (upload + reconnect).
-_TOKEN_KEY = secrets.token_bytes(32)
+
+# Signing key for HMAC tokens (upload + reconnect). Derived from the
+# deployment's IP_HASH_SALT when set, so tokens stay valid across restarts
+# and players can reclaim rooms restored from Redis; random otherwise.
+def _token_key(secret: str) -> bytes:
+    if not secret:
+        return secrets.token_bytes(32)
+    return hmac.new(secret.encode(), b"kaillera-next room tokens", hashlib.sha256).digest()
+
+
+_TOKEN_KEY = _token_key(os.environ.get("IP_HASH_SALT", ""))
 
 # Token TTLs. Both cover a normal match + reconnect window; on expiry the
 # client must rejoin to get a fresh token.
@@ -283,6 +294,8 @@ class Room:
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
+    listed: bool = False  # host opted in to the front-page board; never true with a password
+    started_at: float | None = None  # wall-clock start of the current match, for the board
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -305,6 +318,12 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 _room_lock = asyncio.Lock()
 
 _shutting_down = False
+
+# Latest board frame per listed, in-game room: session_id -> (jpeg bytes, wall time).
+# Memory only, one per room; dropped when the room ends its match, unlists or closes.
+_room_frames: dict[str, tuple[bytes, float]] = {}
+_ROOM_FRAME_MAX_BYTES = 20_000
+_ROOM_FRAME_MAX_W, _ROOM_FRAME_MAX_H = 640, 480  # captures are 320x240
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -350,7 +369,74 @@ def _players_payload(room: Room) -> dict:
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
+        "listed": room.listed,
     }
+
+
+def connected_players(room: Room) -> int:
+    """Players (not spectators) whose socket is connected to this server right now."""
+    return sum(1 for info in room.players.values() if info["socketId"] in _sid_host)
+
+
+def room_is_live(room: Room) -> bool:
+    """True while at least one player's socket is connected to this server.
+
+    A room restored from Redis after a restart or nap keeps its members but
+    none of their sockets: a zombie until someone returns. Players sitting in
+    a disconnect grace window don't count, and neither do spectators: a room
+    with nobody left to play in it has no host to join.
+    """
+    return connected_players(room) > 0
+
+
+def room_host_name(room: Room) -> str:
+    """Display name of the room's current owner, or "" if unknown."""
+    for info in room.players.values():
+        if info.get("socketId") == room.owner:
+            return info.get("playerName", "")
+    first = next(iter(room.players.values()), None)
+    return first.get("playerName", "") if first else ""
+
+
+def room_frame(session_id: str) -> tuple[bytes, float] | None:
+    """Latest board frame for a room that may show one right now."""
+    room = rooms.get(session_id)
+    if room is None or not room.listed or room.status != "playing" or not room_is_live(room):
+        return None
+    return _room_frames.get(session_id)
+
+
+def _board_frame(jpeg: bytes) -> bytes | None:
+    """The board copy of a screenshot, at most _ROOM_FRAME_MAX_BYTES and 640x480.
+
+    Only the header is read before the size check, so a small file that
+    declares huge dimensions is refused without being decoded (the board
+    frame and the invite card both decode it later). Busy frames are
+    re-encoded here rather than in the browser, so the diagnostic
+    screenshot stored for desync triage keeps its quality.
+    """
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg))
+        if img.format != "JPEG" or img.width > _ROOM_FRAME_MAX_W or img.height > _ROOM_FRAME_MAX_H:
+            return None
+        if len(jpeg) <= _ROOM_FRAME_MAX_BYTES:
+            return jpeg
+        img = img.convert("RGB")
+        for quality in (45, 30):
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=quality)
+            if out.tell() <= _ROOM_FRAME_MAX_BYTES:
+                return out.getvalue()
+    except Exception:
+        log.warning("board frame: could not re-encode a %d-byte screenshot", len(jpeg))
+    return None
+
+
+def _drop_room_frame(session_id: str) -> None:
+    _room_frames.pop(session_id, None)
+    og_card.forget(session_id)
 
 
 def _clear_host_rom(room: Room) -> None:
@@ -504,6 +590,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 
     if not room.players and not room.spectators:
         rooms.pop(session_id, None)
+        _drop_room_frame(session_id)
         await state.delete_room(session_id)
         log.info("Room %s deleted (empty)", session_id)
         return
@@ -513,6 +600,10 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     # AND so remaining peers continue play under a new owner. The previous behavior
     # of force-closing the room on any host disconnect punished tab backgrounding,
     # WiFi roams, and Playwright multi-tab orchestration.
+    if room.owner == sid:
+        # Listing was this host's consent; nobody who stays has given it.
+        room.listed = False
+        _drop_room_frame(session_id)
     if room.owner == sid and room.players:
         new_owner_pid, new_owner_info = next(iter(room.players.items()))
         new_owner_sid = new_owner_info["socketId"]
@@ -585,6 +676,8 @@ async def _cleanup_empty_rooms() -> None:
                 _zombie_ages.pop(session_id, None)
                 await state.delete_room(session_id)
                 log.info("Cleanup: deleted room %s", session_id)
+            for session_id in [k for k in _room_frames if k not in rooms]:
+                _drop_room_frame(session_id)
         cleanup()
 
 
@@ -719,6 +812,16 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         if room.match_id:
             resp["matchId"] = room.match_id
         return (None, resp)
+
+    # Zombie rule: a room no player is connected to (restored after a
+    # restart) only takes back its own members, above. A new joiner would
+    # otherwise walk into a room with a ghost for a host. A player inside a
+    # disconnect grace window is on their way back, so the room stays open.
+    # Spectators never enter a room with no connected player: if that
+    # player doesn't return, nobody is left to host.
+    player_returning = not spectate and any(pid in _disconnect_grace_tasks for pid in room.players)
+    if not room_is_live(room) and not player_returning:
+        return ("Room closed", None)
 
     await _leave(sid)  # clean up if already in another room
 
@@ -884,6 +987,9 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.started_at = time.time()
+    # Stats never hold up the room lock (Redis round trips).
+    asyncio.create_task(stats.record_match(room.started_at))
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
     await sio.emit(
@@ -945,6 +1051,8 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
         room.match_id = None
 
     room.status = "lobby"
+    room.started_at = None
+    _drop_room_frame(session_id)
     # mode persists for rematch convenience
     await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
@@ -1056,6 +1164,30 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
         await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
         await state.save_room(session_id, room)
         log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
+    return None
+
+
+@sio.on("set-listed")
+@validated(SetListedPayload)
+async def set_listed(sid: str, payload: SetListedPayload) -> str | None:
+    """Host lists the room on the front-page board, or takes it off."""
+    if not check(sid, "set-listed"):
+        return "Rate limited"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can list the room"
+        if payload.listed and room.password:
+            return "Rooms with a password can't be listed"
+        room.listed = payload.listed
+        if not room.listed:
+            _drop_room_frame(session_id)
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+        log.info("Room %s %s", session_id, "listed" if room.listed else "unlisted")
     return None
 
 
@@ -1390,6 +1522,17 @@ async def game_screenshot(sid: str, data: dict) -> None:
     # Cap at 50KB per screenshot
     if len(img_bytes) > 50_000:
         return
+    # The host's frame doubles as the room's preview on the front-page board
+    # when the room is listed. Only the latest is kept, in memory.
+    if room.listed and sid == room.owner and img_bytes[:2] == b"\xff\xd8":
+        # Pillow work runs off the event loop so frames can't stall signaling.
+        board = await asyncio.to_thread(_board_frame, img_bytes)
+        # The room may have been unlisted, ended or handed over meanwhile:
+        # store only if it is still this host's listed match.
+        now_room = rooms.get(session_id)
+        still_ok = now_room is room and room.listed and room.owner == sid and room.match_id == match_id
+        if board is not None and still_ok:
+            _room_frames[session_id] = (board, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 

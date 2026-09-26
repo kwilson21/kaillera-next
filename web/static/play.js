@@ -535,9 +535,22 @@
 
   // ── Socket.IO ──────────────────────────────────────────────────────────
 
+  // Keepalive (docs/landing-design.md §7.12): a plain HTTP request is
+  // unambiguous inbound traffic, so a host that naps when idle stays awake
+  // under a live room. Off unless the server sets KEEPALIVE_SECONDS.
+  let _keepaliveTimer = null;
+  const startKeepalive = () => {
+    const seconds = Number(window.KN_CONFIG?.keepaliveSeconds) || 0;
+    if (_keepaliveTimer || seconds <= 0) return;
+    _keepaliveTimer = setInterval(() => {
+      fetch('/health', { cache: 'no-store' }).catch(() => {});
+    }, seconds * 1000);
+  };
+
   const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
     window._isSpectator = isSpectator;
+    startKeepalive();
 
     let _reconnectErrorTimer = null;
     let _reconnectDowngradeTimer = null;
@@ -957,6 +970,10 @@
                 );
                 return;
               }
+              if (err === 'Room closed') {
+                showError(roomClosedMessage(roomData?.host_name));
+                return;
+              }
               showError(`Failed to join: ${err}`);
               return;
             }
@@ -1074,7 +1091,7 @@
                   updateRomSharingUI();
                   return;
                 }
-                showError("Your ROM doesn't match the host's game. Drop the correct ROM or enable ROM sharing.");
+                showError("Your ROM doesn't match the host's game. Drop the correct ROM.");
                 return;
               }
 
@@ -1107,8 +1124,19 @@
 
   // ── Users Updated ──────────────────────────────────────────────────────
 
+  const roomClosedMessage = (hostName) => {
+    const host = (hostName || '').trim();
+    return host
+      ? `${host}'s room has closed. Rooms live only while someone's in them. Ask ${host} for a new link, or open your own.`
+      : "This room has closed. Rooms live only while someone's in them. Ask for a new link, or open your own.";
+  };
+
   const onUsersUpdated = (data) => {
     lastUsersData = data;
+    if (data.listed !== undefined) {
+      const listedCb = document.getElementById('opt-listed');
+      if (listedCb) listedCb.checked = !!data.listed;
+    }
     const players = data.players || {};
     const spectators = data.spectators || {};
     const ownerSid = data.owner ?? null;
@@ -1124,6 +1152,9 @@
       renderRomLibrary();
       if (localRomLoaded()) notifyRomReady();
     }
+
+    // Only the host of a listed room sends board-sized screenshots.
+    KNState.boardFrame = isHost && !!data.listed;
 
     // Track room mode from server (set by host's set-mode event)
     if (data.mode) {
@@ -5261,6 +5292,19 @@
       };
       modeSelect.addEventListener('change', updateOpts);
       updateOpts();
+    }
+
+    // Front-page listing (host only; the server refuses password rooms)
+    const listedCb = document.getElementById('opt-listed');
+    if (listedCb) {
+      listedCb.addEventListener('change', () => {
+        const listed = listedCb.checked;
+        socket.emit('set-listed', { listed }, (err) => {
+          if (!err) return;
+          listedCb.checked = !listed;
+          showToast(err);
+        });
+      });
     }
 
     // ROM sharing toggle

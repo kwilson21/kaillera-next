@@ -456,6 +456,8 @@
 
   // -- Gameplay screenshot capture --
   const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
+  // 160x120 for desync triage. The host of a listed room captures 320x240:
+  // it doubles as the room's live preview on the front-page board.
   const SCREENSHOT_WIDTH = 160;
   const SCREENSHOT_HEIGHT = 120;
   let _screenshotCanvas = null;
@@ -478,10 +480,13 @@
     }
 
     try {
-      if (!_screenshotCanvas) {
+      const scale = window.KNState?.boardFrame ? 2 : 1;
+      const outW = SCREENSHOT_WIDTH * scale;
+      const outH = SCREENSHOT_HEIGHT * scale;
+      if (!_screenshotCanvas || _screenshotCanvas.width !== outW) {
         _screenshotCanvas = document.createElement('canvas');
-        _screenshotCanvas.width = SCREENSHOT_WIDTH;
-        _screenshotCanvas.height = SCREENSHOT_HEIGHT;
+        _screenshotCanvas.width = outW;
+        _screenshotCanvas.height = outH;
         _screenshotCtx = _screenshotCanvas.getContext('2d');
       }
       const w = canvas.width;
@@ -499,7 +504,7 @@
         sh = Math.round(w / targetRatio);
         sy = Math.round((h - sh) / 2);
       }
-      _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+      _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, outW, outH);
       const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
       if (!dataUrl || dataUrl.length < 100) {
         if (!_screenshotDebugLogged) {
@@ -510,7 +515,7 @@
       }
       if (!_screenshotDebugLogged) {
         _screenshotDebugLogged = true;
-        _log(`screenshot: ok ${SCREENSHOT_WIDTH}x${SCREENSHOT_HEIGHT} size=${dataUrl.length}`);
+        _log(`screenshot: ok ${outW}x${outH} size=${dataUrl.length}`);
       }
       const base64 = dataUrl.split(',')[1];
       _sendScreenshot({

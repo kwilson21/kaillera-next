@@ -77,6 +77,8 @@ def _deserialize_room(d: dict):
         input_types=d.get("input_types", {}),
         device_types=d.get("device_types", {}),
         match_id=d.get("match_id"),
+        listed=bool(d.get("listed", False)) and d.get("password") is None,
+        started_at=d.get("started_at"),
     )
 
 
@@ -96,6 +98,11 @@ async def init() -> None:
     except Exception:
         log.exception("Failed to connect to Redis — falling back to in-memory only")
         _redis = None
+
+
+def enabled() -> bool:
+    """Whether rooms are being persisted to Redis right now."""
+    return _redis is not None
 
 
 async def ping() -> bool:

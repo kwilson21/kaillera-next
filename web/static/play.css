@@ -325,6 +325,10 @@ body {
   gap: 6px;
 }
 
+.host-options-row[hidden] {
+  display: none;
+}
+
 .host-options-row {
   display: flex;
   align-items: center;

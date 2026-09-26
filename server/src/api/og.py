@@ -310,6 +310,7 @@ def build_og_tags(
     room_name: str | None = None,
     game_id: str | None = None,
     spectate: bool = False,
+    image_url: str | None = None,
 ) -> str:
     """Build OG meta tag HTML string for injection into <head>.
 
@@ -322,7 +323,9 @@ def build_og_tags(
 
     # Card images are now prebuilt static PNGs (see scripts/generate_og_cards.py).
     # Pick the per-game card if we recognize the game, else fall back to home.png.
-    if game_info:
+    if image_url:
+        pass  # caller composed a live card (og_card.py)
+    elif game_info:
         suffix = "watch" if spectate else "play"
         image_url = f"https://{host}/static/og/cards/{quote(game_id, safe='')}-{suffix}.png"
     else:
@@ -361,9 +364,18 @@ def inject_og_tags(html: str, og_tags: str) -> str:
     return _HEAD_RE.sub(rf"\1\n    {og_tags}", html, count=1)
 
 
+def _keepalive_seconds() -> int:
+    """KEEPALIVE_SECONDS: how often the play page pings /health; 0 (default) is off."""
+    try:
+        return max(0, int(os.environ.get("KEEPALIVE_SECONDS", "0")))
+    except ValueError:
+        return 0
+
+
 def _inject_kn_config(html: str, *, rom_sharing_enabled: bool) -> str:
     """Inject server-side feature flags as window.KN_CONFIG before </head>."""
     config_js = (
-        f'<script>window.KN_CONFIG = {{"romSharingEnabled": {"true" if rom_sharing_enabled else "false"}}};</script>'
+        f'<script>window.KN_CONFIG = {{"romSharingEnabled": {"true" if rom_sharing_enabled else "false"}, '
+        f'"keepaliveSeconds": {_keepalive_seconds()}}};</script>'
     )
     return html.replace("</head>", f"  {config_js}\n</head>", 1)
