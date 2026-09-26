@@ -24,13 +24,10 @@ def _mark_rom_ready(page):
 
 
 def test_lobby_to_play_redirect(page, server_url):
-    """Create Room redirects to play.html with correct params."""
+    """Create a room redirects to play.html as host (the room asks for a name)."""
     page.goto(server_url)
-    page.fill("#player-name", "Host")
     page.click("#create-btn")
-    expect(page).to_have_url(re.compile(
-        r"play\.html\?room=\w+&host=1&name=Host&mode=rollback"
-    ))
+    expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&host=1&mode=rollback"))
 
 
 def test_host_guest_start_end(context, server_url):

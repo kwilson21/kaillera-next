@@ -6,118 +6,611 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>kaillera-next</title>
-    <meta name="description" content="Play N64 games online with friends in your browser — no download needed." />
+    <meta
+      name="description"
+      content="Super Smash Bros. 64 online with friends. In your browser. No install. Free and open source."
+    />
+    <meta name="theme-color" content="#0e1218" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
-    <link rel="stylesheet" href="/static/lobby.css" />
+    <link rel="preload" href="/static/fonts/barlow-condensed-700-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/static/fonts/ibm-plex-sans-var-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/static/landing.css" />
   </head>
   <body>
-    <main class="lobby-card">
-      <h1 title="v0.9 forever">kaillera-next</h1>
-      <p class="tagline">Play N64 online with friends — no download needed</p>
-      <label for="player-name" class="sr-only">Your name</label>
-      <input id="player-name" placeholder="Your name" autocomplete="off" aria-label="Your name" maxlength="24" />
-      <button id="create-btn">Create Room</button>
-      <div class="divider">or join a game</div>
-      <div class="join-row">
-        <label for="room-code" class="sr-only">Room code or invite link</label>
-        <input
-          id="room-code"
-          placeholder="Room code or invite link"
-          autocomplete="off"
-          aria-label="Room code or invite link"
-        />
-        <button id="join-btn">Join</button>
-        <button id="watch-btn" title="Join as spectator">Spectate</button>
+    <a class="skip" href="#board">Skip to open rooms</a>
+    <header class="hero">
+      <div class="wrap">
+        <h1 class="name" id="name" aria-label="kaillera-next">
+          <span class="hdr-mark" id="hdr-mark" aria-hidden="true"></span
+          ><span class="letters" aria-hidden="true"
+            ><span class="L" style="--i: 0; --c: var(--p1)">k</span
+            ><span class="L" style="--i: 1; --c: var(--p2)">a</span
+            ><span class="L" style="--i: 2; --c: var(--p3)">i</span
+            ><span class="L" style="--i: 3; --c: var(--p4)">l</span
+            ><span class="L" style="--i: 4; --c: var(--p1)">l</span
+            ><span class="L" style="--i: 5; --c: var(--p2)">e</span
+            ><span class="L" style="--i: 6; --c: var(--p3)">r</span
+            ><span class="L" style="--i: 7; --c: var(--p4)">a</span
+            ><span class="L hy" style="--i: 8; --c: var(--accent)">-</span
+            ><span class="L" style="--i: 9; --c: var(--p1)">n</span
+            ><span class="L" style="--i: 10; --c: var(--p2)">e</span
+            ><span class="L" style="--i: 11; --c: var(--p3)">x</span
+            ><span class="L" style="--i: 12; --c: var(--p4)">t</span></span
+          >
+        </h1>
+        <p class="line">Super Smash Bros. 64 online with friends. In your browser. No install.</p>
+        <p class="sub">Free and open source. Continuing Kaillera, 2001.</p>
+
+        <section class="board" id="board" aria-labelledby="board-title" data-state="loading">
+          <div class="board-h">
+            <h2 id="board-title">Open rooms</h2>
+            <span class="live" id="board-live" aria-live="polite"></span>
+            <span class="wk" id="board-week"></span>
+          </div>
+
+          <!-- live: featured match + rows (filled by landing.js) -->
+          <div id="st-live" hidden>
+            <div class="featured" id="featured" hidden></div>
+            <div class="rooms" id="rooms"></div>
+          </div>
+
+          <div class="empty" id="st-empty" hidden>
+            <svg class="ms" id="ms" viewBox="0 0 48 32" aria-hidden="true">
+              <rect class="outline" x="6" y="6" width="5" height="20" rx="2.2" />
+              <rect class="outline" x="16" y="6" width="5" height="20" rx="2.2" />
+              <rect class="outline" x="26" y="6" width="5" height="20" rx="2.2" />
+              <rect class="outline o4" x="36" y="6" width="5" height="20" rx="2.2" />
+              <rect class="fill f1" x="6" y="6" width="5" height="20" rx="2.2" />
+              <rect class="fill f2" x="16" y="6" width="5" height="20" rx="2.2" />
+              <rect class="fill f3" x="26" y="6" width="5" height="20" rx="2.2" />
+              <rect class="fill f4" x="36" y="6" width="5" height="20" rx="2.2" />
+            </svg>
+            <h3>The floor is quiet.</h3>
+            <p><span id="empty-week"></span>Open a room and send the link. First one in picks the stage.</p>
+          </div>
+
+          <div class="waking" id="st-waking" role="status" hidden>
+            <h3>Powering on… <small class="elapsed" id="elapsed">0:00</small></h3>
+            <p id="waking-line">
+              The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. Press SPACE
+              (tap on a phone) while you wait. This is what rollback does to lag.
+            </p>
+            <div class="prog" aria-hidden="true"><i></i></div>
+            <div
+              class="viz"
+              id="viz"
+              role="button"
+              tabindex="0"
+              aria-label="Input lag visualizer. Press space or tap to send an input."
+            >
+              <div class="viz-row">
+                <span>Input</span>
+                <div class="track"><i class="pulse" id="p-in"></i></div>
+                <b id="v-in">--</b>
+              </div>
+              <div class="viz-row">
+                <span>Response</span>
+                <div class="track"><i class="pulse" id="p-out"></i></div>
+                <b id="v-out">--</b>
+              </div>
+              <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
+              <div class="verdict-sub" id="verdict-sub"></div>
+              <div class="viz-ctl">
+                <label for="lag"
+                  >Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120" />
+                  <output id="lag-out" for="lag">120 ms</output></label
+                >
+                <label for="rb"><input type="checkbox" id="rb" checked /> Rollback on</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="error" id="st-error" hidden>
+            <p>Couldn't load rooms. <a href="/" id="reload">Reload.</a></p>
+          </div>
+
+          <div class="loading" id="st-loading" aria-hidden="true"></div>
+        </section>
+
+        <div class="cta" id="cta">
+          <button class="btn primary big" type="button" id="create-btn">Create a room</button>
+          <span class="code" id="code-box">
+            <label for="room-code">Have a code?</label>
+            <input
+              id="room-code"
+              type="text"
+              placeholder="ABC123"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              maxlength="80"
+            />
+            <button class="btn" type="button" id="join-btn">Join</button>
+            <button class="btn" type="button" id="watch-btn">Watch</button>
+          </span>
+          <button class="code-link" type="button" id="code-link" aria-controls="code-box" aria-expanded="false">
+            Have a code?
+          </button>
+        </div>
+        <p class="need"><b>Playing needs your own SSB64 or Smash Remix ROM.</b> Watching doesn't.</p>
       </div>
-      <!-- Keep in sync with server/config/known_roms.json -->
-      <section class="supported-roms" aria-labelledby="supported-roms-title">
-        <h2 id="supported-roms-title">Supported ROMs</h2>
-        <ul>
-          <li>Super Smash Bros. <span class="rom-region">(US)</span></li>
-          <li>Smash Remix 2.0.0 <span class="rom-region">(US)</span></li>
-          <li>Smash Remix 2.0.1 <span class="rom-region">(US)</span></li>
-        </ul>
-        <p class="supported-roms-note">
-          Only these three ROMs work right now. Bring your own copy (.z64 / .n64 / .v64 / .zip) — other games and
-          versions aren't supported yet.
-        </p>
+    </header>
+
+    <main>
+      <section class="sec" aria-labelledby="h-rom">
+        <div class="wrap">
+          <h2 id="h-rom">You bring the game</h2>
+          <p>
+            kaillera-next doesn't host, share or link to ROMs. You drop your own copy of Super Smash Bros. 64 onto the
+            page. It's read in your browser and never uploaded anywhere.
+          </p>
+          <!-- Keep in sync with server/config/known_roms.json -->
+          <div class="supported-roms">
+            Works right now:
+            <ul>
+              <li>Super Smash Bros. <span class="rom-region">(US)</span></li>
+              <li>Smash Remix 2.0.0 <span class="rom-region">(US)</span></li>
+              <li>Smash Remix 2.0.1 <span class="rom-region">(US)</span></li>
+            </ul>
+            Files: .z64, .n64, .v64 or .zip.
+            <a href="https://github.com/JSsixtyfour/smashremix" rel="noopener" target="_blank">Smash Remix</a> is a free
+            community mod you apply to your own SSB64 copy.
+          </div>
+          <p>No ROM? You can still watch any open room.</p>
+        </div>
+      </section>
+
+      <section class="sec" aria-labelledby="h-how">
+        <div class="wrap two" id="how">
+          <div>
+            <h2 id="h-how">How it works</h2>
+            <p>Create a room and send the link. Friends open it on a laptop or a phone.</p>
+            <p>Everyone drops their own ROM. The host presses Start.</p>
+            <p class="m">
+              Up to 4 players. Spectators welcome. Keyboard, gamepad or on-screen controls. On a phone, an Xbox
+              controller over Bluetooth works too.
+            </p>
+          </div>
+          <!-- Screenshots and the intro video arrive with the assets (M4). A slot
+               renders only once it has an image or a video id. -->
+          <div class="media" id="how-media" hidden>
+            <div class="shots" id="shots"></div>
+            <div class="lite" data-video="" data-title="Intro" data-length="0:50" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sec" aria-labelledby="h-why">
+        <div class="wrap two">
+          <div>
+            <h2 id="h-why">Why it feels close to the couch</h2>
+            <p>
+              Rollback netplay runs the game at full speed on your machine and predicts what your opponent pressed. When
+              a prediction misses, it rewinds a few frames and replays, quietly. The network lag is still there;
+              rollback hides it from you. Under about 150 ms of round trip, it feels like playing offline. Lockstep, the
+              old way, waits the full round trip on every frame.
+            </p>
+            <p class="m">Don't take our word for it.</p>
+            <div class="proof">
+              <a class="btn primary" href="/demo.html">Try the demo · needs your ROM</a>
+              <a class="btn" href="/lag-test.html">Lag visualizer · no ROM</a>
+            </div>
+          </div>
+          <div>
+            <figure class="rb-fig">
+              <svg
+                class="rb"
+                viewBox="-2 0 70 30"
+                role="img"
+                aria-label="A playhead steps through frames. One frame is a wrong guess; the playhead rewinds three frames, replays them and carries on."
+              >
+                <rect x="0" y="17" width="64" height="1" class="axis" />
+                <rect class="t" x="2" y="8" width="2" height="8" />
+                <rect class="t" x="8" y="8" width="2" height="8" />
+                <rect class="t" x="14" y="8" width="2" height="8" />
+                <rect class="t" x="20" y="8" width="2" height="8" />
+                <rect class="t t4" x="26" y="8" width="2" height="8" />
+                <rect class="t t5" x="32" y="8" width="2" height="8" />
+                <rect class="t t6" x="38" y="8" width="2" height="8" />
+                <rect class="t" x="44" y="8" width="2" height="8" />
+                <rect class="t" x="50" y="8" width="2" height="8" />
+                <rect class="t" x="56" y="8" width="2" height="8" />
+                <rect class="t" x="62" y="8" width="2" height="8" />
+                <rect class="head" x="1" y="5" width="4" height="14" rx="1" />
+                <text class="lbl bad" x="39" y="26" text-anchor="middle">wrong guess</text>
+                <text class="lbl re" x="27" y="26" text-anchor="middle">rewind · replay</text>
+              </svg>
+              <figcaption class="m">
+                A wrong guess, a rewind, a replay. It happens all the time; you don't see it.
+              </figcaption>
+            </figure>
+            <div class="lite" data-video="" data-title="Rollback explained" data-length="1:00" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="sec" aria-labelledby="h-since">
+        <div class="wrap">
+          <h2 id="h-since">Since 2001</h2>
+          <p>
+            Kaillera, by Christophe Thibault, let a generation play N64 online. A dozen servers and clients carried it
+            for twenty years. kaillera-next is the same idea with nothing to install and rollback netcode.
+          </p>
+          <ol class="ribbon" aria-label="Lineage, from Kaillera to kaillera-next" tabindex="0">
+            <li>Kaillera</li>
+            <li>EmuLinker</li>
+            <li>EmuLinker SF</li>
+            <li>SupraClient</li>
+            <li>n02</li>
+            <li>Project64k</li>
+            <li>AQZ NetPlay</li>
+            <li>Ownasaurus Client</li>
+            <li>EmuLinker X</li>
+            <li>EmuLinker-K</li>
+            <li>Kaillera Reborn</li>
+            <li>kaillera-next</li>
+          </ol>
+          <p class="m">
+            Free and open source (GPL-2).
+            <a href="https://github.com/kwilson21/kaillera-next" rel="noopener" target="_blank">GitHub</a>
+          </p>
+        </div>
       </section>
     </main>
-    <p style="padding: 24px 0 12px; font-size: 14px; color: #8a8a8a; text-align: center">
-      by Kazon Wilson (Agent 21) &middot; Inspired by Kaillera by Christophe Thibault
-      <br />
-      <a
-        href="https://github.com/kwilson21/kaillera-next"
-        target="_blank"
-        rel="noopener"
-        class="footer-link"
-        title="View on GitHub"
-      >
-        <svg
-          class="footer-icon"
-          viewBox="0 0 24 24"
-          fill="currentColor"
-          xmlns="http://www.w3.org/2000/svg"
-          aria-hidden="true"
+
+    <footer class="foot">
+      <div class="wrap">
+        <div>by Kazon Wilson (Agent 21) · Inspired by Kaillera by Christophe Thibault</div>
+        <div>
+          <a href="https://github.com/kwilson21/kaillera-next" rel="noopener" target="_blank">GitHub</a> ·
+          <a href="https://ko-fi.com/kazonwilson" rel="noopener" target="_blank">Support</a> ·
+          <button type="button" class="linkish" id="kn-about">About</button> ·
+          <button type="button" class="linkish" id="kn-version" aria-label="View changelog"></button>
+        </div>
+        <div>kaillera-next does not host, distribute or link to ROMs.</div>
+      </div>
+    </footer>
+
+    <!-- Header marks (docs/landing-design.md §5.8): one per visit, click to advance. -->
+    <template id="marks">
+      <svg data-mark="seats" viewBox="0 0 32 32">
+        <rect x="3" y="3" width="12" height="12" rx="2.5" fill="#e5484d" opacity="0">
+          <animate
+            attributeName="opacity"
+            values="0;0;1;1;1;0;0"
+            keyTimes="0;0.08;0.14;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="y"
+            values="0;0;3;3;3;3;3"
+            keyTimes="0;0.08;0.14;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <rect x="17" y="3" width="12" height="12" rx="2.5" fill="#3b82f6" opacity="0">
+          <animate
+            attributeName="opacity"
+            values="0;0;1;1;1;0;0"
+            keyTimes="0;0.20;0.26;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="y"
+            values="0;0;3;3;3;3;3"
+            keyTimes="0;0.20;0.26;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <rect x="3" y="17" width="12" height="12" rx="2.5" fill="#f5c518" opacity="0">
+          <animate
+            attributeName="opacity"
+            values="0;0;1;1;1;0;0"
+            keyTimes="0;0.32;0.38;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="y"
+            values="14;14;17;17;17;17;17"
+            keyTimes="0;0.32;0.38;0.88;0.92;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <rect
+          x="17.75"
+          y="17.75"
+          width="10.5"
+          height="10.5"
+          rx="2"
+          fill="none"
+          stroke="#8b95a5"
+          stroke-width="1.5"
+          opacity="0"
         >
-          <path
-            d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0 1 12 6.836a9.59 9.59 0 0 1 2.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10Z"
+          <animate
+            attributeName="opacity"
+            values="0;0;0.35;1;0.35;1;0.35;1;1;0;0"
+            keyTimes="0;0.38;0.42;0.48;0.54;0.60;0.66;0.72;0.88;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
           />
-        </svg>
-        GitHub
-      </a>
-      &middot;
-      <a
-        href="https://ko-fi.com/kazonwilson"
-        target="_blank"
-        rel="noopener"
-        class="footer-link"
-        title="Support on Ko-fi"
-      >
-        <svg class="footer-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path
-            d="M5 12V7a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v5a5 5 0 0 1-5 5H10a5 5 0 0 1-5-5Z"
-            stroke="currentColor"
-            stroke-width="1.5"
+        </rect>
+        <rect x="17" y="29" width="12" height="0" rx="2.5" fill="#3fb950">
+          <animate
+            attributeName="y"
+            values="29;29;17;17;17;29"
+            keyTimes="0;0.70;0.78;0.88;0.92;1"
+            dur="3.6s"
+            repeatCount="indefinite"
           />
-          <path
-            d="M17 7h1.5A2.5 2.5 0 0 1 21 9.5v0a2.5 2.5 0 0 1-2.5 2.5H17"
-            stroke="currentColor"
-            stroke-width="1.5"
+          <animate
+            attributeName="height"
+            values="0;0;12;12;12;0"
+            keyTimes="0;0.70;0.78;0.88;0.92;1"
+            dur="3.6s"
+            repeatCount="indefinite"
           />
-          <path
-            d="M10.5 8.5c-.4-.6-1.2-.8-1.7-.3-.6.5-.6 1.4 0 2l1.7 1.6 1.7-1.6c.6-.6.6-1.5 0-2-.5-.5-1.3-.3-1.7.3Z"
-            fill="currentColor"
+          <animate
+            attributeName="opacity"
+            values="1;1;1;1;0;0"
+            keyTimes="0;0.70;0.78;0.90;0.96;1"
+            dur="3.6s"
+            repeatCount="indefinite"
           />
-        </svg>
-        Support
-      </a>
-      &middot;
-      <span
-        id="kn-about"
-        class="footer-link"
-        style="cursor: pointer"
-        title="About kaillera-next"
-        role="button"
-        tabindex="0"
-        aria-label="About kaillera-next"
-        >About</span
-      >
-      &middot;
-      <span
-        id="kn-version"
-        class="footer-link"
-        style="cursor: pointer"
-        title="View changelog"
-        role="button"
-        tabindex="0"
-        aria-label="View changelog"
-      ></span>
-    </p>
-    <script src="/static/version-guard.js"></script>
-    <script src="/static/storage.js"></script>
-    <script src="/static/version.js"></script>
-    <script src="/static/lobby.js"></script>
-    <script src="/static/feedback.js"></script>
+        </rect>
+      </svg>
+      <svg data-mark="ports" viewBox="0 0 32 32">
+        <rect x="3" y="7" width="5" height="18" rx="2.2" fill="#e5484d" />
+        <rect x="10" y="7" width="5" height="18" rx="2.2" fill="#3b82f6" />
+        <rect x="17" y="7" width="5" height="18" rx="2.2" fill="#f5c518" />
+        <rect x="24.75" y="7.75" width="3.5" height="16.5" rx="1.6" fill="none" stroke="#8b95a5" stroke-width="1.5" />
+        <rect x="24.75" y="24.25" width="3.5" height="0" rx="1.6" fill="#3fb950">
+          <animate
+            attributeName="y"
+            values="24.25;7.75;7.75;7.75;24.25"
+            keyTimes="0;0.45;0.7;0.85;1"
+            dur="2.6s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="height"
+            values="0;16.5;16.5;16.5;0"
+            keyTimes="0;0.45;0.7;0.85;1"
+            dur="2.6s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="opacity"
+            values="1;1;1;0.35;0"
+            keyTimes="0;0.45;0.7;0.85;1"
+            dur="2.6s"
+            repeatCount="indefinite"
+          />
+        </rect>
+      </svg>
+      <svg data-mark="dpad" viewBox="0 0 32 32">
+        <rect x="12" y="12" width="8" height="8" rx="1.8" fill="#242c39">
+          <animate
+            attributeName="fill"
+            values="#242c39;#242c39;#5aa8ff;#5aa8ff;#242c39;#242c39"
+            keyTimes="0;0.30;0.31;0.38;0.43;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <rect x="12" y="2.5" width="8" height="8" rx="1.8" fill="#e5484d" />
+        <rect x="2.5" y="12" width="8" height="8" rx="1.8" fill="#3b82f6" />
+        <rect
+          x="12"
+          y="21.5"
+          width="8"
+          height="8"
+          rx="1.8"
+          fill="#f5c518"
+          stroke="#ffffff"
+          stroke-width="1.5"
+          stroke-opacity="0"
+        >
+          <animate
+            attributeName="stroke-opacity"
+            values="0;0;1;1;0;0"
+            keyTimes="0;0.10;0.12;0.20;0.23;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="y"
+            values="21.5;21.5;22.2;22.2;21.5;21.5"
+            keyTimes="0;0.10;0.12;0.20;0.23;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <rect
+          x="21.5"
+          y="12"
+          width="8"
+          height="8"
+          rx="1.8"
+          fill="#3fb950"
+          stroke="#ffffff"
+          stroke-width="1.5"
+          stroke-opacity="0"
+        >
+          <animate
+            attributeName="stroke-opacity"
+            values="0;0;1;1;0;0"
+            keyTimes="0;0.18;0.20;0.30;0.33;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+          <animate
+            attributeName="x"
+            values="21.5;21.5;22.2;22.2;21.5;21.5"
+            keyTimes="0;0.18;0.20;0.30;0.33;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+        </rect>
+        <circle cx="16" cy="16" r="5" fill="none" stroke="#5aa8ff" stroke-width="1.5" opacity="0">
+          <animate attributeName="r" values="5;5;15;15" keyTimes="0;0.31;0.48;1" dur="3s" repeatCount="indefinite" />
+          <animate
+            attributeName="opacity"
+            values="0;0;0.9;0;0"
+            keyTimes="0;0.31;0.32;0.48;1"
+            dur="3s"
+            repeatCount="indefinite"
+          />
+        </circle>
+      </svg>
+      <svg data-mark="wheel" viewBox="0 0 32 32">
+        <g transform="translate(16 16)">
+          <g>
+            <animateTransform
+              attributeName="transform"
+              type="scale"
+              values="1;1;1.16;1;1;1"
+              keyTimes="0;0.15;0.35;0.55;0.6;1"
+              dur="3.2s"
+              repeatCount="indefinite"
+            />
+            <g>
+              <animateTransform
+                attributeName="transform"
+                type="rotate"
+                values="0;0;360;360"
+                keyTimes="0;0.15;0.55;1"
+                dur="3.2s"
+                repeatCount="indefinite"
+                calcMode="spline"
+                keySplines="0 0 1 1;0.3 0 0.2 1;0 0 1 1"
+              />
+              <g transform="translate(-16 -16)">
+                <rect x="12" y="12" width="8" height="8" rx="1.8" fill="#242c39">
+                  <animate
+                    attributeName="fill"
+                    values="#242c39;#242c39;#5aa8ff;#5aa8ff;#242c39;#242c39"
+                    keyTimes="0;0.60;0.61;0.70;0.76;1"
+                    dur="3.2s"
+                    repeatCount="indefinite"
+                  />
+                </rect>
+                <rect x="12" y="2.5" width="8" height="8" rx="1.8" fill="#e5484d" />
+                <rect x="21.5" y="12" width="8" height="8" rx="1.8" fill="#3fb950" />
+                <rect x="12" y="21.5" width="8" height="8" rx="1.8" fill="#f5c518" />
+                <rect x="2.5" y="12" width="8" height="8" rx="1.8" fill="#3b82f6" />
+              </g>
+            </g>
+          </g>
+        </g>
+        <circle cx="16" cy="16" r="5" fill="none" stroke="#5aa8ff" stroke-width="1.5" opacity="0">
+          <animate attributeName="r" values="5;5;15;15" keyTimes="0;0.61;0.80;1" dur="3.2s" repeatCount="indefinite" />
+          <animate
+            attributeName="opacity"
+            values="0;0;0.9;0;0"
+            keyTimes="0;0.61;0.62;0.80;1"
+            dur="3.2s"
+            repeatCount="indefinite"
+          />
+        </circle>
+      </svg>
+      <svg data-mark="ko" class="ko wide" viewBox="-2 -6 68 48">
+        <polygon
+          points="25.09,11.41 25.09,20.59 18.59,27.09 9.41,27.09 2.91,20.59 2.91,11.41 9.41,4.91 18.59,4.91"
+          fill="#151b25"
+          stroke="#242c39"
+          stroke-width="1.5"
+          stroke-linejoin="round"
+        />
+        <circle cx="14" cy="5.4" r="1.5" fill="#e5484d" />
+        <circle cx="3.4" cy="16" r="1.5" fill="#3b82f6" />
+        <circle cx="14" cy="26.6" r="1.5" fill="#f5c518" />
+        <circle cx="24.6" cy="16" r="1.5" fill="#3fb950" />
+        <g class="stick">
+          <circle cx="14" cy="16" r="5.4" fill="#5aa8ff" />
+          <circle cx="12.5" cy="14.5" r="1.8" fill="#a9d3ff" />
+        </g>
+        <g class="foe t2"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d" fill-opacity=".22" /></g>
+        <g class="foe t1"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d" fill-opacity=".45" /></g>
+        <g class="foe"><rect x="33" y="12" width="8" height="8" rx="1.8" fill="#e5484d" /></g>
+        <circle class="hit" cx="37" cy="16" r="7" fill="none" stroke="#ffffff" stroke-width="1.2" />
+        <g class="spark">
+          <path d="M 60 -2 l 1.6 4.4 4.4 1.6 -4.4 1.6 -1.6 4.4 -1.6 -4.4 -4.4 -1.6 4.4 -1.6 z" fill="#f5c518" />
+        </g>
+        <rect x="33" y="32" width="4" height="4" rx="1" fill="#e5484d" />
+        <rect x="39" y="32" width="4" height="4" rx="1" fill="#e5484d" />
+        <rect class="stock3" x="45" y="32" width="4" height="4" rx="1" fill="#e5484d" />
+      </svg>
+      <svg data-mark="stick" class="istick" viewBox="0 0 32 32">
+        <polygon
+          points="27.09,11.41 27.09,20.59 20.59,27.09 11.41,27.09 4.91,20.59 4.91,11.41 11.41,4.91 20.59,4.91"
+          fill="#151b25"
+          stroke="#242c39"
+          stroke-width="1.5"
+          stroke-linejoin="round"
+        />
+        <circle
+          class="cd"
+          data-dir="n"
+          cx="16"
+          cy="5.4"
+          r="1.7"
+          fill="#e5484d"
+          stroke="#fff"
+          stroke-width="1.2"
+          stroke-opacity="0"
+        />
+        <circle
+          class="cd"
+          data-dir="w"
+          cx="5.4"
+          cy="16"
+          r="1.7"
+          fill="#3b82f6"
+          stroke="#fff"
+          stroke-width="1.2"
+          stroke-opacity="0"
+        />
+        <circle
+          class="cd"
+          data-dir="s"
+          cx="16"
+          cy="26.6"
+          r="1.7"
+          fill="#f5c518"
+          stroke="#fff"
+          stroke-width="1.2"
+          stroke-opacity="0"
+        />
+        <circle
+          class="cd"
+          data-dir="e"
+          cx="26.6"
+          cy="16"
+          r="1.7"
+          fill="#3fb950"
+          stroke="#fff"
+          stroke-width="1.2"
+          stroke-opacity="0"
+        />
+        <circle class="ring" cx="16" cy="16" r="6" fill="none" stroke="#5aa8ff" stroke-width="1.4" />
+        <g class="cap">
+          <circle cx="16" cy="16" r="5.6" fill="#5aa8ff" />
+          <circle cx="14.4" cy="14.4" r="1.9" fill="#a9d3ff" />
+        </g>
+      </svg>
+    </template>
+
+    <script src="/static/version-guard.js" defer></script>
+    <script src="/static/storage.js" defer></script>
+    <script src="/static/version.js" defer></script>
+    <script src="/static/landing.js" defer></script>
+    <script src="/static/feedback.js" defer></script>
   </body>
 </html>

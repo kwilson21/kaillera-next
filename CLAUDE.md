@@ -64,12 +64,14 @@ kaillera-next/
 │           ├── desync_vision.py  # Claude/GPT-4o vision endpoint for screenshot diff
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
-│   ├── index.html           # lobby: create/join rooms
+│   ├── index.html           # front page: open-rooms board, create/join (static, no framework)
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # sync log management page
 │   ├── error.html           # error/fallback page
 │   └── static/
-│       ├── lobby.js             # lobby controller
+│       ├── landing.js           # front page: board poll, waking state, header marks
+│       ├── landing.css          # front page styles (direction A tokens)
+│       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)

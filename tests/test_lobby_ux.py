@@ -1,4 +1,4 @@
-"""Lobby page UX tests — tagline, validation, naming, input constraints.
+"""Front page UX tests — line, code validation, buttons, meta.
 
 Run: pytest tests/test_lobby_ux.py -v
 """
@@ -10,27 +10,24 @@ from playwright.sync_api import expect
 _R = secrets.token_hex(3).upper()
 
 
-def test_tagline_visible(page, server_url):
-    """First-time visitors see explanatory tagline."""
+def test_line_visible(page, server_url):
+    """First-time visitors see what this is in one line (landing-design §7.4)."""
     page.goto(server_url)
-    tagline = page.locator(".tagline")
-    expect(tagline).to_be_visible()
-    expect(tagline).to_contain_text("no download needed")
+    line = page.locator(".line")
+    expect(line).to_be_visible()
+    expect(line).to_contain_text("In your browser. No install.")
 
 
-def test_name_input_has_maxlength(page, server_url):
-    """Player name input enforces maxlength=24."""
+def test_no_name_box_on_the_front_page(page, server_url):
+    """The room asks for a name, not the front page (§7.2 M1)."""
     page.goto(server_url)
-    maxlen = page.locator("#player-name").get_attribute("maxlength")
-    assert maxlen == "24", f"Expected maxlength=24, got {maxlen}"
+    assert page.locator("#player-name").count() == 0
 
 
-def test_spectate_button_label(page, server_url):
-    """Watch button is labeled 'Spectate' with tooltip."""
+def test_watch_button_label(page, server_url):
+    """The code field's spectate button says what it does."""
     page.goto(server_url)
-    btn = page.locator("#watch-btn")
-    expect(btn).to_have_text("Spectate")
-    assert btn.get_attribute("title") == "Join as spectator"
+    expect(page.locator("#watch-btn")).to_have_text("Watch")
 
 
 def test_empty_code_shakes_input(page, server_url):
@@ -50,7 +47,6 @@ def test_empty_code_shakes_input(page, server_url):
 def test_create_button_disables_on_click(page, server_url):
     """Create Room button disables immediately on click to prevent double-click."""
     page.goto(server_url)
-    page.fill("#player-name", "Host")
     # Check disabled state via click handler before navigation fires
     disabled = page.evaluate("""(() => {
         const btn = document.getElementById('create-btn');
@@ -62,10 +58,10 @@ def test_create_button_disables_on_click(page, server_url):
 
 
 def test_meta_description_lobby(page, server_url):
-    """Lobby page has meta description for social sharing."""
+    """Front page has meta description for social sharing."""
     page.goto(server_url)
     desc = page.locator('meta[name="description"]').get_attribute("content")
-    assert desc and "N64" in desc
+    assert desc and "Super Smash Bros. 64" in desc
 
 
 def test_meta_description_play(page, server_url):

@@ -171,6 +171,9 @@ class SecurityHeadersMiddleware:
         "base-uri 'none'; "
         "frame-ancestors 'self'"
     )
+    # The front page adds one thing: its click-to-play videos
+    # (youtube-nocookie, loaded only when a visitor presses play).
+    _CSP_LANDING = _CSP_STRICT + "; frame-src https://www.youtube-nocookie.com"
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
@@ -184,6 +187,8 @@ class SecurityHeadersMiddleware:
             return cls._CSP_PLAY.encode()
         if path.startswith("/static/ejs/cores/"):
             return cls._CSP_PLAY.encode()
+        if path == "/":
+            return cls._CSP_LANDING.encode()
         return cls._CSP_STRICT.encode()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
@@ -205,8 +210,10 @@ class SecurityHeadersMiddleware:
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     (b"cache-control", self._cache_control(path).encode()),
                 ]
-                # COOP/COEP breaks OG image fetches by crawlers
-                if not path.startswith("/static/og/"):
+                # COOP/COEP breaks OG image fetches by crawlers. The front page
+                # doesn't need cross-origin isolation (only the game does), and
+                # COEP would block its click-to-play video.
+                if not path.startswith("/static/og/") and path != "/":
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
