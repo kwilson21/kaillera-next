@@ -323,6 +323,7 @@ _shutting_down = False
 # Memory only, one per room; dropped when the room ends its match, unlists or closes.
 _room_frames: dict[str, tuple[bytes, float]] = {}
 _ROOM_FRAME_MAX_BYTES = 20_000
+_ROOM_FRAME_MAX_W, _ROOM_FRAME_MAX_H = 640, 480  # captures are 320x240
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -406,17 +407,23 @@ def room_frame(session_id: str) -> tuple[bytes, float] | None:
 
 
 def _board_frame(jpeg: bytes) -> bytes | None:
-    """The board copy of a screenshot, at most _ROOM_FRAME_MAX_BYTES.
+    """The board copy of a screenshot, at most _ROOM_FRAME_MAX_BYTES and 640x480.
 
-    Busy frames are re-encoded here rather than in the browser, so the
-    diagnostic screenshot stored for desync triage keeps its quality.
+    Only the header is read before the size check, so a small file that
+    declares huge dimensions is refused without being decoded (the board
+    frame and the invite card both decode it later). Busy frames are
+    re-encoded here rather than in the browser, so the diagnostic
+    screenshot stored for desync triage keeps its quality.
     """
-    if len(jpeg) <= _ROOM_FRAME_MAX_BYTES:
-        return jpeg
     try:
         from PIL import Image
 
-        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        img = Image.open(io.BytesIO(jpeg))
+        if img.format != "JPEG" or img.width > _ROOM_FRAME_MAX_W or img.height > _ROOM_FRAME_MAX_H:
+            return None
+        if len(jpeg) <= _ROOM_FRAME_MAX_BYTES:
+            return jpeg
+        img = img.convert("RGB")
         for quality in (45, 30):
             out = io.BytesIO()
             img.save(out, "JPEG", quality=quality)

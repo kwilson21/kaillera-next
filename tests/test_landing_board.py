@@ -16,7 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 from src import stats  # noqa: E402
 from src.api import signaling  # noqa: E402
 
-JPEG = b"\xff\xd8" + b"\x00" * 100
+
+def _jpeg(size=(320, 240), color=(200, 40, 40)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", size, color).save(out, "JPEG", quality=60)
+    return out.getvalue()
+
+
+JPEG = _jpeg()
 
 
 def _run_async(coro):
@@ -401,3 +412,17 @@ def test_busy_frame_is_shrunk_for_the_board_not_dropped(sig):
     _screenshot("host", room, busy)
     frame = signaling.room_frame("ROOM1")
     assert frame is not None and len(frame[0]) <= 20_000 and frame[0][:2] == b"\xff\xd8"
+
+
+def test_frame_declaring_huge_dimensions_is_refused_without_decoding(sig):
+    room, _ = sig
+    _start(room)
+    room.listed = True
+    # A small file whose frame header claims 30000x30000 (900 megapixels).
+    small = bytearray(_jpeg())
+    sof = small.index(b"\xff\xc0")
+    small[sof + 5 : sof + 9] = (30000).to_bytes(2, "big") * 2
+    big = bytes(small)
+    assert len(big) < 20_000
+    _screenshot("host", room, big)
+    assert signaling.room_frame("ROOM1") is None
