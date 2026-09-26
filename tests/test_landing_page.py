@@ -249,12 +249,13 @@ def test_stats_are_polled_less_often_than_the_list(page, server_url):
 
     page.route("**/list", lst)
     page.route("**/api/stats/public", st)
+    page.clock.install()
     page.goto(server_url)
     expect(page.locator("#board")).to_have_attribute("data-state", "empty")
-    for _ in range(4):
-        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
-        page.wait_for_timeout(150)
-    assert calls["list"] >= 4 and calls["stats"] == 1
+    for _ in range(4):  # four regular 10 s polls
+        page.clock.run_for(10_000)
+        page.wait_for_timeout(100)
+    assert calls["list"] >= 5 and calls["stats"] == 1
 
 
 def test_index_html_gets_the_front_page_headers(server_url):
@@ -263,3 +264,26 @@ def test_index_html_gets_the_front_page_headers(server_url):
     r = requests.get(server_url + "/index.html", timeout=5)
     assert "frame-src https://www.youtube-nocookie.com" in r.headers["content-security-policy"]
     assert "cross-origin-embedder-policy" not in r.headers
+
+
+def test_stats_refetched_when_the_tab_comes_back_and_after_a_failure(page, server_url):
+    calls = {"stats": 0}
+    fail = {"on": True}
+    _mock(page)
+    page.unroute("**/api/stats/public")
+
+    def st(r):
+        calls["stats"] += 1
+        if fail["on"]:
+            r.fulfill(status=500)
+        else:
+            r.fulfill(json={"matches_this_week": None, "people_playing_now": 4})
+
+    page.route("**/api/stats/public", st)
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty")
+    assert calls["stats"] == 1  # first poll, failed
+    fail["on"] = False
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")  # resumed: refetch
+    page.wait_for_timeout(400)
+    assert calls["stats"] == 2

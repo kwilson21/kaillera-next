@@ -316,7 +316,7 @@
     lastInteraction = Date.now();
     if (idleStopped && state !== 'waking') {
       idleStopped = false;
-      refresh();
+      refresh(true);
     }
   }
   for (const ev of ['pointerdown', 'keydown', 'scroll', 'touchstart']) {
@@ -326,18 +326,23 @@
     if (!document.hidden && (state === 'live' || state === 'empty')) {
       lastInteraction = Date.now();
       idleStopped = false;
-      refresh();
+      refresh(true);
     }
   });
 
-  async function refresh() {
-    // The numbers change slowly: fetch them on the first poll and then about
-    // once a minute, alongside the list. Optional; the list is not.
+  async function refresh(fresh) {
+    // The numbers change slowly: fetch them on the first poll, whenever
+    // polling resumes (fresh), and then about once a minute. A failed fetch
+    // is retried on the next poll. Optional; the list is not.
+    if (fresh === true) pollCount = 0;
     const statsReq =
       pollCount++ % STATS_EVERY === 0
         ? getJSON('/api/stats/public', 8000)
             .then((st) => (lastStats = st))
-            .catch(() => lastStats)
+            .catch(() => {
+              pollCount = 0;
+              return lastStats;
+            })
         : Promise.resolve(lastStats);
     let rooms;
     try {
