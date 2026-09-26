@@ -489,3 +489,40 @@ def test_set_listed_is_rate_limited():
     from src import ratelimit
 
     assert "set-listed" in ratelimit._LIMITS
+
+
+# ── Fourth Greptile round ────────────────────────────────────────────────────
+
+
+def test_spectator_not_admitted_while_the_only_player_is_in_grace(sig):
+    del signaling._sid_host["host"]
+    signaling._disconnect_grace_tasks["p-host"] = object()
+    assert _join("watcher", "p-watch", spectate=True) == ("Room closed", None)
+
+
+def test_frame_not_stored_if_room_unlisted_while_it_was_processed(sig, monkeypatch):
+    room, _ = sig
+    _start(room)
+    room.listed = True
+
+    def unlist_during_processing(jpeg):
+        room.listed = False  # set-listed False lands while the thread works
+        return jpeg
+
+    monkeypatch.setattr(signaling, "_board_frame", unlist_during_processing)
+    _screenshot("host", room)
+    assert "ROOM1" not in signaling._room_frames
+
+
+def test_frame_not_stored_if_match_changed_while_it_was_processed(sig, monkeypatch):
+    room, _ = sig
+    _start(room)
+    room.listed = True
+
+    def new_match_during_processing(jpeg):
+        room.match_id = "m2"
+        return jpeg
+
+    monkeypatch.setattr(signaling, "_board_frame", new_match_during_processing)
+    _screenshot("host", room)
+    assert "ROOM1" not in signaling._room_frames

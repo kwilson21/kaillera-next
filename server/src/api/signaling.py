@@ -817,7 +817,10 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     # restart) only takes back its own members, above. A new joiner would
     # otherwise walk into a room with a ghost for a host. A player inside a
     # disconnect grace window is on their way back, so the room stays open.
-    if not room_is_live(room) and not any(pid in _disconnect_grace_tasks for pid in room.players):
+    # Spectators never enter a room with no connected player: if that
+    # player doesn't return, nobody is left to host.
+    player_returning = not spectate and any(pid in _disconnect_grace_tasks for pid in room.players)
+    if not room_is_live(room) and not player_returning:
         return ("Room closed", None)
 
     await _leave(sid)  # clean up if already in another room
@@ -1524,7 +1527,11 @@ async def game_screenshot(sid: str, data: dict) -> None:
     if room.listed and sid == room.owner and img_bytes[:2] == b"\xff\xd8":
         # Pillow work runs off the event loop so frames can't stall signaling.
         board = await asyncio.to_thread(_board_frame, img_bytes)
-        if board is not None:
+        # The room may have been unlisted, ended or handed over meanwhile:
+        # store only if it is still this host's listed match.
+        now_room = rooms.get(session_id)
+        still_ok = now_room is room and room.listed and room.owner == sid and room.match_id == match_id
+        if board is not None and still_ok:
             _room_frames[session_id] = (board, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
