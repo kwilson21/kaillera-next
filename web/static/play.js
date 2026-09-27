@@ -79,6 +79,30 @@
     if (raw === 'rollback' || raw === 'streaming') return raw;
     return 'rollback';
   };
+
+  const emulatorMissing = () => {
+    const missing = [];
+    if (typeof WebAssembly === 'undefined') missing.push('WebAssembly');
+    if (!self.crossOriginIsolated) missing.push('crossOriginIsolated');
+    return missing;
+  };
+
+  let _unsupportedReleasePending = false;
+  const releaseUnsupportedPlayer = (message) => {
+    const missing = emulatorMissing();
+    if (!missing.length) return false;
+    if (!_unsupportedReleasePending && socket?.connected) {
+      _unsupportedReleasePending = true;
+      showToast(message);
+      socket.emit('release-slot', {}, (err) => {
+        if (err) {
+          _unsupportedReleasePending = false;
+          showToast(err);
+        }
+      });
+    }
+    return true;
+  };
   let lastUsersData = null;
   let engine = null;
   let gameRunning = false;
@@ -948,12 +972,10 @@
         // spectators) through without emulator-only browser features.
         mode = normalizeMode(roomData.mode || mode);
         if (!isSpectator && mode !== 'streaming') {
-          const emulatorMissing = [];
-          if (typeof WebAssembly === 'undefined') emulatorMissing.push('WebAssembly');
-          if (!self.crossOriginIsolated) emulatorMissing.push('crossOriginIsolated');
-          if (emulatorMissing.length) {
-            KNEvent('compat', `Missing: ${emulatorMissing.join(', ')}`, { missing: emulatorMissing });
-            showUnsupportedBrowser(emulatorMissing);
+          const missing = emulatorMissing();
+          if (missing.length) {
+            KNEvent('compat', `Missing: ${missing.join(', ')}`, { missing });
+            showUnsupportedBrowser(missing);
             socket.disconnect();
             return;
           }
@@ -1240,6 +1262,9 @@
     // Detect spectator → player transition (via claim-slot)
     const nowPlayer = mySlot !== null && mySlot !== undefined;
     if (isSpectator && nowPlayer) {
+      if (mode !== 'streaming' && releaseUnsupportedPlayer("This browser can't run the game — you can keep watching.")) {
+        return;
+      }
       isSpectator = false;
       window._isSpectator = false;
       if (_romSharingEnabled && _romSharingDecision === null) {
@@ -1255,6 +1280,7 @@
     // Symmetric with the claim-slot case above — the room stays put, no
     // reload, no leave-room.
     const nowSpectator = !nowPlayer && Object.values(spectators).some((s) => s.socketId === socket.id);
+    if (nowSpectator) _unsupportedReleasePending = false;
     if (!isSpectator && nowSpectator) {
       isSpectator = true;
       window._isSpectator = true;
@@ -1262,6 +1288,10 @@
         showToast("Watching — you'll see the game when it starts");
         showOverlay();
       }
+    }
+
+    if (!isHost && !isSpectator && nowPlayer && mode !== 'streaming') {
+      releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
     }
 
     // Diff for toasts
@@ -1538,6 +1568,9 @@
       if (modeSel) modeSel.value = mode;
       updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
+      if (mode !== 'streaming' && !isHost && !isSpectator) {
+        releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
+      }
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
       if (typeof data.sender !== 'string' || !_isKnownPeerSid(data.sender)) return;
@@ -5294,6 +5327,10 @@
     list.addEventListener('click', (e) => {
       const btn = e.target.closest('.claim-slot-btn');
       if (!btn || btn.hidden || btn.disabled) return;
+      if (mode !== 'streaming' && emulatorMissing().length) {
+        showToast("This browser can't run the game — you can keep watching.");
+        return;
+      }
       const slot = Number(btn.dataset.slot);
       btn.disabled = true;
       socket.emit('claim-slot', { slot }, (err) => {
@@ -5411,8 +5448,7 @@
     // checks until the room lookup supplies its authoritative mode.
     const needsEmulator = isHost && mode !== 'streaming';
     if (typeof RTCPeerConnection === 'undefined') missing.push('RTCPeerConnection');
-    if (needsEmulator && typeof WebAssembly === 'undefined') missing.push('WebAssembly');
-    if (needsEmulator && !self.crossOriginIsolated) missing.push('crossOriginIsolated');
+    if (needsEmulator) missing.push(...emulatorMissing());
     if (missing.length) {
       KNEvent('compat', `Missing: ${missing.join(', ')}`, { missing });
       showUnsupportedBrowser(missing);

@@ -384,6 +384,49 @@ def test_spectator_claim_button_copy(browser, server_url, room):
         spectator.close()
 
 
+def test_spectator_without_emulator_features_cannot_claim_rollback_slot(browser, server_url, room):
+    host = browser.new_page()
+    ctx = browser.new_context()
+    ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
+    spectator = ctx.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        spectator.goto(f"{server_url}/play.html?room={room}&name=Spec&spectate=1")
+        expect(spectator.locator("#overlay")).to_be_visible(timeout=10000)
+
+        spectator.locator('.claim-slot-btn[data-slot="1"]').click()
+        expect(spectator.locator("#toast-container")).to_contain_text("can't run the game", timeout=10000)
+        expect(host.locator("#spectator-list")).to_contain_text("Spec")
+        expect(host.locator('.player-slot[data-slot="1"] .name')).not_to_contain_text("Spec")
+    finally:
+        host.close()
+        spectator.close()
+        ctx.close()
+
+
+def test_streaming_guest_without_emulator_features_is_released_on_rollback(browser, server_url, room):
+    host = browser.new_page()
+    ctx = browser.new_context()
+    ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
+    guest = ctx.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(host.locator('.player-slot[data-slot="1"] .name')).to_contain_text("Guest", timeout=10000)
+
+        host.locator("#mode-select").select_option("rollback")
+        expect(guest.locator("#toast-container")).to_contain_text("host switched to rollback", timeout=10000)
+        expect(host.locator("#spectator-list")).to_contain_text("Guest", timeout=10000)
+        expect(host.locator('.player-slot[data-slot="1"] .name')).not_to_contain_text("Guest")
+    finally:
+        host.close()
+        guest.close()
+        ctx.close()
+
+
 def test_spectators_full_message(browser, server_url, room, monkeypatch=None):
     host = browser.new_page()
     watchers = [browser.new_page() for _ in range(3)]
@@ -401,21 +444,7 @@ def test_spectators_full_message(browser, server_url, room, monkeypatch=None):
             expect(w.locator("#overlay")).to_be_visible(timeout=10000)
 
         one_more.goto(f"{server_url}/play.html?room={room}&name=OneMore&spectate=1")
-        one_more.wait_for_function("window.__test_socket && window.__test_socket.connected", timeout=10000)
-        result = one_more.evaluate(f"""
-            new Promise(resolve => {{
-                window.__test_socket.emit('join-room', {{
-                    extra: {{
-                        sessionid: '{room}',
-                        persistentId: 'spec-cap-test',
-                        reconnectToken: '',
-                        player_name: 'OneMore',
-                        spectate: true
-                    }}
-                }}, (err) => resolve(err));
-            }})
-        """)
-        assert result == "Spectator limit reached for your network"
+        expect(one_more.locator("#error-msg")).to_contain_text("This room is full for spectators.", timeout=10000)
     finally:
         host.close()
         for w in watchers:
