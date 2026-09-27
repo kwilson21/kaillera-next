@@ -56,6 +56,14 @@ def feature_enabled_for_host(raw: str, host: str) -> bool:
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
 
 
+def _kn_letters_path() -> str:
+    """The KN tile's letters, read from the favicon so the cards and the tab
+    icon can't drift apart (docs/landing-design.md §5.8)."""
+    svg = (_OG_DIR.parent / "favicon.svg").read_text()
+    match = re.search(r'<path[^>]*\sd="([^"]+)"', svg)
+    return match.group(1) if match else ""
+
+
 def _html_escape(s: str) -> str:
     """Escape HTML special characters."""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
@@ -94,15 +102,17 @@ def _build_card_html(
         detail = "Live in your browser" if spectate else "Up to 4 players · in your browser"
         footer = "Free · No install · Bring your own ROM"
 
-    logo = """<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+    logo = f"""<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
       <rect width="32" height="32" rx="6" fill="#0e1218" stroke="#242c39"/>
-      <path d="M5 5h4v8l5-8h5l-6 10 6 12h-5l-5-9v9H5zM19 5h4l4 12V5h4v22h-4l-4-12v12h-4z" fill="#5aa8ff"/>
+      <path d="{_kn_letters_path()}" fill="#5aa8ff"/>
     </svg>"""
     corner_logo = "" if has_game_bg else logo
     footer_logo = logo.replace('class="logo"', 'class="footer-logo"').replace(
         'aria-hidden="true"', 'role="img" aria-label="kaillera-next"'
     )
-    footer_content = f"{footer_logo}{footer}" if has_game_bg else (footer if is_homepage else f"kaillera-next · {footer}")
+    footer_content = (
+        f"{footer_logo}{footer}" if has_game_bg else (footer if is_homepage else f"kaillera-next · {footer}")
+    )
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 @font-face{{font-family:Barlow;src:url('file://{_OG_DIR.parent / "fonts" / "barlow-condensed-700-latin.woff2"}') format('woff2');font-weight:700}}
 @font-face{{font-family:Plex;src:url('file://{_OG_DIR.parent / "fonts" / "ibm-plex-sans-var-latin.woff2"}') format('woff2');font-weight:400 600}}

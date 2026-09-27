@@ -33,7 +33,7 @@
 // but deliberately excluded from the landing build id because CI rewrites
 // them on nearly every merge (server/src/landing_build.py has the reason).
 const PAGES = { '/': '/index.html', '/index.html': '/index.html', '/join': '/join.html' };
-const ASSET_PREFIXES = ['/static/fonts/'];
+const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',
   '/static/landing.js',

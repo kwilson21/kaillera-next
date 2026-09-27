@@ -6,6 +6,7 @@ mismatch means a real difference.
 Run: server/.venv/bin/python -m pytest tests/test_landing_build.py -v
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,11 +66,7 @@ def test_changing_one_landing_file_changes_the_id(tmp_path):
 
     # A referenced /static/ file changing also moves the id, not just the
     # two HTML pages themselves.
-    referenced = sorted(
-        rel
-        for rel in landing_build.referenced(index.read_text())
-        if (tmp_path / rel).exists()
-    )
+    referenced = sorted(rel for rel in landing_build.referenced(index.read_text()) if (tmp_path / rel).exists())
     assert referenced, "index.html should reference at least one /static/ file"
     changed_file = tmp_path / referenced[0]
     changed_file.write_bytes(changed_file.read_bytes() + b"\n/* edited */\n")
@@ -90,7 +87,11 @@ def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
 
 def test_screenshot_slots_have_accessible_lazy_image_contract():
     script = (REPO / "web" / "static" / "landing.js").read_text()
-    assert "const SHOTS = [];" in script
+    # Every listed shot is a real WebP within the screenshot budget.
+    for src in re.findall(r"src: '(/static/shots/[^']+)'", script):
+        shot = REPO / "web" / src.lstrip("/")
+        assert shot.suffix == ".webp" and shot.is_file(), src
+        assert shot.stat().st_size <= (120 if "photo" in shot.stem else 60) * 1024, src
     assert "img.width = shot.w" in script and "img.height = shot.h" in script
     assert "img.alt = shot.alt" in script and "img.loading = 'lazy'" in script
     assert "media.querySelector('.shots img, .lite:not([hidden])')" in script

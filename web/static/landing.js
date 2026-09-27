@@ -669,7 +669,14 @@
 
   // Captures are enabled by adding metadata only; absent entries create no
   // requests or empty placeholders. Dimensions reserve space before lazy load.
-  const SHOTS = [];
+  const SHOTS = [
+    {
+      src: '/static/shots/s1-room.webp',
+      w: 1056,
+      h: 1856,
+      alt: 'The room page: room code KAZ64, "Play link copied!", Kaz and Agent 21 both with the ROM loaded, Start Game ready.',
+    },
+  ];
   const shots = $('shots');
   for (const shot of SHOTS) {
     if (!shot?.src || !shot.w || !shot.h || !shot.alt) continue;

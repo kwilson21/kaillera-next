@@ -770,6 +770,11 @@ button {
   gap: 28px;
   align-items: start;
 }
+/* Grid items default to min-width: auto, so the phone screenshot strip
+   (fixed 160 px columns) would widen the page instead of scrolling. */
+.two > * {
+  min-width: 0;
+}
 .supported-roms {
   color: var(--muted);
   margin: 0 0 10px;
