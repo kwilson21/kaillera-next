@@ -6272,8 +6272,8 @@
         _syncLog(`${reason}: save RAM not writable (no RETRO_MEMORY_SAVE_RAM)`);
         return false;
       }
+      _protectLocalSaveFile(mod);
       mod.HEAPU8.set(bytes.subarray(0, Math.min(bytes.length, region.size)), region.ptr);
-      _protectLocalSaveFile();
       return true;
     } catch (e) {
       _syncLog(`${reason}: save RAM write failed: ${e?.message || e}`);
@@ -6282,18 +6282,48 @@
   };
   // Once a guest runs on the host's save memory, EmulatorJS would flush it
   // into this browser's save file (every 5 min by default, and on exit) and
-  // overwrite the player's own progress and settings. Keep it in memory only.
-  const _protectLocalSaveFile = () => {
+  // overwrite the player's own progress and settings. Keep it in memory only
+  // for the match; stop() puts the player's own save back. Kept on the
+  // gameManager, which outlives the engine (the emulator hibernates between
+  // games).
+  const _protectLocalSaveFile = (mod) => {
     const ejs = window.EJS_emulator;
     const gm = ejs?.gameManager;
-    if (!gm || gm._knSaveFileProtected) return;
+    if (!gm || gm._knOwnSaveRam) return;
+    gm._knOwnSaveRam = _captureSaveRam(mod) || new Uint8Array(0);
+    gm._knSaveInterval = ejs.saveSaveInterval ? ejs.getSettingValue?.('save-save-interval') || '300' : null;
     gm.saveSaveFiles = () => {};
     if (ejs.saveSaveInterval) {
       clearInterval(ejs.saveSaveInterval);
       ejs.saveSaveInterval = null;
     }
-    gm._knSaveFileProtected = true;
     _syncLog("local save file protected: host's save RAM stays in memory");
+  };
+  const _restoreLocalSaveFile = () => {
+    const ejs = window.EJS_emulator;
+    const gm = ejs?.gameManager;
+    if (!gm?._knOwnSaveRam) return;
+    const own = gm._knOwnSaveRam;
+    const interval = gm._knSaveInterval;
+    gm._knOwnSaveRam = null;
+    gm._knSaveInterval = null;
+    try {
+      const mod = gm.Module;
+      const region = own.length ? _saveRamRegion(mod) : null;
+      if (region) mod.HEAPU8.set(own.subarray(0, Math.min(own.length, region.size)), region.ptr);
+      delete gm.saveSaveFiles; // back to the EmulatorJS method
+      if (interval) ejs.menuOptionChanged?.('save-save-interval', interval);
+      _syncLog(`local save file restored (${own.length} bytes)`);
+    } catch (e) {
+      _syncLog(`local save file restore failed: ${e?.message || e}`);
+    }
+  };
+  // The initial state goes to players only: spectators never load it
+  // (handleSaveStateMsg), and it carries the host's save RAM.
+  const _emitSaveStateToPlayers = (msg) => {
+    for (const sid of Object.keys(_knownPlayers)) {
+      if (sid !== socket.id) socket.emit('data-message', { ...msg, targetSid: sid });
+    }
   };
   // The sidecar is gzipped: RETRO_MEMORY_SAVE_RAM is every save type at once
   // (~290KB, mostly zeros), and the late-join message already carries a
@@ -9489,7 +9519,7 @@
               _syncLog(
                 `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
               );
-              socket.emit('data-message', {
+              _emitSaveStateToPlayers({
                 type: 'save-state',
                 frame: 0,
                 stateFormat: 'savestate',
@@ -9539,7 +9569,7 @@
             _syncLog(
               `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
             );
-            socket.emit('data-message', {
+            _emitSaveStateToPlayers({
               type: 'save-state',
               frame: 0,
               stateFormat: 'savestate',
@@ -9583,7 +9613,7 @@
 
       // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
       // data channels (SCTP limit with maxRetransmits).
-      socket.emit('data-message', {
+      _emitSaveStateToPlayers({
         type: 'save-state',
         frame: 0,
         stateFormat: captured.kind,
@@ -9628,6 +9658,7 @@
   }
 
   const handleSaveStateMsg = async (msg) => {
+    if (msg.targetSid && msg.targetSid !== socket.id) return;
     if (_isSpectator) return;
     if (_phase >= PHASE_LOCKSTEP_READY) return; // already loaded (e.g. from cache)
     _syncLog('received initial state');
@@ -17109,6 +17140,7 @@
     _guestStateAudioFifo = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
+    _restoreLocalSaveFile();
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
