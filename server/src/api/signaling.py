@@ -9,6 +9,7 @@ Client → Server events:
   join-room        — player joins an existing room (or as spectator)
   leave-room       — player leaves (also fired on disconnect)
   claim-slot       — spectator claims a vacated player slot
+  release-slot     — player gives up their slot to spectate ("Watch instead")
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
   set-mode         — host changes netplay mode (rollback/streaming)
@@ -917,6 +918,56 @@ async def _claim_slot_locked(sid: str, payload: ClaimSlotPayload) -> str | None:
     await sio.emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
     log.info("SIO %s claimed slot %d in room %s", sid, slot, session_id)
+    return None
+
+
+@sio.on("release-slot")
+async def release_slot(sid: str, data: dict | None = None) -> str | None:
+    """Player gives up their slot and becomes a spectator ("Watch instead"),
+    without leaving the room. Lobby-only — mid-game slot changes would
+    reshuffle a running match. The host can't release their own slot (no
+    remaining player to hand ownership to would make the room ownerless)."""
+    if not check(sid, "release-slot"):
+        return "Rate limited"
+    async with _room_lock:
+        return await _release_slot_locked(sid)
+
+
+async def _release_slot_locked(sid: str) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id, player_id, is_spectator = entry
+    if is_spectator:
+        return "Already spectating"
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+    if room.status == "playing":
+        return "Cannot switch to spectator during an active game"
+    if room.owner == sid:
+        return "Host can't switch to spectator"
+    if len(room.spectators) >= MAX_SPECTATORS:
+        return "Room spectator limit reached"
+    ip_h = ip_hash_for_sid(sid)
+    same_ip_count = sum(1 for s in room.spectators.values() if ip_hash_for_sid(s.get("socketId", "")) == ip_h)
+    if same_ip_count >= _PER_IP_SPECTATOR_CAP:
+        return "Spectator limit reached for your network"
+
+    player_info = room.players.pop(player_id, None)
+    if player_info is None:
+        return "Not a player"
+    player_name = player_info.get("playerName", "Player")
+    for slot, pid in list(room.slots.items()):
+        if pid == player_id:
+            del room.slots[slot]
+    room.spectators[player_id] = {"socketId": sid, "playerName": player_name}
+    room.rom_ready.discard(sid)
+    _sid_to_room[sid] = (session_id, player_id, True)
+
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
+    log.info("SIO %s released slot to spectate in room %s", sid, session_id)
     return None
 
 

@@ -22,6 +22,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "join-room": (20, 60),
     "leave-room": (10, 10),
     "claim-slot": (5, 10),
+    "release-slot": (5, 10),
     "set-name": (5, 10),
     "set-mode": (5, 10),
     "rom-sharing-toggle": (5, 10),

@@ -132,6 +132,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
+| `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
 | `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
 | `set-name` | client→server | `{name}` | Update player display name |

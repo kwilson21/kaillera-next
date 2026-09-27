@@ -323,6 +323,30 @@ class TestRomReady:
         assert "sid-2" not in room.rom_ready
 
 
+class TestReleaseSlot:
+    def test_same_ip_spectator_cap_refuses_release(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        for index in range(signaling._PER_IP_SPECTATOR_CAP):
+            room.spectators[f"pid-spec-{index}"] = {
+                "socketId": f"sid-spec-{index}",
+                "playerName": "Spec",
+            }
+        rooms["ROOM7"] = room
+        _sid_to_room["sid-2"] = ("ROOM7", "pid-2", False)
+
+        with patch.object(signaling, "ip_hash_for_sid", return_value="same-ip"):
+            err = _run_async(signaling._release_slot_locked("sid-2"))
+
+        assert err == "Spectator limit reached for your network"
+        assert "pid-2" in room.players
+        assert room.slots[1] == "pid-2"
+        assert "pid-2" not in room.spectators
+
+
 # ── data-message relay ───────────────────────────────────────────────────────
 
 
