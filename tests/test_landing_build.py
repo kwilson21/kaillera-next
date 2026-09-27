@@ -88,7 +88,9 @@ def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
 def test_screenshot_slots_have_accessible_lazy_image_contract():
     script = (REPO / "web" / "static" / "landing.js").read_text()
     # Every listed shot is a real WebP within the screenshot budget.
-    for src in re.findall(r"src: '(/static/shots/[^']+)'", script):
+    srcs = re.findall(r"""src: ['"](/static/shots/[^'"]+)['"]""", script)
+    assert srcs, "SHOTS lists no screenshots"
+    for src in srcs:
         shot = REPO / "web" / src.lstrip("/")
         assert shot.suffix == ".webp" and shot.is_file(), src
         assert shot.stat().st_size <= (120 if "photo" in shot.stem else 60) * 1024, src
@@ -97,6 +99,15 @@ def test_screenshot_slots_have_accessible_lazy_image_contract():
     assert "media.querySelector('.shots img, .lite:not([hidden])')" in script
     html = (REPO / "web" / "index.html").read_text()
     assert '<div class="media" id="how-media" hidden>' in html
+
+
+def test_committed_preview_cards_fit_chat_apps():
+    """WhatsApp drops link previews above ~300 KB; check the files that ship."""
+    og = REPO / "web" / "static" / "og"
+    cards = [og / "home.png", *sorted((og / "cards").glob("*.jpg"))]
+    assert len(cards) > 1
+    for card in cards:
+        assert card.stat().st_size <= 300 * 1024, card.name
 
 
 def test_og_renderer_enforces_chat_preview_size_limit():

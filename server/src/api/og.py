@@ -103,7 +103,7 @@ def _build_card_html(
             headline = f"Come watch {host}'s room" if host else f"Watch {game} live"
         else:
             headline = f"{host} invited you to play {game}" if host else f"You're invited to play {game}"
-        detail = "Live in your browser" if spectate else "Up to 4 players · in your browser"
+        detail = "No ROM needed to watch" if spectate else "Up to 4 players · in your browser"
         footer = "Free · No install · Bring your own ROM"
 
     logo = f"""<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">

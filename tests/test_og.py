@@ -75,7 +75,7 @@ def test_game_card_uses_inline_logo_and_non_repeating_detail():
     assert "kaillera-next ·" not in play
 
     watch = _build_card_html(None, "ssb64", spectate=True)
-    assert "Live in your browser" in watch
+    assert "No ROM needed to watch" in watch
     assert "Watch Super Smash Bros. 64 live" in watch
 
 
