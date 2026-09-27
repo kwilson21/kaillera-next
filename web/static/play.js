@@ -1262,7 +1262,10 @@
     // Detect spectator → player transition (via claim-slot)
     const nowPlayer = mySlot !== null && mySlot !== undefined;
     if (isSpectator && nowPlayer) {
-      if (mode !== 'streaming' && releaseUnsupportedPlayer("This browser can't run the game — you can keep watching.")) {
+      if (
+        mode !== 'streaming' &&
+        releaseUnsupportedPlayer("This browser can't run the game — you can keep watching.")
+      ) {
         return;
       }
       isSpectator = false;
