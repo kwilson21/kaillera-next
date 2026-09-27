@@ -147,13 +147,31 @@
     }
     if (unsupported && _warnedRomHash !== _romHash) {
       _warnedRomHash = _romHash;
-      showToast(`Unsupported ROM \u2014 supported: ${_supportedRomNames()}`);
+      // \u00a77.4 wrong/unsupported-ROM copy: amber, names what's supported.
+      // Doesn't block Start (\u00a77.2 M3 #1) \u2014 see updateStartButton.
+      showToast(`Not a supported ROM. It may not work. Supported: ${_supportedRomNames()}`);
     }
   };
 
   const _setRomStatus = (text) => {
     _romStatusText = text;
     _renderRomStatus();
+  };
+
+  // Wrong-ROM banner (W4 variant) \u2014 persistent, names both games, stays
+  // until the guest drops a matching ROM or picks another one.
+  const showRomMismatch = (droppedName) => {
+    const el = document.getElementById('rom-mismatch');
+    const text = document.getElementById('rom-mismatch-text');
+    if (!el || !text) return;
+    const hostName = hostRomDisplayName() || 'a different game';
+    text.textContent = `Your ROM doesn't match. Host is playing ${hostName}; you dropped ${droppedName || 'a different ROM'}.`;
+    el.hidden = false;
+  };
+
+  const hideRomMismatch = () => {
+    const el = document.getElementById('rom-mismatch');
+    if (el) el.hidden = true;
   };
 
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
@@ -974,6 +992,11 @@
                 showError(roomClosedMessage(roomData?.host_name));
                 return;
               }
+              // §7.2 M3 #3 — the spectator-cap copy, whichever cap tripped.
+              if (err === 'Room spectator limit reached' || err === 'Spectator limit reached for your network') {
+                showError('This room is full for spectators.');
+                return;
+              }
               showError(`Failed to join: ${err}`);
               return;
             }
@@ -1185,21 +1208,42 @@
     // Track host ROM identity for display, cache verification, and live invalidation.
     applyHostRomFromData(data, { toastOnChange: true });
 
-    // Update my slot
+    // Update my slot. Recomputed fresh every broadcast (not just "if found")
+    // so a player who releases their slot (Watch instead) or is otherwise
+    // removed from `players` doesn't keep a stale mySlot from before.
+    let myPlayerEntry = null;
     for (const entry of Object.values(players)) {
       if (entry.socketId === socket.id) {
-        mySlot = entry.slot;
-        KNState.slot = mySlot;
+        myPlayerEntry = entry;
         break;
       }
     }
+    mySlot = myPlayerEntry ? myPlayerEntry.slot : null;
+    KNState.slot = mySlot;
 
     // Detect spectator → player transition (via claim-slot)
     const nowPlayer = mySlot !== null && mySlot !== undefined;
     if (isSpectator && nowPlayer) {
       isSpectator = false;
+      window._isSpectator = false;
       if (_romSharingEnabled && _romSharingDecision === null) {
         updateRomSharingUI();
+      }
+      // Restore the ROM drop / gamepad UI that showOverlay() hid for
+      // spectators — claiming a slot needs your ROM (§7.2 M3 #3).
+      if (!gameRunning) showOverlay();
+    }
+
+    // Detect player → spectator transition ("Watch instead" / release-slot).
+    // Symmetric with the claim-slot case above — the room stays put, no
+    // reload, no leave-room.
+    const nowSpectator = !nowPlayer && Object.values(spectators).some((s) => s.socketId === socket.id);
+    if (!isSpectator && nowSpectator) {
+      isSpectator = true;
+      window._isSpectator = true;
+      if (!gameRunning) {
+        showToast("Watching — you'll see the game when it starts");
+        showOverlay();
       }
     }
 
@@ -2788,7 +2832,7 @@
       }
       runRomAutoload('immediate');
     } else {
-      if (isHost) renderRomLibrary();
+      if (!isSpectator) renderRomLibrary();
     }
 
     function runRomAutoload(trigger) {
@@ -2832,7 +2876,7 @@
         } else if (ctx.savedRom && ctx.statusEl) {
           ctx.statusEl.textContent = `Last used: ${ctx.savedRom} (file not cached — drop again)`;
         }
-        if (isHost) renderRomLibrary();
+        if (!isSpectator) renderRomLibrary();
       });
     }
 
@@ -2875,6 +2919,7 @@
   };
 
   const loadRomData = (file, displayName) => {
+    hideRomMismatch();
     _romBlob = file;
     _romName = displayName;
     _romSize = file.size;
@@ -2952,11 +2997,13 @@
           'host hash:',
           _hostRomHash?.substring(0, 16),
         );
+        const droppedName = (_romHash && _knownRoms[_romHash]?.game) || displayName;
         clearLoadedRom();
         if (socket?.connected) socket.emit('rom-ready', { ready: false });
-        showToast('ROM version mismatch — please load the same ROM as the host');
+        showRomMismatch(droppedName);
         return;
       }
+      hideRomMismatch();
       notifyRomReady();
       // Always proceed with late-join, even if hash computation failed
       if (_pendingLateJoin) {
@@ -3129,7 +3176,7 @@
         );
         // Re-render after write commits (not before)
         tx.oncomplete = () => {
-          if (isHost) renderRomLibrary();
+          if (!isSpectator) renderRomLibrary();
         };
       });
     };
@@ -3219,8 +3266,8 @@
     const container = document.getElementById('rom-library');
     if (!container) return;
 
-    // Only show for host
-    if (!isHost) {
+    // Spectators don't load a ROM \u2014 nothing to show.
+    if (isSpectator) {
       container.style.display = 'none';
       container.innerHTML = '';
       return;
@@ -3245,22 +3292,30 @@
         return `${bytes} B`;
       };
 
-      let html = `<div class="rom-library-header"><span>ROM Library</span><span class="rom-count">${entries.length} ROM${entries.length !== 1 ? 's' : ''}</span></div>`;
+      const label = isHost ? 'ROM Library' : 'Your ROMs on this device';
+      let html = `<div class="rom-library-header"><span>${label}</span><span class="rom-count">${entries.length} ROM${entries.length !== 1 ? 's' : ''}</span></div>`;
       html += '<div class="rom-library-list">';
 
       for (const entry of entries) {
         const isActive = entry.hash === _romHash;
-        const verifiedLabel = entry.verified
-          ? `<span class="verified">Verified \u2014 ${esc(entry.gameName)}</span>`
-          : '<span class="unverified">Unverified</span>';
+        // Guest view: name what matches the host's exact game (\u00a77.2 M3 #1 \u2014
+        // "cached ROM is auto-matched with the library visible").
+        const matchesHost = !isHost && _hostRomHash && entry.hash === _hostRomHash;
+        const verifiedLabel = matchesHost
+          ? `<span class="verified">Matches host's game</span>`
+          : entry.verified
+            ? `<span class="verified">Verified \u2014 ${esc(entry.gameName)}</span>`
+            : '<span class="unverified">Unverified</span>';
         const sourceLabel = entry.source === 'p2p' ? 'From host' : '';
 
-        html += `<div class="rom-library-item${isActive ? ' active' : ''}" data-hash="${esc(entry.hash)}">`;
+        html += `<div class="rom-library-item${isActive ? ' active' : ''}${matchesHost ? ' matches-host' : ''}" data-hash="${esc(entry.hash)}">`;
         html += '<span class="rom-check">\u2713</span>';
         html += '<div class="rom-info">';
         html += `<div class="rom-name">${esc(entry.name)}</div>`;
         html += `<div class="rom-meta">${verifiedLabel}<span>${formatSize(entry.size)}</span>${sourceLabel ? `<span>${sourceLabel}</span>` : ''}</div>`;
         html += '</div>';
+        if (!isActive)
+          html += `<button class="rom-use small-btn" data-hash="${esc(entry.hash)}" type="button">Use</button>`;
         html += `<button class="rom-delete" data-hash="${esc(entry.hash)}" title="Remove from library">\u2715</button>`;
         html += '</div>';
       }
@@ -3348,6 +3403,8 @@
         const statusEl = document.getElementById('rom-status');
         if (drop) drop.classList.add('loaded');
         if (statusEl) _setRomStatus(`Loaded: ${displayName}`);
+        hideRomMismatch();
+        renderRomLibrary();
         if (_pendingLateJoin) dismissLateJoinPrompt();
       }
     });
@@ -3729,13 +3786,31 @@
     const romDrop = document.getElementById('rom-drop');
     const romSharingPrompt = document.getElementById('rom-sharing-prompt');
     const gamepadArea = document.getElementById('gamepad-area');
+    const watchInsteadRow = document.getElementById('watch-instead-row');
     if (isSpectator) {
       if (romDrop) romDrop.style.display = 'none';
       if (romSharingPrompt) romSharingPrompt.hidden = true;
       if (gamepadArea) gamepadArea.style.display = 'none';
+      if (watchInsteadRow) watchInsteadRow.hidden = true;
       if (guestStatus) guestStatus.textContent = 'Waiting for host to start the game...';
+      hideRomMismatch();
+    } else {
+      // Restore what spectator mode hid — a claim-slot transition (§7.2 M3
+      // #3) re-enters this branch from a spectator's already-rendered page.
+      if (romDrop) romDrop.style.display = '';
+      if (gamepadArea) gamepadArea.style.display = '';
+      if (!isHost) {
+        // "Watch instead" (§7.2 M3 #1) — the no-ROM path that doesn't leave
+        // the room. Only for a guest still choosing a ROM.
+        if (watchInsteadRow) watchInsteadRow.hidden = false;
+      } else if (watchInsteadRow) {
+        watchInsteadRow.hidden = true;
+      }
     }
 
+    if (!isHost && !isSpectator) renderRomLibrary();
+
+    updateNameHint();
     syncDelayPickerPlacement();
 
     const modeSel = document.getElementById('mode-select');
@@ -3765,19 +3840,21 @@
       const gpEl = slotEl.querySelector('.gamepad');
       const devEl = slotEl.querySelector('.device');
       const romEl = slotEl.querySelector('.rom-status');
+      const claimBtn = slotEl.querySelector('.claim-slot-btn');
 
       if (playerInSlot) {
+        if (claimBtn) claimBtn.hidden = true;
         const isOwner = ownerSid && playerInSlot.socketId === ownerSid;
         const suffix = isOwner ? ' (host)' : '';
         nameEl.textContent = playerInSlot.playerName + suffix;
         nameEl.classList.remove('empty');
         if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
         else delete nameEl.dataset.a21;
-        // ROM ready indicator (pre-game only)
+        // ROM ready indicator (pre-game only) — W4: "✓ ROM" / "needs ROM"
         if (romEl) {
           if (!gameRunning) {
             const ready = !!playerInSlot.romReady;
-            romEl.textContent = ready ? 'Ready' : 'Not Ready';
+            romEl.textContent = ready ? '✓ ROM' : 'needs ROM';
             romEl.className = `rom-status ${ready ? 'ready' : 'not-ready'}`;
           } else {
             romEl.textContent = '';
@@ -3791,6 +3868,7 @@
           gpEl.textContent = itype === 'gamepad' ? '\uD83C\uDFAE' : '\u2328\uFE0F';
           gpEl.title = gpLabel;
           gpEl.setAttribute('aria-label', gpLabel);
+          gpEl.removeAttribute('aria-hidden');
         }
         // Show device type indicator
         if (devEl) {
@@ -3799,6 +3877,7 @@
           devEl.textContent = dtype === 'mobile' ? '\uD83D\uDCF1' : '\uD83D\uDDA5\uFE0F';
           devEl.title = devLabel;
           devEl.setAttribute('aria-label', devLabel);
+          devEl.removeAttribute('aria-hidden');
         }
       } else {
         nameEl.textContent = 'Open';
@@ -3808,16 +3887,24 @@
           romEl.textContent = '';
           romEl.className = 'rom-status';
         }
+        // Empty slot: no input/device to report. role="img" with no name is
+        // an axe violation (role-img-alt); aria-hidden is correct here since
+        // the empty state is already conveyed by the "Open" name text.
         if (gpEl) {
           gpEl.textContent = '';
           gpEl.title = '';
           gpEl.removeAttribute('aria-label');
+          gpEl.setAttribute('aria-hidden', 'true');
         }
         if (devEl) {
           devEl.textContent = '';
           devEl.title = '';
           devEl.removeAttribute('aria-label');
+          devEl.setAttribute('aria-hidden', 'true');
         }
+        // Spectator slot-claim: "Join · needs your ROM" (§7.2 M3 #3).
+        // Lobby-only — hidden once the game is running.
+        if (claimBtn) claimBtn.hidden = !(isSpectator && !gameRunning);
       }
     }
 
@@ -3877,6 +3964,7 @@
         text.textContent = 'Still loading — this can take a moment on first boot...';
       }
     }, 15000);
+    startBootPorts();
   };
 
   // Exposed so the rollback engine can re-show the overlay when a late-join
@@ -3891,6 +3979,7 @@
     }
     const el = document.getElementById('game-loading');
     if (!el || el.classList.contains('hidden')) return;
+    stopBootPorts({ collapse: true });
     el.classList.add('fade-out');
     setTimeout(() => {
       el.classList.add('hidden');
@@ -5103,6 +5192,150 @@
     }
   };
 
+  // ── Room overlay restyle (docs/landing-design.md §7.2 M3) ───────────────
+
+  // Unsupported-browser screen — shown before anything else loads when a
+  // required feature is missing. Plain-language names for the feature-
+  // detection list built at init (RTCPeerConnection, WebAssembly,
+  // crossOriginIsolated).
+  const _MISSING_FEATURE_LABELS = {
+    RTCPeerConnection: 'peer-to-peer connections (WebRTC)',
+    WebAssembly: 'WebAssembly, needed to run the emulator',
+    crossOriginIsolated: 'a security feature (SharedArrayBuffer) that in-app browsers and some privacy modes turn off',
+  };
+
+  const showUnsupportedBrowser = (missing) => {
+    const el = document.getElementById('unsupported-browser');
+    if (!el) return;
+    el.classList.remove('hidden');
+    const detail = document.getElementById('unsupported-detail');
+    if (detail) {
+      const names = missing.map((m) => _MISSING_FEATURE_LABELS[m] || m);
+      detail.textContent =
+        names.length === 1
+          ? `This browser can't run the game. It needs ${names[0]}.`
+          : `This browser can't run the game. It's missing: ${names.join('; ')}.`;
+    }
+    const copyBtn = document.getElementById('unsupported-copy');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        copyToClipboard(inviteUrl(false), 'Link');
+      });
+    }
+    const watchBtn = document.getElementById('unsupported-watch');
+    if (watchBtn) {
+      // Watching only needs WebRTC (video receive) — offer it unless that's
+      // also missing.
+      if (!missing.includes('RTCPeerConnection') && roomCode) {
+        watchBtn.hidden = false;
+        watchBtn.addEventListener('click', () => {
+          window.location.href = inviteUrl(true);
+        });
+      } else {
+        watchBtn.hidden = true;
+      }
+    }
+  };
+
+  // ── "Watch instead" — player releases their slot to spectate without
+  // leaving the room (server event: release-slot). Lobby-only.
+  const releaseSlot = () => {
+    if (!socket?.connected) return;
+    socket.emit('release-slot', {}, (err) => {
+      if (err) {
+        showToast(err);
+        return;
+      }
+      // isSpectator flips on the users-updated broadcast this triggers.
+    });
+  };
+
+  // ── Name: gentle nudge, never a block (docs/landing-design.md §7.4/§7.11) —
+  // "Player" is an allowed name; this just invites picking a real one.
+  const updateNameHint = () => {
+    const hint = document.getElementById('name-hint');
+    if (!hint) return;
+    hint.hidden = !(playerName || '').trim() || playerName.trim().toLowerCase() !== 'player';
+  };
+
+  // ── Spectator slot-claim ("Join · needs your ROM") ──────────────────────
+  const wireClaimSlotButtons = () => {
+    const list = document.getElementById('player-list');
+    if (!list || list.dataset.claimWired) return;
+    list.dataset.claimWired = '1';
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest('.claim-slot-btn');
+      if (!btn || btn.hidden || btn.disabled) return;
+      const slot = Number(btn.dataset.slot);
+      btn.disabled = true;
+      socket.emit('claim-slot', { slot }, (err) => {
+        btn.disabled = false;
+        if (err) showToast(err);
+      });
+    });
+  };
+
+  // ── Match start — boot/sync loading overlay (§5.7f #2, §7.11) ──────────
+  // Ports fill from REAL state only: a slot fills once its player is
+  // ROM-ready AND (it's our own slot, or that peer's WebRTC DataChannel is
+  // open). No fabricated timing — this reads KNState.peers, which the
+  // netplay engines already populate; it never writes to it.
+  let _bootPortsTimer = null;
+  let _bootAllReadyFired = false;
+
+  const _slotIsBootReady = (slot, playersBySlot) => {
+    const p = playersBySlot[slot];
+    if (!p) return false;
+    if (slot === mySlot) return !!p.romReady;
+    const peers = (window.KNState && KNState.peers) || {};
+    const peer = Object.values(peers).find((pr) => pr.slot === slot);
+    const connected = !!(peer && peer.dc && peer.dc.readyState === 'open');
+    return !!p.romReady && connected;
+  };
+
+  const updateBootPorts = () => {
+    const svg = document.getElementById('ms-boot');
+    if (!svg) return;
+    const playersBySlot = {};
+    for (const p of Object.values(lastUsersData?.players || {})) playersBySlot[p.slot] = p;
+    let occupied = 0;
+    let ready = 0;
+    for (let slot = 0; slot < 4; slot++) {
+      const fillEl = svg.querySelector(`.fill[data-slot="${slot}"]`);
+      if (!fillEl) continue;
+      const present = !!playersBySlot[slot];
+      if (present) occupied++;
+      const isReady = present && _slotIsBootReady(slot, playersBySlot);
+      if (isReady) ready++;
+      fillEl.classList.toggle('is-ready', isReady);
+      fillEl.classList.toggle('is-open', !present);
+    }
+    if (occupied > 0 && ready === occupied && !_bootAllReadyFired) {
+      _bootAllReadyFired = true;
+      svg.classList.add('all-ready');
+    }
+  };
+
+  const startBootPorts = () => {
+    _bootAllReadyFired = false;
+    const svg = document.getElementById('ms-boot');
+    if (svg) svg.classList.remove('all-ready', 'collapsing');
+    updateBootPorts();
+    if (_bootPortsTimer) clearInterval(_bootPortsTimer);
+    _bootPortsTimer = setInterval(updateBootPorts, 250);
+  };
+
+  const stopBootPorts = ({ collapse = false } = {}) => {
+    if (_bootPortsTimer) {
+      clearInterval(_bootPortsTimer);
+      _bootPortsTimer = null;
+    }
+    const svg = document.getElementById('ms-boot');
+    if (svg && collapse) svg.classList.add('collapsing');
+  };
+
+  window.KNBootPorts = { start: startBootPorts, stop: stopBootPorts, update: updateBootPorts };
+
   // ── Init ───────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -5143,17 +5376,22 @@
       return;
     }
 
-    // Feature detection — report missing capabilities
+    // Feature detection — §7.2 M3 #2: an unsupported-browser screen shown
+    // before anything else loads, instead of a silent later failure.
     const missing = [];
     if (typeof RTCPeerConnection === 'undefined') missing.push('RTCPeerConnection');
     if (typeof WebAssembly === 'undefined') missing.push('WebAssembly');
     if (!self.crossOriginIsolated) missing.push('crossOriginIsolated');
     if (missing.length) {
       KNEvent('compat', `Missing: ${missing.join(', ')}`, { missing });
+      showUnsupportedBrowser(missing);
+      return;
     }
 
-    // Name input — populate from current name, save + notify on change
+    // Name input — populate from current name, save + notify on change.
+    // "Player" is an allowed name (§7.4/§7.11) — updateNameHint only nudges.
     const nameInput = document.getElementById('player-name-input');
+    updateNameHint();
     if (nameInput) {
       nameInput.value = playerName;
       nameInput.addEventListener('change', () => {
@@ -5167,6 +5405,21 @@
         } else if (!val) {
           nameInput.value = playerName;
         }
+        updateNameHint();
+      });
+    }
+
+    wireClaimSlotButtons();
+
+    const watchInsteadBtn = document.getElementById('watch-instead-btn');
+    if (watchInsteadBtn) watchInsteadBtn.addEventListener('click', releaseSlot);
+
+    const romMismatchChoose = document.getElementById('rom-mismatch-choose');
+    const romDropEl = document.getElementById('rom-drop');
+    if (romMismatchChoose && romDropEl) {
+      romMismatchChoose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        romDropEl.click();
       });
     }
 

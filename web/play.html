@@ -16,6 +16,20 @@
     <link rel="stylesheet" href="/static/play.css" />
   </head>
   <body>
+    <!-- Unsupported-browser screen — shown before anything else loads when
+         RTCPeerConnection, WebAssembly or crossOriginIsolated is missing. -->
+    <div id="unsupported-browser" class="hidden" role="dialog" aria-labelledby="unsupported-title">
+      <div class="ub-card">
+        <h1 id="unsupported-title">This browser can't run the game</h1>
+        <p id="unsupported-detail"></p>
+        <p class="ub-hint">Open this link in Safari or Chrome.</p>
+        <div class="ub-actions">
+          <button id="unsupported-copy" type="button">Copy link</button>
+          <button id="unsupported-watch" type="button" class="small-btn" hidden>or Watch instead</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Pre-game overlay -->
     <div id="overlay" class="hidden">
       <div class="overlay-card">
@@ -28,6 +42,7 @@
           <label for="player-name-input" class="name-label">Name:</label>
           <input id="player-name-input" class="name-input" maxlength="24" autocomplete="off" spellcheck="false" />
         </div>
+        <p id="name-hint" class="name-hint" hidden>Pick a name so others in the room know it's you.</p>
 
         <div class="card-section">
           <div id="player-list" role="list" aria-label="Players">
@@ -35,6 +50,7 @@
               <span class="slot-num" aria-hidden="true">P1</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
+              <button class="claim-slot-btn" data-slot="0" type="button" hidden>Join &middot; needs your ROM</button>
               <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
               <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
@@ -42,6 +58,7 @@
               <span class="slot-num" aria-hidden="true">P2</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
+              <button class="claim-slot-btn" data-slot="1" type="button" hidden>Join &middot; needs your ROM</button>
               <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
               <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
@@ -49,6 +66,7 @@
               <span class="slot-num" aria-hidden="true">P3</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
+              <button class="claim-slot-btn" data-slot="2" type="button" hidden>Join &middot; needs your ROM</button>
               <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
               <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
@@ -56,6 +74,7 @@
               <span class="slot-num" aria-hidden="true">P4</span>
               <span class="name empty">Open</span>
               <span class="rom-status" role="status" aria-live="polite"></span>
+              <button class="claim-slot-btn" data-slot="3" type="button" hidden>Join &middot; needs your ROM</button>
               <span class="gamepad" role="img" aria-label="Input type" title="Input method"></span>
               <span class="device" role="img" aria-label="Device type" title="Device"></span>
             </div>
@@ -73,8 +92,17 @@
               Supported: Super Smash Bros. (US), Smash Remix 2.0.0 (US), Smash Remix 2.0.1 (US)
             </p>
             <p id="rom-status" class="rom-status"></p>
+            <div id="rom-mismatch" class="rom-mismatch" hidden role="alert">
+              <span id="rom-mismatch-text"></span>
+              <button id="rom-mismatch-choose" class="small-btn" type="button">Choose another</button>
+            </div>
           </div>
           <div id="rom-library" style="display: none"></div>
+          <div id="watch-instead-row" class="watch-instead-row" hidden>
+            <span>Don't have it?</span>
+            <button id="watch-instead-btn" class="small-btn" type="button">Watch instead</button>
+            <span class="watch-instead-hint">You stay in the room and see the game when it starts.</span>
+          </div>
           <div id="rom-sharing-prompt" hidden>
             <p class="rom-sharing-prompt-text">
               Or accept ROM from host
@@ -355,10 +383,23 @@
     <!-- EmulatorJS — ROM supplied by user drag-and-drop, loader injected by bootEmulator() -->
     <div id="game"></div>
 
-    <!-- Loading overlay — covers game area during boot/sync -->
+    <!-- Loading overlay — covers game area during boot/sync.
+         Match start (docs/landing-design.md §5.7f #2, §7.2 M3 #4): each
+         port fills as that peer reports ROM-ready and connected (driven by
+         play.js from real state — see updateBootPorts), all bounce when
+         everyone's in, then collapse as the game boots. -->
     <div id="game-loading" class="hidden">
       <div class="game-loading-content">
-        <div class="game-loading-spinner"></div>
+        <svg class="ms-boot" id="ms-boot" viewBox="0 0 48 32" aria-hidden="true">
+          <rect class="outline" data-slot="0" x="6" y="6" width="5" height="20" rx="2.2" />
+          <rect class="outline" data-slot="1" x="16" y="6" width="5" height="20" rx="2.2" />
+          <rect class="outline" data-slot="2" x="26" y="6" width="5" height="20" rx="2.2" />
+          <rect class="outline" data-slot="3" x="36" y="6" width="5" height="20" rx="2.2" />
+          <rect class="fill f1" data-slot="0" x="6" y="6" width="5" height="20" rx="2.2" />
+          <rect class="fill f2" data-slot="1" x="16" y="6" width="5" height="20" rx="2.2" />
+          <rect class="fill f3" data-slot="2" x="26" y="6" width="5" height="20" rx="2.2" />
+          <rect class="fill f4" data-slot="3" x="36" y="6" width="5" height="20" rx="2.2" />
+        </svg>
         <span id="game-loading-text">Loading...</span>
       </div>
     </div>
