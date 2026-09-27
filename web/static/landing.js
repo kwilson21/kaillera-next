@@ -667,6 +667,22 @@
   });
   showMark(markIdx);
 
+  // Captures are enabled by adding metadata only; absent entries create no
+  // requests or empty placeholders. Dimensions reserve space before lazy load.
+  const SHOTS = [];
+  const shots = $('shots');
+  for (const shot of SHOTS) {
+    if (!shot?.src || !shot.w || !shot.h || !shot.alt) continue;
+    const img = el('img');
+    img.src = shot.src;
+    img.width = shot.w;
+    img.height = shot.h;
+    img.alt = shot.alt;
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    shots.append(img);
+  }
+
   // ── Click-to-play video: poster first, the player only on click ──────────
 
   document.querySelectorAll('.lite').forEach((box) => {

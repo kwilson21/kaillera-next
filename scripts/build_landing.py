@@ -27,7 +27,13 @@ WEB = REPO / "web"
 DIST = REPO / "dist-landing"
 
 sys.path.insert(0, str(REPO / "server"))
-from src.landing_build import EXTRA, PAGES, landing_build_id, referenced  # noqa: E402
+from src.landing_build import (  # noqa: E402
+    EXTRA,
+    OPTIONAL_EXTERNAL,
+    PAGES,
+    landing_build_id,
+    referenced,
+)
 
 FALLBACK_METADATA = {"static/version.json", "static/changelog.json"}
 
@@ -41,7 +47,10 @@ def main() -> None:
         files |= referenced(html)
         (DIST / page).parent.mkdir(parents=True, exist_ok=True)
         (DIST / page).write_text(html)
-    files |= {str(p.relative_to(WEB)) for p in (WEB / "static" / "fonts").glob("*.woff2")}
+    files -= {rel for rel in OPTIONAL_EXTERNAL if not (WEB / rel).is_file()}
+    files |= {
+        str(p.relative_to(WEB)) for p in (WEB / "static" / "fonts").glob("*.woff2")
+    }
     for rel in sorted(files):
         src = WEB / rel
         if not src.is_file():
@@ -66,7 +75,9 @@ def main() -> None:
     missing = {"/" + f for f in served if not f.startswith("static/fonts/")} - listed
     if missing:
         raise SystemExit(f"deploy/static/worker.js doesn't serve: {sorted(missing)}")
-    print(f"dist-landing/: {len(PAGES)} pages, {len(served)} static files, build id {build_id}")
+    print(
+        f"dist-landing/: {len(PAGES)} pages, {len(served)} static files, build id {build_id}"
+    )
 
 
 if __name__ == "__main__":

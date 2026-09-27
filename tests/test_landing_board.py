@@ -384,7 +384,7 @@ def test_play_page_uses_live_card_only_for_listed_room_with_frame(client, sig):
     room, _ = sig
     _start(room)
     html = client.get("/play.html?room=ROOM1").text
-    assert "/static/og/cards/ssb64-play.png" in html and "card.jpg" not in html
+    assert "/static/og/cards/ssb64-play.jpg" in html and "card.jpg" not in html
     room.listed = True
     _screenshot("host", room, _real_jpeg())
     html = client.get("/play.html?room=ROOM1").text

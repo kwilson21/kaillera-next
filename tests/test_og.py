@@ -1,6 +1,6 @@
 """Tests for OG card serving.
 
-OG cards are now prebuilt static PNGs in web/static/og/cards/. The runtime
+OG cards are now prebuilt static images in web/static/og/cards/. The runtime
 server has no browser dependency. Generation lives in
 scripts/generate_og_cards.py and runs at build time.
 
@@ -26,11 +26,11 @@ def test_static_cards_exist_for_all_games():
 
     for game_id in GAME_INFO:
         for suffix in ("play", "watch"):
-            card = CARDS_DIR / f"{game_id}-{suffix}.png"
+            card = CARDS_DIR / f"{game_id}-{suffix}.jpg"
             assert card.exists(), f"missing OG card: {card}"
             img = Image.open(card)
             assert img.size == (1200, 630)
-            assert img.format == "PNG"
+            assert img.format == "JPEG"
 
 
 def test_homepage_card_exists():
@@ -42,14 +42,14 @@ def test_homepage_card_exists():
 
 
 def test_build_og_tags_points_at_static_per_game_card():
-    """Recognized game_id → /static/og/cards/{game}-{play|watch}.png."""
+    """Recognized game_id → /static/og/cards/{game}-{play|watch}.jpg."""
     from src.api.og import build_og_tags
 
     tags = build_og_tags("example.com", room_id="ABC123", room_name="Alice", game_id="ssb64", spectate=False)
-    assert "/static/og/cards/ssb64-play.png" in tags
+    assert "/static/og/cards/ssb64-play.jpg" in tags
 
     tags = build_og_tags("example.com", room_id="ABC123", room_name="Alice", game_id="ssb64", spectate=True)
-    assert "/static/og/cards/ssb64-watch.png" in tags
+    assert "/static/og/cards/ssb64-watch.jpg" in tags
 
 
 def test_build_og_tags_falls_back_to_home_for_unknown_game():
@@ -89,7 +89,7 @@ def test_static_card_no_coep_header(server_url):
     """Static OG cards must not have COEP header (blocks crawler fetches)."""
     import requests
 
-    r = requests.get(f"{server_url}/static/og/cards/ssb64-play.png", timeout=10, verify=False)
+    r = requests.get(f"{server_url}/static/og/cards/ssb64-play.jpg", timeout=10, verify=False)
     assert r.status_code == 200
     assert "cross-origin-embedder-policy" not in r.headers
     img = Image.open(io.BytesIO(r.content))

@@ -46,6 +46,8 @@ const ASSET_FILES = new Set([
   '/static/version.json',
   '/static/changelog.json',
   '/static/favicon.svg',
+  '/static/kn-logo.svg',
+  '/static/apple-touch-icon.png',
   '/static/og/home.png', // the generic link-preview image: crawlers fetch it while the server naps
   '/static/landing-build.json', // this build's id — see refreshFreshness()
 ]);
