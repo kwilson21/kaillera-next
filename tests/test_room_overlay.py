@@ -141,7 +141,7 @@ def test_cached_rom_library_visible_for_guest(browser, server_url, room):
         guest_ctx.close()
 
 
-def test_cached_library_pick_must_match_host_rom(browser, server_url, room):
+def test_wrong_library_pick_falls_back_to_the_host_match(browser, server_url, room):
     host_ctx = browser.new_context()
     guest_ctx = browser.new_context()
     host = host_ctx.new_page()
@@ -165,10 +165,15 @@ def test_cached_library_pick_must_match_host_rom(browser, server_url, room):
         expect(guest.locator("#rom-library")).to_be_visible(timeout=10000)
         expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
 
+        match_hash = guest.evaluate("KNState.romHash")
         wrong_item = guest.locator(".rom-library-item", has_text=os.path.basename(wrong_rom))
         wrong_item.locator(".rom-use").click()
-        expect(guest.locator("#rom-mismatch")).to_be_visible(timeout=10000)
-        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("needs ROM", timeout=10000)
+        # Picking the wrong ROM never reports it ready: the guest withdraws
+        # readiness, and the host-ROM check switches back to the cached match.
+        expect(guest.get_by_text("ROM matched")).to_be_visible(timeout=10000)
+        guest.wait_for_function(f"KNState.romHash === '{match_hash}'", timeout=10000)
+        expect(guest.locator(".rom-library-item.active")).to_contain_text(os.path.basename(matching_rom))
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
     finally:
         host.close()
         guest.close()
