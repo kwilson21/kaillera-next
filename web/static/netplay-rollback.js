@@ -9487,6 +9487,39 @@
     }
   };
 
+  // A guest whose own cache (IndexedDB or the server) had the starting state
+  // still waits for the host's save-state: the host sends one on every path,
+  // and only it carries the host's save RAM, and the state the host itself
+  // starts from (a live capture when the host had no cache). Past the deadline
+  // the guest starts from its cached copy without the host's save RAM.
+  const HOST_INITIAL_STATE_WAIT_MS = 10000;
+  let _hostInitialStateWaitTimer = null;
+  const _clearHostInitialStateWait = () => {
+    if (_hostInitialStateWaitTimer) clearTimeout(_hostInitialStateWaitTimer);
+    _hostInitialStateWaitTimer = null;
+  };
+  const _markInitialStateReady = () => {
+    _clearHostInitialStateWait();
+    _phase = PHASE_LOCKSTEP_READY;
+    if (_rttComplete) broadcastLockstepReady();
+    checkAllLockstepReady();
+  };
+  const _cachedInitialStateReady = (source) => {
+    if (_playerSlot === 0) {
+      _markInitialStateReady();
+      return;
+    }
+    _clearHostInitialStateWait();
+    _syncLog(`${source} copy loaded; waiting up to ${HOST_INITIAL_STATE_WAIT_MS}ms for the host's state and save RAM`);
+    const sid = _sessionId;
+    _hostInitialStateWaitTimer = setTimeout(() => {
+      _hostInitialStateWaitTimer = null;
+      if (sid !== _sessionId || _phase >= PHASE_LOCKSTEP_READY) return;
+      _syncLog(`HOST-STATE-WAIT-TIMEOUT: starting from the ${source} copy without the host's save RAM`);
+      _markInitialStateReady();
+    }, HOST_INITIAL_STATE_WAIT_MS);
+  };
+
   const fetchCachedState = async (romHash) => {
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
 
@@ -9502,6 +9535,8 @@
     // 1. Check local IndexedDB first — instant, no network
     try {
       const idbBytes = await _getStateFromIDB(romHash);
+      // The host's save-state already arrived and was loaded: keep it.
+      if (_playerSlot !== 0 && _phase >= PHASE_LOCKSTEP_READY) return;
       if (idbBytes && idbBytes.length > 1000) {
         _syncLog(`cached state loaded from IndexedDB (${idbBytes.length} bytes)`);
         _guestStateBytes = idbBytes instanceof Uint8Array ? idbBytes : new Uint8Array(idbBytes);
@@ -9530,9 +9565,7 @@
             .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
         }
 
-        _phase = PHASE_LOCKSTEP_READY;
-        if (_rttComplete) broadcastLockstepReady();
-        checkAllLockstepReady();
+        _cachedInitialStateReady('IndexedDB');
         return;
       }
     } catch (e) {
@@ -9550,6 +9583,7 @@
       const raw = await resp.arrayBuffer();
       const bytes = new Uint8Array(raw);
       if (bytes.length < 1000) throw new Error(`cached state too small: ${bytes.length}`);
+      if (_playerSlot !== 0 && _phase >= PHASE_LOCKSTEP_READY) return;
       _syncLog(`cached state loaded from server (${bytes.length} bytes)`);
       _guestStateBytes = bytes;
       _guestStateKind = 'savestate';
@@ -9580,9 +9614,7 @@
           .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
       }
 
-      _phase = PHASE_LOCKSTEP_READY;
-      if (_rttComplete) broadcastLockstepReady();
-      checkAllLockstepReady();
+      _cachedInitialStateReady('server cache');
     } catch (e) {
       const reason = e?.name === 'AbortError' ? 'fetch timed out' : e?.message || 'unknown';
       _syncLog(`no cached state — ${reason}, using live capture`);
@@ -9658,13 +9690,15 @@
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
-    if (_phase >= PHASE_LOCKSTEP_READY) return; // already loaded (e.g. from cache)
+    // Already loaded: a cached copy that stopped waiting for this message.
+    if (_phase >= PHASE_LOCKSTEP_READY) return;
     _syncLog('received initial state');
     setStatus('Loading initial state...');
 
     try {
       const bytes = await decodeAndDecompress(msg.data);
       const saveRam = await _decodeSaveRam(msg);
+      if (_phase >= PHASE_LOCKSTEP_READY) return; // HOST-STATE-WAIT-TIMEOUT fired meanwhile
       _guestStateBytes = bytes;
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
@@ -9680,11 +9714,7 @@
       const romHash = _config?.romHash;
       if (romHash && !_isSmashRemix()) _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
 
-      _phase = PHASE_LOCKSTEP_READY;
-      if (_rttComplete) {
-        broadcastLockstepReady();
-      }
-      checkAllLockstepReady();
+      _markInitialStateReady();
     } catch (err) {
       _syncLog(`failed to decompress initial state: ${err}`);
     }
@@ -17138,6 +17168,7 @@
     _guestStateAudioFifo = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
+    _clearHostInitialStateWait();
     _restoreLocalSaveFile();
     _knownPlayers = {};
     _lastRemoteFrame = -1;
