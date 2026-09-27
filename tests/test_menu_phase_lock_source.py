@@ -44,12 +44,10 @@ def test_match_loading_transition_is_not_strict_menu_lockstep():
     src = LOCKSTEP_JS.read_text()
 
     assert "const inBattleTransition = sceneCurr === 22 && gameStatus === 0;" in src
-    assert (
-        "const strictInputLockstep = !inBattleTransition && "
-        "(inControllableMenu || (sceneCurr === 22 && gameStatus === 2));"
-    ) in src
+    assert "(_remixMenuLockstep() || !_useCRollback) &&" in src
+    assert "(inControllableMenu || (sceneCurr === 22 && gameStatus === 2));" in src
     assert "const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;" in src
-    assert "const _menuLockstepActive = strictInputLockstep;" in src
+    assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
     assert "getInputPeers(menuLockstepPhase.strictInputLockstep)" in src
     assert "if (menuLockstepPhase.strictInputLockstep)" in src
 
@@ -78,8 +76,7 @@ def test_phase_lock_resolution_clears_strict_menu_wait():
     idx = m.start()
     block = src[idx : idx + 600]
     assert "_clearStrictMenuWait()" in block, (
-        "phase-lock resolution must clear the strict-menu overlay "
-        "(mirror the boot-sync/JS-menu paths)"
+        "phase-lock resolution must clear the strict-menu overlay (mirror the boot-sync/JS-menu paths)"
     )
 
 
@@ -97,9 +94,7 @@ def test_phase_lock_middle_case_clears_strict_menu_wait():
     # the middle case falls through right after that closing brace. The
     # _clearStrictMenuWait call must appear between the wait-branch's
     # closing `}` and the outer `else {` that handles full resolution.
-    emit_idx = src.find(
-        "_emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);"
-    )
+    emit_idx = src.find("_emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);")
     assert emit_idx >= 0, "phase-lock wait emit not found"
     outer_else_idx = src.find("} else {", emit_idx)
     assert outer_else_idx >= 0, "phase-lock outer else not found"
@@ -137,3 +132,30 @@ def test_strict_menu_wait_has_visible_overlay():
     assert "hideMenuLockstepWait" in play_src
     assert 'id="menu-wait-overlay"' in html_src
     assert "#menu-wait-overlay" in css_src
+
+
+def test_remix_menus_run_rollback_by_default():
+    """Room 5AB4NK8U: strict Remix menu lockstep at a rollback-sized delay
+    capped the menus at ~35fps over ~100ms RTT. Remix now runs rollback from
+    the start like SSB64; ?remixMenuLockstep=1 restores the old gates, and
+    peers that disagree refuse to start instead of splitting timelines.
+    """
+    src = LOCKSTEP_JS.read_text()
+
+    assert (
+        "const RB_REMIX_MENU_ROLLBACK = !RB_REMIX_MENU_LOCKSTEP && RB_ROLLBACK_STATE_BACKEND === 'split-rdram';"
+    ) in src
+    assert "const _remixMenuLockstep = () => !RB_REMIX_MENU_ROLLBACK && _isSmashRemix();" in src
+    flag = src[src.index("const RB_REMIX_MENU_LOCKSTEP = (() => {") :]
+    flag = flag[: flag.index("})();")]
+    assert "return raw === '1';" in flag
+    assert "return false;" in flag
+
+    # Every Remix menu gate keys off the flag, not off _isSmashRemix().
+    assert "if (_remixMenuLockstep()) {\n          // Smash Remix's title/menu code path" in src
+    assert "active: _remixMenuLockstep() && (inControllableMenu" in src
+    assert "if (_remixMenuLockstep() && !!enabled) {" in src
+    assert "const localGameplay = !_remixMenuLockstep() || menuPhase.gameplay;" in src
+
+    assert "remixMenuRollback: RB_REMIX_MENU_ROLLBACK," in src
+    assert "!!peerCaps.remixMenuRollback !== localCaps.remixMenuRollback" in src
