@@ -38,7 +38,7 @@ globalThis.fetch = async (req, init) => {
   const url = typeof req === 'string' || req instanceof URL ? String(req) : req.url;
   if (!originUp) throw new Error('napping');
   // The game server builds absolute URLs from the host it was asked on.
-  // Only HTML responses get the host rewrite (finding 2); everything else
+  // Only HTML responses get the public-host rewrite; everything else
   // (scripts, the board JSON, the socket handshake) must reach the visitor
   // exactly as the origin sent it.
   const u = new URL(url);
@@ -145,7 +145,7 @@ def test_everything_else_goes_to_the_game_server_untouched():
         assert _body(r, path, method) == f"origin:{path} og=https://game.example/card"
     # /play.html (any method) is HTML, so its body gets the same host
     # rewrite as the crawler preview: a shared link must not advertise the
-    # origin's own (Render) hostname (finding 2). A POST to /join isn't
+    # origin's own (Render) hostname. A POST to /join isn't
     # routed as the static page (only GET/HEAD are), so it's proxied here
     # too, and it's HTML as well.
     assert _body(r, "/play.html?room=ABC") == "origin:/play.html?room=ABC og=https://kn.example/card"
@@ -597,7 +597,7 @@ def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
     assert upgrade == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": "websocket"}
 
 
-# ── Freshness (finding 1: the Worker's copies of / and /join go stale) ───────
+# ── Freshness detection for the Worker's copies of / and /join ───────
 
 FRESHNESS_HARNESS = r"""
 const worker = (await import(process.argv[1])).default;
@@ -722,10 +722,8 @@ def test_freshness_origin_timeout_or_error_keeps_serving_assets(scenario):
 
 @pytest.mark.parametrize("scenario", ["empty-id", "non2xx", "badjson"])
 def test_freshness_inconclusive_results_never_read_as_stale(scenario):
-    """review finding P2: an empty/non-string id (or a non-2xx response, or
-    an unparseable body) must be inconclusive, never 'stale'. Fails without
-    the fix: the old code treated {"id": ""} as a real (mismatching) id and
-    flipped straight to 'stale'."""
+    """An invalid body or unsuccessful response is inconclusive and must
+    never change the freshness verdict to stale."""
     out = _run_freshness(scenario)
     assert out["secondPage"].startswith("asset:")
     assert out["secondAsset"].startswith("asset:")
@@ -771,11 +769,8 @@ console.log(JSON.stringify({ landingBuildFetches }));
 
 
 def test_single_in_flight_check_under_concurrent_requests():
-    """review finding P2: a burst of concurrent requests on a fresh isolate
-    must trigger at most one freshness check, not one per request. Fails
-    without the fix: the old code had no _inFlight guard, so every request
-    that saw a stale-enough (or unknown) cached verdict kicked off its own
-    background check."""
+    """Concurrent requests on a fresh isolate share one in-flight freshness
+    check instead of starting one check per request."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -846,13 +841,8 @@ console.log(JSON.stringify({ afterBurst, afterShortWait, afterLongWait }));
 
 
 def test_inconclusive_checks_back_off_instead_of_retrying_every_request():
-    """review finding P2: after an inconclusive result (a consistently
-    erroring origin here), the next check must wait out the normal interval
-    rather than re-checking on every request — counted here as the number of
-    origin /api/landing-build fetches across many requests. Fails without
-    the fix: without a checkedAt-at-start stamp and an _inFlight guard, a
-    request arriving while (or right after) an inconclusive check was still
-    considered 'due' would trigger another check immediately."""
+    """After an inconclusive result, freshness checks wait out the normal
+    interval instead of retrying on every request."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -870,10 +860,8 @@ def test_inconclusive_checks_back_off_instead_of_retrying_every_request():
 
 
 def test_inconclusive_check_keeps_a_previously_conclusive_verdict():
-    """review finding P2 ("never write back a snapshot taken at check
-    start"): once a verdict is conclusively known, a later inconclusive
-    check (the origin started erroring) must leave it exactly as it was,
-    not reset it to 'unknown' or anything else."""
+    """A later inconclusive check leaves an existing conclusive freshness
+    verdict unchanged."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -979,10 +967,8 @@ console.log(JSON.stringify({ assetMs, pageMs }));
 
 
 def test_page_requests_wait_briefly_on_unknown_while_assets_never_do():
-    """review finding P2 (old HTML with new scripts on a fresh isolate):
-    a page request made while the verdict is still 'unknown' waits for the
-    in-flight first check, capped at ~300ms; an asset request never waits at
-    all. Fails without the fix: both would return in a few ms."""
+    """With an unknown verdict, pages briefly await the first freshness
+    check while asset requests return immediately."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -1068,13 +1054,8 @@ console.log(JSON.stringify({ page, asset, race, landingOriginFetches }));
 
 @pytest.mark.parametrize("failure", ["timeout", "503"])
 def test_stale_mode_falls_back_to_the_worker_copy_on_origin_failure(failure):
-    """review finding P1 (stale-mode timeout + fallback): while the verdict
-    is 'stale', a page/landing-asset proxy that times out falls back to this
-    Worker's own copy instead of hanging or erroring out to the visitor. A
-    non-landing path (here /list, standing in for the API/Socket.IO/
-    /play.html) is never given this timeout, so it's still waiting 500ms
-    later. Fails without the fix: proxyLanding had no timeout/fallback at
-    all, so page/asset would hang exactly like /list does here."""
+    """Stale landing requests fall back to Worker assets after an origin
+    failure, while non-landing proxy requests retain their normal behavior."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
@@ -1136,6 +1117,11 @@ globalThis.fetch = async (req, init) => {
   if (url.pathname === '/static/version.json') return hang(init);
   landingFetches++;
   if (landingFetches === 1 && mode.startsWith('cooldown-')) return hang(init);
+  if (mode === 'metadata-page') {
+    return new Promise((resolve) => setTimeout(() => resolve(new Response('origin:' + url.pathname, {
+      status: 200, headers: { 'Content-Type': 'text/plain' },
+    })), 1500));
+  }
   return new Response('origin:' + url.pathname, { status: 200, headers: { 'Content-Type': 'text/plain' } });
 };
 const env = { ORIGIN: 'https://game.example', ASSETS: assets };
@@ -1170,6 +1156,13 @@ if (mode === 'build-marker') {
   const started = Date.now();
   const result = await get('/static/version.json');
   out = { ...result, elapsed: Date.now() - started };
+} else if (mode === 'metadata-page') {
+  await get('/'); await settle();
+  await get('/static/version.json'); // times out on the metadata budget
+  const landingFetchesBeforePage = landingFetches;
+  const started = Date.now();
+  const result = await get('/');
+  out = { ...result, elapsed: Date.now() - started, pageFetches: landingFetches - landingFetchesBeforePage };
 }
 console.log(JSON.stringify(out));
 """
@@ -1221,7 +1214,14 @@ def test_metadata_falls_back_to_assets_with_the_short_timeout():
     assert out["elapsed"] < 1500
 
 
-# ── Host rewrite in proxied HTML (finding 2) ──────────────────────────────────
+def test_metadata_timeout_does_not_suppress_a_viable_stale_page_fetch():
+    out = _run_edge_case("metadata-page")
+    assert out["body"] == "origin:/"
+    assert 1000 < out["elapsed"] < 2500
+    assert out["pageFetches"] == 1
+
+
+# ── Public-host rewrite in proxied HTML ──────────────────────────────────
 
 REWRITE_HARNESS = r"""
 const worker = (await import(process.argv[1])).default;

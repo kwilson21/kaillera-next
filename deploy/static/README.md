@@ -118,9 +118,9 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     every merge to `main`, which should not mark the landing bundle stale.
     They are still packaged as fallback assets. The Worker first tries the
     origin for current release metadata, then uses its own copy after at most
-    one short probe per isolate per 30-second cooldown when the origin is
-    unavailable,
-    so the footer and changelog do not wait for Render to wake.
+    one short probe per isolate per 30-second metadata cooldown when the
+    origin is unavailable, so the footer and changelog do not wait for
+    Render to wake.
     `scripts/build_landing.py` imports this module (rather than duplicating
     the logic) to write the *build's own* id into
     `dist-landing/static/landing-build.json`, and the game server imports
@@ -163,10 +163,14 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     timeout (~3 s); on a non-success response, timeout, or error it falls
     back to this Worker's own
     (possibly outdated, but instant) copy rather than leaving the visitor on
-    a blank tab. After a timeout or network error the isolate skips origin
-    attempts for 30 seconds and serves its bundled copies immediately; a
-    proxied response clears that cooldown only when its status is below 500,
-    while a successful freshness request also clears it. Thus a stale
+    a blank tab. After a landing page or asset timeout/network error, the
+    isolate skips all landing-origin attempts for 30 seconds and serves its
+    bundled copies immediately. Metadata timeouts instead start a separate
+    30-second cooldown consulted only by `version.json` and `changelog.json`,
+    so their shorter budget can never suppress a viable stale-page fetch.
+    The landing cooldown still suppresses metadata probes. A proxied response
+    clears both cooldowns only when its status is below 500, while a successful
+    freshness request also clears both. Thus a stale
     bundle remains in stale mode until it is redeployed, but a sleeping origin
     costs at most one short probe per isolate per cooldown rather than one
     delay for every page and render-blocking asset. The timeout is ~3 s for

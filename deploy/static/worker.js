@@ -203,13 +203,16 @@ const STALE_PROXY_TIMEOUT_MS = 3000;
 const METADATA_PROXY_TIMEOUT_MS = 800;
 const ORIGIN_SLOW_COOLDOWN_MS = 30_000;
 let _originSlowUntil = 0;
+let _metadataSlowUntil = 0;
 
 function originSucceeded() {
   _originSlowUntil = 0;
+  _metadataSlowUntil = 0;
 }
 
-async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_MS) {
+async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_MS, isMetadata = false) {
   if (Date.now() < _originSlowUntil) return null;
+  if (isMetadata && Date.now() < _metadataSlowUntil) return null;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -221,7 +224,11 @@ async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_M
     if (!res.ok && res.status !== 304) return null;
     return await rewriteOriginHost(res, env, url, request.method);
   } catch {
-    _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
+    if (isMetadata) {
+      _metadataSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
+    } else {
+      _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
+    }
     return null; // timed out or errored: caller falls back to our own copy
   } finally {
     clearTimeout(timer);
@@ -384,7 +391,7 @@ export default {
         return withHeaders(await env.ASSETS.fetch(request), false);
       }
       if (url.pathname === '/static/version.json' || url.pathname === '/static/changelog.json') {
-        const proxied = await proxyLanding(request, env, url, METADATA_PROXY_TIMEOUT_MS);
+        const proxied = await proxyLanding(request, env, url, METADATA_PROXY_TIMEOUT_MS, true);
         if (proxied) return proxied;
         return withHeaders(await env.ASSETS.fetch(request), false);
       }

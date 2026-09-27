@@ -1,7 +1,7 @@
 """server/src/landing_build.py: one function computes the "landing build id"
 for both scripts/build_landing.py and GET /api/landing-build
-(server/src/api/app.py), so the Worker's staleness check (finding 1,
-deploy/static/README.md) can trust that a mismatch means a real difference.
+(server/src/api/app.py), so the Worker's staleness check can trust that a
+mismatch means a real difference.
 
 Run: server/.venv/bin/python -m pytest tests/test_landing_build.py -v
 """
