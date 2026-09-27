@@ -6319,11 +6319,10 @@
     }
   };
   // The initial state goes to players only: spectators never load it
-  // (handleSaveStateMsg), and it carries the host's save RAM.
+  // (handleSaveStateMsg), and it carries the host's save RAM. The server fans
+  // it out (toPlayers), so the host uploads it once whatever the player count.
   const _emitSaveStateToPlayers = (msg) => {
-    for (const sid of Object.keys(_knownPlayers)) {
-      if (sid !== socket.id) socket.emit('data-message', { ...msg, targetSid: sid });
-    }
+    socket.emit('data-message', { ...msg, toPlayers: true });
   };
   // The sidecar is gzipped: RETRO_MEMORY_SAVE_RAM is every save type at once
   // (~290KB, mostly zeros), and the late-join message already carries a
@@ -9658,7 +9657,6 @@
   }
 
   const handleSaveStateMsg = async (msg) => {
-    if (msg.targetSid && msg.targetSid !== socket.id) return;
     if (_isSpectator) return;
     if (_phase >= PHASE_LOCKSTEP_READY) return; // already loaded (e.g. from cache)
     _syncLog('received initial state');
