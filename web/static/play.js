@@ -88,17 +88,22 @@
   };
 
   let _unsupportedReleasePending = false;
+  let _unsupportedReleaseFailed = false;
   const releaseUnsupportedPlayer = (message) => {
     const missing = emulatorMissing();
     if (!missing.length) return false;
-    if (!_unsupportedReleasePending && socket?.connected) {
+    if (!_unsupportedReleasePending && !_unsupportedReleaseFailed && socket?.connected) {
       _unsupportedReleasePending = true;
-      showToast(message);
       socket.emit('release-slot', {}, (err) => {
         if (err) {
           _unsupportedReleasePending = false;
-          showToast(err);
+          _unsupportedReleaseFailed = true;
+          socket.emit('leave-room', {});
+          socket.disconnect();
+          showUnsupportedBrowser(missing);
+          return;
         }
+        showToast(message);
       });
     }
     return true;

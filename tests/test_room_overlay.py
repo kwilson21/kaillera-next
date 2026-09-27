@@ -427,6 +427,38 @@ def test_streaming_guest_without_emulator_features_is_released_on_rollback(brows
         ctx.close()
 
 
+def test_unsupported_streaming_guest_leaves_when_release_is_refused(browser, server_url, room):
+    host = browser.new_page()
+    watchers = [browser.new_page() for _ in range(3)]
+    ctx = browser.new_context()
+    ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
+    guest = ctx.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+
+        # Fill the per-IP spectator cap so the guest cannot be moved to watching.
+        for index, watcher in enumerate(watchers):
+            watcher.goto(f"{server_url}/play.html?room={room}&name=Watcher{index}&spectate=1")
+            expect(watcher.locator("#overlay")).to_be_visible(timeout=10000)
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(host.locator('.player-slot[data-slot="1"] .name')).to_contain_text("Guest", timeout=10000)
+
+        host.locator("#mode-select").select_option("rollback")
+
+        expect(guest.locator("#unsupported-browser")).to_be_visible(timeout=10000)
+        expect(guest.locator("#toast-container")).not_to_contain_text("you're now watching")
+        expect(host.locator('.player-slot[data-slot="1"] .name')).not_to_contain_text("Guest", timeout=10000)
+    finally:
+        host.close()
+        for watcher in watchers:
+            watcher.close()
+        guest.close()
+        ctx.close()
+
+
 def test_spectators_full_message(browser, server_url, room, monkeypatch=None):
     host = browser.new_page()
     watchers = [browser.new_page() for _ in range(3)]
