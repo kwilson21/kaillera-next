@@ -87,17 +87,21 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   no COEP, `no-store`). The static files those pages load come from assets
   too: every one of them is listed in `ASSET_FILES`, because the pages'
   scripts are `defer`red and one proxied script behind a napping server
-  would hold up the waking screen. Everything else, WebSocket upgrades
-  included, is passed to `ORIGIN`.
+  would hold up the waking screen. `static/version.json` and
+  `static/changelog.json` are deliberately **not** in `ASSET_FILES` — see
+  "Self-correcting" below. Everything else, WebSocket upgrades included, is
+  passed to `ORIGIN`.
 - Proxied HTML keeps the public host: the game server builds absolute URLs
   (OG tags, links) from the `Host` header it was asked on, which through a
   proxied request is the origin's own hostname. `worker.js` rewrites
   `https://<origin host>` → `https://<public host>` in the body of any
   proxied response whose content type is `text/html` (`/play.html`
   included — a shared link must not advertise `kaillera-next.onrender.com`)
-  before returning it, preserving status and headers otherwise. Non-HTML
-  bodies, a 101 WebSocket upgrade, and streaming responses are passed
-  through untouched. Link previews use the same rewrite (see below).
+  before returning it, preserving status and headers otherwise. This means
+  buffering the whole body first (`res.text()`); no server HTML response
+  streams today, so nothing is lost, but a future one would be buffered too.
+  Left untouched: non-HTML bodies, a HEAD response (no body to read), and a
+  101 WebSocket upgrade. Link previews use the same rewrite (see below).
 - Link previews: a crawler fetching `/join` gets the game server's page
   (room name, host, live card) if it answers within 1.5 s, else the static
   page's generic tags.
@@ -108,25 +112,59 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   - `server/src/landing_build.py` computes a "landing build id" — a stable
     content hash over exactly the files the Worker serves from assets (the
     two pages, the files they reference, `EXTRA`, and every self-hosted
-    font). `scripts/build_landing.py` imports this module (rather than
-    duplicating the logic) to write the *build's own* id into
+    font). `static/version.json` and `static/changelog.json` are excluded on
+    purpose: CI's version-bump workflow rewrites both on nearly every merge
+    to `main`, and a `stale` verdict never reverts on its own while Render is
+    asleep (a timeout/error leaves the verdict alone, it doesn't clear it),
+    so including them would cost visitors a ~1-minute proxy wait after
+    almost every release. Both files are instead always proxied straight to
+    the origin (never served from this Worker's assets), which is harmless:
+    only `web/static/version.js` reads them, for the footer version label
+    and changelog modal, both fetches wrapped in try/catch and non-blocking.
+    `scripts/build_landing.py` imports this module (rather than duplicating
+    the logic) to write the *build's own* id into
     `dist-landing/static/landing-build.json`, and the game server imports
     the same module to compute its *current* id, lazily and cached, at
-    `GET /api/landing-build`. The two can never compute the id
-    differently, because they're the same function.
+    `GET /api/landing-build` (503 if it can't be computed — never a
+    fabricated empty id). The two can never compute the id differently,
+    because they're the same function.
   - Each Worker isolate keeps an in-memory verdict (`fresh` / `stale` /
-    `unknown`) plus when it was last checked. A page or landing-asset
-    request never blocks on the check: it's answered from the cached
-    verdict, and if that verdict is more than ~60 s old (or still
-    `unknown`), a refresh runs in the background via `ctx.waitUntil` —
-    fetching `ORIGIN/api/landing-build` with a ~1.5 s timeout and comparing
-    it to the Worker's own id. The verdict only flips to `stale` on a
-    definite mismatch; a timeout or error leaves the previous verdict
-    alone, so a napping server is never mistaken for a stale Worker.
+    `unknown`) plus when the current or most recent check *started*
+    (`checkedAt` — stamped at the start, not the end, so a slow or
+    inconclusive check still backs off the next attempt). At most one
+    freshness check runs per isolate at a time (`worker.js`'s `_inFlight`);
+    a burst of concurrent requests triggers one, not one each. A landing
+    asset request never waits on it: it's answered from the cached verdict,
+    and if that verdict is more than ~60 s old (or still `unknown`), a
+    refresh runs in the background via `ctx.waitUntil` — fetching
+    `ORIGIN/api/landing-build` with a ~1.5 s timeout and comparing it to the
+    Worker's own id. The verdict only flips (to `fresh` or `stale`) on a
+    *conclusive* result: two non-empty ids that do or don't match. A
+    timeout, network error, non-2xx response, unparseable body, or an
+    empty/non-string id is inconclusive and leaves the previous verdict
+    exactly alone (it never overwrites `known` with a stale snapshot taken
+    when the check started) — so a napping server, or one that briefly can't
+    compute its own id, is never mistaken for a stale Worker.
+  - A **page** request (`/`, `/index.html`, `/join` — never an asset
+    request) made while the verdict is still `unknown`, which only happens
+    on a fresh isolate's first requests, waits for that first in-flight
+    check, capped at ~300 ms, before deciding. This narrows but doesn't
+    close the gap where a brand-new isolate could serve old cached HTML
+    alongside a newer origin's scripts: if the very first check is slower
+    than 300 ms (or the origin is napping and the check never resolves
+    conclusively at all), the page is still served from this Worker's own
+    assets. That's an accepted trade-off, not a guarantee that a visitor
+    "always" gets the origin's current copy — a real redeploy is the only
+    way to be sure.
   - While the verdict reads `stale`, `/`, `/index.html`, `/join` and every
-    `ASSET_FILES`/font path are proxied to the origin instead of served
-    from assets — the pages the game server serves itself, OG tags and
-    `?v=` cache-busting included, which is fine. A real redeploy
+    `ASSET_FILES`/font path are proxied to the origin instead of served from
+    assets — the pages the game server serves itself, OG tags and `?v=`
+    cache-busting included, which is fine. That proxy has its own short
+    timeout (~3 s); on a timeout or error it falls back to this Worker's own
+    (possibly outdated, but instant) copy rather than leaving the visitor on
+    a blank tab. This timeout applies only to landing pages/assets in stale
+    mode — the API, Socket.IO, WebSocket upgrades and `/play.html` are
+    always proxied with no timeout, exactly as before. A real redeploy
     (`npx wrangler deploy -c wrangler.landing.jsonc`) is still the way to
     get instant static pages back immediately, rather than waiting on the
     next background check.
@@ -156,17 +194,32 @@ The route was added and both proxy secrets were set once, on first-time
 setup (2026-09-26). Secrets persist across `wrangler deploy`, so a routine
 redeploy doesn't need to touch them.
 
+After deploying, confirm the Worker's build actually matches the origin's,
+from a clean, up-to-date checkout of `main` (so the id printed locally is the
+one the origin will compute too):
+
+```sh
+git -C <clean checkout of main> pull
+python scripts/build_landing.py   # prints "... build id <id>"
+curl https://kaillera-next.thesuperhuman.us/api/landing-build   # should echo the same id
+```
+
+A mismatch means either the deploy didn't pick up the latest `web/` (rerun
+the build and redeploy) or the checkout used for the build wasn't actually
+up to date with `main`.
+
 ## Rotating the proxy secret
 
 `KN_PROXY_SECRET` on the game server may hold a comma-separated list
 (`server/src/ratelimit.py`), so a rotation never has a gap where every
-visitor collapses into the Worker's single address:
+visitor collapses into the Worker's single address. The secret must not
+itself contain a comma — `openssl rand -hex 32` is safe (hex only):
 
+0. Generate the new secret's value first: `openssl rand -hex 32`.
 1. Set the Render env var `KN_PROXY_SECRET` to `"new,old"` (the new secret
-   first, the current one kept alongside it) and wait for Render to finish
-   redeploying with it.
-2. Generate the new secret's value if you haven't already
-   (`openssl rand -hex 32`), then set it on the Worker:
+   from step 0 first, the current one kept alongside it) and wait for Render
+   to finish redeploying with it.
+2. Set the same new secret on the Worker:
    `npx wrangler secret put PROXY_SECRET -c wrangler.landing.jsonc`.
 3. Confirm the connect log shows real visitor IPs (below) — that's the only
    way to confirm the two sides agree, since a secret can't be read back

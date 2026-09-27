@@ -414,12 +414,13 @@ _landing_build_id_cache: str | None = None
 
 
 def _get_landing_build_id() -> str:
+    """Returns the cached id, or raises if it can't be computed (unreadable
+    web/ directory). Never caches a failure — the id is one line, and a
+    transient read error shouldn't wedge the server into permanently
+    reporting itself broken to the landing Worker."""
     global _landing_build_id_cache
     if _landing_build_id_cache is None:
-        try:
-            _landing_build_id_cache = landing_build.landing_build_id(_WEB_DIR)
-        except OSError:
-            _landing_build_id_cache = ""
+        _landing_build_id_cache = landing_build.landing_build_id(_WEB_DIR)
     return _landing_build_id_cache
 
 
@@ -748,9 +749,15 @@ def create_app(lifespan=None) -> FastAPI:
 
     # The landing Worker's staleness check (see `_get_landing_build_id`
     # above). Same-origin through the Worker, so no public CORS is needed.
+    # On an unreadable web/ directory this 503s rather than returning an
+    # empty id — the Worker must be able to tell "can't compute" from "this
+    # is the id" without special-casing an empty string.
     @app.get("/api/landing-build")
     async def landing_build_endpoint() -> dict:
-        return {"id": _get_landing_build_id()}
+        try:
+            return {"id": _get_landing_build_id()}
+        except OSError:
+            raise HTTPException(status_code=503, detail="landing build id unavailable") from None
 
     @app.get("/ice-servers")
     async def ice_servers(request: Request) -> list:

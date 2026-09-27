@@ -321,6 +321,24 @@ def test_landing_build_id_matches_the_module_and_is_never_cached(client):
     assert r.json() == {"id": landing_build.landing_build_id(web_dir)}
 
 
+def test_landing_build_id_503s_when_it_cant_be_computed(client, monkeypatch):
+    """review finding P2: an unreadable web/ directory must 503, never a
+    fabricated {"id": ""} — the Worker has to be able to tell "can't compute"
+    from "this is the id" without special-casing an empty string. Fails
+    without the fix: the old code cached "" and returned 200."""
+    from src.api import app as appmod
+
+    monkeypatch.setattr(appmod, "_landing_build_id_cache", None)
+
+    def boom(_web_dir):
+        raise OSError("simulated unreadable web/ directory")
+
+    monkeypatch.setattr(appmod.landing_build, "landing_build_id", boom)
+    r = client.get("/api/landing-build")
+    assert r.status_code == 503
+    assert r.json() != {"id": ""}
+
+
 # ── Keepalive flag (off unless KEEPALIVE_SECONDS is set) ─────────────────────
 
 

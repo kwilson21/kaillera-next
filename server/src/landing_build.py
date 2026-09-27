@@ -8,7 +8,7 @@ disagree about which files define "the landing build" or how to hash them.
 The Worker compares its own build's id (baked into dist-landing/ at build
 time) against this endpoint's answer to notice when a Render release shipped
 a newer front page / invite page than the one the Worker has cached — see
-worker.js's `checkFreshness`.
+worker.js's `refreshFreshness`.
 """
 
 from __future__ import annotations
@@ -21,10 +21,17 @@ from pathlib import Path
 # needs that aren't referenced by a `src=`/`href=` in either page's HTML.
 PAGES = ["index.html", "join.html"]
 EXTRA = [
-    "static/version.json",  # fetched at runtime, not referenced in HTML
-    "static/changelog.json",
     "static/og/home.png",  # the generic link-preview image (og:image)
 ]
+# NOT in EXTRA, and NOT served from the Worker's assets: static/version.json
+# and static/changelog.json. CI's version-bump workflow (scripts/bump-version.sh)
+# rewrites both on nearly every merge to main, which would move the landing
+# build id (and so flip the Worker to 'stale') on nearly every merge too —
+# and 'stale' never reverts on its own while Render naps, so visitors would
+# eat a ~1-minute proxy wait after almost every release. Only version.js
+# reads them (footer version + changelog modal), both fetches wrapped in
+# try/catch and non-blocking, so proxying them straight to the origin is
+# harmless — see deploy/static/worker.js and its ASSET_FILES.
 
 _STATIC_REF = re.compile(r'(?:src|href)="(/static/[^"?#]+)"')
 

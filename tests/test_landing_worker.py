@@ -61,6 +61,8 @@ const cases = [
   ['/static/landing.js', 'GET', ''],
   ['/static/fonts/ibm-plex-sans-var-latin.woff2', 'GET', ''],
   ['/static/play.js', 'GET', ''],
+  ['/static/version.json', 'GET', ''],
+  ['/static/changelog.json', 'GET', ''],
   ['/play.html?room=ABC', 'GET', ''],
   ['/list', 'GET', ''],
   ['/socket.io/?EIO=4', 'GET', ''],
@@ -121,6 +123,18 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
     assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
+
+
+def test_version_and_changelog_json_are_proxied_not_served_from_assets():
+    """review finding P1: static/version.json and static/changelog.json are
+    rewritten on nearly every merge by CI's version-bump workflow, which
+    would flip the freshness verdict to 'stale' on nearly every merge too.
+    They're always proxied to the origin instead of cached as assets. Fails
+    without the fix: the old ASSET_FILES listed both, so they'd come back
+    'asset:...' here instead of 'origin:...'."""
+    r = _run(origin_up=True)
+    assert _body(r, "/static/version.json") == "origin:/static/version.json og=https://game.example/card"
+    assert _body(r, "/static/changelog.json") == "origin:/static/changelog.json og=https://game.example/card"
 
 
 def test_everything_else_goes_to_the_game_server_untouched():
@@ -248,6 +262,126 @@ def test_real_runtime_serves_the_pages_without_redirects():
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_real_runtime_decodes_and_reencodes_gzip_html_correctly():
+    """Greptile flagged the host rewrite as possibly corrupting a
+    gzip-compressed HTML response, since rewriteOriginHost() reads it with
+    res.text() and re-serves it with the original (gzip) Content-Encoding
+    header still attached. Checked under `wrangler dev`: the real Workers
+    runtime decodes an encoded body on read and re-encodes on write because
+    the header is carried over, so the rewrite is correct — this is not
+    reproducible against the fake ASSETS/fetch harnesses above, which never
+    touch real gzip framing, so it needs the real local runtime."""
+    import gzip
+    import socket
+    import time
+    import urllib.request
+
+    wrangler = _wrangler()
+    if not wrangler:
+        pytest.skip("wrangler not installed (npm install, or set WRANGLER)")
+    build = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "build_landing.py")], capture_output=True, timeout=60
+    )
+    assert build.returncode == 0
+
+    import http.server
+    import threading
+
+    class GzipOrigin(http.server.BaseHTTPRequestHandler):
+        def _body(self):
+            # The rewrite only matches an "https://" prefix (what Render
+            # actually serves over); the value doesn't need to match the
+            # scheme this local test origin runs on.
+            html = f'<html><a href="https://{self.headers.get("host", "")}/x">x</a></html>'.encode()
+            return gzip.compress(html)
+
+        def do_GET(self):
+            body = self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_HEAD(self):
+            body = self._body()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+
+        def log_message(self, *a):  # quiet
+            pass
+
+    def free_port():
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    origin_port = free_port()
+    origin = http.server.HTTPServer(("127.0.0.1", origin_port), GzipOrigin)
+    origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+    origin_thread.start()
+
+    wrangler_port = free_port()
+    proc = subprocess.Popen(
+        [
+            wrangler,
+            "dev",
+            "-c",
+            "wrangler.landing.jsonc",
+            "--port",
+            str(wrangler_port),
+            "--var",
+            f"ORIGIN:http://127.0.0.1:{origin_port}",
+        ],
+        cwd=REPO,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 60
+        while True:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{wrangler_port}/static/landing.css", timeout=5)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.5)
+
+        # /play.html isn't a landing page or asset, so this goes through the
+        # plain (untimed) proxy() -> rewriteOriginHost() path.
+        req = urllib.request.Request(f"http://127.0.0.1:{wrangler_port}/play.html", headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert r.status == 200
+            raw = r.read()
+            encoding = r.headers.get("Content-Encoding", "")
+            body = gzip.decompress(raw) if encoding == "gzip" else raw
+            text = body.decode("utf-8")
+
+        # wrangler dev serves this Worker under the routed hostname from
+        # wrangler.landing.jsonc regardless of the local port it's listening
+        # on, so that's the public host the rewrite substitutes in — not
+        # 127.0.0.1:<wrangler_port>. Either way, the origin's own host must
+        # be gone and a rewritten https:// link must remain.
+        assert '/x">' in text and "https://" in text
+        assert f"127.0.0.1:{origin_port}" not in text
+
+        head_req = urllib.request.Request(
+            f"http://127.0.0.1:{wrangler_port}/play.html", method="HEAD", headers={"Accept-Encoding": "gzip"}
+        )
+        with urllib.request.urlopen(head_req, timeout=10) as r:
+            assert r.status == 200
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        origin.shutdown()
+        origin_thread.join(timeout=5)
 
 
 def test_real_runtime_forwards_the_visitor_ip_not_the_spoofed_header():
@@ -497,6 +631,15 @@ globalThis.fetch = async (req, init) => {
       });
     }
     if (scenario === 'error') throw new Error('origin unreachable');
+    if (scenario === 'empty-id') {
+      return new Response(JSON.stringify({ id: '' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (scenario === 'non2xx') {
+      return new Response('boom', { status: 500 });
+    }
+    if (scenario === 'badjson') {
+      return new Response('not json', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
     return new Response(JSON.stringify({ id: originId }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -541,7 +684,10 @@ def _run_freshness(scenario: str):
 
 def test_freshness_check_never_blocks_the_first_response():
     # Before the background check has had a chance to run at all, the very
-    # first request must still be served from assets, not held up.
+    # first request must still be served from assets, not held up. (The
+    # 'fresh' scenario resolves the check near-instantly, so the page-wait
+    # added for finding 4 — see test_page_requests_wait_briefly_on_unknown_*
+    # below — never has anything to wait past here.)
     out = _run_freshness("fresh")
     assert out["firstIsAsset"] is True
     assert out["landingBuildFetches"] == 1
@@ -566,6 +712,369 @@ def test_freshness_origin_timeout_or_error_keeps_serving_assets(scenario):
     out = _run_freshness(scenario)
     assert out["secondPage"].startswith("asset:")
     assert out["secondAsset"].startswith("asset:")
+
+
+@pytest.mark.parametrize("scenario", ["empty-id", "non2xx", "badjson"])
+def test_freshness_inconclusive_results_never_read_as_stale(scenario):
+    """review finding P2: an empty/non-string id (or a non-2xx response, or
+    an unparseable body) must be inconclusive, never 'stale'. Fails without
+    the fix: the old code treated {"id": ""} as a real (mismatching) id and
+    flipped straight to 'stale'."""
+    out = _run_freshness(scenario)
+    assert out["secondPage"].startswith("asset:")
+    assert out["secondAsset"].startswith("asset:")
+
+
+# ── Freshness: single in-flight check, checkedAt-at-start backoff ────────────
+
+CONCURRENCY_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const ownId = 'aaaa1111aaaa1111';
+let landingBuildFetches = 0;
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+globalThis.fetch = async (req) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    landingBuildFetches++;
+    // Never resolves on its own — the request path is what matters here,
+    // not the eventual verdict. Aborted (inconclusively) by the caller's
+    // own timeout once every in-flight request has been dispatched.
+    return new Promise((_resolve, reject) => {});
+  }
+  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+
+// A burst of concurrent requests (some pages, some assets) dispatched
+// without waiting on each other first — as a real burst of visitor traffic
+// would arrive on a fresh isolate.
+const paths = ['/', '/static/landing.js', '/index.html', '/join', '/static/landing.js', '/'];
+await Promise.all(paths.map((p) => worker.fetch(new Request('https://kn.example' + p), env, ctx).then((r) => r.text())));
+console.log(JSON.stringify({ landingBuildFetches }));
+"""
+
+
+def test_single_in_flight_check_under_concurrent_requests():
+    """review finding P2: a burst of concurrent requests on a fresh isolate
+    must trigger at most one freshness check, not one per request. Fails
+    without the fix: the old code had no _inFlight guard, so every request
+    that saw a stale-enough (or unknown) cached verdict kicked off its own
+    background check."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", CONCURRENCY_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["landingBuildFetches"] == 1
+
+
+BACKOFF_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const ownId = 'aaaa1111aaaa1111';
+let landingBuildFetches = 0;
+let now = 1_700_000_000_000;
+const RealDate = Date;
+globalThis.Date = class extends RealDate {
+  static now() { return now; }
+};
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+globalThis.fetch = async (req) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    landingBuildFetches++;
+    // Always inconclusive (non-2xx): a consistently-erroring origin.
+    return new Response('boom', { status: 500 });
+  }
+  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+
+async function get(path) {
+  const res = await worker.fetch(new Request('https://kn.example' + path), env, ctx);
+  await res.text();
+  await Promise.all(waits.splice(0));
+}
+
+// Many requests in the same instant: only the first should check at all.
+for (let i = 0; i < 5; i++) await get('/');
+const afterBurst = landingBuildFetches;
+
+// Time passes, but well under the 60s retry interval: still no new check.
+now += 5_000;
+for (let i = 0; i < 5; i++) await get('/');
+const afterShortWait = landingBuildFetches;
+
+// Past the interval: exactly one more check (not one per request since).
+now += 60_000;
+for (let i = 0; i < 5; i++) await get('/');
+const afterLongWait = landingBuildFetches;
+
+console.log(JSON.stringify({ afterBurst, afterShortWait, afterLongWait }));
+"""
+
+
+def test_inconclusive_checks_back_off_instead_of_retrying_every_request():
+    """review finding P2: after an inconclusive result (a consistently
+    erroring origin here), the next check must wait out the normal interval
+    rather than re-checking on every request — counted here as the number of
+    origin /api/landing-build fetches across many requests. Fails without
+    the fix: without a checkedAt-at-start stamp and an _inFlight guard, a
+    request arriving while (or right after) an inconclusive check was still
+    considered 'due' would trigger another check immediately."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", BACKOFF_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["afterBurst"] == 1
+    assert out["afterShortWait"] == 1  # still within the ~60s interval
+    assert out["afterLongWait"] == 2  # one more check, not five
+
+
+def test_inconclusive_check_keeps_a_previously_conclusive_verdict():
+    """review finding P2 ("never write back a snapshot taken at check
+    start"): once a verdict is conclusively known, a later inconclusive
+    check (the origin started erroring) must leave it exactly as it was,
+    not reset it to 'unknown' or anything else."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = r"""
+const worker = (await import(process.argv[1])).default;
+const ownId = 'aaaa1111aaaa1111';
+let now = 1_700_000_000_000;
+const RealDate = Date;
+globalThis.Date = class extends RealDate {
+  static now() { return now; }
+};
+let scenario = 'stale'; // round 1: conclusive stale
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+globalThis.fetch = async (req) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    if (scenario === 'stale') {
+      return new Response(JSON.stringify({ id: 'bbbb2222bbbb2222' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('boom', { status: 500 }); // inconclusive from here on
+  }
+  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+async function get(path) {
+  const res = await worker.fetch(new Request('https://kn.example' + path), env, ctx);
+  const body = await res.text();
+  await Promise.all(waits.splice(0));
+  return body;
+}
+await get('/'); // triggers round 1's check in the background
+const roundOne = await get('/'); // conclusively 'stale' by now
+scenario = 'inconclusive';
+now += 60_000; // past the interval: round 2's check runs, and is inconclusive
+const roundTwo = await get('/');
+console.log(JSON.stringify({ roundOne, roundTwo }));
+"""
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", script, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["roundOne"] == "origin-page"
+    # Still proxied: the inconclusive round-2 check must not have reset the
+    # verdict away from 'stale'.
+    assert out["roundTwo"] == "origin-page"
+
+
+# ── Freshness: page requests wait briefly on 'unknown', assets never do ──────
+
+UNKNOWN_WAIT_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const ownId = 'aaaa1111aaaa1111';
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+globalThis.fetch = async (req, init) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    // Never resolves on its own; only settles (inconclusively) when the
+    // Worker's own FRESHNESS_CHECK_TIMEOUT_MS aborts it, which is well past
+    // the ~300ms page-wait cap this test is timing.
+    return new Promise((_resolve, reject) => {
+      const signal = init && init.signal;
+      if (signal) signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    });
+  }
+  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const ctx = { waitUntil: () => {} }; // not awaited: timing must come from the request path itself
+
+async function timed(path) {
+  const t0 = Date.now();
+  const res = await worker.fetch(new Request('https://kn.example' + path), env, ctx);
+  await res.text();
+  return Date.now() - t0;
+}
+
+const assetMs = await timed('/static/landing.js');
+const pageMs = await timed('/join');
+console.log(JSON.stringify({ assetMs, pageMs }));
+"""
+
+
+def test_page_requests_wait_briefly_on_unknown_while_assets_never_do():
+    """review finding P2 (old HTML with new scripts on a fresh isolate):
+    a page request made while the verdict is still 'unknown' waits for the
+    in-flight first check, capped at ~300ms; an asset request never waits at
+    all. Fails without the fix: both would return in a few ms."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", UNKNOWN_WAIT_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["assetMs"] < 100
+    assert 250 <= out["pageMs"] < 1000  # ~300ms cap, generous either side for CI jitter
+
+
+# ── Stale-mode proxy timeout + fallback to the Worker's own copy ─────────────
+
+STALE_FALLBACK_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const ownId = 'aaaa1111aaaa1111';
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+globalThis.fetch = async (req, init) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    // Conclusively stale, resolved fast, so the verdict is 'stale' by the
+    // time the requests below run.
+    return new Response(JSON.stringify({ id: 'bbbb2222bbbb2222' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  // Every other origin fetch hangs until the caller's own AbortController
+  // fires — simulating a napping/unreachable origin once the verdict is
+  // already 'stale'.
+  return new Promise((_resolve, reject) => {
+    const signal = init && init.signal;
+    if (signal) {
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }
+    // No signal at all (proxy(), used for non-landing paths): never settles.
+  });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+
+async function get(path) {
+  const res = await worker.fetch(new Request('https://kn.example' + path), env, ctx);
+  return res.text();
+}
+
+await get('/'); // establishes the 'stale' verdict in the background
+await Promise.all(waits.splice(0));
+
+const page = await get('/'); // stale mode, origin times out -> falls back
+const asset = await get('/static/landing.js'); // same
+
+let race;
+try {
+  race = await Promise.race([
+    get('/list').then((body) => 'resolved:' + body), // non-landing path: no timeout, no fallback — must hang
+    new Promise((resolve) => setTimeout(() => resolve('still-hanging'), 500)),
+  ]);
+} catch (e) {
+  race = 'errored:' + e.message;
+}
+
+console.log(JSON.stringify({ page, asset, race }));
+"""
+
+
+def test_stale_mode_falls_back_to_the_worker_copy_on_timeout_but_not_for_api():
+    """review finding P1 (stale-mode timeout + fallback): while the verdict
+    is 'stale', a page/landing-asset proxy that times out falls back to this
+    Worker's own copy instead of hanging or erroring out to the visitor. A
+    non-landing path (here /list, standing in for the API/Socket.IO/
+    /play.html) is never given this timeout, so it's still waiting 500ms
+    later. Fails without the fix: proxyLanding had no timeout/fallback at
+    all, so page/asset would hang exactly like /list does here."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", STALE_FALLBACK_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["page"].startswith("asset:")
+    assert out["asset"].startswith("asset:")
+    assert out["race"] == "still-hanging"
 
 
 # ── Host rewrite in proxied HTML (finding 2) ──────────────────────────────────
