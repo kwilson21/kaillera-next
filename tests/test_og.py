@@ -61,6 +61,33 @@ def test_build_og_tags_falls_back_to_home_for_unknown_game():
     assert "/static/og/cards/" not in tags
 
 
+def test_game_card_uses_inline_logo_and_non_repeating_detail():
+    """Photo-backed cards keep the logo out of the artwork and name the game once."""
+    from src.api.og import _build_card_html
+
+    play = _build_card_html("A friend", "ssb64", spectate=False)
+    assert '<svg class="logo"' not in play
+    assert '<svg class="footer-logo"' in play
+    assert 'role="img" aria-label="kaillera-next"' in play
+    assert "Up to 4 players · in your browser" in play
+    assert play.count("Super Smash Bros. 64") == 1
+    assert "kaillera-next ·" not in play
+
+    watch = _build_card_html("A friend", "ssb64", spectate=True)
+    assert "Live in your browser" in watch
+    assert watch.count("Super Smash Bros. 64") == 0
+
+
+def test_home_card_keeps_corner_logo_and_copy():
+    """The unillustrated home card retains its existing corner treatment."""
+    from src.api.og import _build_card_html
+
+    home = _build_card_html(None, None, spectate=False)
+    assert '<svg class="logo"' in home
+    assert '<svg class="footer-logo"' not in home
+    assert "Super Smash Bros. 64 online with friends. In your browser. No install." in home
+
+
 # ── Server route tests (require running server) ──────────────────────────
 
 

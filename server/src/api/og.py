@@ -91,13 +91,18 @@ def _build_card_html(
     else:
         eyebrow = "WATCH LIVE" if spectate else "YOU'RE INVITED"
         headline = f"Come watch {host}'s room" if spectate else f"{host} invited you to play {game}"
-        detail = game
-        footer = "kaillera-next · Free · No install · Bring your own ROM"
+        detail = "Live in your browser" if spectate else "Up to 4 players · in your browser"
+        footer = "Free · No install · Bring your own ROM"
 
     logo = """<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
       <rect width="32" height="32" rx="6" fill="#0e1218" stroke="#242c39"/>
       <path d="M5 5h4v8l5-8h5l-6 10 6 12h-5l-5-9v9H5zM19 5h4l4 12V5h4v22h-4l-4-12v12h-4z" fill="#5aa8ff"/>
     </svg>"""
+    corner_logo = "" if has_game_bg else logo
+    footer_logo = logo.replace('class="logo"', 'class="footer-logo"').replace(
+        'aria-hidden="true"', 'role="img" aria-label="kaillera-next"'
+    )
+    footer_content = f"{footer_logo}{footer}" if has_game_bg else (footer if is_homepage else f"kaillera-next · {footer}")
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 @font-face{{font-family:Barlow;src:url('file://{_OG_DIR.parent / "fonts" / "barlow-condensed-700-latin.woff2"}') format('woff2');font-weight:700}}
 @font-face{{font-family:Plex;src:url('file://{_OG_DIR.parent / "fonts" / "ibm-plex-sans-var-latin.woff2"}') format('woff2');font-weight:400 600}}
@@ -108,8 +113,8 @@ def _build_card_html(
 .copy{{position:absolute;left:64px;right:210px;top:92px;bottom:65px;display:flex;flex-direction:column;justify-content:center}}
 .eyebrow{{font:700 28px Barlow,sans-serif;letter-spacing:.16em;color:#5aa8ff;margin-bottom:16px}}
 .headline{{font:700 {104 if is_homepage else 76}px/.92 Barlow,'Arial Narrow',sans-serif;letter-spacing:-.02em;text-transform:{"none" if is_homepage else "uppercase"};max-width:940px}}
-.detail{{font:400 33px/1.25 Plex,sans-serif;color:#c3cad3;margin-top:25px;max-width:850px}}.footer{{position:absolute;left:64px;bottom:43px;font:600 24px Plex,sans-serif;color:#8b95a5}}
-</style></head><body><div class="card"><div class="shade"></div><div class="rule"></div>{logo}<main class="copy"><div class="eyebrow">{eyebrow}</div><div class="headline">{headline}</div><div class="detail">{detail}</div></main><div class="footer">{footer}</div></div></body></html>"""
+.detail{{font:400 33px/1.25 Plex,sans-serif;color:#c3cad3;margin-top:25px;max-width:850px}}.footer{{position:absolute;left:64px;bottom:43px;display:flex;align-items:center;gap:12px;font:600 24px Plex,sans-serif;color:#8b95a5}}.footer-logo{{width:40px;height:40px;flex:none}}
+</style></head><body><div class="card"><div class="shade"></div><div class="rule"></div>{corner_logo}<main class="copy"><div class="eyebrow">{eyebrow}</div><div class="headline">{headline}</div><div class="detail">{detail}</div></main><div class="footer">{footer_content}</div></div></body></html>"""
 
 
 # ── HTML meta tag injection ───────────────────────────────────────────────────
