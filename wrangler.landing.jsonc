@@ -21,7 +21,7 @@
     "html_handling": "none",
   },
   "vars": {
-    // Where the game server answers. Render's own URL works before any DNS change.
+    // Where the game server answers: Render's own URL.
     "ORIGIN": "https://kaillera-next.onrender.com",
   },
   // On since 2026-09-26 (owner's OK). Rolling back is removing this route

@@ -131,6 +131,36 @@ def test_landing_worker_ip_trusted_only_with_the_secret(monkeypatch):
     assert ratelimit.extract_ip(request(empty)) == worker_ip
 
 
+def test_landing_worker_ip_trusted_with_either_of_two_rotating_secrets(monkeypatch):
+    # Mid-rotation, KN_PROXY_SECRET holds "new,old" (or "old,new") so the
+    # server keeps trusting the Worker whichever one it currently sends.
+    monkeypatch.setattr(ratelimit, "_ON_RENDER", True)
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "new-secret, old-secret")
+    worker_ip = "2a06:98c0:3600::103"
+    worker = {"cf-connecting-ip": worker_ip, "x-kn-client-ip": "5.6.7.8"}
+
+    with_new = {**worker, "x-kn-proxy-auth": "new-secret"}
+    assert ratelimit.extract_ip(request(with_new)) == "5.6.7.8"
+    with_old = {**worker, "x-kn-proxy-auth": "old-secret"}
+    assert ratelimit.extract_ip(request(with_old)) == "5.6.7.8"
+
+    # Whitespace around entries is stripped, and empty entries (e.g. a
+    # trailing comma) are ignored rather than becoming an always-match "".
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", " new-secret ,, old-secret ,")
+    assert ratelimit.extract_ip(request(with_new)) == "5.6.7.8"
+    assert ratelimit.extract_ip(request(with_old)) == "5.6.7.8"
+    empty_auth = {**worker, "x-kn-proxy-auth": ""}
+    assert ratelimit.extract_ip(request(empty_auth)) == worker_ip
+
+    # Matching neither configured secret still falls back.
+    neither = {**worker, "x-kn-proxy-auth": "guess"}
+    assert ratelimit.extract_ip(request(neither)) == worker_ip
+
+    # A list that parses to no usable entries behaves like unset.
+    monkeypatch.setattr(ratelimit, "_PROXY_SECRET", " , ,")
+    assert ratelimit.extract_ip(request({**worker, "x-kn-proxy-auth": ""})) == worker_ip
+
+
 def test_landing_worker_rejects_non_single_ip_values(monkeypatch):
     # engineio joins duplicate headers with ',' — a visitor sending their own
     # x_kn_client_ip alongside the Worker's would otherwise smuggle a second

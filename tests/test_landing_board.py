@@ -307,6 +307,20 @@ def test_health_is_fast_and_simple(client):
     assert body["status"] == "ok" and "rooms" in body
 
 
+def test_landing_build_id_matches_the_module_and_is_never_cached(client):
+    """GET /api/landing-build (finding 1): the landing Worker compares this
+    id against its own build's to notice a stale copy of / and /join."""
+    from pathlib import Path
+
+    from src import landing_build
+
+    r = client.get("/api/landing-build")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    web_dir = Path(__file__).resolve().parents[1] / "web"
+    assert r.json() == {"id": landing_build.landing_build_id(web_dir)}
+
+
 # ── Keepalive flag (off unless KEEPALIVE_SECONDS is set) ─────────────────────
 
 

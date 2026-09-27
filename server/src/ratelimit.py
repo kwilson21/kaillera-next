@@ -92,7 +92,21 @@ _ON_RENDER = os.environ.get("RENDER") == "true"
 # Cloudflare sets CF-Connecting-IP on a Worker's subrequests to the Worker's
 # own address, so the Worker forwards the visitor's IP in X-KN-Client-IP with
 # a shared secret; the header counts only when the secret matches.
+#
+# KN_PROXY_SECRET may hold a comma-separated list, so a rotation can add the
+# new secret alongside the old one before removing it: while both are
+# configured here, the Worker's header is trusted whichever one it presents.
 _PROXY_SECRET = os.environ.get("KN_PROXY_SECRET", "")
+
+
+def _proxy_secrets() -> list[str]:
+    """Parse KN_PROXY_SECRET into its individual entries.
+
+    Re-parses `_PROXY_SECRET` on every call (cheap) rather than caching, so
+    tests that monkeypatch the module attribute see the change immediately.
+    """
+    return [s.strip() for s in _PROXY_SECRET.split(",") if s.strip()]
+
 
 # Warn at most once per (reason) per _PROXY_WARN_INTERVAL, so a misconfigured
 # secret or a spoofed header doesn't spam the log.
@@ -143,20 +157,30 @@ def extract_ip(source: object) -> str:
 
     proxied_ip = header("x-kn-client-ip")
     if proxied_ip:
-        if not _PROXY_SECRET:
+        secrets = _proxy_secrets()
+        if not secrets:
             _warn_proxy_once("X-KN-Client-IP present but KN_PROXY_SECRET is unset — falling back to the normal IP rule")
-        elif not hmac.compare_digest(header("x-kn-proxy-auth").encode(), _PROXY_SECRET.encode()):
-            _warn_proxy_once(
-                "X-KN-Client-IP present but the proxy auth didn't match — falling back to the normal IP rule"
-            )
         else:
-            try:
-                return str(ipaddress.ip_address(proxied_ip.strip()))
-            except ValueError:
+            # Compare against every configured secret — never short-circuit
+            # on the first match — so timing can't reveal which one (if any)
+            # matched, only whether trust was granted.
+            supplied = header("x-kn-proxy-auth").encode()
+            matched = False
+            for secret in secrets:
+                if hmac.compare_digest(supplied, secret.encode()):
+                    matched = True
+            if not matched:
                 _warn_proxy_once(
-                    "X-KN-Client-IP present but the forwarded value wasn't a single IP address"
-                    " — falling back to the normal IP rule"
+                    "X-KN-Client-IP present but the proxy auth didn't match — falling back to the normal IP rule"
                 )
+            else:
+                try:
+                    return str(ipaddress.ip_address(proxied_ip.strip()))
+                except ValueError:
+                    _warn_proxy_once(
+                        "X-KN-Client-IP present but the forwarded value wasn't a single IP address"
+                        " — falling back to the normal IP rule"
+                    )
 
     if _ON_RENDER:
         for name in ("true-client-ip", "cf-connecting-ip"):

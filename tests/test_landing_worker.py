@@ -1,6 +1,7 @@
 """The landing Worker (deploy/static/worker.js) routes requests the way
 deploy/static/README.md says: pages and their files from assets, crawlers
-on /join to the game server with a fallback, everything else proxied.
+on /join to the game server with a fallback, everything else proxied, and
+its own copies proxied instead when its freshness check finds them stale.
 
 Runs the Worker module in node with a fake ASSETS binding and fetch."""
 
@@ -20,7 +21,10 @@ const mod = await import(process.argv[1]);
 const worker = mod.default;
 const env = {
   ORIGIN: 'https://game.example',
-  // Pages carry the static preview block's host placeholder.
+  // Pages carry the static preview block's host placeholder. The freshness
+  // check's own-build-id fetch gets plain text here (not JSON), so it comes
+  // back inconclusive and the verdict stays 'unknown' — same as before this
+  // Worker had a freshness check at all.
   ASSETS: {
     fetch: async (req) => {
       const p = new URL(req.url).pathname;
@@ -34,9 +38,18 @@ globalThis.fetch = async (req, init) => {
   const url = typeof req === 'string' || req instanceof URL ? String(req) : req.url;
   if (!originUp) throw new Error('napping');
   // The game server builds absolute URLs from the host it was asked on.
+  // Only HTML responses get the host rewrite (finding 2); everything else
+  // (scripts, the board JSON, the socket handshake) must reach the visitor
+  // exactly as the origin sent it.
   const u = new URL(url);
-  return new Response('origin:' + u.pathname + u.search + ' og=https://game.example/card', { status: 200 });
+  const isHtml = u.pathname.endsWith('.html') || u.pathname === '/' || u.pathname === '/join';
+  return new Response('origin:' + u.pathname + u.search + ' og=https://game.example/card', {
+    status: 200,
+    headers: { 'Content-Type': isHtml ? 'text/html; charset=utf-8' : 'application/octet-stream' },
+  });
 };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
 const cases = [
   ['/', 'GET', ''],
   ['/index.html', 'GET', ''],
@@ -59,6 +72,7 @@ for (const [path, method, ua] of cases) {
     res = await worker.fetch(
       new Request('https://kn.example' + path, { method, headers: ua ? { 'User-Agent': ua } : {} }),
       env,
+      ctx,
     );
   } catch (e) {
     out.push({ path, method, ua, body: 'error:' + e.message });
@@ -71,6 +85,7 @@ for (const [path, method, ua] of cases) {
     cache: res.headers.get('Cache-Control'),
   });
 }
+await Promise.all(waits);
 console.log(JSON.stringify(out));
 """
 
@@ -112,12 +127,17 @@ def test_everything_else_goes_to_the_game_server_untouched():
     r = _run(origin_up=True)
     for path, method in [
         ("/static/play.js", "GET"),
-        ("/play.html?room=ABC", "GET"),
         ("/list", "GET"),
         ("/socket.io/?EIO=4", "GET"),
-        ("/join?room=ABC", "POST"),
     ]:
         assert _body(r, path, method) == f"origin:{path} og=https://game.example/card"
+    # /play.html (any method) is HTML, so its body gets the same host
+    # rewrite as the crawler preview: a shared link must not advertise the
+    # origin's own (Render) hostname (finding 2). A POST to /join isn't
+    # routed as the static page (only GET/HEAD are), so it's proxied here
+    # too, and it's HTML as well.
+    assert _body(r, "/play.html?room=ABC") == "origin:/play.html?room=ABC og=https://kn.example/card"
+    assert _body(r, "/join?room=ABC", "POST") == "origin:/join?room=ABC og=https://kn.example/card"
 
 
 def test_crawlers_get_the_room_preview_on_the_public_host_or_the_static_page():
@@ -150,6 +170,10 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert (dist / "static" / "join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
     assert not (dist / "static" / "play.js").exists()
+    build_json = dist / "static" / "landing-build.json"
+    assert build_json.is_file()
+    body = json.loads(build_json.read_text())
+    assert isinstance(body.get("id"), str) and len(body["id"]) == 16
 
 
 def _wrangler():
@@ -248,7 +272,12 @@ def test_real_runtime_forwards_the_visitor_ip_not_the_spoofed_header():
 
     class Recorder(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            seen.append({k.lower(): v for k, v in self.headers.items()})
+            # Real workerd also runs the freshness check in the background
+            # (a GET to /api/landing-build) against this same origin, which
+            # can land before or after the /list request below — record the
+            # path so the test can pick out the request it cares about
+            # instead of assuming it's whichever the origin sees first.
+            seen.append({"path": self.path, **{k.lower(): v for k, v in self.headers.items()}})
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -313,10 +342,13 @@ def test_real_runtime_forwards_the_visitor_ip_not_the_spoofed_header():
             assert r.status == 200
 
         deadline = time.time() + 10
-        while not seen and time.time() < deadline:
-            time.sleep(0.1)
-        assert seen, "origin never received the proxied /list request"
-        headers = seen[0]
+        list_seen = None
+        while list_seen is None and time.time() < deadline:
+            list_seen = next((s for s in seen if s["path"].startswith("/list")), None)
+            if list_seen is None:
+                time.sleep(0.1)
+        assert list_seen, "origin never received the proxied /list request"
+        headers = list_seen
 
         # wrangler dev's local workerd runs with no real Cloudflare edge in
         # front of it, so nothing rewrites the CF-Connecting-IP the test
@@ -360,25 +392,28 @@ globalThis.fetch = async (req, init) => {
 };
 const assets = { fetch: async () => new Response('asset') };
 const req = (headers) => new Request('https://kn.example/list', { headers });
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
 // With the secret: the visitor's IP is forwarded; spoofed copies are replaced.
 await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
-  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+  { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' }, ctx);
 // Without it: nothing is forwarded, and spoofed copies are dropped.
 await worker.fetch(req({ 'CF-Connecting-IP': '5.6.7.8', 'X-KN-Client-IP': '1.1.1.1', 'X-KN-Proxy-Auth': 'x' }),
-  { ORIGIN: 'https://game.example', ASSETS: assets });
+  { ORIGIN: 'https://game.example', ASSETS: assets }, ctx);
 // Underscore-spelled visitor headers must be stripped too (engineio folds
 // '-' and '_' together server-side, so a visitor could try either).
 await worker.fetch(req({
   'CF-Connecting-IP': '5.6.7.8',
   'x_kn_client_ip': '1.1.1.1',
   'x_kn_proxy_auth': 'x',
-}), { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' });
+}), { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' }, ctx);
 // The crawler preview path (previewPage -> fetch(url, init)) forwards too.
 await worker.fetch(
   new Request('https://kn.example/join?room=ABC', {
     headers: { 'CF-Connecting-IP': '5.6.7.8', 'User-Agent': 'Discordbot/2.0' },
   }),
   { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+  ctx,
 );
 // A Socket.IO WebSocket upgrade request is proxied with the same headers,
 // and the Upgrade header survives.
@@ -391,7 +426,9 @@ await worker.fetch(
     },
   }),
   { ORIGIN: 'https://game.example', ASSETS: assets, PROXY_SECRET: 's3cret' },
+  ctx,
 );
+await Promise.all(waits);
 console.log(JSON.stringify(seen));
 """
 
@@ -419,3 +456,184 @@ def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
     # The WebSocket upgrade path is proxied with the forwarded IP/auth and
     # keeps its Upgrade header.
     assert upgrade == {**base, "ip": "5.6.7.8", "auth": "s3cret", "upgrade": "websocket"}
+
+
+# ── Freshness (finding 1: the Worker's copies of / and /join go stale) ───────
+
+FRESHNESS_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const scenario = process.argv[2]; // 'fresh' | 'stale' | 'timeout' | 'error'
+const ownId = 'aaaa1111aaaa1111';
+const originId = scenario === 'stale' ? 'bbbb2222bbbb2222' : ownId;
+
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      return new Response(JSON.stringify({ id: ownId }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+
+let landingBuildFetches = 0;
+globalThis.fetch = async (req, init) => {
+  const url = req instanceof Request ? req.url : String(req);
+  if (url.includes('/api/landing-build')) {
+    landingBuildFetches++;
+    if (scenario === 'timeout') {
+      return new Promise((_resolve, reject) => {
+        const signal = init && init.signal;
+        if (signal) {
+          signal.addEventListener('abort', () => {
+            const err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }
+      });
+    }
+    if (scenario === 'error') throw new Error('origin unreachable');
+    return new Response(JSON.stringify({ id: originId }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+};
+
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+const waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+
+async function get(path) {
+  const res = await worker.fetch(new Request('https://kn.example' + path), env, ctx);
+  return res.text();
+}
+
+const first = await get('/');
+// The check runs in the background: it must not have been awaited yet, so
+// the first response is unaffected by whatever it eventually decides.
+const firstIsAsset = first.startsWith('asset:');
+await Promise.all(waits.splice(0));
+const secondPage = await get('/');
+const secondAsset = await get('/static/landing.js');
+console.log(JSON.stringify({ firstIsAsset, secondPage, secondAsset, landingBuildFetches }));
+"""
+
+
+def _run_freshness(scenario: str):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", FRESHNESS_HARNESS, WORKER.as_uri(), scenario],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_freshness_check_never_blocks_the_first_response():
+    # Before the background check has had a chance to run at all, the very
+    # first request must still be served from assets, not held up.
+    out = _run_freshness("fresh")
+    assert out["firstIsAsset"] is True
+    assert out["landingBuildFetches"] == 1
+
+
+def test_freshness_fresh_keeps_serving_assets():
+    out = _run_freshness("fresh")
+    assert out["secondPage"].startswith("asset:")
+    assert out["secondAsset"].startswith("asset:")
+
+
+def test_freshness_stale_proxies_pages_and_landing_assets():
+    out = _run_freshness("stale")
+    assert out["secondPage"] == "origin-page"
+    assert out["secondAsset"] == "origin-page"
+
+
+@pytest.mark.parametrize("scenario", ["timeout", "error"])
+def test_freshness_origin_timeout_or_error_keeps_serving_assets(scenario):
+    # A napping or unreachable origin must never be read as "stale" — that
+    # would flip every visitor over to a server that isn't answering.
+    out = _run_freshness(scenario)
+    assert out["secondPage"].startswith("asset:")
+    assert out["secondAsset"].startswith("asset:")
+
+
+# ── Host rewrite in proxied HTML (finding 2) ──────────────────────────────────
+
+REWRITE_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const env = { ORIGIN: 'https://game.example', ASSETS: { fetch: async () => new Response('asset') } };
+const ctx = { waitUntil: () => {} };
+
+globalThis.fetch = async (req) => {
+  const url = req.url;
+  if (url.includes('/socket.io/')) {
+    // Node's fetch (undici) refuses to construct a real Response with
+    // status 101 (workerd allows it for a WebSocket upgrade); a bare object
+    // exposing what rewriteOriginHost reads is enough for this harness.
+    return { status: 101, headers: new Headers() };
+  }
+  if (url.includes('/api/stats')) {
+    return new Response(JSON.stringify({ url: 'https://game.example/x' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  return new Response(
+    '<html><a href="https://game.example/play.html">play</a>' +
+      '<meta property="og:url" content="https://game.example/play.html?room=ABC" /></html>',
+    { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': '9999' } },
+  );
+};
+
+const html = await worker.fetch(new Request('https://kn.example/play.html?room=ABC'), env, ctx);
+const json = await worker.fetch(new Request('https://kn.example/api/stats'), env, ctx);
+const upgrade = await worker.fetch(
+  new Request('https://kn.example/socket.io/?EIO=4&transport=websocket', { headers: { Upgrade: 'websocket' } }),
+  env,
+  ctx,
+);
+console.log(JSON.stringify({
+  htmlBody: await html.text(),
+  htmlContentLength: html.headers.get('Content-Length'),
+  jsonBody: await json.text(),
+  upgradeStatus: upgrade.status,
+}));
+"""
+
+
+def _run_rewrite():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", REWRITE_HARNESS, WORKER.as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_proxied_html_gets_the_public_host_json_and_upgrades_are_untouched():
+    out = _run_rewrite()
+    assert "https://kn.example/play.html" in out["htmlBody"]
+    assert "game.example" not in out["htmlBody"]
+    # Content-Length changed (or wasn't set to begin with) — dropped rather
+    # than left stale.
+    assert out["htmlContentLength"] is None
+    # A JSON response is left byte-for-byte alone, origin host included.
+    assert out["jsonBody"] == '{"url":"https://game.example/x"}'
+    # A WebSocket upgrade (status 101) is passed through untouched.
+    assert out["upgradeStatus"] == 101
