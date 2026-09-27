@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.56.2",
+    "date": "2026-09-27",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "landing Worker is live, notices stale copies, rotates its proxy secret (#32)"
+      }
+    ]
+  },
+  {
     "version": "0.56.1",
     "date": "2026-09-26",
     "changes": [
