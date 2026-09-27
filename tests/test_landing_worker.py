@@ -290,6 +290,8 @@ def test_real_runtime_decodes_and_reencodes_gzip_html_correctly():
     import threading
 
     class GzipOrigin(http.server.BaseHTTPRequestHandler):
+        head_content_length = None
+
         def _body(self):
             # The rewrite only matches an "https://" prefix (what Render
             # actually serves over); the value doesn't need to match the
@@ -308,6 +310,7 @@ def test_real_runtime_decodes_and_reencodes_gzip_html_correctly():
 
         def do_HEAD(self):
             body = self._body()
+            type(self).head_content_length = len(body)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Encoding", "gzip")
@@ -377,6 +380,7 @@ def test_real_runtime_decodes_and_reencodes_gzip_html_correctly():
         )
         with urllib.request.urlopen(head_req, timeout=10) as r:
             assert r.status == 200
+            assert r.headers["Content-Length"] == str(GzipOrigin.head_content_length)
             assert r.read() == b""
     finally:
         proc.terminate()
@@ -597,9 +601,9 @@ def test_proxied_requests_carry_the_visitor_ip_only_with_the_secret():
 
 FRESHNESS_HARNESS = r"""
 const worker = (await import(process.argv[1])).default;
-const scenario = process.argv[2]; // 'fresh' | 'stale' | 'timeout' | 'error'
+const scenario = process.argv[2]; // 'fresh' | 'stale' | 'slow-stale' | 'timeout' | 'error'
 const ownId = 'aaaa1111aaaa1111';
-const originId = scenario === 'stale' ? 'bbbb2222bbbb2222' : ownId;
+const originId = scenario === 'stale' || scenario === 'slow-stale' ? 'bbbb2222bbbb2222' : ownId;
 
 const assets = {
   fetch: async (req) => {
@@ -619,6 +623,7 @@ globalThis.fetch = async (req, init) => {
   const url = req instanceof Request ? req.url : String(req);
   if (url.includes('/api/landing-build')) {
     landingBuildFetches++;
+    if (scenario === 'slow-stale') await new Promise((resolve) => setTimeout(resolve, 1000));
     if (scenario === 'timeout') {
       return new Promise((_resolve, reject) => {
         const signal = init && init.signal;
@@ -658,14 +663,16 @@ async function get(path) {
   return res.text();
 }
 
+const firstStarted = Date.now();
 const first = await get('/');
+const firstMs = Date.now() - firstStarted;
 // The check runs in the background: it must not have been awaited yet, so
 // the first response is unaffected by whatever it eventually decides.
 const firstIsAsset = first.startsWith('asset:');
 await Promise.all(waits.splice(0));
 const secondPage = await get('/');
 const secondAsset = await get('/static/landing.js');
-console.log(JSON.stringify({ firstIsAsset, secondPage, secondAsset, landingBuildFetches }));
+console.log(JSON.stringify({ firstIsAsset, firstMs, secondPage, secondAsset, landingBuildFetches }));
 """
 
 
@@ -684,13 +691,11 @@ def _run_freshness(scenario: str):
 
 
 def test_freshness_check_never_blocks_the_first_response():
-    # Before the background check has had a chance to run at all, the very
-    # first request must still be served from assets, not held up. (The
-    # 'fresh' scenario resolves the check near-instantly, so the page-wait
-    # added for finding 4 — see test_page_requests_wait_briefly_on_unknown_*
-    # below — never has anything to wait past here.)
-    out = _run_freshness("fresh")
+    # The first response must not await the deliberately one-second check.
+    # It may wait for the separate ~300 ms unknown-verdict grace period.
+    out = _run_freshness("slow-stale")
     assert out["firstIsAsset"] is True
+    assert out["firstMs"] < 700
     assert out["landingBuildFetches"] == 1
 
 
@@ -989,7 +994,8 @@ def test_page_requests_wait_briefly_on_unknown_while_assets_never_do():
     )
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
-    assert out["assetMs"] < 100
+    assert out["assetMs"] < 250
+    assert out["assetMs"] < out["pageMs"]
     assert 250 <= out["pageMs"] < 1000  # ~300ms cap, generous either side for CI jitter
 
 
@@ -1084,6 +1090,135 @@ def test_stale_mode_falls_back_to_the_worker_copy_on_origin_failure(failure):
     assert out["asset"].startswith("asset:")
     assert out["race"] == "still-hanging"
     assert out["landingOriginFetches"] == (1 if failure == "timeout" else 3)
+
+
+EDGE_CASE_HARNESS = r"""
+const worker = (await import(process.argv[1])).default;
+const mode = process.argv[2];
+const ownId = 'aaaa1111aaaa1111';
+let now = Date.now();
+if (mode === 'own-id-retry') Date.now = () => now;
+let ownReads = 0;
+let originBuildReads = 0;
+let landingFetches = 0;
+let joinFetches = 0;
+const assets = {
+  fetch: async (req) => {
+    const p = new URL(req.url).pathname;
+    if (p === '/static/landing-build.json') {
+      ownReads++;
+      if (mode === 'own-id-retry' && ownReads === 1) return new Response('bad', { status: 500 });
+      return new Response(JSON.stringify({ id: ownId }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('asset:' + p, { status: 200 });
+  },
+};
+function hang(init) {
+  return new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+}
+globalThis.fetch = async (req, init) => {
+  const url = new URL(req instanceof Request ? req.url : String(req));
+  if (url.pathname === '/api/landing-build') {
+    originBuildReads++;
+    return new Response(JSON.stringify({ id: mode === 'own-id-retry' ? ownId : 'bbbb2222bbbb2222' }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  if (url.pathname === '/join') {
+    joinFetches++;
+    return hang(init);
+  }
+  if (url.pathname === '/list') {
+    return new Response('list', { status: mode === 'cooldown-524' ? 524 : 200 });
+  }
+  if (url.pathname === '/static/version.json') return hang(init);
+  landingFetches++;
+  if (landingFetches === 1 && mode.startsWith('cooldown-')) return hang(init);
+  return new Response('origin:' + url.pathname, { status: 200, headers: { 'Content-Type': 'text/plain' } });
+};
+const env = { ORIGIN: 'https://game.example', ASSETS: assets };
+let waits = [];
+const ctx = { waitUntil: (p) => waits.push(p) };
+async function get(path, headers) {
+  const res = await worker.fetch(new Request('https://kn.example' + path, { headers }), env, ctx);
+  return { body: await res.text(), status: res.status };
+}
+async function settle() { await Promise.all(waits.splice(0)); }
+
+let out;
+if (mode === 'build-marker') {
+  await get('/'); await settle();
+  out = await get('/static/landing-build.json');
+} else if (mode === 'own-id-retry') {
+  await get('/static/landing.js'); await settle();
+  now += 61_000;
+  await get('/static/landing.js'); await settle();
+  out = { ownReads, originBuildReads };
+} else if (mode === 'crawler') {
+  await get('/'); await settle();
+  const result = await get('/join?room=ABC', { 'User-Agent': 'Discordbot/2.0' });
+  out = { ...result, joinFetches };
+} else if (mode.startsWith('cooldown-')) {
+  await get('/'); await settle();
+  await get('/'); // first stale proxy times out and arms the cooldown
+  await get('/list');
+  const result = await get('/static/landing.js');
+  out = { ...result, landingFetches };
+} else if (mode === 'metadata-timeout') {
+  const started = Date.now();
+  const result = await get('/static/version.json');
+  out = { ...result, elapsed: Date.now() - started };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_edge_case(mode: str):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    res = subprocess.run(
+        [node, "--input-type=module", "-e", EDGE_CASE_HARNESS, WORKER.as_uri(), mode],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_stale_mode_always_serves_the_worker_build_marker():
+    out = _run_edge_case("build-marker")
+    assert json.loads(out["body"])["id"] == "aaaa1111aaaa1111"
+
+
+def test_failed_own_build_id_read_is_retried():
+    out = _run_edge_case("own-id-retry")
+    assert out == {"ownReads": 2, "originBuildReads": 1}
+
+
+def test_stale_crawler_preview_timeout_does_not_fetch_join_twice():
+    out = _run_edge_case("crawler")
+    assert out["body"].startswith("asset:")
+    assert out["joinFetches"] == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_body", "expected_fetches"),
+    [("200", "origin:/static/landing.js", 2), ("524", "asset:/static/landing.js", 1)],
+)
+def test_only_non_5xx_proxy_responses_clear_landing_cooldown(status, expected_body, expected_fetches):
+    out = _run_edge_case(f"cooldown-{status}")
+    assert out["body"] == expected_body
+    assert out["landingFetches"] == expected_fetches
+
+
+def test_metadata_falls_back_to_assets_with_the_short_timeout():
+    out = _run_edge_case("metadata-timeout")
+    assert out["body"] == "asset:/static/version.json"
+    assert out["elapsed"] < 1500
 
 
 # ── Host rewrite in proxied HTML (finding 2) ──────────────────────────────────

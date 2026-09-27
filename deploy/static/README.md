@@ -88,9 +88,10 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   too: every one of them is listed in `ASSET_FILES`, because the pages'
   scripts are `defer`red and one proxied script behind a napping server
   would hold up the waking screen. `static/version.json` and
-  `static/changelog.json` are deliberately **not** in `ASSET_FILES` — see
-  "Self-correcting" below. Everything else, WebSocket upgrades included, is
-  passed to `ORIGIN`.
+  `static/changelog.json` are also in `ASSET_FILES` as fallbacks: the Worker
+  tries the origin first, but they are not part of the landing build id (see
+  "Self-correcting" below). Everything else, WebSocket upgrades included,
+  is passed to `ORIGIN`.
 - Proxied HTML keeps the public host: the game server builds absolute URLs
   (OG tags, links) from the `Host` header it was asked on, which through a
   proxied request is the origin's own hostname. `worker.js` rewrites
@@ -116,8 +117,9 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     that id on purpose: CI's version-bump workflow rewrites both on nearly
     every merge to `main`, which should not mark the landing bundle stale.
     They are still packaged as fallback assets. The Worker first tries the
-    origin for current release metadata, then uses its own copy immediately
-    when the origin is unavailable or in the 30-second slow-origin cooldown,
+    origin for current release metadata, then uses its own copy after at most
+    one short probe per isolate per 30-second cooldown when the origin is
+    unavailable,
     so the footer and changelog do not wait for Render to wake.
     `scripts/build_landing.py` imports this module (rather than duplicating
     the logic) to write the *build's own* id into
@@ -162,13 +164,15 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     back to this Worker's own
     (possibly outdated, but instant) copy rather than leaving the visitor on
     a blank tab. After a timeout or network error the isolate skips origin
-    attempts for 30 seconds and serves its bundled copies immediately; any
-    successful proxy or freshness request clears that cooldown. Thus a stale
+    attempts for 30 seconds and serves its bundled copies immediately; a
+    proxied response clears that cooldown only when its status is below 500,
+    while a successful freshness request also clears it. Thus a stale
     bundle remains in stale mode until it is redeployed, but a sleeping origin
     costs at most one short probe per isolate per cooldown rather than one
-    delay for every page and render-blocking asset. This timeout applies only to landing pages/assets in stale
-    mode — the API, Socket.IO, WebSocket upgrades and `/play.html` are
-    always proxied with no timeout, exactly as before. A real redeploy
+    delay for every page and render-blocking asset. The timeout is ~3 s for
+    landing pages/assets in stale mode and ~800 ms for `version.json` and
+    `changelog.json` in every mode. The API, Socket.IO, WebSocket upgrades
+    and `/play.html` are always proxied with no timeout, exactly as before. A real redeploy
     (`npx wrangler deploy -c wrangler.landing.jsonc`) is still the way to
     get instant static pages back immediately, rather than waiting on the
     next background check.

@@ -104,7 +104,7 @@ async function previewPage(request, env, url) {
       ),
       signal: ctl.signal,
     });
-    originSucceeded();
+    if (res.status < 500) originSucceeded();
     if (res.ok) {
       // The game server builds absolute URLs from the host it was asked on
       // (the origin's); point them at the public host so the card and the
@@ -188,7 +188,7 @@ async function proxy(request, env, url) {
   const req = new Request(target, request);
   forwardedHeaders(request, env, req.headers);
   const res = await fetch(req);
-  originSucceeded();
+  if (res.status < 500) originSucceeded();
   return rewriteOriginHost(res, env, url, request.method);
 }
 
@@ -200,6 +200,7 @@ async function proxy(request, env, url) {
 // timeout or any error this returns null so the caller falls back to this
 // Worker's own (possibly outdated, but instant) copy instead.
 const STALE_PROXY_TIMEOUT_MS = 3000;
+const METADATA_PROXY_TIMEOUT_MS = 800;
 const ORIGIN_SLOW_COOLDOWN_MS = 30_000;
 let _originSlowUntil = 0;
 
@@ -207,16 +208,16 @@ function originSucceeded() {
   _originSlowUntil = 0;
 }
 
-async function proxyLanding(request, env, url) {
+async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_MS) {
   if (Date.now() < _originSlowUntil) return null;
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), STALE_PROXY_TIMEOUT_MS);
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const target = new URL(url.pathname + url.search, env.ORIGIN);
     const req = new Request(target, request);
     forwardedHeaders(request, env, req.headers);
     const res = await fetch(req, { signal: ctl.signal });
-    originSucceeded();
+    if (res.status < 500) originSucceeded();
     if (!res.ok && res.status !== 304) return null;
     return await rewriteOriginHost(res, env, url, request.method);
   } catch {
@@ -383,7 +384,7 @@ export default {
         return withHeaders(await env.ASSETS.fetch(request), false);
       }
       if (url.pathname === '/static/version.json' || url.pathname === '/static/changelog.json') {
-        const proxied = await proxyLanding(request, env, url);
+        const proxied = await proxyLanding(request, env, url, METADATA_PROXY_TIMEOUT_MS);
         if (proxied) return proxied;
         return withHeaders(await env.ASSETS.fetch(request), false);
       }
