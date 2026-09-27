@@ -22,6 +22,7 @@ from pathlib import Path
 PAGES = ["index.html", "join.html"]
 EXTRA = [
     "static/og/home.png",  # the generic link-preview image (og:image)
+    "static/kn-logo.svg",  # reusable large logo for previews and community pages
 ]
 # NOT in EXTRA, but packaged separately as Worker fallback assets:
 # static/version.json and static/changelog.json. CI rewrites both on nearly
@@ -41,11 +42,13 @@ def referenced(html: str) -> set[str]:
 def landing_files(web_dir: Path) -> set[str]:
     """The exact set of files (paths relative to `web_dir`) the landing
     Worker serves from assets: the pages themselves, the files they load,
-    EXTRA, and every self-hosted font."""
+    EXTRA, every self-hosted font and every screenshot (landing.js loads
+    them, so no page references them by `src=`)."""
     files: set[str] = set(EXTRA) | set(PAGES)
     for page in PAGES:
         files |= referenced((web_dir / page).read_text())
     files |= {str(p.relative_to(web_dir)) for p in (web_dir / "static" / "fonts").glob("*.woff2")}
+    files |= {str(p.relative_to(web_dir)) for p in (web_dir / "static" / "shots").glob("*.webp")}
     return files
 
 

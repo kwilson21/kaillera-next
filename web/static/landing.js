@@ -667,6 +667,42 @@
   });
   showMark(markIdx);
 
+  // Captures are enabled by adding metadata only; absent entries create no
+  // requests or empty placeholders. Dimensions reserve space before lazy load.
+  const SHOTS = [
+    {
+      src: '/static/shots/s1-room.webp',
+      w: 1056,
+      h: 1856,
+      alt: 'The room page: room code KAZ64, "Play link copied!", Kaz and Agent 21 both with the ROM loaded, Start Game ready.',
+    },
+    {
+      src: '/static/shots/s2-invite.webp',
+      w: 1170,
+      h: 1700,
+      alt: 'The invite link on a phone: "Kaz invited you to play Super Smash Bros. 64", 1 of 4 in the room, Join the room or Watch instead.',
+    },
+    {
+      src: '/static/shots/s3-match.webp',
+      w: 1651,
+      h: 498,
+      alt: 'The same moment of one match on a laptop and on a phone with on-screen controls: Mario at the ledge, Donkey Kong mid-stage, both at 0%.',
+    },
+  ];
+  const shots = $('shots');
+  for (const shot of SHOTS) {
+    if (!shot?.src || !shot.w || !shot.h || !shot.alt) continue;
+    const img = el('img');
+    img.src = shot.src;
+    img.width = shot.w;
+    img.height = shot.h;
+    img.alt = shot.alt;
+    if (shot.w > shot.h * 2) img.classList.add('wide');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    shots.append(img);
+  }
+
   // ── Click-to-play video: poster first, the player only on click ──────────
 
   document.querySelectorAll('.lite').forEach((box) => {

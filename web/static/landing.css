@@ -770,6 +770,11 @@ button {
   gap: 28px;
   align-items: start;
 }
+/* Grid items default to min-width: auto, so the phone screenshot strip
+   (fixed 160 px columns) would widen the page instead of scrolling. */
+.two > * {
+  min-width: 0;
+}
 .supported-roms {
   color: var(--muted);
   margin: 0 0 10px;
@@ -792,7 +797,7 @@ button {
 }
 .shots {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -802,6 +807,10 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   display: block;
+}
+/* A landscape capture (both screens side by side) gets its own row. */
+.shots img.wide {
+  grid-column: 1 / -1;
 }
 .lite {
   aspect-ratio: 16 / 9;
@@ -1360,11 +1369,23 @@ button {
   .two {
     grid-template-columns: 1fr;
   }
+  /* Phones: one swipe row at a common height, so shape tells them apart. */
   .shots {
-    grid-template-columns: repeat(3, 160px);
+    display: flex;
+    align-items: flex-start;
     overflow-x: auto;
     scrollbar-width: thin;
     padding-bottom: 6px;
+  }
+  .shots img {
+    flex: none;
+    width: auto;
+    height: 240px;
+  }
+  /* Both screens must be visible at once: fit the wide shot to the column. */
+  .shots img.wide {
+    width: 100%;
+    height: auto;
   }
   .viz-row {
     grid-template-columns: 64px 1fr 64px;
