@@ -943,6 +943,22 @@
           _autoSpectated = true;
         }
 
+        // Guests learn the authoritative room mode only after this lookup.
+        // Gate rollback players here, while allowing streaming guests (and
+        // spectators) through without emulator-only browser features.
+        mode = normalizeMode(roomData.mode || mode);
+        if (!isSpectator && mode !== 'streaming') {
+          const emulatorMissing = [];
+          if (typeof WebAssembly === 'undefined') emulatorMissing.push('WebAssembly');
+          if (!self.crossOriginIsolated) emulatorMissing.push('crossOriginIsolated');
+          if (emulatorMissing.length) {
+            KNEvent('compat', `Missing: ${emulatorMissing.join(', ')}`, { missing: emulatorMissing });
+            showUnsupportedBrowser(emulatorMissing);
+            socket.disconnect();
+            return;
+          }
+        }
+
         socket.emit(
           'join-room',
           {
@@ -1232,6 +1248,7 @@
       // Restore the ROM drop / gamepad UI that showOverlay() hid for
       // spectators — claiming a slot needs your ROM (§7.2 M3 #3).
       if (!gameRunning) showOverlay();
+      if (localRomLoaded() && (isHost || !hostRomMismatch())) notifyRomReady();
     }
 
     // Detect player → spectator transition ("Watch instead" / release-slot).
@@ -3255,7 +3272,13 @@
         // Enable ROM sharing checkbox if host
         const romShareCb = document.getElementById('opt-rom-sharing');
         if (romShareCb && isHost) romShareCb.disabled = false;
-        notifyRomReady();
+        if (!isHost && hostRomMismatch()) {
+          socket.emit('rom-ready', { ready: false });
+          showRomMismatch(val.name);
+        } else {
+          hideRomMismatch();
+          notifyRomReady();
+        }
         cb(true, val.name);
       };
       req.onerror = () => cb(false);
@@ -3787,8 +3810,13 @@
     const romSharingPrompt = document.getElementById('rom-sharing-prompt');
     const gamepadArea = document.getElementById('gamepad-area');
     const watchInsteadRow = document.getElementById('watch-instead-row');
+    const romLibrary = document.getElementById('rom-library');
     if (isSpectator) {
       if (romDrop) romDrop.style.display = 'none';
+      if (romLibrary) {
+        romLibrary.style.display = 'none';
+        romLibrary.innerHTML = '';
+      }
       if (romSharingPrompt) romSharingPrompt.hidden = true;
       if (gamepadArea) gamepadArea.style.display = 'none';
       if (watchInsteadRow) watchInsteadRow.hidden = true;
@@ -5379,9 +5407,12 @@
     // Feature detection — §7.2 M3 #2: an unsupported-browser screen shown
     // before anything else loads, instead of a silent later failure.
     const missing = [];
+    // Hosts know their selected mode from the URL. Guests defer emulator-only
+    // checks until the room lookup supplies its authoritative mode.
+    const needsEmulator = isHost && mode !== 'streaming';
     if (typeof RTCPeerConnection === 'undefined') missing.push('RTCPeerConnection');
-    if (typeof WebAssembly === 'undefined') missing.push('WebAssembly');
-    if (!self.crossOriginIsolated) missing.push('crossOriginIsolated');
+    if (needsEmulator && typeof WebAssembly === 'undefined') missing.push('WebAssembly');
+    if (needsEmulator && !self.crossOriginIsolated) missing.push('crossOriginIsolated');
     if (missing.length) {
       KNEvent('compat', `Missing: ${missing.join(', ')}`, { missing });
       showUnsupportedBrowser(missing);

@@ -141,6 +141,41 @@ def test_cached_rom_library_visible_for_guest(browser, server_url, room):
         guest_ctx.close()
 
 
+def test_cached_library_pick_must_match_host_rom(browser, server_url, room):
+    host_ctx = browser.new_context()
+    guest_ctx = browser.new_context()
+    host = host_ctx.new_page()
+    guest = guest_ctx.new_page()
+    matching_rom = _make_fake_rom(0x47)
+    wrong_rom = _make_fake_rom(0x48)
+    try:
+        guest.goto(f"{server_url}/play.html?room={room}A&host=1&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.locator("#rom-drop input[type='file']").set_input_files(matching_rom)
+        expect(guest.locator("#rom-library")).to_contain_text(os.path.basename(matching_rom), timeout=10000)
+        guest.locator("#rom-drop input[type='file']").set_input_files(wrong_rom)
+        expect(guest.locator("#rom-library")).to_contain_text(os.path.basename(wrong_rom), timeout=10000)
+
+        host.goto(f"{server_url}/play.html?room={room}B&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(matching_rom)
+        expect(host.locator('.player-slot[data-slot="0"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+
+        guest.goto(f"{server_url}/play.html?room={room}B&name=Guest")
+        expect(guest.locator("#rom-library")).to_be_visible(timeout=10000)
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+
+        wrong_item = guest.locator(".rom-library-item", has_text=os.path.basename(wrong_rom))
+        wrong_item.locator(".rom-use").click()
+        expect(guest.locator("#rom-mismatch")).to_be_visible(timeout=10000)
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("needs ROM", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+        host_ctx.close()
+        guest_ctx.close()
+
+
 # ── Unsupported ROM: warns, still allows Start ─────────────────────────────
 
 
@@ -182,10 +217,38 @@ def test_watch_instead_switches_to_spectator_in_place(browser, server_url, room)
 
         # Server round trip — the room-broadcast users-updated flips isSpectator.
         expect(guest.locator("#rom-drop")).to_be_hidden(timeout=10000)
+        expect(guest.locator("#rom-library")).to_be_hidden(timeout=10000)
         assert guest.url == url_before  # never left the page / no navigation
         # The host sees the guest listed as a spectator, not in a player slot.
         expect(host.locator("#spectator-list")).to_contain_text("Guest", timeout=10000)
         expect(host.locator('.player-slot[data-slot="1"] .name')).to_have_text("Open", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_reclaim_slot_restores_rom_ready_and_allows_start(browser, server_url, room):
+    host = browser.new_page()
+    guest = browser.new_page()
+    rom = _make_fake_rom(0x66)
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom)
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.locator("#rom-drop input[type='file']").set_input_files(rom)
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+
+        guest.click("#watch-instead-btn")
+        expect(guest.locator("#rom-drop")).to_be_hidden(timeout=10000)
+        guest.click('.claim-slot-btn[data-slot="1"]')
+
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
     finally:
         host.close()
         guest.close()
@@ -255,16 +318,32 @@ def test_unsupported_browser_screen_shown_when_rtc_missing(browser, server_url, 
         ctx.close()
 
 
-def test_unsupported_browser_offers_watch_when_webrtc_present(browser, server_url, room):
+def test_spectator_without_cross_origin_isolation_connects(browser, server_url, room):
+    host = browser.new_page()
+    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+    expect(host.locator("#overlay")).to_be_visible(timeout=10000)
     ctx = browser.new_context()
-    # Simulate a missing feature that isn't WebRTC (crossOriginIsolated off,
-    # e.g. an in-app browser) — Watch should still be offered.
+    ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
+    page = ctx.new_page()
+    try:
+        page.goto(f"{server_url}/play.html?room={room}&name=Spec&spectate=1")
+        expect(page.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(page.locator("#unsupported-browser")).to_be_hidden()
+        expect(host.locator("#spectator-list")).to_contain_text("Spec", timeout=10000)
+    finally:
+        page.close()
+        ctx.close()
+        host.close()
+
+
+def test_player_without_cross_origin_isolation_is_blocked(browser, server_url, room):
+    ctx = browser.new_context()
     ctx.add_init_script("Object.defineProperty(self, 'crossOriginIsolated', { value: false, configurable: true });")
     page = ctx.new_page()
     try:
         page.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
         expect(page.locator("#unsupported-browser")).to_be_visible(timeout=10000)
-        expect(page.locator("#unsupported-watch")).to_be_visible(timeout=10000)
+        expect(page.locator("#overlay")).to_be_hidden()
     finally:
         page.close()
         ctx.close()

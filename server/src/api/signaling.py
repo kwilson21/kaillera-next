@@ -949,6 +949,10 @@ async def _release_slot_locked(sid: str) -> str | None:
         return "Host can't switch to spectator"
     if len(room.spectators) >= MAX_SPECTATORS:
         return "Room spectator limit reached"
+    ip_h = ip_hash_for_sid(sid)
+    same_ip_count = sum(1 for s in room.spectators.values() if ip_hash_for_sid(s.get("socketId", "")) == ip_h)
+    if same_ip_count >= _PER_IP_SPECTATOR_CAP:
+        return "Spectator limit reached for your network"
 
     player_info = room.players.pop(player_id, None)
     if player_info is None:
