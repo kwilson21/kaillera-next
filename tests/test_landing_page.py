@@ -348,7 +348,7 @@ def test_an_older_stats_answer_never_replaces_a_newer_count(page, server_url):
     expect(page.locator("#board-live")).to_have_text("5 people playing right now")
 
 
-# ── Review round 2 (Astra, Fable) ───────────────────────────────────────────
+# ── Responsive layout and refresh ordering ───────────────────────────────────────────
 
 REFRESH = "document.dispatchEvent(new Event('visibilitychange'))"
 

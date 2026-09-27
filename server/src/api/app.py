@@ -10,6 +10,7 @@ V1 endpoints:
   GET  /ice-servers             WebRTC ICE server config
   GET  /play.html               play page with injected OG meta tags
   GET  /                        homepage with injected OG meta tags
+  GET  /api/landing-build       landing build id (landing Worker staleness check)
   GET  /api/cached-state/{h}    download cached save state
   POST /api/cache-state/{h}     upload save state to cache
   POST /api/session-log          HTTP fallback for session log flush
@@ -46,7 +47,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from src import db, state, state_cache, stats
+from src import db, landing_build, state, state_cache, stats
 from src.api import og_card, turn
 from src.api.og import (
     _ROM_SHARING_RAW,
@@ -398,6 +399,31 @@ def _asset_version() -> str:
     return version
 
 
+# ── Landing build id ──────────────────────────────────────────────────────────
+#
+# GET /api/landing-build lets the landing Worker (deploy/static/worker.js)
+# notice when its own cached copy of / and /join is stale: it compares this
+# id against the one baked into its own build at deploy time
+# (dist-landing/static/landing-build.json). Computed once from web/'s current
+# contents via server/src/landing_build.py — the same module
+# scripts/build_landing.py uses — and cached: the server's web/ directory
+# doesn't change at runtime in production, and this only needs to be cheap.
+
+_WEB_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
+_landing_build_id_cache: str | None = None
+
+
+def _get_landing_build_id() -> str:
+    """Returns the cached id, or raises if it can't be computed (unreadable
+    web/ directory). Never caches a failure — the id is one line, and a
+    transient read error shouldn't wedge the server into permanently
+    reporting itself broken to the landing Worker."""
+    global _landing_build_id_cache
+    if _landing_build_id_cache is None:
+        _landing_build_id_cache = landing_build.landing_build_id(_WEB_DIR)
+    return _landing_build_id_cache
+
+
 # ── WASM core auto-discovery + content hash ──────────────────────────────────
 #
 # The patched WASM core is served with `Cache-Control: immutable, max-age=1y`
@@ -720,6 +746,18 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/api/version")
     async def asset_version() -> dict:
         return {"version": _asset_version()}
+
+    # The landing Worker's staleness check (see `_get_landing_build_id`
+    # above). Same-origin through the Worker, so no public CORS is needed.
+    # On an unreadable web/ directory this 503s rather than returning an
+    # empty id — the Worker must be able to tell "can't compute" from "this
+    # is the id" without special-casing an empty string.
+    @app.get("/api/landing-build")
+    async def landing_build_endpoint() -> dict:
+        try:
+            return {"id": _get_landing_build_id()}
+        except (OSError, ValueError):
+            raise HTTPException(status_code=503, detail="landing build id unavailable") from None
 
     @app.get("/ice-servers")
     async def ice_servers(request: Request) -> list:

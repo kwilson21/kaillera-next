@@ -43,6 +43,8 @@ services:
         sync: false
       # Shared with the landing Worker (its PROXY_SECRET): lets the server trust
       # the visitor IP the Worker forwards in X-KN-Client-IP (ratelimit.py).
+      # May hold a comma-separated list ("new,old") to rotate the secret
+      # without a gap: the server trusts either while both are listed.
       - key: KN_PROXY_SECRET
         sync: false
       # Static landing page on another origin (hosting option B in

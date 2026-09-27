@@ -307,6 +307,36 @@ def test_health_is_fast_and_simple(client):
     assert body["status"] == "ok" and "rooms" in body
 
 
+def test_landing_build_id_matches_the_module_and_is_never_cached(client):
+    """The landing build endpoint returns the current uncached build id."""
+    from pathlib import Path
+
+    from src import landing_build
+
+    r = client.get("/api/landing-build")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
+    web_dir = Path(__file__).resolve().parents[1] / "web"
+    assert r.json() == {"id": landing_build.landing_build_id(web_dir)}
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_landing_build_id_503s_when_it_cant_be_computed(client, monkeypatch, error):
+    """An unreadable or invalid web directory returns 503 instead of a
+    fabricated empty build id."""
+    from src.api import app as appmod
+
+    monkeypatch.setattr(appmod, "_landing_build_id_cache", None)
+
+    def boom(_web_dir):
+        raise error("simulated unreadable or invalid web/ directory")
+
+    monkeypatch.setattr(appmod.landing_build, "landing_build_id", boom)
+    r = client.get("/api/landing-build")
+    assert r.status_code == 503
+    assert r.json() != {"id": ""}
+
+
 # ── Keepalive flag (off unless KEEPALIVE_SECONDS is set) ─────────────────────
 
 
@@ -364,7 +394,7 @@ def test_play_page_uses_live_card_only_for_listed_room_with_frame(client, sig):
     assert client.get("/room/NOPE/card.jpg").status_code == 404
 
 
-# ── Review fixes: restart recovery, spectator-only rooms, host transfer ──────
+# ── Restart recovery, spectator-only rooms, and host transfer ──────
 
 
 def test_token_key_is_stable_across_restarts_when_salt_is_set():
@@ -435,7 +465,7 @@ def test_frame_declaring_huge_dimensions_is_refused_without_decoding(sig):
     assert signaling.room_frame("ROOM1") is None
 
 
-# ── Second review round ──────────────────────────────────────────────────────
+# ── Room lifecycle edge cases ──────────────────────────────────────────────────────
 
 
 def test_host_leaving_with_only_spectators_unlists_the_room(sig):
