@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.57.0",
+    "date": "2026-09-27",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "room overlay and demo page in direction A (M3) (#34)"
+      }
+    ]
+  },
+  {
     "version": "0.56.2",
     "date": "2026-09-27",
     "changes": [
