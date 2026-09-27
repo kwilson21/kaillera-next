@@ -18,7 +18,7 @@
  * it reads 'stale', pages and their files are proxied to the origin instead
  * of served from assets, with a short timeout and a fallback back to this
  * Worker's own copy so a napping origin never costs a visitor a blank tab
- * (see `proxyLanding`). See the README's "remaining edge" note for the one
+ * (see `proxyLanding`). See the README's "First-request edge" note for the one
  * case (a brand-new isolate, first request, verdict still 'unknown') this
  * doesn't fully cover.
  *
@@ -29,14 +29,9 @@
 // pages' scripts are `defer`, so one proxied script behind a napping server
 // would hold up the waking screen itself.
 //
-// NOT here (and so always proxied straight to the origin, never cached as
-// assets): /static/version.json and /static/changelog.json. CI's
-// version-bump workflow rewrites both on nearly every merge, which would
-// move the landing build id — and so flip this Worker to 'stale' — on
-// nearly every merge too (server/src/landing_build.py has the full reason).
-// Only web/static/version.js reads them, and only for the footer version
-// label and changelog modal, both fetches wrapped in try/catch and
-// non-blocking; nothing on the waking screen depends on them.
+// version.json and changelog.json are packaged for instant footer fallback,
+// but deliberately excluded from the landing build id because CI rewrites
+// them on nearly every merge (server/src/landing_build.py has the reason).
 const PAGES = { '/': '/index.html', '/index.html': '/index.html', '/join': '/join.html' };
 const ASSET_PREFIXES = ['/static/fonts/'];
 const ASSET_FILES = new Set([
@@ -48,6 +43,8 @@ const ASSET_FILES = new Set([
   '/static/version.js',
   '/static/version-guard.js',
   '/static/feedback.js',
+  '/static/version.json',
+  '/static/changelog.json',
   '/static/favicon.svg',
   '/static/og/home.png', // the generic link-preview image: crawlers fetch it while the server naps
   '/static/landing-build.json', // this build's id — see refreshFreshness()
@@ -107,6 +104,7 @@ async function previewPage(request, env, url) {
       ),
       signal: ctl.signal,
     });
+    originSucceeded();
     if (res.ok) {
       // The game server builds absolute URLs from the host it was asked on
       // (the origin's); point them at the public host so the card and the
@@ -190,6 +188,7 @@ async function proxy(request, env, url) {
   const req = new Request(target, request);
   forwardedHeaders(request, env, req.headers);
   const res = await fetch(req);
+  originSucceeded();
   return rewriteOriginHost(res, env, url, request.method);
 }
 
@@ -201,8 +200,15 @@ async function proxy(request, env, url) {
 // timeout or any error this returns null so the caller falls back to this
 // Worker's own (possibly outdated, but instant) copy instead.
 const STALE_PROXY_TIMEOUT_MS = 3000;
+const ORIGIN_SLOW_COOLDOWN_MS = 30_000;
+let _originSlowUntil = 0;
+
+function originSucceeded() {
+  _originSlowUntil = 0;
+}
 
 async function proxyLanding(request, env, url) {
+  if (Date.now() < _originSlowUntil) return null;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), STALE_PROXY_TIMEOUT_MS);
   try {
@@ -210,8 +216,11 @@ async function proxyLanding(request, env, url) {
     const req = new Request(target, request);
     forwardedHeaders(request, env, req.headers);
     const res = await fetch(req, { signal: ctl.signal });
+    originSucceeded();
+    if (!res.ok && res.status !== 304) return null;
     return await rewriteOriginHost(res, env, url, request.method);
   } catch {
+    _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
     return null; // timed out or errored: caller falls back to our own copy
   } finally {
     clearTimeout(timer);
@@ -255,14 +264,16 @@ let _inFlight = null;
 
 let _ownBuildIdPromise = null;
 
-function ownBuildId(env) {
+async function ownBuildId(env) {
   if (!_ownBuildIdPromise) {
     _ownBuildIdPromise = env.ASSETS.fetch(new Request('https://landing-assets.internal/static/landing-build.json'))
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => (body && typeof body.id === 'string' && body.id ? body.id : null))
       .catch(() => null);
   }
-  return _ownBuildIdPromise;
+  const id = await _ownBuildIdPromise;
+  if (!id) _ownBuildIdPromise = null;
+  return id;
 }
 
 async function refreshFreshness(env) {
@@ -275,6 +286,7 @@ async function refreshFreshness(env) {
       try {
         const res = await fetch(new URL('/api/landing-build', env.ORIGIN), { signal: ctl.signal });
         if (res.ok) {
+          originSucceeded();
           const body = await res.json().catch(() => null);
           // An empty string or a non-string id means the origin couldn't
           // compute its own id (server/src/api/app.py 503s on this too, but
@@ -352,12 +364,14 @@ export default {
     const isGettable = method === 'GET' || method === 'HEAD';
 
     if (page && isGettable) {
+      let previewFailed = false;
       if (url.pathname === '/join' && CRAWLER.test(request.headers.get('User-Agent') || '')) {
         const preview = await previewPage(request, env, url);
         if (preview) return preview;
+        previewFailed = true;
       }
       const verdict = await currentVerdict(env, ctx, true);
-      if (verdict === 'stale') {
+      if (verdict === 'stale' && !previewFailed) {
         const proxied = await proxyLanding(request, env, url);
         if (proxied) return proxied;
       }
@@ -365,6 +379,14 @@ export default {
       return staticPage(res, url);
     }
     if (isAsset) {
+      if (url.pathname === '/static/landing-build.json') {
+        return withHeaders(await env.ASSETS.fetch(request), false);
+      }
+      if (url.pathname === '/static/version.json' || url.pathname === '/static/changelog.json') {
+        const proxied = await proxyLanding(request, env, url);
+        if (proxied) return proxied;
+        return withHeaders(await env.ASSETS.fetch(request), false);
+      }
       const verdict = await currentVerdict(env, ctx, false);
       if (verdict === 'stale') {
         const proxied = await proxyLanding(request, env, url);

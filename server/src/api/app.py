@@ -756,7 +756,7 @@ def create_app(lifespan=None) -> FastAPI:
     async def landing_build_endpoint() -> dict:
         try:
             return {"id": _get_landing_build_id()}
-        except OSError:
+        except (OSError, ValueError):
             raise HTTPException(status_code=503, detail="landing build id unavailable") from None
 
     @app.get("/ice-servers")

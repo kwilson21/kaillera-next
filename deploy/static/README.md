@@ -112,15 +112,13 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   - `server/src/landing_build.py` computes a "landing build id" — a stable
     content hash over exactly the files the Worker serves from assets (the
     two pages, the files they reference, `EXTRA`, and every self-hosted
-    font). `static/version.json` and `static/changelog.json` are excluded on
-    purpose: CI's version-bump workflow rewrites both on nearly every merge
-    to `main`, and a `stale` verdict never reverts on its own while Render is
-    asleep (a timeout/error leaves the verdict alone, it doesn't clear it),
-    so including them would cost visitors a ~1-minute proxy wait after
-    almost every release. Both files are instead always proxied straight to
-    the origin (never served from this Worker's assets), which is harmless:
-    only `web/static/version.js` reads them, for the footer version label
-    and changelog modal, both fetches wrapped in try/catch and non-blocking.
+    font). `static/version.json` and `static/changelog.json` are excluded from
+    that id on purpose: CI's version-bump workflow rewrites both on nearly
+    every merge to `main`, which should not mark the landing bundle stale.
+    They are still packaged as fallback assets. The Worker first tries the
+    origin for current release metadata, then uses its own copy immediately
+    when the origin is unavailable or in the 30-second slow-origin cooldown,
+    so the footer and changelog do not wait for Render to wake.
     `scripts/build_landing.py` imports this module (rather than duplicating
     the logic) to write the *build's own* id into
     `dist-landing/static/landing-build.json`, and the game server imports
@@ -145,7 +143,7 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     exactly alone (it never overwrites `known` with a stale snapshot taken
     when the check started) — so a napping server, or one that briefly can't
     compute its own id, is never mistaken for a stale Worker.
-  - A **page** request (`/`, `/index.html`, `/join` — never an asset
+  - **First-request edge.** A **page** request (`/`, `/index.html`, `/join` — never an asset
     request) made while the verdict is still `unknown`, which only happens
     on a fresh isolate's first requests, waits for that first in-flight
     check, capped at ~300 ms, before deciding. This narrows but doesn't
@@ -160,9 +158,15 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     `ASSET_FILES`/font path are proxied to the origin instead of served from
     assets — the pages the game server serves itself, OG tags and `?v=`
     cache-busting included, which is fine. That proxy has its own short
-    timeout (~3 s); on a timeout or error it falls back to this Worker's own
+    timeout (~3 s); on a non-success response, timeout, or error it falls
+    back to this Worker's own
     (possibly outdated, but instant) copy rather than leaving the visitor on
-    a blank tab. This timeout applies only to landing pages/assets in stale
+    a blank tab. After a timeout or network error the isolate skips origin
+    attempts for 30 seconds and serves its bundled copies immediately; any
+    successful proxy or freshness request clears that cooldown. Thus a stale
+    bundle remains in stale mode until it is redeployed, but a sleeping origin
+    costs at most one short probe per isolate per cooldown rather than one
+    delay for every page and render-blocking asset. This timeout applies only to landing pages/assets in stale
     mode — the API, Socket.IO, WebSocket upgrades and `/play.html` are
     always proxied with no timeout, exactly as before. A real redeploy
     (`npx wrangler deploy -c wrangler.landing.jsonc`) is still the way to
@@ -201,10 +205,11 @@ one the origin will compute too):
 ```sh
 git -C <clean checkout of main> pull
 python scripts/build_landing.py   # prints "... build id <id>"
-curl https://kaillera-next.thesuperhuman.us/api/landing-build   # should echo the same id
+curl https://kaillera-next.thesuperhuman.us/static/landing-build.json # deployed Worker id
+curl https://kaillera-next.thesuperhuman.us/api/landing-build         # origin id
 ```
 
-A mismatch means either the deploy didn't pick up the latest `web/` (rerun
+All three ids must match. A mismatch means either the deploy didn't pick up the latest `web/` (rerun
 the build and redeploy) or the checkout used for the build wasn't actually
 up to date with `main`.
 
@@ -272,10 +277,12 @@ deploy re-adds it. With the route gone, traffic reaches Render directly,
 since DNS for the hostname already points there (a proxied CNAME to
 `kaillera-next.onrender.com`). A change to `web/index.html`, `web/join.html`
 or the files they load no longer needs an immediate redeploy of this
-Worker: its freshness check (above) notices within about a minute and
-proxies to the game server until the next `npx wrangler deploy` picks up
-the new copies. Redeploy anyway for instant static pages rather than a
-minute of proxying.
+Worker: its freshness check (above) notices within about a minute and then
+tries the game server until the next `npx wrangler deploy` picks up the new
+copies. Stale mode lasts until that redeploy. When Render naps, one request
+may spend up to three seconds probing it; the isolate then serves bundled
+copies instantly for a 30-second cooldown. Redeploy to restore consistently
+instant, current static pages.
 
 ## Invite links
 

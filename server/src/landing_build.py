@@ -23,15 +23,12 @@ PAGES = ["index.html", "join.html"]
 EXTRA = [
     "static/og/home.png",  # the generic link-preview image (og:image)
 ]
-# NOT in EXTRA, and NOT served from the Worker's assets: static/version.json
-# and static/changelog.json. CI's version-bump workflow (scripts/bump-version.sh)
-# rewrites both on nearly every merge to main, which would move the landing
-# build id (and so flip the Worker to 'stale') on nearly every merge too —
-# and 'stale' never reverts on its own while Render naps, so visitors would
-# eat a ~1-minute proxy wait after almost every release. Only version.js
-# reads them (footer version + changelog modal), both fetches wrapped in
-# try/catch and non-blocking, so proxying them straight to the origin is
-# harmless — see deploy/static/worker.js and its ASSET_FILES.
+# NOT in EXTRA, but packaged separately as Worker fallback assets:
+# static/version.json and static/changelog.json. CI rewrites both on nearly
+# every merge, so including them would mark the landing bundle stale after
+# releases which did not change the landing page. The Worker tries the origin
+# first for current metadata, then uses its instant bundled copy while the
+# origin is unavailable; see scripts/build_landing.py and worker.js.
 
 _STATIC_REF = re.compile(r'(?:src|href)="(/static/[^"?#]+)"')
 

@@ -68,3 +68,14 @@ def test_changing_one_landing_file_changes_the_id(tmp_path):
     changed_file.write_bytes(changed_file.read_bytes() + b"\n/* edited */\n")
     after_asset_edit = landing_build.landing_build_id(tmp_path)
     assert after_asset_edit != after_edit
+
+
+def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
+    """Frequently rewritten footer metadata must not make landing stale."""
+    _copy_landing_source(tmp_path)
+    before = landing_build.landing_build_id(tmp_path)
+    for rel in ("static/version.json", "static/changelog.json"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"changed": true}')
+    assert landing_build.landing_build_id(tmp_path) == before

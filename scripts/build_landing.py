@@ -29,11 +29,13 @@ DIST = REPO / "dist-landing"
 sys.path.insert(0, str(REPO / "server"))
 from src.landing_build import EXTRA, PAGES, landing_build_id, referenced  # noqa: E402
 
+FALLBACK_METADATA = {"static/version.json", "static/changelog.json"}
+
 
 def main() -> None:
     if DIST.exists():
         shutil.rmtree(DIST)
-    files: set[str] = set(EXTRA)
+    files: set[str] = set(EXTRA) | FALLBACK_METADATA
     for page in PAGES:
         html = (WEB / page).read_text()
         files |= referenced(html)

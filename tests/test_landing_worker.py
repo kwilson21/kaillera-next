@@ -125,16 +125,14 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
 
 
-def test_version_and_changelog_json_are_proxied_not_served_from_assets():
-    """review finding P1: static/version.json and static/changelog.json are
-    rewritten on nearly every merge by CI's version-bump workflow, which
-    would flip the freshness verdict to 'stale' on nearly every merge too.
-    They're always proxied to the origin instead of cached as assets. Fails
-    without the fix: the old ASSET_FILES listed both, so they'd come back
-    'asset:...' here instead of 'origin:...'."""
+def test_version_and_changelog_prefer_origin_and_fall_back_to_assets():
+    """Release metadata is current when Render is up and instant when down."""
     r = _run(origin_up=True)
     assert _body(r, "/static/version.json") == "origin:/static/version.json og=https://game.example/card"
     assert _body(r, "/static/changelog.json") == "origin:/static/changelog.json og=https://game.example/card"
+    down = _run(origin_up=False)
+    assert _body(down, "/static/version.json") == "asset:/static/version.json"
+    assert _body(down, "/static/changelog.json") == "asset:/static/changelog.json"
 
 
 def test_everything_else_goes_to_the_game_server_untouched():
@@ -183,6 +181,8 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert (dist / "index.html").is_file() and (dist / "join.html").is_file()
     assert (dist / "static" / "join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
+    assert (dist / "static" / "version.json").is_file()
+    assert (dist / "static" / "changelog.json").is_file()
     assert not (dist / "static" / "play.js").exists()
     build_json = dist / "static" / "landing-build.json"
     assert build_json.is_file()
@@ -377,6 +377,7 @@ def test_real_runtime_decodes_and_reencodes_gzip_html_correctly():
         )
         with urllib.request.urlopen(head_req, timeout=10) as r:
             assert r.status == 200
+            assert r.read() == b""
     finally:
         proc.terminate()
         proc.wait(timeout=10)
@@ -996,7 +997,9 @@ def test_page_requests_wait_briefly_on_unknown_while_assets_never_do():
 
 STALE_FALLBACK_HARNESS = r"""
 const worker = (await import(process.argv[1])).default;
+const failure = process.argv[2];
 const ownId = 'aaaa1111aaaa1111';
+let landingOriginFetches = 0;
 const assets = {
   fetch: async (req) => {
     const p = new URL(req.url).pathname;
@@ -1012,6 +1015,10 @@ globalThis.fetch = async (req, init) => {
     // Conclusively stale, resolved fast, so the verdict is 'stale' by the
     // time the requests below run.
     return new Response(JSON.stringify({ id: 'bbbb2222bbbb2222' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (!url.endsWith('/list')) {
+    landingOriginFetches++;
+    if (failure === '503') return new Response('unavailable', { status: 503 });
   }
   // Every other origin fetch hangs until the caller's own AbortController
   // fires — simulating a napping/unreachable origin once the verdict is
@@ -1049,11 +1056,12 @@ try {
   race = 'errored:' + e.message;
 }
 
-console.log(JSON.stringify({ page, asset, race }));
+console.log(JSON.stringify({ page, asset, race, landingOriginFetches }));
 """
 
 
-def test_stale_mode_falls_back_to_the_worker_copy_on_timeout_but_not_for_api():
+@pytest.mark.parametrize("failure", ["timeout", "503"])
+def test_stale_mode_falls_back_to_the_worker_copy_on_origin_failure(failure):
     """review finding P1 (stale-mode timeout + fallback): while the verdict
     is 'stale', a page/landing-asset proxy that times out falls back to this
     Worker's own copy instead of hanging or erroring out to the visitor. A
@@ -1065,7 +1073,7 @@ def test_stale_mode_falls_back_to_the_worker_copy_on_timeout_but_not_for_api():
     if not node:
         pytest.skip("node not installed")
     res = subprocess.run(
-        [node, "--input-type=module", "-e", STALE_FALLBACK_HARNESS, WORKER.as_uri()],
+        [node, "--input-type=module", "-e", STALE_FALLBACK_HARNESS, WORKER.as_uri(), failure],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1075,6 +1083,7 @@ def test_stale_mode_falls_back_to_the_worker_copy_on_timeout_but_not_for_api():
     assert out["page"].startswith("asset:")
     assert out["asset"].startswith("asset:")
     assert out["race"] == "still-hanging"
+    assert out["landingOriginFetches"] == (1 if failure == "timeout" else 3)
 
 
 # ── Host rewrite in proxied HTML (finding 2) ──────────────────────────────────
