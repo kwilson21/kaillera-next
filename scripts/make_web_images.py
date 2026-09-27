@@ -22,34 +22,36 @@ def encode(source: Path, destination: Path, limit: int) -> tuple[int, int, int]:
     with Image.open(source) as opened:
         image = ImageOps.exif_transpose(opened).convert("RGB")
     scale = 1.0
-    while scale >= 0.35:
-        candidate = (
-            image
-            if scale == 1
-            else image.resize(
-                (
-                    max(1, round(image.width * scale)),
-                    max(1, round(image.height * scale)),
-                ),
-                Image.Resampling.LANCZOS,
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    try:
+        while scale >= 0.35:
+            candidate = (
+                image
+                if scale == 1
+                else image.resize(
+                    (
+                        max(1, round(image.width * scale)),
+                        max(1, round(image.height * scale)),
+                    ),
+                    Image.Resampling.LANCZOS,
+                )
             )
-        )
-        for quality in range(86, 34, -4):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            candidate.save(destination, "WEBP", quality=quality, method=6)
-            size = destination.stat().st_size
-            if size <= limit:
-                return candidate.width, candidate.height, size
-        scale *= 0.85
-    destination.unlink(missing_ok=True)
-    raise RuntimeError(f"could not fit {source.name} within {limit // 1024} KiB")
+            for quality in range(86, 34, -4):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                candidate.save(temporary, "WEBP", quality=quality, method=6)
+                size = temporary.stat().st_size
+                if size <= limit:
+                    os.replace(temporary, destination)
+                    return candidate.width, candidate.height, size
+            scale *= 0.85
+        raise RuntimeError(f"could not fit {source.name} within {limit // 1024} KiB")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "captures", nargs="?", help="directory containing source captures"
-    )
+    parser.add_argument("captures", nargs="?", help="directory containing source captures")
     args = parser.parse_args()
     raw = args.captures or os.environ.get("KN_CAPTURE_DIR")
     if not raw:
@@ -57,11 +59,7 @@ def main() -> None:
     source_dir = Path(raw).expanduser()
     if not source_dir.is_dir():
         parser.error(f"not a directory: {source_dir}")
-    sources = sorted(
-        p
-        for p in source_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in EXTENSIONS
-    )
+    sources = sorted(p for p in source_dir.iterdir() if p.is_file() and p.suffix.lower() in EXTENSIONS)
     if not sources:
         parser.error(f"no supported images in {source_dir}")
     for source in sources:

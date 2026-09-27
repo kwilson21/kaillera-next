@@ -89,7 +89,8 @@ def _build_card_html(
         bg_css = f'background-image:url("data:image/{mime};base64,{encoded}");'
 
     is_homepage = room_name is None and game_id is None
-    host = _html_escape(room_name or (player_names or ["A friend"])[0])
+    host_name = room_name or (player_names or [None])[0]
+    host = _html_escape(host_name) if host_name else None
     game = _html_escape(game_info["name"] if game_info else game_id or "a retro game")
     if is_homepage:
         eyebrow = "PLAY TOGETHER"
@@ -98,7 +99,10 @@ def _build_card_html(
         footer = "Free · No install · Bring your own ROM"
     else:
         eyebrow = "WATCH LIVE" if spectate else "YOU'RE INVITED"
-        headline = f"Come watch {host}'s room" if spectate else f"{host} invited you to play {game}"
+        if spectate:
+            headline = f"Come watch {host}'s room" if host else f"Watch {game} live"
+        else:
+            headline = f"{host} invited you to play {game}" if host else f"You're invited to play {game}"
         detail = "Live in your browser" if spectate else "Up to 4 players · in your browser"
         footer = "Free · No install · Bring your own ROM"
 

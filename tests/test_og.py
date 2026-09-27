@@ -65,17 +65,29 @@ def test_game_card_uses_inline_logo_and_non_repeating_detail():
     """Photo-backed cards keep the logo out of the artwork and name the game once."""
     from src.api.og import _build_card_html
 
-    play = _build_card_html("A friend", "ssb64", spectate=False)
+    play = _build_card_html(None, "ssb64", spectate=False)
     assert '<svg class="logo"' not in play
     assert '<svg class="footer-logo"' in play
     assert 'role="img" aria-label="kaillera-next"' in play
     assert "Up to 4 players · in your browser" in play
+    assert "You're invited to play Super Smash Bros. 64" in play
     assert play.count("Super Smash Bros. 64") == 1
     assert "kaillera-next ·" not in play
 
-    watch = _build_card_html("A friend", "ssb64", spectate=True)
+    watch = _build_card_html(None, "ssb64", spectate=True)
     assert "Live in your browser" in watch
-    assert watch.count("Super Smash Bros. 64") == 0
+    assert "Watch Super Smash Bros. 64 live" in watch
+
+
+def test_game_card_keeps_named_host_copy():
+    """Room-specific cards still identify their host."""
+    from src.api.og import _build_card_html
+
+    play = _build_card_html("Alice", "ssb64", spectate=False)
+    assert "Alice invited you to play Super Smash Bros. 64" in play
+
+    watch = _build_card_html("Alice", "ssb64", spectate=True)
+    assert "Come watch Alice's room" in watch
 
 
 def test_home_card_keeps_corner_logo_and_copy():
