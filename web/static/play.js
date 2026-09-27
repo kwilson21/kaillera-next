@@ -640,6 +640,7 @@
     });
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
+      if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
       setTimeout(() => {
         if (!socket.connected) _showReconnecting();
@@ -1288,12 +1289,13 @@
     // Symmetric with the claim-slot case above — the room stays put, no
     // reload, no leave-room.
     const nowSpectator = !nowPlayer && Object.values(spectators).some((s) => s.socketId === socket.id);
+    const unsupportedReleaseSucceeded = nowSpectator && _unsupportedReleasePending;
     if (nowSpectator) _unsupportedReleasePending = false;
     if (!isSpectator && nowSpectator) {
       isSpectator = true;
       window._isSpectator = true;
       if (!gameRunning) {
-        showToast("Watching — you'll see the game when it starts");
+        if (!unsupportedReleaseSucceeded) showToast("Watching — you'll see the game when it starts");
         showOverlay();
       }
     }

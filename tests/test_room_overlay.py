@@ -451,6 +451,9 @@ def test_unsupported_streaming_guest_leaves_when_release_is_refused(browser, ser
         expect(guest.locator("#unsupported-browser")).to_be_visible(timeout=10000)
         expect(guest.locator("#toast-container")).not_to_contain_text("you're now watching")
         expect(host.locator('.player-slot[data-slot="1"] .name')).not_to_contain_text("Guest", timeout=10000)
+        guest.wait_for_timeout(3000)
+        expect(guest.locator("#reconnecting-banner")).to_be_hidden()
+        expect(guest.locator("#error-msg")).to_be_hidden()
     finally:
         host.close()
         for watcher in watchers:
