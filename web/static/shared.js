@@ -867,11 +867,26 @@
     } catch (_) {}
   };
 
+  // Random-ish id for a ring instance, regenerated on every clear(). Not
+  // cryptographic — it only needs to be extremely unlikely to collide with
+  // the previous epoch for the same (match_id, slot), which a reload,
+  // reconnect, or slot-reuse otherwise looks like to the server (see
+  // db.append_session_log / migration 0008).
+  const _genRingEpoch = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+  // A single flush's entries can't be allowed to approach the 4MB Socket.IO
+  // max_http_buffer_size on its own — SYNC_LOG_FLUSH_MAX_ENTRIES caps the
+  // *count*, but a run of unusually verbose lines could still blow the byte
+  // budget well before that cap is reached. 1MB leaves ample room for the
+  // summary/context/inputAudit fields also riding in the same payload.
+  const _ENTRIES_AFTER_DEFAULT_MAX_BYTES = 1024 * 1024;
+
   const createSyncLogRing = (maxSize) => {
     const ring = new Array(maxSize);
     let head = 0;
     let count = 0;
     let seq = 0;
+    let epoch = _genRingEpoch();
     return {
       push: (entry) => {
         ring[head] = { seq: seq++, ...entry };
@@ -887,12 +902,27 @@
         }
         return lines.join('\n');
       },
-      getStructuredEntries: () => {
+      // Delta flush support: entries with seq > `afterSeq`, oldest first,
+      // capped at `max` entries and (independently) at `maxBytes` estimated
+      // JSON bytes — whichever limit is hit first. At least one entry is
+      // always returned once any qualify, even if it alone exceeds
+      // maxBytes, so a single oversized line can't stall the flush cursor
+      // forever. The remainder (if any) is picked up on the next call once
+      // the caller advances `afterSeq` past what it has sent.
+      entriesAfter: (afterSeq, max, maxBytes = _ENTRIES_AFTER_DEFAULT_MAX_BYTES) => {
         const entries = [];
+        let bytes = 0;
         const start = count < maxSize ? 0 : head;
         for (let i = 0; i < count; i++) {
           const e = ring[(start + i) % maxSize];
-          entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
+          if (e.seq > afterSeq) {
+            // Estimate: the message plus ~64 bytes of JSON for seq, t and f.
+            const size = (e.msg?.length || 0) + 64;
+            if (entries.length > 0 && bytes + size > maxBytes) break;
+            entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
+            bytes += size;
+            if (entries.length >= max) break;
+          }
         }
         return entries;
       },
@@ -900,9 +930,13 @@
         head = 0;
         count = 0;
         seq = 0;
+        epoch = _genRingEpoch();
       },
       get length() {
         return count;
+      },
+      get epoch() {
+        return epoch;
       },
     };
   };
