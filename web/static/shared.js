@@ -985,6 +985,31 @@
     return filter;
   };
 
+  // Decide whether a stepOneFrame() runner invocation actually emulated the
+  // frame it was called for (#62 — click-during-match desync). A captured
+  // Emscripten MainLoop runner goes stale when a DOM focus change fires
+  // MainLoop.pause()/resume() between capture and use: the stale runner's
+  // closure still points at an old `currentlyRunningMainloop` id, so
+  // checkIsRunning() returns immediately without calling the mainloop func
+  // and without scheduling its successor via requestAnimationFrame. Two
+  // independent signals catch this:
+  //   - `rescheduled`: whether a fresh runner got captured via the
+  //     overrideRAF interceptor during the call (a real step always
+  //     schedules its own next frame).
+  //   - `cycleBefore`/`cycleAfter`: CP0 Count in ms (kn_get_cycle_time_ms),
+  //     sampled immediately around the call. A real step resets/advances it;
+  //     a no-op step leaves it untouched.
+  // Pure so it's testable without a WASM/DOM harness — see
+  // tests/step-runner-classify.test.mjs.
+  const classifyRunnerStep = (rescheduled, cycleBefore, cycleAfter) => {
+    // Stock core (no kn_get_cycle_time_ms export): can't distinguish stale
+    // from legit mid-frame pause by cycle time. Treat as emulated — this is
+    // the pre-#62 behavior (recapture-only, no re-step) for that fallback.
+    if (cycleBefore == null || cycleAfter == null) return 'unknown';
+    if (!rescheduled && cycleAfter === cycleBefore) return 'stale';
+    return 'emulated';
+  };
+
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     SSB64_HASH: SSB64_HASH,
@@ -1012,5 +1037,6 @@
     encodeInput,
     decodeInput,
     createSyncLogRing,
+    classifyRunnerStep,
   };
 })();
