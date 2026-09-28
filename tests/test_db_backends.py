@@ -6,7 +6,7 @@ Run: cd server && uv run --extra dev pytest ../tests/test_db_backends.py -q
 import pytest
 from db_test_support import make_backend, run_async
 
-BACKENDS = ["sqlite"]
+BACKENDS = ["sqlite", "d1"]
 
 
 @pytest.fixture(autouse=True, scope="session")
