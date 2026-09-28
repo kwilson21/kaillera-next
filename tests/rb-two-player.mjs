@@ -23,13 +23,22 @@
  *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
- *   HOST_BROWSER=webkit   Run the host page in Playwright WebKit instead of
- *     Chromium (the guest always stays Chromium). Because a WebKit host and
- *     a Chromium guest boot the WASM core on different JIT engines, the
- *     guest legitimately diverges during boot and requests the host's state
- *     (`BOOT-SYNC: guest requesting host state`, then `sync #1 applied`);
- *     frames before that applied sync are excluded from the hash compare,
- *     the same way FREEZE mode excludes frames before its last resync.
+ *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
+ *     WebKit instead of Chromium (each defaults to Chromium independently,
+ *     so either or both can be WebKit; the Chromium default args —
+ *     swiftshader software GL — are unchanged). When the two resolved
+ *     engines differ (e.g. HOST_BROWSER=webkit with GUEST_BROWSER unset),
+ *     the WASM core boots on different JIT engines, the guest legitimately
+ *     diverges during boot and requests the host's state (`BOOT-SYNC: guest
+ *     requesting host state`, then `sync #1 applied`); frames before that
+ *     applied sync are excluded from the hash compare, the same way FREEZE
+ *     mode excludes frames before its last resync. When the two engines
+ *     match (including WebKit on both sides), no such exclusion applies —
+ *     boot-window frames are compared like any other, on the same basis as
+ *     the Chromium/Chromium default. Chromium software (swiftshader) GL
+ *     caps two co-located emulators well under 60fps on some machines;
+ *     WebKit on both sides can use the real GPU and is the closer match to
+ *     the reported prod case (iOS Safari, which is WebKit).
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
  *     setInterval-driven tick callbacks to at most once per 33ms (a plain
  *     JS wrapper around window.setInterval, installed via an init script),
@@ -93,6 +102,7 @@ const FREEZE_MS = FREEZE_HOST_MS || FREEZE_GUEST_MS;
 const OUT = process.env.OUT || '/tmp/two-player';
 const QUERY = process.env.KN_QUERY || '';
 const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
+const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
@@ -100,15 +110,27 @@ fs.mkdirSync(OUT, { recursive: true });
 const room = 'TP' + Math.random().toString(36).slice(2, 8).toUpperCase();
 
 const HEADLESS = process.env.HEADED !== '1';
-const guestBrowser = await chromium.launch({
-  headless: HEADLESS,
-  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-  args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'],
-});
-// HOST_BROWSER=webkit: the host runs a different JS engine/JIT than the
-// guest, which is the realistic case for two different players' devices.
-// Falls back to the same Chromium instance when unset.
-const hostBrowser = HOST_BROWSER === 'webkit' ? await webkit.launch({ headless: HEADLESS }) : guestBrowser;
+// Chromium args are unchanged from before GUEST_BROWSER existed — still the
+// default for either side, still forced onto swiftshader software GL.
+// Launched lazily (at most once) so a WebKit/WebKit run doesn't pay for an
+// unused Chromium instance; the default (both sides unset) launches exactly
+// one Chromium shared by both pages, same as before this knob existed.
+let _chromiumBrowser = null;
+const chromiumBrowser = async () =>
+  (_chromiumBrowser ??= await chromium.launch({
+    headless: HEADLESS,
+    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'],
+  }));
+let _webkitBrowser = null;
+const webkitBrowser = async () => (_webkitBrowser ??= await webkit.launch({ headless: HEADLESS }));
+// HOST_BROWSER=webkit / GUEST_BROWSER=webkit: either side can run a
+// different JS engine/JIT than the other, the realistic case for two
+// different players' devices (real prod case: iOS Safari = WebKit). Both
+// default to Chromium independently, so the no-knobs default resolves both
+// to the single shared Chromium instance above, unchanged from before.
+const hostBrowser = HOST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
+const guestBrowser = GUEST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 
 const initScript = ({ lat, jitter }) => {
   // Simulated network: delay every outgoing DataChannel message.
@@ -433,13 +455,20 @@ fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
 // Freeze mode: peers legitimately diverge while the host is a phantom, so
 // only frames from the guest's last applied resync onward must match.
-// Cross-engine boot (HOST_BROWSER=webkit): a WebKit host and a Chromium
-// guest JIT the WASM core differently, so the guest legitimately diverges
-// during boot and requests the host's state (BOOT-SYNC ->
-// `sync #1 applied`); only frames from that applied sync onward must match,
-// the same exclusion mechanism as FREEZE mode's recoveredAt.
+// Cross-engine boot (HOST_BROWSER and GUEST_BROWSER resolve to different
+// engines): the WASM core JITs differently on each side, so the guest
+// legitimately diverges during boot and requests the host's state
+// (BOOT-SYNC -> `sync #1 applied`); only frames from that applied sync
+// onward must match, the same exclusion mechanism as FREEZE mode's
+// recoveredAt. When both sides resolve to the SAME engine (including
+// WebKit/WebKit), this does NOT apply — boot-window frames are compared
+// like any other frame, same as the Chromium/Chromium default. Never
+// widen this for a same-engine run: a same-engine boot is supposed to be
+// deterministic from the start, so a same-engine mismatch there is a real
+// signal, not the expected cross-JIT noise this exclusion exists for.
+const crossEngine = HOST_BROWSER !== GUEST_BROWSER;
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
-const bootSyncFrame = HOST_BROWSER === 'webkit' && resyncs.length ? resyncs[0] : 0;
+const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
 const recoveredAt = FREEZE_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : bootSyncFrame;
 let both = 0,
   gpMis = 0,
@@ -593,7 +622,9 @@ const summary = {
   ...(FREEZE_MS > 0
     ? { freezeHostMs: FREEZE_HOST_MS, freezeGuestMs: FREEZE_GUEST_MS, guestResyncs: resyncs, comparedFrom: recoveredAt }
     : {}),
-  ...(HOST_BROWSER === 'webkit' ? { hostBrowser: HOST_BROWSER, bootSyncFrame } : {}),
+  ...(HOST_BROWSER !== 'chromium' || GUEST_BROWSER !== 'chromium'
+    ? { hostBrowser: HOST_BROWSER, guestBrowser: GUEST_BROWSER, crossEngine, ...(crossEngine ? { bootSyncFrame } : {}) }
+    : {}),
   ...(THROTTLE_GUEST ? { throttleGuest: true } : {}),
   ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
   gameFps,
@@ -621,8 +652,10 @@ const summary = {
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
-await guestBrowser.close();
-if (hostBrowser !== guestBrowser) await hostBrowser.close();
+// Close each distinct browser instance once (host and guest may share one,
+// e.g. the Chromium/Chromium default, or both resolve to the one WebKit
+// instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
+for (const b of new Set([hostBrowser, guestBrowser])) await b.close();
 // A freeze makes deep mispredictions and skipped rollbacks expected before
 // the resync; what must hold is that the resync happened, fixed it, and held:
 // no integrity events once recovery settled (each peer's lines after its last
