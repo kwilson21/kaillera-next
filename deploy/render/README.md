@@ -79,6 +79,21 @@ database, which Render also wipes. With them, screenshot bytes go to R2 under
      KN_R2_LIVE=1 uv run --extra dev pytest ../tests/test_blobstore.py -q -k live)
    ```
 
+## Log retention
+
+The server sweeps old logs a minute after it starts and every 6 hours
+(`src/retention.py`). Defaults work; override in Render → Environment:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LOG_RETENTION_DAYS` | 7 | Normal matches are deleted this long after they end; resolved flagged matches this long after they're resolved |
+| `FLAGGED_STALE_DAYS` | 180 | Flagged matches nobody has resolved or looked at are deleted after this long |
+| `BUDGET_AUTO_FLAGGED_BYTES` | 209715200 (200 MB) | Past this much flagged data, automatic flags are recorded but no longer keep the match; feedback flags always do |
+
+A match is flagged when its logs show a crash, freeze or desync, a client
+reports a WASM crash, a vision check finds a visual desync, or a player sends
+a bug report about it.
+
 ## Pointing the domain at Render (owner's OK)
 
 1. In Render: service → **Settings → Custom Domains → Add**

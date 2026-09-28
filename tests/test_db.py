@@ -743,17 +743,13 @@ async def _run_cleanup_sleep_order():
         if len(sleeps) >= 2:
             raise asyncio.CancelledError
 
-    execute_write = AsyncMock()
     with (
         patch("src.api.app.asyncio.sleep", new=fake_sleep),
-        patch("src.api.app.db.execute_write", new=execute_write),
-        patch("src.api.app.db.delete_old_screenshots", new=AsyncMock()) as delete_shots,
+        patch("src.api.app.retention.sweep", new=AsyncMock()) as sweep,
     ):
         try:
             await cleanup_old_data()
         except asyncio.CancelledError:
             pass
-    assert sleeps == [60, 86400]
-    delete_shots.assert_awaited_once()
-    cleaned = [c.args[0] for c in execute_write.await_args_list]
-    assert any("DELETE FROM match_retention" in sql for sql in cleaned)
+    assert sleeps == [60, 6 * 3600]
+    sweep.assert_awaited_once()

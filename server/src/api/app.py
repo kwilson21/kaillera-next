@@ -47,7 +47,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from src import db, landing_build, state, state_cache, stats
+from src import db, landing_build, retention, state, state_cache, stats
 from src.api import og_card, turn
 from src.api.og import (
     _ROM_SHARING_RAW,
@@ -112,37 +112,19 @@ _CRASH_EVENT_TYPES = frozenset({"wasm-fail"})
 
 
 async def cleanup_old_data() -> None:
-    """Background task: delete session logs, client events, and visual desync
-    artifacts (screenshots, vision verdicts) older than the retention period.
-    Screenshots are the bulk consumer — at ~5KB/frame and SCREENSHOT_INTERVAL=300
-    (~5s) per player, an unbounded table grows fast once captures are default-on
-    in prod."""
-    await asyncio.sleep(60)  # Render restarts and naps long before 24 h
+    """Background task: the tiered retention sweep (src/retention.py).
+
+    Normal matches go LOG_RETENTION_DAYS after they end; flagged matches are
+    kept until resolved or stale. Runs a minute after boot (Render restarts
+    and naps often) and then every 6 hours; it depends only on timestamps, so
+    skipped runs are harmless."""
+    await asyncio.sleep(60)
     while True:
         try:
-            days = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
-            cutoff = (f"-{days} days",)
-            for table in (
-                "session_logs",
-                "client_events",
-                "desync_events",
-                # Delta chunks (see migration 0002_session_log_chunks.sql) accumulate independently
-                # of their parent session_logs row's created_at/updated_at,
-                # so they need their own retention sweep or they'd outlive
-                # every other table here.
-                "session_log_chunks",
-                # Until the tiered retention sweep replaces this task.
-                "match_retention",
-            ):
-                await db.execute_write(
-                    f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
-                    cutoff,
-                )
-            await db.delete_old_screenshots(days)
-            log.info("DB cleanup complete (retention: %d days)", days)
+            await retention.sweep()
         except Exception as e:
-            log.warning("DB cleanup error: %s", e)
-        await asyncio.sleep(86400)  # daily
+            log.warning("Retention sweep error: %s", e)
+        await asyncio.sleep(6 * 3600)
 
 
 def _client_ip(request: Request) -> str:
@@ -1266,7 +1248,7 @@ def create_app(lifespan=None) -> FastAPI:
                 valid_room = isinstance(room_code, str) and _PUBLIC_ROOM_ID_RE.match(room_code)
                 match_id = await db.find_recent_match(room_code) if valid_room else None
             if match_id:
-                await db.flag_match(match_id, [{"signal": "feedback", "count": 1, "feedback_id": row_id}])
+                await db.flag_match(match_id, [{"signal": "feedback", "count": 1, "feedback_id": row_id}], auto=False)
         except Exception as exc:
             log.warning("Flagging the match for feedback %d failed: %s", row_id, exc)
         return {"status": "saved", "id": row_id}
@@ -1295,7 +1277,7 @@ def create_app(lifespan=None) -> FastAPI:
             "session_log_count": session_log_rows[0]["cnt"] if session_log_rows else 0,
             "client_event_count": client_event_rows[0]["cnt"] if client_event_rows else 0,
             "feedback_count": feedback_rows[0]["cnt"] if feedback_rows else 0,
-            "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "14")),
+            "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "7")),
         }
 
     # ── Admin session logs API ───────────────────────────────────────────
