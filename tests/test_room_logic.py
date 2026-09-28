@@ -393,3 +393,78 @@ class TestDataMessageRelay:
             )
 
         emit.assert_not_awaited()
+
+
+# ── end-game ─────────────────────────────────────────────────────────────────
+#
+# In prod, a host's End Game click could take 5-8s to process because
+# _end_game_locked awaited db.set_session_ended() (which could queue behind
+# a client's session-log flush on the same connection) BEFORE broadcasting
+# game-ended, so the client's 5s fallback fired first. game-ended now
+# broadcasts before the DB write.
+
+
+class TestEndGameBroadcastOrder:
+    def _run(self, coro, *, order: list):
+        """Patch sio.emit / db.set_session_ended / db.insert_client_event /
+        state.save_room / desync_vision.run_postmortem so _end_game_locked
+        runs without real I/O, recording call order in `order`."""
+
+        async def _record_emit(event, *args, **kwargs):
+            order.append(f"emit:{event}")
+
+        async def _record_set_session_ended(*args, **kwargs):
+            order.append("db.set_session_ended")
+
+        with (
+            patch.object(signaling.sio, "emit", new=AsyncMock(side_effect=_record_emit)),
+            patch.object(signaling.db, "set_session_ended", new=AsyncMock(side_effect=_record_set_session_ended)),
+            patch.object(signaling.db, "insert_client_event", new=AsyncMock()),
+            patch.object(signaling.state, "save_room", new=AsyncMock()),
+            patch.object(signaling.desync_vision, "run_postmortem", new=AsyncMock()),
+        ):
+            return _run_async(coro)
+
+    def test_game_ended_broadcast_before_db_write(self):
+        from src.api.payloads import EndGamePayload
+        from src.api.signaling import _end_game_locked
+
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.status = "playing"
+        room.match_id = "match-1"
+        rooms["ROOM1"] = room
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+
+        order: list = []
+        result = self._run(_end_game_locked("sid-host", EndGamePayload()), order=order)
+
+        assert result is None
+        assert "emit:game-ended" in order
+        assert "db.set_session_ended" in order
+        assert order.index("emit:game-ended") < order.index("db.set_session_ended")
+        # users-updated should also land before the DB write.
+        assert order.index("emit:users-updated") < order.index("db.set_session_ended")
+        # Room state already reflects the end even though the DB write is
+        # ordered after the broadcasts.
+        assert room.status == "lobby"
+        assert room.match_id is None
+
+    def test_end_game_without_active_match_does_not_call_set_session_ended(self):
+        from src.api.payloads import EndGamePayload
+        from src.api.signaling import _end_game_locked
+
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.status = "lobby"
+        room.match_id = None
+        rooms["ROOM2"] = room
+        _sid_to_room["sid-host"] = ("ROOM2", "pid-host", False)
+
+        order: list = []
+        self._run(_end_game_locked("sid-host", EndGamePayload()), order=order)
+
+        assert "db.set_session_ended" not in order
+        assert "emit:game-ended" in order

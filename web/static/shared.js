@@ -896,6 +896,21 @@
         }
         return entries;
       },
+      // Delta flush support: entries with seq > `afterSeq`, oldest first,
+      // capped at `max`. The remainder (if any) is picked up on the next
+      // call once the caller advances `afterSeq` past what it has sent.
+      entriesAfter: (afterSeq, max) => {
+        const entries = [];
+        const start = count < maxSize ? 0 : head;
+        for (let i = 0; i < count; i++) {
+          const e = ring[(start + i) % maxSize];
+          if (e.seq > afterSeq) {
+            entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
+            if (entries.length >= max) break;
+          }
+        }
+        return entries;
+      },
       clear: () => {
         head = 0;
         count = 0;

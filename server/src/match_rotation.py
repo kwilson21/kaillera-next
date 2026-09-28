@@ -251,18 +251,12 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
 # ── Core rotation logic ──────────────────────────────────────────────────────
 
 
-def _merge_entries(session_rows: list[dict]) -> list[dict]:
-    """Flatten all peers' log_data arrays into one list, stamping per-row metadata."""
+async def _merge_entries(session_rows: list[dict]) -> list[dict]:
+    """Flatten all peers' log entries (legacy log_data + chunks) into one list,
+    stamping per-row metadata."""
     merged: list[dict] = []
     for r in session_rows:
-        log_data = r.get("log_data") or "[]"
-        if isinstance(log_data, str):
-            try:
-                log_data = json.loads(log_data)
-            except json.JSONDecodeError:
-                log_data = []
-        if not isinstance(log_data, list):
-            continue
+        log_data = await db.get_full_log_entries(r.get("match_id"), r.get("slot"), r.get("log_data"))
         stamp = {
             "session_id": r.get("id"),
             "match_id": r.get("match_id"),
@@ -288,7 +282,7 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
         log.warning("rotate_match: no session_logs rows for match %s", match_id[:8])
         return None
 
-    merged = _merge_entries(rows)
+    merged = await _merge_entries(rows)
     # Earliest created_at across peers determines the partition month.
     created_at = min((r.get("created_at") or "") for r in rows) or None
 

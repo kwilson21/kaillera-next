@@ -1070,10 +1070,10 @@ def create_app(lifespan=None) -> FastAPI:
         entries = _sanitize_log_blob(entries_raw if isinstance(entries_raw, list) else [])
         if not isinstance(entries, list):
             entries = []
-        log_data_str = json.dumps(entries)
-        while len(log_data_str) > _SESSION_LOG_HTTP_MAX and entries:
+        entries_json = json.dumps(entries)
+        while len(entries_json) > _SESSION_LOG_HTTP_MAX and entries:
             entries = entries[: len(entries) // 2]
-            log_data_str = json.dumps(entries)
+            entries_json = json.dumps(entries)
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
         context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})
@@ -1099,21 +1099,21 @@ def create_app(lifespan=None) -> FastAPI:
                 context_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
-        await db.upsert_session_log(
+        last_seq = await db.append_session_log(
             {
                 "match_id": match_id,
                 "room": room_id,
                 "slot": slot,
                 "player_name": player_name,
                 "mode": mode,
-                "log_data": log_data_str,
+                "entries": entries,
                 "summary": summary_str,
                 "context": context_str,
                 "ip_hash": hashed_ip,
             }
         )
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
-        return {"status": "saved"}
+        return {"status": "saved", "lastSeq": last_seq}
 
     # ── ROM hash table ──────────────────────────────────────────────────
 
@@ -1328,10 +1328,15 @@ def create_app(lifespan=None) -> FastAPI:
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
-        for field in ("log_data", "summary", "context"):
+        raw_log_data = entry.get("log_data")
+        for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
+        # log_data is now legacy full-blob entries (if any) plus appended
+        # session_log_chunks — assembled here so the response shape (a plain
+        # list of entries) is unchanged for callers.
+        entry["log_data"] = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), raw_log_data)
 
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
@@ -1407,16 +1412,10 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
 
-        # Pre-parse the JSON-stored fields. log_data is a JSON array of
-        # entries; summary and context are JSON objects.
-        log_data = entry.get("log_data") or "[]"
-        if isinstance(log_data, str):
-            try:
-                log_data = json.loads(log_data)
-            except json.JSONDecodeError:
-                log_data = []
-        if not isinstance(log_data, list):
-            log_data = []
+        # Pre-parse the JSON-stored fields. log_data is legacy full-blob
+        # entries (if any) plus appended session_log_chunks; summary and
+        # context are JSON objects.
+        log_data = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), entry.get("log_data"))
 
         summary = entry.get("summary") or "{}"
         if isinstance(summary, str):

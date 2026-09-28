@@ -5729,6 +5729,14 @@
   const _syncLogRing = KNShared.createSyncLogRing(SYNC_LOG_MAX);
   let _startTime = 0;
 
+  // Delta session-log flush: each flush sends only entries newer than the
+  // highest seq the server has acked, capped per-flush so one flush can
+  // never approach the Socket.IO max_http_buffer_size (4MB). Advanced only
+  // from the server's ack (socket ack callback / HTTP response JSON), never
+  // optimistically — an unacked or rate-limited flush is simply resent.
+  const SYNC_LOG_FLUSH_MAX_ENTRIES = 5000;
+  let _syncLogAckedSeq = -1;
+
   const _isLocalDev = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   const SYNC_LOG_FLUSH_MS = _isLocalDev && _knLiveFlush ? 1000 : 5000;
   const _knVerboseSyncConsole = (() => {
@@ -5901,8 +5909,6 @@
 
   const exportSyncLog = () => _syncLogRing.export();
 
-  const _getStructuredEntries = () => _syncLogRing.getStructuredEntries();
-
   let _flushInterval = null;
   let _cachedMatchId = null;
   let _cachedRoom = null;
@@ -5955,7 +5961,7 @@
       }
     })(),
     mode: 'rollback',
-    entries: _getStructuredEntries(),
+    entries: _syncLogRing.entriesAfter(_syncLogAckedSeq, SYNC_LOG_FLUSH_MAX_ENTRIES),
     summary: {
       desyncs: KNState.sessionStats?.desyncs ?? 0,
       stalls: KNState.sessionStats?.stalls ?? 0,
@@ -5993,6 +5999,15 @@
     inputAudit: _buildInputAuditPayload(),
   });
 
+  // Advance the flush cursor only from a server-confirmed lastSeq — never
+  // optimistically. An unacked or rate-limited flush is simply resent
+  // (entriesAfter re-sends anything still above the cursor) next interval.
+  const _ackSyncLogFlush = (ack) => {
+    if (ack && typeof ack.lastSeq === 'number' && ack.lastSeq > _syncLogAckedSeq) {
+      _syncLogAckedSeq = ack.lastSeq;
+    }
+  };
+
   const _flushViaHttp = (payload) => {
     const token = _cachedUploadToken || KNState.uploadToken;
     const room = _cachedRoom || KNState.room || '';
@@ -6003,7 +6018,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         keepalive: true,
-      }).catch(() => {});
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((json) => _ackSyncLogFlush(json))
+        .catch(() => {});
     } catch (_) {}
   };
 
@@ -6046,9 +6064,10 @@
       const payload = _buildFlushPayload();
       if (socket?.connected) {
         let acked = false;
-        socket.emit('session-log', payload, () => {
+        socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
+          _ackSyncLogFlush(ack);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
@@ -11329,6 +11348,7 @@
       _cachedRoom = _cachedRoom || KNState.room;
       _cachedUploadToken = _cachedUploadToken || KNState.uploadToken;
       _socketFlushFails = 0;
+      _syncLogAckedSeq = -1;
       _flushInterval = setInterval(_flushSyncLog, SYNC_LOG_FLUSH_MS);
       // Early flush at 5s so short matches (that freeze, crash, or are
       // aborted before the 30s interval fires) still leave a DB row. This
@@ -11877,6 +11897,7 @@
     _cachedRoom = KNState.room;
     _cachedUploadToken = KNState.uploadToken;
     _socketFlushFails = 0;
+    _syncLogAckedSeq = -1;
     _flushInterval = setInterval(_flushSyncLog, SYNC_LOG_FLUSH_MS);
     // Early flush at 5s so short matches (freeze/crash/abort before 30s)
     // still leave a DB row. See also the lockstep-ready path above.
@@ -16917,6 +16938,7 @@
     _cachedRoom = null;
     _cachedUploadToken = null;
     _socketFlushFails = 0;
+    _syncLogAckedSeq = -1;
     if (_flushInterval) {
       clearInterval(_flushInterval);
       _flushInterval = null;

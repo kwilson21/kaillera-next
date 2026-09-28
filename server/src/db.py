@@ -5,6 +5,7 @@ Owns the single kn.db connection. Call init_db() on startup, close_db() on shutd
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -124,6 +125,130 @@ async def upsert_session_log(data: dict) -> int:
     )
     await _db.commit()
     return cursor.lastrowid
+
+
+_SESSION_LOG_CHUNK_CAP = 12 * 1024 * 1024  # 12MB per (match_id, slot) — same budget
+# the old single-blob rewrite used. Enforced by deleting the oldest chunks
+# first so the latest entries (reconnect/desync events) survive.
+
+
+async def append_session_log(data: dict) -> int:
+    """Append new, deduped log entries as a chunk and update session metadata.
+
+    Unlike `upsert_session_log`, this never rewrites the `log_data` blob:
+    new entries land in `session_log_chunks`, keyed by the client's
+    monotonic `seq`. Entries with `seq` <= the stored `last_seq` are
+    dropped — this dedupes resends and old cached clients that still send
+    their entire ring on every flush. Returns the new `last_seq` so the
+    caller can ack it back to the client.
+    """
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    match_id = data["match_id"]
+    slot = data.get("slot")
+
+    cursor = await _db.execute(
+        "SELECT last_seq FROM session_logs WHERE match_id = ? AND slot IS ?",
+        (match_id, slot),
+    )
+    row = await cursor.fetchone()
+    # -1 means "no entries acked yet" (client seqs start at 0).
+    current_last_seq = row[0] if row and row[0] is not None else -1
+
+    entries = data.get("entries") or []
+    new_entries = []
+    max_seq = current_last_seq
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        seq = e.get("seq")
+        if isinstance(seq, (int, float)):
+            if seq <= current_last_seq:
+                continue
+            max_seq = max(max_seq, seq)
+        new_entries.append(e)
+
+    if new_entries:
+        seqs = [e.get("seq") for e in new_entries if isinstance(e.get("seq"), (int, float))]
+        first_seq = min(seqs) if seqs else current_last_seq
+        await _db.execute(
+            "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries) VALUES (?, ?, ?, ?, ?)",
+            (match_id, slot, first_seq, max_seq, json.dumps(new_entries)),
+        )
+        await _enforce_chunk_cap(match_id, slot)
+
+    await _db.execute(
+        """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash, last_seq, updated_at)
+           VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(match_id, slot) DO UPDATE SET
+             summary=excluded.summary, context=excluded.context,
+             ip_hash=excluded.ip_hash, updated_at=datetime('now'), last_seq=excluded.last_seq""",
+        (
+            match_id,
+            data["room"],
+            slot,
+            data.get("player_name"),
+            data.get("mode"),
+            data.get("summary"),
+            data.get("context"),
+            data.get("ip_hash"),
+            max_seq,
+        ),
+    )
+    await _db.commit()
+    return max_seq
+
+
+async def _enforce_chunk_cap(match_id: str, slot: int | None) -> None:
+    """Delete the oldest chunks for (match_id, slot) until total size is under the cap."""
+    if _db is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    cursor = await _db.execute(
+        "SELECT id, length(entries) as sz FROM session_log_chunks WHERE match_id = ? AND slot IS ? ORDER BY id",
+        (match_id, slot),
+    )
+    rows = await cursor.fetchall()
+    total = sum(r[1] for r in rows)
+    idx = 0
+    while total > _SESSION_LOG_CHUNK_CAP and idx < len(rows):
+        await _db.execute("DELETE FROM session_log_chunks WHERE id = ?", (rows[idx][0],))
+        total -= rows[idx][1]
+        idx += 1
+
+
+async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:
+    """Assemble a session's full entry list: legacy `log_data` (if any) plus
+    every `session_log_chunks` row for (match_id, slot), in insertion order.
+
+    Used anywhere that used to just `json.loads(log_data)` — admin detail,
+    export, and match_rotation — so their response/output shapes are
+    unchanged even though storage moved to append-only chunks.
+    """
+    entries: list = []
+    if log_data_str:
+        try:
+            legacy = json.loads(log_data_str)
+        except (json.JSONDecodeError, TypeError):
+            legacy = []
+        if isinstance(legacy, list):
+            entries.extend(legacy)
+
+    if _db is None:
+        return entries
+
+    cursor = await _db.execute(
+        "SELECT entries FROM session_log_chunks WHERE match_id = ? AND slot IS ? ORDER BY id",
+        (match_id, slot),
+    )
+    rows = await cursor.fetchall()
+    for r in rows:
+        try:
+            chunk = json.loads(r[0])
+        except (json.JSONDecodeError, TypeError):
+            chunk = []
+        if isinstance(chunk, list):
+            entries.extend(chunk)
+    return entries
 
 
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:

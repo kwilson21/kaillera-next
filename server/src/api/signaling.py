@@ -1097,18 +1097,26 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
         return "Only the host can end the game"
 
     ended_match_id = room.match_id
-    if room.match_id:
-        await db.set_session_ended(room.match_id, None, "game-end")
-        room.match_id = None
-
+    room.match_id = None
     room.status = "lobby"
     room.started_at = None
     _drop_room_frame(session_id)
+
+    # Broadcast the state change BEFORE the DB write below. `end-game` used
+    # to await db.set_session_ended() first, which could queue behind a
+    # client's session-log flush on the same connection (up to several
+    # seconds under load) and delay this broadcast past the client's 5s
+    # fallback. Room state (above) is already updated in memory, so the
+    # broadcast reflects the true post-end state even though the DB row
+    # hasn't been marked ended yet.
     # mode persists for rematch convenience
     await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+
+    if ended_match_id:
+        await db.set_session_ended(ended_match_id, None, "game-end")
     await state.save_room(session_id, room)
     log.info("Game ended in room %s", session_id)
     await db.insert_client_event(
@@ -1636,23 +1644,30 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
 
 @sio.on("session-log")
 @validated(SessionLogPayload)
-async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
-    """Receive periodic sync log flush from client. Upserts into session_logs table."""
+async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | None:
+    """Receive a periodic sync log flush from client.
+
+    `payload.entries` is a delta — only entries newer than the seq the
+    server last acked — so this appends into `session_log_chunks` instead
+    of rewriting the whole `session_logs.log_data` blob (see db.append_session_log).
+    Returns `{"lastSeq": ...}` as the socket ack so the client can advance
+    its flush cursor; the client resends anything the server hasn't acked.
+    """
     if not check(sid, "session-log"):
-        return
+        return None
     entry = _sid_to_room.get(sid)
     if not entry:
-        return
+        return None
     session_id, player_id, is_spectator = entry
     if is_spectator:
-        return
+        return None
 
     room = rooms.get(session_id)
     if not room or not room.match_id:
-        return
+        return None
 
     if not payload.matchId or payload.matchId != room.match_id:
-        return
+        return None
 
     pid_to_slot = {pid: s for s, pid in room.slots.items()}
     slot = pid_to_slot.get(player_id)
@@ -1679,25 +1694,28 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
     entries = _sanitize_log_blob(entries_raw)
     if not isinstance(entries, list):
         entries = []
-    log_data_str = json.dumps(entries)
-    while len(log_data_str) > _SESSION_LOG_MAX and entries:
-        # Keep LATEST entries (drop oldest) so reconnect/desync events survive
+    entries_json = json.dumps(entries)
+    while len(entries_json) > _SESSION_LOG_MAX and entries:
+        # Keep LATEST entries (drop oldest) — a safety net for oversized
+        # single flushes (e.g. a stale pre-delta client resending its whole
+        # ring). append_session_log's seq dedupe handles the normal case.
         entries = entries[len(entries) // 2 :]
-        log_data_str = json.dumps(entries)
+        entries_json = json.dumps(entries)
 
-    await db.upsert_session_log(
+    last_seq = await db.append_session_log(
         {
             "match_id": payload.matchId,
             "room": session_id,
             "slot": slot,
             "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
             "mode": room.mode,
-            "log_data": log_data_str,
+            "entries": entries,
             "summary": summary_str,
             "context": context_str,
             "ip_hash": ip_hash_for_sid(sid),
         }
     )
+    return {"lastSeq": last_seq}
 
 
 @sio.event
