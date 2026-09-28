@@ -471,7 +471,7 @@ def test_start_wait_rtt_timer_does_not_gate_on_phase_floor():
     assert "_finishRttMeasurement(" in timer_src
 
 
-def test_rollback_init_backfills_bounded_remote_inputs_in_order():
+def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     # Nonzero-frame rollback inits (RB-INIT-CATCHUP, the remixMenuLockstep
     # deferred init, RB-INIT-TIMEOUT at f>0) left remote frames past the init
     # frame that arrived before init JS-only: the receive path dedups later
@@ -493,11 +493,12 @@ def test_rollback_init_backfills_bounded_remote_inputs_in_order():
         const _syncLog = () => {{}};
         const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
         const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
-        for (let frame = 910; frame >= 890; frame--) {{
+        for (let frame = 890; frame <= 910; frame++) {{
           _remoteInputs[1][frame] = {{ buttons: frame, lx: 0, ly: 0, cx: 0, cy: 0 }};
         }}
         _remoteInputs[1][889] = KNShared.ZERO_INPUT;
         _remoteInputs[1][920] = KNShared.ZERO_INPUT;
+        _remoteInputs[1][963] = {{ buttons: 963, lx: 0, ly: 0, cx: 0, cy: 0 }};
         _remoteInputs[1][964] = {{ buttons: 964, lx: 0, ly: 0, cx: 0, cy: 0 }};
         eval({json.dumps(helpers)} + "\\n_backfillCInputsFromJs(mod, 'rollback-init');");
         process.stdout.write(JSON.stringify(calls.map((call) => [call[0], call[1]])));
@@ -512,7 +513,7 @@ def test_rollback_init_backfills_bounded_remote_inputs_in_order():
     )
     assert result.returncode == 0, result.stderr + result.stdout
     fed = json.loads(result.stdout)
-    assert fed == [[1, frame] for frame in range(889, 911)]
+    assert fed == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
 
     assert "_backfillCInputsFromJs(detMod, 'rollback-init');" in src
     input_guard_start = src.index("const _processInputPacket =")

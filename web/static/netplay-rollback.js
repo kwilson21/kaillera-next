@@ -4994,6 +4994,7 @@
         const input = frames?.[frame];
         // Past _frameNum a ZERO_INPUT is a late-join placeholder, not a received input. Fed as
         // real, a different real input arriving later would overwrite it without a rollback.
+        // (Placeholders at or before _frameNum are fed, as before.)
         if (!input || (frame > _frameNum && input === KNShared.ZERO_INPUT)) continue;
         if (_feedCInput(mod, slot, frame, input)) {
           remoteFed++;
