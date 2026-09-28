@@ -722,3 +722,35 @@ async def _run_split_large_flush(tmp_db):
     assert chunks[0]["first_seq"] == 0 and chunks[-1]["last_seq"] == 29
     assert all(a["last_seq"] + 1 == b["first_seq"] for a, b in zip(chunks, chunks[1:], strict=False))
     assert [e["seq"] for e in full] == list(range(30))
+
+
+def test_cleanup_old_data_first_runs_a_minute_after_boot():
+    """Render restarts and naps long before 24 h, so waiting a day first meant
+    cleanup never ran."""
+    _run_async(_run_cleanup_sleep_order())
+
+
+async def _run_cleanup_sleep_order():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from src.api.app import cleanup_old_data
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError
+
+    with (
+        patch("src.api.app.asyncio.sleep", new=fake_sleep),
+        patch("src.api.app.db.execute_write", new=AsyncMock()),
+        patch("src.api.app.db.delete_old_screenshots", new=AsyncMock()) as delete_shots,
+    ):
+        try:
+            await cleanup_old_data()
+        except asyncio.CancelledError:
+            pass
+    assert sleeps == [60, 86400]
+    delete_shots.assert_awaited_once()

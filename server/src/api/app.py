@@ -112,8 +112,8 @@ async def cleanup_old_data() -> None:
     Screenshots are the bulk consumer — at ~5KB/frame and SCREENSHOT_INTERVAL=300
     (~5s) per player, an unbounded table grows fast once captures are default-on
     in prod."""
+    await asyncio.sleep(60)  # Render restarts and naps long before 24 h
     while True:
-        await asyncio.sleep(86400)  # daily
         try:
             days = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
             cutoff = (f"-{days} days",)
@@ -135,6 +135,7 @@ async def cleanup_old_data() -> None:
             log.info("DB cleanup complete (retention: %d days)", days)
         except Exception as e:
             log.warning("DB cleanup error: %s", e)
+        await asyncio.sleep(86400)  # daily
 
 
 def _client_ip(request: Request) -> str:
