@@ -132,7 +132,7 @@ EXPECTED_COLUMNS = {
     ],
     "session_log_chunks": ["id", "match_id", "slot", "first_seq", "last_seq", "entries", "size", "created_at"],
     "client_events": ["id", "type", "message", "meta", "room", "slot", "ip_hash", "user_agent", "created_at"],
-    "screenshots": ["id", "match_id", "slot", "frame", "data", "created_at"],
+    "screenshots": ["id", "match_id", "slot", "frame", "data", "blob_key", "size", "created_at"],
     "match_metrics": [
         "match_id", "mode", "peer_count", "frames", "duration_sec", "ended_by", "mismatch_count",
         "first_divergence_frame", "last_clean_frame", "rollbacks", "predictions", "correct_predictions",
@@ -213,7 +213,7 @@ def test_baseline_upgrades_existing_alembic_database(tmp_path):
             await backend.close()
 
     applied, feedback, leftover = run_async(scenario())
-    assert applied == ["0001", "0002"]
+    assert applied == ["0001", "0002", "0003"]
     assert feedback == [{"message": "kept"}]
     assert leftover == []
 
@@ -261,6 +261,38 @@ def test_alembic_0008_database_skips_session_log_chunks_migration(tmp_path):
             await backend.close()
 
     applied, recorded, chunks = run_async(scenario())
-    assert applied == ["0001"]
-    assert recorded == ["0001", "0002"]
+    assert applied == ["0001", "0003"]
+    assert recorded == ["0001", "0002", "0003"]
     assert chunks == [{"n": 1}]
+
+
+def test_screenshot_rows_keep_their_bytes_through_0003(tmp_path):
+    """0003 rebuilds screenshots so bytes can live in the blob store instead."""
+    from src.migrate import apply_migrations, load_migrations
+
+    backend = make_backend("sqlite", tmp_path)
+    before_0003 = [m for m in load_migrations() if m.version < "0003"]
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+
+    async def scenario():
+        from src.migrate import MIGRATIONS_DIR
+
+        for m in before_0003:
+            src_path = next(MIGRATIONS_DIR.glob(f"{m.version}_*.sql"))
+            (migrations / src_path.name).write_text(src_path.read_text())
+        await backend.open()
+        try:
+            await apply_migrations(backend, migrations)
+            await backend.execute(
+                "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)", ("m", 0, 60, b"\xff\xd8old")
+            )
+            applied = await apply_migrations(backend)
+            rows = await backend.query("SELECT match_id, slot, frame, data, blob_key, size FROM screenshots", ())
+            return applied, rows
+        finally:
+            await backend.close()
+
+    applied, rows = run_async(scenario())
+    assert applied == ["0003"]
+    assert rows == [{"match_id": "m", "slot": 0, "frame": 60, "data": b"\xff\xd8old", "blob_key": None, "size": 5}]

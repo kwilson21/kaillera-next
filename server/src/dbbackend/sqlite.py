@@ -18,7 +18,6 @@ class SqliteBackend:
     commit or rollback can't land in the middle of another's batch."""
 
     name = "sqlite"
-    supports_blobs = True
 
     def __init__(self, path: str) -> None:
         self.path = path

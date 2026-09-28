@@ -13,8 +13,8 @@ whichever server the hostname points to.
   connected.
 - It gets 750 free hours a month, enough to run all month.
 - The container's disk resets on every restart or deploy, so the database
-  lives in Cloudflare D1 instead (see below). Screenshots aren't stored
-  until blob storage lands. Gameplay doesn't depend on any of this.
+  lives in Cloudflare D1 and screenshots in Cloudflare R2 instead (see
+  below). Gameplay doesn't depend on any of this.
 
 ## One-time setup (the owner)
 
@@ -55,6 +55,28 @@ applies `server/migrations/` there on startup.
    ```sh
    cd server && (set -a; . ~/.config/kaillera-next/d1.env; set +a; \
      KN_D1_LIVE=1 uv run --extra dev pytest ../tests/test_d1_live.py -q -s)
+   ```
+
+## Screenshots in Cloudflare R2
+
+Without these the server keeps screenshots in a `blobs` folder next to the
+database, which Render also wipes. With them, screenshot bytes go to R2 under
+`matches/<match_id>/screenshots/`; the database keeps the key and size.
+
+1. Create the bucket: `npx wrangler r2 bucket create kaillera-next-screenshots`.
+2. Create a token: R2 → Manage API Tokens → Create API Token, permission
+   **Object Read & Write**, applied to **that bucket only**. Copy the Access
+   Key ID and Secret Access Key (the secret is shown once).
+3. In Render → Environment, add **all three in one save** (with
+   `CF_ACCOUNT_ID` already set for D1):
+   - `R2_BUCKET`
+   - `R2_ACCESS_KEY_ID`
+   - `R2_SECRET_ACCESS_KEY`
+4. Optional check from your machine, with the values in the same file as
+   the D1 ones:
+   ```sh
+   cd server && (set -a; . ~/.config/kaillera-next/d1.env; set +a; \
+     KN_R2_LIVE=1 uv run --extra dev pytest ../tests/test_blobstore.py -q -k live)
    ```
 
 ## Pointing the domain at Render (owner's OK)

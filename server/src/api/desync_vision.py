@@ -177,10 +177,11 @@ async def desync_vision(req: VisionRequest) -> dict[str, Any]:
 
 
 async def _load_screenshots(match_id: str, frame: int) -> list[PeerScreenshot]:
-    """Load all peer screenshots for (match_id, frame ±2) from the
-    screenshots table (migration 0003). One per slot, closest-frame first."""
+    """Load all peer screenshots for (match_id, frame ±2): rows from the
+    screenshots table, bytes from the blob store. One per slot, closest-frame
+    first."""
     rows = await db.query(
-        """SELECT slot, data
+        """SELECT slot, blob_key, data
            FROM screenshots
            WHERE match_id = ? AND frame BETWEEN ? AND ?
            ORDER BY slot, ABS(frame - ?)""",
@@ -192,7 +193,9 @@ async def _load_screenshots(match_id: str, frame: int) -> list[PeerScreenshot]:
         if row["slot"] in seen_slots:
             continue
         seen_slots.add(row["slot"])
-        img_bytes = row["data"]
+        img_bytes = await db.read_screenshot(row)
+        if img_bytes is None:
+            continue
         # img_bytes may already be base64 str (legacy rows) or raw bytes
         b64 = img_bytes if isinstance(img_bytes, str) else base64.b64encode(img_bytes).decode("ascii")
         out.append(PeerScreenshot(slot=row["slot"], png_b64=b64, hash=None))
