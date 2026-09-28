@@ -154,3 +154,27 @@ def test_baseline_migration_applies_through_d1():
     assert first == ["0001", "0002"]
     assert second == []
     assert {"feedback", "session_logs", "client_events", "screenshots", "match_metrics", "desync_events"} <= set(tables)
+
+
+def test_screenshots_are_skipped_on_d1_with_one_warning(caplog):
+    """D1 can't bind binary values; screenshots wait for the R2 blob store."""
+    import logging
+
+    import src.db as db
+
+    fake = FakeD1()
+
+    async def scenario():
+        await db.init_db(backend=_backend(fake.transport()))
+        try:
+            requests_before = len(fake.requests)
+            first = await db.insert_screenshot("m", 0, 10, b"\xff\xd8jpeg")
+            second = await db.insert_screenshot("m", 0, 20, b"\xff\xd8jpeg")
+            return first, second, len(fake.requests) - requests_before
+        finally:
+            await db.close_db()
+
+    with caplog.at_level(logging.WARNING, logger="src.db"):
+        first, second, sent = run_async(scenario())
+    assert (first, second, sent) == (None, None, 0)
+    assert len([r for r in caplog.records if "screenshot" in r.getMessage().lower()]) == 1

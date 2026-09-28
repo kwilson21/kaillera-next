@@ -20,10 +20,13 @@ log = logging.getLogger(__name__)
 _backend: Backend | None = None
 
 
-async def init_db(db_path: str | None = None) -> None:
-    """Open the backend and apply pending migrations."""
+async def init_db(db_path: str | None = None, *, backend: Backend | None = None) -> None:
+    """Open the backend and apply pending migrations.
+
+    `backend` overrides the environment-selected one (tests pass a fake D1).
+    """
     global _backend
-    backend = backend_from_env(db_path)
+    backend = backend or backend_from_env(db_path)
     await backend.open()
     try:
         applied = await apply_migrations(backend)
@@ -69,6 +72,11 @@ async def insert_feedback(data: dict) -> int:
 _SESSION_LOG_CHUNK_CAP = 12 * 1024 * 1024  # 12MB per (match_id, slot) — same budget
 # the old single-blob rewrite used. Enforced by deleting the oldest chunks
 # first so the latest entries (reconnect/desync events) survive.
+
+# Largest chunk written in one row. A reconnect re-sends the whole ring (MBs)
+# in one flush, and a Cloudflare D1 row holds at most 2 MB, so a flush is
+# split into chunks of at most this many bytes of JSON.
+_SESSION_LOG_CHUNK_MAX = 512 * 1024
 
 _MAX_VALID_SEQ = 2**53  # exact-integer boundary for a JS double
 
@@ -183,20 +191,24 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
         # always kept rather than silently dropped — see _valid_seq.
         new_entries.append(e)
 
-    # The chunk insert, cap enforcement and metadata upsert commit together.
+    # The chunk inserts, cap enforcement and metadata upsert commit together.
     statements: list[tuple[str, tuple]] = []
     if new_entries:
-        entries_json = json.dumps(new_entries)
-        seqs = [_valid_seq(e.get("seq")) for e in new_entries]
-        seqs = [s for s in seqs if s is not None]
-        first_seq = min(seqs) if seqs else current_last_seq
-        statements.append(
-            (
-                "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?)",
-                (match_id, slot, first_seq, max_seq, entries_json, len(entries_json)),
+        high_seq = current_last_seq
+        new_bytes = 0
+        for group in _split_entries(new_entries):
+            entries_json = json.dumps(group)
+            seqs = [s for s in (_valid_seq(e.get("seq")) for e in group) if s is not None]
+            first_seq = min(seqs) if seqs else high_seq
+            high_seq = max([high_seq, *seqs])
+            new_bytes += len(entries_json)
+            statements.append(
+                (
+                    "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?)",
+                    (match_id, slot, first_seq, high_seq, entries_json, len(entries_json)),
+                )
             )
-        )
-        if await _stored_chunk_bytes(match_id, slot) + len(entries_json) > _SESSION_LOG_CHUNK_CAP:
+        if await _stored_chunk_bytes(match_id, slot) + new_bytes > _SESSION_LOG_CHUNK_CAP:
             statements.append(_chunk_cap_statement(match_id, slot))
 
     statements.append(
@@ -226,6 +238,26 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     )
     await backend.batch(statements)
     return max_seq
+
+
+def _split_entries(entries: list[dict]) -> list[list[dict]]:
+    """Group entries in order so each group's JSON is at most _SESSION_LOG_CHUNK_MAX.
+
+    A single entry larger than the limit gets a group of its own.
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    current_bytes = 2  # the enclosing "[]"
+    for entry in entries:
+        entry_bytes = len(json.dumps(entry)) + 2  # ", " separator
+        if current and current_bytes + entry_bytes > _SESSION_LOG_CHUNK_MAX:
+            groups.append(current)
+            current, current_bytes = [], 2
+        current.append(entry)
+        current_bytes += entry_bytes
+    if current:
+        groups.append(current)
+    return groups
 
 
 async def _stored_chunk_bytes(match_id: str, slot: int | None) -> int:
@@ -337,9 +369,23 @@ async def execute_write(sql: str, params: tuple) -> None:
     await _require().execute(sql, params)
 
 
-async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -> int:
-    """Insert a gameplay screenshot and return row ID."""
-    result = await _require().execute(
+_screenshot_skip_warned = False
+
+
+async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -> int | None:
+    """Insert a gameplay screenshot and return row ID.
+
+    Returns None without storing anything when the backend can't hold BLOBs
+    (D1): screenshots wait for the R2 blob store.
+    """
+    global _screenshot_skip_warned
+    backend = _require()
+    if not backend.supports_blobs:
+        if not _screenshot_skip_warned:
+            log.warning("Screenshots are not stored: the %s backend can't hold binary data", backend.name)
+            _screenshot_skip_warned = True
+        return None
+    result = await backend.execute(
         "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)",
         (match_id, slot, frame, data),
     )
