@@ -693,3 +693,32 @@ async def _run_init_twice(tmp_db):
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
     assert [r["version"] for r in rows] == ["0001", "0002"]
     await close_db()
+
+
+def test_append_session_log_splits_large_flush_into_bounded_chunks(tmp_db):
+    """A reconnect can re-send the whole ring (MBs) in one flush. It must be
+    stored as several chunks, each under _SESSION_LOG_CHUNK_MAX, because a
+    Cloudflare D1 row holds at most 2 MB."""
+    _run_async(_run_split_large_flush(tmp_db))
+
+
+async def _run_split_large_flush(tmp_db):
+    from src.db import _SESSION_LOG_CHUNK_MAX, append_session_log, close_db, get_full_log_entries, init_db, query
+
+    await init_db(tmp_db)
+    entries = [{"seq": i, "t": i, "f": i, "msg": "x" * 40_000} for i in range(30)]
+    last_seq = await append_session_log(
+        {"match_id": "m-big", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback", "entries": entries}
+    )
+    chunks = await query(
+        "SELECT first_seq, last_seq, size FROM session_log_chunks WHERE match_id = 'm-big' ORDER BY id", ()
+    )
+    full = await get_full_log_entries("m-big", 0, None)
+    await close_db()
+
+    assert last_seq == 29
+    assert len(chunks) >= 3
+    assert all(c["size"] <= _SESSION_LOG_CHUNK_MAX for c in chunks)
+    assert chunks[0]["first_seq"] == 0 and chunks[-1]["last_seq"] == 29
+    assert all(a["last_seq"] + 1 == b["first_seq"] for a, b in zip(chunks, chunks[1:], strict=False))
+    assert [e["seq"] for e in full] == list(range(30))
