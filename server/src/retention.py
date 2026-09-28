@@ -20,12 +20,13 @@ from src import db
 log = logging.getLogger(__name__)
 
 # First word of a session-log message that flags a match on any occurrence:
-# rollback integrity violations, stalls and freezes.
+# rollback integrity violations, emulator step failures, stalls and freezes.
 _ANY_TAGS = frozenset(
     {
         "REPLAY-NORUN",
         "RB-INVARIANT-VIOLATION",
         "RB-LIVE-MISMATCH",
+        "STEP-THREW",
         "TICK-STUCK",
         "RB-INPUT-STALL-TIMEOUT",
         "PEER-PHANTOM",

@@ -236,3 +236,7 @@ invariants held.
 | `FATAL-RING-STALE` | R3 | RF7 |
 | `RB-LIVE-MISMATCH` | R4 | RF5 |
 | `AUDIO-DEATH` (enriched) | R6 diagnostic | RF6 Part A |
+
+`FATAL-CORE-ABORT` means the WASM core trapped. It stops this peer's tick
+loop and shows the crash error. Other peers stall, then phantom this peer at
+the I1 input-stall deadline. `STEP-THREW` is logged for every thrown step.

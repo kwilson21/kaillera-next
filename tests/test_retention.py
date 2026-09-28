@@ -28,6 +28,8 @@ def _e(msg, slot=0, f=100):
     [
         ("REPLAY-NORUN f=10 rbFrame=8", "REPLAY-NORUN"),
         ("RB-INVARIANT-VIOLATION kind=x", "RB-INVARIANT-VIOLATION"),
+        ("STEP-THREW branch=normal f=10 RuntimeError: memory access out of bounds", "STEP-THREW"),
+        ("FATAL-CORE-ABORT branch=normal f=10 WASM core trapped", "FATAL-CORE-ABORT"),
         ("FATAL-RING-STALE f=10 ring[3]=7", "FATAL-RING-STALE"),
         ("RB-LIVE-MISMATCH f=10 ring=0x1 live=0x2", "RB-LIVE-MISMATCH"),
         ("TICK-STUCK severity=warn f=10 stuckMs=5000", "TICK-STUCK"),

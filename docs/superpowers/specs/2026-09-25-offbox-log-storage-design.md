@@ -274,7 +274,7 @@ single pass over merged entries that `_compute_metrics` already makes.
 
 | Source | Signal | Threshold |
 |---|---|---|
-| Session log `msg` (first word; a `[C] ` prefix from the C engine is stripped) | `REPLAY-NORUN`, `RB-LIVE-MISMATCH`, `RB-INVARIANT-*` (the client logs `RB-INVARIANT-FIXUP`), `FATAL*` (`FATAL-RING-STALE`, `FATAL DELTA-RESTORE-MISMATCH`, …) | any |
+| Session log `msg` (first word; a `[C] ` prefix from the C engine is stripped) | `REPLAY-NORUN`, `RB-LIVE-MISMATCH`, `RB-INVARIANT-*` (the client logs `RB-INVARIANT-FIXUP`), `FATAL*` (`FATAL-RING-STALE`, `FATAL DELTA-RESTORE-MISMATCH`, …), `STEP-THREW` | any |
 | | `RB-CHECK` … `MISMATCH` | any |
 | | `TICK-STUCK`, `RB-INPUT-STALL-TIMEOUT`, `PEER-PHANTOM`, `LOCAL-FREEZE` (not `VISUAL-FREEZE`: the client only logs `VISUAL-FREEZE failed`, the detector erroring) | any |
 | | `INPUT-OOR` | ≥ 20 on one slot |
