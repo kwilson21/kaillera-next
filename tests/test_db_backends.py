@@ -178,3 +178,40 @@ def test_backend_from_env_defaults_to_sqlite_at_db_path(tmp_path, monkeypatch):
     backend = backend_from_env()
     assert isinstance(backend, SqliteBackend)
     assert backend.path == str(tmp_path / "env.db")
+
+
+def test_sqlite_batch_stays_atomic_with_concurrent_execute(tmp_path):
+    """A concurrent execute() must not commit or roll back a batch in progress."""
+    import asyncio
+
+    from src.dbbackend import BackendError
+
+    backend = make_backend("sqlite", tmp_path)
+
+    async def scenario(b):
+        await _make_table(b)
+        doomed = [("INSERT INTO t (name) VALUES (?)", (f"batch{i}",)) for i in range(20)]
+        doomed.append(("INSERT INTO missing VALUES (1)", ()))
+        results = await asyncio.gather(
+            b.batch(doomed),
+            b.execute("INSERT INTO t (name) VALUES (?)", ("solo",)),
+            return_exceptions=True,
+        )
+        assert isinstance(results[0], BackendError)
+        return await b.query("SELECT name FROM t", ())
+
+    assert run_async(_with_open(backend, scenario)) == [{"name": "solo"}]
+
+
+def test_sqlite_batch_non_sqlite_error_rolls_back_and_unblocks(tmp_path):
+    """A non-sqlite error mid-batch must not leave the transaction open."""
+    backend = make_backend("sqlite", tmp_path)
+
+    async def scenario(b):
+        await _make_table(b)
+        with pytest.raises(TypeError):
+            await b.batch([("INSERT INTO t (name) VALUES (?)", ("a",)), ("INSERT INTO t (name) VALUES (?)", None)])
+        await b.batch([("INSERT INTO t (name) VALUES (?)", ("b",))])
+        return await b.query("SELECT name FROM t", ())
+
+    assert run_async(_with_open(backend, scenario)) == [{"name": "b"}]
