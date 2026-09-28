@@ -561,6 +561,9 @@
       // peers did; they don't send it, so pairing with one is refused.
       inputModel: KN_INPUT_MODEL,
       stateBackend,
+      // Smash Remix only: rollback runs through the menus. Tabs from before
+      // this field kept Remix menus in lockstep and don't send it.
+      remixMenuRollback: RB_REMIX_MENU_ROLLBACK,
     };
   };
 
@@ -1582,6 +1585,25 @@
     } catch (_) {}
     return 'split-rdram';
   })();
+  // Smash Remix used to run its menus in strict lockstep: C rollback started
+  // only at MENU→GAMEPLAY and shut down again at match end, with a scene
+  // phase-lock on top. At a rollback-sized delay that capped the menus at
+  // ~35fps over ~100ms RTT (room 5AB4NK8U). It was added for a WASM abort
+  // under retro_serialize-per-frame in Remix menus; rollback now snapshots
+  // with split-rdram. Remix runs rollback from the start, like SSB64;
+  // ?remixMenuLockstep=1 (or localStorage kn-remix-menu-lockstep=1) brings
+  // the old behaviour back. Peers must agree: see remixMenuRollback in
+  // _localRollbackCaps.
+  const RB_REMIX_MENU_LOCKSTEP = (() => {
+    try {
+      const raw = _urlParams.get('remixMenuLockstep') ?? localStorage.getItem('kn-remix-menu-lockstep');
+      return raw === '1';
+    } catch (_) {}
+    return false;
+  })();
+  // The retro backend is the one that aborted in Remix menus: keep it deferred.
+  const RB_REMIX_MENU_ROLLBACK = !RB_REMIX_MENU_LOCKSTEP && RB_ROLLBACK_STATE_BACKEND === 'split-rdram';
+  const _remixMenuLockstep = () => !RB_REMIX_MENU_ROLLBACK && _isSmashRemix();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeDuring') ?? localStorage.getItem('kn-replay-visual-fade-during');
@@ -5558,7 +5580,12 @@
     const inControllableMenu = _isControllableMenuScene(sceneCurr);
     const inBattleTransition = sceneCurr === 22 && gameStatus === 0;
     const gameplay = sceneCurr === 22 && gameStatus === 1;
-    const strictInputLockstep = !inBattleTransition && (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
+    // Without the C engine (no kn_pre_tick, or disabled after repeated
+    // throws) nothing can roll a menu frame back, so the strict gate stays.
+    const strictInputLockstep =
+      (_remixMenuLockstep() || !_useCRollback) &&
+      !inBattleTransition &&
+      (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
     return {
       gameStatus,
       sceneCurr,
@@ -5566,7 +5593,7 @@
       inBattleTransition,
       gameplay,
       strictInputLockstep,
-      active: _isSmashRemix() && (inControllableMenu || (!!enabled && gameStatus >= 0 && gameStatus !== 1)),
+      active: _remixMenuLockstep() && (inControllableMenu || (!!enabled && gameStatus >= 0 && gameStatus !== 1)),
     };
   };
 
@@ -5578,7 +5605,7 @@
       if (!phaseMismatchSlots.includes(slot)) phaseMismatchSlots.push(slot);
     };
 
-    if (_isSmashRemix() && !!enabled) {
+    if (_remixMenuLockstep() && !!enabled) {
       const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;
       const nowMs = performance.now();
       for (const p of getActivePeers()) {
@@ -9093,6 +9120,17 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      // One peer deferring rollback to gameplay while the other runs it from
+      // the start would split their timelines at the first menu input.
+      if (_isSmashRemix() && !!peerCaps.remixMenuRollback !== localCaps.remixMenuRollback) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localRemixMenuRollback=${localCaps.remixMenuRollback ? 1 : 0} ` +
+            `peerRemixMenuRollback=${peerCaps.remixMenuRollback ? 1 : 0} — refusing rollback start`,
+        );
+        setStatus('Version mismatch -- reload both players');
+        _config?.onToast?.('Version mismatch -- reload both players');
+        return;
+      }
     }
 
     // Negotiate delay: ceiling of all players.
@@ -11838,7 +11876,7 @@
       };
 
       if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
-        if (_isSmashRemix()) {
+        if (_remixMenuLockstep()) {
           // Smash Remix's title/menu code path triggers a WASM `unreachable`
           // abort when the rollback engine's per-frame retro_serialize runs
           // concurrently — observed at host f=908 in match 85d7a6c8 after
@@ -13629,7 +13667,7 @@
         // irreversible menu edges are never predicted.
         const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
         const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
-        const localGameplay = !_isSmashRemix() || menuPhase.gameplay;
+        const localGameplay = !_remixMenuLockstep() || menuPhase.gameplay;
         const localInMenu = !!menuPhase.localActive;
         // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
         // Status 0 is dangerous only in controllable menus; scene=22/status=0
