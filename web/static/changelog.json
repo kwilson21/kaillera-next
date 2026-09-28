@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.59.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "send session logs as deltas and end games before the DB write (#41)"
+      }
+    ]
+  },
+  {
     "version": "0.59.1",
     "date": "2026-09-28",
     "changes": [
