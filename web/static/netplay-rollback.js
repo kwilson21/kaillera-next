@@ -2911,8 +2911,12 @@
                     // Mirrors the normal forward-tick sequence: pre_tick →
                     // writeInputToMemory → reset_audio + RNG sync →
                     // stepOneFrame → feedAudio → post_tick. Wrapped in try
-                    // so any failure falls back to the next regular tick
-                    // advancing normally.
+                    // so a pre_tick/input failure falls back to the next
+                    // regular tick. _runStepOneFrame handles step throws
+                    // (STEP-THREW; a WASM trap ends the match via
+                    // _handleCoreFatal); a step that didn't emulate skips
+                    // post_tick so the next regular tick advances frame T
+                    // (R2).
                     if (_pendingRunner) {
                       try {
                         const localAtT = _localInputs[applyFrame] || KNShared.ZERO_INPUT;
@@ -2944,17 +2948,15 @@
                             _resetAudioCallsSinceRb++;
                           }
                           _syncRNGSeed(tickMod, _frameNum);
-                          _inDeterministicStep = true;
-                          try {
-                            stepOneFrame();
-                          } finally {
-                            _inDeterministicStep = false;
+                          if (_runStepOneFrame('coproc-sync')) {
+                            _syncRNGSeed(tickMod, _frameNum);
+                            if (typeof feedAudio === 'function') feedAudio();
+                            const newFrame = tickMod._kn_post_tick();
+                            _frameNum = newFrame;
+                            KNState.frameNum = _frameNum;
+                          } else {
+                            _shadowLog(`worker-coproc sync-step skipped: step did not emulate f=${_frameNum}`);
                           }
-                          _syncRNGSeed(tickMod, _frameNum);
-                          if (typeof feedAudio === 'function') feedAudio();
-                          const newFrame = tickMod._kn_post_tick();
-                          _frameNum = newFrame;
-                          KNState.frameNum = _frameNum;
                         } else {
                           _shadowLog(`worker-coproc sync-step skipped: pre_tick returned ${preCu}`);
                         }
