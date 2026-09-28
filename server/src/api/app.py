@@ -106,7 +106,9 @@ _VALID_EVENT_TYPES = {
 _FEEDBACK_CONTEXT_MAX = 4096
 
 # Client events that report a crash; they flag their match (src/retention.py).
-_CRASH_EVENT_TYPES = frozenset({"wasm-fail", "unhandled"})  # 4KB max for context JSON
+# Not "unhandled": it carries browser noise (extension errors, ResizeObserver
+# warnings, aborted media promises) that would flag healthy matches.
+_CRASH_EVENT_TYPES = frozenset({"wasm-fail"})  # 4KB max for context JSON
 
 
 async def cleanup_old_data() -> None:
@@ -1253,7 +1255,8 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = ctx.get("matchId")
         try:
             if not (isinstance(match_id, str) and 0 < len(match_id) <= 64):
-                room_code = ctx.get("roomCode")
+                # Only a bug report is assumed to be about the room's latest match.
+                room_code = ctx.get("roomCode") if payload.category == "bug" else None
                 valid_room = isinstance(room_code, str) and _PUBLIC_ROOM_ID_RE.match(room_code)
                 match_id = await db.find_recent_match(room_code) if valid_room else None
             if match_id:

@@ -217,20 +217,22 @@ def _event(client, body, room="ROOM1"):
     return client.post(f"/api/client-event?room={room}&token={make_upload_token(room)}", json=body)
 
 
-@pytest.mark.parametrize("evt_type", ["wasm-fail", "unhandled"])
-def test_crash_client_event_flags_its_match(http, evt_type):
+def test_wasm_crash_event_flags_its_match(http):
     client, flag = http
-    r = _event(client, {"type": evt_type, "msg": "RuntimeError: unreachable", "meta": {"match_id": "m1"}, "slot": 1})
+    r = _event(client, {"type": "wasm-fail", "msg": "RuntimeError: unreachable", "meta": {"match_id": "m1"}, "slot": 1})
     assert r.status_code == 200
     flag.assert_awaited_once()
     match_id, reasons = flag.await_args.args[:2]
     assert match_id == "m1"
-    assert reasons[0]["signal"] == f"client-{evt_type}" and reasons[0]["slot"] == 1
+    assert reasons[0]["signal"] == "client-wasm-fail" and reasons[0]["slot"] == 1
     assert flag.await_args.kwargs["room"] == "ROOM1"
 
 
 def test_other_client_events_and_events_without_a_match_do_not_flag(http):
+    """'unhandled' carries browser noise (extensions, ResizeObserver) and would
+    flag healthy matches; only a WASM abort is a crash signal."""
     client, flag = http
+    assert _event(client, {"type": "unhandled", "msg": "Script error.", "meta": {"match_id": "m1"}}).status_code == 200
     assert _event(client, {"type": "webrtc-fail", "msg": "x", "meta": {"match_id": "m1"}}).status_code == 200
     assert _event(client, {"type": "wasm-fail", "msg": "boot timeout", "meta": {}}).status_code == 200
     flag.assert_not_awaited()
@@ -251,6 +253,15 @@ def test_feedback_without_match_id_falls_back_to_the_rooms_recent_match(http):
     assert flag.await_args.args[0] == "m-room"
 
 
+def test_non_bug_feedback_without_match_id_does_not_guess_a_match(http):
+    client, flag = http
+    r = client.post(
+        "/api/feedback", json={"category": "feature", "message": "more stages", "context": {"roomCode": "ROOM1"}}
+    )
+    assert r.status_code == 200
+    flag.assert_not_awaited()
+
+
 def test_feedback_about_nothing_does_not_flag(http):
     client, flag = http
     assert client.post("/api/feedback", json={"category": "feature", "message": "more stages"}).status_code == 200
@@ -266,3 +277,59 @@ def test_vision_desync_verdict_flags_the_match(monkeypatch):
     run_async(desync_vision._flag_if_desynced("m1", 300, {"equal": False, "confidence": "high"}))
     run_async(desync_vision._flag_if_desynced("m2", 300, {"equal": True}))
     flag.assert_awaited_once_with("m1", [{"signal": "vision-desync", "count": 1, "first_f": 300}])
+
+
+def test_match_is_classified_again_once_its_upload_window_closes(tmp_path, monkeypatch):
+    """Rotation first runs when any player leaves; problems logged after that
+    must still flag the match."""
+    monkeypatch.setenv("PARQUET_DIR", str(tmp_path / "parquet"))
+
+    async def scenario():
+        from src import match_rotation
+
+        db = await _open(tmp_path)
+        try:
+            await db.register_match("m1", "ROOM1")
+            base = {"match_id": "m1", "room": "ROOM1", "player_name": "P", "mode": "rollback", "epoch": "e"}
+            await db.append_session_log({**base, "slot": 2, "entries": [{"seq": 0, "f": 5, "msg": "TICK f=5"}]})
+            await db.set_session_ended("m1", 2, "leave")  # one player leaves: rotation runs on clean logs
+            assert await match_rotation.sweep_pending() == 1
+            await db.append_session_log(
+                {**base, "slot": 0, "entries": [{"seq": 0, "f": 900, "msg": "TICK-STUCK severity=warn f=900"}]}
+            )
+            await db.set_session_ended("m1", None, "game-end")
+            first = (await _row(db, "m1"))["tier"]
+            # Upload window closes: ended 31 min ago, rotated before that.
+            await db.execute_write(
+                "UPDATE match_retention SET ended_at = datetime('now', '-31 minutes') WHERE match_id = 'm1'", ()
+            )
+            await db.execute_write(
+                "UPDATE match_metrics SET rotated_at = datetime('now', '-40 minutes') WHERE match_id = 'm1'", ()
+            )
+            second_sweep = await match_rotation.sweep_pending()
+            third_sweep = await match_rotation.sweep_pending()  # already final: not re-rotated
+            return first, second_sweep, third_sweep, await _row(db, "m1")
+        finally:
+            await db.close_db()
+
+    first, second_sweep, third_sweep, row = run_async(scenario())
+    assert first == "normal"
+    assert (second_sweep, third_sweep) == (1, 0)
+    assert row["tier"] == "flagged"
+    assert row["flag_reasons"][0]["signal"] == "TICK-STUCK"
+
+
+def test_concurrent_flags_keep_every_reason(tmp_path):
+    import asyncio
+
+    async def scenario():
+        db = await _open(tmp_path)
+        try:
+            await db.register_match("m1", "ROOM1")
+            await asyncio.gather(*(db.flag_match("m1", [{"signal": f"s{i}", "count": 1}]) for i in range(5)))
+            return await _row(db, "m1")
+        finally:
+            await db.close_db()
+
+    row = run_async(scenario())
+    assert sorted(r["signal"] for r in row["flag_reasons"]) == ["s0", "s1", "s2", "s3", "s4"]

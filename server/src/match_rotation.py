@@ -377,7 +377,8 @@ async def _upsert_metrics(m: MatchMetrics) -> None:
 
 
 async def sweep_pending(limit: int = 50) -> int:
-    """Rotate any ended matches that don't yet have a match_metrics row.
+    """Rotate ended matches without a match_metrics row, and rotate once more
+    those whose upload window has closed since their last rotation.
 
     Returns the number of matches rotated. Caps the batch so one sweep
     tick can't stall the event loop if a backfill is in progress.
@@ -392,6 +393,22 @@ async def sweep_pending(limit: int = 50) -> int:
         LEFT JOIN match_metrics m ON m.match_id = s.match_id
         WHERE s.ended_by IS NOT NULL
           AND m.match_id IS NULL
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    # The first rotation can run on partial logs (one player leaving sets
+    # ended_by mid-match), so a match is rotated once more after its upload
+    # window closes: 30 min after game-end, or 4 h after start if it never
+    # ended. That final pass re-runs the retention classifier on every log.
+    rows += await db.query(
+        """
+        SELECT m.match_id
+        FROM match_metrics m
+        JOIN match_retention r ON r.match_id = m.match_id
+        WHERE r.deleting_at IS NULL
+          AND COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours')) < datetime('now')
+          AND m.rotated_at < COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours'))
         LIMIT ?
         """,
         (limit,),

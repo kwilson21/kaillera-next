@@ -35,7 +35,8 @@ async def init_db(
     fakes). Without R2 configured, blobs go in a `blobs` folder next to the
     SQLite file.
     """
-    global _backend, _blobs
+    global _backend, _blobs, _flag_lock
+    _flag_lock = asyncio.Lock()  # bound to the event loop that opens the database
     _upload_check_cache.clear()
     _registered_matches.clear()
     local_root = Path(db_path or os.environ.get("DB_PATH", DEFAULT_DB_PATH)).parent / "blobs"
@@ -429,6 +430,16 @@ async def flag_match(match_id: str, reasons: list[dict], room: str = "") -> None
     """
     if not reasons:
         return
+    async with _flag_lock:
+        await _flag_match_locked(match_id, reasons, room)
+
+
+# flag_match reads, merges and rewrites flag_reasons; concurrent calls for
+# the same match would overwrite each other. Flags are rare, so one lock.
+_flag_lock = asyncio.Lock()
+
+
+async def _flag_match_locked(match_id: str, reasons: list[dict], room: str) -> None:
     backend = _require()
     await backend.execute(
         "INSERT OR IGNORE INTO match_retention (match_id, room) VALUES (?, ?)",
