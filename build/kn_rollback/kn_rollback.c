@@ -68,7 +68,7 @@ extern uint32_t kn_get_rdram_size(void);
 /* Forward declaration: write full controller input for a slot. */
 extern void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy);
 
-/* Forward declaration: headless mode flag (skip GL in retro_run). */
+/* Forward declaration: headless mode flag (skip presentation in retro_run). */
 extern int kn_headless;
 extern void kn_set_headless(int enable);
 

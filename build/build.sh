@@ -476,7 +476,7 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
     # that keeps real GL state and glsm's shadow cache in sync (#43). A
     # silent WARN here would leave that bracket split again and reintroduce
     # the corruption, so a failed apply is fatal, same as the GLideN64
-    # vertex-bounds patch above.
+    # vertex-bounds patch below.
     if [ -f "${PATCHES_DIR}/mupen64plus-headless-tick.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \

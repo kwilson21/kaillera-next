@@ -1,15 +1,16 @@
 diff --git a/libretro/libretro.c b/libretro/libretro.c
-index cabae39..29fdaba 100644
+index cabae39..f640319 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -104,6 +104,60 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+@@ -104,6 +104,61 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
  
  retro_log_printf_t log_cb = NULL;
  retro_video_refresh_t video_cb = NULL;
 +
-+/* kaillera-next: Headless tick mode — skip all GL state management and video
-+ * callbacks in retro_run(). CPU emulation (co_switch) still runs normally.
-+ * Used to benchmark raw emulation speed for GGPO-style rollback feasibility. */
++/* kaillera-next: Headless tick mode — skip presentation (buffer swap +
++ * video_cb) in retro_run() during rollback replay. GLSM bind/unbind and
++ * GLideN64 rendering still run (#43). CPU emulation (co_switch) always
++ * runs normally. */
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
 +int kn_headless = 0;
@@ -63,16 +64,7 @@ index cabae39..29fdaba 100644
  retro_input_poll_t poll_cb = NULL;
  retro_input_state_t input_cb = NULL;
  retro_audio_sample_batch_t audio_batch_cb = NULL;
-@@ -2057,7 +2111,7 @@ void retro_run (void)
-              emuThreadRunning = true;
-           }
-        }
--       
-+
-        glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
-     }
- 
-@@ -2067,7 +2121,17 @@ void retro_run (void)
+@@ -2067,7 +2122,17 @@ void retro_run (void)
      {
         glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
      }
@@ -91,7 +83,7 @@ index cabae39..29fdaba 100644
      if (libretro_swap_buffer)
      {
         if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
-@@ -2095,6 +2159,9 @@ void retro_run (void)
+@@ -2095,6 +2160,9 @@ void retro_run (void)
          // screen_pitch will be 0 for GLN
          video_cb(NULL, retro_screen_width, retro_screen_height, screen_pitch);
      }
