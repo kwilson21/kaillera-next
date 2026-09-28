@@ -8804,6 +8804,17 @@
       Object.values(window.EJS_emulator?.gameManager?.Module?.AL?.contexts || {})
         .map((c) => c?.audioCtx)
         .filter(Boolean);
+    // Hides the audio-stall re-prompt and cleans up its abort controller —
+    // used both when frames advance past a stall and when boot finishes
+    // while the prompt is still up.
+    const dismissAudioStallPrompt = () => {
+      document.getElementById('gesture-prompt')?.classList.add('hidden');
+      if (_bootGestureAbort) {
+        _bootGestureAbort.abort();
+        _bootGestureAbort = null;
+      }
+      _bootAudioPromptActive = false;
+    };
 
     // All players (host + guest) get a gesture prompt before boot.
     // This ensures the AudioContext is created fresh inside the click
@@ -8991,13 +9002,12 @@
             // while the audio-stall prompt was up — dismiss it so the
             // match doesn't start with it still on screen and a stray tap
             // later doesn't run the handler.
-            document.getElementById('gesture-prompt')?.classList.add('hidden');
-            if (_bootGestureAbort) {
-              _bootGestureAbort.abort();
-              _bootGestureAbort = null;
-            }
-            _bootAudioPromptActive = false;
+            dismissAudioStallPrompt();
           }
+        } else if (document.visibilityState === 'hidden') {
+          // Tab is backgrounded: rAF is paused, so frames legitimately
+          // stop — don't treat this as a boot-audio stall.
+          _bootFrameProgressAt = bootNow;
         } else if (!_bootAudioPromptActive && bootNow - _bootFrameProgressAt >= BOOT_AUDIO_STALL_MS) {
           // I1: boot frame count hasn't advanced for BOOT_AUDIO_STALL_MS.
           // Check whether a core OpenAL AudioContext is the reason — retro_sleep
@@ -9107,6 +9117,12 @@
         }
         setTimeout(waitForEmu, 100);
         return;
+      }
+      if (_bootAudioPromptActive) {
+        // Boot finished (frames reached MIN_BOOT_FRAMES) while the
+        // audio-stall prompt was still up — dismiss it so the match
+        // doesn't start with a leftover prompt over it.
+        dismissAudioStallPrompt();
       }
       const rawSimulateInputForDiscovery = mod?._kn_netplay_simulate_input || mod?._simulate_input;
       const simulateInputForDiscovery = rawSimulateInputForDiscovery?.bind(mod);

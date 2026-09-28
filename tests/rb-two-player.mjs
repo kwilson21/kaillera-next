@@ -91,20 +91,7 @@
  *     sync log. Exits 1 if any frame is corrupted when VISUAL_CHECK=1.
  *   SUSPEND_GUEST_AUDIO=1   Guest context only: models Safari leaving the
  *     core's own AudioContext not running and refusing a resume without a
- *     gesture (#63 root cause). Polls every 50ms for the core's OpenAL
- *     contexts (`EJS_emulator.gameManager.Module.AL.contexts`); the first
- *     time an audioCtx shows up there, suspends it once (via the real,
- *     unpatched `suspend()`) and stops polling — this models the core's
- *     context going suspended right after the core creates it, not the
- *     page's own pre-boot gesture-unlocked contexts (those are resumed
- *     inside the trusted click before the core ever sees them). Separately,
- *     resume() on any AudioContext is patched to reject with a
- *     NotAllowedError DOMException unless called within 1000ms of a trusted
- *     gesture (pointerdown/mousedown/click/touchend on window, capture
- *     phase — Playwright clicks are trusted). The existing gesture-prompt
- *     click loop below re-shows and clicks `#gesture-prompt` whenever
- *     visible during the 60s boot wait, so a boot-audio-stall re-prompt
- *     gets dismissed the same way the initial boot prompt does.
+ *     gesture (#63 root cause). See suspendAudioInitScript below.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
