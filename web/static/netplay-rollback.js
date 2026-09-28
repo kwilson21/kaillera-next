@@ -5558,11 +5558,6 @@
   // at the word-aligned address, then extract the correct byte position.
   let _inGameplay = false;
   let _inGameplayLoggedAt = -1; // frame where we last logged a transition
-  // #47 catch-up diagnostics: tick() recomputes _rbBootConverged locally
-  // every call (strict-menu-lockstep gate, see _rbBootConverged below), but
-  // the scheduler pump needs to read the latest value from outside tick().
-  // Mirrored here right after tick() computes it.
-  let _rbBootConvergedLast = false;
   const _readGameStatus = () => {
     if (!_rdramBase || !_isSmashRemix()) return -1;
     const mod = window.EJS_emulator?.gameManager?.Module;
@@ -6630,6 +6625,24 @@
     _pacingSuppressedLogs = 0;
     _pacingLastLogAt = now;
     _syncLog(`${msg}${suffix}`);
+  };
+  // Periodic pacing summary (~5s): averages/caps over the preceding 300
+  // frames, then resets the window. Shared by the JS lockstep path (still
+  // gated on _frameNum % 300 there) and the C-rollback TICK-PERF block,
+  // which is the only place this runs when C-rollback is active — the JS
+  // path's own copy of this block never executes there (tick() returns at
+  // end:c-rollback first).
+  const _logPacingSummary = () => {
+    if (_pacingAdvCount <= 0) return;
+    const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
+    _syncLog(
+      `PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`,
+    );
+    _pacingCapsCount = 0;
+    _pacingCapsFrames = 0;
+    _pacingMaxAdv = 0;
+    _pacingAdvSum = 0;
+    _pacingAdvCount = 0;
   };
 
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
@@ -12491,30 +12504,18 @@
       } else if (after - _tickNextAt >= TICK_TARGET_MS && after - now < TICK_CATCHUP_BUDGET_MS) {
         // #47: still a full slot behind after the forward frame above (and
         // whatever replay work ran ahead of it), and this pump hasn't yet
-        // spent its catch-up budget — try ONE more forward frame. Only
-        // counts, and only advances _tickNextAt again, if tick() actually
-        // advanced the frame counter: a second call that turns out to be a
-        // replay tick (_tickReplayOnly) or that stalls/early-returns (input
-        // wait, pacing, lockstep gate, etc. — none of which move _frameNum)
-        // leaves the slot unspent for the next pump, exactly like today.
-        // Never looped — at most one extra attempt per pump.
+        // spent its catch-up budget — try ONE more forward frame. Unlike the
+        // forward frame above (which spends the slot even when tick() stalls
+        // — only a replay-only tick leaves it unspent), this catch-up call
+        // only spends a slot when it actually advanced _frameNum: a replay
+        // tick or a stall/early-return (input wait, pacing, lockstep gate,
+        // etc.) leaves the schedule exactly as if no catch-up had been
+        // attempted. Never looped — at most one extra attempt per pump.
         const _frameBeforeCatchup = _frameNum;
         tick();
         if (!_tickReplayOnly && _frameNum !== _frameBeforeCatchup) {
           _tickCatchupFrames++;
           _tickNextAt += TICK_TARGET_MS;
-          // Root-cause diagnostics (#47 boot-window investigation): every
-          // catch-up frame's run state, so a post-match log scan can tell
-          // whether any landed before boot convergence (_rbBootConvergedLast)
-          // or before this peer applied its first sync (guests only —
-          // _lastAppliedSyncHostFrame stays -1 on the host, which never
-          // applies a peer's state). Cheap enough (a few hundred per match)
-          // to leave unconditional rather than gate behind a debug flag.
-          _syncLog(
-            `CATCHUP-FRAME f=${_frameNum} bootConverged=${_rbBootConvergedLast} ` +
-              `runSubstate=${_runSubstate} inGameplay=${_inGameplay} ` +
-              `beforeFirstSync=${_playerSlot !== 0 && _lastAppliedSyncHostFrame < 0}`,
-          );
         }
       }
     }, TICK_PUMP_INTERVAL_MS);
@@ -13904,7 +13905,6 @@
         // phase) must not predict either; a prediction would need another hold.
         const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;
         const _rbBootConverged = _bootDone && !_menuLockstepActive;
-        _rbBootConvergedLast = _rbBootConverged;
         const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
         const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
         const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);
@@ -13999,6 +13999,11 @@
               `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay} ` +
               `droppedSlots=${_tickDroppedSlots} catchupFrames=${_tickCatchupFrames}`,
           );
+          // #47: the JS lockstep path's periodic pacing summary (below,
+          // ~L16231) never runs in C-rollback mode — this path returns at
+          // end:c-rollback first. Log it here too, on the same cadence this
+          // block already dedups on.
+          _logPacingSummary();
         }
         // Reset deadlock recovery flag periodically — without this, a single
         // 3s stall permanently disables lockstep enforcement. Re-stall every
@@ -16229,17 +16234,8 @@
         );
       }
       // Periodic pacing summary (~5s)
-      if (_frameNum % 300 === 0 && _pacingAdvCount > 0) {
-        const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
-        _syncLog(
-          `PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`,
-        );
-        // Reset window
-        _pacingCapsCount = 0;
-        _pacingCapsFrames = 0;
-        _pacingMaxAdv = 0;
-        _pacingAdvSum = 0;
-        _pacingAdvCount = 0;
+      if (_frameNum % 300 === 0) {
+        _logPacingSummary();
       }
       // Mesh health check (~5s): reconcile _knownPlayers (server truth) against
       // actual DC state. Re-initiate connections to players the server says are
