@@ -68,6 +68,7 @@
   let isSpectator = false;
   let mode = 'rollback';
   let mySlot = null;
+  let coreFatal = false;
 
   // Coerce legacy/unknown mode strings to the canonical set. Used at every
   // mode-intake boundary (URL, dropdown, users-updated, game-started, REST,
@@ -3571,6 +3572,12 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
+      onFatal: () => {
+        coreFatal = true;
+        engine?.flushSyncLog?.();
+        engine?.dumpLogs?.();
+        showError("The emulator crashed and can't continue. Reload the page to rejoin the match.");
+      },
       onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {
         const overlay = document.getElementById('reconnect-overlay');
@@ -3612,6 +3619,7 @@
     // NAT traversal failure (state=failed), peer never started (state=new),
     // or signaling stalled (no peers in KNState at all).
     setTimeout(() => {
+      if (coreFatal) return;
       const loadingEl = document.getElementById('game-loading');
       if (loadingEl && !loadingEl.classList.contains('hidden') && gameRunning) {
         const text = document.getElementById('game-loading-text');

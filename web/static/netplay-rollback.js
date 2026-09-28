@@ -303,6 +303,11 @@
   // from the heavier _knRuntimeDiagnostics gate.
   const _knScreenshots = !_knPerfLight && _urlParams.get('screenshots') !== 'off';
   const _knLiveFlush = _urlParams.get('knflush') === 'live';
+  // Local-dev-only: synthesize an Emscripten RuntimeError abort at a selected frame.
+  const _forceAbortFrame = (() => {
+    const v = parseInt(_urlParams.get('knForceAbort') ?? '', 10);
+    return Number.isFinite(v) && v >= 0 ? v : -1;
+  })();
   window._knPerfLight = _knPerfLight;
 
   const _getIceServers = () => window._iceServers || KNState.DEFAULT_ICE_SERVERS;
@@ -5718,6 +5723,7 @@
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
+  let _coreFatalError = false; // set once the WASM core traps; the page must reload to play again
   let _externalTickPaused = false; // demo/UI pause: gates the tick callback without tearing down state
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
@@ -6684,8 +6690,8 @@
   const feedAudio = () => _audio.feed();
 
   const setStatus = (msg) => {
-    if (_config?.onStatus) _config.onStatus(msg);
     _syncLog(msg);
+    if (!_coreFatalError && _config?.onStatus) _config.onStatus(msg);
   };
 
   // Reset pacing state after late-join pause. Wall clock time advances
@@ -9132,6 +9138,7 @@
     const sid = _sessionId;
     const syncTimeoutMs = _isSmashRemix() ? INITIAL_SMASH_TITLE_TIMEOUT_MS + 30000 : 30000;
     setTimeout(() => {
+      if (_coreFatalError) return;
       if (sid !== _sessionId) return; // stale timer from previous session
       if (_phase !== PHASE_RUNNING && _phase >= PHASE_EMU_READY) {
         setStatus('Sync timed out — waiting for reconnect...');
@@ -9143,6 +9150,7 @@
   };
 
   const checkAllLockstepReady = () => {
+    if (_coreFatalError) return; // a dead core cannot enter the start sequence
     if (_phase < PHASE_LOCKSTEP_READY) return;
     if (_phase === PHASE_RUNNING) return;
 
@@ -10568,6 +10576,18 @@
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod) return;
 
+    if (!mod._knOnAbortInstalled) {
+      const previousOnAbort = mod.onAbort;
+      mod.onAbort = (what) => {
+        try {
+          previousOnAbort?.call(mod, what);
+        } finally {
+          _handleCoreFatal('abort', what);
+        }
+      };
+      mod._knOnAbortInstalled = true;
+    }
+
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
@@ -10908,6 +10928,10 @@
     if (_hasForkedCore && _knTraceDiagnostics) {
       const trMod = window.EJS_emulator?.gameManager?.Module;
       if (trMod?._kn_int_trace_set_frame) trMod._kn_int_trace_set_frame(_frameNum);
+    }
+
+    if (_isLocalDev && _forceAbortFrame >= 0 && _frameNum >= _forceAbortFrame) {
+      throw new WebAssembly.RuntimeError('Aborted(RuntimeError: unreachable) [synthetic knForceAbort]');
     }
 
     runner(frameTimeMs);
@@ -11260,6 +11284,31 @@
   };
 
   let _stepNoRunLastLogAt = 0;
+  const CORE_FATAL = {
+    reason: 'Emulator crashed',
+    detail: 'the game core hit a fatal error and cannot continue — reload the page to rejoin',
+  };
+  // A WASM trap leaves the core mid-frame with inconsistent state. Running
+  // on would silently diverge, so stop the match and surface the failure.
+  const _handleCoreFatal = (branch, e) => {
+    if (_coreFatalError) return;
+    _coreFatalError = true;
+    const detail = `${e?.message || e}`.slice(0, 200);
+    _syncLog(`FATAL-CORE-ABORT branch=${branch} f=${_frameNum} — WASM core trapped, ending match: ${detail}`);
+    KNEvent('wasm-fail', `core aborted (${branch}) f=${_frameNum}`, { branch, frame: _frameNum, detail });
+    _phase = PHASE_STOPPED;
+    _checkStateTransition();
+    if (_tickInterval) {
+      clearInterval(_tickInterval);
+      _tickInterval = null;
+    }
+    try {
+      _config?.onFatal?.(CORE_FATAL);
+    } catch (cbErr) {
+      console.error('[lockstep] onFatal callback threw:', cbErr);
+    }
+  };
+
   const _runStepOneFrame = (branch) => {
     _inDeterministicStep = true;
     try {
@@ -11276,14 +11325,16 @@
       }
       return stepped;
     } catch (e) {
+      _inDeterministicStep = false;
       _wasmStepActive = false;
       _syncLog(_formatStepThrew(branch, e));
       console.error(`[lockstep] stepOneFrame threw (${branch}):`, e);
 
-      // A non-abort throw can be a stale Emscripten runner after heap growth
-      // or state load. Try to recapture it, but do not pretend a frame ran.
       const msg = `${e?.message || e}`;
-      if (!msg.includes('Aborted(')) {
+      if (msg.includes('Aborted(') || (typeof WebAssembly !== 'undefined' && e instanceof WebAssembly.RuntimeError)) {
+        _handleCoreFatal(branch, e);
+      } else {
+        // A JS exception escaped the frame; retained STEP-THREW logs show whether these need to be fatal.
         const mod = window.EJS_emulator?.gameManager?.Module;
         if (mod) recaptureManualRunner(mod, `stepOneFrame:${branch}:throw`);
       }
@@ -11569,6 +11620,16 @@
   };
 
   const startLockstep = () => {
+    // Late join and reconnect cannot resume a dead core.
+    if (_coreFatalError) {
+      _syncLog('FATAL-CORE-ABORT start blocked — core is dead, reload required');
+      try {
+        _config?.onFatal?.(CORE_FATAL);
+      } catch (cbErr) {
+        console.error('[lockstep] onFatal callback threw:', cbErr);
+      }
+      return;
+    }
     if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
     window._knPreventRetroArchVisibilityPause = true;
@@ -12454,6 +12515,7 @@
     // #47: some devices cap setInterval this hard — prod saw an iPhone
     // Safari pump settle at ~30 Hz with only ~6ms of work per frame, which
     // capped the whole match at ~30 game fps. See the catch-up branch below.
+    if (_coreFatalError) return; // abort during startLockstep setup must not leave a pump running
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
@@ -16633,6 +16695,7 @@
   // Resolves to the sids a DC send skipped (closed channel), [] when sent,
   // or null when no state went out at all.
   const pushSyncState = async (targetSid, isProactive = false, options = {}) => {
+    if (_coreFatalError) return; // a dead host core cannot provide resync state
     // Host: capture state, compute delta if possible, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return;
     // Proactive and explicit syncs use separate in-flight guards so that a

@@ -11,8 +11,8 @@
  * Checks, printed as JSON and written to OUT/summary.json:
  *   - gameplay hash of every finalized frame (12 frames behind the head,
  *     past the rollback window) is identical on both peers
- *   - no failed rollbacks and no integrity events (R2-R5 in
- *     docs/netplay-invariants.md) in either peer's engine or sync log
+ *   - no failed rollbacks or integrity events (R2-R5 and fatal WASM traps
+ *     in docs/netplay-invariants.md) in either peer's engine or sync log
  *   - TICK-STUCK stalls, negotiated delay and rollback counts, for context
  * Exits 1 if the peers' gameplay state diverges, a rollback fails, an
  * integrity event fires, the match never reaches a battle, or fewer than 80%
@@ -549,7 +549,7 @@ for (const f of Object.keys(H.hashes)) {
 }
 const count = (log, re) => (log.match(re) || []).length;
 const INTEGRITY =
-  /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
+  /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|STEP-THREW|FATAL-CORE-ABORT|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
 
