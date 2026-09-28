@@ -79,11 +79,17 @@ integer/float/NULL params bind correctly, and D1's HTTP batch **is** atomic.
    `D1_HOT_DAYS`, default 2) deletes that match's chunks from D1 and clears
    `session_logs.context`. Admin reads use D1 while the chunks exist and the
    R2 archive after.
-3. **Context size fix (a live bug).** Both session-log handlers allow
-   `context` (with `inputAudit`) up to 2 MiB = 2,097,152 bytes, and it shares
-   a D1 row with `summary`. D1 rows are capped at 2,000,000 bytes, so a long
-   match's flushes fail once its audit passes ~1.99 MB until it passes the
-   2 MiB cap and is dropped. The cap drops to 1.5 MB (next PR).
+3. **Context size cap (defensive).** Both session-log handlers allowed
+   `context` (with `inputAudit`) up to 2 MiB = 2,097,152 bytes, but it shares
+   a D1 row with `summary` and D1 rows are capped at 2,000,000 bytes. Honest
+   clients can't reach that (the sanitizer truncates each list to 4,096
+   items, so a real audit tops out around 1.46 MB), but a modified client
+   could. #51 caps context at 1.5 MB.
+5. **Input audit follow-ups (found reviewing #51).** The sanitizer keeps the
+   *oldest* 4,096 audit entries per list, so the audit covers only about the
+   first 70 s of a match; and the whole audit is re-sent every flush (up to
+   ~1.2 MB per player every 5 s). Both are fixed by sending audit *deltas*
+   the way #41 does for log entries (§8).
 4. **Delivery (§8) is renumbered** around what has shipped.
 
 ---
@@ -489,7 +495,7 @@ R2), #49 (quiet httpx logs), and the D1/R2 cutover on Render.
 Remaining:
 
 1. `fix(logs)`: cap session-log `context` at 1.5 MB in both handlers
-   (revision item 3).
+   (revision item 3) — #51.
 2. `feat(logs)`: `match_retention` registration at `start-game` and ingest
    validation (§5), plus the daily D1-rows and R2-bytes budgets.
 3. `feat(logs)`: archive at rotation (Parquet and context to R2), eviction
@@ -507,6 +513,11 @@ Remaining:
 8. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
    filter, `admin_actions.actor`, triage display on the admin page (§9).
    Then create the daily routine.
+9. `feat(logs)`: input audit as deltas (revision item 5). The client sends
+   only new audit entries with each flush, the server appends them (keeping
+   the newest when trimming), and a dropped audit never overwrites a stored
+   one. Touches the netplay client's flush path, so it needs a
+   `tests/rb-two-player.mjs` run (CLAUDE.md).
 
 Before each merge, check the diff size against `main` (CLAUDE.md).
 
