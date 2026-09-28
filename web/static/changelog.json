@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.60.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "cap session-log context to fit a D1 row (#51)"
+      }
+    ]
+  },
+  {
     "version": "0.60.1",
     "date": "2026-09-28",
     "changes": [
