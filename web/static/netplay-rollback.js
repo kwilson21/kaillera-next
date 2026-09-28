@@ -5558,6 +5558,11 @@
   // at the word-aligned address, then extract the correct byte position.
   let _inGameplay = false;
   let _inGameplayLoggedAt = -1; // frame where we last logged a transition
+  // #47 catch-up diagnostics: tick() recomputes _rbBootConverged locally
+  // every call (strict-menu-lockstep gate, see _rbBootConverged below), but
+  // the scheduler pump needs to read the latest value from outside tick().
+  // Mirrored here right after tick() computes it.
+  let _rbBootConvergedLast = false;
   const _readGameStatus = () => {
     if (!_rdramBase || !_isSmashRemix()) return -1;
     const mod = window.EJS_emulator?.gameManager?.Module;
@@ -12498,6 +12503,18 @@
         if (!_tickReplayOnly && _frameNum !== _frameBeforeCatchup) {
           _tickCatchupFrames++;
           _tickNextAt += TICK_TARGET_MS;
+          // Root-cause diagnostics (#47 boot-window investigation): every
+          // catch-up frame's run state, so a post-match log scan can tell
+          // whether any landed before boot convergence (_rbBootConvergedLast)
+          // or before this peer applied its first sync (guests only —
+          // _lastAppliedSyncHostFrame stays -1 on the host, which never
+          // applies a peer's state). Cheap enough (a few hundred per match)
+          // to leave unconditional rather than gate behind a debug flag.
+          _syncLog(
+            `CATCHUP-FRAME f=${_frameNum} bootConverged=${_rbBootConvergedLast} ` +
+              `runSubstate=${_runSubstate} inGameplay=${_inGameplay} ` +
+              `beforeFirstSync=${_playerSlot !== 0 && _lastAppliedSyncHostFrame < 0}`,
+          );
         }
       }
     }, TICK_PUMP_INTERVAL_MS);
@@ -13887,6 +13904,7 @@
         // phase) must not predict either; a prediction would need another hold.
         const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;
         const _rbBootConverged = _bootDone && !_menuLockstepActive;
+        _rbBootConvergedLast = _rbBootConverged;
         const phaseWaitSlots = [...new Set(menuPhase.waitingPeerSlots || [])].sort((a, b) => a - b);
         const phaseMismatchSlots = menuPhase.phaseMismatchSlots?.length ? menuPhase.phaseMismatchSlots : phaseWaitSlots;
         const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);
