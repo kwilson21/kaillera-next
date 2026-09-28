@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.59.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep the newest session-log entries, not the first 4096 (#40)"
+      }
+    ]
+  },
+  {
     "version": "0.59.0",
     "date": "2026-09-28",
     "changes": [
