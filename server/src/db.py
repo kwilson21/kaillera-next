@@ -36,6 +36,8 @@ async def init_db(
     SQLite file.
     """
     global _backend, _blobs
+    _upload_check_cache.clear()
+    _registered_matches.clear()
     local_root = Path(db_path or os.environ.get("DB_PATH", DEFAULT_DB_PATH)).parent / "blobs"
     _blobs = blobs or blobstore_from_env(local_root)
     backend = backend or backend_from_env(db_path)

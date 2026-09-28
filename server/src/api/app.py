@@ -1071,6 +1071,9 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
         match_id = data.get("matchId", "")
+        # Match ids are server-issued UUIDs; anything else (it becomes a cache key) is refused.
+        if not isinstance(match_id, str) or len(match_id) > 64:
+            raise HTTPException(status_code=400, detail="Invalid matchId")
         if not match_id:
             raise HTTPException(status_code=400, detail="Missing matchId")
 
@@ -1079,7 +1082,11 @@ def create_app(lifespan=None) -> FastAPI:
         slot = data.get("slot")
         if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot <= 3:
             raise HTTPException(status_code=400, detail="Invalid slot")
-        if not await db.match_accepts_uploads(match_id, room_id):
+        # The room's live match is accepted in memory (covers matches running
+        # across a deploy, or whose registration failed); otherwise the match
+        # must be registered and within its upload window.
+        live = rooms.get(room_id)
+        if not (live and live.match_id == match_id) and not await db.match_accepts_uploads(match_id, room_id):
             raise HTTPException(status_code=403, detail="Unknown or closed match")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]

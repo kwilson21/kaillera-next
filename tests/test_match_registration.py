@@ -184,3 +184,17 @@ def test_register_match_writes_once_per_process(tmp_path):
             await db.close_db()
 
     assert run_async(scenario()) == 1
+
+
+def test_init_db_clears_the_upload_caches(tmp_path):
+    import src.db as db
+
+    db._upload_check_cache[("m", "R")] = (True, float("inf"))
+    db._registered_matches.add("m")
+
+    async def scenario():
+        await _open(tmp_path, False)
+        await db.close_db()
+
+    run_async(scenario())
+    assert db._upload_check_cache == {} and db._registered_matches == set()

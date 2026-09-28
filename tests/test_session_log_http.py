@@ -60,3 +60,28 @@ def test_slot_must_be_an_integer_0_to_3(client, slot):
     r = _post(http, {**BODY, "slot": slot})
     assert r.status_code == 400
     append.assert_not_awaited()
+
+
+@pytest.mark.parametrize("match_id", [["m1"], {"a": 1}, 5, "x" * 65])
+def test_match_id_must_be_a_short_string(client, match_id):
+    """It becomes a cache key: an unbounded or unhashable value is refused."""
+    http, append, accepts = client
+    r = _post(http, {**BODY, "matchId": match_id})
+    assert r.status_code == 400
+    accepts.assert_not_awaited()
+    append.assert_not_awaited()
+
+
+def test_live_match_in_this_room_is_accepted_without_a_db_check(client, monkeypatch):
+    """Matches running across a deploy, or whose registration failed, have no
+    match_retention row; the room's live match id is enough."""
+    from types import SimpleNamespace
+
+    from src.api import app as appmod
+
+    http, append, accepts = client
+    accepts.return_value = False
+    monkeypatch.setitem(appmod.rooms, "ROOM1", SimpleNamespace(match_id="m1"))
+    r = _post(http, BODY)
+    assert r.status_code == 200
+    accepts.assert_not_awaited()
