@@ -106,6 +106,9 @@
  *     in summary.json. `corruptedNearReplayEnd` counts corrupted frames at
  *     or one past a `C-REPLAY done: caught up at f=N` line in the host's
  *     sync log. Exits 1 if any frame is corrupted when VISUAL_CHECK=1.
+ *   SUSPEND_GUEST_AUDIO=1   Guest context only: models Safari leaving the
+ *     core's own AudioContext not running and refusing a resume without a
+ *     gesture (#63 root cause). See suspendAudioInitScript below.
  *   CLICK_DURING_BATTLE=1   Reproduces #62 (clicking the UI during a
  *     rollback match desyncs peers). At ~1/3 and ~2/3 of BATTLE_SECONDS,
  *     on the host first and then the guest ~2s later, clicks through the
@@ -148,6 +151,7 @@ const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
+const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 
 // Validate knobs before launching anything: a typo here should fail fast,
@@ -263,6 +267,65 @@ const throttleInitScript = (hz) => {
   };
 };
 
+// Models Safari leaving the core's own OpenAL AudioContext not running and
+// refusing a resume without a gesture (see SUSPEND_GUEST_AUDIO in the
+// header). Two independent pieces:
+//   1. resume() on any AudioContext rejects unless called within 1000ms of
+//      a trusted gesture. This alone doesn't reproduce #63: the page's own
+//      pre-boot gesture-unlocked context (_ejsCtx in netplay-rollback.js's
+//      showGesturePrompt) calls resume() inside the trusted click, which
+//      un-suspends it before the core ever gets it.
+//   2. So separately, poll for the core's own OpenAL context(s)
+//      (EJS_emulator.gameManager.Module.AL.contexts) and suspend each one
+//      — via the real, unpatched suspend() — the first time it appears.
+//      That's the context that actually goes quiet in prod.
+const suspendAudioInitScript = () => {
+  let lastGestureAt = -Infinity;
+  for (const type of ['pointerdown', 'mousedown', 'click', 'touchend']) {
+    window.addEventListener(
+      type,
+      (e) => {
+        if (e.isTrusted) lastGestureAt = performance.now();
+      },
+      { capture: true },
+    );
+  }
+
+  // Gesture-gated resume(), patched on both AudioContext and
+  // webkitAudioContext (skipping a re-patch if they're the same function).
+  const patchResume = (name) => {
+    const Real = window[name];
+    if (!Real || Real.prototype.__knResumePatched) return;
+    const realResume = Real.prototype.resume;
+    Real.prototype.resume = function (...args) {
+      if (performance.now() - lastGestureAt <= 1000) return realResume.apply(this, args);
+      return Promise.reject(new DOMException('Permission was denied', 'NotAllowedError'));
+    };
+    Real.prototype.__knResumePatched = true;
+  };
+  patchResume('AudioContext');
+  if (window.webkitAudioContext) patchResume('webkitAudioContext');
+
+  // Real suspend(), saved before any patching touches it (only resume() is
+  // patched above, but grab this early regardless for clarity/safety).
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const realSuspend = AC?.prototype?.suspend;
+  const suspended = new WeakSet();
+  const poll = setInterval(() => {
+    const contexts = window.EJS_emulator?.gameManager?.Module?.AL?.contexts;
+    if (!contexts) return;
+    let foundAny = false;
+    for (const ctx of Object.values(contexts)) {
+      const audioCtx = ctx?.audioCtx;
+      if (!audioCtx || suspended.has(audioCtx)) continue;
+      suspended.add(audioCtx);
+      realSuspend?.call(audioCtx);
+      foundAny = true;
+    }
+    if (foundAny) clearInterval(poll);
+  }, 50);
+};
+
 // Overrides document.hidden/visibilityState to read from a page-global flag
 // instead of the real (unbackgroundable, in a headless multi-context run)
 // tab state. `_visChangeHandler` in netplay-rollback.js only consults these
@@ -277,11 +340,12 @@ const hiddenInitScript = () => {
   });
 };
 
-const mkPage = async (browser, name, { throttleHz = 0, hidden = false } = {}) => {
+const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAudio = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   if (hidden) await ctx.addInitScript(hiddenInitScript);
+  if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
@@ -291,6 +355,7 @@ const host = await mkPage(hostBrowser, 'host');
 const guest = await mkPage(guestBrowser, 'guest', {
   throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS ? 1 : 0,
   hidden: HIDE_GUEST_MS > 0,
+  suspendAudio: SUSPEND_GUEST_AUDIO,
 });
 await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });

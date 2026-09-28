@@ -8780,6 +8780,10 @@
 
   // Minimum frames the emulator must run before we consider it ready.
   const MIN_BOOT_FRAMES = 120; // ~2 seconds at 60fps
+  // Boot-audio-stall watchdog (I1): how long the boot frame count may sit
+  // still before we suspect the core's OpenAL AudioContext isn't running
+  // (retro_sleep spin in al_get_buffer waits on the audio clock — see #63).
+  const BOOT_AUDIO_STALL_MS = 2000;
 
   const startGameSequence = () => {
     if (_phase >= PHASE_GAME_STARTED) return;
@@ -8798,6 +8802,36 @@
 
     let _bootPollCount = 0;
     let _bootGestureReceived = false;
+    // Boot-audio-stall tracking (I1): last observed boot frame count and
+    // when it last changed, plus per-stall attempt state so we resume()
+    // once before falling back to a second tap prompt.
+    let _bootLastFrames = -1;
+    let _bootFrameProgressAt = performance.now();
+    let _bootAudioStallAttempted = false;
+    let _bootAudioStallLogged = false;
+    let _bootAudioPromptActive = false;
+    // At most one audio-stall re-prompt per boot (I1 terminal deadline:
+    // beyond this, the existing 300-poll boot timeout is what fires).
+    // Deliberately NOT reset when frames advance or from the tap handler —
+    // only here and in the KNRecoverSolidCanvas retry branch, same as the
+    // rest of this boot's state.
+    let _bootAudioPromptShown = false;
+    // Every AudioContext the core's OpenAL layer currently holds.
+    const coreAlAudioCtxs = () =>
+      Object.values(window.EJS_emulator?.gameManager?.Module?.AL?.contexts || {})
+        .map((c) => c?.audioCtx)
+        .filter(Boolean);
+    // Hides the audio-stall re-prompt and cleans up its abort controller —
+    // used both when frames advance past a stall and when boot finishes
+    // while the prompt is still up.
+    const dismissAudioStallPrompt = () => {
+      document.getElementById('gesture-prompt')?.classList.add('hidden');
+      if (_bootGestureAbort) {
+        _bootGestureAbort.abort();
+        _bootGestureAbort = null;
+      }
+      _bootAudioPromptActive = false;
+    };
 
     // All players (host + guest) get a gesture prompt before boot.
     // This ensures the AudioContext is created fresh inside the click
@@ -8972,6 +9006,117 @@
       const frames = hasFrameCount ? mod._get_current_frame_count() : 0;
 
       if (frames < MIN_BOOT_FRAMES) {
+        const bootNow = performance.now();
+        if (frames !== _bootLastFrames) {
+          // Frames advanced (or this is the first poll) — the core isn't
+          // stalled, so clear all per-stall attempt state.
+          _bootLastFrames = frames;
+          _bootFrameProgressAt = bootNow;
+          _bootAudioStallAttempted = false;
+          _bootAudioStallLogged = false;
+          if (_bootAudioPromptActive) {
+            // Boot recovered on its own (tab return, audio catching up)
+            // while the audio-stall prompt was up — dismiss it so the
+            // match doesn't start with it still on screen and a stray tap
+            // later doesn't run the handler.
+            dismissAudioStallPrompt();
+          }
+        } else if (document.visibilityState === 'hidden') {
+          // Tab is backgrounded: rAF is paused, so frames legitimately
+          // stop — don't treat this as a boot-audio stall.
+          _bootFrameProgressAt = bootNow;
+        } else if (!_bootAudioPromptActive && bootNow - _bootFrameProgressAt >= BOOT_AUDIO_STALL_MS) {
+          // I1: boot frame count hasn't advanced for BOOT_AUDIO_STALL_MS.
+          // Check whether a core OpenAL AudioContext is the reason — retro_sleep
+          // spins in al_get_buffer() waiting on the audio clock to advance.
+          const audioCtxs = coreAlAudioCtxs();
+          const stuckCtxs = audioCtxs.filter((c) => c.state !== 'running' && c.state !== 'closed');
+          const states = audioCtxs.length > 0 ? audioCtxs.map((c) => c.state).join(',') : 'none';
+          if (stuckCtxs.length === 0) {
+            // Not an audio stall — log once for diagnostics and fall through
+            // to the existing 300-poll (30s) timeout.
+            if (!_bootAudioStallLogged) {
+              _bootAudioStallLogged = true;
+              _syncLog(`BOOT-STALL f=${frames} audio=${states}`);
+            }
+          } else if (!_bootAudioStallAttempted) {
+            // First attempt: resume() directly. This works when the context
+            // is merely suspended (not blocked by browser gesture policy).
+            _bootAudioStallAttempted = true;
+            _syncLog(`BOOT-AUDIO-STALL f=${frames} states=${states} — resuming`);
+            for (const ctx of stuckCtxs) {
+              ctx.resume().catch((e) => _syncLog(`BOOT-AUDIO-STALL resume failed: ${e.name}`));
+            }
+            _bootFrameProgressAt = bootNow; // give the resume its own stall window
+          } else if (!_bootAudioPromptShown) {
+            // Still stuck after a direct resume() attempt — the browser is
+            // withholding audio until a trusted gesture. Re-show the tap
+            // prompt and resume from inside its click/touchend handler. At
+            // most one of these per boot (I1 terminal deadline): once used,
+            // a further stall does nothing new and the existing 300-poll
+            // boot timeout below is what eventually fires.
+            _bootAudioPromptShown = true;
+            _syncLog('BOOT-AUDIO-STALL resume blocked — showing gesture prompt');
+            _bootAudioPromptActive = true;
+            const promptEl = document.getElementById('gesture-prompt');
+            if (promptEl) {
+              promptEl.classList.remove('hidden');
+              setStatus('Tap to continue');
+              // Fresh AbortController, same pattern as showGesturePrompt —
+              // abort any previous one first so stop() cleans this up too.
+              if (_bootGestureAbort) _bootGestureAbort.abort();
+              _bootGestureAbort = new AbortController();
+              const onAudioStallGesture = () => {
+                promptEl.classList.add('hidden');
+                const stuckAtTap = coreAlAudioCtxs().filter((c) => c.state !== 'running' && c.state !== 'closed');
+                if (stuckAtTap.length === 0) {
+                  // Emscripten's own mousedown auto-resume listener often
+                  // beats us to it within the same tap.
+                  _syncLog('BOOT-AUDIO-STALL gesture: core audio already running');
+                } else {
+                  const preResumeStates = stuckAtTap.map((c) => c.state).join(',');
+                  _syncLog(`BOOT-AUDIO-STALL resuming in gesture states=${preResumeStates}`);
+                  for (const ctx of stuckAtTap) {
+                    ctx
+                      .resume()
+                      .then(() => _syncLog(`BOOT-AUDIO-STALL resumed in gesture state=${ctx.state}`))
+                      .catch((e) => _syncLog(`BOOT-AUDIO-STALL resume failed: ${e.name}`));
+                  }
+                }
+                if (_bootGestureAbort) {
+                  _bootGestureAbort.abort();
+                  _bootGestureAbort = null;
+                }
+                // Only resuming audio here — do NOT re-run onPromptClick /
+                // KNStartEmulatorBoot / bootWithCheats, and do NOT reset
+                // _bootPollCount — it was paused (not reset) while the
+                // prompt was up; resume counting from where it left off.
+                _bootLastFrames = frames;
+                _bootFrameProgressAt = performance.now();
+                _bootAudioStallAttempted = false;
+                _bootAudioStallLogged = false;
+                _bootAudioPromptActive = false;
+              };
+              promptEl.addEventListener('click', onAudioStallGesture, { signal: _bootGestureAbort.signal });
+              promptEl.addEventListener('touchend', onAudioStallGesture, { signal: _bootGestureAbort.signal });
+            } else {
+              // No prompt element to show — don't get stuck claiming the
+              // prompt is active forever. _bootAudioPromptShown stays true
+              // so this doesn't retry every stall window either.
+              _bootAudioPromptActive = false;
+            }
+          }
+          // else: the single re-prompt is already used up and audio is
+          // still stuck — do nothing new; the 300-poll boot timeout is the
+          // terminal deadline from here.
+        }
+        // While the audio-stall gesture prompt is up, wait for the user
+        // like the pre-boot gesture wait does: don't advance _bootPollCount
+        // toward the 300-poll timeout, just keep polling.
+        if (_bootAudioPromptActive) {
+          setTimeout(waitForEmu, 200);
+          return;
+        }
         if (_bootPollCount++ % 5 === 0) {
           _syncLog(`boot slot=${_playerSlot} f=${frames}/${MIN_BOOT_FRAMES}`);
           setStatus(`Booting emulator... (${frames}/${MIN_BOOT_FRAMES})`);
@@ -8989,6 +9134,12 @@
         }
         setTimeout(waitForEmu, 100);
         return;
+      }
+      if (_bootAudioPromptActive) {
+        // Boot finished (frames reached MIN_BOOT_FRAMES) while the
+        // audio-stall prompt was still up — dismiss it so the match
+        // doesn't start with a leftover prompt over it.
+        dismissAudioStallPrompt();
       }
       const rawSimulateInputForDiscovery = mod?._kn_netplay_simulate_input || mod?._simulate_input;
       const simulateInputForDiscovery = rawSimulateInputForDiscovery?.bind(mod);
@@ -9013,6 +9164,12 @@
         if (recovery) {
           _bootPollCount = 0;
           _bootGestureReceived = false;
+          _bootLastFrames = -1;
+          _bootFrameProgressAt = performance.now();
+          _bootAudioStallAttempted = false;
+          _bootAudioStallLogged = false;
+          _bootAudioPromptActive = false;
+          _bootAudioPromptShown = false;
           setStatus(`Renderer retry (${recovery.profile}) — tap to continue`);
           showGesturePrompt();
           setTimeout(waitForEmu, 200);
