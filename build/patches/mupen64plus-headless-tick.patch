@@ -1,15 +1,16 @@
 diff --git a/libretro/libretro.c b/libretro/libretro.c
-index cabae39..ee8ca7c 100644
+index cabae39..f640319 100644
 --- a/libretro/libretro.c
 +++ b/libretro/libretro.c
-@@ -104,6 +104,60 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
+@@ -104,6 +104,61 @@ retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
  
  retro_log_printf_t log_cb = NULL;
  retro_video_refresh_t video_cb = NULL;
 +
-+/* kaillera-next: Headless tick mode — skip all GL state management and video
-+ * callbacks in retro_run(). CPU emulation (co_switch) still runs normally.
-+ * Used to benchmark raw emulation speed for GGPO-style rollback feasibility. */
++/* kaillera-next: Headless tick mode — skip presentation (buffer swap +
++ * video_cb) in retro_run() during rollback replay. GLSM bind/unbind and
++ * GLideN64 rendering still run (#43). CPU emulation (co_switch) always
++ * runs normally. */
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
 +int kn_headless = 0;
@@ -63,43 +64,26 @@ index cabae39..ee8ca7c 100644
  retro_input_poll_t poll_cb = NULL;
  retro_input_state_t input_cb = NULL;
  retro_audio_sample_batch_t audio_batch_cb = NULL;
-@@ -2047,6 +2094,9 @@ void retro_run (void)
-     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
-        update_variables(false);
- 
-+#ifdef __EMSCRIPTEN__
-+    if (!kn_headless) {
-+#endif
-     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
-     {
-        if(EnableThreadedRenderer)
-@@ -2057,17 +2107,23 @@ void retro_run (void)
-              emuThreadRunning = true;
-           }
-        }
--       
-+
-        glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
-     }
-+#ifdef __EMSCRIPTEN__
-+    }
-+#endif
- 
-     co_switch(game_thread);
- 
-+#ifdef __EMSCRIPTEN__
-+    if (!kn_headless) {
-+#endif
-     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
+@@ -2067,7 +2122,17 @@ void retro_run (void)
      {
         glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
      }
 -    
 +
++    /* kaillera-next: headless replay frames still run the GLSM bind/unbind
++     * bracket (and threaded-renderer bookkeeping) above, because GLideN64
++     * issues real GL calls during replay regardless of kn_headless. Skipping
++     * the bracket let those calls run against real GL state that glsm's
++     * shadow cache no longer matched, corrupting frames around rollback
++     * catch-up. Only presentation (buffer swap + video_cb, which would flash
++     * a replay frame to the canvas) is skipped while headless. */
++#ifdef __EMSCRIPTEN__
++    if (!kn_headless) {
++#endif
      if (libretro_swap_buffer)
      {
         if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
-@@ -2095,6 +2151,9 @@ void retro_run (void)
+@@ -2095,6 +2160,9 @@ void retro_run (void)
          // screen_pitch will be 0 for GLN
          video_cb(NULL, retro_screen_width, retro_screen_height, screen_pitch);
      }

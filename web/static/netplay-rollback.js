@@ -1492,10 +1492,14 @@
       if (raw === '1') return true;
     } catch (_) {}
     // Defaulted OFF. The full-headless flag (RB_FULL_HEADLESS_DURING_REPLAY)
-    // already suspends the presentation pipeline (GLSM bind/unbind,
-    // libretro_swap_buffer, video_cb) so the canvas stays frozen on the
-    // last drawn frame during replay — that's all we actually need to
-    // hide the rewind. The rdp-skip layer additionally short-circuits
+    // already suspends presentation (libretro_swap_buffer, video_cb) so the
+    // canvas stays frozen on the last drawn frame during replay — that's
+    // all we actually need to hide the rewind. GLSM bind/unbind itself
+    // keeps running during replay (#43 — GLideN64 still issues real GL
+    // calls during replay regardless of headless, and skipping the GLSM
+    // bracket around them let real GL state and glsm's shadow cache drift
+    // apart, corrupting frames near rollback catch-up). The rdp-skip layer
+    // additionally short-circuits
     // GLideN64 draw calls (drawTriangles / drawScreenSpaceTriangle /
     // drawDMATriangles), which leaves CPU-side draw bookkeeping
     // half-updated relative to the GPU. When the flag flips off after
@@ -1508,9 +1512,11 @@
     return false;
   })();
   // Headless-during-replay: with the flag ON, kn_set_headless suspends
-  // GLSM bind/unbind + libretro_swap_buffer + video_cb during replay,
-  // so the canvas stays frozen on the last drawn frame for the duration
-  // of the replay loop (~50ms typical).
+  // presentation (libretro_swap_buffer + video_cb) during replay, so the
+  // canvas stays frozen on the last drawn frame for the duration of the
+  // replay loop (~50ms typical). GLSM bind/unbind keeps running during
+  // replay either way — see #43 — since GLideN64 issues real GL calls on
+  // every replay frame and the bracket must stay wrapped around them.
   //
   // Briefly tried flipping default OFF (commit 74dc9e8) to let replay
   // frames paint as scrub motion. User reported BOTH parallel and
