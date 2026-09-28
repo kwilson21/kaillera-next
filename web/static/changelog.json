@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.58.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "apply resync states at their own frame, never one frame off (#38)"
+      }
+    ]
+  },
+  {
     "version": "0.58.0",
     "date": "2026-09-27",
     "changes": [
