@@ -39,14 +39,29 @@
  *     hook: whenever idle (no replay in flight) and in battle, downscale
  *     `#game canvas` into an offscreen 48x36 canvas and keep its RGB bytes.
  *     After the match, frames present on both peers at the same frame
- *     number are diffed pairwise (mean absolute byte difference; a clean
- *     match is ~6). Frames above 15 are "glitched" — this is what catches
- *     the GLSM-state corruption around rollback replay catch-up (#43).
- *     Reported as `visualCheck: {framesCompared, glitched,
- *     glitchedNearReplayEnd, firstGlitched}` in summary.json.
- *     `glitchedNearReplayEnd` counts glitched frames at or one past a
- *     `C-REPLAY done: caught up at f=N` line in the host's sync log. Exits
- *     1 if any frame is glitched when VISUAL_CHECK=1.
+ *     number are diffed pairwise: mean absolute difference over all RGB
+ *     bytes of the 48x36 signature. Two very different things score above
+ *     baseline here, and only one of them is a bug:
+ *       - Held-frame / capture-timing noise. Headless replay intentionally
+ *         holds the last presented frame during a rollback burst (see
+ *         RB_FULL_HEADLESS_DURING_REPLAY in netplay-rollback.js), so a
+ *         frame captured right at catch-up can legitimately show the
+ *         pre-rollback picture on one peer (e.g. a character still on the
+ *         respawn platform) while the other has already moved on. Not a
+ *         bug — expected given two independently-timed captures.
+ *       - GL-state corruption (#43): vanished stage geometry/fighters, a
+ *         stray polygon.
+ *     An independent census across old-core (buggy) and fixed-core runs
+ *     found a clean gap between the two: held/timing noise topped out at
+ *     30.8, corruption started at 40 and ran up to 74.3, with zero frames
+ *     scoring 31-40. So frames > 40 are "corrupted" (this is what fails the
+ *     run); frames > 15 but <= 40 are reported informationally as
+ *     `heldOrTimingDiffs` and do not fail anything.
+ *     Reported as `visualCheck: {framesCompared, corrupted,
+ *     corruptedNearReplayEnd, firstCorrupted, heldOrTimingDiffs, maxDiff}`
+ *     in summary.json. `corruptedNearReplayEnd` counts corrupted frames at
+ *     or one past a `C-REPLAY done: caught up at f=N` line in the host's
+ *     sync log. Exits 1 if any frame is corrupted when VISUAL_CHECK=1.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -433,9 +448,21 @@ const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - spanFrom +
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 
 // Visual check: decode both peers' downscaled canvas captures and diff
-// frames present on both sides at the same frame number. Baseline (matching
-// render) mean abs byte diff is ~6; #43's GLSM-state corruption around
-// rollback replay catch-up spikes well above that.
+// frames present on both sides at the same frame number — mean absolute
+// difference over all RGB bytes of the 48x36 signature (sum(|h[i]-g[i]|)
+// over all 5184 bytes, divided by 5184). Baseline (matching render) is a
+// few points; noise up to the low 30s is expected and not a bug: headless
+// replay intentionally holds the last presented frame during a rollback
+// (see RB_FULL_HEADLESS_DURING_REPLAY in netplay-rollback.js), so a frame
+// captured right at catch-up can legitimately show the pre-rollback picture
+// on one peer (e.g. a character still on the respawn platform) while the
+// other has already moved on — a held-frame/capture-timing difference, not
+// corruption. An independent census across old-core and fixed-core runs
+// found a clean gap: held/timing noise topped out at 30.8, corruption (the
+// #43 GLSM-state bug — vanished stage geometry/fighters, a stray polygon)
+// started at 40 and ran up to 74.3, with zero frames in between (31-40).
+// 40 is therefore the corruption cutoff; frames above 15 but at or below 40
+// are reported informationally (heldOrTimingDiffs) and do not fail the run.
 let visualCheck = null;
 if (VISUAL_CHECK) {
   const decode = (v) => {
@@ -457,10 +484,14 @@ if (VISUAL_CHECK) {
     replayEndFrames.add(n);
     replayEndFrames.add(n + 1);
   }
+  const CORRUPT_THRESHOLD = 40;
+  const HELD_OR_TIMING_THRESHOLD = 15;
   let framesCompared = 0,
-    glitched = 0,
-    glitchedNearReplayEnd = 0,
-    firstGlitched = null;
+    corrupted = 0,
+    corruptedNearReplayEnd = 0,
+    firstCorrupted = null,
+    heldOrTimingDiffs = 0,
+    maxDiff = 0;
   for (const [f, hb] of hMap) {
     const gb = gMap.get(f);
     if (!gb || f < recoveredAt) continue;
@@ -468,13 +499,23 @@ if (VISUAL_CHECK) {
     let sum = 0;
     for (let i = 0; i < hb.length; i++) sum += Math.abs(hb[i] - gb[i]);
     const mean = sum / hb.length;
-    if (mean > 15) {
-      glitched++;
-      if (firstGlitched === null) firstGlitched = f;
-      if (replayEndFrames.has(f)) glitchedNearReplayEnd++;
+    if (mean > maxDiff) maxDiff = mean;
+    if (mean > CORRUPT_THRESHOLD) {
+      corrupted++;
+      if (firstCorrupted === null) firstCorrupted = f;
+      if (replayEndFrames.has(f)) corruptedNearReplayEnd++;
+    } else if (mean > HELD_OR_TIMING_THRESHOLD) {
+      heldOrTimingDiffs++;
     }
   }
-  visualCheck = { framesCompared, glitched, glitchedNearReplayEnd, firstGlitched };
+  visualCheck = {
+    framesCompared,
+    corrupted,
+    corruptedNearReplayEnd,
+    firstCorrupted,
+    heldOrTimingDiffs,
+    maxDiff: +maxDiff.toFixed(2),
+  };
 }
 
 const summary = {
@@ -565,5 +606,5 @@ const failed =
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||
-  (VISUAL_CHECK && visualCheck.glitched > 0);
+  (VISUAL_CHECK && visualCheck.corrupted > 0);
 process.exit(failed ? 1 : 0);
