@@ -89,6 +89,22 @@
  *     in summary.json. `corruptedNearReplayEnd` counts corrupted frames at
  *     or one past a `C-REPLAY done: caught up at f=N` line in the host's
  *     sync log. Exits 1 if any frame is corrupted when VISUAL_CHECK=1.
+ *   SUSPEND_GUEST_AUDIO=1   Guest context only: models Safari leaving the
+ *     core's own AudioContext not running and refusing a resume without a
+ *     gesture (#63 root cause). Polls every 50ms for the core's OpenAL
+ *     contexts (`EJS_emulator.gameManager.Module.AL.contexts`); the first
+ *     time an audioCtx shows up there, suspends it once (via the real,
+ *     unpatched `suspend()`) and stops polling — this models the core's
+ *     context going suspended right after the core creates it, not the
+ *     page's own pre-boot gesture-unlocked contexts (those are resumed
+ *     inside the trusted click before the core ever sees them). Separately,
+ *     resume() on any AudioContext is patched to reject with a
+ *     NotAllowedError DOMException unless called within 1000ms of a trusted
+ *     gesture (pointerdown/mousedown/click/touchend on window, capture
+ *     phase — Playwright clicks are trusted). The existing gesture-prompt
+ *     click loop below re-shows and clicks `#gesture-prompt` whenever
+ *     visible during the 60s boot wait, so a boot-audio-stall re-prompt
+ *     gets dismissed the same way the initial boot prompt does.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -116,6 +132,7 @@ const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
+const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 
 // Validate knobs before launching anything: a typo here should fail fast,
 // not surface as a confusing result after minutes of gameplay.
@@ -216,17 +233,80 @@ const throttleInitScript = (hz) => {
   };
 };
 
-const mkPage = async (browser, name, { throttleHz = 0 } = {}) => {
+// Models Safari leaving the core's own OpenAL AudioContext not running and
+// refusing a resume without a gesture (see SUSPEND_GUEST_AUDIO in the
+// header). Two independent pieces:
+//   1. resume() on any AudioContext rejects unless called within 1000ms of
+//      a trusted gesture. This alone doesn't reproduce #63: the page's own
+//      pre-boot gesture-unlocked context (_ejsCtx in netplay-rollback.js's
+//      showGesturePrompt) calls resume() inside the trusted click, which
+//      un-suspends it before the core ever gets it.
+//   2. So separately, poll for the core's own OpenAL context(s)
+//      (EJS_emulator.gameManager.Module.AL.contexts) and suspend each one
+//      — via the real, unpatched suspend() — the first time it appears.
+//      That's the context that actually goes quiet in prod.
+const suspendAudioInitScript = () => {
+  let lastGestureAt = -Infinity;
+  for (const type of ['pointerdown', 'mousedown', 'click', 'touchend']) {
+    window.addEventListener(
+      type,
+      (e) => {
+        if (e.isTrusted) lastGestureAt = performance.now();
+      },
+      { capture: true },
+    );
+  }
+
+  // Gesture-gated resume(), patched on both AudioContext and
+  // webkitAudioContext (skipping a re-patch if they're the same function).
+  const patchResume = (name) => {
+    const Real = window[name];
+    if (!Real || Real.prototype.__knResumePatched) return;
+    const realResume = Real.prototype.resume;
+    Real.prototype.resume = function (...args) {
+      if (performance.now() - lastGestureAt <= 1000) return realResume.apply(this, args);
+      return Promise.reject(new DOMException('Permission was denied', 'NotAllowedError'));
+    };
+    Real.prototype.__knResumePatched = true;
+  };
+  patchResume('AudioContext');
+  if (window.webkitAudioContext) patchResume('webkitAudioContext');
+
+  // Real suspend(), saved before any patching touches it (only resume() is
+  // patched above, but grab this early regardless for clarity/safety).
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const realSuspend = AC?.prototype?.suspend;
+  const suspended = new WeakSet();
+  const poll = setInterval(() => {
+    const contexts = window.EJS_emulator?.gameManager?.Module?.AL?.contexts;
+    if (!contexts) return;
+    let foundAny = false;
+    for (const ctx of Object.values(contexts)) {
+      const audioCtx = ctx?.audioCtx;
+      if (!audioCtx || suspended.has(audioCtx)) continue;
+      suspended.add(audioCtx);
+      realSuspend?.call(audioCtx);
+      foundAny = true;
+    }
+    if (foundAny) clearInterval(poll);
+  }, 50);
+};
+
+const mkPage = async (browser, name, { throttleHz = 0, suspendAudio = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
+  if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
 };
 
 const host = await mkPage(hostBrowser, 'host');
-const guest = await mkPage(guestBrowser, 'guest', { throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : 0 });
+const guest = await mkPage(guestBrowser, 'guest', {
+  throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : 0,
+  suspendAudio: SUSPEND_GUEST_AUDIO,
+});
 await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
