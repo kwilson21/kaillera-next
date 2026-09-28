@@ -35,6 +35,11 @@ def _e(msg, slot=0, f=100):
         ("PEER-PHANTOM slot=2 reason=gone", "PEER-PHANTOM"),
         ("LOCAL-FREEZE f=10 gap=900ms", "LOCAL-FREEZE"),
         ("RB-CHECK f=10 MISMATCH peer=0x1 local=0x2 lastGood=5", "RB-CHECK-MISMATCH"),
+        # Exact strings the client and the C engine emit:
+        ("RB-INVARIANT-FIXUP f=10 replayDepth=3 x", "RB-INVARIANT-FIXUP"),
+        ("[C] FATAL-RING-STALE slot=1 f=10 myF=12 depth=2 ring[3]=7", "FATAL-RING-STALE"),
+        ("[C] FATAL DELTA-RESTORE-MISMATCH idx=1 target_frame=10", "FATAL"),
+        ("[C] FATAL: failed to allocate ring slot 2", "FATAL"),
     ],
 )
 def test_each_signal_flags(msg, signal):
@@ -122,17 +127,38 @@ def test_flag_match_sets_tier_and_merges_idempotently(tmp_path, d1):
     ]
 
 
-def test_flag_match_creates_a_row_for_an_unregistered_match(tmp_path):
+def test_flag_match_never_creates_a_row(tmp_path):
+    """Callers pass client-chosen ids; a row would reopen uploads for them."""
+
     async def scenario():
         db = await _open(tmp_path)
         try:
-            await db.flag_match("old", [{"signal": "client-wasm-fail", "count": 1}], room="ROOM9")
+            await db.flag_match("made-up", [{"signal": "client-wasm-fail", "count": 1}])
+            return await _row(db, "made-up"), await db.match_accepts_uploads("made-up", "ROOM1")
+        finally:
+            await db.close_db()
+
+    assert run_async(scenario()) == (None, False)
+
+
+def test_rotation_registers_a_match_from_before_registration_existed(tmp_path, monkeypatch):
+    monkeypatch.setenv("PARQUET_DIR", str(tmp_path / "parquet"))
+
+    async def scenario():
+        from src import match_rotation
+
+        db = await _open(tmp_path)
+        try:
+            base = {"match_id": "old", "room": "ROOM1", "player_name": "P", "mode": "rollback", "epoch": "e"}
+            await db.append_session_log({**base, "slot": 0, "entries": [{"seq": 0, "f": 9, "msg": "TICK-STUCK f=9"}]})
+            await db.set_session_ended("old", None, "game-end")
+            await match_rotation.rotate_match("old")
             return await _row(db, "old")
         finally:
             await db.close_db()
 
     row = run_async(scenario())
-    assert row["tier"] == "flagged" and row["room"] == "ROOM9"
+    assert row["tier"] == "flagged" and row["room"] == "ROOM1"
 
 
 def test_flag_match_skips_a_match_being_deleted(tmp_path):
@@ -208,6 +234,7 @@ def http(monkeypatch):
     monkeypatch.setattr(db, "insert_client_event", AsyncMock(return_value=1))
     monkeypatch.setattr(db, "insert_feedback", AsyncMock(return_value=11))
     monkeypatch.setattr(db, "find_recent_match", AsyncMock(return_value="m-room"))
+    monkeypatch.setattr(db, "match_accepts_uploads", AsyncMock(return_value=True))
     return TestClient(appmod.create_app()), flag
 
 
@@ -215,6 +242,16 @@ def _event(client, body, room="ROOM1"):
     from src.api.signaling import make_upload_token
 
     return client.post(f"/api/client-event?room={room}&token={make_upload_token(room)}", json=body)
+
+
+def test_crash_event_for_a_match_outside_this_room_does_not_flag(http, monkeypatch):
+    import src.db as db
+
+    client, flag = http
+    monkeypatch.setattr(db, "match_accepts_uploads", AsyncMock(return_value=False))
+    r = _event(client, {"type": "wasm-fail", "msg": "x", "meta": {"match_id": "made-up"}})
+    assert r.status_code == 200
+    flag.assert_not_awaited()
 
 
 def test_wasm_crash_event_flags_its_match(http):
@@ -225,7 +262,9 @@ def test_wasm_crash_event_flags_its_match(http):
     match_id, reasons = flag.await_args.args[:2]
     assert match_id == "m1"
     assert reasons[0]["signal"] == "client-wasm-fail" and reasons[0]["slot"] == 1
-    assert flag.await_args.kwargs["room"] == "ROOM1"
+    import src.db as db
+
+    db.match_accepts_uploads.assert_awaited_once_with("m1", "ROOM1")
 
 
 def test_other_client_events_and_events_without_a_match_do_not_flag(http):

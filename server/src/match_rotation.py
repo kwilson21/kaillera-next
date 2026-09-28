@@ -296,7 +296,9 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     reasons = retention.classify_entries(merged)
     if reasons:
         try:
-            await db.flag_match(match_id, reasons, room=rows[0].get("room") or "")
+            # Matches from before registration existed have no row yet.
+            await db.register_match(match_id, rows[0].get("room") or "")
+            await db.flag_match(match_id, reasons)
         except Exception as exc:
             log.warning("rotate_match: flagging %s failed: %s", match_id[:8], exc)
 
@@ -407,6 +409,7 @@ async def sweep_pending(limit: int = 50) -> int:
         FROM match_metrics m
         JOIN match_retention r ON r.match_id = m.match_id
         WHERE r.deleting_at IS NULL
+          AND r.created_at > datetime('now', '-1 day')  -- every window closes within 4 h; keeps the scan on the index
           AND COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours')) < datetime('now')
           AND m.rotated_at < COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours'))
         LIMIT ?

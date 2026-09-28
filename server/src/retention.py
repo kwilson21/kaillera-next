@@ -18,7 +18,6 @@ _ANY_TAGS = frozenset(
     {
         "REPLAY-NORUN",
         "RB-INVARIANT-VIOLATION",
-        "FATAL-RING-STALE",
         "RB-LIVE-MISMATCH",
         "TICK-STUCK",
         "RB-INPUT-STALL-TIMEOUT",
@@ -26,6 +25,10 @@ _ANY_TAGS = frozenset(
         "LOCAL-FREEZE",
     }
 )
+# ...and any tag with one of these prefixes: the C engine's FATAL lines
+# (FATAL, FATAL-RING-STALE, ...) and rollback-invariant events
+# (RB-INVARIANT-FIXUP, RB-INVARIANT-VIOLATION).
+_ANY_PREFIXES = ("FATAL", "RB-INVARIANT-")
 # Out-of-range inputs from one peer this many times in a match is a storm.
 _INPUT_OOR_STORM = 20
 
@@ -44,13 +47,14 @@ def classify_entries(entries: Iterable[dict]) -> list[dict]:
         msg = entry.get("msg")
         if not isinstance(msg, str):
             continue
-        tag = msg.split(" ", 1)[0]
+        # The C engine's own log lines are relayed with a "[C] " prefix.
+        tag = msg.removeprefix("[C] ").split(" ", 1)[0].rstrip(":")
         if tag == "INPUT-OOR":
             oor.setdefault(entry.get("slot"), []).append(entry)
             continue
         if tag == "RB-CHECK" and "MISMATCH" in msg:
             signal = "RB-CHECK-MISMATCH"
-        elif tag in _ANY_TAGS:
+        elif tag in _ANY_TAGS or tag.startswith(_ANY_PREFIXES):
             signal = tag
         else:
             continue

@@ -103,12 +103,12 @@ _VALID_EVENT_TYPES = {
     "peer_reconnected",
 }
 
-_FEEDBACK_CONTEXT_MAX = 4096
+_FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
 # Client events that report a crash; they flag their match (src/retention.py).
 # Not "unhandled": it carries browser noise (extension errors, ResizeObserver
 # warnings, aborted media promises) that would flag healthy matches.
-_CRASH_EVENT_TYPES = frozenset({"wasm-fail"})  # 4KB max for context JSON
+_CRASH_EVENT_TYPES = frozenset({"wasm-fail"})
 
 
 async def cleanup_old_data() -> None:
@@ -1194,7 +1194,13 @@ def create_app(lifespan=None) -> FastAPI:
         log.info("Client event: %s room=%s msg=%s id=%d", evt_type, room, msg[:100], row_id)
         # A crash report keeps its match until someone resolves it (retention).
         match_id = meta.get("match_id")
-        if evt_type in _CRASH_EVENT_TYPES and isinstance(match_id, str) and 0 < len(match_id) <= 64:
+        event_room = request.query_params.get("room", "")[:32]
+        if (
+            evt_type in _CRASH_EVENT_TYPES
+            and isinstance(match_id, str)
+            and 0 < len(match_id) <= 64
+            and await db.match_accepts_uploads(match_id, event_room)
+        ):
             slot = data.get("slot")
             reason = {
                 "signal": f"client-{evt_type}",
@@ -1203,7 +1209,7 @@ def create_app(lifespan=None) -> FastAPI:
                 "detail": msg[:200],
             }
             try:
-                await db.flag_match(match_id, [reason], room=request.query_params.get("room", "")[:32])
+                await db.flag_match(match_id, [reason])
             except Exception as exc:
                 log.warning("Flagging %s for a %s event failed: %s", match_id[:8], evt_type, exc)
         return {"status": "saved", "id": row_id}

@@ -420,18 +420,20 @@ async def find_recent_match(room: str) -> str | None:
     return rows[0]["match_id"] if rows else None
 
 
-async def flag_match(match_id: str, reasons: list[dict], room: str = "") -> None:
+async def flag_match(match_id: str, reasons: list[dict]) -> None:
     """Mark a match flagged (kept until resolved) and merge `reasons` into it.
 
     Idempotent: a reason whose signal is already stored keeps the larger
     count and the earliest frame, so classifying the same logs again doesn't
-    double-count. A match with no row yet (started before registration
-    existed) gets one. Matches being deleted are left alone.
+    double-count. Only an existing row is flagged: callers pass client-chosen
+    ids, and creating a row would reopen uploads for them (a match from
+    before registration is registered by rotation first). Matches being
+    deleted are left alone.
     """
     if not reasons:
         return
     async with _flag_lock:
-        await _flag_match_locked(match_id, reasons, room)
+        await _flag_match_locked(match_id, reasons)
 
 
 # flag_match reads, merges and rewrites flag_reasons; concurrent calls for
@@ -439,12 +441,8 @@ async def flag_match(match_id: str, reasons: list[dict], room: str = "") -> None
 _flag_lock = asyncio.Lock()
 
 
-async def _flag_match_locked(match_id: str, reasons: list[dict], room: str) -> None:
+async def _flag_match_locked(match_id: str, reasons: list[dict]) -> None:
     backend = _require()
-    await backend.execute(
-        "INSERT OR IGNORE INTO match_retention (match_id, room) VALUES (?, ?)",
-        (match_id, room),
-    )
     rows = await backend.query("SELECT flag_reasons, deleting_at FROM match_retention WHERE match_id = ?", (match_id,))
     if not rows or rows[0]["deleting_at"]:
         return
