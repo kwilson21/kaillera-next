@@ -187,13 +187,18 @@ an invariant violation. Logs `REPLAY-NORUN` with full diagnostic
 fields (current frame, replay depth, runner state). Dev builds throw.
 
 A counted frame must have been emulated exactly once. #62 found that
-a DOM focus change (e.g. clicking the toolbar or feedback form)
-triggers Emscripten's `MainLoop.pause()`/`resume()`, which bumps
-`currentlyRunningMainloop` and makes the `_pendingRunner` captured by
-`overrideRAF` stale: calling it hits `checkIsRunning()` and returns
-without emulating the frame or scheduling its successor, yet the old
-code counted the frame anyway — a silent one-tick desync. `stepOneFrame()`
-now detects this (no runner rescheduled AND `kn_get_cycle_time_ms`
+after a DOM focus change (e.g. clicking the toolbar or feedback form),
+the next captured `_pendingRunner` call can emulate nothing — CP0
+Count (`kn_get_cycle_time_ms`) unchanged across the call and no
+successor runner scheduled — while `EJS_emulator.paused` stays false;
+the old code counted the frame anyway, a silent one-tick desync. Two
+mechanisms are consistent with that signature and neither was
+isolated: (a) the focus change fires Emscripten's
+`MainLoop.pause()`/`resume()`, bumping `currentlyRunningMainloop` so
+the captured runner is stale and `checkIsRunning()` returns early, or
+(b) RetroArch's own runloop pause makes `emscripten_mainloop` pause
+and return without running the core. `stepOneFrame()` now detects the
+no-op signature (no runner rescheduled AND `kn_get_cycle_time_ms`
 unchanged across the call, when the core exports it), recaptures the
 runner, and re-steps the SAME frame once. If the retry still does not
 emulate, `stepOneFrame()` returns `false` like the no-runner case above,

@@ -111,14 +111,15 @@
  *     on the host first and then the guest ~2s later, clicks through the
  *     toolbar "more" menu into the feedback form (`#toolbar-more` →
  *     `.kn-feedback-toolbar-item` → a `.kn-feedback-cat` button) and closes
- *     it with Escape — the exact click path that triggers the focus change
- *     that goes on to stale the captured Emscripten MainLoop runner (see
- *     docs/netplay-invariants.md §R2). Fire-and-forget via setTimeout so it
- *     doesn't block the battle-length wait or change BATTLE_SECONDS. Each
- *     round is logged. Before the #62 fix this makes the gameplay-hash
- *     compare below fail (hundreds of finalized gameplay-hash mismatches
- *     observed before the fix, 0 after); after the fix it should pass like
- *     a CLICK_DURING_BATTLE=0 run.
+ *     it via `.kn-feedback-close` — the exact click path that moves DOM
+ *     focus and, per the measured #62 signature (no runner rescheduled,
+ *     CP0 Count unchanged), can leave a captured runner emulating nothing
+ *     (see docs/netplay-invariants.md §R2). Fire-and-forget via setTimeout
+ *     so it doesn't block the battle-length wait or change BATTLE_SECONDS.
+ *     Each round is logged. Before the #62 fix this makes the
+ *     gameplay-hash compare below fail (hundreds of finalized
+ *     gameplay-hash mismatches observed before the fix, 0 after); after
+ *     the fix it should pass like a CLICK_DURING_BATTLE=0 run.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -457,7 +458,7 @@ const clickThroughFeedback = async (page, label) => {
   await page.click('.kn-feedback-toolbar-item');
   await page.waitForTimeout(500);
   await page.click('.kn-feedback-cat');
-  await page.keyboard.press('Escape');
+  await page.click('.kn-feedback-close');
   console.log(`CLICK_DURING_BATTLE: ${label} click round done`);
 };
 const scheduleClickRound = (delayMs, roundLabel) => {

@@ -986,13 +986,14 @@
   };
 
   // Decide whether a stepOneFrame() runner invocation actually emulated the
-  // frame it was called for (#62 — click-during-match desync). A captured
-  // Emscripten MainLoop runner goes stale when a DOM focus change fires
-  // MainLoop.pause()/resume() between capture and use: the stale runner's
-  // closure still points at an old `currentlyRunningMainloop` id, so
-  // checkIsRunning() returns immediately without calling the mainloop func
-  // and without scheduling its successor via requestAnimationFrame. Two
-  // independent signals catch this:
+  // frame it was called for (#62 — click-during-match desync). #62 found
+  // that after a DOM focus change (e.g. clicking the toolbar or feedback
+  // form), the runner call can return immediately without calling the
+  // mainloop func and without scheduling its successor via
+  // requestAnimationFrame. The mechanism wasn't isolated: plausibly a
+  // stale MainLoop runner (MainLoop.pause()/resume() bumps
+  // currentlyRunningMainloop so checkIsRunning() returns early) or
+  // RetroArch's own runloop pause. Two independent signals catch this:
   //   - `rescheduled`: whether a fresh runner got captured via the
   //     overrideRAF interceptor during the call (a real step always
   //     schedules its own next frame).

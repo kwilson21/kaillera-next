@@ -10999,13 +10999,16 @@
 
   // Run the currently-captured _pendingRunner once for `frameTimeMs` and
   // report whether it actually emulated the frame. See #62: after a
-  // focus-driven MainLoop.pause()/resume() (e.g. clicking the toolbar or
-  // feedback form), a runner captured before the bump hits Emscripten's
-  // checkIsRunning() and returns immediately — no mainloop func call, no
-  // reschedule — while stepOneFrame still counted the frame as stepped.
-  // KNShared.classifyRunnerStep() makes the emulated/stale decision from
-  // two signals sampled around the call: did a fresh runner get
-  // rescheduled, and did CP0 Count (kn_get_cycle_time_ms) move at all.
+  // click moves DOM focus (e.g. toolbar or feedback form), the runner
+  // call can emulate nothing — no mainloop func call, no reschedule —
+  // while stepOneFrame still counted the frame as stepped. Plausible
+  // causes (not isolated): a stale runner after MainLoop.pause()/
+  // resume() bumps currentlyRunningMainloop so checkIsRunning() returns
+  // early, or RetroArch's own runloop pause makes emscripten_mainloop
+  // return without running the core. KNShared.classifyRunnerStep()
+  // makes the emulated/stale decision from two signals sampled around
+  // the call: did a fresh runner get rescheduled, and did CP0 Count
+  // (kn_get_cycle_time_ms) move at all.
   const _runCapturedRunner = (frameTimeMs) => {
     const runner = _pendingRunner;
     _pendingRunner = null;
