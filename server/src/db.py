@@ -607,7 +607,13 @@ async def execute_batch(statements: list[tuple[str, tuple]]) -> None:
 
 
 async def delete_match_blobs(match_id: str) -> None:
-    """Delete every blob stored under the match's prefix (screenshots now)."""
+    """Delete every blob stored under the match's prefix (screenshots now).
+
+    The id must be a single path segment: an empty id would name every
+    match's folder, and one with "/" another match's.
+    """
+    if not match_id or "/" in match_id or match_id in (".", ".."):
+        raise BlobStoreError(f"Refusing to delete blobs for match id {match_id!r}")
     await _blob_store().delete_prefix(f"matches/{match_id}/")
 
 

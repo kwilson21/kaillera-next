@@ -119,11 +119,15 @@ async def cleanup_old_data() -> None:
     and naps often) and then every 6 hours; it depends only on timestamps, so
     skipped runs are harmless."""
     await asyncio.sleep(60)
+    passes = 0
     while True:
         try:
-            await retention.sweep()
+            # The unregistered-rows cleanup scans whole tables (D1 bills rows
+            # read): at boot and then once a day.
+            await retention.sweep(include_unregistered=passes % 4 == 0)
         except Exception as e:
             log.warning("Retention sweep error: %s", e)
+        passes += 1
         await asyncio.sleep(6 * 3600)
 
 

@@ -165,7 +165,14 @@ class R2BlobStore:
         checked = [_check_key(k) for k in keys]
         for start in range(0, len(checked), _DELETE_BATCH):
             batch = checked[start : start + _DELETE_BATCH]
-            await self._call("delete_objects", Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
+            result = await self._call("delete_objects", Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
+            # Quiet mode still reports keys it failed to delete; don't treat them as gone.
+            errors = (result or {}).get("Errors") or []
+            if errors:
+                first = errors[0]
+                raise BlobStoreError(
+                    f"R2 delete_objects failed for {len(errors)} key(s): {first.get('Code', 'unknown')}"
+                )
 
 
 def blobstore_from_env(local_root: Path) -> BlobStore:

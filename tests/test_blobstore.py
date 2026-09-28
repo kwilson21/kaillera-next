@@ -238,3 +238,18 @@ def test_live_r2_put_get_delete(tmp_path):
             assert await store.get(key) is None
 
     assert run_async(scenario()) == b"\x00\x01live"
+
+
+def test_r2_delete_reports_per_key_failures():
+    """delete_objects doesn't raise for keys it failed to delete; they come back in Errors."""
+    from src.blobstore import BlobStoreError
+
+    client = FakeS3()
+
+    def partial_failure(**kw):
+        client.calls.append(("delete_objects", kw))
+        return {"Errors": [{"Key": kw["Delete"]["Objects"][0]["Key"], "Code": "InternalError"}]}
+
+    client.delete_objects = partial_failure
+    with pytest.raises(BlobStoreError, match="InternalError"):
+        run_async(_r2(client).delete(["matches/m/screenshots/0-1.jpg"]))

@@ -16,7 +16,6 @@ import os
 from collections.abc import Iterable
 
 from src import db
-from src.blobstore import BlobStoreError
 
 log = logging.getLogger(__name__)
 
@@ -99,9 +98,19 @@ _EXPIRED = """(
 _BATCH = 200
 
 
+def _days(name: str, default: int) -> int:
+    """A retention window in days, never below 1: 0 would delete live matches."""
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        log.warning("Retention: %s is not a whole number of days; using %d", name, default)
+        return default
+    return max(value, 1)
+
+
 def _windows() -> tuple[str, str, str]:
-    retention_days = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
-    stale_days = int(os.environ.get("FLAGGED_STALE_DAYS", "180"))
+    retention_days = _days("LOG_RETENTION_DAYS", 7)
+    stale_days = _days("FLAGGED_STALE_DAYS", 180)
     return f"-{retention_days} days", f"-{stale_days} days", f"-{retention_days} days"
 
 
@@ -110,7 +119,7 @@ async def mark_expired() -> list[str]:
 
     The UPDATE re-checks expiry, so a flag or resolve that lands between the
     SELECT and the UPDATE makes it a no-op. A tombstoned match is refused for
-    uploads and flags, and hidden from the admin API.
+    uploads and flags.
     """
     windows = _windows()
     rows = await db.query(
@@ -134,15 +143,18 @@ async def finish_deletes() -> int:
     Each step is idempotent, so a sweep interrupted anywhere leaves a hidden
     match that the next sweep finishes (spec §4). Returns matches finished.
     """
-    rows = await db.query("SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL LIMIT ?", (_BATCH,))
+    rows = await db.query(
+        "SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL ORDER BY deleting_at LIMIT ?", (_BATCH,)
+    )
     if not rows:
         return 0
     # client_events has no index on meta.match_id, so delete every tombstoned
     # match's events in one scan rather than one scan per match (D1 bills
     # rows read). The matches are already hidden, so doing this first is safe.
     await db.execute_write(
-        """DELETE FROM client_events WHERE json_valid(meta) AND json_extract(meta, '$.match_id') IN
-           (SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL)""",
+        """DELETE FROM client_events
+           WHERE CASE WHEN json_valid(meta) THEN json_extract(meta, '$.match_id') END IN
+                 (SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL)""",
         (),
     )
     finished = 0
@@ -150,22 +162,24 @@ async def finish_deletes() -> int:
         match_id = row["match_id"]
         try:
             await db.delete_match_blobs(match_id)
-        except BlobStoreError as exc:
-            log.warning("Retention: blobs of %s not deleted yet: %s", match_id[:8], exc)
+            await db.execute_batch(
+                [
+                    (f"DELETE FROM {table} WHERE match_id = ?", (match_id,))
+                    for table in (
+                        "screenshots",
+                        "desync_events",
+                        "session_log_chunks",
+                        "session_logs",
+                        "match_metrics",
+                        "match_retention",  # last: the tombstone goes only when everything else has
+                    )
+                ]
+            )
+        except Exception as exc:
+            # One match that keeps failing must not stop the others; it stays
+            # tombstoned and is retried next sweep.
+            log.warning("Retention: match %s not deleted yet: %s", match_id[:8], exc)
             continue
-        await db.execute_batch(
-            [
-                (f"DELETE FROM {table} WHERE match_id = ?", (match_id,))
-                for table in (
-                    "screenshots",
-                    "desync_events",
-                    "session_log_chunks",
-                    "session_logs",
-                    "match_metrics",
-                    "match_retention",  # last: the tombstone goes only when everything else has
-                )
-            ]
-        )
         finished += 1
     return finished
 
@@ -185,17 +199,19 @@ async def sweep_unregistered() -> None:
     await db.execute_write(
         """DELETE FROM client_events WHERE created_at < datetime('now', ?)
            AND NOT EXISTS (SELECT 1 FROM match_retention r
-                           WHERE json_valid(client_events.meta)
-                             AND r.match_id = json_extract(client_events.meta, '$.match_id'))""",
+                           WHERE r.match_id = CASE WHEN json_valid(client_events.meta)
+                                                   THEN json_extract(client_events.meta, '$.match_id') END)""",
         cutoff,
     )
 
 
-async def sweep() -> None:
+async def sweep(*, include_unregistered: bool = True) -> None:
     """One retention pass: finish interrupted deletes, tombstone and delete
-    newly expired matches, then age out unregistered rows."""
+    newly expired matches, then (unless told not to) age out unregistered
+    rows, which scans whole tables and so runs less often."""
     await finish_deletes()
     marked = await mark_expired()
     finished = await finish_deletes()
-    await sweep_unregistered()
+    if include_unregistered:
+        await sweep_unregistered()
     log.info("Retention sweep: %d match(es) expired, %d deleted", len(marked), finished)

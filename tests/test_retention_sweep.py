@@ -327,3 +327,91 @@ def test_client_events_of_deleted_matches_are_removed_in_one_statement(tmp_path)
     event_deletes, left = run_async(scenario())
     assert left == [GONE, GONE, GONE]
     assert event_deletes <= 2  # one for tombstoned matches, one for unregistered rows
+
+
+async def _backdate_rows(db, match_id, days):
+    ago = (f"-{days} days", match_id)
+    for table in ("session_logs", "session_log_chunks", "screenshots", "desync_events"):
+        await db.execute_write(f"UPDATE {table} SET created_at = datetime('now', ?) WHERE match_id = ?", ago)
+    await db.execute_write(
+        "UPDATE client_events SET created_at = datetime('now', ?) WHERE json_extract(meta, '$.match_id') = ?", ago
+    )
+
+
+def test_flagged_matchs_old_rows_are_never_swept_as_unregistered(tmp_path):
+    """The orphan cleanup must skip every row of a retained match, however old."""
+
+    async def setup(db):
+        await _match(db, "flagged", ended_days_ago=30, created_days_ago=30)
+        await db.flag_match("flagged", [{"signal": "TICK-STUCK", "count": 1}])
+        await _backdate_rows(db, "flagged", 30)
+
+    assert _sweep_and_count(tmp_path, setup, "flagged") == [KEPT]
+
+
+def test_normal_match_inside_its_window_keeps_rows_older_than_the_window(tmp_path):
+    """A match ended 6 days ago whose first rows are 8 days old is still kept."""
+
+    async def setup(db):
+        await _match(db, "long", ended_days_ago=6, created_days_ago=8)
+        await _backdate_rows(db, "long", 8)
+
+    assert _sweep_and_count(tmp_path, setup, "long") == [KEPT]
+
+
+def test_one_failing_match_does_not_stop_the_sweep(tmp_path):
+    async def scenario():
+        import src.db as dbmod
+        from src import retention
+
+        db = await _open(tmp_path)
+        try:
+            await _match(db, "bad", ended_days_ago=9, created_days_ago=9)
+            await _match(db, "good", ended_days_ago=8, created_days_ago=8)
+            real_batch = dbmod.execute_batch
+
+            async def failing_for_bad(statements):
+                if statements and statements[0][1] == ("bad",):
+                    raise RuntimeError("D1 query failed (HTTP 500)")
+                return await real_batch(statements)
+
+            dbmod.execute_batch = failing_for_bad
+            try:
+                await retention.sweep()
+            finally:
+                dbmod.execute_batch = real_batch
+            return await _left(db, "good", tmp_path)
+        finally:
+            await db.close_db()
+
+    assert run_async(scenario()) == GONE
+
+
+@pytest.mark.parametrize("match_id", ["", "a/b", ".."])
+def test_blob_delete_refuses_ids_that_are_not_one_segment(tmp_path, match_id):
+    from src.blobstore import BlobStoreError
+
+    async def scenario():
+        db = await _open(tmp_path)
+        try:
+            await db.insert_screenshot("keep", 0, 1, JPEG)
+            with pytest.raises(BlobStoreError):
+                await db.delete_match_blobs(match_id)
+        finally:
+            await db.close_db()
+
+    run_async(scenario())
+    assert (tmp_path / "blobs/matches/keep/screenshots/0-1.jpg").exists()
+
+
+def test_retention_windows_have_a_one_day_floor(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_RETENTION_DAYS", "0")
+
+    async def setup(db):
+        await _match(db, "today", ended_days_ago=0, created_days_ago=0)
+        await db.execute_write(
+            "UPDATE match_retention SET created_at = datetime('now', '-12 hours'), ended_at = datetime('now', '-12 hours') WHERE match_id = 'today'",
+            (),
+        )
+
+    assert _sweep_and_count(tmp_path, setup, "today") == [KEPT]
