@@ -1072,7 +1072,12 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Missing matchId")
 
         room_id = request.query_params.get("room", "")
+        # Rooms hold at most 4 players (OpenRoomPayload.maxPlayers), slots 0-3.
         slot = data.get("slot")
+        if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot <= 3:
+            raise HTTPException(status_code=400, detail="Invalid slot")
+        if not await db.match_accepts_uploads(match_id, room_id):
+            raise HTTPException(status_code=403, detail="Unknown or closed match")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
         epoch = str(data.get("epoch", ""))[:64]
