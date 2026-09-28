@@ -5990,7 +5990,7 @@
     })(),
     mode: 'rollback',
     // Identifies this ring instance to the server (see db.append_session_log
-    // / migration 0008): a reload, reconnect, or slot-reuse creates a new
+    // / migration 0002_session_log_chunks.sql): a reload, reconnect, or slot-reuse creates a new
     // ring (new epoch) that restarts seq at 0, and without this the server
     // would dedupe every new entry away against the old ring's last_seq.
     epoch: _syncLogRing.epoch,

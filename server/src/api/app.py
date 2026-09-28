@@ -121,7 +121,7 @@ async def cleanup_old_data() -> None:
                 "client_events",
                 "screenshots",
                 "desync_events",
-                # Delta chunks (see migration 0008) accumulate independently
+                # Delta chunks (see migration 0002_session_log_chunks.sql) accumulate independently
                 # of their parent session_logs row's created_at/updated_at,
                 # so they need their own retention sweep or they'd outlive
                 # every other table here.

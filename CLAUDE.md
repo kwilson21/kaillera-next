@@ -55,7 +55,7 @@ kaillera-next/
 │       ├── main.py          # entry point (FastAPI + Socket.IO + uvloop)
 │       ├── state.py         # Redis-backed room persistence
 │       ├── ratelimit.py     # per-IP rate limiting
-│       ├── db.py            # SQLite database (aiosqlite + Alembic migrations)
+│       ├── db.py            # database: SQLite or Cloudflare D1 backend (src/dbbackend/), SQL migrations in server/migrations/
 │       └── api/
 │           ├── app.py       # FastAPI app (REST + security middleware)
 │           ├── og.py        # OG card image generation (Playwright HTML screenshots)

@@ -150,7 +150,7 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
     main.py            Entry point — serves API, Socket.IO, and static frontend
     state.py           Redis-backed room persistence
     ratelimit.py       Per-IP rolling-window rate limiting
-    db.py              SQLite database (aiosqlite + Alembic migrations)
+    db.py              Database: SQLite or Cloudflare D1 backend, SQL migrations in server/migrations/
     api/
       app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data

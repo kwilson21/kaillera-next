@@ -1,6 +1,9 @@
-"""SQLite database module — aiosqlite connection, Alembic migrations, query helpers.
+"""Database module: backend selection, migrations, query helpers.
 
-Owns the single kn.db connection. Call init_db() on startup, close_db() on shutdown.
+Owns the single database backend. Call init_db() on startup, close_db() on
+shutdown. The backend is local SQLite unless Cloudflare D1 is configured
+(see src/dbbackend/__init__.py); both run the same SQLite-dialect SQL, and
+schema changes are plain-SQL files in server/migrations/ (src/migrate.py).
 """
 
 from __future__ import annotations
@@ -8,85 +11,47 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from pathlib import Path
 
-import aiosqlite
+from src.dbbackend import Backend, backend_from_env
+from src.migrate import apply_migrations
 
 log = logging.getLogger(__name__)
 
-_db: aiosqlite.Connection | None = None
-
-_DEFAULT_DB_PATH = os.path.join("data", "kn.db")
+_backend: Backend | None = None
 
 
 async def init_db(db_path: str | None = None) -> None:
-    """Run Alembic migrations and open the aiosqlite connection."""
-    global _db
-    path = db_path or os.environ.get("DB_PATH", _DEFAULT_DB_PATH)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-
-    # Run Alembic migrations synchronously (they use their own connection)
-    _run_migrations(path)
-
-    _db = await aiosqlite.connect(path)
-    _db.row_factory = aiosqlite.Row
-    await _db.execute("PRAGMA journal_mode=WAL")
-    log.info("Database connected: %s", path)
-
-
-def _run_migrations(db_path: str) -> None:
-    """Run Alembic upgrade head against the given database path."""
-    import sqlite3
-
-    from alembic import command
-    from alembic.config import Config
-
-    alembic_dir = Path(__file__).parent.parent / "alembic"
-    ini_path = Path(__file__).parent.parent / "alembic.ini"
-
-    cfg = Config(str(ini_path))
-    cfg.set_main_option("script_location", str(alembic_dir))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-
-    # Guard: if the DB was stamped with a revision that no longer exists
-    # (for example, a migration was added then later removed), stamp to the
-    # latest known revision and retry. This keeps deploys from crashing on
-    # older data volumes that still carry the orphaned revision marker.
+    """Open the backend and apply pending migrations."""
+    global _backend
+    backend = backend_from_env(db_path)
+    await backend.open()
     try:
-        command.upgrade(cfg, "head")
-    except Exception as exc:
-        if "No such revision" not in str(exc) and "Can't locate revision" not in str(exc):
-            raise
-        log.warning("Alembic revision mismatch -- fixing: %s", exc)
-        from alembic.script import ScriptDirectory
-
-        script = ScriptDirectory.from_config(cfg)
-        head = script.get_current_head()
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute("UPDATE alembic_version SET version_num = ?", (head,))
-            conn.commit()
-        finally:
-            conn.close()
-        log.info("Stamped alembic_version to %s, retrying migrations", head)
-        command.upgrade(cfg, "head")
+        applied = await apply_migrations(backend)
+    except Exception:
+        await backend.close()
+        raise
+    _backend = backend
+    log.info("Database connected: %s (migrations applied: %s)", backend.name, ", ".join(applied) or "none")
 
 
 async def close_db() -> None:
-    """Close the aiosqlite connection."""
-    global _db
-    if _db:
-        await _db.close()
-        _db = None
+    """Close the backend."""
+    global _backend
+    if _backend is not None:
+        await _backend.close()
+        _backend = None
         log.info("Database connection closed")
+
+
+def _require() -> Backend:
+    if _backend is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    return _backend
 
 
 async def insert_feedback(data: dict) -> int:
     """Insert a feedback row and return the new row ID."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(
+    result = await _require().execute(
         """INSERT INTO feedback (category, message, email, page, context, ip_hash)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (
@@ -98,8 +63,7 @@ async def insert_feedback(data: dict) -> int:
             data.get("ip_hash"),
         ),
     )
-    await _db.commit()
-    return cursor.lastrowid
+    return result.last_row_id
 
 
 _SESSION_LOG_CHUNK_CAP = 12 * 1024 * 1024  # 12MB per (match_id, slot) — same budget
@@ -163,22 +127,21 @@ async def append_session_log(data: dict) -> int:
     client.
 
     `data["epoch"]` identifies the client's in-memory ring instance (see
-    migration 0008). When it differs from the epoch already stored for this
-    (match_id, slot), `last_seq` is treated as -1 for this flush (and the
-    new epoch adopted) instead of deduping the new ring's entries against
-    the old one's high-water mark — otherwise a reload, reconnect, or a
-    spectator claiming a slot a previous player used would have every entry
-    look like a dup of stale state and get silently dropped. A missing/empty
-    epoch (legacy caller) skips this check entirely, preserving the old
-    dedupe-by-last_seq-only behavior.
+    migration 0002_session_log_chunks.sql). When it differs from the epoch
+    already stored for this (match_id, slot), `last_seq` is treated as -1
+    for this flush (and the new epoch adopted) instead of deduping the new
+    ring's entries against the old one's high-water mark — otherwise a
+    reload, reconnect, or a spectator claiming a slot a previous player used
+    would have every entry look like a dup of stale state and get silently
+    dropped. A missing/empty epoch (legacy caller) skips this check
+    entirely, preserving the old dedupe-by-last_seq-only behavior.
 
     Concurrent flushes for the same (match_id, slot) are serialized by
     `_acquire_append_lock` so two overlapping calls can't both read the same
     `last_seq` and both insert a chunk for entries the other has already
     covered.
     """
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
+    _require()
     match_id = data["match_id"]
     slot = data.get("slot")
     epoch = data.get("epoch") or ""
@@ -191,18 +154,19 @@ async def append_session_log(data: dict) -> int:
 
 
 async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> int:
-    cursor = await _db.execute(
+    backend = _require()
+    rows = await backend.query(
         "SELECT last_seq, log_epoch FROM session_logs WHERE match_id = ? AND slot IS ?",
         (match_id, slot),
     )
-    row = await cursor.fetchone()
-    stored_epoch = row[1] if row and row[1] is not None else ""
+    row = rows[0] if rows else None
+    stored_epoch = row["log_epoch"] if row and row["log_epoch"] is not None else ""
     # No epoch supplied (legacy caller) behaves exactly as before: dedupe
     # against whatever last_seq is already stored. A supplied epoch that
     # doesn't match the stored one resets the high-water mark.
     same_epoch = not epoch or epoch == stored_epoch
     # -1 means "no entries acked yet" (client seqs start at 0).
-    current_last_seq = row[0] if row and row[0] is not None and same_epoch else -1
+    current_last_seq = row["last_seq"] if row and row["last_seq"] is not None and same_epoch else -1
 
     entries = data.get("entries") or []
     new_entries = []
@@ -219,19 +183,25 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
         # always kept rather than silently dropped — see _valid_seq.
         new_entries.append(e)
 
+    # The chunk insert, cap enforcement and metadata upsert commit together.
+    statements: list[tuple[str, tuple]] = []
     if new_entries:
         entries_json = json.dumps(new_entries)
         seqs = [_valid_seq(e.get("seq")) for e in new_entries]
         seqs = [s for s in seqs if s is not None]
         first_seq = min(seqs) if seqs else current_last_seq
-        await _db.execute(
-            "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?)",
-            (match_id, slot, first_seq, max_seq, entries_json, len(entries_json)),
+        statements.append(
+            (
+                "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?)",
+                (match_id, slot, first_seq, max_seq, entries_json, len(entries_json)),
+            )
         )
-        await _enforce_chunk_cap(match_id, slot)
+        if await _stored_chunk_bytes(match_id, slot) + len(entries_json) > _SESSION_LOG_CHUNK_CAP:
+            statements.append(_chunk_cap_statement(match_id, slot))
 
-    await _db.execute(
-        """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash, last_seq, log_epoch, updated_at)
+    statements.append(
+        (
+            """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash, last_seq, log_epoch, updated_at)
            VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, datetime('now'))
            ON CONFLICT(match_id, slot) DO UPDATE SET
              summary=excluded.summary, context=excluded.context,
@@ -240,45 +210,44 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
                             THEN MAX(session_logs.last_seq, excluded.last_seq)
                             ELSE excluded.last_seq END,
              log_epoch=excluded.log_epoch""",
-        (
-            match_id,
-            data["room"],
-            slot,
-            data.get("player_name"),
-            data.get("mode"),
-            data.get("summary"),
-            data.get("context"),
-            data.get("ip_hash"),
-            max_seq,
-            epoch,
-        ),
+            (
+                match_id,
+                data["room"],
+                slot,
+                data.get("player_name"),
+                data.get("mode"),
+                data.get("summary"),
+                data.get("context"),
+                data.get("ip_hash"),
+                max_seq,
+                epoch,
+            ),
+        )
     )
-    await _db.commit()
+    await backend.batch(statements)
     return max_seq
 
 
-async def _enforce_chunk_cap(match_id: str, slot: int | None) -> None:
-    """Delete the oldest chunks for (match_id, slot) until total size is under the cap.
+async def _stored_chunk_bytes(match_id: str, slot: int | None) -> int:
+    """Total size of the chunks already stored for (match_id, slot).
 
     Uses the `size` column recorded at insert time instead of re-reading
-    `length(entries)` for every stored chunk on every flush — with a long
-    match accumulating dozens of chunks, that re-read cost was paid again
-    on every single flush.
+    `length(entries)` for every stored chunk on every flush.
     """
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(
-        "SELECT COALESCE(SUM(size), 0) FROM session_log_chunks WHERE match_id = ? AND slot IS ?",
+    rows = await _require().query(
+        "SELECT COALESCE(SUM(size), 0) AS total FROM session_log_chunks WHERE match_id = ? AND slot IS ?",
         (match_id, slot),
     )
-    row = await cursor.fetchone()
-    if not row or row[0] <= _SESSION_LOG_CHUNK_CAP:
-        return
-    # Keep the newest chunks whose cumulative size (counted from the newest
-    # backwards) still fits the cap; delete everything older in one
-    # statement — equivalent to the old "pop the oldest until under cap"
-    # loop, without a per-row DELETE.
-    await _db.execute(
+    return int(rows[0]["total"]) if rows else 0
+
+
+def _chunk_cap_statement(match_id: str, slot: int | None) -> tuple[str, tuple]:
+    """DELETE the oldest chunks for (match_id, slot) until the total fits the cap.
+
+    Keeps the newest chunks whose cumulative size (counted from the newest
+    backwards) still fits, in one statement rather than a per-row DELETE.
+    """
+    return (
         """
         DELETE FROM session_log_chunks
         WHERE match_id = ? AND slot IS ?
@@ -312,17 +281,16 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
         if isinstance(legacy, list):
             entries.extend(legacy)
 
-    if _db is None:
+    if _backend is None:
         return entries
 
-    cursor = await _db.execute(
+    rows = await _backend.query(
         "SELECT entries FROM session_log_chunks WHERE match_id = ? AND slot IS ? ORDER BY id",
         (match_id, slot),
     )
-    rows = await cursor.fetchall()
     for r in rows:
         try:
-            chunk = json.loads(r[0])
+            chunk = json.loads(r["entries"])
         except (json.JSONDecodeError, TypeError):
             chunk = []
         if isinstance(chunk, list):
@@ -332,27 +300,23 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
 
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:
     """Mark how a session ended."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
+    backend = _require()
     if slot is not None:
-        await _db.execute(
+        await backend.execute(
             "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND slot=?",
             (ended_by, match_id, slot),
         )
     else:
         # Only update rows without an existing ended_by (don't overwrite leave/disconnect with game-end)
-        await _db.execute(
+        await backend.execute(
             "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND ended_by IS NULL",
             (ended_by, match_id),
         )
-    await _db.commit()
 
 
 async def insert_client_event(data: dict) -> int:
     """Insert a client event and return row ID."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(
+    result = await _require().execute(
         """INSERT INTO client_events (type, message, meta, room, slot, ip_hash, user_agent)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
@@ -365,61 +329,37 @@ async def insert_client_event(data: dict) -> int:
             data.get("user_agent"),
         ),
     )
-    await _db.commit()
-    return cursor.lastrowid
+    return result.last_row_id
 
 
 async def execute_write(sql: str, params: tuple) -> None:
     """Run a write query (DELETE, UPDATE) and commit."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    await _db.execute(sql, params)
-    await _db.commit()
+    await _require().execute(sql, params)
 
 
 async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -> int:
     """Insert a gameplay screenshot and return row ID."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(
+    result = await _require().execute(
         "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)",
         (match_id, slot, frame, data),
     )
-    await _db.commit()
-    return cursor.lastrowid
+    return result.last_row_id
 
 
 async def get_screenshots(match_id: str) -> list[dict]:
     """Return screenshot metadata (without data) for a match."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(
+    return await _require().query(
         "SELECT id, match_id, slot, frame, length(data) as size, created_at FROM screenshots WHERE match_id = ? ORDER BY slot, frame",
         (match_id,),
     )
-    rows = await cursor.fetchall()
-    if not rows:
-        return []
-    columns = [desc[0] for desc in cursor.description]
-    return [dict(zip(columns, row, strict=False)) for row in rows]
 
 
 async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     """Return raw JPEG bytes for a screenshot."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute("SELECT data FROM screenshots WHERE id = ?", (screenshot_id,))
-    row = await cursor.fetchone()
-    return row[0] if row else None
+    rows = await _require().query("SELECT data FROM screenshots WHERE id = ?", (screenshot_id,))
+    return rows[0]["data"] if rows else None
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
     """Run a read query and return results as a list of dicts."""
-    if _db is None:
-        raise RuntimeError("Database not initialized -- call init_db() first")
-    cursor = await _db.execute(sql, params)
-    rows = await cursor.fetchall()
-    if not rows:
-        return []
-    columns = [desc[0] for desc in cursor.description]
-    return [dict(zip(columns, row, strict=False)) for row in rows]
+    return await _require().query(sql, params)

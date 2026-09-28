@@ -361,12 +361,11 @@ async def _run_legacy_plus_chunks(tmp_db):
     # append_session_log (and its last_seq bookkeeping) existed. There's no
     # write helper for this shape anymore — insert it directly, the way a
     # pre-migration row would already look on disk.
-    await db_mod._db.execute(
+    await db_mod.execute_write(
         "INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ("m4", "R1", 0, "P1", "rollback", json.dumps(legacy_entries), "{}", "{}", "abc"),
     )
-    await db_mod._db.commit()
 
     # A last_seq of 0 (default before this feature existed on the row) would
     # be wrong here since it would dedupe away seq=0 forever; the migration
@@ -630,7 +629,7 @@ async def _run_concurrent_appends(tmp_db):
 def test_cleanup_old_data_also_cleans_session_log_chunks(tmp_db):
     """cleanup_old_data must delete stale session_log_chunks rows too —
     they accumulate independently of their parent session_logs row's own
-    created_at/updated_at (see migration 0008), so without their own sweep
+    created_at/updated_at (see migration 0002_session_log_chunks.sql), so without their own sweep
     they'd outlive every other retention-governed table."""
     _run_async(_run_cleanup_chunks(tmp_db))
 
@@ -645,17 +644,16 @@ async def _run_cleanup_chunks(tmp_db):
     from src.db import close_db, init_db, query
 
     await init_db(tmp_db)
-    await db_mod._db.execute(
+    await db_mod.execute_write(
         "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-31 days'))",
         ("m-old", 0, 0, 0, "[]", 2),
     )
-    await db_mod._db.execute(
+    await db_mod.execute_write(
         "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
         ("m-new", 0, 0, 0, "[]", 2),
     )
-    await db_mod._db.commit()
 
     # cleanup_old_data is `while True: await asyncio.sleep(86400); ...`.
     # Make the sleep resolve instantly so one iteration runs almost
@@ -678,4 +676,20 @@ async def _run_cleanup_chunks(tmp_db):
 
     rows = await query("SELECT match_id FROM session_log_chunks", ())
     assert [r["match_id"] for r in rows] == ["m-new"]
+    await close_db()
+
+
+def test_init_db_records_migrations_and_is_rerunnable(tmp_db):
+    """init_db applies the SQL migrations once; a second start applies nothing."""
+    _run_async(_run_init_twice(tmp_db))
+
+
+async def _run_init_twice(tmp_db):
+    from src.db import close_db, init_db, query
+
+    await init_db(tmp_db)
+    await close_db()
+    await init_db(tmp_db)
+    rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
+    assert [r["version"] for r in rows] == ["0001", "0002"]
     await close_db()

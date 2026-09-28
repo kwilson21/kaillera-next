@@ -871,7 +871,7 @@
   // cryptographic — it only needs to be extremely unlikely to collide with
   // the previous epoch for the same (match_id, slot), which a reload,
   // reconnect, or slot-reuse otherwise looks like to the server (see
-  // db.append_session_log / migration 0008).
+  // db.append_session_log / migration 0002_session_log_chunks.sql).
   const _genRingEpoch = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
   // A single flush's entries can't be allowed to approach the 4MB Socket.IO
