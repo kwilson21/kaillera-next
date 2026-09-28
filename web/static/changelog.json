@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.61.0",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "register matches and validate log uploads against them (#53)"
+      }
+    ]
+  },
+  {
     "version": "0.60.2",
     "date": "2026-09-28",
     "changes": [
