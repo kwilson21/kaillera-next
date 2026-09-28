@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.12",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "recover a boot audio stall without a tap using a stand-in audio clock (#72)"
+      }
+    ]
+  },
+  {
     "version": "0.63.11",
     "date": "2026-09-28",
     "changes": [
