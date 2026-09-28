@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.59.5",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "make the D1 cutover safe for large log flushes and screenshots (#46)"
+      }
+    ]
+  },
+  {
     "version": "0.59.4",
     "date": "2026-09-28",
     "changes": [
