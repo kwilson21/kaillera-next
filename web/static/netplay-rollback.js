@@ -10943,7 +10943,7 @@
         `replayRemaining=${replayRemaining} tick=${performance.now().toFixed(1)}`,
     );
     if (window.KN_DEV_BUILD) {
-      throw new Error('REPLAY-NORUN: stepOneFrame called with null runner during replay');
+      throw new Error('REPLAY-NORUN: stepOneFrame did not emulate during replay');
     }
   };
 
@@ -11026,9 +11026,10 @@
       // already advanced _frameNum many times while the emulator was
       // frozen — that's the peer-divergence path observed in production
       // (host log showed `manual runner recaptured after focus+750ms`,
-      // i.e. ~45 frames of skew). Self-heal here keeps both peers
-      // bit-identical: at most one tick of skew before recovery, which
-      // is recovered by the runner's own emscripten_mainloop call below.
+      // i.e. ~45 frames of skew). The recapture here happens before the
+      // step, so this frame is emulated with no skew; a runner that is
+      // present but stale is caught after the call (see
+      // _runCapturedRunner / #62).
       if (_manualMode && !_isSpectator) {
         const recapMod = window.EJS_emulator?.gameManager?.Module;
         if (recapMod) recaptureManualRunner(recapMod, 'stepOneFrame:no-runner');
@@ -11072,16 +11073,6 @@
       _wasmStepActive = false;
       _logReplayNoRun();
       return false;
-    }
-
-    // The frame WAS emulated (outcome is 'emulated' or 'unknown'). If the
-    // runner didn't reschedule its successor — a legit mid-frame pause
-    // (e.g. a rollback restore) rather than a stale no-op — recapture now
-    // so the next stepOneFrame() call has a runner immediately instead of
-    // relying on that call's own no-runner self-heal one tick later.
-    if (!_pendingRunner) {
-      const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod) recaptureManualRunner(mod, 'stepOneFrame:no-reschedule');
     }
 
     // Cheap visual ground-truth capture — default-on in prod so the admin

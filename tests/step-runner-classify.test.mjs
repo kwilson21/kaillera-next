@@ -24,8 +24,8 @@ test('a normal step (rescheduled, cycle time advanced) is emulated', () => {
 });
 
 test('a normal step that also reschedules with unchanged cycle time is emulated', () => {
-  // Some legitimate steps (e.g. very first frame) may not move the cycle
-  // counter; rescheduling alone is enough to prove the runner ran.
+  // Rescheduling alone is enough to prove the runner ran, even if the
+  // cycle counter didn't move.
   assert.equal(classifyRunnerStep(true, 0, 0), 'emulated');
 });
 

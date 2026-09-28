@@ -1003,8 +1003,8 @@
   // tests/step-runner-classify.test.mjs.
   const classifyRunnerStep = (rescheduled, cycleBefore, cycleAfter) => {
     // Stock core (no kn_get_cycle_time_ms export): can't distinguish stale
-    // from legit mid-frame pause by cycle time. Treat as emulated — this is
-    // the pre-#62 behavior (recapture-only, no re-step) for that fallback.
+    // from legit mid-frame pause by cycle time, so don't re-step — same as
+    // pre-#62 behavior.
     if (cycleBefore == null || cycleAfter == null) return 'unknown';
     if (!rescheduled && cycleAfter === cycleBefore) return 'stale';
     return 'emulated';

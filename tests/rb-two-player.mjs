@@ -116,8 +116,9 @@
  *     docs/netplay-invariants.md §R2). Fire-and-forget via setTimeout so it
  *     doesn't block the battle-length wait or change BATTLE_SECONDS. Each
  *     round is logged. Before the #62 fix this makes the gameplay-hash
- *     compare below fail (19-48 mismatches observed); after the fix it
- *     should pass like a CLICK_DURING_BATTLE=0 run.
+ *     compare below fail (hundreds of finalized gameplay-hash mismatches
+ *     observed before the fix, 0 after); after the fix it should pass like
+ *     a CLICK_DURING_BATTLE=0 run.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -179,9 +180,9 @@ if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
   console.log('HIDE_GUEST_MS is mutually exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and THROTTLE_GUEST');
   process.exit(1);
 }
-if (CLICK_DURING_BATTLE && !(BATTLE_SECONDS > 10)) {
+if (CLICK_DURING_BATTLE && !(BATTLE_SECONDS > 15)) {
   console.log(
-    `CLICK_DURING_BATTLE=1 needs BATTLE_SECONDS > 10 (two click rounds need room at the 1/3 and 2/3 marks) — got ${BATTLE_SECONDS}`,
+    `CLICK_DURING_BATTLE=1 needs BATTLE_SECONDS > 15 (round 2 at 2/3 plus host click ~0.8s + 2s gap + guest click ~0.8s must finish before collect()) — got ${BATTLE_SECONDS}`,
   );
   process.exit(1);
 }
