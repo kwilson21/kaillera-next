@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.58.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "sync the host's save RAM at game start; accept 16MB late-join states (#37)"
+      }
+    ]
+  },
+  {
     "version": "0.58.1",
     "date": "2026-09-28",
     "changes": [
