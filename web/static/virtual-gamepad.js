@@ -481,11 +481,14 @@
       '  }',
 
       // Game/stream surface: gets ALL space between panels. 4:3 preserved by object-fit.
+      // No width:auto on #game: shrink-to-fit tracks the canvas buffer, which RetroArch
+      // sizes from the canvas box, so a restart after hibernateEmulator stuck it at 0.
       '  #game, #stream-overlay {',
       '    max-width: calc(100vw - var(--panel-l) - var(--panel-r) - var(--offset-l) - var(--offset-r)) !important;',
-      '    width: auto !important;',
       '    margin: auto !important;',
       '  }',
+      // #stream-overlay keeps width:auto so play.css's aspect-ratio sizes it from its height.
+      '  #stream-overlay { width: auto !important; }',
 
       // Panels: flex columns, width from design tokens
       '  .vgp-left, .vgp-right {',
