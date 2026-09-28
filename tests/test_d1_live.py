@@ -79,3 +79,17 @@ def test_live_batch_atomicity_report():
 
     count = run_async(_with_table(scenario))[0]["c"]
     print(f"\nD1 HTTP batch atomic: {count == 0} (rows left after failed batch: {count})")
+
+
+def test_live_large_text_param_fits_one_row():
+    """Session-log context is capped at 1.5 MB (_SESSION_LOG_CONTEXT_MAX) to fit
+    a D1 row; check the HTTP API accepts a parameter that size."""
+    from src.api.signaling import _SESSION_LOG_CONTEXT_MAX
+
+    big = "x" * _SESSION_LOG_CONTEXT_MAX
+
+    async def scenario(b, table):
+        await b.execute(f"INSERT INTO {table} (n, s) VALUES (?, ?)", (1, big))
+        return await b.query(f"SELECT length(s) AS n FROM {table}", ())
+
+    assert run_async(_with_table(scenario)) == [{"n": _SESSION_LOG_CONTEXT_MAX}]

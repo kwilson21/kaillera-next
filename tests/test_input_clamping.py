@@ -109,10 +109,11 @@ def test_socket_session_log_accepts_and_persists_input_audit():
     )
     assert payload.inputAudit["localCount"] == 1
 
-    source = SIGNALING_PY.read_text()
-    assert 'context["inputAudit"] = payload.inputAudit' in source
-    assert 'context.pop("inputAudit", None)' in source
-    json.dumps(payload.inputAudit)
+    from src.api.signaling import _session_log_context
+
+    stored = json.loads(_session_log_context(payload.context, payload.inputAudit))
+    assert stored["inputAudit"] == payload.inputAudit
+    assert "_session_log_context(payload.context, payload.inputAudit)" in SIGNALING_PY.read_text()
 
 
 def test_lockstep_input_audit_resets_between_matches_and_flush_clones_payload():
