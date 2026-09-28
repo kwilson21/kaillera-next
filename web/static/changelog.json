@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.63.7",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "don't fast-forward or resync on tab return while rollback kept peers in step (#64) (#68)"
+      }
+    ]
+  },
+  {
+    "version": "0.63.6",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep the game visible after a restart on landscape touch devices (#66)"
+      }
+    ]
+  },
+  {
     "version": "0.63.5",
     "date": "2026-09-28",
     "changes": [
