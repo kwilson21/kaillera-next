@@ -108,7 +108,9 @@
  *     sync log. Exits 1 if any frame is corrupted when VISUAL_CHECK=1.
  *   SUSPEND_GUEST_AUDIO=1   Guest context only: models Safari leaving the
  *     core's own AudioContext not running and refusing a resume without a
- *     gesture (#63 root cause). See suspendAudioInitScript below.
+ *     gesture (#63 root cause). See suspendAudioInitScript below. The fix
+ *     (stand-in audio clock) should recover boot without a second tap —
+ *     the run fails if the guest needs more than one prompt click to boot.
  *   CLICK_DURING_BATTLE=1   Reproduces #62 (clicking the UI during a
  *     rollback match desyncs peers). At ~1/3 and ~2/3 of BATTLE_SECONDS,
  *     on the host first and then the guest ~2s later, clicks through the
@@ -366,16 +368,22 @@ await host.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
 console.log('room', room, 'both ROM-ready; starting');
 await host.click('#start-btn');
 
-// Dismiss the tap-to-start prompt on whichever page shows it.
+// Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
+// many times the guest's prompt was found visible and clicked — with
+// SUSPEND_GUEST_AUDIO, a second tap here means the boot-audio-stall fix
+// (stand-in clock) didn't recover boot on its own.
 const t0 = Date.now();
+let guestBootTaps = 0;
 while (Date.now() - t0 < 60000) {
   for (const p of [host, guest]) {
     const v = await p.locator('#gesture-prompt:not(.hidden)').count();
-    if (v)
+    if (v) {
+      if (p === guest) guestBootTaps++;
       await p
         .locator('#gesture-prompt')
         .click({ force: true })
         .catch(() => {});
+    }
   }
   // Also require EJS_emulator.gameManager.Module: on WebKit, currentFrame can
   // go truthy a tick before gameManager is attached (seen with
@@ -751,6 +759,10 @@ const rbInputStallTimeoutsOf = (log) => count(log, /RB-INPUT-STALL-TIMEOUT/g);
 // reach netplay-rollback.js, and a pass wouldn't mean anything.
 const guestExercisedTabVisible = (log) => log.includes('tab visible (was background');
 const guestExercisedRollbackInStep = (log) => log.includes('rollback in step');
+// Same reasoning for SUSPEND_GUEST_AUDIO: a pass where the guest never hit
+// the boot-audio-stall watchdog at all (fix path unexercised) wouldn't mean
+// anything either.
+const guestExercisedStandInClock = (log) => log.includes('stand-in audio clock installed');
 
 // Game fps over the measurement window (see MIN_GAME_FPS doc above): frames
 // advanced (last non-replay _kn_post_tick frame) / wall seconds, per peer.
@@ -900,6 +912,7 @@ const summary = {
         },
       }
     : {}),
+  ...(SUSPEND_GUEST_AUDIO ? { guestBootTaps, guestExercisedStandInClock: guestExercisedStandInClock(G.sync) } : {}),
   ...(CLICK_DURING_BATTLE ? { clickDuringBattle: true } : {}),
   ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
   gameFps,
@@ -997,6 +1010,15 @@ const hideGuestFailed =
 if (hideGuestFailed) {
   console.log('HIDE_GUEST_MS: desync-indicating events or unexercised fix path:', JSON.stringify(summary.hideGuest));
 }
+const suspendGuestAudioFailed = SUSPEND_GUEST_AUDIO && (guestBootTaps > 1 || !summary.guestExercisedStandInClock);
+if (suspendGuestAudioFailed) {
+  if (guestBootTaps > 1) {
+    console.log(`SUSPEND_GUEST_AUDIO: guest needed ${guestBootTaps} taps to boot (expected 1)`);
+  }
+  if (!summary.guestExercisedStandInClock) {
+    console.log('SUSPEND_GUEST_AUDIO: guest never installed the stand-in audio clock (fix path unexercised)');
+  }
+}
 const failed =
   gpMis > 0 ||
   gsMis > 0 ||
@@ -1009,5 +1031,6 @@ const failed =
   (VISUAL_CHECK && visualCheck.corrupted > 0) ||
   minGameFpsFailed ||
   (THROTTLE_GUEST && !throttleFlipped) ||
-  hideGuestFailed;
+  hideGuestFailed ||
+  suspendGuestAudioFailed;
 process.exit(failed ? 1 : 0);
