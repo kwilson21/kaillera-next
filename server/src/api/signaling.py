@@ -1667,6 +1667,31 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
 _SESSION_LOG_MAX_ENTRIES = 60_000
 
 
+# `context` (with the delta-encoded inputAudit, which grows with match length)
+# shares a session_logs row with `summary`, and a Cloudflare D1 row holds at
+# most 2,000,000 bytes. Past this cap the audit is dropped, then the context.
+_SESSION_LOG_CONTEXT_MAX = 1_500_000
+
+
+def _session_log_context(context_raw: object, input_audit: object) -> str:
+    """Sanitized context JSON with inputAudit attached, within _SESSION_LOG_CONTEXT_MAX.
+
+    The audit is dropped first when it doesn't fit; a context still over
+    4 KB without it becomes "{}".
+    """
+    context_clean = _sanitize_log_blob(context_raw if isinstance(context_raw, dict) else {})
+    context = dict(context_clean) if isinstance(context_clean, dict) else {}
+    if isinstance(input_audit, dict) and input_audit:
+        context["inputAudit"] = _sanitize_log_blob(input_audit)
+    context_str = json.dumps(context)
+    if len(context_str) > _SESSION_LOG_CONTEXT_MAX:
+        context.pop("inputAudit", None)
+        context_str = json.dumps(context)
+        if len(context_str) > 4096:
+            context_str = "{}"
+    return context_str
+
+
 def _session_log_entries(entries_raw: object, max_bytes: int) -> list:
     """A session log flush's entries: the newest ones whose JSON fits `max_bytes`.
 
@@ -1719,22 +1744,12 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
     slot = pid_to_slot.get(player_id)
 
     _SUMMARY_MAX = 4096
-    _CONTEXT_MAX = 2 * 1024 * 1024
     summary_clean = _sanitize_log_blob(payload.summary if isinstance(payload.summary, dict) else {})
     summary_str = json.dumps(summary_clean)
     if len(summary_str) > _SUMMARY_MAX:
         summary_str = "{}"
 
-    context_clean = _sanitize_log_blob(payload.context if isinstance(payload.context, dict) else {})
-    context = dict(context_clean) if isinstance(context_clean, dict) else {}
-    if isinstance(payload.inputAudit, dict) and payload.inputAudit:
-        context["inputAudit"] = _sanitize_log_blob(payload.inputAudit)
-    context_str = json.dumps(context)
-    if len(context_str) > _CONTEXT_MAX:
-        context.pop("inputAudit", None)
-        context_str = json.dumps(context)
-        if len(context_str) > _SUMMARY_MAX:
-            context_str = "{}"
+    context_str = _session_log_context(payload.context, payload.inputAudit)
 
     # Newest entries win, so reconnect/desync events near the end survive.
     entries = _session_log_entries(payload.entries, _SESSION_LOG_MAX)

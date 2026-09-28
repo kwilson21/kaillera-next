@@ -62,6 +62,7 @@ from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
     _sanitize_log_blob,
+    _session_log_context,
     _session_log_entries,
     connected_players,
     room_frame,
@@ -1080,27 +1081,13 @@ def create_app(lifespan=None) -> FastAPI:
         entries = _session_log_entries(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
-        context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})
-        context = dict(context_clean) if isinstance(context_clean, dict) else {}
-        # kaillera-next: include inputAudit in the context column. The audit
-        # is a delta-encoded dict of the local + remote input histories used
-        # for cross-peer diffing. See Option G in the rollback diagnostics.
-        input_audit = data.get("inputAudit")
-        if isinstance(input_audit, dict):
-            context["inputAudit"] = _sanitize_log_blob(input_audit)
+        # context carries inputAudit (Option G: the delta-encoded local +
+        # remote input histories used for cross-peer diffing), capped to fit
+        # a D1 row as in the Socket.IO handler.
+        context_str = _session_log_context(data.get("context"), data.get("inputAudit"))
         summary_str = json.dumps(summary) if isinstance(summary, dict) else "{}"
-        context_str = json.dumps(context)
         if len(summary_str) > 4096:
             summary_str = "{}"
-        # context may contain inputAudit (Option G), which can reach up to
-        # ~1 MB per side. Allow up to 2 MB — same budget as log_data.
-        if len(context_str) > 2 * 1024 * 1024:
-            # Drop the audit rather than the whole context.
-            if isinstance(context, dict) and "inputAudit" in context:
-                context.pop("inputAudit", None)
-            context_str = json.dumps(context)
-            if len(context_str) > 4096:
-                context_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
         last_seq = await db.append_session_log(
