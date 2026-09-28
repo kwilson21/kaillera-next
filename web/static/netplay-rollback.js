@@ -5902,6 +5902,24 @@
   const exportSyncLog = () => _syncLogRing.export();
 
   const _getStructuredEntries = () => _syncLogRing.getStructuredEntries();
+  // Every flush re-sends the whole ring, and Socket.IO drops a message over
+  // the server's 4MB max_http_buffer_size: past ~20k verbose lines (about 8
+  // minutes at 45 lines/s) every flush failed and the stored log went stale.
+  // Send the newest entries that fit, leaving room for summary and context.
+  const SESSION_LOG_FLUSH_MAX_BYTES = 3 * 1024 * 1024;
+  const _flushEntries = () => {
+    const entries = _getStructuredEntries();
+    let bytes = 0;
+    let start = entries.length;
+    while (start > 0) {
+      // Estimate: the message plus ~64 bytes of JSON for seq, t and f.
+      const size = (entries[start - 1].msg?.length || 0) + 64;
+      if (bytes + size > SESSION_LOG_FLUSH_MAX_BYTES) break;
+      bytes += size;
+      start--;
+    }
+    return start > 0 ? entries.slice(start) : entries;
+  };
 
   let _flushInterval = null;
   let _cachedMatchId = null;
@@ -5955,7 +5973,7 @@
       }
     })(),
     mode: 'rollback',
-    entries: _getStructuredEntries(),
+    entries: _flushEntries(),
     summary: {
       desyncs: KNState.sessionStats?.desyncs ?? 0,
       stalls: KNState.sessionStats?.stalls ?? 0,
