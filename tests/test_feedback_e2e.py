@@ -31,7 +31,7 @@ def test_feedback_fab_and_modal_lifecycle(page, server_url):
     fab.click()
     expect(page.locator(".kn-feedback-backdrop")).to_be_visible(timeout=2000)
 
-    # Submit disabled without category + message
+    # Submit disabled with empty message
     expect(page.locator(".kn-feedback-submit")).to_be_disabled()
 
     # Select category and type message — submit enables
@@ -43,6 +43,29 @@ def test_feedback_fab_and_modal_lifecycle(page, server_url):
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
     expect(page.locator(".kn-feedback-backdrop")).to_be_hidden()
+
+
+def test_feedback_submit_without_category_defaults_general(page, server_url):
+    """Typing a message without picking a category still enables Send, and
+    the submission is categorized as 'general' (issue #62)."""
+    page.goto(server_url)
+    page.wait_for_timeout(500)
+
+    page.click(".kn-feedback-fab")
+    expect(page.locator(".kn-feedback-backdrop")).to_be_visible(timeout=2000)
+
+    # No category selected — submit should still enable once there's text.
+    expect(page.locator(".kn-feedback-submit")).to_be_disabled()
+    page.fill(".kn-feedback-textarea", "Lost my report last time")
+    expect(page.locator(".kn-feedback-submit")).to_be_enabled()
+
+    with page.expect_request("**/api/feedback") as req_info:
+        page.click(".kn-feedback-submit")
+    request = req_info.value
+    body = request.post_data_json
+    assert body["category"] == "general"
+
+    expect(page.locator(".kn-feedback-backdrop")).to_be_hidden(timeout=2000)
 
 
 def test_first_visit_callout(context, server_url):

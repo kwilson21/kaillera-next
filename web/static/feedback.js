@@ -271,7 +271,7 @@
         <div class="kn-feedback-categories">${categoryButtons}</div>
         <label class="kn-feedback-label" for="kn-fb-message">Message</label>
         <textarea class="kn-feedback-textarea" id="kn-fb-message"
-          placeholder="Select a category above..."></textarea>
+          placeholder="${CATEGORY_LABELS.general.placeholder}"></textarea>
         <input class="kn-feedback-email" id="kn-fb-email" type="email"
           placeholder="Email (optional, for follow-up)" />
         <input class="kn-feedback-hp" name="company_fax" tabindex="-1"
@@ -309,7 +309,7 @@
 
   const _updateSubmitState = (modal) => {
     const msg = modal.querySelector('.kn-feedback-textarea').value.trim();
-    modal.querySelector('.kn-feedback-submit').disabled = !_selectedCategory || !msg;
+    modal.querySelector('.kn-feedback-submit').disabled = !msg;
   };
 
   const _openModal = () => {
@@ -330,13 +330,13 @@
   const _submit = async (modal) => {
     const btn = modal.querySelector('.kn-feedback-submit');
     const msg = modal.querySelector('.kn-feedback-textarea').value.trim();
-    if (!_selectedCategory || !msg) return;
+    if (!msg) return;
 
     btn.disabled = true;
     btn.textContent = 'Sending...';
 
     const payload = {
-      category: _selectedCategory,
+      category: _selectedCategory || 'general',
       message: msg,
       email: modal.querySelector('.kn-feedback-email').value.trim() || null,
       company_fax: modal.querySelector('[name="company_fax"]').value,
@@ -358,7 +358,7 @@
         modal.querySelector('.kn-feedback-email').value = '';
         modal.querySelector('[name="company_fax"]').value = '';
         for (const b of modal.querySelectorAll('.kn-feedback-cat')) b.classList.remove('active');
-        modal.querySelector('.kn-feedback-textarea').placeholder = 'Select a category above...';
+        modal.querySelector('.kn-feedback-textarea').placeholder = CATEGORY_LABELS.general.placeholder;
         _updateSubmitState(modal);
       } else if (res.status === 429) {
         _showToast('Please wait before submitting again');
