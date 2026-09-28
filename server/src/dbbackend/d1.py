@@ -35,7 +35,6 @@ def _exec_result(item: dict[str, Any]) -> ExecResult:
 
 class D1Backend:
     name = "d1"
-    supports_blobs = False
 
     def __init__(
         self,

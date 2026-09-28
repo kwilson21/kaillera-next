@@ -691,7 +691,7 @@ async def _run_init_twice(tmp_db):
     await close_db()
     await init_db(tmp_db)
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
-    assert [r["version"] for r in rows] == ["0001", "0002"]
+    assert [r["version"] for r in rows] == ["0001", "0002", "0003"]
     await close_db()
 
 

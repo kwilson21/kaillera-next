@@ -119,7 +119,6 @@ async def cleanup_old_data() -> None:
             for table in (
                 "session_logs",
                 "client_events",
-                "screenshots",
                 "desync_events",
                 # Delta chunks (see migration 0002_session_log_chunks.sql) accumulate independently
                 # of their parent session_logs row's created_at/updated_at,
@@ -131,6 +130,7 @@ async def cleanup_old_data() -> None:
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
                     cutoff,
                 )
+            await db.delete_old_screenshots(days)
             log.info("DB cleanup complete (retention: %d days)", days)
         except Exception as e:
             log.warning("DB cleanup error: %s", e)

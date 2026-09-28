@@ -26,8 +26,6 @@ class ExecResult:
 
 class Backend(Protocol):
     name: str
-    # False when the backend can't store BLOB values (D1's HTTP API is JSON).
-    supports_blobs: bool
 
     async def open(self) -> None: ...
 

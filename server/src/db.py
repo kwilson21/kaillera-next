@@ -4,6 +4,7 @@ Owns the single database backend. Call init_db() on startup, close_db() on
 shutdown. The backend is local SQLite unless Cloudflare D1 is configured
 (see src/dbbackend/__init__.py); both run the same SQLite-dialect SQL, and
 schema changes are plain-SQL files in server/migrations/ (src/migrate.py).
+Screenshot bytes live in the blob store (src/blobstore.py); rows keep the key.
 """
 
 from __future__ import annotations
@@ -11,21 +12,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 
-from src.dbbackend import Backend, backend_from_env
+from src.blobstore import BlobStore, BlobStoreError, blobstore_from_env
+from src.dbbackend import DEFAULT_DB_PATH, Backend, backend_from_env
 from src.migrate import apply_migrations
 
 log = logging.getLogger(__name__)
 
 _backend: Backend | None = None
+_blobs: BlobStore | None = None
 
 
-async def init_db(db_path: str | None = None, *, backend: Backend | None = None) -> None:
+async def init_db(
+    db_path: str | None = None, *, backend: Backend | None = None, blobs: BlobStore | None = None
+) -> None:
     """Open the backend and apply pending migrations.
 
-    `backend` overrides the environment-selected one (tests pass a fake D1).
+    `backend` and `blobs` override the environment-selected ones (tests pass
+    fakes). Without R2 configured, blobs go in a `blobs` folder next to the
+    SQLite file.
     """
-    global _backend
+    global _backend, _blobs
+    local_root = Path(db_path or os.environ.get("DB_PATH", DEFAULT_DB_PATH)).parent / "blobs"
+    _blobs = blobs or blobstore_from_env(local_root)
     backend = backend or backend_from_env(db_path)
     await backend.open()
     try:
@@ -34,7 +45,12 @@ async def init_db(db_path: str | None = None, *, backend: Backend | None = None)
         await backend.close()
         raise
     _backend = backend
-    log.info("Database connected: %s (migrations applied: %s)", backend.name, ", ".join(applied) or "none")
+    log.info(
+        "Database connected: %s (migrations applied: %s; blobs: %s)",
+        backend.name,
+        ", ".join(applied) or "none",
+        _blobs.name,
+    )
 
 
 async def close_db() -> None:
@@ -369,25 +385,33 @@ async def execute_write(sql: str, params: tuple) -> None:
     await _require().execute(sql, params)
 
 
-_screenshot_skip_warned = False
+def _blob_store() -> BlobStore:
+    if _blobs is None:
+        raise RuntimeError("Database not initialized -- call init_db() first")
+    return _blobs
 
 
 async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -> int | None:
-    """Insert a gameplay screenshot and return row ID.
+    """Store a gameplay screenshot and return its row ID.
 
-    Returns None without storing anything when the backend can't hold BLOBs
-    (D1): screenshots wait for the R2 blob store.
+    The bytes go to the blob store under matches/<match_id>/screenshots/;
+    the row keeps the key and size. Screenshots are best-effort diagnostics:
+    a non-integer slot/frame or a failed upload stores nothing and returns
+    None rather than raising into the Socket.IO handler.
     """
-    global _screenshot_skip_warned
-    backend = _require()
-    if not backend.supports_blobs:
-        if not _screenshot_skip_warned:
-            log.warning("Screenshots are not stored: the %s backend can't hold binary data", backend.name)
-            _screenshot_skip_warned = True
+    try:
+        slot, frame = int(slot), int(frame)
+    except (TypeError, ValueError):
         return None
-    result = await backend.execute(
-        "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)",
-        (match_id, slot, frame, data),
+    key = f"matches/{match_id}/screenshots/{slot}-{frame}.jpg"
+    try:
+        await _blob_store().put(key, data, "image/jpeg")
+    except BlobStoreError as exc:
+        log.warning("Screenshot not stored (match=%s slot=%s frame=%s): %s", match_id[:8], slot, frame, exc)
+        return None
+    result = await _require().execute(
+        "INSERT INTO screenshots (match_id, slot, frame, blob_key, size) VALUES (?, ?, ?, ?, ?)",
+        (match_id, slot, frame, key, len(data)),
     )
     return result.last_row_id
 
@@ -395,15 +419,33 @@ async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -
 async def get_screenshots(match_id: str) -> list[dict]:
     """Return screenshot metadata (without data) for a match."""
     return await _require().query(
-        "SELECT id, match_id, slot, frame, length(data) as size, created_at FROM screenshots WHERE match_id = ? ORDER BY slot, frame",
+        "SELECT id, match_id, slot, frame, COALESCE(size, length(data)) as size, created_at FROM screenshots WHERE match_id = ? ORDER BY slot, frame",
         (match_id,),
     )
 
 
+async def read_screenshot(row: dict) -> bytes | None:
+    """Bytes for a screenshots row: from the blob store, or `data` for rows
+    written before migration 0003."""
+    if row.get("blob_key"):
+        return await _blob_store().get(row["blob_key"])
+    return row.get("data")
+
+
 async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     """Return raw JPEG bytes for a screenshot."""
-    rows = await _require().query("SELECT data FROM screenshots WHERE id = ?", (screenshot_id,))
-    return rows[0]["data"] if rows else None
+    rows = await _require().query("SELECT blob_key, data FROM screenshots WHERE id = ?", (screenshot_id,))
+    return await read_screenshot(rows[0]) if rows else None
+
+
+async def delete_old_screenshots(days: int) -> None:
+    """Delete screenshots older than `days`: their blobs first, then the rows."""
+    cutoff = (f"-{days} days",)
+    rows = await _require().query(
+        "SELECT blob_key FROM screenshots WHERE created_at < datetime('now', ?) AND blob_key IS NOT NULL", cutoff
+    )
+    await _blob_store().delete([r["blob_key"] for r in rows])
+    await _require().execute("DELETE FROM screenshots WHERE created_at < datetime('now', ?)", cutoff)
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
