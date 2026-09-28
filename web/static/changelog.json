@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.0",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "tiered retention sweep with resumable deletes (#55)"
+      }
+    ]
+  },
+  {
     "version": "0.62.0",
     "date": "2026-09-28",
     "changes": [
