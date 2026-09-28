@@ -58,16 +58,23 @@ async def lifespan(_app):
     await state.close()
 
 
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
+    )
+    # httpx logs every request at INFO, and every Cloudflare D1 query is one
+    # (the match-rotation sweep alone runs one a minute). Keep its warnings.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 def run() -> None:
     """Entry point called by `kaillera-server` CLI command."""
     from dotenv import load_dotenv
 
     load_dotenv()  # loads .env from cwd (server/) if it exists
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
-    )
+    _configure_logging()
 
     _anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     _vision_flag = os.getenv("DESYNC_VISION_ENABLED") == "1"
