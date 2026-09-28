@@ -1,5 +1,155 @@
 [
   {
+    "version": "0.59.3",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "backport GLideN64 vertex bounds fixes (garbage stage geometry) (#42)"
+      }
+    ]
+  },
+  {
+    "version": "0.59.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "send session logs as deltas and end games before the DB write (#41)"
+      }
+    ]
+  },
+  {
+    "version": "0.59.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep the newest session-log entries, not the first 4096 (#40)"
+      }
+    ]
+  },
+  {
+    "version": "0.59.0",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "run rollback through Smash Remix menus instead of strict lockstep (#39)"
+      }
+    ]
+  },
+  {
+    "version": "0.58.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "sync the host's save RAM at game start; accept 16MB late-join states (#37)"
+      }
+    ]
+  },
+  {
+    "version": "0.58.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "apply resync states at their own frame, never one frame off (#38)"
+      }
+    ]
+  },
+  {
+    "version": "0.58.0",
+    "date": "2026-09-27",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "KN logo, direction A preview cards, landing screenshots (M4) (#36)"
+      }
+    ]
+  },
+  {
+    "version": "0.57.0",
+    "date": "2026-09-27",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "room overlay and demo page in direction A (M3) (#34)"
+      }
+    ]
+  },
+  {
+    "version": "0.56.2",
+    "date": "2026-09-27",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "landing Worker is live, notices stale copies, rotates its proxy secret (#32)"
+      }
+    ]
+  },
+  {
+    "version": "0.56.1",
+    "date": "2026-09-26",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep per-visitor IPs behind the landing Worker (#31)"
+      }
+    ]
+  },
+  {
+    "version": "0.56.0",
+    "date": "2026-09-26",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "invite page (/join) and landing Worker for option A (#30)"
+      }
+    ]
+  },
+  {
+    "version": "0.55.0",
+    "date": "2026-09-26",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "landing page: live open-rooms board, waking state, header marks (#29)"
+      }
+    ]
+  },
+  {
+    "version": "0.54.0",
+    "date": "2026-09-26",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "landing-page plumbing: listed rooms, board frames, zombie-room rule, public stats (#28)"
+      }
+    ]
+  },
+  {
+    "version": "0.53.4",
+    "date": "2026-09-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "hold the Remix C shutdown until pending corrections land (#27)"
+      }
+    ]
+  },
+  {
+    "version": "0.53.3",
+    "date": "2026-09-25",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "Smash Remix freezes at match start and on pause (#25)"
+      }
+    ]
+  },
+  {
     "version": "0.53.2",
     "date": "2026-09-25",
     "changes": [

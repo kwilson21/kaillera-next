@@ -1,0 +1,30 @@
+// Landing Worker (hosting option A): / and /join from static assets, the rest
+// passed through to the game server. See deploy/static/README.md.
+//   python scripts/build_landing.py && npx wrangler deploy -c wrangler.landing.jsonc
+// Live on kaillera-next.thesuperhuman.us/* since 2026-09-26. Redeployed by
+// hand after landing-page changes; not deployed automatically by CI.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kaillera-next-landing",
+  "main": "deploy/static/worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "assets": {
+    "directory": "./dist-landing",
+    "binding": "ASSETS",
+    // The Worker decides every request: pages and their files from assets,
+    // everything else to the game server.
+    "run_worker_first": true,
+    // The Worker maps / and /join to their files itself. Cloudflare's default
+    // HTML handling would answer /index.html and /join.html with redirects to
+    // / and /join, which loop back here.
+    "html_handling": "none",
+  },
+  "vars": {
+    // Where the game server answers: Render's own URL.
+    "ORIGIN": "https://kaillera-next.onrender.com",
+  },
+  // On since 2026-09-26 (owner's OK). Rolling back is removing this route
+  // (here and in the dashboard): the hostname then reaches Render directly.
+  "routes": [{ "pattern": "kaillera-next.thesuperhuman.us/*", "zone_name": "thesuperhuman.us" }],
+}

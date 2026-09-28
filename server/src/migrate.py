@@ -35,6 +35,11 @@ _CREATE_TRACKING = """CREATE TABLE IF NOT EXISTS schema_migrations (
 
 _RECORD = "INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)"
 
+# Alembic revision -> our migrations whose schema it already contains. A
+# database Alembic already upgraded gets these recorded instead of re-run,
+# because ALTER TABLE ADD COLUMN can't be made re-runnable.
+_ALEMBIC_EQUIVALENTS = {"0008": ["0002"]}
+
 
 @dataclass(frozen=True)
 class Migration:
@@ -83,14 +88,29 @@ async def apply_one(backend: Backend, migration: Migration) -> None:
     await backend.batch(statements)
 
 
+async def _alembic_revision(backend: Backend) -> str | None:
+    """The revision of a database Alembic created, or None."""
+    tables = await backend.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'", ())
+    if not tables:
+        return None
+    rows = await backend.query("SELECT version_num FROM alembic_version", ())
+    return rows[0]["version_num"] if rows else None
+
+
 async def apply_migrations(backend: Backend, directory: Path = MIGRATIONS_DIR) -> list[str]:
     """Apply pending migrations in order. Returns the versions applied."""
     migrations = load_migrations(directory)
     await backend.execute(_CREATE_TRACKING)
+    # Read before 0001 runs: the baseline drops alembic_version.
+    already_in_schema = set(_ALEMBIC_EQUIVALENTS.get(await _alembic_revision(backend) or "", []))
     applied = {row["version"] for row in await backend.query("SELECT version FROM schema_migrations", ())}
     newly_applied: list[str] = []
     for migration in migrations:
         if migration.version in applied:
+            continue
+        if migration.version in already_in_schema:
+            await backend.execute(_RECORD, (migration.version, migration.name))
+            log.info("Recorded migration %s_%s (already applied by Alembic)", migration.version, migration.name)
             continue
         await apply_one(backend, migration)
         newly_applied.append(migration.version)

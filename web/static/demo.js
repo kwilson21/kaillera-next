@@ -432,6 +432,57 @@
 
   const _formatNumber = (value, digits = 0) => (Number.isFinite(value) ? value.toFixed(digits) : '--');
 
+  // Rollback timeline (docs/landing-design.md §5.7f #3, §7.2 M3) — the
+  // Result card's live instrument. Driven entirely by real engine signals
+  // from getHudCounters() via web/static/rollback-timeline.js's pure state
+  // machine; see that file for what triggers a rewind vs. a lockstep wait.
+  const _reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
+  let _rbState = window.KNRollbackTimeline?.createState?.() ?? null;
+  let _rbRefs = null;
+  let _rbStillRendered = false;
+  const _getRbRefs = () => {
+    if (_rbRefs) return _rbRefs;
+    const svg = $('rb-timeline');
+    if (!svg) return null;
+    const ticks = Array.from(svg.querySelectorAll('.t')).sort(
+      (a, b) => Number(a.dataset.i ?? 0) - Number(b.dataset.i ?? 0),
+    );
+    _rbRefs = {
+      ticks,
+      head: $('rb-head'),
+      labelBad: $('rb-lbl-bad'),
+      labelReplay: $('rb-lbl-re'),
+      caption: $('rb-caption'),
+    };
+    return _rbRefs;
+  };
+  const _updateRollbackTimeline = (counters, inMatch) => {
+    const api = window.KNRollbackTimeline;
+    if (!api || !_rbState) return;
+    const refs = _getRbRefs();
+    if (!refs) return;
+    if (_reducedMotion) {
+      // Static illustrative frame — no motion, no per-frame reduce() calls.
+      if (!_rbStillRendered) {
+        api.render(_rbState, refs, { still: true });
+        _rbStillRendered = true;
+      }
+      return;
+    }
+    _rbState = api.reduce(
+      _rbState,
+      {
+        mode: _rollbackEnabled ? 'rollback' : 'lockstep',
+        matchActive: !!inMatch,
+        rollbackEventsTotal: counters?.rollbackEventsTotal ?? 0,
+        avgRollbackDepth: counters?.avgRollbackDepth ?? 0,
+        delay: counters?.delay ?? 0,
+      },
+      performance.now(),
+    );
+    api.render(_rbState, refs);
+  };
+
   const _readFile = (file) =>
     new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1344,6 +1395,11 @@
       _lastHudRenderAt = now;
       _renderHudText(counters, totalPreds);
     }
+
+    // The timeline needs its own per-frame drive (not throttled to
+    // HUD_RENDER_INTERVAL_MS) so a rewind's red→blue→advance sequence reads
+    // as motion rather than a slideshow.
+    _updateRollbackTimeline(counters, window.NetplayRollback?.isInMatchOrPaused?.());
 
     // Two predicates drive different parts of the demo's match transition:
     //

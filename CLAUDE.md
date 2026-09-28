@@ -64,12 +64,17 @@ kaillera-next/
 │           ├── desync_vision.py  # Claude/GPT-4o vision endpoint for screenshot diff
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
-│   ├── index.html           # lobby: create/join rooms
+│   ├── index.html           # front page: open-rooms board, create/join (static, no framework)
+│   ├── join.html            # invite page (/join?room=CODE): who invited you, Join vs Watch, waking
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # sync log management page
 │   ├── error.html           # error/fallback page
 │   └── static/
-│       ├── lobby.js             # lobby controller
+│       ├── landing.js           # front page: board poll, waking state, header marks
+│       ├── join.js              # invite page: room lookup, full/closed/in-app states
+│       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
+│       ├── landing.css          # front page styles (direction A tokens)
+│       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
@@ -91,6 +96,7 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 ├── build/           # WASM core build system (Docker + patches)
+├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
 ├── docs/            # roadmap and MVP plan
 ├── Dockerfile       # production Docker image
@@ -126,6 +132,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
+| `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
 | `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
 | `set-name` | client→server | `{name}` | Update player display name |
@@ -136,10 +143,11 @@ All events go through the default Socket.IO namespace (`/`).
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
+| `set-listed` | client→server | `{listed}` | Host lists the room on the front-page board (never with a password) |
 | `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
-| `session-log` | client→server | `{matchId, entries, summary, context}` | Periodic sync log flush |
+| `session-log` | client→server | `{matchId, epoch, entries, summary, context}` | Periodic sync log flush: only entries the server hasn't acked; acks `{lastSeq}` |
 | `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
 | `debug-logs` | client→server | `{...}` | Upload debug console log |
 | `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |
@@ -251,4 +259,15 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - Docker for production builds
 - `ALLOWED_ORIGIN` env var controls CORS (default `*`, set to your domain in production)
 - `PORT` (default 27888), `MAX_ROOMS` (default 100), `MAX_SPECTATORS` (default 20)
+- `KEEPALIVE_SECONDS` (default 0 = off): play pages ping `/health` this often
+- `PUBLIC_ORIGINS`: extra origins allowed to read `/health`, `/list`, `/room/*`,
+  `/api/stats/public` (a static landing page on another domain); only matters
+  when `ALLOWED_ORIGIN` is a specific origin (with `*`, any origin may read them)
+- `KN_PROXY_SECRET`: shared with the landing Worker (`PROXY_SECRET` there);
+  the server trusts the visitor IP the Worker forwards (`X-KN-Client-IP`)
+  only when this matches. May be a comma-separated list ("new,old") to
+  rotate the secret with no gap: either entry is trusted while both are
+  listed. Unset = never trusted
+- `IP_HASH_SALT`: salts IP hashes and also derives the room-token signing key,
+  so reconnect tokens stay valid across restarts (random per process if unset)
 - `.env` file supported via python-dotenv

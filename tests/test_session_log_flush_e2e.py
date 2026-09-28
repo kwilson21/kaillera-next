@@ -25,7 +25,8 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-SERVER_URL = "https://localhost:27888"
+# KN_TEST_PORT lets parallel checkouts each run their own test server.
+SERVER_URL = f"https://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 ADMIN_KEY = "1234"
 
 
@@ -58,7 +59,7 @@ def test_session_log_flush_reaches_db(page):
 
     This is the minimum-viable check that the entire flush pipeline
     (JS _buildFlushPayload → Socket.IO session-log → Pydantic validation
-     → db.upsert_session_log → SQLite row) is working end-to-end.
+     → db.append_session_log → SQLite row) is working end-to-end.
     """
     # Unique room so we don't collide with other runs
     room = "TEST" + secrets.token_hex(2).upper()

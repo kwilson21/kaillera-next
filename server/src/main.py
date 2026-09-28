@@ -49,7 +49,10 @@ async def lifespan(_app):
     log_task.cancel()
     rotation_task.cancel()
     if rooms:
-        log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+        if state.enabled():
+            log.info("Shutting down gracefully, %d room(s) preserved in Redis", len(rooms))
+        else:
+            log.info("Shutting down gracefully, %d room(s) lost (REDIS_URL not configured)", len(rooms))
     await db.close_db()
     await state_cache.close()
     await state.close()

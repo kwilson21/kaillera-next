@@ -9,6 +9,7 @@ Client → Server events:
   join-room        — player joins an existing room (or as spectator)
   leave-room       — player leaves (also fired on disconnect)
   claim-slot       — spectator claims a vacated player slot
+  release-slot     — player gives up their slot to spectate ("Watch instead")
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
   set-mode         — host changes netplay mode (rollback/streaming)
@@ -22,7 +23,10 @@ Client → Server events:
   snapshot         — game snapshot relay (broadcast to room)
   input            — input relay for streaming mode (broadcast to room)
   set-name         — player updates display name
-  session-log      — periodic sync log flush (upserts into session_logs)
+  session-log      — periodic sync log flush; a delta of entries newer than
+                     the server's last-acked seq, tagged with the client's
+                     ring epoch, appended into session_log_chunks (acked
+                     back as `{lastSeq}`)
   game-screenshot  — periodic gameplay screenshot (debug/diagnostics)
   debug-sync       — upload sync diagnostic log
   debug-logs       — upload debug console log
@@ -53,6 +57,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -65,8 +70,8 @@ from dataclasses import dataclass, field
 
 import socketio
 
-from src import db, state
-from src.api import desync_vision
+from src import db, state, stats
+from src.api import desync_vision, og_card
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
     ClaimSlotPayload,
@@ -79,6 +84,7 @@ from src.api.payloads import (
     RomSharingTogglePayload,
     SessionLogPayload,
     SetGameIdPayload,
+    SetListedPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
@@ -113,8 +119,17 @@ _DISCONNECT_GRACE_SECONDS = 30
 # disconnects still leave immediately so room state stays responsive.
 _LOBBY_OWNER_GRACE_SECONDS = 5
 
-# Per-instance signing key for HMAC tokens (upload + reconnect).
-_TOKEN_KEY = secrets.token_bytes(32)
+
+# Signing key for HMAC tokens (upload + reconnect). Derived from the
+# deployment's IP_HASH_SALT when set, so tokens stay valid across restarts
+# and players can reclaim rooms restored from Redis; random otherwise.
+def _token_key(secret: str) -> bytes:
+    if not secret:
+        return secrets.token_bytes(32)
+    return hmac.new(secret.encode(), b"kaillera-next room tokens", hashlib.sha256).digest()
+
+
+_TOKEN_KEY = _token_key(os.environ.get("IP_HASH_SALT", ""))
 
 # Token TTLs. Both cover a normal match + reconnect window; on expiry the
 # client must rejoin to get a fresh token.
@@ -283,6 +298,8 @@ class Room:
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
+    listed: bool = False  # host opted in to the front-page board; never true with a password
+    started_at: float | None = None  # wall-clock start of the current match, for the board
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -305,6 +322,12 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 _room_lock = asyncio.Lock()
 
 _shutting_down = False
+
+# Latest board frame per listed, in-game room: session_id -> (jpeg bytes, wall time).
+# Memory only, one per room; dropped when the room ends its match, unlists or closes.
+_room_frames: dict[str, tuple[bytes, float]] = {}
+_ROOM_FRAME_MAX_BYTES = 20_000
+_ROOM_FRAME_MAX_W, _ROOM_FRAME_MAX_H = 640, 480  # captures are 320x240
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -350,7 +373,74 @@ def _players_payload(room: Room) -> dict:
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
+        "listed": room.listed,
     }
+
+
+def connected_players(room: Room) -> int:
+    """Players (not spectators) whose socket is connected to this server right now."""
+    return sum(1 for info in room.players.values() if info["socketId"] in _sid_host)
+
+
+def room_is_live(room: Room) -> bool:
+    """True while at least one player's socket is connected to this server.
+
+    A room restored from Redis after a restart or nap keeps its members but
+    none of their sockets: a zombie until someone returns. Players sitting in
+    a disconnect grace window don't count, and neither do spectators: a room
+    with nobody left to play in it has no host to join.
+    """
+    return connected_players(room) > 0
+
+
+def room_host_name(room: Room) -> str:
+    """Display name of the room's current owner, or "" if unknown."""
+    for info in room.players.values():
+        if info.get("socketId") == room.owner:
+            return info.get("playerName", "")
+    first = next(iter(room.players.values()), None)
+    return first.get("playerName", "") if first else ""
+
+
+def room_frame(session_id: str) -> tuple[bytes, float] | None:
+    """Latest board frame for a room that may show one right now."""
+    room = rooms.get(session_id)
+    if room is None or not room.listed or room.status != "playing" or not room_is_live(room):
+        return None
+    return _room_frames.get(session_id)
+
+
+def _board_frame(jpeg: bytes) -> bytes | None:
+    """The board copy of a screenshot, at most _ROOM_FRAME_MAX_BYTES and 640x480.
+
+    Only the header is read before the size check, so a small file that
+    declares huge dimensions is refused without being decoded (the board
+    frame and the invite card both decode it later). Busy frames are
+    re-encoded here rather than in the browser, so the diagnostic
+    screenshot stored for desync triage keeps its quality.
+    """
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(jpeg))
+        if img.format != "JPEG" or img.width > _ROOM_FRAME_MAX_W or img.height > _ROOM_FRAME_MAX_H:
+            return None
+        if len(jpeg) <= _ROOM_FRAME_MAX_BYTES:
+            return jpeg
+        img = img.convert("RGB")
+        for quality in (45, 30):
+            out = io.BytesIO()
+            img.save(out, "JPEG", quality=quality)
+            if out.tell() <= _ROOM_FRAME_MAX_BYTES:
+                return out.getvalue()
+    except Exception:
+        log.warning("board frame: could not re-encode a %d-byte screenshot", len(jpeg))
+    return None
+
+
+def _drop_room_frame(session_id: str) -> None:
+    _room_frames.pop(session_id, None)
+    og_card.forget(session_id)
 
 
 def _clear_host_rom(room: Room) -> None:
@@ -504,6 +594,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 
     if not room.players and not room.spectators:
         rooms.pop(session_id, None)
+        _drop_room_frame(session_id)
         await state.delete_room(session_id)
         log.info("Room %s deleted (empty)", session_id)
         return
@@ -513,6 +604,10 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     # AND so remaining peers continue play under a new owner. The previous behavior
     # of force-closing the room on any host disconnect punished tab backgrounding,
     # WiFi roams, and Playwright multi-tab orchestration.
+    if room.owner == sid:
+        # Listing was this host's consent; nobody who stays has given it.
+        room.listed = False
+        _drop_room_frame(session_id)
     if room.owner == sid and room.players:
         new_owner_pid, new_owner_info = next(iter(room.players.items()))
         new_owner_sid = new_owner_info["socketId"]
@@ -585,6 +680,8 @@ async def _cleanup_empty_rooms() -> None:
                 _zombie_ages.pop(session_id, None)
                 await state.delete_room(session_id)
                 log.info("Cleanup: deleted room %s", session_id)
+            for session_id in [k for k in _room_frames if k not in rooms]:
+                _drop_room_frame(session_id)
         cleanup()
 
 
@@ -720,6 +817,16 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
             resp["matchId"] = room.match_id
         return (None, resp)
 
+    # Zombie rule: a room no player is connected to (restored after a
+    # restart) only takes back its own members, above. A new joiner would
+    # otherwise walk into a room with a ghost for a host. A player inside a
+    # disconnect grace window is on their way back, so the room stays open.
+    # Spectators never enter a room with no connected player: if that
+    # player doesn't return, nobody is left to host.
+    player_returning = not spectate and any(pid in _disconnect_grace_tasks for pid in room.players)
+    if not room_is_live(room) and not player_returning:
+        return ("Room closed", None)
+
     await _leave(sid)  # clean up if already in another room
 
     if spectate:
@@ -817,6 +924,56 @@ async def _claim_slot_locked(sid: str, payload: ClaimSlotPayload) -> str | None:
     return None
 
 
+@sio.on("release-slot")
+async def release_slot(sid: str, data: dict | None = None) -> str | None:
+    """Player gives up their slot and becomes a spectator ("Watch instead"),
+    without leaving the room. Lobby-only — mid-game slot changes would
+    reshuffle a running match. The host can't release their own slot (no
+    remaining player to hand ownership to would make the room ownerless)."""
+    if not check(sid, "release-slot"):
+        return "Rate limited"
+    async with _room_lock:
+        return await _release_slot_locked(sid)
+
+
+async def _release_slot_locked(sid: str) -> str | None:
+    entry = _sid_to_room.get(sid)
+    if entry is None:
+        return "Not in a room"
+    session_id, player_id, is_spectator = entry
+    if is_spectator:
+        return "Already spectating"
+    room = rooms.get(session_id)
+    if room is None:
+        return "Room not found"
+    if room.status == "playing":
+        return "Cannot switch to spectator during an active game"
+    if room.owner == sid:
+        return "Host can't switch to spectator"
+    if len(room.spectators) >= MAX_SPECTATORS:
+        return "Room spectator limit reached"
+    ip_h = ip_hash_for_sid(sid)
+    same_ip_count = sum(1 for s in room.spectators.values() if ip_hash_for_sid(s.get("socketId", "")) == ip_h)
+    if same_ip_count >= _PER_IP_SPECTATOR_CAP:
+        return "Spectator limit reached for your network"
+
+    player_info = room.players.pop(player_id, None)
+    if player_info is None:
+        return "Not a player"
+    player_name = player_info.get("playerName", "Player")
+    for slot, pid in list(room.slots.items()):
+        if pid == player_id:
+            del room.slots[slot]
+    room.spectators[player_id] = {"socketId": sid, "playerName": player_name}
+    room.rom_ready.discard(sid)
+    _sid_to_room[sid] = (session_id, player_id, True)
+
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await state.save_room(session_id, room)
+    log.info("SIO %s released slot to spectate in room %s", sid, session_id)
+    return None
+
+
 @sio.on("set-name")
 @validated(SetNamePayload)
 async def set_name(sid: str, payload: SetNamePayload) -> str | None:
@@ -884,6 +1041,9 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.started_at = time.time()
+    # Stats never hold up the room lock (Redis round trips).
+    asyncio.create_task(stats.record_match(room.started_at))
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
     await sio.emit(
@@ -940,17 +1100,31 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
         return "Only the host can end the game"
 
     ended_match_id = room.match_id
-    if room.match_id:
-        await db.set_session_ended(room.match_id, None, "game-end")
-        room.match_id = None
-
+    room.match_id = None
     room.status = "lobby"
+    room.started_at = None
+    _drop_room_frame(session_id)
+
+    # Broadcast the state change BEFORE the DB write below. `end-game` used
+    # to await db.set_session_ended() first, which could queue behind a
+    # client's session-log flush on the same connection (up to several
+    # seconds under load) and delay this broadcast past the client's 5s
+    # fallback. Room state (above) is already updated in memory, so the
+    # broadcast reflects the true post-end state even though the DB row
+    # hasn't been marked ended yet.
     # mode persists for rematch convenience
     await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
+
+    # Redis first, then the DB write: if set_session_ended raises, Redis must
+    # already reflect the room back in "lobby" — otherwise a restart or
+    # failover would restore this room still claiming to be mid-match even
+    # though every client was already told the game ended above.
     await state.save_room(session_id, room)
+    if ended_match_id:
+        await db.set_session_ended(ended_match_id, None, "game-end")
     log.info("Game ended in room %s", session_id)
     await db.insert_client_event(
         {
@@ -1056,6 +1230,30 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
         await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
         await state.save_room(session_id, room)
         log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
+    return None
+
+
+@sio.on("set-listed")
+@validated(SetListedPayload)
+async def set_listed(sid: str, payload: SetListedPayload) -> str | None:
+    """Host lists the room on the front-page board, or takes it off."""
+    if not check(sid, "set-listed"):
+        return "Rate limited"
+    async with _room_lock:
+        result = _get_room(sid)
+        if result is None:
+            return "Not in a room"
+        session_id, room = result
+        if room.owner != sid:
+            return "Only the host can list the room"
+        if payload.listed and room.password:
+            return "Rooms with a password can't be listed"
+        room.listed = payload.listed
+        if not room.listed:
+            _drop_room_frame(session_id)
+        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+        log.info("Room %s %s", session_id, "listed" if room.listed else "unlisted")
     return None
 
 
@@ -1217,13 +1415,23 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     result = _get_room(sid)
     if result is None:
         return
-    session_id, _room = result
+    session_id, room = result
 
     target_sid = data.get("targetSid")
     if isinstance(target_sid, str) and target_sid:
         target_entry = _sid_to_room.get(target_sid)
         if target_entry and target_entry[0] == session_id:
             await sio.emit(event, data, to=target_sid)
+        return
+
+    # Players only, not spectators: one upload from the sender, fanned out
+    # here, so a 4-player initial state doesn't cost the sender three uploads
+    # against its byte budget.
+    if data.get("toPlayers") is True:
+        for player in list(room.players.values()):
+            player_sid = player.get("socketId")
+            if isinstance(player_sid, str) and player_sid and player_sid != sid:
+                await sio.emit(event, data, to=player_sid)
         return
 
     await sio.emit(event, data, room=session_id, skip_sid=sid)
@@ -1390,13 +1598,23 @@ async def game_screenshot(sid: str, data: dict) -> None:
     # Cap at 50KB per screenshot
     if len(img_bytes) > 50_000:
         return
+    # The host's frame doubles as the room's preview on the front-page board
+    # when the room is listed. Only the latest is kept, in memory.
+    if room.listed and sid == room.owner and img_bytes[:2] == b"\xff\xd8":
+        # Pillow work runs off the event loop so frames can't stall signaling.
+        board = await asyncio.to_thread(_board_frame, img_bytes)
+        # The room may have been unlisted, ended or handed over meanwhile:
+        # store only if it is still this host's listed match.
+        now_room = rooms.get(session_id)
+        still_ok = now_room is room and room.listed and room.owner == sid and room.match_id == match_id
+        if board is not None and still_ok:
+            _room_frames[session_id] = (board, time.time())
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
-_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data — sized to hold the
-# full client ring (SYNC_LOG_MAX=60000 entries × ~150 B/entry ≈ 9 MB) so a 60-min
-# match's boot/menu/init events survive to the server. The drop-oldest-half
-# fallback below kicks in only on pathologically verbose matches.
+_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap on one flush's entries. Clients send
+# only the entries the server hasn't acked (at most SYNC_LOG_FLUSH_MAX_ENTRIES),
+# so this only bounds a stale pre-delta client resending its whole ring.
 
 _LOG_BLOB_MAX_DEPTH = 6
 _LOG_BLOB_MAX_KEYS = 256
@@ -1421,6 +1639,10 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
     if isinstance(obj, (int, float)):
         return obj
     if isinstance(obj, str):
+        # Printable ASCII holds no control characters: skip the per-character
+        # scan, which costs ~0.8s for a full 60k-entry log.
+        if obj.isascii() and obj.isprintable():
+            return obj[:_LOG_BLOB_MAX_STR]
         cleaned = "".join(ch for ch in obj if ch == "\n" or ch == "\t" or unicodedata.category(ch)[0] != "C")
         return cleaned[:_LOG_BLOB_MAX_STR]
     if isinstance(obj, list):
@@ -1440,25 +1662,58 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
     return None
 
 
+# Size of the client's sync-log ring (SYNC_LOG_MAX in netplay-rollback.js): the
+# most one flush can legitimately carry.
+_SESSION_LOG_MAX_ENTRIES = 60_000
+
+
+def _session_log_entries(entries_raw: object, max_bytes: int) -> list:
+    """A session log flush's entries: the newest ones whose JSON fits `max_bytes`.
+
+    Entries are sanitized one by one. Passing the whole list through
+    _sanitize_log_blob capped it at _LOG_BLOB_MAX_LIST_LEN (4096) and kept the
+    oldest, so a verbose match's log stopped about 90s in (match 1cd13296).
+    """
+    if not isinstance(entries_raw, list):
+        return []
+    entries = [_sanitize_log_blob(e, 1) for e in entries_raw[-_SESSION_LOG_MAX_ENTRIES:]]
+    # Drop the oldest until the list fits: each entry costs its JSON plus the
+    # ", " separator, the list its brackets.
+    sizes = [len(json.dumps(e)) + 2 for e in entries]
+    total = sum(sizes) + 2
+    start = 0
+    while total > max_bytes and start < len(entries):
+        total -= sizes[start]
+        start += 1
+    return entries[start:]
+
+
 @sio.on("session-log")
 @validated(SessionLogPayload)
-async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
-    """Receive periodic sync log flush from client. Upserts into session_logs table."""
+async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | None:
+    """Receive a periodic sync log flush from client.
+
+    `payload.entries` is a delta — only entries newer than the seq the
+    server last acked — so this appends into `session_log_chunks` instead
+    of rewriting the whole `session_logs.log_data` blob (see db.append_session_log).
+    Returns `{"lastSeq": ...}` as the socket ack so the client can advance
+    its flush cursor; the client resends anything the server hasn't acked.
+    """
     if not check(sid, "session-log"):
-        return
+        return None
     entry = _sid_to_room.get(sid)
     if not entry:
-        return
+        return None
     session_id, player_id, is_spectator = entry
     if is_spectator:
-        return
+        return None
 
     room = rooms.get(session_id)
     if not room or not room.match_id:
-        return
+        return None
 
     if not payload.matchId or payload.matchId != room.match_id:
-        return
+        return None
 
     pid_to_slot = {pid: s for s, pid in room.slots.items()}
     slot = pid_to_slot.get(player_id)
@@ -1481,29 +1736,24 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
         if len(context_str) > _SUMMARY_MAX:
             context_str = "{}"
 
-    entries_raw = payload.entries if isinstance(payload.entries, list) else []
-    entries = _sanitize_log_blob(entries_raw)
-    if not isinstance(entries, list):
-        entries = []
-    log_data_str = json.dumps(entries)
-    while len(log_data_str) > _SESSION_LOG_MAX and entries:
-        # Keep LATEST entries (drop oldest) so reconnect/desync events survive
-        entries = entries[len(entries) // 2 :]
-        log_data_str = json.dumps(entries)
+    # Newest entries win, so reconnect/desync events near the end survive.
+    entries = _session_log_entries(payload.entries, _SESSION_LOG_MAX)
 
-    await db.upsert_session_log(
+    last_seq = await db.append_session_log(
         {
             "match_id": payload.matchId,
             "room": session_id,
             "slot": slot,
             "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
             "mode": room.mode,
-            "log_data": log_data_str,
+            "entries": entries,
+            "epoch": payload.epoch,
             "summary": summary_str,
             "context": context_str,
             "ip_hash": ip_hash_for_sid(sid),
         }
     )
+    return {"lastSeq": last_seq}
 
 
 @sio.event

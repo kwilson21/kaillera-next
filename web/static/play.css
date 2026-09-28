@@ -1,3 +1,47 @@
+/* Room overlay tokens (docs/landing-design.md §7.5, direction A) — shared
+   with web/static/landing.css and join.js/join.html. Only the pre-game
+   overlay and its states are restyled to this direction (§7.2 M3); the
+   in-game toolbar/HUD keep their existing look. */
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/barlow-condensed-600-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/static/fonts/barlow-condensed-700-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url('/static/fonts/ibm-plex-sans-var-latin.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #0e1218;
+  --bg2: #151b25;
+  --line: #242c39;
+  --text: #e8ecf1;
+  --muted: #8b95a5;
+  --accent: #5aa8ff;
+  --accent-ink: #061020;
+  --radius: 4px;
+  --p1: #e5484d;
+  --p2: #3b82f6;
+  --p3: #f5c518;
+  --p4: #3fb950;
+  --font-display: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -5,7 +49,7 @@
 }
 
 :focus-visible {
-  outline: 2px solid #6af;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -143,11 +187,13 @@ body {
 #overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: radial-gradient(70% 50% at 50% 0%, #121a26, var(--bg) 70%);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
+  font-family: var(--font-body);
+  color: var(--text);
 }
 
 #overlay.hidden {
@@ -155,11 +201,11 @@ body {
 }
 
 .overlay-card {
-  background: #1a1a2e;
-  border: 1px solid #2a2a40;
-  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   padding: 1.25rem;
-  max-width: 460px;
+  max-width: 480px;
   width: 90vw;
   max-height: 90vh;
   overflow-y: auto;
@@ -169,19 +215,26 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
   margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
 }
 
 .overlay-card h2 {
   margin: 0;
-  font-size: 1rem;
+  font-family: var(--font-label, var(--font-display));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.85rem;
   font-weight: 600;
 }
 
 #room-display {
-  font-size: 1.4rem;
-  letter-spacing: 0.15em;
-  color: #6af;
+  font-size: 1.1rem;
+  letter-spacing: 0.12em;
+  color: var(--accent);
 }
 
 .name-section {
@@ -191,17 +244,17 @@ body {
 }
 
 .name-label {
-  font-size: 14px;
-  color: #888;
+  font-size: 13px;
+  color: var(--muted);
   white-space: nowrap;
 }
 
 .name-input {
   flex: 1;
-  background: #12121e;
-  border: 1px solid #2a2a40;
-  border-radius: 6px;
-  color: #e0e0e0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
   padding: 10px;
   font-size: 14px;
   font-family: inherit;
@@ -209,25 +262,34 @@ body {
 }
 
 .name-input:focus {
-  border-color: #6af;
-  outline: 2px solid #6af;
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+.name-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 0 8px;
+  padding: 0 2px;
 }
 
 .copy-btn {
   padding: 8px 14px !important;
   font-size: 14px !important;
   min-height: 44px !important;
-  background: #2a2a40 !important;
+  background: var(--line) !important;
+  color: var(--text) !important;
   white-space: nowrap;
 }
 .copy-btn:hover {
-  background: #3a3a55 !important;
+  background: #2f3a4d !important;
 }
 
 .card-section {
-  background: #13132a;
-  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   padding: 10px;
   margin-bottom: 8px;
 }
@@ -245,21 +307,27 @@ body {
   .overlay-card h2 {
     font-size: 0.95rem;
   }
+
+  /* 44px minimum tap targets on phones (§7.6) */
+  .claim-slot-btn {
+    min-height: 44px !important;
+  }
 }
 
-/* Player list */
+/* Player list — W4 layout (docs/landing-design.md §4 W4) */
 .player-slot {
   display: flex;
   align-items: center;
   padding: 6px 10px;
-  background: #0d0d1a;
-  border-radius: 5px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   margin-bottom: 3px;
   font-size: 14px;
 }
 
 .player-slot .slot-num {
-  color: #8a8a8a;
+  color: var(--muted);
   margin-right: 8px;
   font-size: 11px;
   font-weight: bold;
@@ -271,7 +339,7 @@ body {
 }
 
 .player-slot .name.empty {
-  color: #8a8a8a;
+  color: var(--muted);
   font-style: italic;
   font-size: 13px;
 }
@@ -286,16 +354,32 @@ body {
 }
 
 .player-slot .rom-status.ready {
-  color: #6f6;
+  color: var(--p4);
 }
 
 .player-slot .rom-status.not-ready {
-  color: #f66;
+  color: var(--p3);
+}
+
+.claim-slot-btn {
+  margin-left: auto;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+  min-height: 32px !important;
+  background: var(--accent) !important;
+  color: var(--accent-ink) !important;
+  font-weight: 600;
+}
+.claim-slot-btn:hover {
+  filter: brightness(1.08);
+}
+.claim-slot-btn[hidden] {
+  display: none !important;
 }
 
 .player-slot .gamepad {
   font-size: 14px;
-  color: #888;
+  color: var(--muted);
   margin-left: 6px;
   pointer-events: none;
   cursor: default;
@@ -303,17 +387,17 @@ body {
 
 .player-slot .device {
   font-size: 14px;
-  color: #888;
+  color: var(--muted);
   margin-left: 6px;
 }
 
 .gamepad-detected {
-  color: #6f6 !important;
+  color: var(--p4) !important;
 }
 
 #spectator-list {
   font-size: 11px;
-  color: #8a8a8a;
+  color: var(--muted);
   margin-top: 6px;
   padding: 0 2px;
 }
@@ -323,6 +407,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.host-options-row[hidden] {
+  display: none;
 }
 
 .host-options-row {
@@ -414,22 +502,24 @@ body {
 #start-btn {
   width: 100%;
   font-size: 15px;
-  background: #2a7a2a;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--accent-ink);
   margin-top: 4px;
 }
 
 #start-btn:hover:not(:disabled) {
-  background: #3a9a3a;
+  filter: brightness(1.08);
 }
 #start-btn:disabled {
-  background: #1a1a30;
-  color: #444;
+  background: var(--line);
+  color: var(--muted);
   cursor: default;
 }
 
 #guest-status {
   text-align: center;
-  color: #8a8a8a;
+  color: var(--muted);
   margin-top: 8px;
   font-size: 14px;
 }
@@ -464,7 +554,7 @@ body {
 button {
   padding: 12px 20px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: #3a5a8a;
   color: #fff;
   font-size: 15px;
@@ -476,14 +566,21 @@ button:hover {
   background: #4a6fa5;
 }
 
+.overlay-card button,
+#unsupported-browser button {
+  border-radius: var(--radius);
+  font-family: inherit;
+}
+
 .small-btn {
   padding: 8px 12px !important;
   font-size: 14px !important;
   min-height: 44px !important;
-  background: #2a2a40 !important;
+  background: var(--line) !important;
+  color: var(--text) !important;
 }
 .small-btn:hover {
-  background: #3a3a55 !important;
+  background: #2f3a4d !important;
 }
 
 #remap-wizard {
@@ -507,14 +604,15 @@ button:hover {
   display: block;
   width: 100%;
   margin-top: 8px;
-  background: #3a2a2a;
+  background: var(--line);
+  color: var(--text);
   font-size: 14px;
   padding: 10px;
   min-height: 44px;
 }
 
 #leave-btn:hover {
-  background: #5a3a3a;
+  background: color-mix(in srgb, var(--p1) 25%, var(--line));
 }
 
 /* Footer links */
@@ -1011,89 +1109,139 @@ button:hover {
   background: #4a6fa5;
 }
 
-/* ROM drop zone */
+/* ROM drop zone (W4 §4) */
 .rom-drop {
-  border: 2px dashed #2a2a40;
-  border-radius: 6px;
+  border: 1px dashed var(--muted);
+  border-radius: var(--radius);
   padding: 1rem;
   text-align: center;
   cursor: pointer;
+  background: var(--bg2);
   transition:
     border-color 0.2s,
     background 0.2s;
 }
 
+.rom-drop p {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+.rom-drop .rom-hint {
+  font-family: var(--font-body);
+  font-weight: 400;
+}
+
 .rom-drop.dragover {
-  border-color: #6af;
-  background: rgba(102, 170, 255, 0.05);
+  border-color: var(--accent);
+  background: rgba(90, 168, 255, 0.06);
 }
 
 .rom-drop.loaded {
-  border-color: #4a4;
-  background: rgba(68, 170, 68, 0.05);
+  border-color: var(--p4);
+  background: rgba(63, 185, 80, 0.06);
 }
 
 .rom-hint {
   font-size: 12px;
-  color: #8a8a8a;
+  color: var(--muted);
   margin-top: 4px;
 }
 
 .rom-status.rom-unsupported {
-  color: #e8a33d;
+  color: var(--p3);
+}
+
+/* Wrong-ROM banner (W4 variant) — names both games, persists until fixed */
+.rom-mismatch {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--p1);
+  background: color-mix(in srgb, var(--p1) 12%, var(--bg2));
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+.rom-mismatch[hidden] {
+  display: none;
+}
+
+/* "Watch instead" — the no-ROM path that stays in the room (§7.2 M3 #1) */
+.watch-instead-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  color: var(--text);
+  font-size: 13px;
+  margin-top: 8px;
+}
+.watch-instead-row[hidden] {
+  display: none;
+}
+.watch-instead-hint {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .host-rom-info {
-  border: 1px solid #2a2a40;
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   margin-bottom: 8px;
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.35;
-  color: #cfd8ff;
-  background: rgba(102, 170, 255, 0.06);
+  color: var(--text);
+  background: rgba(90, 168, 255, 0.06);
   overflow-wrap: anywhere;
 }
 
 .host-rom-info.pending {
-  color: #888;
+  color: var(--muted);
   background: rgba(255, 255, 255, 0.03);
 }
 
 .host-rom-info.ready {
-  border-color: #3d5f88;
+  border-color: var(--accent);
 }
 
-/* ROM Library */
+/* ROM Library — also shown to guests, matched entries marked (§7.2 M3 #1) */
 .rom-library {
-  border: 1px solid #2a2a40;
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
   overflow: hidden;
   margin-top: 8px;
 }
 
 .rom-library-header {
   padding: 6px 10px;
-  background: #222238;
-  color: #888;
+  background: var(--bg2);
+  color: var(--muted);
   font-size: 11px;
+  font-family: var(--font-display);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.1em;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .rom-library-header .rom-count {
-  color: #8a8a8a;
+  color: var(--muted);
   font-size: 10px;
 }
 
 .rom-library-list {
-  max-height: 132px;
+  max-height: 160px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: #333 transparent;
+  scrollbar-color: var(--line) transparent;
 }
 
 .rom-library-item {
@@ -1102,7 +1250,7 @@ button:hover {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  border-top: 1px solid #1e1e30;
+  border-top: 1px solid var(--line);
   transition: background 0.15s;
 }
 
@@ -1115,8 +1263,14 @@ button:hover {
 }
 
 .rom-library-item.active {
-  background: rgba(68, 170, 68, 0.08);
-  border-left: 3px solid #4a4;
+  background: rgba(63, 185, 80, 0.08);
+  border-left: 3px solid var(--p4);
+  padding-left: 7px;
+}
+
+.rom-library-item.matches-host:not(.active) {
+  background: rgba(90, 168, 255, 0.06);
+  border-left: 3px solid var(--accent);
   padding-left: 7px;
 }
 
@@ -1129,7 +1283,7 @@ button:hover {
 }
 
 .rom-library-item.active .rom-check {
-  color: #4a4;
+  color: var(--p4);
 }
 
 .rom-library-item .rom-info {
@@ -1138,7 +1292,7 @@ button:hover {
 }
 
 .rom-library-item .rom-name {
-  color: #aaa;
+  color: var(--text);
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
@@ -1146,28 +1300,36 @@ button:hover {
 }
 
 .rom-library-item.active .rom-name {
-  color: #ddd;
+  color: var(--text);
 }
 
 .rom-library-item .rom-meta {
-  color: #8a8a8a;
+  color: var(--muted);
   font-size: 10px;
   display: flex;
   gap: 8px;
 }
 
 .rom-library-item .rom-meta .verified {
-  color: #4a4;
+  color: var(--p4);
+}
+
+.rom-library-item.matches-host .rom-meta .verified {
+  color: var(--accent);
 }
 
 .rom-library-item .rom-meta .unverified {
-  color: #888;
+  color: var(--muted);
+}
+
+.rom-library-item .rom-use {
+  flex-shrink: 0;
 }
 
 .rom-library-item .rom-delete {
   background: none;
-  border: 1px solid #333;
-  color: #8a8a8a;
+  border: 1px solid var(--line);
+  color: var(--muted);
   border-radius: 4px;
   padding: 2px 6px;
   font-size: 11px;
@@ -1179,13 +1341,13 @@ button:hover {
 }
 
 .rom-library-item .rom-delete:hover {
-  border-color: #a44;
-  color: #a44;
+  border-color: var(--p1);
+  color: var(--p1);
 }
 
 .rom-status {
   font-size: 12px;
-  color: #6af;
+  color: var(--accent);
   margin-top: 8px;
 }
 
@@ -1276,24 +1438,140 @@ button:hover {
   gap: 16px;
 }
 
-.game-loading-spinner {
-  width: 36px;
-  height: 36px;
-  border: 3px solid #2a2a40;
-  border-top-color: #6af;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+/* Match start (docs/landing-design.md §5.7f #2, §7.11) — driven by real
+   per-slot state from play.js (updateBootPorts), not a fixed timer. Ports
+   fill via CSS transition as JS toggles .is-ready; .all-ready plays one
+   bounce once every occupied port is ready; .collapsing plays as the game
+   boots (dismissGameLoading). Still frame under reduced motion. */
+.ms-boot {
+  width: 64px;
+  height: 43px;
+  display: block;
 }
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+.ms-boot rect {
+  transform-box: fill-box;
+  transform-origin: bottom center;
+}
+.ms-boot .outline {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.2;
+}
+.ms-boot .fill {
+  transform: scaleY(0);
+  transition: transform 0.5s ease-out;
+}
+.ms-boot .fill.is-open {
+  display: none;
+}
+.ms-boot .fill.is-ready {
+  transform: scaleY(1);
+}
+.ms-boot .f1.is-ready {
+  fill: var(--p1);
+}
+.ms-boot .f2.is-ready {
+  fill: var(--p2);
+}
+.ms-boot .f3.is-ready {
+  fill: var(--p3);
+}
+.ms-boot .f4.is-ready {
+  fill: var(--p4);
+}
+.ms-boot.all-ready .fill.is-ready {
+  animation: ms-boot-bounce 0.5s ease-out;
+}
+.ms-boot.collapsing .fill,
+.ms-boot.collapsing .outline {
+  transition:
+    height 0.4s ease-in,
+    transform 0.4s ease-in;
+  transform: scaleY(1) !important;
+  height: 5px;
+  transform-box: fill-box;
+}
+@keyframes ms-boot-bounce {
+  0%,
+  100% {
+    transform: scaleY(1) translateY(0);
+  }
+  50% {
+    transform: scaleY(1) translateY(-3px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ms-boot .fill {
+    transition: none;
+  }
+  .ms-boot.all-ready .fill.is-ready {
+    animation: none;
+  }
+  .ms-boot.collapsing .fill,
+  .ms-boot.collapsing .outline {
+    transition: none;
   }
 }
 
 #game-loading-text {
   font-size: 14px;
   color: #aaa;
+}
+
+/* ── Unsupported-browser screen (docs/landing-design.md §7.2 M3 #2) ────── */
+#unsupported-browser {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(70% 50% at 50% 0%, #121a26, var(--bg) 70%);
+  color: var(--text);
+  font-family: var(--font-body);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 20px;
+}
+#unsupported-browser.hidden {
+  display: none;
+}
+.ub-card {
+  max-width: 440px;
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px 20px;
+  text-align: center;
+}
+.ub-card h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.ub-card p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.ub-card .ub-hint {
+  color: var(--text);
+}
+.ub-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 16px;
+}
+#unsupported-copy {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+#unsupported-watch[hidden] {
+  display: none;
 }
 
 /* Gesture prompt overlay — above everything including EmulatorJS */

@@ -3,41 +3,86 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Demo | kaillera-next</title>
+    <title>Rollback demo | kaillera-next</title>
+    <meta
+      name="description"
+      content="Drop your Super Smash Bros. 64 ROM, crank the simulated network lag, and feel the difference between rollback and lockstep netplay."
+    />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <style>
+      /* demo.html — restyled to direction A (docs/landing-design.md §7.5). */
+
+      @font-face {
+        font-family: 'Barlow Condensed';
+        font-style: normal;
+        font-weight: 600;
+        font-display: swap;
+        src: url('/static/fonts/barlow-condensed-600-latin.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'Barlow Condensed';
+        font-style: normal;
+        font-weight: 700;
+        font-display: swap;
+        src: url('/static/fonts/barlow-condensed-700-latin.woff2') format('woff2');
+      }
+      @font-face {
+        font-family: 'IBM Plex Sans';
+        font-style: normal;
+        font-weight: 400 600;
+        font-display: swap;
+        src: url('/static/fonts/ibm-plex-sans-var-latin.woff2') format('woff2');
+      }
+
       :root {
         color-scheme: dark;
-        --bg: #111;
-        --panel: #1a1a2e;
-        --panel-2: #0d0d1a;
-        --border: #2a2a40;
-        --input-border: #333;
-        --text: #eee;
-        --muted: #8a8a8a;
-        --accent: #6af;
-        --button: #3a5a8a;
-        --button-hover: #4a6fa5;
-        --success: #7ddc8a;
-        --danger: #f66;
+        --bg: #0e1218;
+        --bg2: #151b25;
+        --line: #242c39;
+        --text: #e8ecf1;
+        --muted: #8b95a5;
+        --accent: #5aa8ff;
+        --accent-ink: #061020;
+        --radius: 4px;
+        --p1: #e5484d;
+        --p2: #3b82f6;
+        --p3: #f5c518;
+        --p4: #3fb950;
+        --success: #3fb950;
+        --danger: #e5484d;
+        --font-display: 'Barlow Condensed', 'Arial Narrow', sans-serif;
+        --font-body: 'IBM Plex Sans', system-ui, sans-serif;
       }
 
       * {
         box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+      }
+
+      body {
         margin: 0;
-        padding: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 var(--font-body);
+        -webkit-text-size-adjust: 100%;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      button {
+        font: inherit;
+        cursor: pointer;
       }
 
       :focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 2px;
-      }
-
-      body {
-        min-height: 100vh;
-        background: var(--bg);
-        color: var(--text);
-        font-family: sans-serif;
       }
 
       .shell {
@@ -47,38 +92,45 @@
       }
 
       header {
-        margin-bottom: 12px;
+        padding-block: 20px 12px;
       }
 
       h1,
       h2 {
-        color: var(--accent);
-        letter-spacing: 0.1em;
+        font-family: var(--font-display);
+        color: var(--text);
+        margin: 0;
       }
 
       h1 {
-        font-size: clamp(1.2rem, 2vw, 1.6rem);
-        line-height: 1.1;
+        font-size: clamp(22px, 3vw, 32px);
+        font-weight: 700;
+        letter-spacing: 0.03em;
         text-transform: uppercase;
+        line-height: 1.1;
       }
 
       h2 {
-        font-size: 0.78rem;
-        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 8px;
       }
 
       .lede {
-        margin-top: 6px;
-        color: var(--muted);
-        font-size: 0.9rem;
+        margin: 8px 0 0;
+        color: var(--text);
+        font-size: 15px;
         line-height: 1.4;
+        max-width: 62ch;
       }
 
       .status-line {
-        margin-top: 6px;
+        margin: 4px 0 0;
         color: var(--muted);
-        font-size: 0.8rem;
+        font-size: 13px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -101,9 +153,9 @@
 
       .stage {
         position: relative;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: #050607;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #05070a;
         overflow: hidden;
         /* Stage is 4:3 to match the N64's native ratio so the canvas
          * fills it edge-to-edge with no letterbox bars. Whichever
@@ -147,7 +199,7 @@
       }
 
       #rom-drop {
-        background: rgba(13, 13, 26, 0.94);
+        background: rgba(14, 18, 24, 0.94);
       }
 
       /* Rollback <-> lockstep switch: a label over the running game while
@@ -164,22 +216,24 @@
 
       .mode-switch-card {
         padding: 12px 20px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg2);
         text-align: center;
       }
 
       .mode-switch-title {
+        font-family: var(--font-display);
         color: var(--accent);
         font-weight: 700;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
       }
 
       .mode-switch-sub {
         margin-top: 4px;
         color: var(--muted);
-        font-size: 0.8rem;
+        font-size: 13px;
       }
 
       #rom-drop.dragover {
@@ -189,27 +243,28 @@
 
       .drop-inner {
         width: min(440px, calc(100% - 32px));
-        padding: 1.5rem;
-        border: 1px dashed var(--border);
-        border-radius: 12px;
-        background: var(--panel);
+        padding: 24px;
+        border: 1px dashed var(--muted);
+        border-radius: var(--radius);
+        background: var(--bg2);
         text-align: center;
       }
 
       .drop-title {
         display: block;
         margin-bottom: 8px;
-        color: var(--accent);
-        font-size: 1.05rem;
+        font-family: var(--font-display);
+        color: var(--text);
+        font-size: 20px;
         font-weight: 700;
-        letter-spacing: 0.1em;
+        letter-spacing: 0.04em;
         text-transform: uppercase;
       }
 
       .drop-copy {
         margin-bottom: 14px;
         color: var(--muted);
-        font-size: 0.85rem;
+        font-size: 13px;
       }
 
       button,
@@ -219,19 +274,29 @@
         justify-content: center;
         min-height: 44px;
         padding: 12px 20px;
-        border: 0;
-        border-radius: 6px;
-        background: var(--button);
-        color: #fff;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: transparent;
+        color: var(--text);
         font: inherit;
         font-size: 14px;
         font-weight: 600;
-        cursor: pointer;
       }
 
       button:hover,
       .file-button:hover {
-        background: var(--button-hover);
+        border-color: var(--text);
+      }
+
+      .file-button {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      .file-button:hover {
+        border-color: var(--accent);
+        filter: brightness(1.08);
       }
 
       .file-button input {
@@ -243,12 +308,12 @@
       }
 
       #game-loading {
-        background: rgba(5, 6, 7, 0.82);
+        background: rgba(5, 7, 10, 0.85);
         z-index: 4;
       }
 
       #gesture-prompt {
-        background: rgba(5, 6, 7, 0.92);
+        background: rgba(5, 7, 10, 0.92);
         z-index: 6;
         cursor: pointer;
       }
@@ -258,9 +323,9 @@
         align-items: center;
         gap: 12px;
         padding: 14px 18px;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg2);
         color: var(--text);
         font-weight: 700;
       }
@@ -269,7 +334,7 @@
         width: 18px;
         height: 18px;
         border-radius: 50%;
-        border: 2px solid rgba(255, 255, 255, 0.22);
+        border: 2px solid rgba(232, 236, 241, 0.22);
         border-top-color: var(--accent);
         animation: spin 0.8s linear infinite;
       }
@@ -282,32 +347,31 @@
 
       .gesture-button {
         padding: 22px 36px;
-        font-size: 1.2rem;
+        font-family: var(--font-display);
+        font-size: 20px;
         font-weight: 700;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
         text-transform: uppercase;
-        border: 0;
-        border-radius: 14px;
-        background: var(--button);
-        color: #fff;
-        cursor: pointer;
+        border: 1px solid var(--accent);
+        border-radius: var(--radius);
+        background: var(--accent);
+        color: var(--accent-ink);
         animation: gestureBreath 1.6s ease-in-out infinite;
-        box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.5);
       }
 
       .gesture-button:hover {
-        background: var(--button-hover);
+        filter: brightness(1.08);
       }
 
       @keyframes gestureBreath {
         0%,
         100% {
           transform: scale(1);
-          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.4);
+          box-shadow: 0 0 0 0 rgba(90, 168, 255, 0.4);
         }
         50% {
-          transform: scale(1.06);
-          box-shadow: 0 0 0 18px rgba(102, 170, 255, 0);
+          transform: scale(1.04);
+          box-shadow: 0 0 0 14px rgba(90, 168, 255, 0);
         }
       }
 
@@ -317,11 +381,12 @@
         gap: 12px;
       }
 
-      .panel-card {
+      .panel-card,
+      .hud-card {
         padding: 14px 16px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg2);
       }
 
       .slider-heading {
@@ -329,13 +394,13 @@
         align-items: baseline;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
       }
 
       .slider-heading label {
         color: var(--text);
-        font-weight: 700;
-        font-size: 0.95rem;
+        font-weight: 600;
+        font-size: 14px;
       }
 
       .value {
@@ -354,23 +419,30 @@
       .slider-hint {
         margin-top: 6px;
         color: var(--muted);
-        font-size: 0.75rem;
+        font-size: 12px;
       }
 
       .mode-toggle {
         width: 100%;
-        min-height: 56px;
-        font-size: 1.05rem;
+        min-height: 52px;
+        font-family: var(--font-display);
+        font-size: 18px;
         font-weight: 700;
-        letter-spacing: 0.04em;
+        letter-spacing: 0.03em;
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
       }
 
       .mode-toggle.is-off {
-        background: #5a3140;
+        border-color: var(--danger);
+        background: transparent;
+        color: var(--text);
       }
 
       .mode-toggle.is-off:hover {
-        background: #724052;
+        border-color: var(--danger);
+        background: color-mix(in srgb, var(--danger) 14%, var(--bg2));
       }
 
       .emu-controls {
@@ -380,24 +452,24 @@
       }
 
       .emu-controls button {
-        background: var(--panel-2);
-        border: 1px solid var(--border);
+        background: var(--bg);
+        border: 1px solid var(--line);
         font-weight: 600;
         min-height: 40px;
-        font-size: 0.95rem;
+        font-size: 14px;
       }
 
       .emu-controls button:hover:not(:disabled) {
-        background: #14142a;
+        border-color: var(--text);
       }
 
       .emu-controls button:disabled {
-        opacity: 0.4;
+        opacity: 0.45;
         cursor: not-allowed;
       }
 
       .emu-controls button.is-paused {
-        background: #2a3550;
+        background: color-mix(in srgb, var(--accent) 16%, var(--bg));
         border-color: var(--accent);
       }
 
@@ -408,24 +480,24 @@
 
       .auto-compare button {
         width: 100%;
-        background: var(--panel-2);
-        border: 1px solid var(--border);
+        background: var(--bg);
+        border: 1px solid var(--line);
         font-weight: 600;
       }
 
       .auto-compare button:hover {
-        background: #14142a;
+        border-color: var(--text);
       }
 
       .auto-compare.is-running button {
-        background: #2a3550;
+        background: color-mix(in srgb, var(--accent) 16%, var(--bg));
         border-color: var(--accent);
       }
 
       .progress-track {
         height: 4px;
         margin-top: 8px;
-        background: var(--panel-2);
+        background: var(--bg);
         border-radius: 2px;
         overflow: hidden;
       }
@@ -437,22 +509,16 @@
         transition: width 100ms linear;
       }
 
-      .hud-card {
-        padding: 14px 16px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel);
-      }
-
       .input-feel {
-        padding: 14px 8px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: #111125;
+        padding: 12px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg);
         text-align: center;
-        font-size: clamp(1.1rem, 2.4vw, 1.6rem);
-        font-weight: 800;
-        letter-spacing: 0.02em;
+        font-family: var(--font-display);
+        font-size: clamp(18px, 2.4vw, 24px);
+        font-weight: 700;
+        letter-spacing: 0.01em;
         font-variant-numeric: tabular-nums;
         color: var(--muted);
       }
@@ -468,7 +534,7 @@
       .input-feel-sub {
         margin-top: 8px;
         color: var(--muted);
-        font-size: 0.78rem;
+        font-size: 12px;
         text-align: center;
         line-height: 1.4;
         min-height: 1.4em;
@@ -477,10 +543,10 @@
       .frame-delay {
         margin-top: 10px;
         padding: 8px 10px;
-        border-radius: 8px;
-        background: var(--panel-2);
+        border-radius: var(--radius);
+        background: var(--bg);
         color: var(--text);
-        font-size: 0.85rem;
+        font-size: 13px;
         text-align: center;
         font-variant-numeric: tabular-nums;
         line-height: 1.4;
@@ -491,26 +557,84 @@
 
       .frame-delay.is-great {
         color: var(--success);
-        background: rgba(125, 220, 138, 0.08);
+        background: color-mix(in srgb, var(--success) 12%, var(--bg));
       }
 
       .frame-delay.is-okay {
-        color: #f4b84a;
-        background: rgba(244, 184, 74, 0.08);
+        color: var(--p3);
+        background: color-mix(in srgb, var(--p3) 12%, var(--bg));
       }
 
       .frame-delay.is-bad {
         color: var(--danger);
-        background: rgba(255, 102, 102, 0.08);
+        background: color-mix(in srgb, var(--danger) 12%, var(--bg));
       }
 
       .frame-delay strong {
         font-weight: 700;
       }
 
+      /* ---------- Rollback timeline (§5.7f #3, driven live) ---------- */
+      .rb-fig {
+        margin: 12px 0 0;
+        padding: 0;
+      }
+
+      .rb {
+        width: 100%;
+        height: auto;
+        display: block;
+        overflow: visible;
+      }
+
+      .rb .axis {
+        fill: var(--line);
+      }
+
+      .rb .t {
+        fill: var(--line);
+        transition: fill 120ms linear;
+      }
+
+      .rb .t.is-bad {
+        fill: var(--p1);
+      }
+
+      .rb .t.is-replay {
+        fill: var(--accent);
+      }
+
+      .rb .head {
+        fill: var(--accent);
+        transition: transform 160ms linear;
+      }
+
+      .rb .lbl {
+        font: 600 4.2px/1 var(--font-display);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        transition: opacity 120ms linear;
+      }
+
+      .rb .lbl.bad {
+        fill: var(--p1);
+      }
+
+      .rb .lbl.re {
+        fill: var(--accent);
+      }
+
+      .rb-caption {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+        min-height: 2.6em;
+      }
+
       .keys-card h2 {
         margin: 0 0 8px;
-        font-size: 0.85rem;
+        font-size: 12px;
       }
 
       .keys {
@@ -518,27 +642,28 @@
         grid-template-columns: auto 1fr;
         gap: 4px 10px;
         margin: 0;
-        font-size: 0.78rem;
+        font-size: 12px;
+        color: var(--muted);
       }
 
       .keys dt {
         white-space: nowrap;
+        color: var(--text);
       }
 
       .keys dd {
         margin: 0;
-        color: var(--muted);
       }
 
       kbd {
         display: inline-block;
         min-width: 1.5em;
         padding: 1px 5px;
-        border: 1px solid var(--input-border);
-        border-radius: 4px;
-        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--bg);
         font:
-          0.72rem/1.4 ui-monospace,
+          11px/1.4 ui-monospace,
           monospace;
         text-align: center;
       }
@@ -546,25 +671,25 @@
       .gamepad-status {
         margin-top: 8px;
         padding: 8px 10px;
-        border-radius: 8px;
-        background: var(--panel);
+        border-radius: var(--radius);
+        background: var(--bg2);
         color: var(--muted);
-        font-size: 0.78rem;
+        font-size: 12px;
         line-height: 1.4;
         text-align: center;
       }
 
       .gamepad-status.is-detected {
         color: var(--success);
-        background: rgba(125, 220, 138, 0.08);
+        background: color-mix(in srgb, var(--success) 12%, var(--bg2));
       }
 
       .hud-details {
         margin-top: 12px;
         padding-top: 10px;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid var(--line);
         color: var(--muted);
-        font-size: 0.78rem;
+        font-size: 12px;
         line-height: 1.5;
         font-variant-numeric: tabular-nums;
       }
@@ -572,74 +697,70 @@
       .play-cta {
         display: block;
         padding: 14px 16px;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg2);
         color: var(--text);
         text-decoration: none;
         text-align: center;
         transition:
           border-color 0.3s ease,
-          background 0.3s ease,
-          transform 0.3s ease;
+          background 0.3s ease;
       }
 
       .play-cta:hover {
         border-color: var(--accent);
-        background: #1d2138;
+        background: color-mix(in srgb, var(--accent) 10%, var(--bg2));
       }
 
       .play-cta.is-convinced {
         border-color: var(--accent);
-        background: linear-gradient(135deg, #2a3550, var(--panel));
+        background: color-mix(in srgb, var(--accent) 14%, var(--bg2));
         animation: convincePulse 2.4s ease-in-out infinite;
       }
 
       @keyframes convincePulse {
         0%,
         100% {
-          box-shadow: 0 0 0 0 rgba(102, 170, 255, 0.45);
+          box-shadow: 0 0 0 0 rgba(90, 168, 255, 0.4);
         }
         50% {
-          box-shadow: 0 0 0 14px rgba(102, 170, 255, 0);
+          box-shadow: 0 0 0 12px rgba(90, 168, 255, 0);
         }
       }
 
       .play-cta-headline {
+        font-family: var(--font-display);
         color: var(--accent);
         font-weight: 700;
-        font-size: 0.82rem;
-        letter-spacing: 0.08em;
+        font-size: 12px;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
         margin-bottom: 4px;
       }
 
       .play-cta-sub {
         color: var(--muted);
-        font-size: 0.78rem;
+        font-size: 13px;
         margin-bottom: 10px;
       }
 
       .play-cta-button {
         display: inline-block;
         padding: 10px 18px;
-        border-radius: 6px;
-        background: var(--button);
-        color: #fff;
+        border-radius: var(--radius);
+        background: var(--accent);
+        color: var(--accent-ink);
         font-weight: 700;
-        font-size: 0.92rem;
-      }
-
-      .play-cta:hover .play-cta-button {
-        background: var(--button-hover);
+        font-size: 14px;
       }
 
       .explainer {
-        max-width: 920px;
-        margin-top: 16px;
+        max-width: 76ch;
+        margin-top: 14px;
         color: var(--muted);
-        font-size: 0.9rem;
-        line-height: 1.45;
+        font-size: 14px;
+        line-height: 1.5;
       }
 
       .hidden {
@@ -656,6 +777,23 @@
           max-height: 60vh;
         }
       }
+
+      @media (prefers-reduced-motion: reduce) {
+        .gesture-button {
+          animation: none;
+        }
+        .play-cta.is-convinced {
+          animation: none;
+        }
+        .game-loading-spinner {
+          animation: none;
+        }
+        .rb .t,
+        .rb .head,
+        .rb .lbl {
+          transition: none;
+        }
+      }
     </style>
     <script src="/static/version-guard.js"></script>
     <script src="/static/api-sandbox.js"></script>
@@ -670,6 +808,7 @@
     <script src="/static/kn-desync-detector.js"></script>
     <script src="/static/controller-settings.js"></script>
     <script src="/static/netplay-rollback.js"></script>
+    <script src="/static/rollback-timeline.js"></script>
     <script src="/static/fake-peer.js"></script>
     <script src="/static/ssb64-menu-autopilot.js"></script>
     <script src="/static/demo.js"></script>
@@ -690,7 +829,8 @@
               <div class="drop-inner">
                 <span class="drop-title">Drop ROM here</span>
                 <p class="drop-copy">
-                  Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files.
+                  Raw <strong>.z64</strong>, <strong>.n64</strong>, or <strong>.v64</strong> files. Stays on this
+                  device.
                 </p>
                 <label class="file-button">
                   Choose ROM
@@ -733,9 +873,9 @@
           <p class="explainer">
             In this demo P2 is a synthetic peer running in the same tab. An autopilot drives the menus for both players;
             in the match P2 plays random inputs at roughly human cadence. Each time P2's input differs from what the
-            engine predicted, the engine rewinds. That fills the Rollbacks counter and, at high RTT, shows up in the fps
-            readout. Crank the RTT slider and the count rises: that's the latency rollback keeps out of your input
-            delay, paid for in rewinds instead.
+            engine predicted, the engine rewinds. That fills the Rollbacks counter and the Result card's timeline below,
+            and at high RTT shows up in the fps readout. Crank the RTT slider and the count rises: that's the latency
+            rollback keeps out of your input delay, paid for in rewinds instead.
           </p>
         </div>
 
@@ -743,7 +883,7 @@
           <a id="play-cta" class="play-cta" href="/">
             <div id="play-cta-headline" class="play-cta-headline">Play with friends</div>
             <div id="play-cta-sub" class="play-cta-sub">No installs. Free. Share a link.</div>
-            <span id="play-cta-button" class="play-cta-button">Open the lobby →</span>
+            <span id="play-cta-button" class="play-cta-button">Open the front page →</span>
           </a>
 
           <div class="hud-card">
@@ -756,6 +896,32 @@
             <div id="hud-details" class="hud-details">
               Engine: Waiting (start a match) · Mode: Rollback · RTT: 0 ms · — fps · Frame: 0 · Rollbacks: none yet
             </div>
+            <figure class="rb-fig">
+              <svg
+                id="rb-timeline"
+                class="rb"
+                viewBox="-2 0 70 30"
+                role="img"
+                aria-label="Rollback timeline: a live view of the engine's predictions and rewinds during your match"
+              >
+                <rect x="0" y="17" width="64" height="1" class="axis" />
+                <rect class="t" data-i="0" x="2" y="8" width="2" height="8" />
+                <rect class="t" data-i="1" x="8" y="8" width="2" height="8" />
+                <rect class="t" data-i="2" x="14" y="8" width="2" height="8" />
+                <rect class="t" data-i="3" x="20" y="8" width="2" height="8" />
+                <rect class="t" data-i="4" x="26" y="8" width="2" height="8" />
+                <rect class="t" data-i="5" x="32" y="8" width="2" height="8" />
+                <rect class="t" data-i="6" x="38" y="8" width="2" height="8" />
+                <rect class="t" data-i="7" x="44" y="8" width="2" height="8" />
+                <rect class="t" data-i="8" x="50" y="8" width="2" height="8" />
+                <rect class="t" data-i="9" x="56" y="8" width="2" height="8" />
+                <rect class="t" data-i="10" x="62" y="8" width="2" height="8" />
+                <rect id="rb-head" class="head" x="1" y="5" width="4" height="14" rx="1" />
+                <text id="rb-lbl-bad" class="lbl bad" x="20" y="26" text-anchor="middle">wrong guess</text>
+                <text id="rb-lbl-re" class="lbl re" x="20" y="26" text-anchor="middle">rewind · replay</text>
+              </svg>
+              <figcaption id="rb-caption" class="rb-caption">Waiting for a match to start.</figcaption>
+            </figure>
           </div>
 
           <div class="panel-card">

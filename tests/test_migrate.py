@@ -128,8 +128,9 @@ EXPECTED_COLUMNS = {
     "feedback": ["id", "category", "message", "email", "page", "context", "ip_hash", "created_at"],
     "session_logs": [
         "id", "match_id", "room", "slot", "player_name", "mode", "log_data", "summary",
-        "context", "ended_by", "ip_hash", "created_at", "updated_at",
+        "context", "ended_by", "ip_hash", "created_at", "updated_at", "last_seq", "log_epoch",
     ],
+    "session_log_chunks": ["id", "match_id", "slot", "first_seq", "last_seq", "entries", "size", "created_at"],
     "client_events": ["id", "type", "message", "meta", "room", "slot", "ip_hash", "user_agent", "created_at"],
     "screenshots": ["id", "match_id", "slot", "frame", "data", "created_at"],
     "match_metrics": [
@@ -150,6 +151,7 @@ EXPECTED_INDEXES = {
     "idx_screenshots_match": ("screenshots", 0),
     "idx_match_metrics_created_at": ("match_metrics", 0),
     "idx_desync_events_match_frame": ("desync_events", 0),
+    "idx_session_log_chunks_match_slot": ("session_log_chunks", 0),
 }
 
 
@@ -211,6 +213,54 @@ def test_baseline_upgrades_existing_alembic_database(tmp_path):
             await backend.close()
 
     applied, feedback, leftover = run_async(scenario())
-    assert applied == ["0001"]
+    assert applied == ["0001", "0002"]
     assert feedback == [{"message": "kept"}]
     assert leftover == []
+
+
+def test_alembic_0008_database_skips_session_log_chunks_migration(tmp_path):
+    """A database already upgraded by Alembic 0008 has last_seq/log_epoch.
+
+    ALTER TABLE ADD COLUMN can't be made re-runnable, so the runner records
+    0002 as applied instead of running it again.
+    """
+    from src.migrate import apply_migrations
+
+    backend = make_backend("sqlite", tmp_path)
+    conn = sqlite3.connect(backend.path)
+    conn.executescript(
+        """
+        CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, PRIMARY KEY (version_num));
+        INSERT INTO alembic_version VALUES ('0008');
+        CREATE TABLE session_logs (
+            id INTEGER NOT NULL, match_id TEXT NOT NULL, room TEXT NOT NULL, slot INTEGER, player_name TEXT,
+            mode TEXT, log_data TEXT, summary TEXT, context TEXT, ended_by TEXT, ip_hash TEXT,
+            created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+            last_seq INTEGER DEFAULT '-1' NOT NULL, log_epoch TEXT DEFAULT '' NOT NULL, PRIMARY KEY (id)
+        );
+        CREATE UNIQUE INDEX idx_session_logs_game_slot ON session_logs (match_id, slot);
+        CREATE TABLE session_log_chunks (
+            id INTEGER NOT NULL, match_id TEXT NOT NULL, slot INTEGER, first_seq INTEGER NOT NULL,
+            last_seq INTEGER NOT NULL, entries TEXT NOT NULL, size INTEGER DEFAULT '0' NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (id)
+        );
+        INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries) VALUES ('m', 0, 0, 0, '[]');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    async def scenario():
+        await backend.open()
+        try:
+            applied = await apply_migrations(backend)
+            recorded = await backend.query("SELECT version FROM schema_migrations ORDER BY version", ())
+            chunks = await backend.query("SELECT COUNT(*) AS n FROM session_log_chunks", ())
+            return applied, [r["version"] for r in recorded], chunks
+        finally:
+            await backend.close()
+
+    applied, recorded, chunks = run_async(scenario())
+    assert applied == ["0001"]
+    assert recorded == ["0001", "0002"]
+    assert chunks == [{"n": 1}]

@@ -5,9 +5,12 @@ V1 endpoints:
   GET  /health
   GET  /list?game_id=...        EmulatorJS-Netplay room listing
   GET  /room/{room_id}          minimal room info (rate-limited)
+  GET  /room/{room_id}/frame.jpg latest board frame of a listed, in-game room
+  GET  /api/stats/public        front-page numbers (real or absent)
   GET  /ice-servers             WebRTC ICE server config
   GET  /play.html               play page with injected OG meta tags
   GET  /                        homepage with injected OG meta tags
+  GET  /api/landing-build       landing build id (landing Worker staleness check)
   GET  /api/cached-state/{h}    download cached save state
   POST /api/cache-state/{h}     upload save state to cache
   POST /api/session-log          HTTP fallback for session log flush
@@ -38,15 +41,17 @@ import re
 import subprocess as _sp
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 
-from src import db, state, state_cache
-from src.api import turn
+from src import db, landing_build, state, state_cache, stats
+from src.api import og_card, turn
 from src.api.og import (
     _ROM_SHARING_RAW,
+    GAME_INFO,
     _inject_kn_config,
     build_og_tags,
     feature_enabled_for_host,
@@ -55,7 +60,13 @@ from src.api.og import (
 from src.api.payloads import FeedbackPayload
 from src.api.signaling import (
     MAX_ROOMS,
+    MAX_SPECTATORS,
     _sanitize_log_blob,
+    _session_log_entries,
+    connected_players,
+    room_frame,
+    room_host_name,
+    room_is_live,
     rooms,
     verify_upload_token,
 )
@@ -110,6 +121,11 @@ async def cleanup_old_data() -> None:
                 "client_events",
                 "screenshots",
                 "desync_events",
+                # Delta chunks (see migration 0002_session_log_chunks.sql) accumulate independently
+                # of their parent session_logs row's created_at/updated_at,
+                # so they need their own retention sweep or they'd outlive
+                # every other table here.
+                "session_log_chunks",
             ):
                 await db.execute_write(
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
@@ -162,6 +178,12 @@ class SecurityHeadersMiddleware:
         "base-uri 'none'; "
         "frame-ancestors 'self'"
     )
+    # The front page adds one thing: its click-to-play videos
+    # (youtube-nocookie, loaded only when a visitor presses play).
+    _CSP_LANDING = _CSP_STRICT + "; frame-src https://www.youtube-nocookie.com"
+    # The front page and the invite page: landing CSP, and no COEP (only the
+    # game page needs isolation). The landing Worker sends the same.
+    _LANDING_PATHS = frozenset({"/", "/index.html", "/join"})
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
@@ -175,6 +197,8 @@ class SecurityHeadersMiddleware:
             return cls._CSP_PLAY.encode()
         if path.startswith("/static/ejs/cores/"):
             return cls._CSP_PLAY.encode()
+        if path in cls._LANDING_PATHS:
+            return cls._CSP_LANDING.encode()
         return cls._CSP_STRICT.encode()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
@@ -196,8 +220,10 @@ class SecurityHeadersMiddleware:
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     (b"cache-control", self._cache_control(path).encode()),
                 ]
-                # COOP/COEP breaks OG image fetches by crawlers
-                if not path.startswith("/static/og/"):
+                # COOP/COEP breaks OG image fetches by crawlers. The front page
+                # doesn't need cross-origin isolation (only the game does), and
+                # COEP would block its click-to-play video.
+                if not path.startswith("/static/og/") and path not in self._LANDING_PATHS:
                     extra.append((b"cross-origin-opener-policy", b"same-origin"))
                     extra.append((b"cross-origin-embedder-policy", b"require-corp"))
                 message["headers"] = list(message.get("headers", [])) + extra
@@ -222,8 +248,70 @@ class SecurityHeadersMiddleware:
         # HTML that has outdated ?v= cache-bust params on script tags.
         if path.endswith(".html") or path == "/":
             return "no-store"
+        # Board frames: the URL carries the frame's timestamp (/list), so a
+        # short private cache lets the featured panel and its row share one
+        # fetch without ever showing an old frame under a new URL.
+        if path.startswith("/room/") and path.endswith("/frame.jpg"):
+            return "private, max-age=60"
         # API responses and everything else
         return "no-store"
+
+
+# ── Public read-only CORS ─────────────────────────────────────────────────────
+
+
+def public_origins() -> set[str] | None:
+    """Origins allowed to read the public endpoints; None means any origin.
+
+    ALLOWED_ORIGIN (the site itself) plus PUBLIC_ORIGINS, a comma-separated
+    list for a static landing page served from another origin (hosting
+    option B in deploy/static/README.md).
+    """
+    raw = os.environ.get("ALLOWED_ORIGIN", "*").strip()
+    if raw == "*" or not raw:
+        return None
+    extra = os.environ.get("PUBLIC_ORIGINS", "")
+    return {o.strip().rstrip("/") for o in f"{raw},{extra}".split(",") if o.strip()}
+
+
+class PublicCorsMiddleware:
+    """Lets the static landing page read the board and wake the server.
+
+    Only simple GETs on read-only endpoints, no credentials. Error responses
+    carry the header too, so the invite page can tell 404 from a network
+    failure while the server is waking.
+    """
+
+    _EXACT = ("/health", "/list", "/api/stats/public")
+    _PREFIX = "/room/"
+
+    def __init__(self, app) -> None:  # noqa: ANN001
+        self.app = app
+        self._origins = public_origins()
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http" or scope.get("method") not in ("GET", "HEAD"):
+            await self.app(scope, receive, send)
+            return
+        path: str = scope.get("path", "")
+        if path not in self._EXACT and not path.startswith(self._PREFIX):
+            await self.app(scope, receive, send)
+            return
+        origin = dict(scope.get("headers", [])).get(b"origin", b"").decode("latin-1").rstrip("/")
+        if not origin or (self._origins is not None and origin not in self._origins):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cors(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    *message.get("headers", []),
+                    (b"access-control-allow-origin", origin.encode("latin-1")),
+                    (b"vary", b"Origin"),
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
 
 
 # ── Cache busting middleware ──────────────────────────────────────────────────
@@ -315,6 +403,31 @@ def _asset_version() -> str:
     _VERSION_CACHE["key"] = sig
     _VERSION_CACHE["value"] = version
     return version
+
+
+# ── Landing build id ──────────────────────────────────────────────────────────
+#
+# GET /api/landing-build lets the landing Worker (deploy/static/worker.js)
+# notice when its own cached copy of / and /join is stale: it compares this
+# id against the one baked into its own build at deploy time
+# (dist-landing/static/landing-build.json). Computed once from web/'s current
+# contents via server/src/landing_build.py — the same module
+# scripts/build_landing.py uses — and cached: the server's web/ directory
+# doesn't change at runtime in production, and this only needs to be cheap.
+
+_WEB_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
+_landing_build_id_cache: str | None = None
+
+
+def _get_landing_build_id() -> str:
+    """Returns the cached id, or raises if it can't be computed (unreadable
+    web/ directory). Never caches a failure — the id is one line, and a
+    transient read error shouldn't wedge the server into permanently
+    reporting itself broken to the landing Worker."""
+    global _landing_build_id_cache
+    if _landing_build_id_cache is None:
+        _landing_build_id_cache = landing_build.landing_build_id(_WEB_DIR)
+    return _landing_build_id_cache
 
 
 # ── WASM core auto-discovery + content hash ──────────────────────────────────
@@ -546,6 +659,7 @@ def create_app(lifespan=None) -> FastAPI:
     app.add_middleware(CacheBustMiddleware, version_fn=_asset_version)
     app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
+    app.add_middleware(PublicCorsMiddleware)
 
     # Load error page template
     _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
@@ -638,6 +752,18 @@ def create_app(lifespan=None) -> FastAPI:
     @app.get("/api/version")
     async def asset_version() -> dict:
         return {"version": _asset_version()}
+
+    # The landing Worker's staleness check (see `_get_landing_build_id`
+    # above). Same-origin through the Worker, so no public CORS is needed.
+    # On an unreadable web/ directory this 503s rather than returning an
+    # empty id — the Worker must be able to tell "can't compute" from "this
+    # is the id" without special-casing an empty string.
+    @app.get("/api/landing-build")
+    async def landing_build_endpoint() -> dict:
+        try:
+            return {"id": _get_landing_build_id()}
+        except (OSError, ValueError):
+            raise HTTPException(status_code=503, detail="landing build id unavailable") from None
 
     @app.get("/ice-servers")
     async def ice_servers(request: Request) -> list:
@@ -736,15 +862,71 @@ def create_app(lifespan=None) -> FastAPI:
             },
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,
+            "host_name": room_host_name(room),
+            "listed": room.listed,
+            # Nobody connected (restored after a restart): new joiners are
+            # refused with "Room closed"; its own members may still return.
+            "closed": not room_is_live(room),
         }
+
+    @app.get("/room/{room_id}/frame.jpg")
+    def get_room_frame(room_id: str, request: Request) -> Response:
+        if not check_ip(_client_ip(request), "room-frame"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        if not _PUBLIC_ROOM_ID_RE.match(room_id):
+            raise HTTPException(status_code=404, detail="No frame")
+        frame = room_frame(room_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="No frame")
+        return Response(
+            content=frame[0],
+            media_type="image/jpeg",
+            headers={"cross-origin-resource-policy": "cross-origin"},
+        )
+
+    def _live_card_url(host: str, code: str, room) -> str | None:  # noqa: ANN001
+        """Invite card from the latest frame, for listed in-game rooms that have one."""
+        frame = room_frame(code)
+        if frame is None:
+            return None
+        return f"https://{host}/room/{quote(code, safe='')}/card.jpg?t={int(frame[1])}"
+
+    @app.get("/room/{room_id}/card.jpg")
+    def get_room_card(room_id: str, request: Request) -> Response:
+        if not check_ip(_client_ip(request), "room-frame"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        if not _PUBLIC_ROOM_ID_RE.match(room_id):
+            raise HTTPException(status_code=404, detail="No card")
+        frame = room_frame(room_id)
+        room = rooms.get(room_id)
+        if frame is None or room is None:
+            raise HTTPException(status_code=404, detail="No card")
+        info = GAME_INFO.get(room.game_id)
+        game = info["name"] if info else (room.rom_name or room.game_id)
+        try:
+            jpeg = og_card.card_for(room_id, frame, game, room_host_name(room))
+        except Exception:
+            log.exception("og card: compose failed for room %s", room_id)
+            raise HTTPException(status_code=404, detail="No card") from None
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"cross-origin-resource-policy": "cross-origin"},
+        )
 
     @app.get("/list")
     def list_rooms(request: Request, game_id: str | None = None) -> list:
-        if not check_ip(_client_ip(request), "room-lookup"):
+        if not check_ip(_client_ip(request), "board"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        now = time.time()
         result = []
-        for room in rooms.values():
+        for code, room in rooms.items():
             if game_id and room.game_id != game_id:
+                continue
+            if room.listed and not room.password:
+                # Ghost rooms (nobody connected) never reach the board.
+                if room_is_live(room):
+                    result.append(_listed_row(code, room, now))
                 continue
             first_player = next(iter(room.players.values()), {})
             result.append(
@@ -759,6 +941,40 @@ def create_app(lifespan=None) -> FastAPI:
                 }
             )
         return result
+
+    def _listed_row(code: str, room, now: float) -> dict:  # noqa: ANN001
+        """Board row for a listed room: today's fields plus what the board needs."""
+        frame = room_frame(code)
+        info = GAME_INFO.get(room.game_id)
+        return {
+            "room_name": room.room_name,
+            "room_code": code,
+            "game_id": room.game_id,
+            "game": info["name"] if info else (room.rom_name or room.game_id),
+            "host_name": room_host_name(room),
+            "player_count": len(room.players),
+            "max_players": room.max_players,
+            "spectator_count": len(room.spectators),
+            "max_spectators": MAX_SPECTATORS,
+            "status": room.status,
+            "has_password": False,
+            "listed": True,
+            "started_at": room.started_at if room.status == "playing" else None,
+            # The timestamp lets the page tell a new frame from the one it
+            # already shows without fetching it, and keys the frame's cache.
+            "frame_url": f"/room/{code}/frame.jpg?t={int(frame[1])}" if frame else None,
+            "frame_age_s": round(now - frame[1], 1) if frame else None,
+        }
+
+    @app.get("/api/stats/public")
+    async def public_stats(request: Request) -> dict:
+        if not check_ip(_client_ip(request), "board"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        return {
+            # None until a full week has been recorded; the page then shows no number.
+            "matches_this_week": await stats.matches_this_week(),
+            "people_playing_now": sum(connected_players(r) for r in rooms.values() if r.status == "playing"),
+        }
 
     _ROM_HASH_RE = re.compile(r"^[SF]?[0-9a-fA-F]{16,64}$")
 
@@ -824,7 +1040,10 @@ def create_app(lifespan=None) -> FastAPI:
     # Mirrors the Socket.IO session-log handler but over HTTP.
     # Used when socket.emit fails (browser quirks, transport issues).
 
-    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024  # 2MB — same as Socket.IO handler
+    # 2MB — the Socket.IO handler's own cap (_SESSION_LOG_MAX in signaling.py)
+    # is 12MB; this HTTP fallback path keeps a tighter limit since it only
+    # exists to catch flushes the socket path couldn't deliver.
+    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024
 
     def _require_upload_token_relaxed(request: Request) -> None:
         """Verify upload token HMAC without requiring the room to still exist."""
@@ -855,15 +1074,10 @@ def create_app(lifespan=None) -> FastAPI:
         slot = data.get("slot")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
+        epoch = str(data.get("epoch", ""))[:64]
 
-        entries_raw = data.get("entries", [])
-        entries = _sanitize_log_blob(entries_raw if isinstance(entries_raw, list) else [])
-        if not isinstance(entries, list):
-            entries = []
-        log_data_str = json.dumps(entries)
-        while len(log_data_str) > _SESSION_LOG_HTTP_MAX and entries:
-            entries = entries[: len(entries) // 2]
-            log_data_str = json.dumps(entries)
+        # Newest entries win, as in the Socket.IO handler.
+        entries = _session_log_entries(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
         context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})
@@ -889,21 +1103,22 @@ def create_app(lifespan=None) -> FastAPI:
                 context_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
-        await db.upsert_session_log(
+        last_seq = await db.append_session_log(
             {
                 "match_id": match_id,
                 "room": room_id,
                 "slot": slot,
                 "player_name": player_name,
                 "mode": mode,
-                "log_data": log_data_str,
+                "entries": entries,
+                "epoch": epoch,
                 "summary": summary_str,
                 "context": context_str,
                 "ip_hash": hashed_ip,
             }
         )
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
-        return {"status": "saved"}
+        return {"status": "saved", "lastSeq": last_seq}
 
     # ── ROM hash table ──────────────────────────────────────────────────
 
@@ -1118,10 +1333,15 @@ def create_app(lifespan=None) -> FastAPI:
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
-        for field in ("log_data", "summary", "context"):
+        raw_log_data = entry.get("log_data")
+        for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
+        # log_data is now legacy full-blob entries (if any) plus appended
+        # session_log_chunks — assembled here so the response shape (a plain
+        # list of entries) is unchanged for callers.
+        entry["log_data"] = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), raw_log_data)
 
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
@@ -1197,16 +1417,10 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
 
-        # Pre-parse the JSON-stored fields. log_data is a JSON array of
-        # entries; summary and context are JSON objects.
-        log_data = entry.get("log_data") or "[]"
-        if isinstance(log_data, str):
-            try:
-                log_data = json.loads(log_data)
-            except json.JSONDecodeError:
-                log_data = []
-        if not isinstance(log_data, list):
-            log_data = []
+        # Pre-parse the JSON-stored fields. log_data is legacy full-blob
+        # entries (if any) plus appended session_log_chunks; summary and
+        # context are JSON objects.
+        log_data = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), entry.get("log_data"))
 
         summary = entry.get("summary") or "{}"
         if isinstance(summary, str):
@@ -1593,6 +1807,7 @@ def create_app(lifespan=None) -> FastAPI:
     _web_dir = Path(os.path.dirname(__file__)).parent.parent.parent / "web"
     _play_html: str | None = None
     _index_html: str | None = None
+    _join_html: str | None = None
 
     def _get_play_html() -> str:
         nonlocal _play_html
@@ -1605,6 +1820,12 @@ def create_app(lifespan=None) -> FastAPI:
         if _index_html is None:
             _index_html = (_web_dir / "index.html").read_text()
         return _index_html
+
+    def _get_join_html() -> str:
+        nonlocal _join_html
+        if _join_html is None:
+            _join_html = (_web_dir / "join.html").read_text()
+        return _join_html
 
     def _owner_name(room) -> str:  # noqa: ANN001
         """Get room owner's display name."""
@@ -1629,13 +1850,39 @@ def create_app(lifespan=None) -> FastAPI:
         room = rooms.get(room_id) if valid_room else None
         if room:
             game_id = room.game_id or safe_game
-            tags = build_og_tags(host, room_id, _owner_name(room), game_id, spectate)
+            tags = build_og_tags(
+                host, room_id, _owner_name(room), game_id, spectate, image_url=_live_card_url(host, room_id, room)
+            )
         elif valid_room:
             tags = build_og_tags(host, room_id, room_id, safe_game, spectate)
         else:
             tags = build_og_tags(host)
         html = inject_og_tags(_get_play_html(), tags)
         html = _inject_kn_config(html, rom_sharing_enabled=feature_enabled_for_host(_ROM_SHARING_RAW, host))
+        return Response(content=html, media_type="text/html")
+
+    @app.get("/join")
+    def join_page(request: Request) -> Response:
+        """Invite page (landing-design §7.2 M2). Static HTML; the room's link
+        preview tags are filled in here so chat apps show who is inviting."""
+        room_id = request.query_params.get("room")
+        spectate = request.query_params.get("spectate") == "1"
+        host = _validated_host(request)
+        valid_room = bool(room_id and _PUBLIC_ROOM_ID_RE.match(room_id))
+        room = rooms.get(room_id) if valid_room else None
+        if room:
+            tags = build_og_tags(
+                host,
+                room_id,
+                _owner_name(room),
+                room.game_id,
+                spectate,
+                image_url=_live_card_url(host, room_id, room),
+                join_page=True,
+            )
+        else:
+            tags = build_og_tags(host)
+        html = inject_og_tags(_get_join_html(), tags)
         return Response(content=html, media_type="text/html")
 
     @app.get("/")

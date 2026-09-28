@@ -323,6 +323,30 @@ class TestRomReady:
         assert "sid-2" not in room.rom_ready
 
 
+class TestReleaseSlot:
+    def test_same_ip_spectator_cap_refuses_release(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        for index in range(signaling._PER_IP_SPECTATOR_CAP):
+            room.spectators[f"pid-spec-{index}"] = {
+                "socketId": f"sid-spec-{index}",
+                "playerName": "Spec",
+            }
+        rooms["ROOM7"] = room
+        _sid_to_room["sid-2"] = ("ROOM7", "pid-2", False)
+
+        with patch.object(signaling, "ip_hash_for_sid", return_value="same-ip"):
+            err = _run_async(signaling._release_slot_locked("sid-2"))
+
+        assert err == "Spectator limit reached for your network"
+        assert "pid-2" in room.players
+        assert room.slots[1] == "pid-2"
+        assert "pid-2" not in room.spectators
+
+
 # ── data-message relay ───────────────────────────────────────────────────────
 
 
@@ -350,6 +374,31 @@ class TestDataMessageRelay:
         assert kwargs["to"] == "sid-late"
         assert "room" not in kwargs
 
+    def test_to_players_relays_to_players_only(self):
+        room = _make_room()
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.players["pid-3"] = {"socketId": "sid-3", "playerName": "P3"}
+        room.spectators["pid-spec"] = {"socketId": "sid-spec", "playerName": "Spec"}
+        rooms["ROOM1"] = room
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+
+        emit = AsyncMock()
+        with patch.object(signaling.sio, "emit", new=emit):
+            _run_async(
+                signaling._relay(
+                    "sid-host",
+                    {"type": "save-state", "toPlayers": True, "data": "payload"},
+                    "data-message",
+                    "data-message",
+                    max_bytes=4096,
+                )
+            )
+
+        targets = sorted(call.kwargs["to"] for call in emit.await_args_list)
+        assert targets == ["sid-2", "sid-3"]
+        assert all("room" not in call.kwargs for call in emit.await_args_list)
+
     def test_target_sid_outside_room_is_not_relayed(self):
         rooms["ROOM1"] = _make_room()
         rooms["ROOM2"] = _make_room()
@@ -369,3 +418,85 @@ class TestDataMessageRelay:
             )
 
         emit.assert_not_awaited()
+
+
+# ── end-game ─────────────────────────────────────────────────────────────────
+#
+# In prod, a host's End Game click could take 5-8s to process because
+# _end_game_locked awaited db.set_session_ended() (which could queue behind
+# a client's session-log flush on the same connection) BEFORE broadcasting
+# game-ended, so the client's 5s fallback fired first. game-ended now
+# broadcasts before the DB write.
+
+
+class TestEndGameBroadcastOrder:
+    def _run(self, coro, *, order: list):
+        """Patch sio.emit / db.set_session_ended / db.insert_client_event /
+        state.save_room / desync_vision.run_postmortem so _end_game_locked
+        runs without real I/O, recording call order in `order`."""
+
+        async def _record_emit(event, *args, **kwargs):
+            order.append(f"emit:{event}")
+
+        async def _record_set_session_ended(*args, **kwargs):
+            order.append("db.set_session_ended")
+
+        async def _record_save_room(*args, **kwargs):
+            order.append("state.save_room")
+
+        with (
+            patch.object(signaling.sio, "emit", new=AsyncMock(side_effect=_record_emit)),
+            patch.object(signaling.db, "set_session_ended", new=AsyncMock(side_effect=_record_set_session_ended)),
+            patch.object(signaling.db, "insert_client_event", new=AsyncMock()),
+            patch.object(signaling.state, "save_room", new=AsyncMock(side_effect=_record_save_room)),
+            patch.object(signaling.desync_vision, "run_postmortem", new=AsyncMock()),
+        ):
+            return _run_async(coro)
+
+    def test_game_ended_broadcast_before_db_write(self):
+        from src.api.payloads import EndGamePayload
+        from src.api.signaling import _end_game_locked
+
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.status = "playing"
+        room.match_id = "match-1"
+        rooms["ROOM1"] = room
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+
+        order: list = []
+        result = self._run(_end_game_locked("sid-host", EndGamePayload()), order=order)
+
+        assert result is None
+        assert "emit:game-ended" in order
+        assert "db.set_session_ended" in order
+        assert order.index("emit:game-ended") < order.index("db.set_session_ended")
+        # users-updated should also land before the DB write.
+        assert order.index("emit:users-updated") < order.index("db.set_session_ended")
+        # Redis is updated before the DB write, so a set_session_ended
+        # failure can never leave Redis still claiming the room is playing
+        # after every client was already told the game ended.
+        assert order.index("state.save_room") < order.index("db.set_session_ended")
+        # Room state already reflects the end even though the DB write is
+        # ordered after the broadcasts.
+        assert room.status == "lobby"
+        assert room.match_id is None
+
+    def test_end_game_without_active_match_does_not_call_set_session_ended(self):
+        from src.api.payloads import EndGamePayload
+        from src.api.signaling import _end_game_locked
+
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.slots[0] = "pid-host"
+        room.status = "lobby"
+        room.match_id = None
+        rooms["ROOM2"] = room
+        _sid_to_room["sid-host"] = ("ROOM2", "pid-host", False)
+
+        order: list = []
+        self._run(_end_game_locked("sid-host", EndGamePayload()), order=order)
+
+        assert "db.set_session_ended" not in order
+        assert "emit:game-ended" in order

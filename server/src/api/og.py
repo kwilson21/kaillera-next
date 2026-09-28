@@ -56,6 +56,14 @@ def feature_enabled_for_host(raw: str, host: str) -> bool:
 _OG_DIR = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "static" / "og"
 
 
+def _kn_letters_path() -> str:
+    """The KN tile's letters, read from the favicon so the cards and the tab
+    icon can't drift apart (docs/landing-design.md §5.8)."""
+    svg = (_OG_DIR.parent / "favicon.svg").read_text()
+    match = re.search(r'<path[^>]*\sd="([^"]+)"', svg)
+    return match.group(1) if match else ""
+
+
 def _html_escape(s: str) -> str:
     """Escape HTML special characters."""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
@@ -68,235 +76,59 @@ def _build_card_html(
     player_names: list[str] | None = None,
     game_images_enabled: bool = True,
 ) -> str:
-    """Build a self-contained HTML page for the OG card."""
+    """Build a self-contained 1200×630 Direction A preview card."""
+    import base64
+
     game_info = GAME_INFO.get(game_id) if game_id else None
-    has_game_bg = game_images_enabled and game_info is not None and (_OG_DIR / game_info["image"]).exists()
-    # Three render modes:
-    #   - homepage: room_name=None, game_id=None (generic kaillera-next card)
-    #   - per-game static: room_name=None, game_id=<known> (build-time card per game)
-    #   - per-room: room_name set (legacy dynamic; only used by scripts/generate_og_cards.py
-    #     for fallback cards now that runtime rendering is gone)
-    is_homepage = room_name is None and game_id is None
-    is_per_game_static = room_name is None and game_id is not None
-
-    # Background image as base64 data URI for self-contained HTML
+    image_path = _OG_DIR / game_info["image"] if game_info else None
+    has_game_bg = bool(game_images_enabled and image_path and image_path.exists())
     bg_css = ""
-    if has_game_bg:
-        import base64
+    if has_game_bg and image_path:
+        encoded = base64.b64encode(image_path.read_bytes()).decode()
+        mime = "jpeg" if image_path.suffix.lower() in {".jpg", ".jpeg"} else image_path.suffix.lstrip(".")
+        bg_css = f'background-image:url("data:image/{mime};base64,{encoded}");'
 
-        bg_path = _OG_DIR / game_info["image"]
-        b64 = base64.b64encode(bg_path.read_bytes()).decode()
-        ext = bg_path.suffix.lstrip(".")
-        bg_css = f'background-image: url("data:image/{ext};base64,{b64}"); background-size: cover; background-position: center;'
-
-    # Overlay class
-    overlay_class = "overlay-game" if has_game_bg else "overlay-generic"
-    text_shadow_class = "text-shadowed" if has_game_bg else ""
-
-    # kn watermark
-    kn_html = '<div class="kn-bg">kn</div>' if has_game_bg else '<div class="kn-bg-generic">kn</div>'
-
-    # Badge
-    badge_html = ""
-    if not is_homepage:
-        if spectate:
-            badge_html = '<div class="badge badge-watch">WATCH GAME</div>'
-        else:
-            badge_html = '<div class="badge badge-play">JOIN GAME</div>'
-
-    # Headline
+    is_homepage = room_name is None and game_id is None
+    host_name = room_name or (player_names or [None])[0]
+    host = _html_escape(host_name) if host_name else None
+    game = _html_escape(game_info["name"] if game_info else game_id or "a retro game")
     if is_homepage:
+        eyebrow = "PLAY TOGETHER"
         headline = "kaillera-next"
-    elif spectate:
-        headline = "Come watch!"
+        detail = "Super Smash Bros. 64 online with friends. In your browser. No install."
+        footer = "Free · No install · Bring your own ROM"
     else:
-        headline = "Ready to fight?"
-
-    # Subtitle
-    if is_homepage:
-        subtitle = "Play retro games online with friends"
-        subtitle_class = "subtitle-default"
-    elif is_per_game_static:
-        subtitle = "Up to 4 players online" if not spectate else "Watch live"
-        subtitle_class = "subtitle-blue"
-    elif spectate and player_names and len(player_names) >= 2:
-        if len(player_names) == 2:
-            subtitle = f"{_html_escape(player_names[0])} vs {_html_escape(player_names[1])}"
+        eyebrow = "WATCH LIVE" if spectate else "YOU'RE INVITED"
+        if spectate:
+            headline = f"Come watch {host}'s room" if host else f"Watch {game} live"
         else:
-            subtitle = (
-                f"{_html_escape(player_names[0])}, {_html_escape(player_names[1])} & {len(player_names) - 2} more"
-            )
-        subtitle_class = "subtitle-blue"
-    elif spectate:
-        subtitle = f"{_html_escape(room_name)} is playing"
-        subtitle_class = "subtitle-blue"
-    else:
-        subtitle = f"{_html_escape(room_name)} is waiting"
-        subtitle_class = "subtitle-blue"
+            headline = f"{host} invited you to play {game}" if host else f"You're invited to play {game}"
+        detail = "No ROM needed to watch" if spectate else "Up to 4 players · in your browser"
+        footer = "Free · No install · Bring your own ROM"
 
-    # Game name
-    if is_homepage:
-        game_text = "no install needed &middot; up to 4 players"
-    elif game_info:
-        game_text = _html_escape(game_info["name"])
-    else:
-        game_text = _html_escape(game_id or "Unknown Game")
-
-    # Tagline
-    tagline = "kaillera-next"
-
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  @font-face {{
-    font-family: 'Inter';
-    src: url('file://{_OG_DIR / "Inter-Bold.ttf"}') format('truetype');
-    font-weight: 700;
-  }}
-  body {{
-    width: 1200px;
-    height: 630px;
-    overflow: hidden;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    background: #1a1a2e;
-  }}
-  .card {{
-    width: 1200px;
-    height: 630px;
-    position: relative;
-    overflow: hidden;
-    {bg_css}
-  }}
-  .bg-blur {{
-    position: absolute;
-    top: -4px; left: -4px; right: -4px; bottom: -4px;
-    {bg_css}
-    filter: blur(1px);
-    transform: scale(1.03);
-  }}
-  .overlay {{
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    padding: 60px 80px;
-    gap: 10px;
-  }}
-  .overlay-game {{
-    background: linear-gradient(135deg, rgba(10,10,30,0.88) 0%, rgba(10,10,30,0.55) 50%, rgba(10,10,30,0.3) 100%);
-  }}
-  .overlay-generic {{
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-  }}
-  .kn-bg {{
-    position: absolute;
-    right: 20px;
-    bottom: -20px;
-    font-weight: 900;
-    font-size: 380px;
-    color: rgba(102, 170, 255, 0.30);
-    letter-spacing: -14px;
-    z-index: 2;
-  }}
-  .kn-bg-generic {{
-    position: absolute;
-    right: 20px;
-    bottom: -20px;
-    font-weight: 900;
-    font-size: 420px;
-    color: rgba(102, 170, 255, 0.06);
-    letter-spacing: -16px;
-  }}
-  .text-shadowed .headline {{
-    text-shadow: 0 3px 16px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,1);
-  }}
-  .text-shadowed .subtitle-blue,
-  .text-shadowed .subtitle-default {{
-    text-shadow: 0 2px 12px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,1);
-  }}
-  .text-shadowed .game-name {{
-    text-shadow: 0 2px 10px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,1);
-  }}
-  .text-shadowed .tagline {{
-    text-shadow: 0 1px 8px rgba(0,0,0,0.9), 0 0 3px rgba(0,0,0,1);
-  }}
-  .badge {{
-    display: inline-block;
-    font-weight: 700;
-    font-size: 44px;
-    letter-spacing: 2px;
-    padding: 14px 28px;
-    border-radius: 8px;
-    z-index: 3;
-    position: relative;
-    width: fit-content;
-    margin-bottom: 4px;
-  }}
-  .badge-play {{
-    background: rgba(102, 170, 255, 0.25);
-    color: #6af;
-  }}
-  .badge-watch {{
-    background: rgba(255, 170, 102, 0.25);
-    color: #fa6;
-  }}
-  .headline {{
-    font-weight: 800;
-    font-size: 130px;
-    color: #fff;
-    z-index: 3;
-    position: relative;
-    line-height: 1.15;
-  }}
-  .subtitle-blue {{
-    font-weight: 600;
-    font-size: 72px;
-    color: #6af;
-    z-index: 3;
-    position: relative;
-  }}
-  .subtitle-default {{
-    font-weight: 600;
-    font-size: 72px;
-    color: #ccc;
-    z-index: 3;
-    position: relative;
-  }}
-  .game-name {{
-    font-weight: 500;
-    font-size: 56px;
-    color: #ccc;
-    z-index: 3;
-    position: relative;
-  }}
-  .tagline {{
-    font-weight: 400;
-    font-size: 48px;
-    color: #999;
-    margin-top: 8px;
-    z-index: 3;
-    position: relative;
-  }}
-</style>
-</head>
-<body>
-<div class="card">
-  {"<div class='bg-blur'></div>" if has_game_bg else ""}
-  <div class="overlay {overlay_class} {text_shadow_class}">
-    {kn_html}
-    {badge_html}
-    <div class="headline">{headline}</div>
-    <div class="{subtitle_class}">{subtitle}</div>
-    <div class="game-name">{game_text}</div>
-    <div class="tagline">{tagline}</div>
-  </div>
-</div>
-</body>
-</html>"""
+    logo = f"""<svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="6" fill="#0e1218" stroke="#242c39"/>
+      <path d="{_kn_letters_path()}" fill="#5aa8ff"/>
+    </svg>"""
+    corner_logo = "" if has_game_bg else logo
+    footer_logo = logo.replace('class="logo"', 'class="footer-logo"').replace(
+        'aria-hidden="true"', 'role="img" aria-label="kaillera-next"'
+    )
+    footer_content = (
+        f"{footer_logo}{footer}" if has_game_bg else (footer if is_homepage else f"kaillera-next · {footer}")
+    )
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
+@font-face{{font-family:Barlow;src:url('file://{_OG_DIR.parent / "fonts" / "barlow-condensed-700-latin.woff2"}') format('woff2');font-weight:700}}
+@font-face{{font-family:Plex;src:url('file://{_OG_DIR.parent / "fonts" / "ibm-plex-sans-var-latin.woff2"}') format('woff2');font-weight:400 600}}
+*{{box-sizing:border-box}}html,body{{margin:0;width:1200px;height:630px;overflow:hidden}}body{{background:#0e1218;color:#e8ecf1;font-family:Plex,system-ui,sans-serif}}
+.card{{position:relative;width:100%;height:100%;{bg_css}background-size:cover;background-position:center}}
+.shade{{position:absolute;inset:0;background:{"linear-gradient(90deg,rgba(14,18,24,.97) 0%,rgba(14,18,24,.88) 52%,rgba(14,18,24,.30) 100%)" if has_game_bg else "linear-gradient(135deg,#0e1218 0%,#151b25 70%,#17283d 100%)"}}}
+.rule{{position:absolute;left:64px;top:58px;width:72px;height:6px;background:#5aa8ff}}.logo{{position:absolute;right:58px;top:52px;width:76px;height:76px}}
+.copy{{position:absolute;left:64px;right:210px;top:92px;bottom:65px;display:flex;flex-direction:column;justify-content:center}}
+.eyebrow{{font:700 28px Barlow,sans-serif;letter-spacing:.16em;color:#5aa8ff;margin-bottom:16px}}
+.headline{{font:700 {104 if is_homepage else 76}px/.92 Barlow,'Arial Narrow',sans-serif;letter-spacing:-.02em;text-transform:{"none" if is_homepage else "uppercase"};max-width:940px}}
+.detail{{font:400 33px/1.25 Plex,sans-serif;color:#c3cad3;margin-top:25px;max-width:850px}}.footer{{position:absolute;left:64px;bottom:43px;display:flex;align-items:center;gap:12px;font:600 24px Plex,sans-serif;color:#8b95a5}}.footer-logo{{width:40px;height:40px;flex:none}}
+</style></head><body><div class="card"><div class="shade"></div><div class="rule"></div>{corner_logo}<main class="copy"><div class="eyebrow">{eyebrow}</div><div class="headline">{headline}</div><div class="detail">{detail}</div></main><div class="footer">{footer_content}</div></div></body></html>"""
 
 
 # ── HTML meta tag injection ───────────────────────────────────────────────────
@@ -310,6 +142,8 @@ def build_og_tags(
     room_name: str | None = None,
     game_id: str | None = None,
     spectate: bool = False,
+    image_url: str | None = None,
+    join_page: bool = False,
 ) -> str:
     """Build OG meta tag HTML string for injection into <head>.
 
@@ -320,11 +154,13 @@ def build_og_tags(
     """
     game_info = GAME_INFO.get(game_id) if game_id else None
 
-    # Card images are now prebuilt static PNGs (see scripts/generate_og_cards.py).
+    # Card images are now prebuilt static images (see scripts/generate_og_cards.py).
     # Pick the per-game card if we recognize the game, else fall back to home.png.
-    if game_info:
+    if image_url:
+        pass  # caller composed a live card (og_card.py)
+    elif game_info:
         suffix = "watch" if spectate else "play"
-        image_url = f"https://{host}/static/og/cards/{quote(game_id, safe='')}-{suffix}.png"
+        image_url = f"https://{host}/static/og/cards/{quote(game_id, safe='')}-{suffix}.jpg"
     else:
         image_url = f"https://{host}/static/og/home.png"
 
@@ -334,20 +170,25 @@ def build_og_tags(
         if game_label:
             title += f" \u00b7 {game_label}"
         description = "kaillera-next \u2014 play retro games online with friends"
-        page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
-        if game_id:
-            page_url += f"&amp;game={quote(game_id, safe='')}"
+        if join_page:
+            page_url = f"https://{host}/join?room={quote(room_id, safe='')}"
+        else:
+            page_url = f"https://{host}/play.html?room={quote(room_id, safe='')}"
+        if game_id and not join_page:
+            page_url += f"&game={quote(game_id, safe='')}"
         if spectate:
-            page_url += "&amp;spectate=1"
+            page_url += "&spectate=1"
     else:
         title = "kaillera-next"
         description = "Play retro games online with friends \u2014 no install needed"
         page_url = f"https://{host}/"
 
+    image_type = "image/jpeg" if image_url.lower().split("?", 1)[0].endswith((".jpg", ".jpeg")) else "image/png"
     return (
         f'<meta property="og:title" content="{_html_escape(title)}" />\n'
         f'    <meta property="og:description" content="{_html_escape(description)}" />\n'
         f'    <meta property="og:image" content="{_html_escape(image_url)}" />\n'
+        f'    <meta property="og:image:type" content="{image_type}" />\n'
         f'    <meta property="og:image:width" content="1200" />\n'
         f'    <meta property="og:image:height" content="630" />\n'
         f'    <meta property="og:url" content="{_html_escape(page_url)}" />\n'
@@ -356,14 +197,30 @@ def build_og_tags(
     )
 
 
+# The static pages carry generic tags for the landing Worker's copy; the
+# server's own tags replace them.
+_STATIC_OG_RE = re.compile(r"[ \t]*<!-- og:static.*?<!-- /og:static -->\n?", re.DOTALL)
+
+
 def inject_og_tags(html: str, og_tags: str) -> str:
-    """Inject OG meta tags into cached HTML by inserting after <head> opening tag."""
-    return _HEAD_RE.sub(rf"\1\n    {og_tags}", html, count=1)
+    """Inject OG meta tags into cached HTML by inserting after <head> opening tag,
+    replacing the page's static fallback block if it has one."""
+    html = _STATIC_OG_RE.sub("", html, count=1)
+    return _HEAD_RE.sub(lambda m: f"{m.group(1)}\n    {og_tags}", html, count=1)
+
+
+def _keepalive_seconds() -> int:
+    """KEEPALIVE_SECONDS: how often the play page pings /health; 0 (default) is off."""
+    try:
+        return max(0, int(os.environ.get("KEEPALIVE_SECONDS", "0")))
+    except ValueError:
+        return 0
 
 
 def _inject_kn_config(html: str, *, rom_sharing_enabled: bool) -> str:
     """Inject server-side feature flags as window.KN_CONFIG before </head>."""
     config_js = (
-        f'<script>window.KN_CONFIG = {{"romSharingEnabled": {"true" if rom_sharing_enabled else "false"}}};</script>'
+        f'<script>window.KN_CONFIG = {{"romSharingEnabled": {"true" if rom_sharing_enabled else "false"}, '
+        f'"keepaliveSeconds": {_keepalive_seconds()}}};</script>'
     )
     return html.replace("</head>", f"  {config_js}\n</head>", 1)

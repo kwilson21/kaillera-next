@@ -1,6 +1,8 @@
 """In-memory per-IP rate limiting with rolling window."""
 
 import hashlib
+import hmac
+import ipaddress
 import logging
 import os
 import time
@@ -20,9 +22,11 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "join-room": (20, 60),
     "leave-room": (10, 10),
     "claim-slot": (5, 10),
+    "release-slot": (5, 10),
     "set-name": (5, 10),
     "set-mode": (5, 10),
     "rom-sharing-toggle": (5, 10),
+    "set-listed": (5, 10),
     "rom-ready": (10, 10),
     "input-type": (5, 10),
     "device-type": (5, 10),
@@ -33,6 +37,11 @@ _LIMITS: dict[str, tuple[int, float]] = {
     # unknown room codes burns through the miss budget fast, while
     # legitimate polling of an existing room stays under "room-lookup".
     "room-lookup-miss": (5, 60),
+    # Front-page board: each open tab polls /list every 10 s (6/min) and the
+    # stats about once a minute. 240/min leaves room for ~30 tabs behind one
+    # household or carrier NAT. Frames are fetched per listed room.
+    "board": (240, 60),
+    "room-frame": (240, 60),
     # A page fetches ICE servers once per room join. Generous because players
     # can share an IP (LAN, carrier NAT); Cloudflare calls are bounded by
     # turn.py's cache and failure backoff, not by this.
@@ -80,6 +89,53 @@ def ip_hash_for_sid(sid: str) -> str:
 # never used there.
 _ON_RENDER = os.environ.get("RENDER") == "true"
 
+# The landing Worker (deploy/static/worker.js) sits in front of the server.
+# Cloudflare sets CF-Connecting-IP on a Worker's subrequests to the Worker's
+# own address, so the Worker forwards the visitor's IP in X-KN-Client-IP with
+# a shared secret; the header counts only when the secret matches.
+#
+# KN_PROXY_SECRET may hold a comma-separated list, so a rotation can add the
+# new secret alongside the old one before removing it: while both are
+# configured here, the Worker's header is trusted whichever one it presents.
+_PROXY_SECRET = os.environ.get("KN_PROXY_SECRET", "")
+
+
+def _proxy_secrets() -> list[str]:
+    """Parse KN_PROXY_SECRET into its individual entries.
+
+    Re-parses `_PROXY_SECRET` on every call (cheap) rather than caching, so
+    tests that monkeypatch the module attribute see the change immediately.
+    """
+    return [s.strip() for s in _PROXY_SECRET.split(",") if s.strip()]
+
+
+# Warn at most once per (reason) per _PROXY_WARN_INTERVAL, so a misconfigured
+# secret or a spoofed header doesn't spam the log.
+_proxy_warned: dict[str, float] = {}
+_PROXY_WARN_INTERVAL = 600.0
+
+# The Worker's own egress range (documented in deploy/static/worker.js). If
+# KN_PROXY_SECRET is set here but the Worker sends no X-KN-Client-IP (its own
+# PROXY_SECRET is unset), the normal IP rule resolves to an address in this
+# range for every visitor — that's the silent one-IP-for-the-whole-site bug.
+_CF_WORKER_NET = ipaddress.ip_network("2a06:98c0::/29")
+
+
+def _is_worker_address(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in _CF_WORKER_NET
+    except ValueError:
+        return False
+
+
+def _warn_proxy_once(message: str) -> None:
+    """Log `message` at most once per _PROXY_WARN_INTERVAL, keyed by its own text."""
+    now = time.monotonic()
+    last = _proxy_warned.get(message)
+    if last is None or now - last >= _PROXY_WARN_INTERVAL:  # monotonic can start near 0
+        _proxy_warned[message] = now
+        log.warning("%s", message)
+
 
 def extract_ip(source: object) -> str:
     """Extract client IP from a FastAPI Request or ASGI environ dict.
@@ -100,18 +156,59 @@ def extract_ip(source: object) -> str:
 
         peer = source.client.host if source.client else "unknown"
 
+    proxied_ip = header("x-kn-client-ip")
+    if proxied_ip:
+        secrets = _proxy_secrets()
+        if not secrets:
+            _warn_proxy_once("X-KN-Client-IP present but KN_PROXY_SECRET is unset — falling back to the normal IP rule")
+        else:
+            # Compare against every configured secret — never short-circuit
+            # on the first match — so timing can't reveal which one (if any)
+            # matched, only whether trust was granted.
+            supplied = header("x-kn-proxy-auth").encode()
+            matched = False
+            for secret in secrets:
+                if hmac.compare_digest(supplied, secret.encode()):
+                    matched = True
+            if not matched:
+                _warn_proxy_once(
+                    "X-KN-Client-IP present but the proxy auth didn't match — falling back to the normal IP rule"
+                )
+            else:
+                try:
+                    return str(ipaddress.ip_address(proxied_ip.strip()))
+                except ValueError:
+                    _warn_proxy_once(
+                        "X-KN-Client-IP present but the forwarded value wasn't a single IP address"
+                        " — falling back to the normal IP rule"
+                    )
+
     if _ON_RENDER:
         for name in ("true-client-ip", "cf-connecting-ip"):
             if header(name):
-                return header(name).strip()
-        return "unknown"
-    cf_ip = header("cf-connecting-ip")
-    if cf_ip:
-        return cf_ip.strip()
-    forwarded = header("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return peer
+                result = header(name).strip()
+                break
+        else:
+            result = "unknown"
+    else:
+        cf_ip = header("cf-connecting-ip")
+        if cf_ip:
+            result = cf_ip.strip()
+        else:
+            forwarded = header("x-forwarded-for")
+            result = forwarded.split(",")[0].strip() if forwarded else peer
+
+    # No X-KN-Client-IP at all, but the server expects one from the landing
+    # Worker and the normal rule resolved to the Worker's own address: the
+    # Worker is very likely missing its own PROXY_SECRET, so it never sent
+    # the header — this is the silent one-IP-for-the-whole-site bug.
+    if not proxied_ip and _PROXY_SECRET and _is_worker_address(result):
+        _warn_proxy_once(
+            "a request came from a Cloudflare Worker without X-KN-Client-IP"
+            " — is PROXY_SECRET set on the landing Worker?"
+        )
+
+    return result
 
 
 MAX_CONNECTIONS_PER_IP = 20
