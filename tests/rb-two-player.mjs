@@ -210,8 +210,16 @@ while (Date.now() - t0 < 60000) {
         .click({ force: true })
         .catch(() => {});
   }
+  // Also require EJS_emulator.gameManager.Module: on WebKit, currentFrame can
+  // go truthy a tick before gameManager is attached (seen with
+  // GUEST_BROWSER=webkit — install() below reads gameManager.Module and
+  // threw `undefined is not an object`). Harmless extra check on Chromium.
   const ready = await Promise.all(
-    [host, guest].map((p) => p.evaluate(() => !!window.NetplayRollback?.getHudCounters?.()?.currentFrame)),
+    [host, guest].map((p) =>
+      p.evaluate(
+        () => !!window.NetplayRollback?.getHudCounters?.()?.currentFrame && !!window.EJS_emulator?.gameManager?.Module,
+      ),
+    ),
   );
   if (ready[0] && ready[1]) break;
   await host.waitForTimeout(500);
