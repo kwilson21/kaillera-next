@@ -10582,7 +10582,7 @@
         try {
           previousOnAbort?.call(mod, what);
         } finally {
-          _handleCoreFatal('abort', what);
+          if (_config) _handleCoreFatal('abort', what);
         }
       };
       mod._knOnAbortInstalled = true;
@@ -10931,7 +10931,8 @@
     }
 
     if (_isLocalDev && _forceAbortFrame >= 0 && _frameNum >= _forceAbortFrame) {
-      throw new WebAssembly.RuntimeError('Aborted(RuntimeError: unreachable) [synthetic knForceAbort]');
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      mod.abort('synthetic knForceAbort');
     }
 
     runner(frameTimeMs);
@@ -11284,15 +11285,20 @@
   };
 
   let _stepNoRunLastLogAt = 0;
-  const CORE_FATAL = {
-    reason: 'Emulator crashed',
-    detail: 'the game core hit a fatal error and cannot continue — reload the page to rejoin',
+  const _notifyCoreFatal = () => {
+    try {
+      _config?.onFatal?.();
+    } catch (cbErr) {
+      console.error('[lockstep] onFatal callback threw:', cbErr);
+    }
   };
   // A WASM trap leaves the core mid-frame with inconsistent state. Running
   // on would silently diverge, so stop the match and surface the failure.
   const _handleCoreFatal = (branch, e) => {
     if (_coreFatalError) return;
     _coreFatalError = true;
+    // Restore wall-clock timestamps after a mid-step abort.
+    _inDeterministicStep = false;
     const detail = `${e?.message || e}`.slice(0, 200);
     _syncLog(`FATAL-CORE-ABORT branch=${branch} f=${_frameNum} — WASM core trapped, ending match: ${detail}`);
     KNEvent('wasm-fail', `core aborted (${branch}) f=${_frameNum}`, { branch, frame: _frameNum, detail });
@@ -11302,11 +11308,7 @@
       clearInterval(_tickInterval);
       _tickInterval = null;
     }
-    try {
-      _config?.onFatal?.(CORE_FATAL);
-    } catch (cbErr) {
-      console.error('[lockstep] onFatal callback threw:', cbErr);
-    }
+    _notifyCoreFatal();
   };
 
   const _runStepOneFrame = (branch) => {
@@ -11623,11 +11625,7 @@
     // Late join and reconnect cannot resume a dead core.
     if (_coreFatalError) {
       _syncLog('FATAL-CORE-ABORT start blocked — core is dead, reload required');
-      try {
-        _config?.onFatal?.(CORE_FATAL);
-      } catch (cbErr) {
-        console.error('[lockstep] onFatal callback threw:', cbErr);
-      }
+      _notifyCoreFatal();
       return;
     }
     if (_phase === PHASE_RUNNING) return;

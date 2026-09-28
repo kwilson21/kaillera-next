@@ -1378,6 +1378,8 @@
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
   const onGameStarted = (data) => {
+    // Keep match events from covering the fatal error modal.
+    if (coreFatal) return;
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
