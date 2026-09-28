@@ -40,19 +40,30 @@
  *     WebKit on both sides can use the real GPU and is the closer match to
  *     the reported prod case (iOS Safari, which is WebKit).
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
- *     setInterval-driven tick callbacks to at most once per 33ms (a plain
- *     JS wrapper around window.setInterval, installed via an init script),
- *     modeling a device whose timers drop to ~30Hz. Forces the host into
- *     rollback bursts so replay-catch-up frames actually occur.
+ *     setInterval-driven tick callbacks to an average of THROTTLE_GUEST_HZ
+ *     (env, default 30) callbacks/s — a plain JS wrapper around
+ *     window.setInterval, installed via an init script, modeling a device
+ *     whose timers drop to that rate. Uses a fixed callback schedule, not a
+ *     "≥33ms since the last passed call" gate: the engine's tick pump fires
+ *     on a 6ms grid (TICK_PUMP_INTERVAL_MS), so that gate rounds every
+ *     passed gap up to the next 6ms step (~36-42ms, i.e. ~25Hz) — this
+ *     harness used to measure TICK-PERF tickMs median=39.9 p95=41.2 at
+ *     "33ms", well off prod's actual throttled iPhone (median=29.9
+ *     p95=31.0, ~33Hz). A fixed schedule keeps the average exact regardless
+ *     of which 6ms tick it lands on. Forces the host into rollback bursts
+ *     so replay-catch-up frames actually occur.
  *   MIN_GAME_FPS=<n>   Fail (exit 1) if either peer's measured game fps
  *     (frames advanced / wall seconds, from window.__tp's own emulator
  *     frame counter) drops below n. The measurement window is from ~15s
  *     into the battle (when THROTTLE_GUEST flips the guest's cap) to the
  *     end of battle when THROTTLE_GUEST=1, else the whole battle. Reported
  *     as `gameFps: {host, guest}` in summary.json, alongside each peer's
- *     `PACING-THROTTLE start` count and cumulative `TICK-PERF` scheduler
- *     counters (`droppedSlots`, `catchupFrames` — see #47) during that
- *     window, under `schedulerCounters`.
+ *     `pacing: {heldFrames, episodes, summaries}` — summed from the
+ *     unsampled `PACING f=...` summary lines (each covers the preceding
+ *     300 frames; the rate-limited `PACING-THROTTLE start/end` lines are
+ *     capped at 1/s and undercount episodes) — and cumulative `TICK-PERF`
+ *     scheduler counters (`droppedSlots`, `catchupFrames` — see #47) during
+ *     that window, under `schedulerCounters`.
  *   VISUAL_CHECK=1   On both peers, piggyback on the existing _kn_post_tick
  *     hook: whenever idle (no replay in flight) and in battle, downscale
  *     `#game canvas` into an offscreen 48x36 canvas and keep its RGB bytes.
@@ -104,6 +115,7 @@ const QUERY = process.env.KN_QUERY || '';
 const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
 const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
+const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 fs.mkdirSync(OUT, { recursive: true });
@@ -159,37 +171,49 @@ const initScript = ({ lat, jitter }) => {
   };
 };
 
-// Caps setInterval-driven callbacks to at most once per `minMs`, once
-// `window.__knThrottle` is flipped true. Below the cap (or before the flag
-// flips) every call passes through unchanged — this never speeds anything
-// up, only occasionally skips a callback once throttling is enabled.
-const throttleInitScript = () => {
+// Caps setInterval-driven callbacks to an average of `hz` calls/sec, once
+// `window.__knThrottle` is flipped true. Before the flag flips every call
+// passes through unchanged — this never speeds anything up.
+//
+// Fixed schedule, not a "≥period since the last passed call" gate: the
+// engine's tick pump fires on a 6ms grid (TICK_PUMP_INTERVAL_MS), so a
+// since-last-call gate rounds every passed gap up to the next 6ms step —
+// at a 33ms gate that's ~36-42ms, i.e. ~25Hz actually delivered, not 30
+// (confirmed via TICK-PERF tickMs median=39.9 p95=41.2, vs prod's real
+// throttled iPhone at median=29.9 p95=31.0, ~33Hz). Advancing a fixed
+// `next` by a constant `period` keeps the long-run average exact no matter
+// which 6ms tick a call lands on; resetting to `now + period` when a whole
+// period behind (rather than always advancing from the old `next`) avoids
+// a burst of catch-up calls after a long pause (GC, backgrounded tab).
+const throttleInitScript = (hz) => {
   window.__knThrottle = false;
+  const period = 1000 / hz;
   const orig = window.setInterval;
   window.setInterval = function (fn, delay, ...args) {
-    let last = 0;
+    let next = 0;
     const wrapped = (...a) => {
-      const now = performance.now();
-      const minDelay = window.__knThrottle ? 33 : 0;
-      if (now - last < minDelay) return;
-      last = now;
+      if (window.__knThrottle) {
+        const now = performance.now();
+        if (now < next) return;
+        next = next + period > now ? next + period : now + period;
+      }
       fn(...a);
     };
     return orig.call(window, wrapped, delay, ...args);
   };
 };
 
-const mkPage = async (browser, name, { throttle = false } = {}) => {
+const mkPage = async (browser, name, { throttleHz = 0 } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
-  if (throttle) await ctx.addInitScript(throttleInitScript);
+  if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
 };
 
 const host = await mkPage(hostBrowser, 'host');
-const guest = await mkPage(guestBrowser, 'guest', { throttle: THROTTLE_GUEST });
+const guest = await mkPage(guestBrowser, 'guest', { throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : 0 });
 await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
@@ -396,7 +420,7 @@ if (inBattle) {
         }),
         host.evaluate(() => window.__tp.markFpsWindowStart()),
       ]).then(
-        () => console.log('THROTTLE_GUEST: guest capped to ~30Hz; fps window started'),
+        () => console.log(`THROTTLE_GUEST: guest capped to ~${THROTTLE_GUEST_HZ}Hz; fps window started`),
         (e) => console.log('THROTTLE_GUEST: failed to flip flag/mark window', e.message),
       );
     }, 15000);
@@ -522,18 +546,32 @@ const gameFpsOf = (peer) => {
 };
 const gameFps = { host: gameFpsOf(H), guest: gameFpsOf(G) };
 
-// PACING-THROTTLE start lines within the measurement window, per peer's own
-// sync log (t is that page's performance.now(), same clock as fpsWindowStart).
-const pacingThrottleStartsInWindow = (peer) => {
+// Pacing episodes within the measurement window, from the unsampled
+// per-300-frame `PACING f=...` summary lines (#47) in each peer's own sync
+// log (t is that page's performance.now(), same clock as fpsWindowStart) —
+// not the `PACING-THROTTLE start/end` lines, which are rate-limited to 1/s
+// and so miss most episodes on a busy peer. Each summary line's
+// capsCount/capsFrames cover the 300 frames preceding it.
+const pacingInWindow = (peer) => {
   const start = peer.fpsWindowStart;
   if (!start) return null;
-  return peer.sync.split('\n').filter((l) => {
-    if (!l.includes('PACING-THROTTLE start')) return false;
+  const lines = peer.sync.split('\n').filter((l) => {
+    if (!l.includes('PACING f=')) return false;
     const t = parseFloat(l.split('\t')[1]);
     return Number.isFinite(t) && t >= start.t;
-  }).length;
+  });
+  let episodes = 0,
+    heldFrames = 0;
+  for (const l of lines) {
+    const m = l.match(/capsCount=(\d+) capsFrames=(\d+)/);
+    if (m) {
+      episodes += +m[1];
+      heldFrames += +m[2];
+    }
+  }
+  return { heldFrames, episodes, summaries: lines.length };
 };
-const pacingThrottleStarts = { host: pacingThrottleStartsInWindow(H), guest: pacingThrottleStartsInWindow(G) };
+const pacing = { host: pacingInWindow(H), guest: pacingInWindow(G) };
 
 // Cumulative scheduler counters from the last TICK-PERF line (#47):
 // droppedSlots (backlog drops) and catchupFrames (extra forward frames run
@@ -633,10 +671,10 @@ const summary = {
   ...(HOST_BROWSER !== 'chromium' || GUEST_BROWSER !== 'chromium'
     ? { hostBrowser: HOST_BROWSER, guestBrowser: GUEST_BROWSER, crossEngine, ...(crossEngine ? { bootSyncFrame } : {}) }
     : {}),
-  ...(THROTTLE_GUEST ? { throttleGuest: true } : {}),
+  ...(THROTTLE_GUEST ? { throttleGuest: true, throttleGuestHz: THROTTLE_GUEST_HZ } : {}),
   ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
   gameFps,
-  pacingThrottleStarts,
+  pacing,
   schedulerCounters,
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks },
