@@ -403,6 +403,62 @@ async def match_accepts_uploads(match_id: str, room: str) -> bool:
     return accepted
 
 
+async def find_recent_match(room: str) -> str | None:
+    """The room's most recent match still inside its upload window, or None.
+
+    Links feedback that carries only a room code to the match it's about.
+    """
+    rows = await _require().query(
+        """SELECT match_id FROM match_retention
+           WHERE room = ? AND deleting_at IS NULL
+             AND ((ended_at IS NOT NULL AND ended_at > datetime('now', ?))
+                  OR (ended_at IS NULL AND created_at > datetime('now', ?)))
+           ORDER BY created_at DESC LIMIT 1""",
+        (room, _UPLOAD_GRACE_AFTER_END, _UPLOAD_WINDOW_WITHOUT_END),
+    )
+    return rows[0]["match_id"] if rows else None
+
+
+async def flag_match(match_id: str, reasons: list[dict], room: str = "") -> None:
+    """Mark a match flagged (kept until resolved) and merge `reasons` into it.
+
+    Idempotent: a reason whose signal is already stored keeps the larger
+    count and the earliest frame, so classifying the same logs again doesn't
+    double-count. A match with no row yet (started before registration
+    existed) gets one. Matches being deleted are left alone.
+    """
+    if not reasons:
+        return
+    backend = _require()
+    await backend.execute(
+        "INSERT OR IGNORE INTO match_retention (match_id, room) VALUES (?, ?)",
+        (match_id, room),
+    )
+    rows = await backend.query("SELECT flag_reasons, deleting_at FROM match_retention WHERE match_id = ?", (match_id,))
+    if not rows or rows[0]["deleting_at"]:
+        return
+    try:
+        stored = json.loads(rows[0]["flag_reasons"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        stored = []
+    by_signal = {r.get("signal"): dict(r) for r in stored if isinstance(r, dict)}
+    for reason in reasons:
+        old = by_signal.get(reason.get("signal"))
+        if old is None:
+            by_signal[reason.get("signal")] = dict(reason)
+            continue
+        old["count"] = max(int(old.get("count") or 0), int(reason.get("count") or 0))
+        frame = reason.get("first_f")
+        if isinstance(frame, int | float) and (old.get("first_f") is None or frame < old["first_f"]):
+            old["first_f"] = frame
+    await backend.execute(
+        """UPDATE match_retention
+           SET tier = 'flagged', flag_reasons = ?, last_touched_at = datetime('now')
+           WHERE match_id = ? AND deleting_at IS NULL""",
+        (json.dumps(list(by_signal.values())), match_id),
+    )
+
+
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:
     """Mark how a session ended."""
     backend = _require()

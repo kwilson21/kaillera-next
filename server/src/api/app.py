@@ -103,7 +103,10 @@ _VALID_EVENT_TYPES = {
     "peer_reconnected",
 }
 
-_FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
+_FEEDBACK_CONTEXT_MAX = 4096
+
+# Client events that report a crash; they flag their match (src/retention.py).
+_CRASH_EVENT_TYPES = frozenset({"wasm-fail", "unhandled"})  # 4KB max for context JSON
 
 
 async def cleanup_old_data() -> None:
@@ -1187,6 +1190,20 @@ def create_app(lifespan=None) -> FastAPI:
             }
         )
         log.info("Client event: %s room=%s msg=%s id=%d", evt_type, room, msg[:100], row_id)
+        # A crash report keeps its match until someone resolves it (retention).
+        match_id = meta.get("match_id")
+        if evt_type in _CRASH_EVENT_TYPES and isinstance(match_id, str) and 0 < len(match_id) <= 64:
+            slot = data.get("slot")
+            reason = {
+                "signal": f"client-{evt_type}",
+                "count": 1,
+                "slot": slot if isinstance(slot, int) and not isinstance(slot, bool) else None,
+                "detail": msg[:200],
+            }
+            try:
+                await db.flag_match(match_id, [reason], room=request.query_params.get("room", "")[:32])
+            except Exception as exc:
+                log.warning("Flagging %s for a %s event failed: %s", match_id[:8], evt_type, exc)
         return {"status": "saved", "id": row_id}
 
     # ── Feedback submission ──────────────────────────────────────────────
@@ -1229,6 +1246,20 @@ def create_app(lifespan=None) -> FastAPI:
             }
         )
         log.info("Feedback saved: id=%d category=%s page=%s", row_id, payload.category, payload.page)
+        # Feedback keeps the match it's about until someone resolves it
+        # (retention): by the matchId the client sends, else the room's
+        # most recent match.
+        ctx = payload.context if isinstance(payload.context, dict) else {}
+        match_id = ctx.get("matchId")
+        try:
+            if not (isinstance(match_id, str) and 0 < len(match_id) <= 64):
+                room_code = ctx.get("roomCode")
+                valid_room = isinstance(room_code, str) and _PUBLIC_ROOM_ID_RE.match(room_code)
+                match_id = await db.find_recent_match(room_code) if valid_room else None
+            if match_id:
+                await db.flag_match(match_id, [{"signal": "feedback", "count": 1, "feedback_id": row_id}])
+        except Exception as exc:
+            log.warning("Flagging the match for feedback %d failed: %s", row_id, exc)
         return {"status": "saved", "id": row_id}
 
     # ── Admin API ─────────────────────────────────────────────────────────

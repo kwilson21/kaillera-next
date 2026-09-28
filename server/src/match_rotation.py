@@ -46,7 +46,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import db
+from src import db, retention
 
 log = logging.getLogger(__name__)
 
@@ -292,6 +292,13 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
 
     metrics = _compute_metrics(match_id, rows, merged, parquet_path, parquet_bytes)
     await _upsert_metrics(metrics)
+
+    reasons = retention.classify_entries(merged)
+    if reasons:
+        try:
+            await db.flag_match(match_id, reasons, room=rows[0].get("room") or "")
+        except Exception as exc:
+            log.warning("rotate_match: flagging %s failed: %s", match_id[:8], exc)
 
     log.info(
         "rotated match=%s peers=%d entries=%d mismatches=%d parquet=%s",
