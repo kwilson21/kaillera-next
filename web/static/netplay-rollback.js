@@ -519,7 +519,7 @@
       _rttComplete = true;
       _syncLog(`RTT measurement complete with no samples (${reason})`);
     }
-    if (_phase >= PHASE_LOCKSTEP_READY && _phase !== PHASE_RUNNING) {
+    if (_phase === PHASE_LOCKSTEP_READY) {
       broadcastLockstepReady();
       checkAllLockstepReady();
     }
@@ -9137,7 +9137,7 @@
 
     if (_isSyntheticOnlyInitialSyncSkip()) {
       _syncLog('synthetic demo: skipping initial state sync');
-      if (_frameNum === 0) _clearInputsForNewMatch('synthetic-sync-skip');
+      _clearInputsForNewMatch('synthetic-sync-skip');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
@@ -9682,7 +9682,7 @@
   };
   const _markInitialStateReady = () => {
     _clearHostInitialStateWait();
-    if (_frameNum === 0) _clearInputsForNewMatch('initial-state-ready');
+    _clearInputsForNewMatch('initial-state-ready');
     _phase = PHASE_LOCKSTEP_READY;
     if (_rttComplete) broadcastLockstepReady();
     checkAllLockstepReady();
@@ -9846,7 +9846,7 @@
       _guestStateHiddenWords = captured.hiddenWords;
       _guestStateAudioFifo = captured.audioFifo;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
-      if (_frameNum === 0) _clearInputsForNewMatch('host-capture-ready');
+      _clearInputsForNewMatch('host-capture-ready');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -11585,6 +11585,7 @@
   };
 
   const _clearInputsForNewMatch = (reason) => {
+    if (_frameNum !== 0) return; // late join keeps its buffers
     // Runs before this peer sends lockstep-ready: a peer can start as soon as it sees it, and its first inputs
     // (frame 0+) must survive until startLockstep().
     // Demo synthetic peers inject their inputs once and never resend, so keep theirs.
