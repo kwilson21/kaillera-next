@@ -111,26 +111,6 @@ def test_legacy_row_with_bytes_in_database_is_still_readable(tmp_path):
     assert data == JPEG
 
 
-def test_delete_old_screenshots_removes_rows_and_blobs(tmp_path):
-    async def scenario():
-        db = await _open(tmp_path)
-        try:
-            await db.insert_screenshot("m-old", 0, 300, JPEG)
-            await db.insert_screenshot("m-new", 0, 300, JPEG)
-            await db.execute_write(
-                "UPDATE screenshots SET created_at = datetime('now', '-20 days') WHERE match_id = ?", ("m-old",)
-            )
-            await db.delete_old_screenshots(14)
-            rows = await db.query("SELECT match_id FROM screenshots", ())
-            return [r["match_id"] for r in rows]
-        finally:
-            await db.close_db()
-
-    assert run_async(scenario()) == ["m-new"]
-    assert not (tmp_path / "blobs/matches/m-old/screenshots/0-300.jpg").exists()
-    assert (tmp_path / "blobs/matches/m-new/screenshots/0-300.jpg").exists()
-
-
 def test_desync_vision_loads_screenshots_from_blob_store(tmp_path):
     from src.api import desync_vision
 

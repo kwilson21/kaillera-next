@@ -420,7 +420,7 @@ async def find_recent_match(room: str) -> str | None:
     return rows[0]["match_id"] if rows else None
 
 
-async def flag_match(match_id: str, reasons: list[dict]) -> None:
+async def flag_match(match_id: str, reasons: list[dict], *, auto: bool = True) -> None:
     """Mark a match flagged (kept until resolved) and merge `reasons` into it.
 
     Idempotent: a reason whose signal is already stored keeps the larger
@@ -429,11 +429,16 @@ async def flag_match(match_id: str, reasons: list[dict]) -> None:
     ids, and creating a row would reopen uploads for them (a match from
     before registration is registered by rotation first). Matches being
     deleted are left alone.
+
+    `auto` flags come from signals a client can trigger (logs, crash events,
+    vision); once flagged matches hold more than BUDGET_AUTO_FLAGGED_BYTES,
+    they're recorded with auto_flag_capped = 1 but keep the normal tier.
+    Feedback and manual flags pass auto=False and are never capped.
     """
     if not reasons:
         return
     async with _flag_lock:
-        await _flag_match_locked(match_id, reasons)
+        await _flag_match_locked(match_id, reasons, auto)
 
 
 # flag_match reads, merges and rewrites flag_reasons; concurrent calls for
@@ -441,9 +446,28 @@ async def flag_match(match_id: str, reasons: list[dict]) -> None:
 _flag_lock = asyncio.Lock()
 
 
-async def _flag_match_locked(match_id: str, reasons: list[dict]) -> None:
+# Spec §5 sizes this for R2; while logs live in D1 (500 MB free) it's lower.
+_DEFAULT_BUDGET_AUTO_FLAGGED_BYTES = 200 * 1024 * 1024
+
+
+async def _flagged_bytes() -> int:
+    """Bytes of session-log chunks and screenshots held by flagged matches."""
+    rows = await _require().query(
+        """SELECT
+             COALESCE((SELECT SUM(c.size) FROM session_log_chunks c
+                       JOIN match_retention r ON r.match_id = c.match_id WHERE r.tier = 'flagged'), 0)
+           + COALESCE((SELECT SUM(COALESCE(s.size, length(s.data), 0)) FROM screenshots s
+                       JOIN match_retention r ON r.match_id = s.match_id WHERE r.tier = 'flagged'), 0) AS bytes""",
+        (),
+    )
+    return int(rows[0]["bytes"] or 0) if rows else 0
+
+
+async def _flag_match_locked(match_id: str, reasons: list[dict], auto: bool) -> None:
     backend = _require()
-    rows = await backend.query("SELECT flag_reasons, deleting_at FROM match_retention WHERE match_id = ?", (match_id,))
+    rows = await backend.query(
+        "SELECT flag_reasons, deleting_at, tier FROM match_retention WHERE match_id = ?", (match_id,)
+    )
     if not rows or rows[0]["deleting_at"]:
         return
     try:
@@ -460,11 +484,19 @@ async def _flag_match_locked(match_id: str, reasons: list[dict]) -> None:
         frame = reason.get("first_f")
         if isinstance(frame, int | float) and (old.get("first_f") is None or frame < old["first_f"]):
             old["first_f"] = frame
+    merged = json.dumps(list(by_signal.values()))
+    budget = int(os.environ.get("BUDGET_AUTO_FLAGGED_BYTES", _DEFAULT_BUDGET_AUTO_FLAGGED_BYTES))
+    if auto and rows[0]["tier"] != "flagged" and await _flagged_bytes() > budget:
+        await backend.execute(
+            "UPDATE match_retention SET flag_reasons = ?, auto_flag_capped = 1 WHERE match_id = ? AND deleting_at IS NULL",
+            (merged, match_id),
+        )
+        return
     await backend.execute(
         """UPDATE match_retention
            SET tier = 'flagged', flag_reasons = ?, last_touched_at = datetime('now')
            WHERE match_id = ? AND deleting_at IS NULL""",
-        (json.dumps(list(by_signal.values())), match_id),
+        (merged, match_id),
     )
 
 
@@ -511,9 +543,9 @@ async def insert_client_event(data: dict) -> int:
     return result.last_row_id
 
 
-async def execute_write(sql: str, params: tuple) -> None:
-    """Run a write query (DELETE, UPDATE) and commit."""
-    await _require().execute(sql, params)
+async def execute_write(sql: str, params: tuple) -> int:
+    """Run a write query (DELETE, UPDATE) and commit. Returns rows changed."""
+    return (await _require().execute(sql, params)).changes
 
 
 def _blob_store() -> BlobStore:
@@ -569,14 +601,24 @@ async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     return await read_screenshot(rows[0]) if rows else None
 
 
-async def delete_old_screenshots(days: int) -> None:
-    """Delete screenshots older than `days`: their blobs first, then the rows."""
-    cutoff = (f"-{days} days",)
-    rows = await _require().query(
-        "SELECT blob_key FROM screenshots WHERE created_at < datetime('now', ?) AND blob_key IS NOT NULL", cutoff
-    )
-    await _blob_store().delete([r["blob_key"] for r in rows])
-    await _require().execute("DELETE FROM screenshots WHERE created_at < datetime('now', ?)", cutoff)
+async def execute_batch(statements: list[tuple[str, tuple]]) -> None:
+    """Run write statements as one atomic batch (one D1 request)."""
+    await _require().batch(statements)
+
+
+async def delete_match_blobs(match_id: str) -> None:
+    """Delete every blob stored under the match's prefix (screenshots now).
+
+    The id must be a single path segment: an empty id would name every
+    match's folder, and one with "/" another match's.
+    """
+    if not match_id or "/" in match_id or match_id in (".", ".."):
+        raise BlobStoreError(f"Refusing to delete blobs for match id {match_id!r}")
+    await _blob_store().delete_prefix(f"matches/{match_id}/")
+
+
+async def delete_blobs(keys: list[str]) -> None:
+    await _blob_store().delete(keys)
 
 
 async def query(sql: str, params: tuple) -> list[dict]:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -46,6 +47,8 @@ class BlobStore(Protocol):
     async def get(self, key: str) -> bytes | None: ...
 
     async def delete(self, keys: Sequence[str]) -> None: ...
+
+    async def delete_prefix(self, prefix: str) -> None: ...
 
 
 class LocalBlobStore:
@@ -87,6 +90,11 @@ class LocalBlobStore:
                 path.unlink(missing_ok=True)
 
         await asyncio.to_thread(remove)
+
+    async def delete_prefix(self, prefix: str) -> None:
+        """Delete every blob under `prefix`, which names a folder ("matches/<id>/")."""
+        folder = self._path(prefix.rstrip("/"))
+        await asyncio.to_thread(shutil.rmtree, folder, True)
 
 
 class R2BlobStore:
@@ -140,11 +148,31 @@ class R2BlobStore:
             raise BlobStoreError(f"R2 get_object failed: {type(exc).__name__}") from exc
         return await asyncio.to_thread(response["Body"].read)
 
+    async def delete_prefix(self, prefix: str) -> None:
+        """Delete every object whose key starts with `prefix` ("matches/<id>/")."""
+        _check_key(prefix.rstrip("/"))
+        keys: list[str] = []
+        token: str | None = None
+        while True:
+            page = await self._call("list_objects_v2", Prefix=prefix, **({"ContinuationToken": token} if token else {}))
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+        await self.delete(keys)
+
     async def delete(self, keys: Sequence[str]) -> None:
         checked = [_check_key(k) for k in keys]
         for start in range(0, len(checked), _DELETE_BATCH):
             batch = checked[start : start + _DELETE_BATCH]
-            await self._call("delete_objects", Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
+            result = await self._call("delete_objects", Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
+            # Quiet mode still reports keys it failed to delete; don't treat them as gone.
+            errors = (result or {}).get("Errors") or []
+            if errors:
+                first = errors[0]
+                raise BlobStoreError(
+                    f"R2 delete_objects failed for {len(errors)} key(s): {first.get('Code', 'unknown')}"
+                )
 
 
 def blobstore_from_env(local_root: Path) -> BlobStore:

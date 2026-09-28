@@ -96,6 +96,18 @@ class FakeS3:
             raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "missing"}}, "GetObject")
         return {"Body": _Body(self.objects[kw["Key"]])}
 
+    def list_objects_v2(self, **kw):
+        """Two keys per page, so tests exercise pagination."""
+        self.calls.append(("list_objects_v2", kw))
+        keys = sorted(k for k in self.objects if k.startswith(kw["Prefix"]))
+        start = int(kw.get("ContinuationToken", 0))
+        page = keys[start : start + 2]
+        more = start + 2 < len(keys)
+        out = {"Contents": [{"Key": k} for k in page], "IsTruncated": more}
+        if more:
+            out["NextContinuationToken"] = str(start + 2)
+        return out
+
     def delete_objects(self, **kw):
         self.calls.append(("delete_objects", kw))
         self._maybe_fail("DeleteObjects")
@@ -145,6 +157,15 @@ def test_r2_delete_batches_by_1000():
     run_async(_r2(client).delete(keys))
     batches = [kw["Delete"]["Objects"] for op, kw in client.calls if op == "delete_objects"]
     assert [len(b) for b in batches] == [1000, 500]
+
+
+def test_r2_delete_prefix_lists_every_page_and_deletes_only_that_prefix():
+    client = FakeS3()
+    for i in range(5):
+        client.objects[f"matches/a/screenshots/0-{i}.jpg"] = b"x"
+    client.objects["matches/ab/screenshots/0-1.jpg"] = b"keep"
+    run_async(_r2(client).delete_prefix("matches/a/"))
+    assert list(client.objects) == ["matches/ab/screenshots/0-1.jpg"]
 
 
 def test_r2_rejects_unsafe_keys():
@@ -217,3 +238,18 @@ def test_live_r2_put_get_delete(tmp_path):
             assert await store.get(key) is None
 
     assert run_async(scenario()) == b"\x00\x01live"
+
+
+def test_r2_delete_reports_per_key_failures():
+    """delete_objects doesn't raise for keys it failed to delete; they come back in Errors."""
+    from src.blobstore import BlobStoreError
+
+    client = FakeS3()
+
+    def partial_failure(**kw):
+        client.calls.append(("delete_objects", kw))
+        return {"Errors": [{"Key": kw["Delete"]["Objects"][0]["Key"], "Code": "InternalError"}]}
+
+    client.delete_objects = partial_failure
+    with pytest.raises(BlobStoreError, match="InternalError"):
+        run_async(_r2(client).delete(["matches/m/screenshots/0-1.jpg"]))
