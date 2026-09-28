@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.8",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "re-step frames a stale main-loop runner skipped (#62)"
+      }
+    ]
+  },
+  {
     "version": "0.63.7",
     "date": "2026-09-28",
     "changes": [

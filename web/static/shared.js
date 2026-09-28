@@ -985,6 +985,32 @@
     return filter;
   };
 
+  // Decide whether a stepOneFrame() runner invocation actually emulated the
+  // frame it was called for (#62 — click-during-match desync). #62 found
+  // that after a DOM focus change (e.g. clicking the toolbar or feedback
+  // form), the runner call can return immediately without calling the
+  // mainloop func and without scheduling its successor via
+  // requestAnimationFrame. The mechanism wasn't isolated: plausibly a
+  // stale MainLoop runner (MainLoop.pause()/resume() bumps
+  // currentlyRunningMainloop so checkIsRunning() returns early) or
+  // RetroArch's own runloop pause. Two independent signals catch this:
+  //   - `rescheduled`: whether a fresh runner got captured via the
+  //     overrideRAF interceptor during the call (a real step always
+  //     schedules its own next frame).
+  //   - `cycleBefore`/`cycleAfter`: CP0 Count in ms (kn_get_cycle_time_ms),
+  //     sampled immediately around the call. A real step resets/advances it;
+  //     a no-op step leaves it untouched.
+  // Pure so it's testable without a WASM/DOM harness — see
+  // tests/step-runner-classify.test.mjs.
+  const classifyRunnerStep = (rescheduled, cycleBefore, cycleAfter) => {
+    // Stock core (no kn_get_cycle_time_ms export): can't distinguish stale
+    // from legit mid-frame pause by cycle time, so don't re-step — same as
+    // pre-#62 behavior.
+    if (cycleBefore == null || cycleAfter == null) return 'unknown';
+    if (!rescheduled && cycleAfter === cycleBefore) return 'stale';
+    return 'emulated';
+  };
+
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     SSB64_HASH: SSB64_HASH,
@@ -1012,5 +1038,6 @@
     encodeInput,
     decodeInput,
     createSyncLogRing,
+    classifyRunnerStep,
   };
 })();

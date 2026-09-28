@@ -11083,54 +11083,35 @@
     'cvt_d_l',
   ];
 
-  const stepOneFrame = () => {
-    if (!_pendingRunner) {
-      // Try to recapture immediately. If we wait for the pointerdown retry
-      // chain to find this (75/250/750/1500ms), the lockstep tick has
-      // already advanced _frameNum many times while the emulator was
-      // frozen — that's the peer-divergence path observed in production
-      // (host log showed `manual runner recaptured after focus+750ms`,
-      // i.e. ~45 frames of skew). Self-heal here keeps both peers
-      // bit-identical: at most one tick of skew before recovery, which
-      // is recovered by the runner's own emscripten_mainloop call below.
-      if (_manualMode && !_isSpectator) {
-        const recapMod = window.EJS_emulator?.gameManager?.Module;
-        if (recapMod) recaptureManualRunner(recapMod, 'stepOneFrame:no-runner');
-      }
+  // ── R2: no silent no-ops during rollback replay ────────────────────────
+  // If a tick lands with no way to actually step the emulator, kn_post_tick
+  // would still advance rb.frame, producing a Frankenstein state with
+  // frozen emulation. Per §Core principle: log-loud-and-continue. No resync
+  // recovery. See docs/netplay-invariants.md §R2. Shared by both "no
+  // runner at all" (top of stepOneFrame) and "stale runner exhausted the
+  // retry" (#62, below) paths so the R2 semantics stay identical either way.
+  const _logReplayNoRun = () => {
+    if (!(_useCRollback && _rbReplayLogged)) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const rbFrame = mod?._kn_get_frame?.() ?? -1;
+    const replayRemaining = mod?._kn_get_replay_depth?.() ?? -1;
+    _syncLog(
+      `REPLAY-NORUN f=${_frameNum} rbFrame=${rbFrame} ` +
+        `replayRemaining=${replayRemaining} tick=${performance.now().toFixed(1)}`,
+    );
+    if (window.KN_DEV_BUILD) {
+      throw new Error('REPLAY-NORUN: stepOneFrame did not emulate during replay');
     }
-    if (!_pendingRunner) {
-      // ── R2: no silent no-ops during rollback replay ──────────────
-      // If a replay tick lands here with a null runner, retro_unserialize
-      // (or another path) invalidated it and we have no way to actually
-      // step the emulator. kn_post_tick would still advance rb.frame,
-      // producing a Frankenstein state with frozen emulation. Per §Core
-      // principle: log-loud-and-continue. No resync recovery.
-      // See docs/netplay-invariants.md §R2.
-      if (_useCRollback && _rbReplayLogged) {
-        const mod = window.EJS_emulator?.gameManager?.Module;
-        const rbFrame = mod?._kn_get_frame?.() ?? -1;
-        const replayRemaining = mod?._kn_get_replay_depth?.() ?? -1;
-        _syncLog(
-          `REPLAY-NORUN f=${_frameNum} rbFrame=${rbFrame} ` +
-            `replayRemaining=${replayRemaining} tick=${performance.now().toFixed(1)}`,
-        );
-        if (window.KN_DEV_BUILD) {
-          throw new Error('REPLAY-NORUN: stepOneFrame called with null runner during replay');
-        }
-      }
-      return false;
-    }
-    // MF6: mark WASM step active so TICK-STUCK watchdog can
-    // attribute a stall to the WASM side if the frame counter is
-    // stuck while this flag is true. Cleared in the return path
-    // below (no try/finally — the runner is synchronous; if it
-    // throws, the exception propagates and the tick interval keeps
-    // firing new ticks which will clear the flag on re-entry).
-    _wasmStepActive = true;
-    const runner = _pendingRunner;
-    _pendingRunner = null;
+  };
 
-    const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+  // Pre-runner setup for a single frame: frame time, relative-cycle
+  // baseline, C-level frame time/event-queue/interrupt-drain calls, trace
+  // tagging, and the synthetic-abort test hook. Factored out of stepOneFrame
+  // so the #62 stale-runner retry below can redo this setup for the SAME
+  // frame before re-invoking the runner — these calls set up the frame the
+  // runner is about to advance, so a re-step without redoing them would
+  // advance against stale frame-time/event-queue state.
+  const _prepareFrameStep = (frameTimeMs) => {
     window._kn_frameTime = frameTimeMs;
 
     // On first lockstep frame, switch from flat time to relative cycle counter.
@@ -11169,8 +11150,90 @@
       const mod = window.EJS_emulator?.gameManager?.Module;
       mod.abort('synthetic knForceAbort');
     }
+  };
 
+  let _staleRunnerLastLogAt = 0;
+
+  // Run the currently-captured _pendingRunner once for `frameTimeMs` and
+  // report whether it actually emulated the frame. See #62: after a
+  // click moves DOM focus (e.g. toolbar or feedback form), the runner
+  // call can emulate nothing — no mainloop func call, no reschedule —
+  // while stepOneFrame still counted the frame as stepped. Plausible
+  // causes (not isolated): a stale runner after MainLoop.pause()/
+  // resume() bumps currentlyRunningMainloop so checkIsRunning() returns
+  // early, or RetroArch's own runloop pause makes emscripten_mainloop
+  // return without running the core. KNShared.classifyRunnerStep()
+  // makes the emulated/stale decision from two signals sampled around
+  // the call: did a fresh runner get rescheduled, and did CP0 Count
+  // (kn_get_cycle_time_ms) move at all.
+  const _runCapturedRunner = (frameTimeMs) => {
+    const runner = _pendingRunner;
+    _pendingRunner = null;
+    _prepareFrameStep(frameTimeMs);
+    const cycleMod = _hasForkedCore ? window.EJS_emulator?.gameManager?.Module : null;
+    const hasCycleCheck = !!cycleMod?._kn_get_cycle_time_ms;
+    const cycleBefore = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
     runner(frameTimeMs);
+    const cycleAfter = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
+    const rescheduled = !!_pendingRunner;
+    return KNShared.classifyRunnerStep(rescheduled, cycleBefore, cycleAfter);
+  };
+
+  const stepOneFrame = () => {
+    if (!_pendingRunner) {
+      // Try to recapture immediately. If we wait for the pointerdown retry
+      // chain to find this (75/250/750/1500ms), the lockstep tick has
+      // already advanced _frameNum many times while the emulator was
+      // frozen — that's the peer-divergence path observed in production
+      // (host log showed `manual runner recaptured after focus+750ms`,
+      // i.e. ~45 frames of skew). The recapture here happens before the
+      // step, so this frame is emulated with no skew; a runner that is
+      // present but stale is caught after the call (see
+      // _runCapturedRunner / #62).
+      if (_manualMode && !_isSpectator) {
+        const recapMod = window.EJS_emulator?.gameManager?.Module;
+        if (recapMod) recaptureManualRunner(recapMod, 'stepOneFrame:no-runner');
+      }
+    }
+    if (!_pendingRunner) {
+      _logReplayNoRun();
+      return false;
+    }
+    // MF6: mark WASM step active so TICK-STUCK watchdog can
+    // attribute a stall to the WASM side if the frame counter is
+    // stuck while this flag is true. Cleared in the return path
+    // below (no try/finally — the runner is synchronous; if it
+    // throws, the exception propagates and the tick interval keeps
+    // firing new ticks which will clear the flag on re-entry).
+    _wasmStepActive = true;
+
+    const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
+    let outcome = _runCapturedRunner(frameTimeMs);
+
+    if (outcome === 'stale') {
+      // The runner did not emulate: it was stale (see _runCapturedRunner
+      // above) and this peer would otherwise count an unemulated frame —
+      // exactly the #62 click-during-match desync. Recapture and re-step
+      // the SAME frame once before giving up.
+      const nowMs = window.APISandbox?.nativePerfNow ? window.APISandbox.nativePerfNow() : performance.now();
+      if (nowMs - _staleRunnerLastLogAt >= 1000) {
+        _staleRunnerLastLogAt = nowMs;
+        _syncLog(`STEP-STALE-RUNNER f=${_frameNum} — runner did not emulate; recapturing and re-stepping`);
+      }
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (mod) recaptureManualRunner(mod, 'stepOneFrame:stale-runner');
+      outcome = _pendingRunner ? _runCapturedRunner(frameTimeMs) : 'stale';
+    }
+
+    if (outcome === 'stale') {
+      // Still did not emulate after one recapture+retry. Do not count this
+      // frame — return false so _runStepOneFrame's STEP-NORUN path (and,
+      // during replay, R2's REPLAY-NORUN logging below) handle it exactly
+      // like the no-runner-at-all case; kn_post_tick is skipped upstream.
+      _wasmStepActive = false;
+      _logReplayNoRun();
+      return false;
+    }
 
     // Cheap visual ground-truth capture — default-on in prod so the admin
     // panel always has frames for desync triage. Opt out with ?screenshots=off.

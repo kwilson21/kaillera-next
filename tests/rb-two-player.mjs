@@ -109,6 +109,20 @@
  *   SUSPEND_GUEST_AUDIO=1   Guest context only: models Safari leaving the
  *     core's own AudioContext not running and refusing a resume without a
  *     gesture (#63 root cause). See suspendAudioInitScript below.
+ *   CLICK_DURING_BATTLE=1   Reproduces #62 (clicking the UI during a
+ *     rollback match desyncs peers). At ~1/3 and ~2/3 of BATTLE_SECONDS,
+ *     on the host first and then the guest ~2s later, clicks through the
+ *     toolbar "more" menu into the feedback form (`#toolbar-more` →
+ *     `.kn-feedback-toolbar-item` → a `.kn-feedback-cat` button) and closes
+ *     it via `.kn-feedback-close` — the exact click path that moves DOM
+ *     focus and, per the measured #62 signature (no runner rescheduled,
+ *     CP0 Count unchanged), can leave a captured runner emulating nothing
+ *     (see docs/netplay-invariants.md §R2). Fire-and-forget via setTimeout
+ *     so it doesn't block the battle-length wait or change BATTLE_SECONDS.
+ *     Each round is logged. Before the #62 fix this makes the
+ *     gameplay-hash compare below fail (hundreds of finalized
+ *     gameplay-hash mismatches observed before the fix, 0 after); after
+ *     the fix it should pass like a CLICK_DURING_BATTLE=0 run.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -138,6 +152,7 @@ const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
+const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 
 // Validate knobs before launching anything: a typo here should fail fast,
 // not surface as a confusing result after minutes of gameplay.
@@ -168,6 +183,12 @@ if (!Number.isFinite(HIDE_GUEST_MS) || HIDE_GUEST_MS < 0) {
 }
 if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
   console.log('HIDE_GUEST_MS is mutually exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and THROTTLE_GUEST');
+  process.exit(1);
+}
+if (CLICK_DURING_BATTLE && !(BATTLE_SECONDS > 15)) {
+  console.log(
+    `CLICK_DURING_BATTLE=1 needs BATTLE_SECONDS > 15 (round 2 at 2/3 plus host click ~0.8s + 2s gap + guest click ~0.8s must finish before collect()) — got ${BATTLE_SECONDS}`,
+  );
   process.exit(1);
 }
 
@@ -491,6 +512,34 @@ const install = async (p, role) => {
 await install(host, 'host');
 await install(guest, 'guest');
 
+// #62 repro: click through the toolbar "more" menu into the feedback form
+// and back out. Fire-and-forget from setTimeout callers below — a click
+// round throwing (e.g. a selector not present) is logged, not fatal, so it
+// can't hang the battle-length wait.
+const clickThroughFeedback = async (page, label) => {
+  console.log(`CLICK_DURING_BATTLE: ${label} click round starting`);
+  await page.click('#toolbar-more');
+  await page.waitForTimeout(300);
+  await page.click('.kn-feedback-toolbar-item');
+  await page.waitForTimeout(500);
+  await page.click('.kn-feedback-cat');
+  await page.click('.kn-feedback-close');
+  console.log(`CLICK_DURING_BATTLE: ${label} click round done`);
+};
+const scheduleClickRound = (delayMs, roundLabel) => {
+  setTimeout(() => {
+    clickThroughFeedback(host, `${roundLabel} host`)
+      .catch((e) => console.log(`CLICK_DURING_BATTLE: ${roundLabel} host round failed`, e.message))
+      .then(() =>
+        new Promise((r) => setTimeout(r, 2000)).then(() =>
+          clickThroughFeedback(guest, `${roundLabel} guest`).catch((e) =>
+            console.log(`CLICK_DURING_BATTLE: ${roundLabel} guest round failed`, e.message),
+          ),
+        ),
+      );
+  }, delayMs);
+};
+
 // Wait for the battle, then play.
 const tb = Date.now();
 const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
@@ -561,6 +610,13 @@ if (inBattle) {
       host.evaluate(() => window.__tp.markFpsWindowStart()),
       guest.evaluate(() => window.__tp.markFpsWindowStart()),
     ]);
+  }
+  if (CLICK_DURING_BATTLE) {
+    // #62 repro: two click rounds (host, then guest ~2s later), fired via
+    // setTimeout so they don't block the battle-length wait below and don't
+    // change BATTLE_SECONDS.
+    scheduleClickRound((BATTLE_SECONDS * 1000) / 3, 'round 1');
+    scheduleClickRound((BATTLE_SECONDS * 1000 * 2) / 3, 'round 2');
   }
   if (FREEZE_MS > 0) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
@@ -844,6 +900,7 @@ const summary = {
         },
       }
     : {}),
+  ...(CLICK_DURING_BATTLE ? { clickDuringBattle: true } : {}),
   ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
   gameFps,
   pacing,
