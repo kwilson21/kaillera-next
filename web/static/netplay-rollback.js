@@ -4956,8 +4956,8 @@
     return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
   };
 
-  // Legitimate remote frames sit in roughly [_frameNum - 240,
-  // _frameNum + DELAY_FRAMES + 60].
+  // Bounds on legitimate remote input frames, shared by _processInputPacket's
+  // guard and the rollback-init backfill.
   const INPUT_PAST_WINDOW_FRAMES = 240; // ~4s at 60fps — generous for a stalled peer
   const INPUT_FUTURE_MARGIN_FRAMES = 60; // 1s past delay buffer
 
@@ -4992,6 +4992,8 @@
       if (!Number.isFinite(slot) || slot === _playerSlot) continue;
       for (let frame = startFrame; frame <= endFrame; frame++) {
         const input = frames?.[frame];
+        // Past _frameNum a ZERO_INPUT is a late-join placeholder, not a received input. Fed as
+        // real, a different real input arriving later would overwrite it without a rollback.
         if (!input || (frame > _frameNum && input === KNShared.ZERO_INPUT)) continue;
         if (_feedCInput(mod, slot, frame, input)) {
           remoteFed++;
