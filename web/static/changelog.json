@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.5",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "feed pre-init remote inputs past the init frame to C at every rollback init (#61)"
+      }
+    ]
+  },
+  {
     "version": "0.63.4",
     "date": "2026-09-28",
     "changes": [
