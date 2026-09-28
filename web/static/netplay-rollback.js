@@ -1448,8 +1448,10 @@
         gameFps,
         // Where missing frames went: stall ticks each spend a slot waiting
         // on remote input (gap = a lost packet at the window edge, else the
-        // peer is too far behind); droppedSlots is the session total the
-        // scheduler skipped while too far behind.
+        // peer is too far behind) — a stalled #47 catch-up attempt spends no
+        // slot, so it isn't counted here. droppedSlots is the session total
+        // the scheduler skipped while too far behind; catchupFrames is the
+        // session total of extra forward frames the pump ran to catch up.
         stalls: { ticks: stall.length, gap: stall.filter((r) => r.gap).length, adv: stats(pickField(stall, 'adv')) },
         droppedSlots: typeof _tickDroppedSlots === 'number' ? _tickDroppedSlots : null,
         catchupFrames: typeof _tickCatchupFrames === 'number' ? _tickCatchupFrames : null,
@@ -5724,11 +5726,7 @@
   let _tickReplayOnly = false; // last tick only re-simulated; the 60 Hz slot is unspent
   const TICK_MAX_BACKLOG_SLOTS = 12; // was 4, which a 5+ frame rollback's replay could exceed
   let _tickDroppedSlots = 0; // slots skipped by the backlog reset (reported in knTickProfileSummary)
-  // #47: budget for the single extra catch-up forward frame below — capped
-  // at one 60 Hz slot's worth of wall time so a pump chasing a backlog can
-  // never run away (the backlog-drop branch above is the real safety valve
-  // for a pump that's fallen far behind; this only covers a pump that's
-  // exactly one slot behind schedule).
+  // Work one pump may have done before it skips the #47 catch-up frame (see the pump).
   const TICK_CATCHUP_BUDGET_MS = TICK_TARGET_MS;
   let _tickCatchupFrames = 0; // extra forward frames run to catch up a throttled pump (reported in knTickProfileSummary)
   // Saved originals of WASM speed-control functions — neutralized during lockstep
@@ -12457,25 +12455,16 @@
     // down. Pump more frequently, but advance at most one simulation frame
     // per 60Hz deadline so the game cadence stays correct.
     //
-    // #47: some devices cap setInterval callbacks harder than that — prod
-    // saw an iPhone Safari pump settle at a steady ~30 Hz (TICK-PERF tickMs
-    // median~29.9) with only ~6ms of work per frame, i.e. plenty of spare
-    // time but not enough callback invocations. At one forward frame per
-    // pump, a 30 Hz pump caps the whole match at 30 game fps: the peer
-    // itself runs slow, and PACING-THROTTLE then paces the other peer down
-    // to match. So below, once the ordinary path above has advanced one
-    // frame and given replay work priority (it always runs first and keeps
-    // its own budget), if the schedule is still a full 60 Hz slot behind
-    // AND there's catch-up budget left in this pump, run ONE more forward
-    // frame — at most 2 forward frames per pump, never more. See
-    // TICK_CATCHUP_BUDGET_MS above for why a pump can't run away chasing a
-    // backlog this way.
+    // #47: some devices cap setInterval this hard — prod saw an iPhone
+    // Safari pump settle at ~30 Hz with only ~6ms of work per frame, which
+    // capped the whole match at ~30 game fps. See the catch-up branch below.
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
       if (_externalTickPaused) return;
       const now = performance.now();
       if (now + 0.25 < _tickNextAt) return;
+      const frameAtPumpStart = _frameNum;
       tick();
       // A replay tick re-simulates past frames and leaves the game where it
       // was, so it must not use up this 60 Hz slot: keep ticking (replay
@@ -12501,16 +12490,20 @@
       if (after - _tickNextAt > TICK_TARGET_MS * TICK_MAX_BACKLOG_SLOTS) {
         _tickDroppedSlots += Math.floor((after - _tickNextAt) / TICK_TARGET_MS);
         _tickNextAt = after + TICK_TARGET_MS;
-      } else if (after - _tickNextAt >= TICK_TARGET_MS && after - now < TICK_CATCHUP_BUDGET_MS) {
-        // #47: still a full slot behind after the forward frame above (and
-        // whatever replay work ran ahead of it), and this pump hasn't yet
-        // spent its catch-up budget — try ONE more forward frame. Unlike the
-        // forward frame above (which spends the slot even when tick() stalls
-        // — only a replay-only tick leaves it unspent), this catch-up call
-        // only spends a slot when it actually advanced _frameNum: a replay
-        // tick or a stall/early-return (input wait, pacing, lockstep gate,
-        // etc.) leaves the schedule exactly as if no catch-up had been
-        // attempted. Never looped — at most one extra attempt per pump.
+      } else if (
+        after - _tickNextAt >= TICK_TARGET_MS &&
+        after - now < TICK_CATCHUP_BUDGET_MS &&
+        _frameNum !== frameAtPumpStart
+      ) {
+        // #47: runs at most one extra forward frame, only when this pump's
+        // regular tick above advanced a frame, the schedule is still a full
+        // slot behind, and the pump has spent less than one slot of wall
+        // time so far (measured from pump start, so replay work above
+        // counts against it). Bounded because it's a single call, never
+        // looped — a far-behind pump is handled by the backlog-drop branch
+        // above instead. A catch-up call that doesn't advance (stall,
+        // pacing hold, replay) spends no slot, so the schedule is left as
+        // if it hadn't run.
         const _frameBeforeCatchup = _frameNum;
         tick();
         if (!_tickReplayOnly && _frameNum !== _frameBeforeCatchup) {
@@ -13999,10 +13992,7 @@
               `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay} ` +
               `droppedSlots=${_tickDroppedSlots} catchupFrames=${_tickCatchupFrames}`,
           );
-          // #47: the JS lockstep path's periodic pacing summary (below,
-          // ~L16231) never runs in C-rollback mode — this path returns at
-          // end:c-rollback first. Log it here too, on the same cadence this
-          // block already dedups on.
+          // Also called from the JS lockstep path's `_frameNum % 300` block, which C-rollback ticks never reach.
           _logPacingSummary();
         }
         // Reset deadlock recovery flag periodically — without this, a single
