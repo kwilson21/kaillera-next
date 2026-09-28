@@ -63,7 +63,7 @@ Without these the server keeps screenshots in a `blobs` folder next to the
 database, which Render also wipes. With them, screenshot bytes go to R2 under
 `matches/<match_id>/screenshots/`; the database keeps the key and size.
 
-1. Create the bucket: `npx wrangler r2 bucket create kaillera-next-logs`.
+1. Create the bucket: `npx wrangler r2 bucket create kaillera-next-screenshots`.
 2. Create a token: R2 → Manage API Tokens → Create API Token, permission
    **Object Read & Write**, applied to **that bucket only**. Copy the Access
    Key ID and Secret Access Key (the secret is shown once).
