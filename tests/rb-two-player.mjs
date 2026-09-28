@@ -35,6 +35,15 @@
  *     JS wrapper around window.setInterval, installed via an init script),
  *     modeling a device whose timers drop to ~30Hz. Forces the host into
  *     rollback bursts so replay-catch-up frames actually occur.
+ *   MIN_GAME_FPS=<n>   Fail (exit 1) if either peer's measured game fps
+ *     (frames advanced / wall seconds, from window.__tp's own emulator
+ *     frame counter) drops below n. The measurement window is from ~15s
+ *     into the battle (when THROTTLE_GUEST flips the guest's cap) to the
+ *     end of battle when THROTTLE_GUEST=1, else the whole battle. Reported
+ *     as `gameFps: {host, guest}` in summary.json, alongside each peer's
+ *     `PACING-THROTTLE start` count and cumulative `TICK-PERF` scheduler
+ *     counters (`droppedSlots`, `catchupFrames` — see #47) during that
+ *     window, under `schedulerCounters`.
  *   VISUAL_CHECK=1   On both peers, piggyback on the existing _kn_post_tick
  *     hook: whenever idle (no replay in flight) and in battle, downscale
  *     `#game canvas` into an offscreen 48x36 canvas and keep its RGB bytes.
@@ -86,6 +95,7 @@ const QUERY = process.env.KN_QUERY || '';
 const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
+const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 fs.mkdirSync(OUT, { recursive: true });
 const room = 'TP' + Math.random().toString(36).slice(2, 8).toUpperCase();
 
@@ -200,6 +210,7 @@ const install = async (p, role) => {
         btnCool: 0,
         btnHeld: 0,
         visualFrames: [],
+        fpsWindowStart: null,
       });
       let visCtx = null;
       if (VISUAL_CHECK) {
@@ -210,6 +221,15 @@ const install = async (p, role) => {
       }
       const rb = window.NetplayRollback;
       const frameNow = () => rb.getHudCounters?.()?.currentFrame ?? 0;
+      // Marks the start of the game-fps measurement window: the node script
+      // calls this either right when the battle begins (no THROTTLE_GUEST —
+      // measure the whole battle) or when it flips the guest's setInterval
+      // cap (THROTTLE_GUEST — measure only the throttled window). Frame
+      // count comes from the emulator's own forward-frame counter, the same
+      // source _kn_post_tick uses below, so it's comparable across peers.
+      window.__tp.markFpsWindowStart = () => {
+        W.fpsWindowStart = { f: frameNow(), t: performance.now() };
+      };
       const pilot = window.KNMenuAutopilot.create({ read32: (a) => rb.readRdram32(a), log: (m) => (W.pilotFail = m) });
       const actor = role === 'host' ? pilot.p1 : pilot.p2;
       let held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
@@ -334,17 +354,28 @@ if (inBattle) {
   console.log('in battle; playing', BATTLE_SECONDS, 's');
   if (THROTTLE_GUEST) {
     // Fire-and-forget: flips the guest's throttle flag ~15s into the
-    // battle without blocking the battle-length wait below.
+    // battle without blocking the battle-length wait below. Marks the
+    // game-fps measurement window start on both peers at the same moment,
+    // so gameFps is measured only over the throttled window (see
+    // MIN_GAME_FPS in the header doc).
     setTimeout(() => {
-      guest
-        .evaluate(() => {
+      Promise.all([
+        guest.evaluate(() => {
           window.__knThrottle = true;
-        })
-        .then(
-          () => console.log('THROTTLE_GUEST: guest capped to ~30Hz'),
-          (e) => console.log('THROTTLE_GUEST: failed to flip flag', e.message),
-        );
+          window.__tp.markFpsWindowStart();
+        }),
+        host.evaluate(() => window.__tp.markFpsWindowStart()),
+      ]).then(
+        () => console.log('THROTTLE_GUEST: guest capped to ~30Hz; fps window started'),
+        (e) => console.log('THROTTLE_GUEST: failed to flip flag/mark window', e.message),
+      );
     }, 15000);
+  } else {
+    // No throttle knob: measure game fps over the whole battle.
+    await Promise.all([
+      host.evaluate(() => window.__tp.markFpsWindowStart()),
+      guest.evaluate(() => window.__tp.markFpsWindowStart()),
+    ]);
   }
   if (FREEZE_MS > 0) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
@@ -383,6 +414,8 @@ const collect = (p, VISUAL_CHECK) =>
       hashes: window.__tp.hashes,
       inBattleAt: window.__tp.inBattleAt,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
+      fpsWindowStart: window.__tp.fpsWindowStart,
+      fpsWindowEnd: { f: window.NetplayRollback.getHudCounters().currentFrame, t: performance.now() },
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
@@ -441,6 +474,41 @@ const INTEGRITY =
   /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
+
+// Game fps over the measurement window (see MIN_GAME_FPS doc above): frames
+// advanced (emulator's own forward-frame counter) / wall seconds, per peer.
+const gameFpsOf = (peer) => {
+  const start = peer.fpsWindowStart;
+  const end = peer.fpsWindowEnd;
+  if (!start || !end || end.t <= start.t) return null;
+  return +(((end.f - start.f) * 1000) / (end.t - start.t)).toFixed(1);
+};
+const gameFps = { host: gameFpsOf(H), guest: gameFpsOf(G) };
+
+// PACING-THROTTLE start lines within the measurement window, per peer's own
+// sync log (t is that page's performance.now(), same clock as fpsWindowStart).
+const pacingThrottleStartsInWindow = (peer) => {
+  const start = peer.fpsWindowStart;
+  if (!start) return null;
+  return peer.sync.split('\n').filter((l) => {
+    if (!l.includes('PACING-THROTTLE start')) return false;
+    const t = parseFloat(l.split('\t')[1]);
+    return Number.isFinite(t) && t >= start.t;
+  }).length;
+};
+const pacingThrottleStarts = { host: pacingThrottleStartsInWindow(H), guest: pacingThrottleStartsInWindow(G) };
+
+// Cumulative scheduler counters from the last TICK-PERF line (#47):
+// droppedSlots (backlog drops) and catchupFrames (extra forward frames run
+// to catch up a throttled pump) — never reset, so this is the session
+// total, not scoped to the fps window.
+const lastTickPerf = (log) => {
+  const matches = [...log.matchAll(/TICK-PERF f=(\d+).*?droppedSlots=(\d+) catchupFrames=(\d+)/g)];
+  if (!matches.length) return null;
+  const m = matches[matches.length - 1];
+  return { f: +m[1], droppedSlots: +m[2], catchupFrames: +m[3] };
+};
+const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sync) };
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
 const spanFrom = Math.max(battleFrom, recoveredAt);
@@ -527,6 +595,10 @@ const summary = {
     : {}),
   ...(HOST_BROWSER === 'webkit' ? { hostBrowser: HOST_BROWSER, bootSyncFrame } : {}),
   ...(THROTTLE_GUEST ? { throttleGuest: true } : {}),
+  ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
+  gameFps,
+  pacingThrottleStarts,
+  schedulerCounters,
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks },
   failedRollbacks: { host: H.failed, guest: G.failed },
@@ -599,6 +671,12 @@ const integrityFailed =
   FREEZE_MS > 0
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
     : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
+const minGameFpsFailed =
+  MIN_GAME_FPS !== null &&
+  ((gameFps.host !== null && gameFps.host < MIN_GAME_FPS) || (gameFps.guest !== null && gameFps.guest < MIN_GAME_FPS));
+if (minGameFpsFailed) {
+  console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
+}
 const failed =
   gpMis > 0 ||
   gsMis > 0 ||
@@ -606,5 +684,6 @@ const failed =
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||
-  (VISUAL_CHECK && visualCheck.corrupted > 0);
+  (VISUAL_CHECK && visualCheck.corrupted > 0) ||
+  minGameFpsFailed;
 process.exit(failed ? 1 : 0);
