@@ -150,7 +150,11 @@ def test_lockstep_input_discovery_uses_raw_simulate_export_after_guarding():
 
     wait_idx = source.find("const waitForEmu = () => {")
     assert wait_idx != -1
-    wait_window = source[wait_idx : wait_idx + 6500]
+    # Bound by the call that follows the definition, not a fixed length, so
+    # new code inside waitForEmu can't push the asserted lines out of the window.
+    wait_end = source.find("\n    waitForEmu();\n", wait_idx)
+    assert wait_end != -1
+    wait_window = source[wait_idx:wait_end]
 
     assert "const rawSimulateInputForDiscovery = mod?._kn_netplay_simulate_input || mod?._simulate_input;" in wait_window
     assert "const simulateInputForDiscovery = rawSimulateInputForDiscovery?.bind(mod);" in wait_window
