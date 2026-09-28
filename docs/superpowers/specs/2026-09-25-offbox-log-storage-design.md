@@ -1,8 +1,8 @@
 # Off-box log storage (D1 + R2) with tiered retention
 
 **Date:** 2026-09-25
-**Status:** Approved in conversation; pending written-spec review
-**Scope:** Server persistence layer, retention, admin API; two one-line-scale client changes
+**Status:** Approved 2026-09-25. Revised 2026-09-28 after the first PRs shipped (see "Revision 2026-09-28"); the revision is pending review.
+**Scope:** Server persistence layer, retention, admin API; two one-line-scale client changes, plus the input-audit delta change (§8 item 3), which touches the netplay client's flush path
 
 ## Problem
 
@@ -21,7 +21,7 @@ Cloudflare (the account that already provides TURN), so that:
 
 - Session logs, match metrics/Parquet, client events, desync verdicts,
   feedback and screenshots survive deploys, restarts and idle sleep.
-- An in-progress match loses at most ~10 s of logs to a restart.
+- An in-progress match loses at most ~10 s of logs to a restart (revised: ~0, see "Revision 2026-09-28").
 - The admin API keeps working with the **same paths and response fields**.
 - Matches where something went wrong are kept until explicitly resolved (or
   very stale); normal matches are kept a short time.
@@ -30,7 +30,7 @@ Cloudflare (the account that already provides TURN), so that:
 
 ## Non-goals
 
-- Changing the Socket.IO wire format, client flush cadence or upload caps.
+- Changing the client flush cadence or upload caps. (The `inputAudit` payload does change, to deltas; see §8 item 3.)
 - Touching the netplay tick loop, sync, input or the WASM core.
 - `debug-sync` / `debug-logs`: they write to stdout or local files under
   `DEBUG_MODE` and are not in `kn.db`. They stay as they are.
@@ -43,11 +43,56 @@ Cloudflare (the account that already provides TURN), so that:
 | Question | Decision |
 |---|---|
 | What must survive | Everything in `kn.db` |
-| Mid-match loss window | ~10 s |
+| Mid-match loss window | ~10 s (revised: ~0 with direct writes) |
 | Store | D1 for small queryable rows, R2 for blobs (chosen over Litestream-to-R2 and R2-only) |
 | Migrations | Replace Alembic with numbered plain-SQL files and a small runner shared by both backends |
 | Crash signal gap | Add a global `error` listener in `play.js` (in scope) |
 | Feedback → match link | Add `matchId` to feedback context (in scope) |
+
+## Revision 2026-09-28
+
+**Shipped and running in production:**
+
+| PR | What |
+|---|---|
+| #41 | Clients send session-log *deltas* by monotonic `seq`; the server appends them as `session_log_chunks` rows (was Alembic 0008, now migration `0002`) instead of rewriting a 12 MB blob every 5 s |
+| #44 | `Backend` interface, `SqliteBackend`, `D1Backend`, plain-SQL migrations replacing Alembic |
+| #46 | Session-log flushes split into chunks of at most 512 KB (D1 rows hold at most 2 MB) |
+| #48 | `blobstore.py` (local folder / R2); screenshot bytes in R2 under `matches/<id>/screenshots/`, rows keep `blob_key` and `size` (migration `0003`) |
+| #49 | httpx request lines no longer logged at INFO |
+
+Production has used D1 (`kaillera-next-logs`) since 2026-09-28 and R2
+(`kaillera-next-screenshots`) since #48. Live checks against both passed:
+integer/float/NULL params bind correctly, and D1's HTTP batch **is** atomic.
+
+**What changes in this spec because of that:**
+
+1. **No spool or shipper.** #41 turned each flush into a small append, so
+   ingest writes straight to D1 (session logs, client events) and R2
+   (screenshots). The loss window is effectively zero rather than ~10 s. The
+   "Ingest: spool, then ship" design below is replaced by "Ingest: direct
+   writes", and the shipper's jobs (budgets, retries) move to the write path.
+2. **D1 is the hot store, R2 the archive.** D1's free tier caps a database at
+   500 MB, and flagged matches' logs are kept for months, so they can't all
+   stay in D1. Once a match can no longer receive uploads, it is archived to
+   R2 (each slot's raw entries and context, plus a Parquet analytics copy);
+   `D1_HOT_DAYS` (default 2) after that, its chunks leave D1. Admin reads
+   switch from D1 to the archive on `archived_at`. Details in §1 "Archive and
+   eviction".
+3. **Context size cap (defensive).** Both session-log handlers allowed
+   `context` (with `inputAudit`) up to 2 MiB = 2,097,152 bytes, but it shares
+   a D1 row with `summary` and D1 rows are capped at 2,000,000 bytes. Honest
+   clients can't reach that (the sanitizer truncates each list to 4,096
+   items, so a real audit tops out around 1.46 MB), but a modified client
+   could. #51 caps context at 1.5 MB.
+4. **Input audit as deltas (found reviewing #51).** The sanitizer keeps the
+   *oldest* 4,096 audit entries per list, so the audit covers only about the
+   first 70 s of a match; and the whole audit is re-sent every flush (up to
+   ~1.2 MB per player every 5 s), the largest source of D1 byte churn. The
+   client will send only new audit entries, stored as chunks with
+   `kind = 'audit'` next to the log chunks, so the archive and eviction
+   handle both the same way. This lands before the archive (§8 item 3).
+5. **Delivery (§8) is renumbered** around what has shipped.
 
 ---
 
@@ -57,20 +102,22 @@ Cloudflare (the account that already provides TURN), so that:
 
 | Data | D1 (rows) | R2 (objects) |
 |---|---|---|
-| Session logs | `session_logs` metadata: `match_id`, `room`, `slot`, `player_name`, `mode`, `summary` (≤ 4 KB), `ended_by`, timestamps, `blob_key`, `blob_bytes`, `ip_hash` | `matches/<match_id>/sessions/<slot>.json.gz` = `{"log_data": [...], "context": {...}}` |
-| Match archive | `match_metrics` (unchanged columns; `parquet_path` holds the R2 key) | `matches/<match_id>/entries.zstd.parquet` |
+| Session logs (hot) | `session_logs` (metadata, `summary` ≤ 4 KB, `context` ≤ 1.5 MB, `last_seq`, `log_epoch`) and `session_log_chunks` (entries, ≤ 512 KB per row) | — |
+| Session logs (archive, after rotation) | `session_logs` kept with `context` cleared; chunks deleted after `D1_HOT_DAYS` | `matches/<match_id>/entries.zstd.parquet` (all slots' entries) and `matches/<match_id>/sessions/<slot>.context.json.gz` |
+| Match metrics | `match_metrics` (unchanged columns; `parquet_path` holds the R2 key) | — |
 | Screenshots | `screenshots`: `id`, `match_id`, `slot`, `frame`, `size`, `blob_key`, `created_at` | `matches/<match_id>/screenshots/<slot>-<frame>.jpg` |
 | Feedback, client events, desync verdicts | As today | — |
 | Retention, budgets, audit | `match_retention`, `server_state`, `admin_actions` (below) | — |
 
 Every object for a match lives under `matches/<match_id>/`, so deleting a match is
-one prefix delete. D1 rows never carry a value near D1's 2 MB row limit: the
-large fields (`log_data`, `context` with `inputAudit`, image bytes) are in R2.
+one prefix delete. D1 rows stay under D1's 2 MB row limit: chunks are split at
+512 KB, `context` is capped at 1.5 MB, and image bytes are in R2. D1's total
+size stays bounded because ended matches move to the R2 archive.
 
 ### Backends
 
 `db.py` keeps its public functions (`init_db`, `close_db`, `query`,
-`execute_write`, `upsert_session_log`, `set_session_ended`,
+`execute_write`, `append_session_log`, `set_session_ended`,
 `insert_client_event`, `insert_feedback`, `insert_screenshot`, `get_screenshots`,
 …) and the SQL they run. Behind them sits a backend with three operations,
 `query(sql, params)`, `execute(sql, params)`, and `batch([(sql, params), ...])`:
@@ -84,60 +131,84 @@ large fields (`log_data`, `context` with `inputAudit`, image bytes) are in R2.
   describe `params` as strings, so the contract tests must prove that integer
   and NULL parameters round-trip with the same results as SQLite.
 
-A new `server/src/blobstore.py` has the same shape, with `put(key, bytes)`,
-`get(key) -> bytes | None`, `delete_prefix(prefix)`, `list_prefixes(prefix)`:
+`server/src/blobstore.py` (shipped in #48) has `put(key, bytes, content_type)`,
+`get(key) -> bytes | None` and `delete(keys)`. Retention adds
+`delete_prefix(prefix)` and `list_prefixes(prefix)`:
 
 - `LocalBlobStore`: a directory (default `data/blobs`).
 - `R2BlobStore`: boto3 S3 client at `https://{CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   calls run via `asyncio.to_thread`.
 
-Selection: if `D1_DATABASE_ID`/`D1_API_TOKEN` are set, use D1; else SQLite. If
-`R2_BUCKET` and keys are set, use R2; else local. Unset → the server behaves as
+Selection: if `D1_DATABASE_ID` or `D1_API_TOKEN` is set, use D1; if any of
+`R2_BUCKET`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` is set, use R2 (both also
+need `CF_ACCOUNT_ID`; a partial configuration stops the server). Unset → the server behaves as
 today on local disk.
 
-### Ingest: spool, then ship
+### Ingest: direct writes
 
-The `session-log` Socket.IO handler, the `/api/session-log` HTTP fallback and
-`game-screenshot` keep all current validation and caps. After validation they
-no longer write to the database on every flush:
+*(Replaces the original "spool, then ship" design: #41 made each flush a
+small append, so there is nothing to batch.)*
 
-1. Serialize and gzip the payload, and write it atomically (temp file +
-   `os.replace`) to `data/spool/<match_id>/<slot>.json.gz` (screenshots:
-   `data/spool/<match_id>/screenshots/<slot>-<frame>.jpg`). Disk, not RAM:
-   Render free has 512 MB of RAM and a log can be 12 MB uncompressed.
-2. Queue the small D1 writes (session-log metadata upsert, screenshot row) in
-   the shipper's pending batch.
+- **Session logs:** the `session-log` Socket.IO handler and the
+  `/api/session-log` HTTP fallback call `db.append_session_log`, which writes
+  the new chunks, the size-cap delete and the metadata upsert to D1 in one
+  atomic batch. A failed write raises, the client isn't acked, and it resends
+  those entries on its next flush (dedupe by `seq`).
+- **Screenshots:** `db.insert_screenshot` puts the bytes in R2, then writes the
+  row. Best-effort: a failed upload stores nothing.
+- **Client events and feedback:** one D1 insert each, as before.
+- **Budgets** (§5) are counted in the `db` write functions, not a shipper.
 
-Client events are queued in the same pending batch. Feedback is written
-directly to D1 (rare and valuable). If that write fails, it is queued and the
-user still sees success.
-
-`log_shipper` (new, `server/src/log_shipper.py`) runs every `SHIP_INTERVAL_SEC`
-(10). Each tick it:
-
-1. Uploads each dirty spool file to R2, then removes it from the spool.
-2. Sends every pending D1 write in one `batch` request.
-3. Enforces the global budgets (§5).
-
-It also runs a final flush from the FastAPI lifespan shutdown (Render sends
-SIGTERM before replacing an instance). Leftover spool files found at startup
-are shipped on the first tick.
-
-Per player this is at most one R2 PUT per 10 s. Per server it is about one D1
-request per 10 s, or roughly 2.9k D1 row writes per hour with 4 players
-active, well under the free 100k/day.
+Rough volume per hour of 4-player play: ~14k D1 rows written by ingest
+(2,880 flushes × ~3 rows, plus 2,880 screenshot rows with their index), and
+about as many again later from eviction and retention deletes, so ~26k in
+total. The free 100k/day is therefore about 4 hours of 4-player play a day
+(~2.3 h under the 60k budget). Screenshots are 2,880 R2 PUTs per hour; R2's
+free 1M writes/month covers ~347 such hours. Counts come from D1's own
+`meta.rows_written` (which includes index writes), not an in-app tally.
 
 ### Rotation
 
-`match_rotation.sweep_pending` keeps its role: find ended matches without a
-`match_metrics` row (now in D1), read each slot's log object from R2, and
-merge them. It then:
+`match_rotation.sweep_pending` keeps its early role: soon after a match ends
+it computes `match_metrics` and runs the retention classifier (§2) so the
+admin API has numbers quickly. Those are provisional, because a player
+leaving mid-match already sets `ended_by`, and final flushes can land later.
 
-- writes the Parquet file to R2,
-- upserts `match_metrics`,
-- runs the retention classifier (§2).
+### Archive and eviction
 
-`desync_vision` reads screenshot bytes through `blobstore`.
+**When a match is archived.** Only once it can no longer receive uploads:
+its ingest window (§5) has closed, i.e. 30 min after `ended_at`, or 4 h after
+`created_at` when no end was ever recorded (crash, restart). Archiving then:
+
+1. Recomputes `match_metrics` and re-runs the classifier on the complete logs.
+2. Uploads, for each slot, the raw entries exactly as stored (log and audit
+   chunks, JSON Lines) to `matches/<id>/sessions/<slot>.entries.jsonl.gz`
+   and its `context` to `matches/<id>/sessions/<slot>.context.json.gz`. A
+   NULL slot uses `slot-none`. These are what admin detail, export and
+   input-audit read after eviction, so they return the same data.
+3. Uploads the Parquet copy (`matches/<id>/entries.zstd.parquet`) for
+   DuckDB/Polars analysis. It is not used to serve admin reads (Parquet
+   null-pads missing keys and coerces types).
+4. Records, in one D1 statement, `archived_at`, the highest chunk `id` and
+   the `session_logs.updated_at` it covered, and `archive_bytes`. It does this
+   only after every upload succeeded; a failed upload leaves the match
+   un-archived for the next sweep.
+
+**Eviction.** `D1_HOT_DAYS` after `archived_at`, one atomic D1 batch deletes
+the match's chunks with `id <= archived_max_chunk_id`, clears `context` and
+`log_data` on rows whose `updated_at` still equals the archived value, and
+sets `evicted_at`. Tombstoned matches (§4) are skipped, so a late archive
+can never recreate objects after a delete has started.
+
+**Admin reads** use D1 until `evicted_at` is set and the archive after, so a
+hot session with no chunks yet shows as empty rather than `log_deleted`.
+
+**Existing data.** The PR that adds archiving also backfills: matches rotated
+since the 2026-09-28 cutover (their `parquet_path` points at the wiped local
+disk) and matches created before `match_retention` existed get a retention
+row and go through the same archive step.
+
+`desync_vision` reads screenshot bytes through `blobstore` (shipped in #48).
 
 ### Migrations
 
@@ -145,10 +216,12 @@ Alembic (`server/alembic/`, `server/alembic.ini`) is replaced by
 `server/migrations/NNNN_<name>.sql` and a runner in `db.py`. The runner
 records applied files in `schema_migrations(version TEXT PRIMARY KEY,
 applied_at TEXT)` and applies pending files in order through the active
-backend, one statement at a time. `0001_baseline.sql` is today's schema
-(the result of Alembic 0001–0007). Later migrations are added by the PRs that
-need them. Existing local dev databases are deleted once; there is no Alembic
-→ runner upgrade path.
+backend as one batch per file. `0001_baseline.sql` is the schema Alembic
+0001–0007 produced and applies over an existing Alembic database;
+`0002_session_log_chunks.sql` carries Alembic 0008 (#41), and databases
+already at Alembic 0008 get it recorded rather than re-run
+(`_ALEMBIC_EQUIVALENTS`); `0003_screenshot_blobs.sql` rebuilds `screenshots`.
+Existing migrations are never edited; every change is a new file.
 
 ---
 
@@ -173,7 +246,12 @@ CREATE TABLE match_retention (
   resolved_at     TEXT,
   resolved_note   TEXT,
   last_touched_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleting_at     TEXT                              -- tombstone (§4)
+  deleting_at     TEXT,                             -- tombstone (§4)
+  archived_at            TEXT,                      -- archive complete (§1)
+  archived_max_chunk_id  INTEGER,                   -- highest chunk id in the archive
+  archived_updated_at    TEXT,                      -- session_logs.updated_at the archive covered
+  archive_bytes          INTEGER,                   -- bytes uploaded to R2 for this match
+  evicted_at             TEXT                       -- chunks/context removed from D1
 );
 ```
 
@@ -236,12 +314,12 @@ All existing paths and response fields stay the same. Consumers:
 | Endpoint | Change |
 |---|---|
 | `GET /admin/api/session-logs` | SQL runs on D1. The per-match desync-count loop becomes one `GROUP BY match_id` query. New optional `tier=flagged\|normal`. Tombstoned matches hidden. |
-| `GET /admin/api/session-logs/{id}` | `log_data`/`context` come from the R2 object. If the object is missing, both are `null` and the response carries `"log_deleted": true`. Touches retention. |
-| `GET …/session-logs/{id}/export` | Streams JSONL from the R2 object; same format. |
-| `GET /admin/api/input-audit/{match_id}` | Reads each slot's `context` from R2. |
-| `GET /admin/api/screenshots/{match_id}`, `…/img/{id}` | Metadata from D1; image bytes proxied from R2 (no presigned URLs). |
+| `GET /admin/api/session-logs/{id}` | `log_data`/`context` come from D1 chunks while the match is hot, and from the R2 archive (Parquet filtered to the slot, context JSON) after eviction. If neither exists, both are `null` and the response carries `"log_deleted": true`. Touches retention. |
+| `GET …/session-logs/{id}/export` | Streams JSONL from the same source; same format. |
+| `GET /admin/api/input-audit/{match_id}` | Reads each slot's `context` from D1, or the R2 archive after eviction. |
+| `GET /admin/api/screenshots/{match_id}`, `…/img/{id}` | Metadata from D1; image bytes proxied from R2 (no presigned URLs). Shipped in #48. |
 | `GET /admin/api/matches`, `…/matches/{id}` | Joins `match_retention`; adds `tier`, `flag_reasons`, `resolved_at`, `resolved_note`, `last_touched_at`. New filters `tier=`, `unresolved=true`. With `tier=flagged`, `days` is ignored. Tombstoned matches: hidden in the list; detail returns 410. |
-| `GET /admin/api/stats` | Counts from D1. Keeps `retention_days`. Adds `flagged_stale_days`, `tiers: {normal, flagged_unresolved, resolved}`, `storage: "d1+r2"\|"local"`, `storage_status: {state, last_error, spool_files, spool_bytes}`, `budgets` (§5). |
+| `GET /admin/api/stats` | Counts from D1. Keeps `retention_days`. Adds `flagged_stale_days`, `tiers: {normal, flagged_unresolved, resolved}`, `storage: "d1+r2"\|"local"`, `storage_status: {state, last_error, d1_bytes, r2_bytes}`, `budgets` (§5). |
 | `client-events`, `feedback`, `desync-events`, `session-timeline` | Same SQL on D1. Feedback responses add `resolved_at`. |
 
 New endpoints (require `X-Admin-Key`; optional body `{"note": str}`, max 1 KB;
@@ -266,25 +344,27 @@ existing `escapeHtml`.
 
 ### Deletion across R2 and D1 (no cross-store transaction)
 
-R2 and D1 cannot share a transaction, and the D1 HTTP API's batch is not
-documented as atomic. The documented rollback applies to the Worker binding's
-`db.batch()`. Deletion is therefore a resumable three-step process, with a
-tombstone, that is correct under interruption at any point:
+R2 and D1 cannot share a transaction. (D1's HTTP batch itself is atomic,
+verified live on 2026-09-28, which the archive and ingest paths rely on.)
+Deletion is therefore a resumable three-step process, with a tombstone, that
+is correct under interruption at any point:
 
 1. **Mark:** `UPDATE match_retention SET deleting_at = datetime('now') WHERE match_id = ? AND deleting_at IS NULL AND <expiry condition>`.
    Because the expiry condition is in the same statement, a flag or resolve
    that landed first makes this a no-op. From here the match is hidden (list)
    or 410 (detail), and flag/resolve/unresolve return 409.
-2. **R2:** list `matches/<id>/` and delete keys in batches of ≤ 1000. Deleting
-   a key that is already gone is a no-op.
+2. **R2:** list `matches/<id>/` (screenshots, Parquet, context archives) and
+   delete keys in batches of ≤ 1000. Deleting a key that is already gone is a
+   no-op.
 3. **D1:** delete `screenshots`, `desync_events`, the match's `client_events`,
-   `session_logs` and `match_metrics`, and delete `match_retention` last. Each
-   statement is idempotent on its own.
+   `session_log_chunks`, `session_logs` and `match_metrics`, and delete
+   `match_retention` last. Each statement is idempotent on its own.
 
 Each sweep first finishes every row with `deleting_at` set, then marks newly
 expired ones. An interruption after step 1 or during step 2 or 3 leaves a hidden
 match that the next sweep finishes. The tombstone is removed only after
-everything else is gone. The shipper and `flag_match` skip tombstoned matches.
+everything else is gone. Ingest validation (§5) and `flag_match` skip
+tombstoned matches.
 
 ### Retention sweep
 
@@ -300,10 +380,11 @@ deletes those with no `match_retention` row whose objects are older than
 
 | Failure | Behavior |
 |---|---|
-| D1/R2 unreachable or quota exceeded while shipping | Spool files and pending rows are kept. Retry with exponential backoff capped at 5 min. One WARN per state change. Socket.IO handlers never await D1/R2. |
-| D1 unreachable at boot | The server starts anyway. The shipper runs migrations before its first ship. Admin endpoints return 503 with the reason. `/health` stays OK. |
-| Feedback write fails | Queued in the shipper; the user sees success. |
-| Two instances overlap during a deploy | Both may ship the same `(match, slot)`. Uploads are the full log, so last writer wins. Rotation upserts. Sweep steps are idempotent. |
+| D1 unreachable or over quota during a session-log flush | The append raises, the client isn't acked, and it resends those entries next flush. Gameplay is unaffected. |
+| R2 unreachable during a screenshot | That screenshot is skipped with a warning. |
+| R2 unreachable during rotation | The match isn't archived or evicted; the next sweep retries. |
+| D1 unreachable at boot | Today boot fails and Render keeps the previous instance. Accepted: a deploy during a D1 outage simply doesn't go live. |
+| Two instances overlap during a deploy | Appends dedupe by `seq`; rotation upserts; sweep steps are idempotent. |
 | R2 object missing on admin read | `log_deleted: true`, not a 500. |
 
 ---
@@ -339,7 +420,7 @@ if all of these hold:
 - it is within 30 min of `ended_at`, or within 4 h of `created_at` if
   `ended_at` is NULL.
 
-Anything else is rejected before touching the spool. Match ids are UUID4 and
+Anything else is rejected before anything is written. Match ids are UUID4 and
 not guessable, so knowing a real match id requires having been in its room.
 
 ### Global budgets
@@ -352,10 +433,18 @@ many IPs from exhausting the shared free tier or the bill:
 | `BUDGET_D1_ROWS_PER_DAY` | 60000 | D1 100k rows written/day |
 | `BUDGET_R2_UPLOAD_BYTES_PER_DAY` | 2 GB | R2 cost |
 | `BUDGET_STORED_BYTES` | 8 GB | R2 10 GB free storage |
+| `BUDGET_D1_BYTES` | 400 MB | D1 500 MB per database (free) |
 | `BUDGET_AUTO_FLAGGED_BYTES` | 2 GB | Unbounded growth from forged flag signals |
 
-- Stored bytes = sum of `session_logs.blob_bytes`, `screenshots.size` and
-  `match_metrics.parquet_bytes`, computed by the sweep.
+- R2 stored bytes = sum of `screenshots.size` and
+  `match_retention.archive_bytes`, computed by the sweep.
+- D1 bytes are estimated as `SUM(session_log_chunks.size)` plus
+  `SUM(length(context))`. (D1's `size_after` isn't used: SQLite deletes go to
+  the free list, so it may not drop after an eviction.)
+- Over `BUDGET_D1_BYTES`, the sweep evicts archived matches early (oldest
+  first) before anything is dropped.
+- Budgets decide at write time: with direct writes there's no queue to drop
+  from later, so an exhausted budget rejects the lowest-priority writes first.
 - Counters are kept in memory and saved to `server_state` once a minute
   (~1.4k row writes/day), so a restart does not reset them.
 - When a budget is exhausted, data is dropped in this order: screenshots, then
@@ -386,10 +475,10 @@ many IPs from exhausting the shared free tier or the bill:
 |---|---|---|
 | `CF_ACCOUNT_ID` | — | D1 endpoint and R2 endpoint |
 | `D1_DATABASE_ID`, `D1_API_TOKEN` | — | unset → SQLite |
-| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | — | unset → `data/blobs` |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | — | unset → `blobs/` next to the SQLite file; production bucket `kaillera-next-screenshots` (it holds every match's objects despite the name) |
 | `LOG_RETENTION_DAYS` | 7 | was 14 |
 | `FLAGGED_STALE_DAYS` | 180 | |
-| `SHIP_INTERVAL_SEC` | 10 | |
+| `D1_HOT_DAYS` | 2 | days after `ended_at` before an archived match leaves D1 |
 | `BUDGET_*` | see §5 | |
 
 `render.yaml` adds the secrets with `sync: false`. `deploy/render/README.md`
@@ -413,22 +502,25 @@ README is updated. New dependency: `boto3` (declared directly in
   SQL on in-memory SQLite and returns D1's response JSON, and the suite covers
   integer/NULL params. The same suite runs `LocalBlobStore` and an in-memory
   fake R2.
-- **Optional live test:** skipped unless the D1/R2 env vars are set. Run once
-  during implementation, including a check of whether the `/query` batch is
-  transactional; the design does not depend on the answer.
+- **Optional live tests:** skipped unless the D1/R2 env vars are set. They
+  showed D1's `/query` batch is atomic, which ingest and eviction rely on.
 - **Classifier:** one fixture per signal; `INPUT-OOR` at 19 and 20.
 - **Retention:** injectable clock for every window; the deletion interruption
   test fails at each step and asserts that repeated sweeps converge to fully
   deleted with no visible partial match; a flag racing with a mark.
-- **Shipper:** dirty tracking, backoff, shutdown flush, startup spool recovery,
-  and budget priority order.
+- **Archive and eviction:** nothing is archived before the ingest window
+  closes; chunks written after an archive are never evicted; a failed upload
+  leaves the match un-archived; admin detail, export and input-audit return
+  identical data before and after eviction; the backfill covers pre-existing
+  matches.
+- **Budgets:** counters at the write path and the drop priority order.
 - **Ingest validation:** unknown match, wrong room, wrong slot, expired
   window, tombstoned match.
 - **Admin API:** existing tests pass unchanged, which shows the response
   shapes did not change. New endpoints, `admin_actions` rows, 409/410 paths.
 - **End to end:** one local two-player match per PR that changes ingest
-  (logs land, rotate, show in admin). `rb-two-player.mjs` is not required
-  because the tick loop, sync and input are untouched.
+  (logs land, rotate, show in admin). `rb-two-player.mjs` is required only for
+  the input-audit delta PR, which changes the client's flush path.
 - **Production check after cutover:** play a match, restart the Render
   service, and confirm the match, logs and metrics are still in the admin API.
 
@@ -436,41 +528,53 @@ README is updated. New dependency: `boto3` (declared directly in
 
 ## 8. Delivery (small PRs, in order)
 
-1. `refactor(db)`: SQL migration runner and `0001_baseline.sql` replace
-   Alembic; backend interface and `SqliteBackend`. No behavior change.
-2. `feat(db)`: `D1Backend` and the contract suite.
-3. `feat(logs)`: `blobstore` (local and R2), spool, `log_shipper` with the
-   daily budgets (`BUDGET_D1_ROWS_PER_DAY`, `BUDGET_R2_UPLOAD_BYTES_PER_DAY`);
-   `match_retention` registration at `start-game` and ingest validation.
-   Session logs move to R2, and the admin detail, export and input-audit
-   endpoints read from the blob store.
-4. `feat(logs)`: screenshots move to the blob store (ingest, admin, `desync_vision`).
-5. `feat(retention)`: classifier in rotation; flag hooks for client events,
-   desync verdicts and feedback; `BUDGET_AUTO_FLAGGED_BYTES`; the two client
-   changes.
+Done: #44 (backends, migrations), #46 (chunk splitting), #48 (screenshots in
+R2), #49 (quiet httpx logs), and the D1/R2 cutover on Render.
+
+Remaining:
+
+1. `fix(logs)`: cap session-log `context` at 1.5 MB in both handlers
+   (revision item 3) — #51.
+2. `feat(logs)`: `match_retention` registration at `start-game` and ingest
+   validation (§5); daily D1-rows (from `meta.rows_written`, needs D1Backend
+   to return `meta`) and R2-bytes budgets; and `cleanup_old_data` runs 60 s
+   after startup instead of after 24 h, so D1 is cleaned before the full
+   retention sweep lands.
+3. `feat(logs)`: input audit as deltas (revision item 4): the client sends
+   only new audit entries, stored as `kind = 'audit'` chunks, trimmed
+   newest-kept; a dropped audit never overwrites a stored one. Changes the
+   netplay client's flush path, so `tests/rb-two-player.mjs` must pass.
+4. `feat(logs)`: archive and eviction (§1): archive after the ingest window,
+   eviction after `D1_HOT_DAYS`, admin reads switching on `evicted_at`,
+   `BUDGET_D1_BYTES`, and the backfill of existing matches.
+5. `feat(retention)`: classifier (early and at archive); flag hooks for client
+   events, desync verdicts and feedback; `BUDGET_AUTO_FLAGGED_BYTES`; the two
+   client changes.
 6. `feat(retention)`: tombstoned `retention_sweep` replaces
    `cleanup_old_data`; stored-bytes accounting and `BUDGET_STORED_BYTES`;
    orphan sweep.
 7. `feat(admin)`: retention fields and filters, flag/resolve endpoints,
    `admin_actions`, new stats fields.
 8. `feat(admin)`: admin page badges, filters and buttons.
-9. `chore(deploy)`: `render.yaml` env entries, README setup, cutover and the
-   production check.
-10. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
-    filter, `admin_actions.actor`, triage display on the admin page (§9).
-    Then create the daily routine.
+9. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
+   filter, `admin_actions.actor`, triage display on the admin page (§9).
+   Then create the daily routine.
+
+Each PR that adds a setting also adds it to `render.yaml` and
+`deploy/render/README.md`, whose setup section should include turning on the
+Cloudflare billing notification for R2.
 
 Before each merge, check the diff size against `main` (CLAUDE.md).
 
 ---
 
-## 9. Daily feedback routine (follow-up after PR 9)
+## 9. Daily feedback routine (follow-up after §8 item 9)
 
 Once feedback persists, a scheduled cloud agent processes new feedback every
-day. It is set up only after the cutover (PR 9); before that, prod wipes
-feedback on every restart.
+day. Feedback has persisted since the 2026-09-28 cutover; the routine is set
+up once its API (§8 item 9) ships.
 
-### API additions (PR 10)
+### API additions (§8 item 9)
 
 - Migration: `feedback` gains `triaged_at`, `triage_category`, `triage_note`
   (≤ 4 KB).
