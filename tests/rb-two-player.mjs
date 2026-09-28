@@ -41,6 +41,23 @@
  *     60fps on some machines; WebKit on both sides can use the real GPU and
  *     is the closer match to the reported prod case (iOS Safari, which is
  *     WebKit).
+ *   HIDE_GUEST_MS=<n>   Halfway through the battle, hide the guest tab the
+ *     way a real backgrounded browser tab does: `document.hidden`/
+ *     `visibilityState` flip to hidden (via a property override installed
+ *     at context creation — real tab backgrounding can't be simulated from
+ *     outside the page) and its setInterval-driven ticks are throttled to
+ *     ~1Hz (reusing THROTTLE_GUEST's mechanism), matching the browser's own
+ *     background-tab throttling. A `visibilitychange` event fires so
+ *     `_visChangeHandler` in netplay-rollback.js runs its real bg-return
+ *     path. After HIDE_GUEST_MS, both flip back and a `visibilitychange`
+ *     fires again; the second half of the battle plays normally. Mutually
+ *     exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and THROTTLE_GUEST. No
+ *     exclusion window applies (unlike FREEZE mode) — the normal hash
+ *     compare and integrity checks cover the whole match, and the run also
+ *     fails (exit 1) if either peer's sync log has any `TICK-STUCK
+ *     severity=error`, `PEER-PHANTOM`, or `RB-INPUT-STALL-TIMEOUT` line
+ *     (issue #64: a backgrounded guest used to desync the match). Counts
+ *     reported under `hideGuest` in summary.json, alongside `hideGuestMs`.
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
  *     setInterval-driven tick callbacks to an average of THROTTLE_GUEST_HZ
  *     (env, default 30) callbacks/s — a plain JS wrapper around
@@ -114,6 +131,7 @@ const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
 const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
+const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 
@@ -138,6 +156,14 @@ if (!Number.isFinite(THROTTLE_GUEST_HZ) || THROTTLE_GUEST_HZ <= 0) {
 }
 if (THROTTLE_GUEST && !(BATTLE_SECONDS > 15)) {
   console.log(`THROTTLE_GUEST=1 needs BATTLE_SECONDS > 15 (the throttle flips 15s in) — got ${BATTLE_SECONDS}`);
+  process.exit(1);
+}
+if (!Number.isFinite(HIDE_GUEST_MS) || HIDE_GUEST_MS < 0) {
+  console.log(`HIDE_GUEST_MS=${process.env.HIDE_GUEST_MS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
+  console.log('HIDE_GUEST_MS is mutually exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and THROTTLE_GUEST');
   process.exit(1);
 }
 
@@ -216,17 +242,35 @@ const throttleInitScript = (hz) => {
   };
 };
 
-const mkPage = async (browser, name, { throttleHz = 0 } = {}) => {
+// Overrides document.hidden/visibilityState to read from a page-global flag
+// instead of the real (unbackgroundable, in a headless multi-context run)
+// tab state. `_visChangeHandler` in netplay-rollback.js only consults these
+// getters and listens for the `visibilitychange` event — both driven here —
+// so this reproduces a real backgrounded tab from its point of view.
+const hiddenInitScript = () => {
+  window.__knHidden = false;
+  Object.defineProperty(Document.prototype, 'hidden', { configurable: true, get: () => window.__knHidden });
+  Object.defineProperty(Document.prototype, 'visibilityState', {
+    configurable: true,
+    get: () => (window.__knHidden ? 'hidden' : 'visible'),
+  });
+};
+
+const mkPage = async (browser, name, { throttleHz = 0, hidden = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
+  if (hidden) await ctx.addInitScript(hiddenInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
 };
 
 const host = await mkPage(hostBrowser, 'host');
-const guest = await mkPage(guestBrowser, 'guest', { throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : 0 });
+const guest = await mkPage(guestBrowser, 'guest', {
+  throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS ? 1 : 0,
+  hidden: HIDE_GUEST_MS > 0,
+});
 await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
@@ -462,6 +506,22 @@ if (inBattle) {
       while (performance.now() - t < ms);
     }, FREEZE_MS);
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else if (HIDE_GUEST_MS > 0) {
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+    console.log('hiding guest tab for', HIDE_GUEST_MS, 'ms');
+    await guest.evaluate(() => {
+      window.__knHidden = true;
+      window.__knThrottle = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await host.waitForTimeout(HIDE_GUEST_MS);
+    await guest.evaluate(() => {
+      window.__knHidden = false;
+      window.__knThrottle = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    console.log('guest tab shown again');
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
@@ -555,6 +615,21 @@ const INTEGRITY =
   /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|STEP-THREW|FATAL-CORE-ABORT|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
+
+// HIDE_GUEST_MS mode (issue #64): unlike FREEZE mode, there is no exclusion
+// window — a backgrounded-then-returned guest must never desync the match,
+// so any of these events anywhere in either peer's sync log is a failure.
+const tickStuckErrorsOf = (log) => count(log, /TICK-STUCK severity=error/g);
+const peerPhantomsOf = (log) => count(log, /PEER-PHANTOM/g);
+const rbInputStallTimeoutsOf = (log) => count(log, /RB-INPUT-STALL-TIMEOUT/g);
+// The run must actually exercise the fix, not just avoid tripping on a
+// no-op path: the guest's sync log must show it went through the real
+// bg-return handler ("tab visible (was background") and that
+// _requestLifecycleFullResync took the in-step skip ("rollback in step").
+// Their absence means the hide/throttle/visibilitychange plumbing didn't
+// reach netplay-rollback.js, and a pass wouldn't mean anything.
+const guestExercisedTabVisible = (log) => log.includes('tab visible (was background');
+const guestExercisedRollbackInStep = (log) => log.includes('rollback in step');
 
 // Game fps over the measurement window (see MIN_GAME_FPS doc above): frames
 // advanced (last non-replay _kn_post_tick frame) / wall seconds, per peer.
@@ -692,6 +767,18 @@ const summary = {
     ? { hostBrowser: HOST_BROWSER, guestBrowser: GUEST_BROWSER, crossEngine, ...(crossEngine ? { bootSyncFrame } : {}) }
     : {}),
   ...(THROTTLE_GUEST ? { throttleGuest: true, throttleGuestHz: THROTTLE_GUEST_HZ, throttleFlipped } : {}),
+  ...(HIDE_GUEST_MS > 0
+    ? {
+        hideGuest: {
+          hideGuestMs: HIDE_GUEST_MS,
+          tickStuckErrors: { host: tickStuckErrorsOf(H.sync), guest: tickStuckErrorsOf(G.sync) },
+          peerPhantoms: { host: peerPhantomsOf(H.sync), guest: peerPhantomsOf(G.sync) },
+          rbInputStallTimeouts: { host: rbInputStallTimeoutsOf(H.sync), guest: rbInputStallTimeoutsOf(G.sync) },
+          guestExercisedTabVisible: guestExercisedTabVisible(G.sync),
+          guestExercisedRollbackInStep: guestExercisedRollbackInStep(G.sync),
+        },
+      }
+    : {}),
   ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
   gameFps,
   pacing,
@@ -775,6 +862,19 @@ const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FP
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
 }
+const hideGuestFailed =
+  HIDE_GUEST_MS > 0 &&
+  (summary.hideGuest.tickStuckErrors.host > 0 ||
+    summary.hideGuest.tickStuckErrors.guest > 0 ||
+    summary.hideGuest.peerPhantoms.host > 0 ||
+    summary.hideGuest.peerPhantoms.guest > 0 ||
+    summary.hideGuest.rbInputStallTimeouts.host > 0 ||
+    summary.hideGuest.rbInputStallTimeouts.guest > 0 ||
+    !summary.hideGuest.guestExercisedTabVisible ||
+    !summary.hideGuest.guestExercisedRollbackInStep);
+if (hideGuestFailed) {
+  console.log('HIDE_GUEST_MS: desync-indicating events or unexercised fix path:', JSON.stringify(summary.hideGuest));
+}
 const failed =
   gpMis > 0 ||
   gsMis > 0 ||
@@ -786,5 +886,6 @@ const failed =
   battleCoverage < 0.8 ||
   (VISUAL_CHECK && visualCheck.corrupted > 0) ||
   minGameFpsFailed ||
-  (THROTTLE_GUEST && !throttleFlipped);
+  (THROTTLE_GUEST && !throttleFlipped) ||
+  hideGuestFailed;
 process.exit(failed ? 1 : 0);
