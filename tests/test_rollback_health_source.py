@@ -1,4 +1,7 @@
+import json
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -7,6 +10,55 @@ LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 ROLLBACK_C = ROOT / "build/kn_rollback/kn_rollback.c"
 ROLLBACK_H = ROOT / "build/kn_rollback/kn_rollback.h"
 INVARIANTS_DOC = ROOT / "docs/netplay-invariants.md"
+
+
+def test_rollback_init_backfills_bounded_remote_inputs_in_order():
+    # Nonzero-frame rollback inits left pre-init remote frames past the init
+    # frame JS-only; C predicted them and never verified those inputs.
+    src = LOCKSTEP_JS.read_text()
+    helper_start = src.find("const INPUT_PAST_WINDOW_FRAMES =")
+    if helper_start < 0:  # The pre-fix source has no shared bounds constants.
+        helper_start = src.index("const _feedCInput =")
+    helper_end = src.index("// -- Audio (delegated", helper_start)
+    helpers = src[helper_start:helper_end]
+    script = textwrap.dedent(
+        f"""
+        const calls = [];
+        const _rbRollbackMax = 12;
+        const DELAY_FRAMES = 3;
+        const _frameNum = 900;
+        const _playerSlot = 0;
+        const _localInputs = {{}};
+        const _remoteInputs = {{ 1: {{}} }};
+        const _syncLog = () => {{}};
+        const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
+        const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
+        for (let frame = 910; frame >= 890; frame--) {{
+          _remoteInputs[1][frame] = {{ buttons: frame, lx: 0, ly: 0, cx: 0, cy: 0 }};
+        }}
+        _remoteInputs[1][889] = KNShared.ZERO_INPUT;
+        _remoteInputs[1][920] = KNShared.ZERO_INPUT;
+        _remoteInputs[1][964] = {{ buttons: 964, lx: 0, ly: 0, cx: 0, cy: 0 }};
+        eval({json.dumps(helpers)} + "\\n_backfillCInputsFromJs(mod, 'rollback-init');");
+        process.stdout.write(JSON.stringify(calls.map((call) => [call[0], call[1]])));
+        """
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    fed = json.loads(result.stdout)
+    assert fed == [[1, frame] for frame in range(889, 911)]
+
+    assert "_backfillCInputsFromJs(detMod, 'rollback-init');" in src
+    input_guard_start = src.index("const _processInputPacket =")
+    input_guard_end = src.index("const recvInput =", input_guard_start)
+    input_guard = src[input_guard_start:input_guard_end]
+    assert "INPUT_FUTURE_MARGIN_FRAMES" in input_guard
 
 
 def test_c_output_exports_validate_pointers_and_sizes():
