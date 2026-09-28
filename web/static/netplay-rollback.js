@@ -17043,6 +17043,9 @@
   };
 
   const stop = () => {
+    // Before the final log flush, so its log line reaches the server.
+    _clearHostInitialStateWait();
+    _restoreLocalSaveFile();
     _flushSyncLog();
     _resetInputAudit();
     _cachedMatchId = null;
@@ -17168,8 +17171,6 @@
     _guestStateAudioFifo = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
-    _clearHostInitialStateWait();
-    _restoreLocalSaveFile();
     _knownPlayers = {};
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};

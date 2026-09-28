@@ -40,4 +40,6 @@ def test_cached_guest_waits_for_the_host_save_state():
 
 def test_guest_writes_host_save_ram_at_start_and_restores_its_own_at_stop():
     assert "_writeSaveRam(readyMod, _guestStateSaveRam, 'initial-sync-load')" in SRC
-    assert "_clearHostInitialStateWait();\n    _restoreLocalSaveFile();" in SRC
+    stop = SRC[SRC.index("  const stop = () => {") :]
+    assert stop.index("_restoreLocalSaveFile();") < stop.index("_flushSyncLog();")
+    assert "_clearHostInitialStateWait();\n    _restoreLocalSaveFile();\n    _flushSyncLog();" in stop
