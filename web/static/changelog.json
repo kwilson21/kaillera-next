@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.62.0",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "flag matches whose logs show a crash, freeze or desync (#54)"
+      }
+    ]
+  },
+  {
     "version": "0.61.0",
     "date": "2026-09-28",
     "changes": [
