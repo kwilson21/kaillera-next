@@ -237,7 +237,6 @@ checks.
 CREATE TABLE match_retention (
   match_id        TEXT PRIMARY KEY,
   room            TEXT NOT NULL,
-  slots           TEXT NOT NULL,          -- JSON array of slots allowed to upload
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   ended_at        TEXT,
   tier            TEXT NOT NULL DEFAULT 'normal',   -- 'normal' | 'flagged'
@@ -255,7 +254,6 @@ CREATE TABLE match_retention (
 );
 ```
 
-- `slots` grows when a late joiner or spectator claims a slot mid-match.
 - `ended_at` is set on `game-end` (same place as `set_session_ended`).
 - `last_touched_at` is updated on a flag, a resolve or unresolve, a manual
   note, and when an admin opens the match's detail.
@@ -413,12 +411,20 @@ made-up matches. After this change, the session-log HTTP fallback, the
 if all of these hold:
 
 - `match_retention` has the `match_id` (in-memory cache, D1 lookup on a miss,
-  negative results cached for 60 s);
+  hits and misses cached for 60 s);
 - its `room` equals the token's / sid's room;
-- `slot` is in `slots`;
+- `slot` is an integer 0–3 (HTTP fallback); Socket.IO screenshots must use
+  the sender's current slot;
 - `deleting_at` is NULL;
 - it is within 30 min of `ended_at`, or within 4 h of `created_at` if
   `ended_at` is NULL.
+
+A per-match slot list was dropped (shipped in §8 item 2): keeping it correct
+needs hooks at every slot change (mid-game join, claim-slot, host handover),
+and it only stops a room member writing under another slot of the same match.
+The Socket.IO session-log and screenshot handlers already require the room's
+live match id; the check above matters for the HTTP fallback, which accepts
+uploads after `end-game` clears it.
 
 Anything else is rejected before anything is written. Match ids are UUID4 and
 not guessable, so knowing a real match id requires having been in its room.
@@ -536,10 +542,10 @@ Remaining:
 1. `fix(logs)`: cap session-log `context` at 1.5 MB in both handlers
    (revision item 3) — #51.
 2. `feat(logs)`: `match_retention` registration at `start-game` and ingest
-   validation (§5); daily D1-rows (from `meta.rows_written`, needs D1Backend
-   to return `meta`) and R2-bytes budgets; and `cleanup_old_data` runs 60 s
-   after startup instead of after 24 h, so D1 is cleaned before the full
-   retention sweep lands.
+   validation (§5); and `cleanup_old_data` runs 60 s after startup instead of
+   after 24 h, so D1 is cleaned before the full retention sweep lands. The
+   daily D1-rows (from `meta.rows_written`, needs D1Backend to return `meta`)
+   and R2-bytes budgets follow as their own PR.
 3. `feat(logs)`: input audit as deltas (revision item 4): the client sends
    only new audit entries, stored as `kind = 'audit'` chunks, trimmed
    newest-kept; a dropped audit never overwrites a stored one. Changes the
