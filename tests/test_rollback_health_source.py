@@ -393,3 +393,25 @@ def test_rb_input_dc_close_routes_through_cleanup_and_reliable_fallback():
     close_idx = src.find("resetPeerRollbackTransport(peer, remoteSid, 'rb-dc-close');")
     close_window = src[close_idx - 300 : close_idx + 500]
     assert "resetPeerState(" not in close_window
+
+
+def test_start_wait_rtt_has_wall_clock_deadline():
+    # I1: checkAllLockstepReady's START-WAIT-RTT branch waits on _rttComplete
+    # with no deadline before #56 — a failed ping send or a DC closing
+    # mid-measurement could leave that wait unbounded forever.
+    src = LOCKSTEP_JS.read_text()
+    doc = INVARIANTS_DOC.read_text()
+
+    assert "const START_WAIT_RTT_MS = 5000;" in src
+    assert "START-WAIT-RTT-TIMEOUT" in src
+
+    doc_rows = [line for line in doc.splitlines() if "START_WAIT_RTT_MS" in line]
+    assert doc_rows, "I1 table missing a START_WAIT_RTT_MS row"
+    assert any("START-WAIT-RTT-TIMEOUT" in row for row in doc_rows)
+
+    # The send-failure path must route through the same completion helper as
+    # normal ("all peers done") completion, not just increment counters.
+    ping_idx = src.index("const sendNextPing = (peer) => {")
+    ping_src = src[ping_idx : src.index("const handleDelayPong", ping_idx)]
+    catch_src = ping_src[ping_src.index("} catch (_) {") :]
+    assert "_finishRttMeasurement(" in catch_src

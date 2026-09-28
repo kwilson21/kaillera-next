@@ -501,6 +501,35 @@
     sendNextPing(peer);
   };
 
+  // Shared by every path that can finish RTT measurement (all peers replied,
+  // a ping send failed, or START_WAIT_RTT_MS expired): compute the median
+  // over whatever samples exist and set _rttComplete. checkAllLockstepReady
+  // withholds lockstep-ready/start until _rttComplete, so re-check it here —
+  // this is the only place completion is decided, so there's no separate
+  // "announce" call to duplicate at each call site.
+  const _finishRttMeasurement = (reason) => {
+    if (_rttSamples.length > 0) {
+      _rttSamples.sort((a, b) => a - b);
+      const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
+      _rttMedian = median;
+      // Lockstep default — rollback-aware recalculation happens at game start
+      const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
+      if (window.setAutoDelay) window.setAutoDelay(delay);
+      _rttComplete = true;
+      _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay} (${reason})`);
+    } else {
+      // No samples at all (e.g. every send failed before ping 1) — leave
+      // _rttMedian at its 0 default, same as the pre-measurement state the
+      // rest of the code already treats as "no RTT data".
+      _rttComplete = true;
+      _syncLog(`RTT measurement complete with no samples (${reason})`);
+    }
+    if (_phase >= PHASE_LOCKSTEP_READY && _phase !== PHASE_RUNNING) {
+      broadcastLockstepReady();
+      checkAllLockstepReady();
+    }
+  };
+
   const sendNextPing = (peer) => {
     if (peer._rttPingCount >= 22) {
       peer._rttComplete = true;
@@ -512,16 +541,7 @@
       }
       _rttPeersComplete++;
       // When all peers are done, compute auto delay from max median across peers
-      if (_rttPeersComplete >= _rttPeersTotal) {
-        _rttSamples.sort((a, b) => a - b);
-        const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        _rttMedian = median;
-        // Lockstep default — rollback-aware recalculation happens at game start
-        const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
-        _rttComplete = true;
-        if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay}`);
-      }
+      if (_rttPeersComplete >= _rttPeersTotal) _finishRttMeasurement('all-peers-done');
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
       // transient latency spikes instead.
@@ -532,6 +552,10 @@
     } catch (_) {
       peer._rttComplete = true;
       _rttPeersComplete++;
+      // I1: a send failure must still reach "all peers done" — previously
+      // this only incremented counters, so a peer whose channel died mid-
+      // measurement left _rttComplete false forever (#56).
+      if (_rttPeersComplete >= _rttPeersTotal) _finishRttMeasurement('send-failure');
     }
   };
 
@@ -542,11 +566,7 @@
     if (peer._rttPingCount > 2) {
       peer._rttSamples.push(rtt);
     }
-    sendNextPing(peer);
-    if (_rttComplete && _phase >= PHASE_LOCKSTEP_READY) {
-      broadcastLockstepReady();
-      checkAllLockstepReady();
-    }
+    sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
   const KN_INPUT_MODEL = 2;
@@ -9159,6 +9179,22 @@
     }, syncTimeoutMs);
   };
 
+  // I1: the START-WAIT-RTT branch below waits on this peer's own RTT
+  // measurement (_rttComplete) before announcing lockstep-ready and
+  // starting — starting first would let this peer run ahead and send
+  // first inputs too early. _finishRttMeasurement normally sets
+  // _rttComplete once every peer's ping loop finishes or fails, but a DC
+  // that closes mid-measurement (never completing, never decrementing
+  // _rttPeersTotal) could leave that wait — and every other peer's
+  // broadcastLockstepReady() with it — unbounded. Finish with whatever
+  // samples arrived so far and start anyway.
+  const START_WAIT_RTT_MS = 5000;
+  let _startWaitRttTimer = null;
+  const _clearStartWaitRttTimer = () => {
+    if (_startWaitRttTimer) clearTimeout(_startWaitRttTimer);
+    _startWaitRttTimer = null;
+  };
+
   const checkAllLockstepReady = () => {
     if (_coreFatalError) return; // a dead core cannot enter the start sequence
     if (_phase < PHASE_LOCKSTEP_READY) return;
@@ -9177,6 +9213,15 @@
       if (!_startWaitRttLogged) {
         _startWaitRttLogged = true;
         _syncLog(`START-WAIT-RTT peers=${playerPeerSids.length} complete=${_rttPeersComplete}/${_rttPeersTotal}`);
+        const sid = _sessionId;
+        _startWaitRttTimer = setTimeout(() => {
+          _startWaitRttTimer = null;
+          if (sid !== _sessionId || _rttComplete || _phase < PHASE_LOCKSTEP_READY || _phase >= PHASE_RUNNING) return;
+          _syncLog(
+            `START-WAIT-RTT-TIMEOUT complete=${_rttPeersComplete}/${_rttPeersTotal} samples=${_rttSamples.length}`,
+          );
+          _finishRttMeasurement('start-wait-timeout');
+        }, START_WAIT_RTT_MS);
       }
       return;
     }
@@ -17248,6 +17293,7 @@
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
     _startWaitRttLogged = false;
+    _clearStartWaitRttTimer();
     _resetInputAudit();
     _deadbandStick.reset();
     _config = config;
@@ -17351,6 +17397,7 @@
     _rttComplete = false;
     _rttPeersComplete = 0;
     _rttPeersTotal = 0;
+    _clearStartWaitRttTimer();
 
     // Stop lockstep tick loop
     stopSync();
