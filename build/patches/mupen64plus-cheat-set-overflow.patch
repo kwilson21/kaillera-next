@@ -1,0 +1,11 @@
+--- a/libretro/libretro.c
++++ b/libretro/libretro.c
+@@ -2253,7 +2253,7 @@
+             matchLength++;
+         } else {
+             if (matchLength){
+-               char codePartS[matchLength];
++               char codePartS[matchLength + 1];
+                strncpy(codePartS,codeLine+cursor-matchLength,matchLength);
+                codePartS[matchLength]=0;
+                codeParts[partCount++]=strtoul(codePartS,NULL,16);

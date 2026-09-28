@@ -421,6 +421,14 @@ mupen64plus-core/src/main/%.o ./mupen64plus-core/src/main/%.o: CFLAGS := $(filte
             echo "    WARN: AI DMA determinism patch failed"
     fi
 
+    # retro_cheat_set: each hex part's stack buffer was one byte short for its
+    # NUL terminator (found by an ASan build, #52). A failed apply is fatal.
+    if [ -f "${PATCHES_DIR}/mupen64plus-cheat-set-overflow.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-cheat-set-overflow.patch" && \
+            echo "    Applied mupen64plus cheat set overflow patch" || \
+            { echo "FATAL: cheat set overflow patch failed"; exit 1; }
+    fi
+
     # RSP HLE audio determinism: mode 1=silent skip, mode 2=process+restore DRAM.
     # Applied via sed injection (patch format was fragile).
     if ! grep -q "kn_skip_rsp_audio" mupen64plus-rsp-hle/src/hle.c; then
@@ -481,6 +489,15 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
         git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
             { echo "FATAL: headless tick patch failed"; exit 1; }
+    fi
+
+    # Emscripten never reuses GL object ids, so GLideN64 program ids pass 1024
+    # within a match (#52); also bounds-checks the framebuffer blit table. A failed
+    # apply is fatal to prevent heap corruption.
+    if [ -f "${PATCHES_DIR}/mupen64plus-glsm-uniform-bounds.patch" ]; then
+        git apply "${PATCHES_DIR}/mupen64plus-glsm-uniform-bounds.patch" && \
+            echo "    Applied mupen64plus GLSM uniform bounds patch" || \
+            { echo "FATAL: GLSM uniform bounds patch failed"; exit 1; }
     fi
 
     # Replay RDP skip: keep RSP/core/GL cadence alive, but skip GLideN64
