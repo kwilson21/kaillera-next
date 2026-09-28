@@ -12,8 +12,9 @@ whichever server the hostname points to.
 - Socket.IO heartbeats count as traffic, so it never sleeps while anyone is
   connected.
 - It gets 750 free hours a month, enough to run all month.
-- Logs and the local SQLite database reset on every restart or deploy.
-  Gameplay doesn't depend on them.
+- The container's disk resets on every restart or deploy, so the database
+  lives in Cloudflare D1 instead (see below). Screenshots aren't stored
+  until blob storage lands. Gameplay doesn't depend on any of this.
 
 ## One-time setup (the owner)
 
@@ -31,6 +32,30 @@ whichever server the hostname points to.
 3. Wait for the first deploy, then open the service's
    `https://<name>.onrender.com` URL. The site works there before any DNS
    change.
+
+## Database in Cloudflare D1
+
+Without these three variables the server uses a local SQLite file, which
+Render wipes on every restart. With them, it uses the D1 database and
+applies `server/migrations/` there on startup.
+
+1. Create the database: `npx wrangler d1 create kaillera-next-logs` (or
+   Storage & Databases → D1 in the dashboard). Note its ID.
+2. Create an API token: My Profile → API Tokens → Create Custom Token,
+   permission **Account → D1 → Edit** on your account. A D1 token reaches
+   every D1 database on the account, so keep it only in Render and a local
+   `chmod 600` file.
+3. In Render → Environment, add **all three in one save**. With only some
+   set, the server refuses to start:
+   - `CF_ACCOUNT_ID`
+   - `D1_DATABASE_ID`
+   - `D1_API_TOKEN`
+4. Optional check from your machine, with the values in a file outside the
+   repo (the dev server loads `.env`, so don't put them there):
+   ```sh
+   cd server && (set -a; . ~/.config/kaillera-next/d1.env; set +a; \
+     KN_D1_LIVE=1 uv run --extra dev pytest ../tests/test_d1_live.py -q -s)
+   ```
 
 ## Pointing the domain at Render (owner's OK)
 
