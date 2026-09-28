@@ -23,18 +23,44 @@
  *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
- *   HOST_BROWSER=webkit   Run the host page in Playwright WebKit instead of
- *     Chromium (the guest always stays Chromium). Because a WebKit host and
- *     a Chromium guest boot the WASM core on different JIT engines, the
- *     guest legitimately diverges during boot and requests the host's state
- *     (`BOOT-SYNC: guest requesting host state`, then `sync #1 applied`);
- *     frames before that applied sync are excluded from the hash compare,
- *     the same way FREEZE mode excludes frames before its last resync.
+ *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
+ *     WebKit instead of Chromium (each defaults to Chromium independently,
+ *     so either or both can be WebKit; the Chromium default args —
+ *     swiftshader software GL — apply to whichever side stays Chromium).
+ *     When the two resolved engines differ (e.g. HOST_BROWSER=webkit with
+ *     GUEST_BROWSER unset), the WASM core boots on different JIT engines,
+ *     the guest legitimately diverges during boot and requests the host's
+ *     state (`BOOT-SYNC: guest requesting host state`, then `sync #1
+ *     applied`); frames before that applied sync are excluded from the hash
+ *     compare, the same way FREEZE mode excludes frames before its last
+ *     resync. When the two engines match (including WebKit on both sides),
+ *     no such exclusion applies — boot-window frames are compared like any
+ *     other, on the same basis as the Chromium/Chromium default. Chromium
+ *     software (swiftshader) GL caps two co-located emulators well under
+ *     60fps on some machines; WebKit on both sides can use the real GPU and
+ *     is the closer match to the reported prod case (iOS Safari, which is
+ *     WebKit).
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
- *     setInterval-driven tick callbacks to at most once per 33ms (a plain
- *     JS wrapper around window.setInterval, installed via an init script),
- *     modeling a device whose timers drop to ~30Hz. Forces the host into
- *     rollback bursts so replay-catch-up frames actually occur.
+ *     setInterval-driven tick callbacks to an average of THROTTLE_GUEST_HZ
+ *     (env, default 30) callbacks/s — a plain JS wrapper around
+ *     window.setInterval, installed via an init script, modeling a device
+ *     whose timers drop to that rate (scheduling detail in
+ *     throttleInitScript below). Forces the host into rollback bursts so
+ *     replay-catch-up frames actually occur.
+ *   MIN_GAME_FPS=<n>   Fail (exit 1) if either peer's measured game fps
+ *     (frames advanced / wall seconds, from the last non-replay
+ *     _kn_post_tick frame) drops below n, or is missing. The measurement
+ *     window is from ~15s into the battle (when THROTTLE_GUEST flips the
+ *     guest's cap) to the end of battle when THROTTLE_GUEST=1, else the
+ *     whole battle. Reported as `gameFps: {host, guest}` in summary.json,
+ *     alongside each peer's `pacing: {capsCount, capsFrames, summaries}` —
+ *     capsCount is pacing episodes started and capsFrames is paced (held)
+ *     tick calls, both summed from the unsampled per-300-frame `PACING
+ *     f=...` lines in the window (the rate-limited `PACING-THROTTLE
+ *     start/end` lines undercount episodes) — and each peer's cumulative
+ *     `TICK-PERF` scheduler counters (`droppedSlots`, `catchupFrames` — see
+ *     #47) under `schedulerCounters`: the session total as of the last
+ *     TICK-PERF line, not scoped to this window.
  *   VISUAL_CHECK=1   On both peers, piggyback on the existing _kn_post_tick
  *     hook: whenever idle (no replay in flight) and in battle, downscale
  *     `#game canvas` into an offscreen 48x36 canvas and keep its RGB bytes.
@@ -84,21 +110,56 @@ const FREEZE_MS = FREEZE_HOST_MS || FREEZE_GUEST_MS;
 const OUT = process.env.OUT || '/tmp/two-player';
 const QUERY = process.env.KN_QUERY || '';
 const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
+const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
+const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
+const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
+
+// Validate knobs before launching anything: a typo here should fail fast,
+// not surface as a confusing result after minutes of gameplay.
+for (const [name, value] of [
+  ['HOST_BROWSER', HOST_BROWSER],
+  ['GUEST_BROWSER', GUEST_BROWSER],
+]) {
+  if (value !== 'chromium' && value !== 'webkit') {
+    console.log(`${name}=${value} invalid — must be exactly "chromium" or "webkit"`);
+    process.exit(1);
+  }
+}
+if (MIN_GAME_FPS !== null && !(Number.isFinite(MIN_GAME_FPS) && MIN_GAME_FPS > 0)) {
+  console.log(`MIN_GAME_FPS=${process.env.MIN_GAME_FPS} invalid — must be a finite number > 0`);
+  process.exit(1);
+}
+if (!Number.isFinite(THROTTLE_GUEST_HZ) || THROTTLE_GUEST_HZ <= 0) {
+  console.log(`THROTTLE_GUEST_HZ=${process.env.THROTTLE_GUEST_HZ} invalid — must be a finite number > 0`);
+  process.exit(1);
+}
+if (THROTTLE_GUEST && !(BATTLE_SECONDS > 15)) {
+  console.log(`THROTTLE_GUEST=1 needs BATTLE_SECONDS > 15 (the throttle flips 15s in) — got ${BATTLE_SECONDS}`);
+  process.exit(1);
+}
+
 fs.mkdirSync(OUT, { recursive: true });
 const room = 'TP' + Math.random().toString(36).slice(2, 8).toUpperCase();
 
 const HEADLESS = process.env.HEADED !== '1';
-const guestBrowser = await chromium.launch({
-  headless: HEADLESS,
-  ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-  args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'],
-});
-// HOST_BROWSER=webkit: the host runs a different JS engine/JIT than the
-// guest, which is the realistic case for two different players' devices.
-// Falls back to the same Chromium instance when unset.
-const hostBrowser = HOST_BROWSER === 'webkit' ? await webkit.launch({ headless: HEADLESS }) : guestBrowser;
+// Chromium is forced onto swiftshader software GL (see the
+// HOST_BROWSER/GUEST_BROWSER doc above). Both launchers are lazy and
+// memoized to at most one instance each, so the default (both sides
+// unset) shares a single Chromium instance and a WebKit/WebKit run never
+// launches an unused Chromium.
+let _chromiumBrowser = null;
+const chromiumBrowser = async () =>
+  (_chromiumBrowser ??= await chromium.launch({
+    headless: HEADLESS,
+    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'],
+  }));
+let _webkitBrowser = null;
+const webkitBrowser = async () => (_webkitBrowser ??= await webkit.launch({ headless: HEADLESS }));
+const hostBrowser = HOST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
+const guestBrowser = GUEST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 
 const initScript = ({ lat, jitter }) => {
   // Simulated network: delay every outgoing DataChannel message.
@@ -127,37 +188,44 @@ const initScript = ({ lat, jitter }) => {
   };
 };
 
-// Caps setInterval-driven callbacks to at most once per `minMs`, once
-// `window.__knThrottle` is flipped true. Below the cap (or before the flag
-// flips) every call passes through unchanged — this never speeds anything
-// up, only occasionally skips a callback once throttling is enabled.
-const throttleInitScript = () => {
+// Caps setInterval-driven callbacks to an average of `hz` calls/sec, once
+// `window.__knThrottle` is flipped true. Before the flag flips every call
+// passes through unchanged — this never speeds anything up.
+//
+// Fixed schedule, not a since-last-call gate: the engine's tick pump fires
+// on a 6ms grid, so a since-last-call gate rounds gaps up to the next
+// step — a 33ms gate delivers ~25Hz, not 30. Advancing a fixed `next` by
+// `period` keeps the average exact regardless of which 6ms tick a call
+// lands on, resetting after a long pause instead of bursting through it.
+const throttleInitScript = (hz) => {
   window.__knThrottle = false;
+  const period = 1000 / hz;
   const orig = window.setInterval;
   window.setInterval = function (fn, delay, ...args) {
-    let last = 0;
+    let next = 0;
     const wrapped = (...a) => {
-      const now = performance.now();
-      const minDelay = window.__knThrottle ? 33 : 0;
-      if (now - last < minDelay) return;
-      last = now;
+      if (window.__knThrottle) {
+        const now = performance.now();
+        if (now < next) return;
+        next = next + period > now ? next + period : now + period;
+      }
       fn(...a);
     };
     return orig.call(window, wrapped, delay, ...args);
   };
 };
 
-const mkPage = async (browser, name, { throttle = false } = {}) => {
+const mkPage = async (browser, name, { throttleHz = 0 } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
-  if (throttle) await ctx.addInitScript(throttleInitScript);
+  if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
 };
 
 const host = await mkPage(hostBrowser, 'host');
-const guest = await mkPage(guestBrowser, 'guest', { throttle: THROTTLE_GUEST });
+const guest = await mkPage(guestBrowser, 'guest', { throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : 0 });
 await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
@@ -178,8 +246,16 @@ while (Date.now() - t0 < 60000) {
         .click({ force: true })
         .catch(() => {});
   }
+  // Also require EJS_emulator.gameManager.Module: on WebKit, currentFrame can
+  // go truthy a tick before gameManager is attached (seen with
+  // GUEST_BROWSER=webkit — install() below reads gameManager.Module and
+  // threw `undefined is not an object`). Harmless extra check on Chromium.
   const ready = await Promise.all(
-    [host, guest].map((p) => p.evaluate(() => !!window.NetplayRollback?.getHudCounters?.()?.currentFrame)),
+    [host, guest].map((p) =>
+      p.evaluate(
+        () => !!window.NetplayRollback?.getHudCounters?.()?.currentFrame && !!window.EJS_emulator?.gameManager?.Module,
+      ),
+    ),
   );
   if (ready[0] && ready[1]) break;
   await host.waitForTimeout(500);
@@ -200,6 +276,7 @@ const install = async (p, role) => {
         btnCool: 0,
         btnHeld: 0,
         visualFrames: [],
+        fpsWindowStart: null,
       });
       let visCtx = null;
       if (VISUAL_CHECK) {
@@ -210,6 +287,15 @@ const install = async (p, role) => {
       }
       const rb = window.NetplayRollback;
       const frameNow = () => rb.getHudCounters?.()?.currentFrame ?? 0;
+      // Marks the start of the game-fps measurement window: the node script
+      // calls this either right when the battle begins (no THROTTLE_GUEST —
+      // measure the whole battle) or when it flips the guest's setInterval
+      // cap (THROTTLE_GUEST — measure only the throttled window). Frame
+      // count is the last non-replay _kn_post_tick frame (W.lastR, set
+      // below) — getHudCounters().currentFrame is rewound mid-replay.
+      window.__tp.markFpsWindowStart = () => {
+        W.fpsWindowStart = { f: W.lastR ?? frameNow(), t: performance.now() };
+      };
       const pilot = window.KNMenuAutopilot.create({ read32: (a) => rb.readRdram32(a), log: (m) => (W.pilotFail = m) });
       const actor = role === 'host' ? pilot.p1 : pilot.p2;
       let held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
@@ -300,6 +386,7 @@ const tb = Date.now();
 const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
 let lastLog = 0;
 let inBattle = false;
+let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 for (;;) {
   const s = await Promise.all(
     [host, guest].map((p) =>
@@ -334,17 +421,36 @@ if (inBattle) {
   console.log('in battle; playing', BATTLE_SECONDS, 's');
   if (THROTTLE_GUEST) {
     // Fire-and-forget: flips the guest's throttle flag ~15s into the
-    // battle without blocking the battle-length wait below.
+    // battle without blocking the battle-length wait below. Marks the
+    // game-fps measurement window start on both peers at the same moment,
+    // so gameFps is measured only over the throttled window (see
+    // MIN_GAME_FPS in the header doc). Records success in throttleFlipped
+    // so a failed flip fails the run below instead of silently comparing
+    // an unthrottled guest against MIN_GAME_FPS.
     setTimeout(() => {
-      guest
-        .evaluate(() => {
+      Promise.all([
+        guest.evaluate(() => {
           window.__knThrottle = true;
-        })
-        .then(
-          () => console.log('THROTTLE_GUEST: guest capped to ~30Hz'),
-          (e) => console.log('THROTTLE_GUEST: failed to flip flag', e.message),
-        );
+          window.__tp.markFpsWindowStart();
+        }),
+        host.evaluate(() => window.__tp.markFpsWindowStart()),
+      ]).then(
+        () => {
+          throttleFlipped = true;
+          console.log(`THROTTLE_GUEST: guest capped to ~${THROTTLE_GUEST_HZ}Hz; fps window started`);
+        },
+        (e) => {
+          throttleFlipped = false;
+          console.log('THROTTLE_GUEST: failed to flip flag/mark window', e.message);
+        },
+      );
     }, 15000);
+  } else {
+    // No throttle knob: measure game fps over the whole battle.
+    await Promise.all([
+      host.evaluate(() => window.__tp.markFpsWindowStart()),
+      guest.evaluate(() => window.__tp.markFpsWindowStart()),
+    ]);
   }
   if (FREEZE_MS > 0) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
@@ -362,6 +468,10 @@ if (inBattle) {
 
 const collect = (p, VISUAL_CHECK) =>
   p.evaluate((VISUAL_CHECK) => {
+    const fpsWindowEnd = {
+      f: window.__tp.lastR ?? window.NetplayRollback.getHudCounters().currentFrame,
+      t: performance.now(),
+    };
     const m = window.EJS_emulator.gameManager.Module;
     let visual = null;
     if (VISUAL_CHECK) {
@@ -383,6 +493,8 @@ const collect = (p, VISUAL_CHECK) =>
       hashes: window.__tp.hashes,
       inBattleAt: window.__tp.inBattleAt,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
+      fpsWindowStart: window.__tp.fpsWindowStart,
+      fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
@@ -400,13 +512,12 @@ fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
 // Freeze mode: peers legitimately diverge while the host is a phantom, so
 // only frames from the guest's last applied resync onward must match.
-// Cross-engine boot (HOST_BROWSER=webkit): a WebKit host and a Chromium
-// guest JIT the WASM core differently, so the guest legitimately diverges
-// during boot and requests the host's state (BOOT-SYNC ->
-// `sync #1 applied`); only frames from that applied sync onward must match,
-// the same exclusion mechanism as FREEZE mode's recoveredAt.
+// Cross-engine boot (see HOST_BROWSER/GUEST_BROWSER doc above): frames
+// before the guest's applied BOOT-SYNC are excluded the same way — never
+// widen this to a same-engine run, where a boot-window mismatch is real.
+const crossEngine = hostBrowser !== guestBrowser;
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
-const bootSyncFrame = HOST_BROWSER === 'webkit' && resyncs.length ? resyncs[0] : 0;
+const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
 const recoveredAt = FREEZE_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : bootSyncFrame;
 let both = 0,
   gpMis = 0,
@@ -441,6 +552,55 @@ const INTEGRITY =
   /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
+
+// Game fps over the measurement window (see MIN_GAME_FPS doc above): frames
+// advanced (last non-replay _kn_post_tick frame) / wall seconds, per peer.
+const gameFpsOf = (peer) => {
+  const start = peer.fpsWindowStart;
+  const end = peer.fpsWindowEnd;
+  if (!start || !end || end.t <= start.t) return null;
+  return +(((end.f - start.f) * 1000) / (end.t - start.t)).toFixed(1);
+};
+const gameFps = { host: gameFpsOf(H), guest: gameFpsOf(G) };
+
+// Pacing episodes within the measurement window, from the unsampled
+// per-300-frame `PACING f=...` summary lines (#47) in each peer's own sync
+// log (t is that page's performance.now(), same clock as fpsWindowStart) —
+// not the `PACING-THROTTLE start/end` lines, which are rate-limited to 1/s
+// and so miss most episodes on a busy peer. Each summary line's
+// capsCount/capsFrames cover the 300 frames preceding it.
+const pacingInWindow = (peer) => {
+  const start = peer.fpsWindowStart;
+  if (!start) return null;
+  const lines = peer.sync.split('\n').filter((l) => {
+    if (!l.includes('PACING f=')) return false;
+    const t = parseFloat(l.split('\t')[1]);
+    return Number.isFinite(t) && t >= start.t;
+  });
+  let capsCount = 0,
+    capsFrames = 0;
+  for (const l of lines) {
+    const m = l.match(/capsCount=(\d+) capsFrames=(\d+)/);
+    if (m) {
+      capsCount += +m[1];
+      capsFrames += +m[2];
+    }
+  }
+  return { capsCount, capsFrames, summaries: lines.length };
+};
+const pacing = { host: pacingInWindow(H), guest: pacingInWindow(G) };
+
+// Cumulative scheduler counters from the last TICK-PERF line (#47):
+// droppedSlots (backlog drops) and catchupFrames (extra forward frames run
+// to catch up a throttled pump) — never reset, so this is the session
+// total, not scoped to the fps window.
+const lastTickPerf = (log) => {
+  const matches = [...log.matchAll(/TICK-PERF f=(\d+).*?droppedSlots=(\d+) catchupFrames=(\d+)/g)];
+  if (!matches.length) return null;
+  const m = matches[matches.length - 1];
+  return { f: +m[1], droppedSlots: +m[2], catchupFrames: +m[3] };
+};
+const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sync) };
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
 const spanFrom = Math.max(battleFrom, recoveredAt);
@@ -525,8 +685,14 @@ const summary = {
   ...(FREEZE_MS > 0
     ? { freezeHostMs: FREEZE_HOST_MS, freezeGuestMs: FREEZE_GUEST_MS, guestResyncs: resyncs, comparedFrom: recoveredAt }
     : {}),
-  ...(HOST_BROWSER === 'webkit' ? { hostBrowser: HOST_BROWSER, bootSyncFrame } : {}),
-  ...(THROTTLE_GUEST ? { throttleGuest: true } : {}),
+  ...(HOST_BROWSER !== 'chromium' || GUEST_BROWSER !== 'chromium'
+    ? { hostBrowser: HOST_BROWSER, guestBrowser: GUEST_BROWSER, crossEngine, ...(crossEngine ? { bootSyncFrame } : {}) }
+    : {}),
+  ...(THROTTLE_GUEST ? { throttleGuest: true, throttleGuestHz: THROTTLE_GUEST_HZ, throttleFlipped } : {}),
+  ...(MIN_GAME_FPS !== null ? { minGameFps: MIN_GAME_FPS } : {}),
+  gameFps,
+  pacing,
+  schedulerCounters,
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks },
   failedRollbacks: { host: H.failed, guest: G.failed },
@@ -549,8 +715,10 @@ const summary = {
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
-await guestBrowser.close();
-if (hostBrowser !== guestBrowser) await hostBrowser.close();
+// Close each distinct browser instance once (host and guest may share one,
+// e.g. the Chromium/Chromium default, or both resolve to the one WebKit
+// instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
+for (const b of new Set([hostBrowser, guestBrowser])) await b.close();
 // A freeze makes deep mispredictions and skipped rollbacks expected before
 // the resync; what must hold is that the resync happened, fixed it, and held:
 // no integrity events once recovery settled (each peer's lines after its last
@@ -599,6 +767,10 @@ const integrityFailed =
   FREEZE_MS > 0
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
     : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
+const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
+if (minGameFpsFailed) {
+  console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
+}
 const failed =
   gpMis > 0 ||
   gsMis > 0 ||
@@ -606,5 +778,7 @@ const failed =
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||
-  (VISUAL_CHECK && visualCheck.corrupted > 0);
+  (VISUAL_CHECK && visualCheck.corrupted > 0) ||
+  minGameFpsFailed ||
+  (THROTTLE_GUEST && !throttleFlipped);
 process.exit(failed ? 1 : 0);

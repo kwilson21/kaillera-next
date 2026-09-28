@@ -1448,10 +1448,14 @@
         gameFps,
         // Where missing frames went: stall ticks each spend a slot waiting
         // on remote input (gap = a lost packet at the window edge, else the
-        // peer is too far behind); droppedSlots is the session total the
-        // scheduler skipped while too far behind.
+        // peer is too far behind) — a stalled #47 catch-up attempt is
+        // recorded here too but spends no slot, so stalls.ticks can exceed
+        // the slots stalls actually cost. droppedSlots is the session total
+        // the scheduler skipped while too far behind; catchupFrames is the
+        // session total of extra forward frames the pump ran to catch up.
         stalls: { ticks: stall.length, gap: stall.filter((r) => r.gap).length, adv: stats(pickField(stall, 'adv')) },
         droppedSlots: typeof _tickDroppedSlots === 'number' ? _tickDroppedSlots : null,
+        catchupFrames: typeof _tickCatchupFrames === 'number' ? _tickCatchupFrames : null,
         pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length, stall: stall.length },
         normal: {
           total: stats(pickField(normal, 'total')),
@@ -5723,6 +5727,9 @@
   let _tickReplayOnly = false; // last tick only re-simulated; the 60 Hz slot is unspent
   const TICK_MAX_BACKLOG_SLOTS = 12; // was 4, which a 5+ frame rollback's replay could exceed
   let _tickDroppedSlots = 0; // slots skipped by the backlog reset (reported in knTickProfileSummary)
+  // Work one pump may have done before it skips the #47 catch-up frame (see the pump).
+  const TICK_CATCHUP_BUDGET_MS = TICK_TARGET_MS;
+  let _tickCatchupFrames = 0; // extra forward frames run to catch up a throttled pump (reported in knTickProfileSummary)
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -6617,6 +6624,19 @@
     _pacingSuppressedLogs = 0;
     _pacingLastLogAt = now;
     _syncLog(`${msg}${suffix}`);
+  };
+  // Periodic pacing summary (~5s): averages/caps over the preceding 300 frames, then resets the window.
+  const _logPacingSummary = () => {
+    if (_pacingAdvCount <= 0) return;
+    const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
+    _syncLog(
+      `PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`,
+    );
+    _pacingCapsCount = 0;
+    _pacingCapsFrames = 0;
+    _pacingMaxAdv = 0;
+    _pacingAdvSum = 0;
+    _pacingAdvCount = 0;
   };
 
   let _inDeterministicStep = false; // gate for performance.now() override during frame step
@@ -12430,12 +12450,17 @@
     // forces the JSC peer to run at ~50fps and makes faster peers throttle
     // down. Pump more frequently, but advance at most one simulation frame
     // per 60Hz deadline so the game cadence stays correct.
+    //
+    // #47: some devices cap setInterval this hard — prod saw an iPhone
+    // Safari pump settle at ~30 Hz with only ~6ms of work per frame, which
+    // capped the whole match at ~30 game fps. See the catch-up branch below.
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
       if (_externalTickPaused) return;
       const now = performance.now();
       if (now + 0.25 < _tickNextAt) return;
+      let frameBeforeTick = _frameNum;
       tick();
       // A replay tick re-simulates past frames and leaves the game where it
       // was, so it must not use up this 60 Hz slot: keep ticking (replay
@@ -12450,6 +12475,7 @@
         !_externalTickPaused &&
         performance.now() - now < TICK_REPLAY_PUMP_BUDGET_MS
       ) {
+        frameBeforeTick = _frameNum;
         tick();
       }
       if (_tickReplayOnly) return;
@@ -12461,6 +12487,26 @@
       if (after - _tickNextAt > TICK_TARGET_MS * TICK_MAX_BACKLOG_SLOTS) {
         _tickDroppedSlots += Math.floor((after - _tickNextAt) / TICK_TARGET_MS);
         _tickNextAt = after + TICK_TARGET_MS;
+      } else if (
+        after - _tickNextAt >= TICK_TARGET_MS &&
+        after - now < TICK_CATCHUP_BUDGET_MS &&
+        _frameNum > frameBeforeTick
+      ) {
+        // #47: runs at most one extra forward frame, only when the tick
+        // that ended this pump's regular path advanced a frame, the
+        // schedule is still a full slot behind, and the pump has spent less
+        // than one slot of wall time so far (measured from pump start, so
+        // replay work above counts against it). Bounded because it's a
+        // single call, never looped — a far-behind pump is handled by the
+        // backlog-drop branch above instead. A catch-up call that doesn't
+        // advance (stall, pacing hold, replay) spends no slot, so the
+        // schedule is left as if it hadn't run.
+        const _frameBeforeCatchup = _frameNum;
+        tick();
+        if (!_tickReplayOnly && _frameNum > _frameBeforeCatchup) {
+          _tickCatchupFrames++;
+          _tickNextAt += TICK_TARGET_MS;
+        }
       }
     }, TICK_PUMP_INTERVAL_MS);
     _syncLog(`tick scheduler target=${TICK_TARGET_MS.toFixed(2)}ms pump=${TICK_PUMP_INTERVAL_MS}ms`);
@@ -13940,8 +13986,11 @@
           }
           _syncLog(
             `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
-              `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
+              `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay} ` +
+              `droppedSlots=${_tickDroppedSlots} catchupFrames=${_tickCatchupFrames}`,
           );
+          // Also called from the JS lockstep path's `_frameNum % 300` block, which C-rollback ticks never reach.
+          _logPacingSummary();
         }
         // Reset deadlock recovery flag periodically — without this, a single
         // 3s stall permanently disables lockstep enforcement. Re-stall every
@@ -16172,17 +16221,8 @@
         );
       }
       // Periodic pacing summary (~5s)
-      if (_frameNum % 300 === 0 && _pacingAdvCount > 0) {
-        const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
-        _syncLog(
-          `PACING f=${_frameNum} avgAdv=${avgAdv} maxAdv=${_pacingMaxAdv.toFixed(1)} capsCount=${_pacingCapsCount} capsFrames=${_pacingCapsFrames}`,
-        );
-        // Reset window
-        _pacingCapsCount = 0;
-        _pacingCapsFrames = 0;
-        _pacingMaxAdv = 0;
-        _pacingAdvSum = 0;
-        _pacingAdvCount = 0;
+      if (_frameNum % 300 === 0) {
+        _logPacingSummary();
       }
       // Mesh health check (~5s): reconcile _knownPlayers (server truth) against
       // actual DC state. Re-initiate connections to players the server says are
