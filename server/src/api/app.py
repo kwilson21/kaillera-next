@@ -62,7 +62,7 @@ from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
     _sanitize_log_blob,
-    _session_log_entries_json,
+    _session_log_entries,
     connected_players,
     room_frame,
     room_host_name,
@@ -121,6 +121,11 @@ async def cleanup_old_data() -> None:
                 "client_events",
                 "screenshots",
                 "desync_events",
+                # Delta chunks (see migration 0008) accumulate independently
+                # of their parent session_logs row's created_at/updated_at,
+                # so they need their own retention sweep or they'd outlive
+                # every other table here.
+                "session_log_chunks",
             ):
                 await db.execute_write(
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
@@ -1035,7 +1040,10 @@ def create_app(lifespan=None) -> FastAPI:
     # Mirrors the Socket.IO session-log handler but over HTTP.
     # Used when socket.emit fails (browser quirks, transport issues).
 
-    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024  # 2MB — same as Socket.IO handler
+    # 2MB — the Socket.IO handler's own cap (_SESSION_LOG_MAX in signaling.py)
+    # is 12MB; this HTTP fallback path keeps a tighter limit since it only
+    # exists to catch flushes the socket path couldn't deliver.
+    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024
 
     def _require_upload_token_relaxed(request: Request) -> None:
         """Verify upload token HMAC without requiring the room to still exist."""
@@ -1066,10 +1074,10 @@ def create_app(lifespan=None) -> FastAPI:
         slot = data.get("slot")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
+        epoch = str(data.get("epoch", ""))[:64]
 
-        # Newest entries win, as in the Socket.IO handler (this used to keep
-        # the oldest half on overflow).
-        log_data_str = _session_log_entries_json(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
+        # Newest entries win, as in the Socket.IO handler.
+        entries = _session_log_entries(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
         context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})
@@ -1095,21 +1103,22 @@ def create_app(lifespan=None) -> FastAPI:
                 context_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
-        await db.upsert_session_log(
+        last_seq = await db.append_session_log(
             {
                 "match_id": match_id,
                 "room": room_id,
                 "slot": slot,
                 "player_name": player_name,
                 "mode": mode,
-                "log_data": log_data_str,
+                "entries": entries,
+                "epoch": epoch,
                 "summary": summary_str,
                 "context": context_str,
                 "ip_hash": hashed_ip,
             }
         )
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
-        return {"status": "saved"}
+        return {"status": "saved", "lastSeq": last_seq}
 
     # ── ROM hash table ──────────────────────────────────────────────────
 
@@ -1324,10 +1333,15 @@ def create_app(lifespan=None) -> FastAPI:
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
-        for field in ("log_data", "summary", "context"):
+        raw_log_data = entry.get("log_data")
+        for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
                     entry[field] = json.loads(entry[field])
+        # log_data is now legacy full-blob entries (if any) plus appended
+        # session_log_chunks — assembled here so the response shape (a plain
+        # list of entries) is unchanged for callers.
+        entry["log_data"] = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), raw_log_data)
 
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
@@ -1403,16 +1417,10 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
 
-        # Pre-parse the JSON-stored fields. log_data is a JSON array of
-        # entries; summary and context are JSON objects.
-        log_data = entry.get("log_data") or "[]"
-        if isinstance(log_data, str):
-            try:
-                log_data = json.loads(log_data)
-            except json.JSONDecodeError:
-                log_data = []
-        if not isinstance(log_data, list):
-            log_data = []
+        # Pre-parse the JSON-stored fields. log_data is legacy full-blob
+        # entries (if any) plus appended session_log_chunks; summary and
+        # context are JSON objects.
+        log_data = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), entry.get("log_data"))
 
         summary = entry.get("summary") or "{}"
         if isinstance(summary, str):

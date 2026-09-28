@@ -8,12 +8,13 @@ backfills (`python -m src.match_rotation`).
 
 Why this exists
 ---------------
-Every match's session log lives in `session_logs.log_data` as a JSON
-array string — which is fine for ingestion (small, append-only writes
-per peer) but awful for analysis. Every admin query currently has to
-re-parse the blob on every request. Worse, as soon as we want
+Every match's session log lives as `session_logs.log_data` (legacy full
+blobs, pre delta-flush) plus its `session_log_chunks` rows (see
+db.get_full_log_entries) — which is fine for ingestion (small, append-only
+writes per peer) but awful for analysis. Every admin query currently has to
+reassemble and re-parse that on every request. Worse, as soon as we want
 cross-match aggregates (rollback success rates over time, desync
-counts by game mode, etc.) we'd be re-parsing every blob every time.
+counts by game mode, etc.) we'd be redoing that work every time.
 
 Rotation does that parsing exactly once per match and writes two
 artifacts:
@@ -251,18 +252,12 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
 # ── Core rotation logic ──────────────────────────────────────────────────────
 
 
-def _merge_entries(session_rows: list[dict]) -> list[dict]:
-    """Flatten all peers' log_data arrays into one list, stamping per-row metadata."""
+async def _merge_entries(session_rows: list[dict]) -> list[dict]:
+    """Flatten all peers' log entries (legacy log_data + chunks) into one list,
+    stamping per-row metadata."""
     merged: list[dict] = []
     for r in session_rows:
-        log_data = r.get("log_data") or "[]"
-        if isinstance(log_data, str):
-            try:
-                log_data = json.loads(log_data)
-            except json.JSONDecodeError:
-                log_data = []
-        if not isinstance(log_data, list):
-            continue
+        log_data = await db.get_full_log_entries(r.get("match_id"), r.get("slot"), r.get("log_data"))
         stamp = {
             "session_id": r.get("id"),
             "match_id": r.get("match_id"),
@@ -288,7 +283,7 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
         log.warning("rotate_match: no session_logs rows for match %s", match_id[:8])
         return None
 
-    merged = _merge_entries(rows)
+    merged = await _merge_entries(rows)
     # Earliest created_at across peers determines the partition month.
     created_at = min((r.get("created_at") or "") for r in rows) or None
 
