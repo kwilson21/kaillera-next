@@ -6374,6 +6374,10 @@
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
+  // A resync state at most this many frames ahead of the guest is held until the
+  // guest reaches its frame instead of applying at once (see tick()). Larger
+  // gaps (boot sync) realign the guest's frame counter in applySyncState.
+  const SYNC_HOLD_MAX_FRAMES = 2;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
   // host: in-flight state pushes don't requeue after the queue was cleared,
   // per sid (resetPeerState) or for the whole match (stop).
@@ -12912,6 +12916,19 @@
       if (_frameNum >= _syncTargetFrame) {
         if (_pendingResyncState && syncApplyBlocked) {
           // Replay in flight: apply on a later tick (bounded, see above).
+        } else if (
+          _pendingResyncState &&
+          _pendingResyncState.frame > _frameNum &&
+          _pendingResyncState.frame - _frameNum <= SYNC_HOLD_MAX_FRAMES
+        ) {
+          // The state is from a later frame than the target (a newer push
+          // replaced a held one, or the capture ran late): move the target to
+          // it, as the non-coordinated branch below does. Same deadline.
+          _pendingResyncState.held = true;
+          _syncTargetFrame = _pendingResyncState.frame;
+          if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+          _syncLog(`sync held: state frame ${_syncTargetFrame} is past target, f=${_frameNum}`);
         } else if (_pendingResyncState) {
           // State arrived on time — apply at the agreed frame
           const pending = _pendingResyncState;
@@ -12931,11 +12948,27 @@
       }
       // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
     } else if (_pendingResyncState && !syncApplyBlocked) {
-      // Non-coordinated (proactive push, reconnect, visibility/network-change): apply now
+      // Non-coordinated (proactive push, reconnect, visibility/network-change).
+      // A state from a frame this peer hasn't reached yet is held until it
+      // gets there, as a coordinated sync would be. Applied early, the loaded
+      // state was a frame ahead of the counter, which the counter never caught
+      // up with: `sync #N applied (frame X+1 -> X)` started a permanent desync
+      // in the two-player run on PR #37. Jumping the counter forward instead
+      // would skip this peer's input for the frames in between, which the
+      // other peers have predicted. The deadline is the coordinated one
+      // (COORD-SYNC-TIMEOUT above), after which the state applies here.
       const pending = _pendingResyncState;
-      _pendingResyncState = null;
-      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-      applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
+      if (!pending.held && ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES) {
+        pending.held = true;
+        _syncTargetFrame = pending.frame;
+        _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
+      } else {
+        _pendingResyncState = null;
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      }
     }
 
     _chk('post-sync-target');
@@ -16656,10 +16689,9 @@
   const applySyncState = (bytes, frame, fromProactive = false) => {
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
-    // never fires mid-tick or mid-input-processing.
-    //
-    // KEY INSIGHT: The frame counter is only used for input synchronization.
-    // By keeping _frameNum where it is, input buffers stay valid and no stall.
+    // never fires mid-tick or mid-input-processing. The kn_sync path moves
+    // _frameNum to the state's frame (see below); the loadState fallback
+    // keeps it where it is.
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
 
@@ -16742,12 +16774,14 @@
         }
       }
 
-      // For boot sync (first alignment from divergent boot state), reset
-      // frame counter to the host's frame. Without this, the guest keeps
-      // its old _frameNum while the emulator state is from the host's frame,
-      // causing input mapping mismatch. Only done when the frame gap is
-      // large (boot sync) — not for normal resyncs where frames are close.
-      if (frame != null && mod._kn_set_frame && Math.abs(_frameNum - frame) > 2) {
+      // The loaded state is at the host's `frame`, so the counter must be
+      // too, whatever the gap. Without this the guest keeps its old _frameNum
+      // under the host's state and applies each frame's inputs to the wrong
+      // frame. Small gaps used to keep the old counter, a permanent desync
+      // one frame off; a state ahead of the guest is now held in tick() until
+      // the guest reaches it, so a forward gap only lands here after that
+      // hold timed out. Backward gaps replay frames whose inputs were sent.
+      if (frame != null && mod._kn_set_frame && _frameNum !== frame) {
         const oldFrame = _frameNum;
         _frameNum = frame;
         KNState.frameNum = frame;
@@ -16761,7 +16795,7 @@
         _resetStrictMenuResends();
         _clearStrictMenuWait();
         _bootStallRecoveryFired = false;
-        _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
+        _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
         // Arm post-sync diagnostic burst: log full state hash for 10 frames
         window._knPostSyncDiagFrames = 10;
       }
