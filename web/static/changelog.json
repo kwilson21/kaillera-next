@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.59.3",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "backport GLideN64 vertex bounds fixes (garbage stage geometry) (#42)"
+      }
+    ]
+  },
+  {
     "version": "0.59.2",
     "date": "2026-09-28",
     "changes": [
