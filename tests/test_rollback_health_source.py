@@ -1,4 +1,7 @@
+import json
 import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 
@@ -466,3 +469,54 @@ def test_start_wait_rtt_timer_does_not_gate_on_phase_floor():
     assert "_rttComplete" in timer_src
     assert "_phase >= PHASE_RUNNING" in timer_src
     assert "_finishRttMeasurement(" in timer_src
+
+
+def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
+    # Nonzero-frame rollback inits (RB-INIT-CATCHUP, the remixMenuLockstep
+    # deferred init, RB-INIT-TIMEOUT at f>0) left remote frames past the init
+    # frame that arrived before init JS-only: the receive path dedups later
+    # copies against _remoteInputs, so C predicted them and never verified.
+    # Past _frameNum a ZERO_INPUT placeholder (late join) must stay unfed.
+    src = LOCKSTEP_JS.read_text()
+    helper_start = src.index("const INPUT_PAST_WINDOW_FRAMES =")
+    helper_end = src.index("// -- Audio (delegated", helper_start)
+    helpers = src[helper_start:helper_end]
+    script = textwrap.dedent(
+        f"""
+        const calls = [];
+        const _rbRollbackMax = 12;
+        const DELAY_FRAMES = 3;
+        const _frameNum = 900;
+        const _playerSlot = 0;
+        const _localInputs = {{}};
+        const _remoteInputs = {{ 1: {{}} }};
+        const _syncLog = () => {{}};
+        const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
+        const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
+        for (let frame = 890; frame <= 910; frame++) {{
+          _remoteInputs[1][frame] = {{ buttons: frame, lx: 0, ly: 0, cx: 0, cy: 0 }};
+        }}
+        _remoteInputs[1][889] = KNShared.ZERO_INPUT;
+        _remoteInputs[1][920] = KNShared.ZERO_INPUT;
+        _remoteInputs[1][963] = {{ buttons: 963, lx: 0, ly: 0, cx: 0, cy: 0 }};
+        _remoteInputs[1][964] = {{ buttons: 964, lx: 0, ly: 0, cx: 0, cy: 0 }};
+        eval({json.dumps(helpers)} + "\\n_backfillCInputsFromJs(mod, 'rollback-init');");
+        process.stdout.write(JSON.stringify(calls.map((call) => [call[0], call[1]])));
+        """
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    fed = json.loads(result.stdout)
+    assert fed == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
+
+    assert "_backfillCInputsFromJs(detMod, 'rollback-init');" in src
+    input_guard_start = src.index("const _processInputPacket =")
+    input_guard_end = src.index("const recvInput =", input_guard_start)
+    input_guard = src[input_guard_start:input_guard_end]
+    assert "INPUT_FUTURE_MARGIN_FRAMES" in input_guard

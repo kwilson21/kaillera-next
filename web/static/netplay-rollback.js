@@ -4956,6 +4956,11 @@
     return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
   };
 
+  // Bounds on legitimate remote input frames, shared by _processInputPacket's
+  // guard and the rollback-init backfill.
+  const INPUT_PAST_WINDOW_FRAMES = 240; // ~4s at 60fps — generous for a stalled peer
+  const INPUT_FUTURE_MARGIN_FRAMES = 60; // 1s past delay buffer
+
   const _feedCInput = (mod, slot, frame, input) => {
     if (!mod?._kn_feed_input || !input || slot === null || slot === undefined || frame < 0) return false;
     mod._kn_feed_input(
@@ -4970,10 +4975,11 @@
     return true;
   };
 
-  const _backfillCInputsFromJs = (mod, reason, remoteAhead = false) => {
+  const _backfillCInputsFromJs = (mod, reason) => {
     if (!mod?._kn_feed_input) return;
-    const maxWindow = Math.min(240, Math.max(60, _rbRollbackMax + DELAY_FRAMES + 8));
+    const maxWindow = Math.min(INPUT_PAST_WINDOW_FRAMES, Math.max(60, _rbRollbackMax + DELAY_FRAMES + 8));
     const startFrame = Math.max(0, _frameNum - maxWindow);
+    const endFrame = _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES;
     let localFed = 0;
     let remoteFed = 0;
     let fedThrough = _frameNum;
@@ -4984,9 +4990,12 @@
     for (const [slotKey, frames] of Object.entries(_remoteInputs)) {
       const slot = Number(slotKey);
       if (!Number.isFinite(slot) || slot === _playerSlot) continue;
-      for (const [frameKey, input] of Object.entries(frames || {})) {
-        const frame = Number(frameKey);
-        if (!Number.isInteger(frame) || frame < startFrame || (!remoteAhead && frame > _frameNum)) continue;
+      for (let frame = startFrame; frame <= endFrame; frame++) {
+        const input = frames?.[frame];
+        // Past _frameNum a ZERO_INPUT is a late-join placeholder, not a received input. Fed as
+        // real, a different real input arriving later would overwrite it without a rollback.
+        // (Placeholders at or before _frameNum are fed, as before.)
+        if (!input || (frame > _frameNum && input === KNShared.ZERO_INPUT)) continue;
         if (_feedCInput(mod, slot, frame, input)) {
           remoteFed++;
           fedThrough = Math.max(fedThrough, frame);
@@ -7461,13 +7470,11 @@
     // sit in roughly [_frameNum - 240, _frameNum + DELAY_FRAMES + 60].
     // Reject anything wildly outside that range; INPUT-LATE handles the
     // soft-stale case below.
-    const _INPUT_PAST_WINDOW = 240; // ~4s at 60fps — generous for a stalled peer
-    const _INPUT_FUTURE_MARGIN = 60; // 1s past delay buffer
     if (
       !Number.isFinite(recvFrame) ||
       recvFrame < 0 ||
-      recvFrame < _frameNum - _INPUT_PAST_WINDOW ||
-      recvFrame > _frameNum + DELAY_FRAMES + _INPUT_FUTURE_MARGIN
+      recvFrame < _frameNum - INPUT_PAST_WINDOW_FRAMES ||
+      recvFrame > _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
       return false;
@@ -12030,7 +12037,8 @@
           rngMod._kn_set_rdram_preserve(_rdramBase);
           _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
         }
-        _backfillCInputsFromJs(detMod, 'rollback-init', initFrame === 0 && _frameNum === 0);
+        // Input dedup can hide pre-init frames from C; init is its only chance to see them.
+        _backfillCInputsFromJs(detMod, 'rollback-init');
 
         // kn_rollback_init mallocs ringSize × stateSize (~208MB) + an 8MB
         // rdram-preserve buffer. On Smash Remix, this consistently grows
