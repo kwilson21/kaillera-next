@@ -1448,8 +1448,9 @@
         gameFps,
         // Where missing frames went: stall ticks each spend a slot waiting
         // on remote input (gap = a lost packet at the window edge, else the
-        // peer is too far behind) — a stalled #47 catch-up attempt spends no
-        // slot, so it isn't counted here. droppedSlots is the session total
+        // peer is too far behind) — a stalled #47 catch-up attempt is
+        // recorded here too but spends no slot, so stalls.ticks can exceed
+        // the slots stalls actually cost. droppedSlots is the session total
         // the scheduler skipped while too far behind; catchupFrames is the
         // session total of extra forward frames the pump ran to catch up.
         stalls: { ticks: stall.length, gap: stall.filter((r) => r.gap).length, adv: stats(pickField(stall, 'adv')) },
@@ -6624,12 +6625,7 @@
     _pacingLastLogAt = now;
     _syncLog(`${msg}${suffix}`);
   };
-  // Periodic pacing summary (~5s): averages/caps over the preceding 300
-  // frames, then resets the window. Shared by the JS lockstep path (still
-  // gated on _frameNum % 300 there) and the C-rollback TICK-PERF block,
-  // which is the only place this runs when C-rollback is active — the JS
-  // path's own copy of this block never executes there (tick() returns at
-  // end:c-rollback first).
+  // Periodic pacing summary (~5s): averages/caps over the preceding 300 frames, then resets the window.
   const _logPacingSummary = () => {
     if (_pacingAdvCount <= 0) return;
     const avgAdv = (_pacingAdvSum / _pacingAdvCount).toFixed(1);
@@ -12464,7 +12460,7 @@
       if (_externalTickPaused) return;
       const now = performance.now();
       if (now + 0.25 < _tickNextAt) return;
-      const frameAtPumpStart = _frameNum;
+      let frameBeforeTick = _frameNum;
       tick();
       // A replay tick re-simulates past frames and leaves the game where it
       // was, so it must not use up this 60 Hz slot: keep ticking (replay
@@ -12479,6 +12475,7 @@
         !_externalTickPaused &&
         performance.now() - now < TICK_REPLAY_PUMP_BUDGET_MS
       ) {
+        frameBeforeTick = _frameNum;
         tick();
       }
       if (_tickReplayOnly) return;
@@ -12493,20 +12490,20 @@
       } else if (
         after - _tickNextAt >= TICK_TARGET_MS &&
         after - now < TICK_CATCHUP_BUDGET_MS &&
-        _frameNum !== frameAtPumpStart
+        _frameNum > frameBeforeTick
       ) {
-        // #47: runs at most one extra forward frame, only when this pump's
-        // regular tick above advanced a frame, the schedule is still a full
-        // slot behind, and the pump has spent less than one slot of wall
-        // time so far (measured from pump start, so replay work above
-        // counts against it). Bounded because it's a single call, never
-        // looped — a far-behind pump is handled by the backlog-drop branch
-        // above instead. A catch-up call that doesn't advance (stall,
-        // pacing hold, replay) spends no slot, so the schedule is left as
-        // if it hadn't run.
+        // #47: runs at most one extra forward frame, only when the tick
+        // that ended this pump's regular path advanced a frame, the
+        // schedule is still a full slot behind, and the pump has spent less
+        // than one slot of wall time so far (measured from pump start, so
+        // replay work above counts against it). Bounded because it's a
+        // single call, never looped — a far-behind pump is handled by the
+        // backlog-drop branch above instead. A catch-up call that doesn't
+        // advance (stall, pacing hold, replay) spends no slot, so the
+        // schedule is left as if it hadn't run.
         const _frameBeforeCatchup = _frameNum;
         tick();
-        if (!_tickReplayOnly && _frameNum !== _frameBeforeCatchup) {
+        if (!_tickReplayOnly && _frameNum > _frameBeforeCatchup) {
           _tickCatchupFrames++;
           _tickNextAt += TICK_TARGET_MS;
         }

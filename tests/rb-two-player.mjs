@@ -26,7 +26,8 @@
  *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
  *     WebKit instead of Chromium (each defaults to Chromium independently,
  *     so either or both can be WebKit; the Chromium default args —
- *     swiftshader software GL — are unchanged). When the two resolved
+ *     swiftshader software GL — apply to whichever side stays Chromium).
+ *     When the two resolved
  *     engines differ (e.g. HOST_BROWSER=webkit with GUEST_BROWSER unset),
  *     the WASM core boots on different JIT engines, the guest legitimately
  *     diverges during boot and requests the host's state (`BOOT-SYNC: guest
@@ -47,8 +48,8 @@
  *     throttleInitScript below). Forces the host into rollback bursts so
  *     replay-catch-up frames actually occur.
  *   MIN_GAME_FPS=<n>   Fail (exit 1) if either peer's measured game fps
- *     (frames advanced / wall seconds, from window.__tp's own emulator
- *     frame counter) drops below n, or is missing. The measurement window
+ *     (frames advanced / wall seconds, from the last non-replay
+ *     _kn_post_tick frame) drops below n, or is missing. The measurement window
  *     is from ~15s into the battle (when THROTTLE_GUEST flips the guest's
  *     cap) to the end of battle when THROTTLE_GUEST=1, else the whole
  *     battle. Reported as `gameFps: {host, guest}` in summary.json,
@@ -290,10 +291,10 @@ const install = async (p, role) => {
       // calls this either right when the battle begins (no THROTTLE_GUEST —
       // measure the whole battle) or when it flips the guest's setInterval
       // cap (THROTTLE_GUEST — measure only the throttled window). Frame
-      // count comes from the emulator's own forward-frame counter, the same
-      // source _kn_post_tick uses below, so it's comparable across peers.
+      // count is the last non-replay _kn_post_tick frame (W.lastR, set
+      // below) — getHudCounters().currentFrame is rewound mid-replay.
       window.__tp.markFpsWindowStart = () => {
-        W.fpsWindowStart = { f: frameNow(), t: performance.now() };
+        W.fpsWindowStart = { f: W.lastR ?? frameNow(), t: performance.now() };
       };
       const pilot = window.KNMenuAutopilot.create({ read32: (a) => rb.readRdram32(a), log: (m) => (W.pilotFail = m) });
       const actor = role === 'host' ? pilot.p1 : pilot.p2;
@@ -489,7 +490,10 @@ const collect = (p, VISUAL_CHECK) =>
       inBattleAt: window.__tp.inBattleAt,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
       fpsWindowStart: window.__tp.fpsWindowStart,
-      fpsWindowEnd: { f: window.NetplayRollback.getHudCounters().currentFrame, t: performance.now() },
+      fpsWindowEnd: {
+        f: window.__tp.lastR ?? window.NetplayRollback.getHudCounters().currentFrame,
+        t: performance.now(),
+      },
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
@@ -507,17 +511,9 @@ fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
 
 // Freeze mode: peers legitimately diverge while the host is a phantom, so
 // only frames from the guest's last applied resync onward must match.
-// Cross-engine boot (HOST_BROWSER and GUEST_BROWSER resolve to different
-// engines): the WASM core JITs differently on each side, so the guest
-// legitimately diverges during boot and requests the host's state
-// (BOOT-SYNC -> `sync #1 applied`); only frames from that applied sync
-// onward must match, the same exclusion mechanism as FREEZE mode's
-// recoveredAt. When both sides resolve to the SAME engine (including
-// WebKit/WebKit), this does NOT apply — boot-window frames are compared
-// like any other frame, same as the Chromium/Chromium default. Never
-// widen this for a same-engine run: a same-engine boot is supposed to be
-// deterministic from the start, so a same-engine mismatch there is a real
-// signal, not the expected cross-JIT noise this exclusion exists for.
+// Cross-engine boot (see HOST_BROWSER/GUEST_BROWSER doc above): frames
+// before the guest's applied BOOT-SYNC are excluded the same way — never
+// widen this to a same-engine run, where a boot-window mismatch is real.
 const crossEngine = hostBrowser !== guestBrowser;
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
 const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
@@ -557,7 +553,7 @@ const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
 
 // Game fps over the measurement window (see MIN_GAME_FPS doc above): frames
-// advanced (emulator's own forward-frame counter) / wall seconds, per peer.
+// advanced (last non-replay _kn_post_tick frame) / wall seconds, per peer.
 const gameFpsOf = (peer) => {
   const start = peer.fpsWindowStart;
   const end = peer.fpsWindowEnd;
