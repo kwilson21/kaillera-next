@@ -60,9 +60,7 @@ async def _run_init_and_query(tmp_db):
     from src.db import close_db, init_db, query
 
     await init_db(tmp_db)
-    tables = await query(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", ()
-    )
+    tables = await query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", ())
     table_names = [t["name"] for t in tables]
     assert "feedback" in table_names
     assert "session_logs" in table_names
@@ -78,14 +76,16 @@ async def _run_insert_feedback(tmp_db):
     from src.db import close_db, init_db, insert_feedback, query
 
     await init_db(tmp_db)
-    row_id = await insert_feedback({
-        "category": "bug",
-        "message": "Test bug report",
-        "email": "test@example.com",
-        "page": "game",
-        "context": '{"mode": "rollback"}',
-        "ip_hash": "abc123",
-    })
+    row_id = await insert_feedback(
+        {
+            "category": "bug",
+            "message": "Test bug report",
+            "email": "test@example.com",
+            "page": "game",
+            "context": '{"mode": "rollback"}',
+            "ip_hash": "abc123",
+        }
+    )
     assert row_id == 1
     rows = await query("SELECT * FROM feedback WHERE id = ?", (row_id,))
     assert len(rows) == 1
@@ -103,14 +103,16 @@ async def _run_query_dicts(tmp_db):
     from src.db import close_db, init_db, insert_feedback, query
 
     await init_db(tmp_db)
-    await insert_feedback({
-        "category": "feature",
-        "message": "Add dark mode",
-        "email": None,
-        "page": "home",
-        "context": None,
-        "ip_hash": "def456",
-    })
+    await insert_feedback(
+        {
+            "category": "feature",
+            "message": "Add dark mode",
+            "email": None,
+            "page": "home",
+            "context": None,
+            "ip_hash": "def456",
+        }
+    )
     rows = await query("SELECT id, category, message FROM feedback", ())
     assert isinstance(rows[0], dict)
     assert "id" in rows[0]
@@ -127,30 +129,34 @@ async def _run_upsert_session_log(tmp_db):
     from src.db import close_db, init_db, query, upsert_session_log
 
     await init_db(tmp_db)
-    row_id = await upsert_session_log({
-        "match_id": "test-match-1",
-        "room": "ABC123",
-        "slot": 0,
-        "player_name": "Player 1",
-        "mode": "rollback",
-        "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"test"}]',
-        "summary": '{"desyncs":0}',
-        "context": '{"ua":"test"}',
-        "ip_hash": "abc",
-    })
+    row_id = await upsert_session_log(
+        {
+            "match_id": "test-match-1",
+            "room": "ABC123",
+            "slot": 0,
+            "player_name": "Player 1",
+            "mode": "rollback",
+            "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"test"}]',
+            "summary": '{"desyncs":0}',
+            "context": '{"ua":"test"}',
+            "ip_hash": "abc",
+        }
+    )
     assert row_id >= 1
 
-    await upsert_session_log({
-        "match_id": "test-match-1",
-        "room": "ABC123",
-        "slot": 0,
-        "player_name": "Player 1",
-        "mode": "rollback",
-        "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"updated"}]',
-        "summary": '{"desyncs":1}',
-        "context": '{"ua":"test"}',
-        "ip_hash": "abc",
-    })
+    await upsert_session_log(
+        {
+            "match_id": "test-match-1",
+            "room": "ABC123",
+            "slot": 0,
+            "player_name": "Player 1",
+            "mode": "rollback",
+            "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"updated"}]',
+            "summary": '{"desyncs":1}',
+            "context": '{"ua":"test"}',
+            "ip_hash": "abc",
+        }
+    )
 
     rows = await query("SELECT * FROM session_logs WHERE match_id='test-match-1' AND slot=0", ())
     assert len(rows) == 1
@@ -168,15 +174,17 @@ async def _run_insert_client_event(tmp_db):
     from src.db import close_db, init_db, insert_client_event, query
 
     await init_db(tmp_db)
-    row_id = await insert_client_event({
-        "type": "desync",
-        "message": "test desync",
-        "meta": '{"frame":100}',
-        "room": "ABC123",
-        "slot": 0,
-        "ip_hash": "def",
-        "user_agent": "TestBrowser/1.0",
-    })
+    row_id = await insert_client_event(
+        {
+            "type": "desync",
+            "message": "test desync",
+            "meta": '{"frame":100}',
+            "room": "ABC123",
+            "slot": 0,
+            "ip_hash": "def",
+            "user_agent": "TestBrowser/1.0",
+        }
+    )
     assert row_id >= 1
     rows = await query("SELECT * FROM client_events WHERE id=?", (row_id,))
     assert rows[0]["type"] == "desync"
@@ -192,32 +200,36 @@ async def _run_set_session_ended(tmp_db):
     from src.db import close_db, init_db, query, set_session_ended, upsert_session_log
 
     await init_db(tmp_db)
-    await upsert_session_log({
-        "match_id": "end-test-1",
-        "room": "XYZ",
-        "slot": 0,
-        "player_name": "P1",
-        "mode": "rollback",
-        "log_data": "[]",
-        "summary": "{}",
-        "context": "{}",
-        "ip_hash": "abc",
-    })
+    await upsert_session_log(
+        {
+            "match_id": "end-test-1",
+            "room": "XYZ",
+            "slot": 0,
+            "player_name": "P1",
+            "mode": "rollback",
+            "log_data": "[]",
+            "summary": "{}",
+            "context": "{}",
+            "ip_hash": "abc",
+        }
+    )
     await set_session_ended("end-test-1", 0, "disconnect")
     rows = await query("SELECT ended_by FROM session_logs WHERE match_id='end-test-1' AND slot=0", ())
     assert rows[0]["ended_by"] == "disconnect"
 
-    await upsert_session_log({
-        "match_id": "end-test-1",
-        "room": "XYZ",
-        "slot": 1,
-        "player_name": "P2",
-        "mode": "rollback",
-        "log_data": "[]",
-        "summary": "{}",
-        "context": "{}",
-        "ip_hash": "def",
-    })
+    await upsert_session_log(
+        {
+            "match_id": "end-test-1",
+            "room": "XYZ",
+            "slot": 1,
+            "player_name": "P2",
+            "mode": "rollback",
+            "log_data": "[]",
+            "summary": "{}",
+            "context": "{}",
+            "ip_hash": "def",
+        }
+    )
     await set_session_ended("end-test-1", None, "game-end")
     rows = await query(
         "SELECT slot, ended_by FROM session_logs WHERE match_id='end-test-1' ORDER BY slot",
@@ -228,4 +240,20 @@ async def _run_set_session_ended(tmp_db):
     # test_session_logging::test_game_end_does_not_overwrite_disconnect).
     assert rows[0]["ended_by"] == "disconnect"
     assert rows[1]["ended_by"] == "game-end"
+    await close_db()
+
+
+def test_init_db_records_baseline_and_is_rerunnable(tmp_db):
+    """init_db applies the SQL baseline once; a second start applies nothing."""
+    _run_async(_run_init_twice(tmp_db))
+
+
+async def _run_init_twice(tmp_db):
+    from src.db import close_db, init_db, query
+
+    await init_db(tmp_db)
+    await close_db()
+    await init_db(tmp_db)
+    rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
+    assert [r["version"] for r in rows] == ["0001"]
     await close_db()

@@ -10,8 +10,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "redis[hiredis]>=5.0.0",
     "aiosqlite==0.20.0",
-    "alembic==1.15.2",
-    "sqlalchemy>=2.0.0",
     # Parquet rotation (src/match_rotation.py) — turns finished matches
     # into Parquet files + precomputed metrics so admin queries and
     # analyze_match.py don't re-parse the session_logs JSON blob.
