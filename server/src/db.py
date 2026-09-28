@@ -601,6 +601,11 @@ async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     return await read_screenshot(rows[0]) if rows else None
 
 
+async def execute_batch(statements: list[tuple[str, tuple]]) -> None:
+    """Run write statements as one atomic batch (one D1 request)."""
+    await _require().batch(statements)
+
+
 async def delete_match_blobs(match_id: str) -> None:
     """Delete every blob stored under the match's prefix (screenshots now)."""
     await _blob_store().delete_prefix(f"matches/{match_id}/")

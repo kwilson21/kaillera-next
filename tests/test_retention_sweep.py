@@ -170,21 +170,35 @@ def test_interrupted_delete_is_hidden_then_finished(tmp_path):
             await db.close_db()
 
     mid, tombstone, accepts, after = run_async(scenario())
-    assert mid == KEPT and tombstone is not None and accepts is False
+    # Client events go first (one scan per sweep); everything else waits for the blobs.
+    assert mid == {**KEPT, "client_events": 0} and tombstone is not None and accepts is False
     assert after == GONE
 
 
 def test_tombstone_is_not_set_on_a_match_flagged_meanwhile(tmp_path):
-    """The mark statement re-checks expiry, so a flag that lands first wins."""
+    """The mark UPDATE re-checks expiry, so a flag landing between the SELECT
+    and the UPDATE wins."""
 
     async def scenario():
+        import src.db as dbmod
         from src import retention
 
         db = await _open(tmp_path)
         try:
             await _match(db, "old", ended_days_ago=8, created_days_ago=8)
-            await db.flag_match("old", [{"signal": "feedback", "count": 1}], auto=False)
-            marked = await retention.mark_expired()
+            real_query = dbmod.query
+
+            async def query_then_flag(sql, params):
+                rows = await real_query(sql, params)
+                if "deleting_at IS NULL" in sql and rows:
+                    await db.flag_match("old", [{"signal": "feedback", "count": 1}], auto=False)
+                return rows
+
+            dbmod.query = query_then_flag
+            try:
+                marked = await retention.mark_expired()
+            finally:
+                dbmod.query = real_query
             return marked, await _left(db, "old", tmp_path)
         finally:
             await db.close_db()
@@ -276,3 +290,40 @@ def test_local_delete_prefix_removes_only_that_prefix(tmp_path):
         return await store.get("matches/a/screenshots/0-1.jpg"), await store.get("matches/ab/screenshots/0-1.jpg")
 
     assert run_async(scenario()) == (None, b"2")
+
+
+def test_client_events_of_deleted_matches_are_removed_in_one_statement(tmp_path):
+    """client_events has no index on meta.match_id; a delete per match would
+    scan the table once per match, and D1 bills every row read."""
+
+    async def scenario():
+        import src.db as dbmod
+        from src import retention
+
+        db = await _open(tmp_path)
+        try:
+            for mid in ("a", "b", "c"):
+                await _match(db, mid, ended_days_ago=8, created_days_ago=8)
+            backend = dbmod._require()
+            statements = []
+            real_execute, real_batch = backend.execute, backend.batch
+
+            async def count_execute(sql, params=()):
+                statements.append(sql)
+                return await real_execute(sql, params)
+
+            async def count_batch(batch):
+                statements.extend(sql for sql, _ in batch)
+                return await real_batch(batch)
+
+            backend.execute, backend.batch = count_execute, count_batch
+            await retention.sweep()
+            backend.execute, backend.batch = real_execute, real_batch
+            left = [await _left(db, m, tmp_path) for m in ("a", "b", "c")]
+            return sum("FROM client_events" in s and "json_extract" in s for s in statements), left
+        finally:
+            await db.close_db()
+
+    event_deletes, left = run_async(scenario())
+    assert left == [GONE, GONE, GONE]
+    assert event_deletes <= 2  # one for tombstoned matches, one for unregistered rows

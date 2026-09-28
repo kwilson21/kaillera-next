@@ -135,6 +135,16 @@ async def finish_deletes() -> int:
     match that the next sweep finishes (spec §4). Returns matches finished.
     """
     rows = await db.query("SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL LIMIT ?", (_BATCH,))
+    if not rows:
+        return 0
+    # client_events has no index on meta.match_id, so delete every tombstoned
+    # match's events in one scan rather than one scan per match (D1 bills
+    # rows read). The matches are already hidden, so doing this first is safe.
+    await db.execute_write(
+        """DELETE FROM client_events WHERE json_valid(meta) AND json_extract(meta, '$.match_id') IN
+           (SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL)""",
+        (),
+    )
     finished = 0
     for row in rows:
         match_id = row["match_id"]
@@ -143,16 +153,19 @@ async def finish_deletes() -> int:
         except BlobStoreError as exc:
             log.warning("Retention: blobs of %s not deleted yet: %s", match_id[:8], exc)
             continue
-        for sql in (
-            "DELETE FROM screenshots WHERE match_id = ?",
-            "DELETE FROM desync_events WHERE match_id = ?",
-            "DELETE FROM client_events WHERE json_valid(meta) AND json_extract(meta, '$.match_id') = ?",
-            "DELETE FROM session_log_chunks WHERE match_id = ?",
-            "DELETE FROM session_logs WHERE match_id = ?",
-            "DELETE FROM match_metrics WHERE match_id = ?",
-            "DELETE FROM match_retention WHERE match_id = ?",
-        ):
-            await db.execute_write(sql, (match_id,))
+        await db.execute_batch(
+            [
+                (f"DELETE FROM {table} WHERE match_id = ?", (match_id,))
+                for table in (
+                    "screenshots",
+                    "desync_events",
+                    "session_log_chunks",
+                    "session_logs",
+                    "match_metrics",
+                    "match_retention",  # last: the tombstone goes only when everything else has
+                )
+            ]
+        )
         finished += 1
     return finished
 
