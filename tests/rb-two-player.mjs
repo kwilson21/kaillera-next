@@ -27,19 +27,19 @@
  *     WebKit instead of Chromium (each defaults to Chromium independently,
  *     so either or both can be WebKit; the Chromium default args —
  *     swiftshader software GL — apply to whichever side stays Chromium).
- *     When the two resolved
- *     engines differ (e.g. HOST_BROWSER=webkit with GUEST_BROWSER unset),
- *     the WASM core boots on different JIT engines, the guest legitimately
- *     diverges during boot and requests the host's state (`BOOT-SYNC: guest
- *     requesting host state`, then `sync #1 applied`); frames before that
- *     applied sync are excluded from the hash compare, the same way FREEZE
- *     mode excludes frames before its last resync. When the two engines
- *     match (including WebKit on both sides), no such exclusion applies —
- *     boot-window frames are compared like any other, on the same basis as
- *     the Chromium/Chromium default. Chromium software (swiftshader) GL
- *     caps two co-located emulators well under 60fps on some machines;
- *     WebKit on both sides can use the real GPU and is the closer match to
- *     the reported prod case (iOS Safari, which is WebKit).
+ *     When the two resolved engines differ (e.g. HOST_BROWSER=webkit with
+ *     GUEST_BROWSER unset), the WASM core boots on different JIT engines,
+ *     the guest legitimately diverges during boot and requests the host's
+ *     state (`BOOT-SYNC: guest requesting host state`, then `sync #1
+ *     applied`); frames before that applied sync are excluded from the hash
+ *     compare, the same way FREEZE mode excludes frames before its last
+ *     resync. When the two engines match (including WebKit on both sides),
+ *     no such exclusion applies — boot-window frames are compared like any
+ *     other, on the same basis as the Chromium/Chromium default. Chromium
+ *     software (swiftshader) GL caps two co-located emulators well under
+ *     60fps on some machines; WebKit on both sides can use the real GPU and
+ *     is the closer match to the reported prod case (iOS Safari, which is
+ *     WebKit).
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
  *     setInterval-driven tick callbacks to an average of THROTTLE_GUEST_HZ
  *     (env, default 30) callbacks/s — a plain JS wrapper around
@@ -49,18 +49,18 @@
  *     replay-catch-up frames actually occur.
  *   MIN_GAME_FPS=<n>   Fail (exit 1) if either peer's measured game fps
  *     (frames advanced / wall seconds, from the last non-replay
- *     _kn_post_tick frame) drops below n, or is missing. The measurement window
- *     is from ~15s into the battle (when THROTTLE_GUEST flips the guest's
- *     cap) to the end of battle when THROTTLE_GUEST=1, else the whole
- *     battle. Reported as `gameFps: {host, guest}` in summary.json,
+ *     _kn_post_tick frame) drops below n, or is missing. The measurement
+ *     window is from ~15s into the battle (when THROTTLE_GUEST flips the
+ *     guest's cap) to the end of battle when THROTTLE_GUEST=1, else the
+ *     whole battle. Reported as `gameFps: {host, guest}` in summary.json,
  *     alongside each peer's `pacing: {capsCount, capsFrames, summaries}` —
  *     capsCount is pacing episodes started and capsFrames is paced (held)
- *     tick calls, both summed from the unsampled per-300-frame
- *     `PACING f=...` lines in the window (the rate-limited
- *     `PACING-THROTTLE start/end` lines undercount episodes) — and each
- *     peer's cumulative `TICK-PERF` scheduler counters (`droppedSlots`,
- *     `catchupFrames` — see #47) under `schedulerCounters`: the session
- *     total as of the last TICK-PERF line, not scoped to this window.
+ *     tick calls, both summed from the unsampled per-300-frame `PACING
+ *     f=...` lines in the window (the rate-limited `PACING-THROTTLE
+ *     start/end` lines undercount episodes) — and each peer's cumulative
+ *     `TICK-PERF` scheduler counters (`droppedSlots`, `catchupFrames` — see
+ *     #47) under `schedulerCounters`: the session total as of the last
+ *     TICK-PERF line, not scoped to this window.
  *   VISUAL_CHECK=1   On both peers, piggyback on the existing _kn_post_tick
  *     hook: whenever idle (no replay in flight) and in battle, downscale
  *     `#game canvas` into an offscreen 48x36 canvas and keep its RGB bytes.
@@ -468,6 +468,10 @@ if (inBattle) {
 
 const collect = (p, VISUAL_CHECK) =>
   p.evaluate((VISUAL_CHECK) => {
+    const fpsWindowEnd = {
+      f: window.__tp.lastR ?? window.NetplayRollback.getHudCounters().currentFrame,
+      t: performance.now(),
+    };
     const m = window.EJS_emulator.gameManager.Module;
     let visual = null;
     if (VISUAL_CHECK) {
@@ -490,10 +494,7 @@ const collect = (p, VISUAL_CHECK) =>
       inBattleAt: window.__tp.inBattleAt,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
       fpsWindowStart: window.__tp.fpsWindowStart,
-      fpsWindowEnd: {
-        f: window.__tp.lastR ?? window.NetplayRollback.getHudCounters().currentFrame,
-        t: performance.now(),
-      },
+      fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
