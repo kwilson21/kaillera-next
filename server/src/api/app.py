@@ -62,6 +62,7 @@ from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
     _sanitize_log_blob,
+    _session_log_entries_json,
     connected_players,
     room_frame,
     room_host_name,
@@ -1066,14 +1067,9 @@ def create_app(lifespan=None) -> FastAPI:
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
 
-        entries_raw = data.get("entries", [])
-        entries = _sanitize_log_blob(entries_raw if isinstance(entries_raw, list) else [])
-        if not isinstance(entries, list):
-            entries = []
-        log_data_str = json.dumps(entries)
-        while len(log_data_str) > _SESSION_LOG_HTTP_MAX and entries:
-            entries = entries[: len(entries) // 2]
-            log_data_str = json.dumps(entries)
+        # Newest entries win, as in the Socket.IO handler (this used to keep
+        # the oldest half on overflow).
+        log_data_str = _session_log_entries_json(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
         context_clean = _sanitize_log_blob(data.get("context", {}) if isinstance(data.get("context"), dict) else {})

@@ -1597,10 +1597,10 @@ async def game_screenshot(sid: str, data: dict) -> None:
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
-_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data — sized to hold the
-# full client ring (SYNC_LOG_MAX=60000 entries × ~150 B/entry ≈ 9 MB) so a 60-min
-# match's boot/menu/init events survive to the server. The drop-oldest-half
-# fallback below kicks in only on pathologically verbose matches.
+_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data. A flush can't carry
+# more than the 4MB Socket.IO buffer (max_http_buffer_size), so the client
+# sends the newest entries that fit SESSION_LOG_FLUSH_MAX_BYTES (3MB); this cap
+# only bounds what an oversized payload could store.
 
 _LOG_BLOB_MAX_DEPTH = 6
 _LOG_BLOB_MAX_KEYS = 256
@@ -1625,6 +1625,10 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
     if isinstance(obj, (int, float)):
         return obj
     if isinstance(obj, str):
+        # Printable ASCII holds no control characters: skip the per-character
+        # scan, which costs ~0.8s for a full 60k-entry log.
+        if obj.isascii() and obj.isprintable():
+            return obj[:_LOG_BLOB_MAX_STR]
         cleaned = "".join(ch for ch in obj if ch == "\n" or ch == "\t" or unicodedata.category(ch)[0] != "C")
         return cleaned[:_LOG_BLOB_MAX_STR]
     if isinstance(obj, list):
@@ -1642,6 +1646,32 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
             out[key] = _sanitize_log_blob(v, depth + 1)
         return out
     return None
+
+
+# The client re-sends its whole sync-log ring (SYNC_LOG_MAX = 60000 entries in
+# netplay-rollback.js) on every flush.
+_SESSION_LOG_MAX_ENTRIES = 60_000
+
+
+def _session_log_entries_json(entries_raw: object, max_bytes: int) -> str:
+    """JSON for a session log's entries: the newest ones that fit `max_bytes`.
+
+    Entries are sanitized one by one. Passing the whole list through
+    _sanitize_log_blob capped it at _LOG_BLOB_MAX_LIST_LEN (4096) and kept the
+    oldest, so a verbose match's log stopped about 90s in (match 1cd13296).
+    """
+    if not isinstance(entries_raw, list):
+        return "[]"
+    entries = [_sanitize_log_blob(e, 1) for e in entries_raw[-_SESSION_LOG_MAX_ENTRIES:]]
+    # Drop the oldest until the list fits: each entry costs its JSON plus the
+    # ", " separator, the list its brackets.
+    sizes = [len(json.dumps(e)) + 2 for e in entries]
+    total = sum(sizes) + 2
+    start = 0
+    while total > max_bytes and start < len(entries):
+        total -= sizes[start]
+        start += 1
+    return json.dumps(entries[start:])
 
 
 @sio.on("session-log")
@@ -1685,15 +1715,8 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> None:
         if len(context_str) > _SUMMARY_MAX:
             context_str = "{}"
 
-    entries_raw = payload.entries if isinstance(payload.entries, list) else []
-    entries = _sanitize_log_blob(entries_raw)
-    if not isinstance(entries, list):
-        entries = []
-    log_data_str = json.dumps(entries)
-    while len(log_data_str) > _SESSION_LOG_MAX and entries:
-        # Keep LATEST entries (drop oldest) so reconnect/desync events survive
-        entries = entries[len(entries) // 2 :]
-        log_data_str = json.dumps(entries)
+    # Newest entries win, so reconnect/desync events near the end survive.
+    log_data_str = _session_log_entries_json(payload.entries, _SESSION_LOG_MAX)
 
     await db.upsert_session_log(
         {
