@@ -501,12 +501,8 @@
     sendNextPing(peer);
   };
 
-  // Shared by every path that can finish RTT measurement (all peers replied,
-  // a ping send failed, or START_WAIT_RTT_MS expired): compute the median
-  // over whatever samples exist and set _rttComplete. checkAllLockstepReady
-  // withholds lockstep-ready/start until _rttComplete, so re-check it here —
-  // this is the only place completion is decided, so there's no separate
-  // "announce" call to duplicate at each call site.
+  // Every path that finishes RTT (all peers done, a send failed, START_WAIT_RTT_MS) ends here.
+  // checkAllLockstepReady withholds lockstep-ready until _rttComplete, so announce and re-check.
   const _finishRttMeasurement = (reason) => {
     if (_rttSamples.length > 0) {
       _rttSamples.sort((a, b) => a - b);
@@ -518,11 +514,7 @@
       _rttComplete = true;
       _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay} (${reason})`);
     } else {
-      // No samples at all (e.g. every send failed before ping 1) — reset
-      // _rttMedian to 0 (not just leave it) so this match can't inherit a
-      // stale median left over from an earlier one; stop() also resets it,
-      // but this covers a zero-sample finish without an intervening stop()
-      // in between (#56).
+      // No samples (e.g. the start-wait timeout fired first): no RTT data, so delay uses the preference.
       _rttMedian = 0;
       _rttComplete = true;
       _syncLog(`RTT measurement complete with no samples (${reason})`);
@@ -555,9 +547,7 @@
     } catch (_) {
       peer._rttComplete = true;
       _rttPeersComplete++;
-      // I1: a send failure must still reach "all peers done" — previously
-      // this only incremented counters, so a peer whose channel died mid-
-      // measurement left _rttComplete false forever (#56).
+      // A failed send still counts toward "all peers done", or _rttComplete never gets set.
       if (_rttPeersComplete >= _rttPeersTotal) _finishRttMeasurement('send-failure');
     }
   };
@@ -9182,18 +9172,8 @@
     }, syncTimeoutMs);
   };
 
-  // I1: the START-WAIT-RTT branch below waits on this peer's own RTT
-  // measurement (_rttComplete) before announcing lockstep-ready — starting
-  // first would let this peer run ahead and send first inputs too early.
-  // _finishRttMeasurement normally sets _rttComplete once every peer's ping
-  // loop finishes or fails, but a DC that closes mid-measurement (never
-  // completing, never decrementing _rttPeersTotal) could leave that wait
-  // unbounded. Only a peer's completed 22-ping run contributes to
-  // _rttSamples — an in-progress peer's samples are dropped — so in a
-  // 2-player game this timeout usually fires with zero samples and delay
-  // falls back to the delay preference. Finishing RTT here only announces
-  // this peer's own lockstep-ready; start still waits for every player
-  // peer's lockstep-ready via checkAllLockstepReady.
+  // I1 deadline for START-WAIT-RTT: a DC that closes mid-measurement never completes, so finish RTT anyway.
+  // Only peers that finished all 22 pings contribute samples; with none, delay falls back to the preference.
   const START_WAIT_RTT_MS = 5000;
   let _startWaitRttTimer = null;
   const _clearStartWaitRttTimer = () => {
@@ -9222,15 +9202,8 @@
         const sid = _sessionId;
         _startWaitRttTimer = setTimeout(() => {
           _startWaitRttTimer = null;
-          // No phase-floor guard here: the sync-retry timeout in
-          // checkAllEmuReady can drop _phase back to PHASE_EMU_READY while
-          // this timer is armed, and _startWaitRttLogged stays true so no
-          // new timer gets armed when LOCKSTEP_READY is re-entered — that
-          // would leave the wait unbounded again. Finishing RTT while phase
-          // is low is harmless: _finishRttMeasurement only
-          // broadcasts/re-checks lockstep-ready when phase is
-          // LOCKSTEP_READY and not RUNNING, and the later re-entry into
-          // LOCKSTEP_READY broadcasts because _rttComplete is already true.
+          // No phase-floor guard: the sync timeout can drop back to EMU_READY and this timer never re-arms.
+          // Finishing early is harmless; re-entering LOCKSTEP_READY broadcasts once _rttComplete is set.
           if (sid !== _sessionId || _rttComplete || _phase >= PHASE_RUNNING) return;
           _syncLog(
             `START-WAIT-RTT-TIMEOUT complete=${_rttPeersComplete}/${_rttPeersTotal} samples=${_rttSamples.length}`,
