@@ -1041,6 +1041,13 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    # Register before announcing the match, so log uploads quoting this id
+    # are accepted. Logging never blocks a game: a failed write is logged and
+    # only HTTP-fallback uploads for this match will be refused.
+    try:
+        await db.register_match(room.match_id, session_id)
+    except Exception as exc:
+        log.warning("Match %s not registered; its HTTP log uploads will be refused: %s", room.match_id[:8], exc)
     room.started_at = time.time()
     # Stats never hold up the room lock (Redis round trips).
     asyncio.create_task(stats.record_match(room.started_at))
@@ -1587,6 +1594,10 @@ async def game_screenshot(sid: str, data: dict) -> None:
     # Validate match_id matches the room's current match
     room = rooms.get(session_id)
     if not room or room.match_id != match_id:
+        return
+    # Screenshot keys are per slot: a player may only upload their own.
+    own_slot = next((s for s, pid in room.slots.items() if pid == player_id), None)
+    if own_slot is None or slot != own_slot:
         return
     # Decode and store in DB
     import base64

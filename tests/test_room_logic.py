@@ -500,3 +500,99 @@ class TestEndGameBroadcastOrder:
 
         assert "db.set_session_ended" not in order
         assert "emit:game-ended" in order
+
+
+# ── match registration and screenshot slots ─────────────────────────────────
+
+
+def _patched_start(extra=None):
+    patches = [
+        patch.object(signaling.sio, "emit", new=AsyncMock()),
+        patch.object(signaling.state, "save_room", new=AsyncMock()),
+        patch.object(signaling.db, "insert_client_event", new=AsyncMock()),
+        patch.object(signaling.stats, "record_match", new=AsyncMock()),
+    ]
+    return patches + (extra or [])
+
+
+def _host_room(code="ROOM1"):
+    room = _make_room(owner="sid-host")
+    room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+    room.slots[0] = "pid-host"
+    room.rom_ready.add("sid-host")
+    rooms[code] = room
+    _sid_to_room["sid-host"] = (code, "pid-host", False)
+    return room
+
+
+def _run_with(patches, coro):
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        return _run_async(coro)
+
+
+def test_start_game_registers_the_match_before_announcing_it():
+    from src.api.payloads import StartGamePayload
+    from src.api.signaling import _start_game_locked
+
+    room = _host_room()
+    order = []
+    register = AsyncMock(side_effect=lambda mid, code: order.append(("register", mid, code)))
+    emit = AsyncMock(side_effect=lambda event, *a, **k: order.append(("emit", event)))
+    patches = _patched_start([patch.object(signaling.db, "register_match", new=register)])
+    patches[0] = patch.object(signaling.sio, "emit", new=emit)
+
+    assert _run_with(patches, _start_game_locked("sid-host", StartGamePayload(mode="rollback"))) is None
+    assert order[0] == ("register", room.match_id, "ROOM1")
+    assert ("emit", "game-started") in order
+
+
+def test_start_game_survives_register_failure():
+    from src.api.payloads import StartGamePayload
+    from src.api.signaling import _start_game_locked
+
+    room = _host_room()
+    failing = AsyncMock(side_effect=RuntimeError("D1 down"))
+    patches = _patched_start([patch.object(signaling.db, "register_match", new=failing)])
+
+    assert _run_with(patches, _start_game_locked("sid-host", StartGamePayload(mode="rollback"))) is None
+    assert room.status == "playing" and room.match_id
+
+
+def _screenshot_room():
+    room = _host_room()
+    room.match_id = "match-1"
+    room.players["pid-guest"] = {"socketId": "sid-guest", "playerName": "Guest"}
+    room.slots[1] = "pid-guest"
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+    return room
+
+
+def _send_screenshot(sid, slot):
+    import base64
+
+    from src.api.signaling import game_screenshot
+
+    insert = AsyncMock()
+    data = {"matchId": "match-1", "slot": slot, "frame": 300, "data": base64.b64encode(b"\xff\xd8jpeg").decode()}
+    patches = [
+        patch.object(signaling, "check", new=lambda sid, event: True),
+        patch.object(signaling.db, "insert_screenshot", new=insert),
+    ]
+    _run_with(patches, game_screenshot(sid, data))
+    return insert
+
+
+def test_screenshot_with_own_slot_is_stored():
+    _screenshot_room()
+    insert = _send_screenshot("sid-guest", 1)
+    insert.assert_awaited_once_with("match-1", 1, 300, b"\xff\xd8jpeg")
+
+
+def test_screenshot_claiming_another_players_slot_is_dropped():
+    _screenshot_room()
+    insert = _send_screenshot("sid-guest", 0)
+    insert.assert_not_awaited()
