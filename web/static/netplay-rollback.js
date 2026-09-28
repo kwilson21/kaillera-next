@@ -518,9 +518,12 @@
       _rttComplete = true;
       _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay} (${reason})`);
     } else {
-      // No samples at all (e.g. every send failed before ping 1) — leave
-      // _rttMedian at its 0 default, same as the pre-measurement state the
-      // rest of the code already treats as "no RTT data".
+      // No samples at all (e.g. every send failed before ping 1) — reset
+      // _rttMedian to 0 (not just leave it) so this match can't inherit a
+      // stale median left over from an earlier one; stop() also resets it,
+      // but this covers a zero-sample finish without an intervening stop()
+      // in between (#56).
+      _rttMedian = 0;
       _rttComplete = true;
       _syncLog(`RTT measurement complete with no samples (${reason})`);
     }
@@ -9180,14 +9183,17 @@
   };
 
   // I1: the START-WAIT-RTT branch below waits on this peer's own RTT
-  // measurement (_rttComplete) before announcing lockstep-ready and
-  // starting — starting first would let this peer run ahead and send
-  // first inputs too early. _finishRttMeasurement normally sets
-  // _rttComplete once every peer's ping loop finishes or fails, but a DC
-  // that closes mid-measurement (never completing, never decrementing
-  // _rttPeersTotal) could leave that wait — and every other peer's
-  // broadcastLockstepReady() with it — unbounded. Finish with whatever
-  // samples arrived so far and start anyway.
+  // measurement (_rttComplete) before announcing lockstep-ready — starting
+  // first would let this peer run ahead and send first inputs too early.
+  // _finishRttMeasurement normally sets _rttComplete once every peer's ping
+  // loop finishes or fails, but a DC that closes mid-measurement (never
+  // completing, never decrementing _rttPeersTotal) could leave that wait
+  // unbounded. Only a peer's completed 22-ping run contributes to
+  // _rttSamples — an in-progress peer's samples are dropped — so in a
+  // 2-player game this timeout usually fires with zero samples and delay
+  // falls back to the delay preference. Finishing RTT here only announces
+  // this peer's own lockstep-ready; start still waits for every player
+  // peer's lockstep-ready via checkAllLockstepReady.
   const START_WAIT_RTT_MS = 5000;
   let _startWaitRttTimer = null;
   const _clearStartWaitRttTimer = () => {
@@ -9216,7 +9222,16 @@
         const sid = _sessionId;
         _startWaitRttTimer = setTimeout(() => {
           _startWaitRttTimer = null;
-          if (sid !== _sessionId || _rttComplete || _phase < PHASE_LOCKSTEP_READY || _phase >= PHASE_RUNNING) return;
+          // No phase-floor guard here: the sync-retry timeout in
+          // checkAllEmuReady can drop _phase back to PHASE_EMU_READY while
+          // this timer is armed, and _startWaitRttLogged stays true so no
+          // new timer gets armed when LOCKSTEP_READY is re-entered — that
+          // would leave the wait unbounded again. Finishing RTT while phase
+          // is low is harmless: _finishRttMeasurement only
+          // broadcasts/re-checks lockstep-ready when phase is
+          // LOCKSTEP_READY and not RUNNING, and the later re-entry into
+          // LOCKSTEP_READY broadcasts because _rttComplete is already true.
+          if (sid !== _sessionId || _rttComplete || _phase >= PHASE_RUNNING) return;
           _syncLog(
             `START-WAIT-RTT-TIMEOUT complete=${_rttPeersComplete}/${_rttPeersTotal} samples=${_rttSamples.length}`,
           );
@@ -17394,6 +17409,7 @@
     _hudRollbackDepthSamples = [];
     _hudEventTimestamps = [];
     _rttSamples = [];
+    _rttMedian = 0;
     _rttComplete = false;
     _rttPeersComplete = 0;
     _rttPeersTotal = 0;

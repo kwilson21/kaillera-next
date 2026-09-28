@@ -50,7 +50,7 @@ recovered.
 | Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
 | Menu-start barrier (Smash Remix: suppress input until all peers confirm controllable scene) | `MENU_START_BARRIER_SETTLE_MS = 500` (via `_menuStartReleaseAt = nowMs + MENU_START_BARRIER_SETTLE_MS`) | Set `_menuStartBarrierReleased = true`, release barrier | `MENU-BARRIER released` | commit 2 (feat(rollback): menu-start barrier) |
 | Initial state from a guest's own cache (IndexedDB or server) waits for the host's save-state, which carries the host's save RAM | `HOST_INITIAL_STATE_WAIT_MS = 10000` | Start from the cached copy without the host's save RAM | `HOST-STATE-WAIT-TIMEOUT` | — |
-| Start waits for this peer's own RTT measurement (so it announces lockstep-ready and picks delay with RTT data) | `START_WAIT_RTT_MS = 5000` | Finish RTT with the samples collected so far, announce lockstep-ready and start | `START-WAIT-RTT-TIMEOUT` | #56 |
+| Start waits for this peer's own RTT measurement (so it announces lockstep-ready and picks delay with RTT data) | `START_WAIT_RTT_MS = 5000` | Finish RTT with samples from peers that completed (often none: delay then falls back to the delay preference) and announce lockstep-ready; start still waits for peers' lockstep-ready | `START-WAIT-RTT-TIMEOUT` | #56 |
 
 ## I2 — Reconnect starts clean
 
