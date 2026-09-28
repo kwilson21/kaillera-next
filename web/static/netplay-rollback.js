@@ -1605,6 +1605,23 @@
     } catch (_) {}
     return true;
   })();
+  // Shared with the tick loop's RB-INPUT-STALL gameplay stall (see the
+  // prediction-window comment above it): how far ahead of a peer's last
+  // received frame we can run before the C engine's rollback budget is
+  // exhausted and we have to stall. `_requestLifecycleFullResync` reuses
+  // this so a backgrounded peer that the rollback stall kept in step
+  // doesn't get fast-forwarded/resynced on return. Keep the formula in
+  // sync with the tick loop's `stallThreshold` — don't duplicate it.
+  const _rbInputStallThreshold = () =>
+    RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH + 1 : DELAY_FRAMES + 4;
+  // Slack over _rbInputStallThreshold() for the lifecycle-resync in-step
+  // check (_requestLifecycleFullResync): a peer already held right at that
+  // threshold has sent input up through guestLastSent + threshold, so a
+  // plain `behind <= threshold` comparison has zero headroom. Doubling it
+  // never miscategorizes an actually-phantomed peer either — its packets
+  // past DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES (60) are dropped as
+  // INPUT-OOR, so `_lastRemoteFrame` trails it by at least ~60 frames.
+  const RB_LIFECYCLE_IN_STEP_SLACK = 2;
   const RB_ROLLBACK_STATE_BACKEND = (() => {
     try {
       const raw = _urlParams.get('rollbackStateBackend') ?? localStorage.getItem('kn-rollback-state-backend');
@@ -12385,10 +12402,40 @@
     // player sending input (slowly). Pausing completely breaks multi-tab
     // setups where one tab is always document.hidden.
     //
-    // On return to foreground: fast-forward frame counter to catch up with
-    // peers, then resync emulator state from host.
+    // On return to foreground: if C rollback is active, every non-phantom
+    // input peer's `_lastRemoteFrame` reading is fresh (each has advanced
+    // within MAX_STALL_MS — a frozen, not merely throttled, tab can leave a
+    // stale reading that `visibilitychange` fires before the queued packets
+    // land), and the rollback input stall (tick loop, same
+    // `_rbInputStallThreshold()`, plus `RB_LIFECYCLE_IN_STEP_SLACK` slack)
+    // kept peers in step while we were throttled, do nothing — normal
+    // ticking catches up on its own. Fast-forwarding here would zero out
+    // local inputs for the skipped frames and wipe `_remoteInputs`, which
+    // the other peer still needs; neither is recoverable, so both sides end
+    // up stalling on a gap that's never filled (issue #64). Otherwise
+    // (stock-core lockstep fallback, no input peers, a stale reading, or the
+    // peer got far enough ahead to phantom us): fast-forward frame counter
+    // to catch up with peers, then resync emulator state from host.
     let _backgroundAt = 0;
     const _requestLifecycleFullResync = (reason) => {
+      if (_useCRollback) {
+        const inputPeers = getInputPeers().filter((p) => !_peerPhantom[p.slot]);
+        const nowTs = performance.now();
+        const staleMs = inputPeers.length
+          ? Math.max(...inputPeers.map((p) => nowTs - (_peerLastAdvanceTime[p.slot] ?? Infinity)))
+          : Infinity;
+        if (staleMs <= MAX_STALL_MS) {
+          const behind = _lastRemoteFrame - _frameNum;
+          const inStepThreshold = _rbInputStallThreshold() * RB_LIFECYCLE_IN_STEP_SLACK;
+          if (behind <= inStepThreshold) {
+            _syncLog(
+              `${reason}: rollback in step (behind=${behind} staleMs=${Math.round(staleMs)}) — no fast-forward/resync`,
+            );
+            return;
+          }
+        }
+      }
+
       // Fast-forward _frameNum to catch up with peers. Background throttling
       // means we fell behind — peers have moved far ahead.
       // BF2: during boot convergence, this skips the 300-frame pure-lockstep
@@ -12462,9 +12509,13 @@
         // Short background (<500ms): no action needed (audio resume above still fires)
         if (bgDuration < 500) return;
 
-        // Force full resync after background return (delta base is stale).
-        // Only reset on guest — host's delta base should persist so it can
-        // send small deltas instead of 8MB full state every time.
+        // Drop the delta base — it's stale after any real background time,
+        // and if `_requestLifecycleFullResync` below does end up requesting
+        // a resync (rollback wasn't kept in step, or this is the stock-core
+        // lockstep fallback), it must be a full state rather than a delta
+        // against a base this out of date. Only reset on guest — host's
+        // delta base should persist so it can send small deltas instead of
+        // 8MB full state every time.
         if (_playerSlot !== 0) {
           _setLastSyncState(null, 'bg-return');
         }
@@ -14258,7 +14309,7 @@
           // (This used min(delay + 10, 12) from when the C cap was 12; the
           // cap is now 7, so mispredictions 8+ deep were being skipped.)
           // Legacy mode keeps its own delay+4 sizing.
-          const stallThreshold = RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH + 1 : DELAY_FRAMES + 4;
+          const stallThreshold = _rbInputStallThreshold();
           for (const p of rbInputPeers) {
             if (_peerPhantom[p.slot]) continue;
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
