@@ -8,12 +8,13 @@ backfills (`python -m src.match_rotation`).
 
 Why this exists
 ---------------
-Every match's session log lives in `session_logs.log_data` as a JSON
-array string — which is fine for ingestion (small, append-only writes
-per peer) but awful for analysis. Every admin query currently has to
-re-parse the blob on every request. Worse, as soon as we want
+Every match's session log lives as `session_logs.log_data` (legacy full
+blobs, pre delta-flush) plus its `session_log_chunks` rows (see
+db.get_full_log_entries) — which is fine for ingestion (small, append-only
+writes per peer) but awful for analysis. Every admin query currently has to
+reassemble and re-parse that on every request. Worse, as soon as we want
 cross-match aggregates (rollback success rates over time, desync
-counts by game mode, etc.) we'd be re-parsing every blob every time.
+counts by game mode, etc.) we'd be redoing that work every time.
 
 Rotation does that parsing exactly once per match and writes two
 artifacts:

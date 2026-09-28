@@ -118,35 +118,39 @@ async def _run_query_dicts(tmp_db):
     await close_db()
 
 
-def test_upsert_session_log(tmp_db):
-    """upsert_session_log inserts then updates on conflict."""
-    _run_async(_run_upsert_session_log(tmp_db))
+def test_append_session_log_inserts_then_updates_on_conflict(tmp_db):
+    """append_session_log inserts a session_logs row, then updates it in
+    place on a second flush for the same (match_id, slot) — the insert+
+    update-on-conflict behavior that used to live in the now-removed
+    upsert_session_log (dropped once nothing but tests called it; the
+    delta-flush path below covers the same row lifecycle)."""
+    _run_async(_run_append_insert_then_update(tmp_db))
 
 
-async def _run_upsert_session_log(tmp_db):
-    from src.db import close_db, init_db, query, upsert_session_log
+async def _run_append_insert_then_update(tmp_db):
+    from src.db import append_session_log, close_db, init_db, query
 
     await init_db(tmp_db)
-    row_id = await upsert_session_log({
+    row_id = await append_session_log({
         "match_id": "test-match-1",
         "room": "ABC123",
         "slot": 0,
         "player_name": "Player 1",
         "mode": "rollback",
-        "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"test"}]',
+        "entries": [{"seq": 0, "t": 1.0, "f": 1, "msg": "test"}],
         "summary": '{"desyncs":0}',
         "context": '{"ua":"test"}',
         "ip_hash": "abc",
     })
-    assert row_id >= 1
+    assert row_id == 0  # append_session_log returns the new last_seq, not a row id
 
-    await upsert_session_log({
+    await append_session_log({
         "match_id": "test-match-1",
         "room": "ABC123",
         "slot": 0,
         "player_name": "Player 1",
         "mode": "rollback",
-        "log_data": '[{"seq":0,"t":1.0,"f":1,"msg":"updated"}]',
+        "entries": [{"seq": 1, "t": 2.0, "f": 2, "msg": "updated"}],
         "summary": '{"desyncs":1}',
         "context": '{"ua":"test"}',
         "ip_hash": "abc",
@@ -154,7 +158,7 @@ async def _run_upsert_session_log(tmp_db):
 
     rows = await query("SELECT * FROM session_logs WHERE match_id='test-match-1' AND slot=0", ())
     assert len(rows) == 1
-    assert '"updated"' in rows[0]["log_data"]
+    assert rows[0]["last_seq"] == 1
     assert '"desyncs":1' in rows[0]["summary"] or '"desyncs": 1' in rows[0]["summary"]
     await close_db()
 
@@ -189,16 +193,16 @@ def test_set_session_ended(tmp_db):
 
 
 async def _run_set_session_ended(tmp_db):
-    from src.db import close_db, init_db, query, set_session_ended, upsert_session_log
+    from src.db import append_session_log, close_db, init_db, query, set_session_ended
 
     await init_db(tmp_db)
-    await upsert_session_log({
+    await append_session_log({
         "match_id": "end-test-1",
         "room": "XYZ",
         "slot": 0,
         "player_name": "P1",
         "mode": "rollback",
-        "log_data": "[]",
+        "entries": [],
         "summary": "{}",
         "context": "{}",
         "ip_hash": "abc",
@@ -207,13 +211,13 @@ async def _run_set_session_ended(tmp_db):
     rows = await query("SELECT ended_by FROM session_logs WHERE match_id='end-test-1' AND slot=0", ())
     assert rows[0]["ended_by"] == "disconnect"
 
-    await upsert_session_log({
+    await append_session_log({
         "match_id": "end-test-1",
         "room": "XYZ",
         "slot": 1,
         "player_name": "P2",
         "mode": "rollback",
-        "log_data": "[]",
+        "entries": [],
         "summary": "{}",
         "context": "{}",
         "ip_hash": "def",
@@ -348,19 +352,26 @@ def test_get_full_log_entries_concatenates_legacy_log_data_and_chunks(tmp_db):
 async def _run_legacy_plus_chunks(tmp_db):
     import json
 
-    from src.db import append_session_log, close_db, get_full_log_entries, init_db, upsert_session_log
+    import src.db as db_mod
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db
 
     await init_db(tmp_db)
     legacy_entries = [{"seq": 0, "t": 0, "f": 0, "msg": "legacy-a"}, {"seq": 1, "t": 1, "f": 1, "msg": "legacy-b"}]
-    await upsert_session_log({
-        "match_id": "m4", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
-        "log_data": json.dumps(legacy_entries), "summary": "{}", "context": "{}", "ip_hash": "abc",
-    })
+    # Simulate a row written under the old full-blob scheme, before
+    # append_session_log (and its last_seq bookkeeping) existed. There's no
+    # write helper for this shape anymore — insert it directly, the way a
+    # pre-migration row would already look on disk.
+    await db_mod._db.execute(
+        "INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("m4", "R1", 0, "P1", "rollback", json.dumps(legacy_entries), "{}", "{}", "abc"),
+    )
+    await db_mod._db.commit()
 
     # A last_seq of 0 (default before this feature existed on the row) would
     # be wrong here since it would dedupe away seq=0 forever; the migration
-    # defaults new rows to -1, but this row was upserted directly (bypassing
-    # append_session_log) so last_seq is whatever upsert_session_log leaves —
+    # defaults new rows to -1, but this row was inserted directly (bypassing
+    # append_session_log) so last_seq is whatever the column default leaves —
     # confirm new entries starting at seq=2 still land correctly regardless.
     await append_session_log({
         "match_id": "m4", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
@@ -410,4 +421,261 @@ async def _run_chunk_cap(tmp_db):
         assert chunks[-1]["last_seq"] == 4
     finally:
         db_mod._SESSION_LOG_CHUNK_CAP = original_cap
+    await close_db()
+
+
+def test_session_log_chunks_records_size_at_insert_time(tmp_db):
+    """`size` is stored at insert time (used to enforce the cap without
+    re-reading length(entries) on every flush — see _enforce_chunk_cap)."""
+    _run_async(_run_chunk_size_column(tmp_db))
+
+
+async def _run_chunk_size_column(tmp_db):
+    from src.db import append_session_log, close_db, init_db, query
+
+    await init_db(tmp_db)
+    await append_session_log({
+        "match_id": "m-size", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "entries": [{"seq": 0, "t": 0, "f": 0, "msg": "hello"}], "summary": "{}", "context": "{}", "ip_hash": "abc",
+    })
+    rows = await query(
+        "SELECT size, length(entries) as len FROM session_log_chunks WHERE match_id='m-size' AND slot=0", ()
+    )
+    assert rows[0]["size"] == rows[0]["len"]
+    assert rows[0]["size"] > 0
+    await close_db()
+
+
+# ── epoch reset (reload / reconnect / slot-reuse) ────────────────────────────
+#
+# A page reload, a fresh reconnect tab, or a spectator claiming a slot a
+# previous player used all create a brand-new client ring that restarts
+# `seq` at 0, while the server's stored `last_seq` for that (match_id, slot)
+# is already high from the previous ring. Without a per-ring epoch, every
+# entry from the new ring looks like a dup of the old one's high-water mark
+# and gets silently dropped.
+
+
+def test_append_session_log_epoch_change_resets_dedup_for_reload(tmp_db):
+    _run_async(_run_epoch_reset(tmp_db))
+
+
+async def _run_epoch_reset(tmp_db):
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db, query
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-reload", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc",
+    }
+
+    # First "session" (epoch e1) plays for a while and racks up a high last_seq.
+    await append_session_log(
+        {**base, "epoch": "e1", "entries": [{"seq": i, "t": i, "f": i, "msg": f"e1-{i}"} for i in range(50)]}
+    )
+    rows = await query("SELECT last_seq, log_epoch FROM session_logs WHERE match_id='m-reload' AND slot=0", ())
+    assert rows[0]["last_seq"] == 49
+    assert rows[0]["log_epoch"] == "e1"
+
+    # Page reload: a brand-new ring starts at seq 0 again, under a new epoch.
+    last_seq = await append_session_log(
+        {
+            **base,
+            "epoch": "e2",
+            "entries": [
+                {"seq": 0, "t": 0, "f": 0, "msg": "e2-0"},
+                {"seq": 1, "t": 1, "f": 1, "msg": "e2-1"},
+            ],
+        }
+    )
+    # Without the epoch reset, seq 0/1 would be <= the old last_seq (49) and
+    # silently dropped as dupes.
+    assert last_seq == 1
+
+    full = await get_full_log_entries("m-reload", 0, None)
+    msgs = {e["msg"] for e in full}
+    assert "e2-0" in msgs
+    assert "e2-1" in msgs
+
+    rows = await query("SELECT last_seq, log_epoch FROM session_logs WHERE match_id='m-reload' AND slot=0", ())
+    assert rows[0]["last_seq"] == 1
+    assert rows[0]["log_epoch"] == "e2"
+    await close_db()
+
+
+def test_append_session_log_same_epoch_still_dedupes_normally(tmp_db):
+    """Sanity check: the epoch mechanism must not disable normal dedup when
+    the epoch hasn't changed (e.g. an ordinary resend of an unacked flush)."""
+    _run_async(_run_same_epoch_dedupe(tmp_db))
+
+
+async def _run_same_epoch_dedupe(tmp_db):
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-same-epoch", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+    }
+    await append_session_log({**base, "entries": [{"seq": 0, "t": 0, "f": 0, "msg": "a"}]})
+    last_seq = await append_session_log(
+        {**base, "entries": [{"seq": 0, "t": 0, "f": 0, "msg": "a"}, {"seq": 1, "t": 1, "f": 1, "msg": "b"}]}
+    )
+    assert last_seq == 1
+    full = await get_full_log_entries("m-same-epoch", 0, None)
+    assert [e["msg"] for e in full] == ["a", "b"]
+    await close_db()
+
+
+# ── seq validation ────────────────────────────────────────────────────────
+#
+# Only a non-bool int in [0, 2**53) is trusted for dedup/high-water-mark
+# purposes. An entry with any other seq (missing, float, negative, too
+# large, or a bool) can't be safely compared, so it is always kept rather
+# than silently dropped — it just never participates in dedup.
+
+
+def test_append_session_log_validates_seq(tmp_db):
+    _run_async(_run_seq_validation(tmp_db))
+
+
+async def _run_seq_validation(tmp_db):
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-seq", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc",
+    }
+    entries = [
+        {"seq": 0, "t": 0, "f": 0, "msg": "valid-0"},
+        {"seq": True, "t": 1, "f": 1, "msg": "bool-seq"},  # bool is not a valid seq
+        {"seq": -1, "t": 2, "f": 2, "msg": "negative"},  # out of range
+        {"seq": 2**53, "t": 3, "f": 3, "msg": "too-big"},  # out of range
+        {"seq": 1.5, "t": 4, "f": 4, "msg": "float-seq"},  # not an int
+        {"msg": "no-seq"},  # missing seq entirely
+        {"seq": 1, "t": 5, "f": 5, "msg": "valid-1"},
+    ]
+    last_seq = await append_session_log({**base, "entries": entries})
+    # Only entries with a valid seq (0 and 1) participate in the high-water mark.
+    assert last_seq == 1
+
+    full = await get_full_log_entries("m-seq", 0, None)
+    # All 7 entries are kept — an invalid seq means "can't dedupe", not
+    # "discard the client's data".
+    assert len(full) == 7
+    assert {e["msg"] for e in full} == {
+        "valid-0", "bool-seq", "negative", "too-big", "float-seq", "no-seq", "valid-1",
+    }
+
+    # A second flush resending the exact same entries: the two with a valid,
+    # already-acked seq (0 and 1) are deduped away as usual, but the ones
+    # without a usable seq are appended again every time — that's the
+    # documented tradeoff of "always keep" over "silently drop".
+    last_seq2 = await append_session_log({**base, "entries": entries})
+    assert last_seq2 == 1
+    full2 = await get_full_log_entries("m-seq", 0, None)
+    assert len(full2) == 7 + 5
+    await close_db()
+
+
+# ── concurrent appends ───────────────────────────────────────────────────────
+#
+# Two overlapping flushes for the same (match_id, slot) — e.g. a socket
+# flush racing an HTTP fallback retry of the same interval — must not both
+# read the same last_seq and both decide the same entries are new.
+
+
+def test_append_session_log_concurrent_overlapping_appends_do_not_duplicate(tmp_db):
+    _run_async(_run_concurrent_appends(tmp_db))
+
+
+async def _run_concurrent_appends(tmp_db):
+    import asyncio
+
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db, query
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-concurrent", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+    }
+
+    # One flush sends 0-2 (new); a second, racing flush resends 0-2 plus one
+    # genuinely new entry (3) — as a retried/duplicated flush would. Without
+    # serialization, both could read last_seq=-1 before either commits and
+    # both store entries 0-2, duplicating them.
+    results = await asyncio.gather(
+        append_session_log(
+            {**base, "entries": [{"seq": i, "t": i, "f": i, "msg": f"a{i}"} for i in range(3)]}
+        ),
+        append_session_log(
+            {**base, "entries": [{"seq": i, "t": i, "f": i, "msg": f"a{i}"} for i in range(4)]}
+        ),
+    )
+    assert max(results) == 3
+
+    full = await get_full_log_entries("m-concurrent", 0, None)
+    seqs = sorted(e["seq"] for e in full)
+    assert seqs == [0, 1, 2, 3]  # no duplicates, regardless of interleaving order
+
+    rows = await query("SELECT last_seq FROM session_logs WHERE match_id='m-concurrent' AND slot=0", ())
+    assert rows[0]["last_seq"] == 3
+    await close_db()
+
+
+# ── retention sweep (cleanup_old_data) ───────────────────────────────────────
+
+
+def test_cleanup_old_data_also_cleans_session_log_chunks(tmp_db):
+    """cleanup_old_data must delete stale session_log_chunks rows too —
+    they accumulate independently of their parent session_logs row's own
+    created_at/updated_at (see migration 0008), so without their own sweep
+    they'd outlive every other retention-governed table."""
+    _run_async(_run_cleanup_chunks(tmp_db))
+
+
+async def _run_cleanup_chunks(tmp_db):
+    import asyncio
+    import contextlib
+    from unittest.mock import patch
+
+    import src.db as db_mod
+    from src.api.app import cleanup_old_data
+    from src.db import close_db, init_db, query
+
+    await init_db(tmp_db)
+    await db_mod._db.execute(
+        "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-31 days'))",
+        ("m-old", 0, 0, 0, "[]", 2),
+    )
+    await db_mod._db.execute(
+        "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+        ("m-new", 0, 0, 0, "[]", 2),
+    )
+    await db_mod._db.commit()
+
+    # cleanup_old_data is `while True: await asyncio.sleep(86400); ...`.
+    # Make the sleep resolve instantly so one iteration runs almost
+    # immediately, then cancel the task once it has had its effect.
+    async def _instant_sleep(_seconds):
+        return None
+
+    with patch("src.api.app.asyncio.sleep", new=_instant_sleep):
+        task = asyncio.ensure_future(cleanup_old_data())
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0)
+                rows = await query("SELECT match_id FROM session_log_chunks", ())
+                if len(rows) == 1:
+                    break
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    rows = await query("SELECT match_id FROM session_log_chunks", ())
+    assert [r["match_id"] for r in rows] == ["m-new"]
     await close_db()

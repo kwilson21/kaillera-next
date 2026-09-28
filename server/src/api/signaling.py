@@ -23,7 +23,10 @@ Client → Server events:
   snapshot         — game snapshot relay (broadcast to room)
   input            — input relay for streaming mode (broadcast to room)
   set-name         — player updates display name
-  session-log      — periodic sync log flush (upserts into session_logs)
+  session-log      — periodic sync log flush; a delta of entries newer than
+                     the server's last-acked seq, tagged with the client's
+                     ring epoch, appended into session_log_chunks (acked
+                     back as `{lastSeq}`)
   game-screenshot  — periodic gameplay screenshot (debug/diagnostics)
   debug-sync       — upload sync diagnostic log
   debug-logs       — upload debug console log
@@ -1115,9 +1118,13 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     # (late-joiners' corrected types may not have been seen by all clients)
     await sio.emit("users-updated", _players_payload(room), room=session_id)
 
+    # Redis first, then the DB write: if set_session_ended raises, Redis must
+    # already reflect the room back in "lobby" — otherwise a restart or
+    # failover would restore this room still claiming to be mid-match even
+    # though every client was already told the game ended above.
+    await state.save_room(session_id, room)
     if ended_match_id:
         await db.set_session_ended(ended_match_id, None, "game-end")
-    await state.save_room(session_id, room)
     log.info("Game ended in room %s", session_id)
     await db.insert_client_event(
         {
@@ -1740,6 +1747,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "player_name": room.players.get(player_id, {}).get("playerName", "")[:32],
             "mode": room.mode,
             "entries": entries,
+            "epoch": payload.epoch,
             "summary": summary_str,
             "context": context_str,
             "ip_hash": ip_hash_for_sid(sid),

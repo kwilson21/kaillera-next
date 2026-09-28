@@ -55,15 +55,15 @@ def test_game_end_does_not_overwrite_disconnect(tmp_db):
 
 
 async def _run_ended_by_no_overwrite(tmp_db):
-    from src.db import close_db, init_db, query, set_session_ended, upsert_session_log
+    from src.db import append_session_log, close_db, init_db, query, set_session_ended
 
     await init_db(tmp_db)
 
     for slot, name, ip in [(0, "P1", "a"), (1, "P2", "b")]:
-        await upsert_session_log({
+        await append_session_log({
             "match_id": "m1", "room": "R1", "slot": slot,
             "player_name": name, "mode": "rollback",
-            "log_data": "[]", "summary": "{}", "context": "{}", "ip_hash": ip,
+            "entries": [], "summary": "{}", "context": "{}", "ip_hash": ip,
         })
 
     # P1 disconnects first

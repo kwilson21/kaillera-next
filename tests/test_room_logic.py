@@ -441,11 +441,14 @@ class TestEndGameBroadcastOrder:
         async def _record_set_session_ended(*args, **kwargs):
             order.append("db.set_session_ended")
 
+        async def _record_save_room(*args, **kwargs):
+            order.append("state.save_room")
+
         with (
             patch.object(signaling.sio, "emit", new=AsyncMock(side_effect=_record_emit)),
             patch.object(signaling.db, "set_session_ended", new=AsyncMock(side_effect=_record_set_session_ended)),
             patch.object(signaling.db, "insert_client_event", new=AsyncMock()),
-            patch.object(signaling.state, "save_room", new=AsyncMock()),
+            patch.object(signaling.state, "save_room", new=AsyncMock(side_effect=_record_save_room)),
             patch.object(signaling.desync_vision, "run_postmortem", new=AsyncMock()),
         ):
             return _run_async(coro)
@@ -471,6 +474,10 @@ class TestEndGameBroadcastOrder:
         assert order.index("emit:game-ended") < order.index("db.set_session_ended")
         # users-updated should also land before the DB write.
         assert order.index("emit:users-updated") < order.index("db.set_session_ended")
+        # Redis is updated before the DB write, so a set_session_ended
+        # failure can never leave Redis still claiming the room is playing
+        # after every client was already told the game ended.
+        assert order.index("state.save_room") < order.index("db.set_session_ended")
         # Room state already reflects the end even though the DB write is
         # ordered after the broadcasts.
         assert room.status == "lobby"

@@ -176,6 +176,12 @@ class DeviceTypePayload(BaseModel):
 class SessionLogPayload(BaseModel):
     matchId: str = ""
     entries: list = Field(default_factory=list)
+    # Identifies the client's in-memory sync-log ring instance (regenerated
+    # whenever the ring is created or cleared — see db.append_session_log).
+    # Lets the server tell a genuine reload/reconnect/slot-reuse (which
+    # restarts the client's seq counter at 0) apart from a resend, so the
+    # new ring's entries aren't deduped away against a stale last_seq.
+    epoch: str = Field(default="", max_length=64)
     summary: dict = Field(default_factory=dict)
     context: dict = Field(default_factory=dict)
     inputAudit: dict = Field(default_factory=dict)

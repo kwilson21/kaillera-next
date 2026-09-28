@@ -5989,6 +5989,11 @@
       }
     })(),
     mode: 'rollback',
+    // Identifies this ring instance to the server (see db.append_session_log
+    // / migration 0008): a reload, reconnect, or slot-reuse creates a new
+    // ring (new epoch) that restarts seq at 0, and without this the server
+    // would dedupe every new entry away against the old ring's last_seq.
+    epoch: _syncLogRing.epoch,
     entries: _syncLogRing.entriesAfter(_syncLogAckedSeq, SYNC_LOG_FLUSH_MAX_ENTRIES),
     summary: {
       desyncs: KNState.sessionStats?.desyncs ?? 0,
@@ -6030,25 +6035,55 @@
   // Advance the flush cursor only from a server-confirmed lastSeq — never
   // optimistically. An unacked or rate-limited flush is simply resent
   // (entriesAfter re-sends anything still above the cursor) next interval.
-  const _ackSyncLogFlush = (ack) => {
-    if (ack && typeof ack.lastSeq === 'number' && ack.lastSeq > _syncLogAckedSeq) {
+  //
+  // `sentEpoch` is the ring epoch captured when the flush that produced this
+  // ack was *sent*. If the ring has since been cleared (new epoch — a stop()
+  // cycle overlapping with an in-flight flush), this ack describes a
+  // last_seq under the OLD epoch and must not be applied to the new one's
+  // cursor: the seq spaces aren't comparable, so "advancing" would actually
+  // skip entries the new ring hasn't sent yet.
+  const _ackSyncLogFlush = (ack, sentEpoch) => {
+    if (!ack || typeof ack.lastSeq !== 'number') return;
+    if (sentEpoch !== _syncLogRing.epoch) return;
+    if (ack.lastSeq > _syncLogAckedSeq) {
       _syncLogAckedSeq = ack.lastSeq;
     }
   };
 
-  const _flushViaHttp = (payload) => {
+  // fetch(..., {keepalive:true}) bodies are capped at 64KB by the browser —
+  // silently dropped (not even a network error) past that. The periodic
+  // fallback (used while the socket is connected-but-failing) can carry a
+  // full flush without keepalive; only the pagehide/hidden safety-net flush
+  // needs keepalive (socket is already gone), so only that call site caps
+  // entries to fit the 64KB limit.
+  const _KEEPALIVE_ENTRY_BUDGET = 60 * 1024;
+  const _capPayloadEntriesForKeepalive = (payload) => {
+    const entries = payload.entries || [];
+    let bytes = 0;
+    let start = entries.length;
+    while (start > 0) {
+      const size = (entries[start - 1].msg?.length || 0) + 64;
+      if (bytes + size > _KEEPALIVE_ENTRY_BUDGET) break;
+      bytes += size;
+      start--;
+    }
+    return start > 0 ? { ...payload, entries: entries.slice(start) } : payload;
+  };
+
+  const _flushViaHttp = (payload, { keepalive = false } = {}) => {
     const token = _cachedUploadToken || KNState.uploadToken;
     const room = _cachedRoom || KNState.room || '';
     if (!token || !room) return;
+    const body = keepalive ? _capPayloadEntriesForKeepalive(payload) : payload;
     try {
       fetch(`/api/session-log?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        keepalive: true,
+        body: JSON.stringify(body),
+        ...(keepalive ? { keepalive: true } : {}),
       })
         .then((res) => (res.ok ? res.json() : null))
-        .then((json) => _ackSyncLogFlush(json))
+        .then((json) => _ackSyncLogFlush(json, payload.epoch))
         .catch(() => {});
     } catch (_) {}
   };
@@ -6095,7 +6130,7 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
-          _ackSyncLogFlush(ack);
+          _ackSyncLogFlush(ack, payload.epoch);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
@@ -12090,8 +12125,10 @@
           // Drain C debug log one last time so we capture final rb_log entries
           _drainCDebugLog();
           const payload = _buildFlushPayload();
-          // Only use HTTP here — Socket.IO is already torn down
-          _flushViaHttp(payload);
+          // Only use HTTP here — Socket.IO is already torn down. keepalive
+          // is required for delivery to survive unload, which caps the
+          // body at 64KB, so entries are capped to fit.
+          _flushViaHttp(payload, { keepalive: true });
         } catch (_) {}
       };
       window._knFlushUnloadHandler = handler;

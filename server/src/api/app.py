@@ -121,6 +121,11 @@ async def cleanup_old_data() -> None:
                 "client_events",
                 "screenshots",
                 "desync_events",
+                # Delta chunks (see migration 0008) accumulate independently
+                # of their parent session_logs row's created_at/updated_at,
+                # so they need their own retention sweep or they'd outlive
+                # every other table here.
+                "session_log_chunks",
             ):
                 await db.execute_write(
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
@@ -1035,7 +1040,10 @@ def create_app(lifespan=None) -> FastAPI:
     # Mirrors the Socket.IO session-log handler but over HTTP.
     # Used when socket.emit fails (browser quirks, transport issues).
 
-    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024  # 2MB — same as Socket.IO handler
+    # 2MB — the Socket.IO handler's own cap (_SESSION_LOG_MAX in signaling.py)
+    # is 12MB; this HTTP fallback path keeps a tighter limit since it only
+    # exists to catch flushes the socket path couldn't deliver.
+    _SESSION_LOG_HTTP_MAX = 2 * 1024 * 1024
 
     def _require_upload_token_relaxed(request: Request) -> None:
         """Verify upload token HMAC without requiring the room to still exist."""
@@ -1066,6 +1074,7 @@ def create_app(lifespan=None) -> FastAPI:
         slot = data.get("slot")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
+        epoch = str(data.get("epoch", ""))[:64]
 
         # Newest entries win, as in the Socket.IO handler.
         entries = _session_log_entries(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
@@ -1102,6 +1111,7 @@ def create_app(lifespan=None) -> FastAPI:
                 "player_name": player_name,
                 "mode": mode,
                 "entries": entries,
+                "epoch": epoch,
                 "summary": summary_str,
                 "context": context_str,
                 "ip_hash": hashed_ip,

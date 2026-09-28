@@ -15,6 +15,21 @@ whole ring) are deduped for free.
 `log_data` is kept as-is for old rows; a session's full entry list is
 now legacy `log_data` (if any) plus its chunks in insertion order.
 
+`log_epoch` (added on `session_logs`) carries a random string the client
+generates when its in-memory ring is created (and regenerates on
+clear()). A page reload, a fresh reconnect tab, or a spectator claiming
+a slot a previous player already used all restart the client's `seq`
+counter at 0 while the server's `last_seq` for that (match_id, slot) is
+already high — without `log_epoch`, every entry from the new ring would
+look like a dedup of an old one and get silently dropped. When the
+incoming epoch differs from the stored one, the server treats
+`last_seq` as -1 for that flush and adopts the new epoch.
+
+`session_log_chunks.size` records each chunk's JSON byte length at
+insert time, so enforcing the per-(match_id, slot) size cap doesn't
+need to re-read `length(entries)` for every stored chunk on every
+flush.
+
 Revision ID: 0008
 Revises: 0007
 Create Date: 2026-09-27
@@ -35,6 +50,9 @@ def upgrade() -> None:
     # append_session_log's `seq <= last_seq` check.
     with op.batch_alter_table("session_logs") as batch:
         batch.add_column(sa.Column("last_seq", sa.Integer, nullable=False, server_default="-1"))
+        # Empty string, not NULL, so a plain `= excluded.log_epoch` comparison
+        # in the upsert never has to special-case NULL != NULL.
+        batch.add_column(sa.Column("log_epoch", sa.Text, nullable=False, server_default=""))
 
     op.create_table(
         "session_log_chunks",
@@ -44,6 +62,11 @@ def upgrade() -> None:
         sa.Column("first_seq", sa.Integer, nullable=False),
         sa.Column("last_seq", sa.Integer, nullable=False),
         sa.Column("entries", sa.Text, nullable=False),
+        # Byte length of `entries`, recorded at insert time — see module
+        # docstring. Defaults to 0 for any row inserted without it, which the
+        # cap-enforcement query treats as "unknown, don't count against
+        # size" rather than crashing.
+        sa.Column("size", sa.Integer, nullable=False, server_default="0"),
         sa.Column("created_at", sa.Text, server_default=sa.text("(datetime('now'))")),
     )
     op.create_index(
@@ -58,3 +81,4 @@ def downgrade() -> None:
     op.drop_table("session_log_chunks")
     with op.batch_alter_table("session_logs") as batch:
         batch.drop_column("last_seq")
+        batch.drop_column("log_epoch")
