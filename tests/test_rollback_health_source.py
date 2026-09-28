@@ -393,3 +393,76 @@ def test_rb_input_dc_close_routes_through_cleanup_and_reliable_fallback():
     close_idx = src.find("resetPeerRollbackTransport(peer, remoteSid, 'rb-dc-close');")
     close_window = src[close_idx - 300 : close_idx + 500]
     assert "resetPeerState(" not in close_window
+
+
+def test_start_wait_rtt_has_wall_clock_deadline():
+    # I1: checkAllLockstepReady's START-WAIT-RTT branch waits on _rttComplete
+    # with no deadline before #56 — a failed ping send or a DC closing
+    # mid-measurement could leave that wait unbounded forever.
+    src = LOCKSTEP_JS.read_text()
+    doc = INVARIANTS_DOC.read_text()
+
+    assert "const START_WAIT_RTT_MS = 5000;" in src
+    assert "START-WAIT-RTT-TIMEOUT" in src
+
+    doc_rows = [line for line in doc.splitlines() if "START_WAIT_RTT_MS" in line]
+    assert doc_rows, "I1 table missing a START_WAIT_RTT_MS row"
+    assert any("START-WAIT-RTT-TIMEOUT" in row for row in doc_rows)
+
+    # The send-failure path must route through the same completion helper as
+    # normal ("all peers done") completion, not just increment counters.
+    ping_idx = src.index("const sendNextPing = (peer) => {")
+    ping_src = src[ping_idx : src.index("const handleDelayPong", ping_idx)]
+    catch_src = ping_src[ping_src.index("} catch (_) {") :]
+    assert "_finishRttMeasurement(" in catch_src
+
+
+def test_stop_resets_rtt_median_between_matches():
+    # I1/#56: _rttMedian (set from the previous match's RTT samples) was
+    # never reset anywhere, including stop(). In match 2+, a zero-sample RTT
+    # measurement left the old median in place; checkAllLockstepReady's
+    # `hasRollback && _rttMedian > 0` branch then ran _rttStats(_rttSamples)
+    # on an empty sample array, and `s.median.toFixed` threw on the null
+    # result inside the START-WAIT-RTT timer callback, so the match never
+    # started.
+    src = LOCKSTEP_JS.read_text()
+    start_idx = src.index("const stop = () => {")
+    end_idx = src.index("const _medianSample = (samples) => {", start_idx)
+    stop_src = src[start_idx:end_idx]
+
+    assert "_rttMedian = 0;" in stop_src
+
+
+def test_finish_rtt_measurement_resets_median_when_no_samples():
+    # I1/#56 (paired with the stop() reset above): a match that finishes RTT
+    # measurement with zero samples (every ping send failed before the first
+    # ping ever landed) must not inherit a stale median from an earlier
+    # match either.
+    src = LOCKSTEP_JS.read_text()
+    start_idx = src.index("const _finishRttMeasurement = (reason) => {")
+    end_idx = src.index("const sendNextPing = (peer) => {", start_idx)
+    finish_src = src[start_idx:end_idx]
+
+    assert "RTT measurement complete with no samples" in finish_src
+    else_idx = finish_src.index("} else {")
+    assert "_rttMedian = 0;" in finish_src[else_idx:]
+
+
+def test_start_wait_rtt_timer_does_not_gate_on_phase_floor():
+    # I1/#56: the timer previously early-returned when `_phase` had dropped
+    # below PHASE_LOCKSTEP_READY (e.g. the sync-retry timeout at
+    # checkAllEmuReady resets `_phase = PHASE_EMU_READY`). That left
+    # `_startWaitRttLogged` permanently true with no timer re-armed once
+    # LOCKSTEP_READY was re-entered, so the wait became unbounded again.
+    # The timer must finish RTT regardless of the current phase floor —
+    # only the session, completion, and already-running guards remain.
+    src = LOCKSTEP_JS.read_text()
+    start_idx = src.index("_startWaitRttTimer = setTimeout(() => {")
+    end_idx = src.index("}, START_WAIT_RTT_MS);", start_idx) + len("}, START_WAIT_RTT_MS);")
+    timer_src = src[start_idx:end_idx]
+
+    assert "_phase < PHASE_LOCKSTEP_READY" not in timer_src
+    assert "sid !== _sessionId" in timer_src
+    assert "_rttComplete" in timer_src
+    assert "_phase >= PHASE_RUNNING" in timer_src
+    assert "_finishRttMeasurement(" in timer_src

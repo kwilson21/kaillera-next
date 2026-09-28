@@ -501,6 +501,30 @@
     sendNextPing(peer);
   };
 
+  // Every path that finishes RTT (all peers done, a send failed, START_WAIT_RTT_MS) ends here.
+  // checkAllLockstepReady withholds lockstep-ready until _rttComplete, so announce and re-check.
+  const _finishRttMeasurement = (reason) => {
+    if (_rttSamples.length > 0) {
+      _rttSamples.sort((a, b) => a - b);
+      const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
+      _rttMedian = median;
+      // Lockstep default — rollback-aware recalculation happens at game start
+      const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
+      if (window.setAutoDelay) window.setAutoDelay(delay);
+      _rttComplete = true;
+      _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay} (${reason})`);
+    } else {
+      // No samples (e.g. the start-wait timeout fired first): no RTT data, so delay uses the preference.
+      _rttMedian = 0;
+      _rttComplete = true;
+      _syncLog(`RTT measurement complete with no samples (${reason})`);
+    }
+    if (_phase === PHASE_LOCKSTEP_READY) {
+      broadcastLockstepReady();
+      checkAllLockstepReady();
+    }
+  };
+
   const sendNextPing = (peer) => {
     if (peer._rttPingCount >= 22) {
       peer._rttComplete = true;
@@ -512,16 +536,7 @@
       }
       _rttPeersComplete++;
       // When all peers are done, compute auto delay from max median across peers
-      if (_rttPeersComplete >= _rttPeersTotal) {
-        _rttSamples.sort((a, b) => a - b);
-        const median = _rttSamples[Math.floor(_rttSamples.length / 2)];
-        _rttMedian = median;
-        // Lockstep default — rollback-aware recalculation happens at game start
-        const delay = Math.min(9, Math.max(2, Math.ceil(median / 16.67)));
-        _rttComplete = true;
-        if (window.setAutoDelay) window.setAutoDelay(delay);
-        _syncLog(`RTT median: ${median.toFixed(1)}ms samples: ${_rttSamples.length} -> auto delay: ${delay}`);
-      }
+      if (_rttPeersComplete >= _rttPeersTotal) _finishRttMeasurement('all-peers-done');
       // Delay stays fixed for the session — changing it mid-match breaks
       // muscle memory for combo timing. Input stalls and resync handle
       // transient latency spikes instead.
@@ -532,6 +547,8 @@
     } catch (_) {
       peer._rttComplete = true;
       _rttPeersComplete++;
+      // A failed send still counts toward "all peers done", or _rttComplete never gets set.
+      if (_rttPeersComplete >= _rttPeersTotal) _finishRttMeasurement('send-failure');
     }
   };
 
@@ -542,11 +559,7 @@
     if (peer._rttPingCount > 2) {
       peer._rttSamples.push(rtt);
     }
-    sendNextPing(peer);
-    if (_rttComplete && _phase >= PHASE_LOCKSTEP_READY) {
-      broadcastLockstepReady();
-      checkAllLockstepReady();
-    }
+    sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
   const KN_INPUT_MODEL = 2;
@@ -4957,25 +4970,33 @@
     return true;
   };
 
-  const _backfillCInputsFromJs = (mod, reason) => {
+  const _backfillCInputsFromJs = (mod, reason, remoteAhead = false) => {
     if (!mod?._kn_feed_input) return;
     const maxWindow = Math.min(240, Math.max(60, _rbRollbackMax + DELAY_FRAMES + 8));
     const startFrame = Math.max(0, _frameNum - maxWindow);
     let localFed = 0;
     let remoteFed = 0;
+    let fedThrough = _frameNum;
 
     for (let f = startFrame; f <= _frameNum; f++) {
       if (_feedCInput(mod, _playerSlot, f, _localInputs[f])) localFed++;
-      for (const [slotKey, frames] of Object.entries(_remoteInputs)) {
-        const slot = Number(slotKey);
-        if (!Number.isFinite(slot) || slot === _playerSlot) continue;
-        if (_feedCInput(mod, slot, f, frames?.[f])) remoteFed++;
+    }
+    for (const [slotKey, frames] of Object.entries(_remoteInputs)) {
+      const slot = Number(slotKey);
+      if (!Number.isFinite(slot) || slot === _playerSlot) continue;
+      for (const [frameKey, input] of Object.entries(frames || {})) {
+        const frame = Number(frameKey);
+        if (!Number.isInteger(frame) || frame < startFrame || (!remoteAhead && frame > _frameNum)) continue;
+        if (_feedCInput(mod, slot, frame, input)) {
+          remoteFed++;
+          fedThrough = Math.max(fedThrough, frame);
+        }
       }
     }
 
     if (localFed || remoteFed) {
       _syncLog(
-        `C-INPUT-BACKFILL reason=${reason} f=${_frameNum} range=${startFrame}-${_frameNum} ` +
+        `C-INPUT-BACKFILL reason=${reason} f=${_frameNum} range=${startFrame}-${fedThrough} ` +
           `local=${localFed} remote=${remoteFed}`,
       );
     }
@@ -5022,6 +5043,7 @@
 
   // Lockstep state
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
+  let _startWaitRttLogged = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _guestStateKind = 'savestate'; // 'savestate' or 'kn-sync'
   let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
@@ -9115,6 +9137,7 @@
 
     if (_isSyntheticOnlyInitialSyncSkip()) {
       _syncLog('synthetic demo: skipping initial state sync');
+      _clearInputsForNewMatch('synthetic-sync-skip');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) broadcastLockstepReady();
       checkAllLockstepReady();
@@ -9149,6 +9172,15 @@
     }, syncTimeoutMs);
   };
 
+  // I1 deadline for START-WAIT-RTT: a DC that closes mid-measurement never completes, so finish RTT anyway.
+  // Only peers that finished all 22 pings contribute samples; with none, delay falls back to the preference.
+  const START_WAIT_RTT_MS = 5000;
+  let _startWaitRttTimer = null;
+  const _clearStartWaitRttTimer = () => {
+    if (_startWaitRttTimer) clearTimeout(_startWaitRttTimer);
+    _startWaitRttTimer = null;
+  };
+
   const checkAllLockstepReady = () => {
     if (_coreFatalError) return; // a dead core cannot enter the start sequence
     if (_phase < PHASE_LOCKSTEP_READY) return;
@@ -9161,6 +9193,26 @@
     });
     const soloMode = playerPeerSids.length === 0;
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
+    const syntheticOnlyDemo = _isSyntheticOnlyInitialSyncSkip();
+    // Starting before announcing readiness lets this peer run ahead and send first inputs too early.
+    if (!_rttComplete && !soloMode && !syntheticOnlyDemo) {
+      if (!_startWaitRttLogged) {
+        _startWaitRttLogged = true;
+        _syncLog(`START-WAIT-RTT peers=${playerPeerSids.length} complete=${_rttPeersComplete}/${_rttPeersTotal}`);
+        const sid = _sessionId;
+        _startWaitRttTimer = setTimeout(() => {
+          _startWaitRttTimer = null;
+          // No phase-floor guard: the sync timeout can drop back to EMU_READY and this timer never re-arms.
+          // Finishing early is harmless; re-entering LOCKSTEP_READY broadcasts once _rttComplete is set.
+          if (sid !== _sessionId || _rttComplete || _phase >= PHASE_RUNNING) return;
+          _syncLog(
+            `START-WAIT-RTT-TIMEOUT complete=${_rttPeersComplete}/${_rttPeersTotal} samples=${_rttSamples.length}`,
+          );
+          _finishRttMeasurement('start-wait-timeout');
+        }, START_WAIT_RTT_MS);
+      }
+      return;
+    }
 
     if (readyCount < playerPeerSids.length) return;
 
@@ -9630,6 +9682,7 @@
   };
   const _markInitialStateReady = () => {
     _clearHostInitialStateWait();
+    _clearInputsForNewMatch('initial-state-ready');
     _phase = PHASE_LOCKSTEP_READY;
     if (_rttComplete) broadcastLockstepReady();
     checkAllLockstepReady();
@@ -9793,6 +9846,7 @@
       _guestStateHiddenWords = captured.hiddenWords;
       _guestStateAudioFifo = captured.audioFifo;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
+      _clearInputsForNewMatch('host-capture-ready');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -11530,6 +11584,30 @@
     );
   };
 
+  const _clearInputsForNewMatch = (reason) => {
+    if (_frameNum !== 0) return; // late join keeps its buffers
+    // Runs before this peer sends lockstep-ready: a peer can start as soon as it sees it, and its first inputs
+    // (frame 0+) must survive until startLockstep().
+    // Demo synthetic peers inject their inputs once and never resend, so keep theirs.
+    const localBuffered = Object.keys(_localInputs || {}).length;
+    const preservedRemoteInputs = {};
+    const preservedPeerStarted = {};
+    let remoteBuffered = 0;
+    for (const [, peer] of Object.entries(_peers)) {
+      if (peer?.synthetic === true && _isValidPlayerSlot(peer.slot)) {
+        if (_remoteInputs[peer.slot]) preservedRemoteInputs[peer.slot] = _remoteInputs[peer.slot];
+        if (_peerInputStarted[peer.slot]) preservedPeerStarted[peer.slot] = true;
+      }
+    }
+    for (const [slot, frames] of Object.entries(_remoteInputs || {})) {
+      if (!preservedRemoteInputs[slot]) remoteBuffered += Object.keys(frames || {}).length;
+    }
+    _localInputs = {};
+    _remoteInputs = preservedRemoteInputs;
+    _peerInputStarted = preservedPeerStarted;
+    _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
+  };
+
   const _scheduleMatchInputReset = (reason) => {
     if (!_pendingMatchInputResetReason) _pendingMatchInputResetReason = reason;
   };
@@ -11691,23 +11769,8 @@
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
     if (_frameNum === 0) {
-      // Preserve synthetic peers' input state across this wipe. The wipe is
-      // designed for real WebRTC peers that re-populate state continuously by
-      // sending packets each frame; synthetic peers (1P demo mode) are created
-      // once at init and have no equivalent recovery path. Without preservation,
-      // the lockstep input-application path stalls at _frameNum=DELAY_FRAMES
-      // because _remoteInputs[syntheticSlot][0] is undefined and never refilled.
-      const preservedRemoteInputs = {};
-      const preservedPeerStarted = {};
-      for (const [, peer] of Object.entries(_peers)) {
-        if (peer?.synthetic === true && _isValidPlayerSlot(peer.slot)) {
-          if (_remoteInputs[peer.slot]) preservedRemoteInputs[peer.slot] = _remoteInputs[peer.slot];
-          if (_peerInputStarted[peer.slot]) preservedPeerStarted[peer.slot] = true;
-        }
-      }
-      _localInputs = {};
-      _remoteInputs = preservedRemoteInputs;
-      _peerInputStarted = preservedPeerStarted;
+      // Fresh match (late join sets _frameNum first). Input buffers were already cleared on entering LOCKSTEP_READY;
+      // a peer that started first may have sent frames 0+.
       _pendingMatchInputResetReason = '';
       _activeRoster = null;
       _pendingLateJoinPeerSids.clear();
@@ -11967,7 +12030,7 @@
           rngMod._kn_set_rdram_preserve(_rdramBase);
           _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
         }
-        _backfillCInputsFromJs(detMod, 'rollback-init');
+        _backfillCInputsFromJs(detMod, 'rollback-init', initFrame === 0 && _frameNum === 0);
 
         // kn_rollback_init mallocs ringSize × stateSize (~208MB) + an 8MB
         // rdram-preserve buffer. On Smash Remix, this consistently grows
@@ -17218,6 +17281,8 @@
 
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
+    _startWaitRttLogged = false;
+    _clearStartWaitRttTimer();
     _resetInputAudit();
     _deadbandStick.reset();
     _config = config;
@@ -17318,9 +17383,11 @@
     _hudRollbackDepthSamples = [];
     _hudEventTimestamps = [];
     _rttSamples = [];
+    _rttMedian = 0;
     _rttComplete = false;
     _rttPeersComplete = 0;
     _rttPeersTotal = 0;
+    _clearStartWaitRttTimer();
 
     // Stop lockstep tick loop
     stopSync();
