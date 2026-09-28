@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-25
 **Status:** Approved 2026-09-25. Revised 2026-09-28 after the first PRs shipped (see "Revision 2026-09-28"); the revision is pending review.
-**Scope:** Server persistence layer, retention, admin API; two one-line-scale client changes
+**Scope:** Server persistence layer, retention, admin API; two one-line-scale client changes, plus the input-audit delta change (§8 item 3), which touches the netplay client's flush path
 
 ## Problem
 
@@ -21,7 +21,7 @@ Cloudflare (the account that already provides TURN), so that:
 
 - Session logs, match metrics/Parquet, client events, desync verdicts,
   feedback and screenshots survive deploys, restarts and idle sleep.
-- An in-progress match loses at most ~10 s of logs to a restart.
+- An in-progress match loses at most ~10 s of logs to a restart (revised: ~0, see "Revision 2026-09-28").
 - The admin API keeps working with the **same paths and response fields**.
 - Matches where something went wrong are kept until explicitly resolved (or
   very stale); normal matches are kept a short time.
@@ -30,7 +30,7 @@ Cloudflare (the account that already provides TURN), so that:
 
 ## Non-goals
 
-- Changing the Socket.IO wire format, client flush cadence or upload caps.
+- Changing the client flush cadence or upload caps. (The `inputAudit` payload does change, to deltas; see §8 item 3.)
 - Touching the netplay tick loop, sync, input or the WASM core.
 - `debug-sync` / `debug-logs`: they write to stdout or local files under
   `DEBUG_MODE` and are not in `kn.db`. They stay as they are.
@@ -43,7 +43,7 @@ Cloudflare (the account that already provides TURN), so that:
 | Question | Decision |
 |---|---|
 | What must survive | Everything in `kn.db` |
-| Mid-match loss window | ~10 s |
+| Mid-match loss window | ~10 s (revised: ~0 with direct writes) |
 | Store | D1 for small queryable rows, R2 for blobs (chosen over Litestream-to-R2 and R2-only) |
 | Migrations | Replace Alembic with numbered plain-SQL files and a small runner shared by both backends |
 | Crash signal gap | Add a global `error` listener in `play.js` (in scope) |
@@ -74,23 +74,25 @@ integer/float/NULL params bind correctly, and D1's HTTP batch **is** atomic.
    writes", and the shipper's jobs (budgets, retries) move to the write path.
 2. **D1 is the hot store, R2 the archive.** D1's free tier caps a database at
    500 MB, and flagged matches' logs are kept for months, so they can't all
-   stay in D1. When rotation processes an ended match it writes the merged
-   entries as Parquet and each slot's `context` as JSON to R2, then (after
-   `D1_HOT_DAYS`, default 2) deletes that match's chunks from D1 and clears
-   `session_logs.context`. Admin reads use D1 while the chunks exist and the
-   R2 archive after.
+   stay in D1. Once a match can no longer receive uploads, it is archived to
+   R2 (each slot's raw entries and context, plus a Parquet analytics copy);
+   `D1_HOT_DAYS` (default 2) after that, its chunks leave D1. Admin reads
+   switch from D1 to the archive on `archived_at`. Details in §1 "Archive and
+   eviction".
 3. **Context size cap (defensive).** Both session-log handlers allowed
    `context` (with `inputAudit`) up to 2 MiB = 2,097,152 bytes, but it shares
    a D1 row with `summary` and D1 rows are capped at 2,000,000 bytes. Honest
    clients can't reach that (the sanitizer truncates each list to 4,096
    items, so a real audit tops out around 1.46 MB), but a modified client
    could. #51 caps context at 1.5 MB.
-5. **Input audit follow-ups (found reviewing #51).** The sanitizer keeps the
+4. **Input audit as deltas (found reviewing #51).** The sanitizer keeps the
    *oldest* 4,096 audit entries per list, so the audit covers only about the
    first 70 s of a match; and the whole audit is re-sent every flush (up to
-   ~1.2 MB per player every 5 s). Both are fixed by sending audit *deltas*
-   the way #41 does for log entries (§8).
-4. **Delivery (§8) is renumbered** around what has shipped.
+   ~1.2 MB per player every 5 s), the largest source of D1 byte churn. The
+   client will send only new audit entries, stored as chunks with
+   `kind = 'audit'` next to the log chunks, so the archive and eviction
+   handle both the same way. This lands before the archive (§8 item 3).
+5. **Delivery (§8) is renumbered** around what has shipped.
 
 ---
 
@@ -115,7 +117,7 @@ size stays bounded because ended matches move to the R2 archive.
 ### Backends
 
 `db.py` keeps its public functions (`init_db`, `close_db`, `query`,
-`execute_write`, `upsert_session_log`, `set_session_ended`,
+`execute_write`, `append_session_log`, `set_session_ended`,
 `insert_client_event`, `insert_feedback`, `insert_screenshot`, `get_screenshots`,
 …) and the SQL they run. Behind them sits a backend with three operations,
 `query(sql, params)`, `execute(sql, params)`, and `batch([(sql, params), ...])`:
@@ -137,8 +139,9 @@ size stays bounded because ended matches move to the R2 archive.
 - `R2BlobStore`: boto3 S3 client at `https://{CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   calls run via `asyncio.to_thread`.
 
-Selection: if `D1_DATABASE_ID`/`D1_API_TOKEN` are set, use D1; else SQLite. If
-`R2_BUCKET` and keys are set, use R2; else local. Unset → the server behaves as
+Selection: if `D1_DATABASE_ID` or `D1_API_TOKEN` is set, use D1; if any of
+`R2_BUCKET`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` is set, use R2 (both also
+need `CF_ACCOUNT_ID`; a partial configuration stops the server). Unset → the server behaves as
 today on local disk.
 
 ### Ingest: direct writes
@@ -156,27 +159,54 @@ small append, so there is nothing to batch.)*
 - **Client events and feedback:** one D1 insert each, as before.
 - **Budgets** (§5) are counted in the `db` write functions, not a shipper.
 
-Rough volume with 4 players: about 14k D1 row writes per hour of play
-(well under 100k/day at today's traffic) and 48 screenshot PUTs per minute.
+Rough volume per hour of 4-player play: ~14k D1 rows written by ingest
+(2,880 flushes × ~3 rows, plus 2,880 screenshot rows with their index), and
+about as many again later from eviction and retention deletes, so ~26k in
+total. The free 100k/day is therefore about 4 hours of 4-player play a day
+(~2.3 h under the 60k budget). Screenshots are 2,880 R2 PUTs per hour; R2's
+free 1M writes/month covers ~347 such hours. Counts come from D1's own
+`meta.rows_written` (which includes index writes), not an in-app tally.
 
 ### Rotation
 
-`match_rotation.sweep_pending` keeps its role: find ended matches without a
-`match_metrics` row, read each slot's entries (`db.get_full_log_entries`),
-and merge them. It then:
+`match_rotation.sweep_pending` keeps its early role: soon after a match ends
+it computes `match_metrics` and runs the retention classifier (§2) so the
+admin API has numbers quickly. Those are provisional, because a player
+leaving mid-match already sets `ended_by`, and final flushes can land later.
 
-- writes the Parquet file to R2 (`matches/<id>/entries.zstd.parquet`) instead
-  of the local disk, and each slot's `context` to
-  `matches/<id>/sessions/<slot>.context.json.gz`;
-- upserts `match_metrics`;
-- runs the retention classifier (§2).
+### Archive and eviction
 
-A later pass of the same sweeper **evicts** archived matches from D1 once
-they are `D1_HOT_DAYS` past `ended_at`: it deletes their
-`session_log_chunks` and sets `session_logs.context = '{}'`, recording
-`archived_at` on `match_retention`. It never evicts a match whose Parquet
-upload failed. Admin detail, export and input-audit read the chunks and
-`context` from D1 while present, and from the R2 archive otherwise.
+**When a match is archived.** Only once it can no longer receive uploads:
+its ingest window (§5) has closed, i.e. 30 min after `ended_at`, or 4 h after
+`created_at` when no end was ever recorded (crash, restart). Archiving then:
+
+1. Recomputes `match_metrics` and re-runs the classifier on the complete logs.
+2. Uploads, for each slot, the raw entries exactly as stored (log and audit
+   chunks, JSON Lines) to `matches/<id>/sessions/<slot>.entries.jsonl.gz`
+   and its `context` to `matches/<id>/sessions/<slot>.context.json.gz`. A
+   NULL slot uses `slot-none`. These are what admin detail, export and
+   input-audit read after eviction, so they return the same data.
+3. Uploads the Parquet copy (`matches/<id>/entries.zstd.parquet`) for
+   DuckDB/Polars analysis. It is not used to serve admin reads (Parquet
+   null-pads missing keys and coerces types).
+4. Records, in one D1 statement, `archived_at`, the highest chunk `id` and
+   the `session_logs.updated_at` it covered, and `archive_bytes`. It does this
+   only after every upload succeeded; a failed upload leaves the match
+   un-archived for the next sweep.
+
+**Eviction.** `D1_HOT_DAYS` after `archived_at`, one atomic D1 batch deletes
+the match's chunks with `id <= archived_max_chunk_id`, clears `context` and
+`log_data` on rows whose `updated_at` still equals the archived value, and
+sets `evicted_at`. Tombstoned matches (§4) are skipped, so a late archive
+can never recreate objects after a delete has started.
+
+**Admin reads** use D1 until `evicted_at` is set and the archive after, so a
+hot session with no chunks yet shows as empty rather than `log_deleted`.
+
+**Existing data.** The PR that adds archiving also backfills: matches rotated
+since the 2026-09-28 cutover (their `parquet_path` points at the wiped local
+disk) and matches created before `match_retention` existed get a retention
+row and go through the same archive step.
 
 `desync_vision` reads screenshot bytes through `blobstore` (shipped in #48).
 
@@ -216,7 +246,12 @@ CREATE TABLE match_retention (
   resolved_at     TEXT,
   resolved_note   TEXT,
   last_touched_at TEXT NOT NULL DEFAULT (datetime('now')),
-  deleting_at     TEXT                              -- tombstone (§4)
+  deleting_at     TEXT,                             -- tombstone (§4)
+  archived_at            TEXT,                      -- archive complete (§1)
+  archived_max_chunk_id  INTEGER,                   -- highest chunk id in the archive
+  archived_updated_at    TEXT,                      -- session_logs.updated_at the archive covered
+  archive_bytes          INTEGER,                   -- bytes uploaded to R2 for this match
+  evicted_at             TEXT                       -- chunks/context removed from D1
 );
 ```
 
@@ -309,10 +344,10 @@ existing `escapeHtml`.
 
 ### Deletion across R2 and D1 (no cross-store transaction)
 
-R2 and D1 cannot share a transaction, and the D1 HTTP API's batch is not
-documented as atomic. The documented rollback applies to the Worker binding's
-`db.batch()`. Deletion is therefore a resumable three-step process, with a
-tombstone, that is correct under interruption at any point:
+R2 and D1 cannot share a transaction. (D1's HTTP batch itself is atomic,
+verified live on 2026-09-28, which the archive and ingest paths rely on.)
+Deletion is therefore a resumable three-step process, with a tombstone, that
+is correct under interruption at any point:
 
 1. **Mark:** `UPDATE match_retention SET deleting_at = datetime('now') WHERE match_id = ? AND deleting_at IS NULL AND <expiry condition>`.
    Because the expiry condition is in the same statement, a flag or resolve
@@ -401,11 +436,15 @@ many IPs from exhausting the shared free tier or the bill:
 | `BUDGET_D1_BYTES` | 400 MB | D1 500 MB per database (free) |
 | `BUDGET_AUTO_FLAGGED_BYTES` | 2 GB | Unbounded growth from forged flag signals |
 
-- R2 stored bytes = sum of `screenshots.size`, `match_metrics.parquet_bytes`
-  and archived context sizes, computed by the sweep. D1 bytes come from the
-  `size_after` field D1 returns with every query.
+- R2 stored bytes = sum of `screenshots.size` and
+  `match_retention.archive_bytes`, computed by the sweep.
+- D1 bytes are estimated as `SUM(session_log_chunks.size)` plus
+  `SUM(length(context))`. (D1's `size_after` isn't used: SQLite deletes go to
+  the free list, so it may not drop after an eviction.)
 - Over `BUDGET_D1_BYTES`, the sweep evicts archived matches early (oldest
   first) before anything is dropped.
+- Budgets decide at write time: with direct writes there's no queue to drop
+  from later, so an exhausted budget rejects the lowest-priority writes first.
 - Counters are kept in memory and saved to `server_state` once a minute
   (~1.4k row writes/day), so a restart does not reset them.
 - When a budget is exhausted, data is dropped in this order: screenshots, then
@@ -463,25 +502,25 @@ README is updated. New dependency: `boto3` (declared directly in
   SQL on in-memory SQLite and returns D1's response JSON, and the suite covers
   integer/NULL params. The same suite runs `LocalBlobStore` and an in-memory
   fake R2.
-- **Optional live test:** skipped unless the D1/R2 env vars are set. Run once
-  during implementation, including a check of whether the `/query` batch is
-  transactional; the design does not depend on the answer.
+- **Optional live tests:** skipped unless the D1/R2 env vars are set. They
+  showed D1's `/query` batch is atomic, which ingest and eviction rely on.
 - **Classifier:** one fixture per signal; `INPUT-OOR` at 19 and 20.
 - **Retention:** injectable clock for every window; the deletion interruption
   test fails at each step and asserts that repeated sweeps converge to fully
   deleted with no visible partial match; a flag racing with a mark.
-- **Archive and eviction:** a rotated match's Parquet and context land in the
-  blob store; eviction deletes chunks only after a successful archive; admin
-  detail, export and input-audit return identical data before and after
-  eviction.
+- **Archive and eviction:** nothing is archived before the ingest window
+  closes; chunks written after an archive are never evicted; a failed upload
+  leaves the match un-archived; admin detail, export and input-audit return
+  identical data before and after eviction; the backfill covers pre-existing
+  matches.
 - **Budgets:** counters at the write path and the drop priority order.
 - **Ingest validation:** unknown match, wrong room, wrong slot, expired
   window, tombstoned match.
 - **Admin API:** existing tests pass unchanged, which shows the response
   shapes did not change. New endpoints, `admin_actions` rows, 409/410 paths.
 - **End to end:** one local two-player match per PR that changes ingest
-  (logs land, rotate, show in admin). `rb-two-player.mjs` is not required
-  because the tick loop, sync and input are untouched.
+  (logs land, rotate, show in admin). `rb-two-player.mjs` is required only for
+  the input-audit delta PR, which changes the client's flush path.
 - **Production check after cutover:** play a match, restart the Render
   service, and confirm the match, logs and metrics are still in the admin API.
 
@@ -497,39 +536,45 @@ Remaining:
 1. `fix(logs)`: cap session-log `context` at 1.5 MB in both handlers
    (revision item 3) — #51.
 2. `feat(logs)`: `match_retention` registration at `start-game` and ingest
-   validation (§5), plus the daily D1-rows and R2-bytes budgets.
-3. `feat(logs)`: archive at rotation (Parquet and context to R2), eviction
-   after `D1_HOT_DAYS`, admin reads that fall back to the archive,
-   `BUDGET_D1_BYTES`.
-4. `feat(retention)`: classifier in rotation; flag hooks for client events,
-   desync verdicts and feedback; `BUDGET_AUTO_FLAGGED_BYTES`; the two client
-   changes.
-5. `feat(retention)`: tombstoned `retention_sweep` replaces
+   validation (§5); daily D1-rows (from `meta.rows_written`, needs D1Backend
+   to return `meta`) and R2-bytes budgets; and `cleanup_old_data` runs 60 s
+   after startup instead of after 24 h, so D1 is cleaned before the full
+   retention sweep lands.
+3. `feat(logs)`: input audit as deltas (revision item 4): the client sends
+   only new audit entries, stored as `kind = 'audit'` chunks, trimmed
+   newest-kept; a dropped audit never overwrites a stored one. Changes the
+   netplay client's flush path, so `tests/rb-two-player.mjs` must pass.
+4. `feat(logs)`: archive and eviction (§1): archive after the ingest window,
+   eviction after `D1_HOT_DAYS`, admin reads switching on `evicted_at`,
+   `BUDGET_D1_BYTES`, and the backfill of existing matches.
+5. `feat(retention)`: classifier (early and at archive); flag hooks for client
+   events, desync verdicts and feedback; `BUDGET_AUTO_FLAGGED_BYTES`; the two
+   client changes.
+6. `feat(retention)`: tombstoned `retention_sweep` replaces
    `cleanup_old_data`; stored-bytes accounting and `BUDGET_STORED_BYTES`;
    orphan sweep.
-6. `feat(admin)`: retention fields and filters, flag/resolve endpoints,
+7. `feat(admin)`: retention fields and filters, flag/resolve endpoints,
    `admin_actions`, new stats fields.
-7. `feat(admin)`: admin page badges, filters and buttons.
-8. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
+8. `feat(admin)`: admin page badges, filters and buttons.
+9. `feat(admin)`: feedback triage fields and endpoint, `triaged=false`
    filter, `admin_actions.actor`, triage display on the admin page (§9).
    Then create the daily routine.
-9. `feat(logs)`: input audit as deltas (revision item 5). The client sends
-   only new audit entries with each flush, the server appends them (keeping
-   the newest when trimming), and a dropped audit never overwrites a stored
-   one. Touches the netplay client's flush path, so it needs a
-   `tests/rb-two-player.mjs` run (CLAUDE.md).
+
+Each PR that adds a setting also adds it to `render.yaml` and
+`deploy/render/README.md`, whose setup section should include turning on the
+Cloudflare billing notification for R2.
 
 Before each merge, check the diff size against `main` (CLAUDE.md).
 
 ---
 
-## 9. Daily feedback routine (follow-up after §8 item 8)
+## 9. Daily feedback routine (follow-up after §8 item 9)
 
 Once feedback persists, a scheduled cloud agent processes new feedback every
 day. Feedback has persisted since the 2026-09-28 cutover; the routine is set
-up once its API (§8 item 8) ships.
+up once its API (§8 item 9) ships.
 
-### API additions (§8 item 8)
+### API additions (§8 item 9)
 
 - Migration: `feedback` gains `triaged_at`, `triage_category`, `triage_note`
   (≤ 4 KB).
