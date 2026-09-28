@@ -258,10 +258,14 @@ CREATE TABLE match_retention (
 - `last_touched_at` is updated on a flag, a resolve or unresolve, a manual
   note, and when an admin opens the match's detail.
 
-`flag_match(match_id, signal, detail)` in `server/src/retention.py` is the
-only way to flag a match. It is idempotent: it merges `{signal, count, slot,
-first_f, note}` into `flag_reasons`, sets `tier='flagged'`, and touches the row.
-It does nothing if `deleting_at` is set.
+`db.flag_match(match_id, reasons)` is the only way to flag a match
+(`retention.classify_entries` decides what counts in the logs). It is
+idempotent: reasons merge by signal (larger count, earliest frame) into
+`flag_reasons`, it sets `tier='flagged'` and touches the row, and it is
+serialized so concurrent flags keep every reason. It only updates an existing
+row (callers pass client-chosen ids) and does nothing if `deleting_at` is
+set. Rotation classifies a match when it first ends and once more after its
+upload window closes, since a player leaving mid-match triggers the first.
 
 ### Flag signals
 
@@ -270,13 +274,13 @@ single pass over merged entries that `_compute_metrics` already makes.
 
 | Source | Signal | Threshold |
 |---|---|---|
-| Session log `msg` | `REPLAY-NORUN`, `RB-INVARIANT-VIOLATION`, `FATAL-RING-STALE`, `RB-LIVE-MISMATCH` | any |
+| Session log `msg` (first word; a `[C] ` prefix from the C engine is stripped) | `REPLAY-NORUN`, `RB-LIVE-MISMATCH`, `RB-INVARIANT-*` (the client logs `RB-INVARIANT-FIXUP`), `FATAL*` (`FATAL-RING-STALE`, `FATAL DELTA-RESTORE-MISMATCH`, …) | any |
 | | `RB-CHECK` … `MISMATCH` | any |
-| | `TICK-STUCK`, `RB-INPUT-STALL-TIMEOUT`, `PEER-PHANTOM`, `LOCAL-FREEZE`, `VISUAL-FREEZE` | any |
+| | `TICK-STUCK`, `RB-INPUT-STALL-TIMEOUT`, `PEER-PHANTOM`, `LOCAL-FREEZE` (not `VISUAL-FREEZE`: the client only logs `VISUAL-FREEZE failed`, the detector erroring) | any |
 | | `INPUT-OOR` | ≥ 20 on one slot |
-| Client events (`meta.match_id`, else same room within `created_at`…`ended_at`) | `wasm-fail`, `unhandled` | any; flagged when the event is ingested |
+| Client events (`meta.match_id`, which must be the room's registered match) | `wasm-fail` (includes boot timeouts); not `unhandled`, which carries browser noise | any; flagged when the event is ingested |
 | `desync_events` | `vision_equal = 0` | any; flagged when the verdict is written |
-| Feedback (`context.matchId`, else `roomCode` + submit time within the match window) | `feedback` | any; flagged at submit |
+| Feedback (`context.matchId`; for bug reports without one, the room's most recent open match) | `feedback` | any; flagged at submit |
 | Admin | `manual` with note | — |
 
 ### Client changes (the only ones)
