@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.4",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep early match inputs so the guest doesn't stall at boot (#60)"
+      }
+    ]
+  },
+  {
     "version": "0.63.3",
     "date": "2026-09-28",
     "changes": [
