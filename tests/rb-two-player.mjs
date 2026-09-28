@@ -13,10 +13,11 @@
  *     past the rollback window) is identical on both peers
  *   - no failed rollbacks or integrity events (R2-R5 and fatal WASM traps
  *     in docs/netplay-invariants.md) in either peer's engine or sync log
+ *   - no rollback input-stall timeouts below frame 300 on either peer
  *   - TICK-STUCK stalls, negotiated delay and rollback counts, for context
- * Exits 1 if the peers' gameplay state diverges, a rollback fails, an
- * integrity event fires, the match never reaches a battle, or fewer than 80%
- * of the finalized battle frames were compared.
+ * Exits 1 for gameplay divergence; rollback failure; integrity events; a match
+ * that never reaches a battle; fewer than 80% of finalized battle frames
+ * compared; or a boot input stall timeout.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
@@ -548,6 +549,8 @@ for (const f of Object.keys(H.hashes)) {
   }
 }
 const count = (log, re) => (log.match(re) || []).length;
+const bootInputStallTimeoutsOf = (log) =>
+  [...log.matchAll(/RB-INPUT-STALL-TIMEOUT f=(\d+)/g)].filter(([, frame]) => +frame < 300).length;
 const INTEGRITY =
   /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|STEP-THREW|FATAL-CORE-ABORT|FAILED-ROLLBACK|DEEP-MISPREDICT-SKIP|RESTORE-FAILED/g;
 const bad = (log) => count(log, INTEGRITY);
@@ -698,6 +701,7 @@ const summary = {
   failedRollbacks: { host: H.failed, guest: G.failed },
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
   integrityEvents: { host: bad(H.clog) + bad(H.sync), guest: bad(G.clog) + bad(G.sync) },
+  bootInputStallTimeouts: { host: bootInputStallTimeoutsOf(H.sync), guest: bootInputStallTimeoutsOf(G.sync) },
   tickStuck: { host: count(H.sync, /TICK-STUCK/g), guest: count(G.sync, /TICK-STUCK/g) },
   hashCompare: {
     framesCompared: both,
@@ -774,6 +778,8 @@ if (minGameFpsFailed) {
 const failed =
   gpMis > 0 ||
   gsMis > 0 ||
+  summary.bootInputStallTimeouts.host > 0 ||
+  summary.bootInputStallTimeouts.guest > 0 ||
   integrityFailed ||
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
