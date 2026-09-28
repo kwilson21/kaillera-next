@@ -374,6 +374,31 @@ class TestDataMessageRelay:
         assert kwargs["to"] == "sid-late"
         assert "room" not in kwargs
 
+    def test_to_players_relays_to_players_only(self):
+        room = _make_room()
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.players["pid-3"] = {"socketId": "sid-3", "playerName": "P3"}
+        room.spectators["pid-spec"] = {"socketId": "sid-spec", "playerName": "Spec"}
+        rooms["ROOM1"] = room
+        _sid_to_room["sid-host"] = ("ROOM1", "pid-host", False)
+
+        emit = AsyncMock()
+        with patch.object(signaling.sio, "emit", new=emit):
+            _run_async(
+                signaling._relay(
+                    "sid-host",
+                    {"type": "save-state", "toPlayers": True, "data": "payload"},
+                    "data-message",
+                    "data-message",
+                    max_bytes=4096,
+                )
+            )
+
+        targets = sorted(call.kwargs["to"] for call in emit.await_args_list)
+        assert targets == ["sid-2", "sid-3"]
+        assert all("room" not in call.kwargs for call in emit.await_args_list)
+
     def test_target_sid_outside_room_is_not_relayed(self):
         rooms["ROOM1"] = _make_room()
         rooms["ROOM2"] = _make_room()

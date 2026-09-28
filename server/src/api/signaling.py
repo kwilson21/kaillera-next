@@ -1400,13 +1400,23 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     result = _get_room(sid)
     if result is None:
         return
-    session_id, _room = result
+    session_id, room = result
 
     target_sid = data.get("targetSid")
     if isinstance(target_sid, str) and target_sid:
         target_entry = _sid_to_room.get(target_sid)
         if target_entry and target_entry[0] == session_id:
             await sio.emit(event, data, to=target_sid)
+        return
+
+    # Players only, not spectators: one upload from the sender, fanned out
+    # here, so a 4-player initial state doesn't cost the sender three uploads
+    # against its byte budget.
+    if data.get("toPlayers") is True:
+        for player in list(room.players.values()):
+            player_sid = player.get("socketId")
+            if isinstance(player_sid, str) and player_sid and player_sid != sid:
+                await sio.emit(event, data, to=player_sid)
         return
 
     await sio.emit(event, data, room=session_id, skip_sid=sid)
