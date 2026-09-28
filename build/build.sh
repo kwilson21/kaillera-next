@@ -764,6 +764,19 @@ KNHLE_EOF
             { echo "FATAL: GLideN64 PBO scope patch failed"; exit 1; }
     fi
 
+    # GLideN64 vertex bounds: our GLideN64 pin (libretro/GLideN64 b33fa191,
+    # synced with upstream through a78f4586 (2025-01)) predates two upstream
+    # gonetz/GLideN64 fixes from 2025-03-29 that stop malformed display lists
+    # from indexing the vertex buffer out of bounds (observed as
+    # garbage/stretched geometry, e.g. Smash Remix's Pokemon Stadium stage):
+    #   95484364 "Fix vertices array out of bounds read." (GraphicsDrawer.h)
+    #   9f8fc1e4 "Make gSPCullVertices return true if its input is wrong." (gSP.cpp)
+    if [ -f "${PATCHES_DIR}/gliden64-vertex-bounds.patch" ]; then
+        git apply "${PATCHES_DIR}/gliden64-vertex-bounds.patch" && \
+            echo "    Applied GLideN64 vertex bounds patch" || \
+            { echo "FATAL: GLideN64 vertex bounds patch failed"; exit 1; }
+    fi
+
     # C-level rollback engine: copy kn_rollback.c/h into the source tree
     # and add to Makefile.common so it gets compiled with the core.
     echo "    Installing kn_rollback.c/h..."
