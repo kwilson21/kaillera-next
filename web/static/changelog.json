@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "bound glsm's uniform cache so late shader programs can't corrupt the heap (#52) (#59)"
+      }
+    ]
+  },
+  {
     "version": "0.63.1",
     "date": "2026-09-28",
     "changes": [
