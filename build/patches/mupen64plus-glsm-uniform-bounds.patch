@@ -1,0 +1,254 @@
+--- a/libretro-common/glsm/glsm.c
++++ b/libretro-common/glsm/glsm.c
+@@ -272,6 +272,15 @@
+ 
+ static bool copy_image_support = 0;
+ static struct gl_program_uniforms program_uniforms[MAX_UNIFORMS][MAX_UNIFORMS];
++
++/* Emscripten never reuses GL object ids, so GLideN64 program ids pass 1024 within a match (#52). */
++static struct gl_program_uniforms *glsm_uniform_cache(GLint location)
++{
++   if (gl_state.program >= MAX_UNIFORMS || location < 0 || location >= MAX_UNIFORMS)
++      return NULL;
++   return &program_uniforms[gl_state.program][location];
++}
++
+ static struct gl_framebuffers* framebuffers[MAX_FRAMEBUFFERS];
+ 
+ static GLenum active_texture;
+@@ -1671,8 +1680,9 @@
+ #endif
+    GLuint temp = glCreateProgram();
+    int i;
+-   for (i = 0; i < MAX_UNIFORMS; ++i)
+-      memset(&program_uniforms[temp][i], 0, sizeof(struct gl_program_uniforms));
++   if (temp < MAX_UNIFORMS)
++      for (i = 0; i < MAX_UNIFORMS; ++i)
++         memset(&program_uniforms[temp][i], 0, sizeof(struct gl_program_uniforms));
+    return temp;
+ }
+ 
+@@ -1969,9 +1979,12 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform1f.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform1f != v0) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform1f != v0) {
+       glUniform1f(location, v0);
+-      program_uniforms[gl_state.program][location].uniform1f = v0;
++      if (c) {
++         c->uniform1f = v0;
++      }
+    }
+ }
+ 
+@@ -1986,9 +1999,12 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform1fv.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform1f != value[0]) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform1f != value[0]) {
+       glUniform1fv(location, count, value);
+-      program_uniforms[gl_state.program][location].uniform1f = value[0];
++      if (c) {
++         c->uniform1f = value[0];
++      }
+    }
+ }
+ 
+@@ -2003,9 +2019,12 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform1iv.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform1i != value[0]) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform1i != value[0]) {
+       glUniform1iv(location, count, value);
+-      program_uniforms[gl_state.program][location].uniform1i = value[0];
++      if (c) {
++         c->uniform1i = value[0];
++      }
+    }
+ }
+ 
+@@ -2094,9 +2113,12 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform1i.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform1i != v0) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform1i != v0) {
+       glUniform1i(location, v0);
+-      program_uniforms[gl_state.program][location].uniform1i = v0;
++      if (c) {
++         c->uniform1i = v0;
++      }
+    }
+ }
+ 
+@@ -2111,10 +2133,13 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform2f.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform2f[0] != v0 || program_uniforms[gl_state.program][location].uniform2f[1] != v1) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform2f[0] != v0 || c->uniform2f[1] != v1) {
+       glUniform2f(location, v0, v1);
+-      program_uniforms[gl_state.program][location].uniform2f[0] = v0;
+-      program_uniforms[gl_state.program][location].uniform2f[1] = v1;
++      if (c) {
++         c->uniform2f[0] = v0;
++         c->uniform2f[1] = v1;
++      }
+    }
+ }
+ 
+@@ -2129,10 +2154,13 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform2i.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform2i[0] != v0 || program_uniforms[gl_state.program][location].uniform2i[1] != v1) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform2i[0] != v0 || c->uniform2i[1] != v1) {
+       glUniform2i(location, v0, v1);
+-      program_uniforms[gl_state.program][location].uniform2i[0] = v0;
+-      program_uniforms[gl_state.program][location].uniform2i[1] = v1;
++      if (c) {
++         c->uniform2i[0] = v0;
++         c->uniform2i[1] = v1;
++      }
+    }
+ }
+ 
+@@ -2147,10 +2175,13 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform2fv.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform2f[0] != value[0] || program_uniforms[gl_state.program][location].uniform2f[1] != value[1]) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform2f[0] != value[0] || c->uniform2f[1] != value[1]) {
+       glUniform2fv(location, count, value);
+-      program_uniforms[gl_state.program][location].uniform2f[0] = value[0];
+-      program_uniforms[gl_state.program][location].uniform2f[1] = value[1];
++      if (c) {
++         c->uniform2f[0] = value[0];
++         c->uniform2f[1] = value[1];
++      }
+    }
+ }
+ 
+@@ -2165,11 +2196,14 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform3f.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform3f[0] != v0 || program_uniforms[gl_state.program][location].uniform3f[1] != v1 || program_uniforms[gl_state.program][location].uniform3f[2] != v2) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform3f[0] != v0 || c->uniform3f[1] != v1 || c->uniform3f[2] != v2) {
+       glUniform3f(location, v0, v1, v2);
+-      program_uniforms[gl_state.program][location].uniform3f[0] = v0;
+-      program_uniforms[gl_state.program][location].uniform3f[1] = v1;
+-      program_uniforms[gl_state.program][location].uniform3f[2] = v2;
++      if (c) {
++         c->uniform3f[0] = v0;
++         c->uniform3f[1] = v1;
++         c->uniform3f[2] = v2;
++      }
+    }
+ }
+ 
+@@ -2184,11 +2218,14 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform3fv.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform3f[0] != value[0] || program_uniforms[gl_state.program][location].uniform3f[1] != value[1] || program_uniforms[gl_state.program][location].uniform3f[2] != value[2]) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform3f[0] != value[0] || c->uniform3f[1] != value[1] || c->uniform3f[2] != value[2]) {
+       glUniform3fv(location, count, value);
+-      program_uniforms[gl_state.program][location].uniform3f[0] = value[0];
+-      program_uniforms[gl_state.program][location].uniform3f[1] = value[1];
+-      program_uniforms[gl_state.program][location].uniform3f[2] = value[2];
++      if (c) {
++         c->uniform3f[0] = value[0];
++         c->uniform3f[1] = value[1];
++         c->uniform3f[2] = value[2];
++      }
+    }
+ }
+ 
+@@ -2203,12 +2240,15 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform4i.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform4i[0] != v0 || program_uniforms[gl_state.program][location].uniform4i[1] != v1 || program_uniforms[gl_state.program][location].uniform4i[2] != v2 || program_uniforms[gl_state.program][location].uniform4i[3] != v3) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform4i[0] != v0 || c->uniform4i[1] != v1 || c->uniform4i[2] != v2 || c->uniform4i[3] != v3) {
+       glUniform4i(location, v0, v1, v2, v3);
+-      program_uniforms[gl_state.program][location].uniform4i[0] = v0;
+-      program_uniforms[gl_state.program][location].uniform4i[1] = v1;
+-      program_uniforms[gl_state.program][location].uniform4i[2] = v2;
+-      program_uniforms[gl_state.program][location].uniform4i[3] = v3;
++      if (c) {
++         c->uniform4i[0] = v0;
++         c->uniform4i[1] = v1;
++         c->uniform4i[2] = v2;
++         c->uniform4i[3] = v3;
++      }
+    }
+ }
+ 
+@@ -2223,12 +2263,15 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform4f.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform4f[0] != v0 || program_uniforms[gl_state.program][location].uniform4f[1] != v1 || program_uniforms[gl_state.program][location].uniform4f[2] != v2 || program_uniforms[gl_state.program][location].uniform4f[3] != v3) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform4f[0] != v0 || c->uniform4f[1] != v1 || c->uniform4f[2] != v2 || c->uniform4f[3] != v3) {
+       glUniform4f(location, v0, v1, v2, v3);
+-      program_uniforms[gl_state.program][location].uniform4f[0] = v0;
+-      program_uniforms[gl_state.program][location].uniform4f[1] = v1;
+-      program_uniforms[gl_state.program][location].uniform4f[2] = v2;
+-      program_uniforms[gl_state.program][location].uniform4f[3] = v3;
++      if (c) {
++         c->uniform4f[0] = v0;
++         c->uniform4f[1] = v1;
++         c->uniform4f[2] = v2;
++         c->uniform4f[3] = v3;
++      }
+    }
+ }
+ 
+@@ -2243,12 +2286,15 @@
+ #ifdef GLSM_DEBUG
+    log_cb(RETRO_LOG_INFO, "glUniform4fv.\n");
+ #endif
+-   if (program_uniforms[gl_state.program][location].uniform4f[0] != value[0] || program_uniforms[gl_state.program][location].uniform4f[1] != value[1] || program_uniforms[gl_state.program][location].uniform4f[2] != value[2] || program_uniforms[gl_state.program][location].uniform4f[3] != value[3]) {
++   struct gl_program_uniforms *c = glsm_uniform_cache(location);
++   if (!c || c->uniform4f[0] != value[0] || c->uniform4f[1] != value[1] || c->uniform4f[2] != value[2] || c->uniform4f[3] != value[3]) {
+       glUniform4fv(location, count, value);
+-      program_uniforms[gl_state.program][location].uniform4f[0] = value[0];
+-      program_uniforms[gl_state.program][location].uniform4f[1] = value[1];
+-      program_uniforms[gl_state.program][location].uniform4f[2] = value[2];
+-      program_uniforms[gl_state.program][location].uniform4f[3] = value[3];
++      if (c) {
++         c->uniform4f[0] = value[0];
++         c->uniform4f[1] = value[1];
++         c->uniform4f[2] = value[2];
++         c->uniform4f[3] = value[3];
++      }
+    }
+ }
+ 
+@@ -2681,7 +2727,10 @@
+    GLuint src_attachment;
+    GLuint dst_attachment;
+    const bool good_pointer = gl_state.framebuf[0].desired_location < MAX_FRAMEBUFFERS && gl_state.framebuf[1].desired_location < MAX_FRAMEBUFFERS;
+-   const bool good_target = framebuffers[gl_state.framebuf[0].desired_location]->target == framebuffers[gl_state.framebuf[1].desired_location]->target;
++   const bool good_target = good_pointer
++      && framebuffers[gl_state.framebuf[0].desired_location]
++      && framebuffers[gl_state.framebuf[1].desired_location]
++      && framebuffers[gl_state.framebuf[0].desired_location]->target == framebuffers[gl_state.framebuf[1].desired_location]->target;
+    const bool sameSize = dstX1 - dstX0 == srcX1 - srcX0 && dstY1 - dstY0 == srcY1 - srcY0;
+    if (sameSize && copy_image_support && good_pointer && good_target) {
+       if (mask == GL_COLOR_BUFFER_BIT) {
