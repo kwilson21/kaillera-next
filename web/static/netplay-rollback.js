@@ -1452,6 +1452,7 @@
         // scheduler skipped while too far behind.
         stalls: { ticks: stall.length, gap: stall.filter((r) => r.gap).length, adv: stats(pickField(stall, 'adv')) },
         droppedSlots: typeof _tickDroppedSlots === 'number' ? _tickDroppedSlots : null,
+        catchupFrames: typeof _tickCatchupFrames === 'number' ? _tickCatchupFrames : null,
         pathDist: { normal: normal.length, replay: replay.length, pacing: pacing.length, stall: stall.length },
         normal: {
           total: stats(pickField(normal, 'total')),
@@ -5723,6 +5724,13 @@
   let _tickReplayOnly = false; // last tick only re-simulated; the 60 Hz slot is unspent
   const TICK_MAX_BACKLOG_SLOTS = 12; // was 4, which a 5+ frame rollback's replay could exceed
   let _tickDroppedSlots = 0; // slots skipped by the backlog reset (reported in knTickProfileSummary)
+  // #47: budget for the single extra catch-up forward frame below — capped
+  // at one 60 Hz slot's worth of wall time so a pump chasing a backlog can
+  // never run away (the backlog-drop branch above is the real safety valve
+  // for a pump that's fallen far behind; this only covers a pump that's
+  // exactly one slot behind schedule).
+  const TICK_CATCHUP_BUDGET_MS = TICK_TARGET_MS;
+  let _tickCatchupFrames = 0; // extra forward frames run to catch up a throttled pump (reported in knTickProfileSummary)
   // Saved originals of WASM speed-control functions — neutralized during lockstep
   let _origToggleFF = null; // Module._toggle_fastforward
   let _origToggleSM = null; // Module._toggle_slow_motion
@@ -12430,6 +12438,20 @@
     // forces the JSC peer to run at ~50fps and makes faster peers throttle
     // down. Pump more frequently, but advance at most one simulation frame
     // per 60Hz deadline so the game cadence stays correct.
+    //
+    // #47: some devices cap setInterval callbacks harder than that — prod
+    // saw an iPhone Safari pump settle at a steady ~30 Hz (TICK-PERF tickMs
+    // median~29.9) with only ~6ms of work per frame, i.e. plenty of spare
+    // time but not enough callback invocations. At one forward frame per
+    // pump, a 30 Hz pump caps the whole match at 30 game fps: the peer
+    // itself runs slow, and PACING-THROTTLE then paces the other peer down
+    // to match. So below, once the ordinary path above has advanced one
+    // frame and given replay work priority (it always runs first and keeps
+    // its own budget), if the schedule is still a full 60 Hz slot behind
+    // AND there's catch-up budget left in this pump, run ONE more forward
+    // frame — at most 2 forward frames per pump, never more. See
+    // TICK_CATCHUP_BUDGET_MS above for why a pump can't run away chasing a
+    // backlog this way.
     _tickNextAt = performance.now() + TICK_TARGET_MS;
     _tickInterval = setInterval(() => {
       if (_phase !== PHASE_RUNNING) return;
@@ -12461,6 +12483,22 @@
       if (after - _tickNextAt > TICK_TARGET_MS * TICK_MAX_BACKLOG_SLOTS) {
         _tickDroppedSlots += Math.floor((after - _tickNextAt) / TICK_TARGET_MS);
         _tickNextAt = after + TICK_TARGET_MS;
+      } else if (after - _tickNextAt >= TICK_TARGET_MS && after - now < TICK_CATCHUP_BUDGET_MS) {
+        // #47: still a full slot behind after the forward frame above (and
+        // whatever replay work ran ahead of it), and this pump hasn't yet
+        // spent its catch-up budget — try ONE more forward frame. Only
+        // counts, and only advances _tickNextAt again, if tick() actually
+        // advanced the frame counter: a second call that turns out to be a
+        // replay tick (_tickReplayOnly) or that stalls/early-returns (input
+        // wait, pacing, lockstep gate, etc. — none of which move _frameNum)
+        // leaves the slot unspent for the next pump, exactly like today.
+        // Never looped — at most one extra attempt per pump.
+        const _frameBeforeCatchup = _frameNum;
+        tick();
+        if (!_tickReplayOnly && _frameNum !== _frameBeforeCatchup) {
+          _tickCatchupFrames++;
+          _tickNextAt += TICK_TARGET_MS;
+        }
       }
     }, TICK_PUMP_INTERVAL_MS);
     _syncLog(`tick scheduler target=${TICK_TARGET_MS.toFixed(2)}ms pump=${TICK_PUMP_INTERVAL_MS}ms`);
@@ -13940,7 +13978,8 @@
           }
           _syncLog(
             `TICK-PERF f=${_frameNum} fps=${avgFps.toFixed(1)} tickMs median=${median.toFixed(1)} p95=${p95.toFixed(1)} ` +
-              `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay}`,
+              `inputAvail=${inputAvail} converged=${_rbBootConverged} inMenu=${inMenu} inGameplay=${_inGameplay} ` +
+              `droppedSlots=${_tickDroppedSlots} catchupFrames=${_tickCatchupFrames}`,
           );
         }
         // Reset deadlock recovery flag periodically — without this, a single
