@@ -223,7 +223,7 @@ def test_rom_transfer_mobile_ua(browser, server_url):
 
 
 def test_background_tab_resumes_cleanly(browser, server_url):
-    """Background tab fast-forwards and resyncs on return."""
+    """Background tab resumes on return."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
@@ -259,7 +259,7 @@ def test_background_tab_resumes_cleanly(browser, server_url):
             document.dispatchEvent(new Event('visibilitychange'));
         """)
 
-        # Guest should fast-forward and resume (frame advances past 0)
+        # Guest should resume (frame advances past 0)
         guest.wait_for_function(
             "window._frameNum > 0",
             timeout=10000,

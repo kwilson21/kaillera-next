@@ -1,15 +1,8 @@
-"""Issue #64: a backgrounded guest's tab throttles to ~1Hz (or freezes
-outright), but the C rollback engine's own RB-INPUT-STALL stall holds the
-other peer at most _rbInputStallThreshold() frames ahead — so the peers can
-still be in step when the tab returns. _requestLifecycleFullResync used to
-fast-forward _frameNum and wipe _localInputs/_remoteInputs unconditionally on
-return, which drops inputs neither peer ever regenerates and desyncs the
-match. When rollback kept the peers in step, the function must do nothing but
-log — no fast-forward, no input wipe, no resync request, no lifecycle resync
-guard — and only take that path when the peer data behind it is fresh.
-"""
+"""Issue #69: background return while C rollback is active must preserve inputs."""
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,66 +28,69 @@ def test_stall_threshold_formula_is_not_duplicated():
     assert "const stallThreshold = _rbInputStallThreshold();" in src[tick_idx:]
 
 
-def test_lifecycle_resync_skips_only_when_rollback_kept_peers_in_step():
+def test_background_return_skips_resync_only_while_c_rollback_is_active():
+    # #64/#69: fast-forwarding and wiping inputs creates holes neither peer can
+    # refill, causing both to stall and phantom each other; stale freeze data
+    # at visibilitychange must not send C rollback through that path.
     src = ROLLBACK_JS.read_text()
-    fn_idx = src.index("const _requestLifecycleFullResync = (reason) => {")
+    fn_start = src.index("const _requestLifecycleFullResync = (reason) => {")
+    fn_end = src.index("_visChangeHandler = () => {", fn_start)
+    fn = src[fn_start:fn_end]
+    fn = fn[: fn.rfind("};") + 2]
+    script = f"""
+const calls = {{ setLastSyncState: [], guards: [], socket: [], logs: [] }};
+let _useCRollback = true;
+let _frameNum = 100;
+let _lastRemoteFrame = 104;
+let _playerSlot = 1;
+let _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
+let _localInputs = {{ 100: {{ buttons: 2 }} }};
+let _rbInitFrame = -1;
+let _consecutiveResyncs = 0;
+let _syncCheckInterval = 10;
+let _resyncRequestInFlight = false;
+let _syncTargetFrame = 0;
+let _syncTargetDeadlineAt = 1;
+const _syncBaseInterval = 20;
+const DELAY_FRAMES = 2;
+const KNState = {{ frameNum: 100 }};
+const KNShared = {{ ZERO_INPUT: {{ buttons: 0 }} }};
+const _peers = {{}};
+const _peerPhantom = {{}};
+const _peerLastAdvanceTime = {{ 0: 1 }};
+const MAX_STALL_MS = 5000;
+const _rbInputStallThreshold = () => 20;
+const getInputPeers = () => [{{ slot: 0 }}];
+const _setLastSyncState = (...args) => calls.setLastSyncState.push(args);
+const _beginLifecycleResyncGuard = (...args) => calls.guards.push(args);
+const _requestSocketFullResync = (...args) => {{ calls.socket.push(args); return true; }};
+const _syncLog = (message) => calls.logs.push(message);
+eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
+const rollback = {{ frame: _frameNum, inputs: _remoteInputs, calls: JSON.parse(JSON.stringify(calls)) }};
 
-    use_c_rollback_idx = src.index("_useCRollback", fn_idx)
-    in_step_idx = src.index("_rbInputStallThreshold() * RB_LIFECYCLE_IN_STEP_SLACK", fn_idx)
-    return_idx = src.index("return;", in_step_idx)
-    fast_forward_idx = src.index("_frameNum = _lastRemoteFrame;", fn_idx)
-    guard_idx = src.index("_beginLifecycleResyncGuard(reason);", fn_idx)
+_useCRollback = false;
+_frameNum = 100;
+_lastRemoteFrame = 104;
+_remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
+_localInputs = {{ 100: {{ buttons: 2 }} }};
+calls.setLastSyncState.length = calls.guards.length = calls.socket.length = calls.logs.length = 0;
+eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
+process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, inputs: _remoteInputs, calls }} }}));
+"""
+    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr + result.stdout
+    output = json.loads(result.stdout)
 
-    # The rollback in-step check (and its early return) must come strictly
-    # before any of the fast-forward / input-wipe / resync-guard side
-    # effects, and only runs when _useCRollback is checked first.
-    assert fn_idx < use_c_rollback_idx < in_step_idx < return_idx < fast_forward_idx < guard_idx
+    rollback = output["rollback"]
+    assert rollback["frame"] == 100
+    assert rollback["inputs"]["0"]["100"] == {"buttons": 1}
+    assert rollback["calls"]["setLastSyncState"] == []
+    assert rollback["calls"]["guards"] == []
+    assert rollback["calls"]["socket"] == []
+    assert "bg-return: rollback mode — no fast-forward/resync (behind=4)" in rollback["calls"]["logs"]
 
-    # Skipping must not leave the guest's lifecycle resync guard armed —
-    # that guard suppresses local input ("local input suppressed during
-    # emulator resume ... lifecycle=true") until a resync it never requested
-    # would have cleared it.
-    assert "_beginLifecycleResyncGuard" not in src[in_step_idx:return_idx]
-
-    # Behind-by amount is logged so a real desync is diagnosable.
-    assert "behind=" in src[in_step_idx:return_idx]
-
-
-def test_lifecycle_resync_in_step_check_has_slack_above_tick_loop_threshold():
-    # A peer held right at the tick loop's own stall threshold has already
-    # sent input up through guestLastSent + threshold, so a bare
-    # `behind <= _rbInputStallThreshold()` comparison has zero headroom.
-    src = ROLLBACK_JS.read_text()
-
-    assert "const RB_LIFECYCLE_IN_STEP_SLACK = " in src
-    fn_idx = src.index("const _requestLifecycleFullResync = (reason) => {")
-    assert "_rbInputStallThreshold() * RB_LIFECYCLE_IN_STEP_SLACK" in src[fn_idx:]
-
-
-def test_lifecycle_resync_requires_fresh_peer_advance_before_skipping():
-    # A tab that was fully frozen (not merely throttled to ~1Hz — iOS/Chrome
-    # intensive throttling, bfcache) can leave a stale _lastRemoteFrame
-    # reading: visibilitychange may fire before the queued packets land, so
-    # the old frame would misread as "in step" and skip a resync that's
-    # actually needed. The skip must only fire when every live (non-phantom)
-    # input peer has advanced within MAX_STALL_MS of now.
-    src = ROLLBACK_JS.read_text()
-    fn_idx = src.index("const _requestLifecycleFullResync = (reason) => {")
-    in_step_idx = src.index("_rbInputStallThreshold() * RB_LIFECYCLE_IN_STEP_SLACK", fn_idx)
-
-    input_peers_idx = src.index("getInputPeers()", fn_idx)
-    phantom_filter_idx = src.index("_peerPhantom[p.slot]", fn_idx)
-    advance_time_idx = src.index("_peerLastAdvanceTime[p.slot]", fn_idx)
-    max_stall_idx = src.index("MAX_STALL_MS", fn_idx)
-    stale_log_idx = src.index("staleMs=", fn_idx)
-
-    assert fn_idx < input_peers_idx < in_step_idx
-    assert fn_idx < phantom_filter_idx < in_step_idx
-    assert fn_idx < advance_time_idx < in_step_idx
-    assert fn_idx < max_stall_idx < in_step_idx
-    assert in_step_idx < stale_log_idx
-
-    # No live input peers at all means no fresh data to trust — fall
-    # through to the old fast-forward/resync path rather than skip blind.
-    length_check_idx = src.index("inputPeers.length", fn_idx)
-    assert fn_idx < length_check_idx < in_step_idx
+    lockstep = output["lockstep"]
+    assert lockstep["frame"] == 104
+    assert lockstep["inputs"] == {}
+    assert lockstep["calls"]["setLastSyncState"] == [[None, "bg-return"]]
+    assert lockstep["calls"]["socket"] == [["bg-return"]]

@@ -49,15 +49,26 @@
  *     ~1Hz (reusing THROTTLE_GUEST's mechanism), matching the browser's own
  *     background-tab throttling. A `visibilitychange` event fires so
  *     `_visChangeHandler` in netplay-rollback.js runs its real bg-return
- *     path. After HIDE_GUEST_MS, both flip back and a `visibilitychange`
- *     fires again; the second half of the battle plays normally. Mutually
- *     exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and THROTTLE_GUEST. No
- *     exclusion window applies (unlike FREEZE mode) — the normal hash
- *     compare and integrity checks cover the whole match, and the run also
- *     fails (exit 1) if either peer's sync log has any `TICK-STUCK
- *     severity=error`, `PEER-PHANTOM`, or `RB-INPUT-STALL-TIMEOUT` line
- *     (issue #64: a backgrounded guest used to desync the match). Counts
- *     reported under `hideGuest` in summary.json, alongside `hideGuestMs`.
+ *     path (while the C rollback engine is active, returning does no
+ *     fast-forward or resync). After HIDE_GUEST_MS, both flip back and a
+ *     `visibilitychange` fires again; the second half of the battle plays
+ *     normally. Mutually exclusive with FREEZE_HOST_MS/FREEZE_GUEST_MS and
+ *     THROTTLE_GUEST. No exclusion window applies (unlike FREEZE mode) — the
+ *     normal hash compare and integrity checks cover the whole match, and
+ *     the run also fails (exit 1) if either peer's sync log has any
+ *     `TICK-STUCK severity=error`, `PEER-PHANTOM`, or `RB-INPUT-STALL-TIMEOUT`
+ *     line (issue #64: a backgrounded guest used to desync the match), or if
+ *     the guest's log doesn't show the bg-return path ran. Counts reported
+ *     under `hideGuest` in summary.json, alongside `hideGuestMs`.
+ *   HIDE_GUEST_FROZEN=1   With HIDE_GUEST_MS, model a frozen tab instead
+ *     (iOS backgrounding, bfcache: no JS at all while hidden): one
+ *     synchronous evaluate hides the tab, blocks the guest's main thread for
+ *     HIDE_GUEST_MS and shows it again, so `visibilitychange` fires on thaw
+ *     before the packets queued during the freeze are processed. No ~1Hz
+ *     throttle. Same pass/fail rules. A freeze of 5s or more lets the host
+ *     phantom the guest (RB-INPUT-STALL-TIMEOUT), which fails the run;
+ *     recovering from that is issue #69 item 3.
+ *     Example: `HIDE_GUEST_MS=4000 HIDE_GUEST_FROZEN=1 JITTER=20`.
  *   THROTTLE_GUEST=1   ~15s into the battle, cap the guest page's
  *     setInterval-driven tick callbacks to an average of THROTTLE_GUEST_HZ
  *     (env, default 30) callbacks/s — a plain JS wrapper around
@@ -153,6 +164,7 @@ const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
+const HIDE_GUEST_FROZEN = process.env.HIDE_GUEST_FROZEN === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
@@ -183,6 +195,10 @@ if (THROTTLE_GUEST && !(BATTLE_SECONDS > 15)) {
 }
 if (!Number.isFinite(HIDE_GUEST_MS) || HIDE_GUEST_MS < 0) {
   console.log(`HIDE_GUEST_MS=${process.env.HIDE_GUEST_MS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (HIDE_GUEST_FROZEN && !(HIDE_GUEST_MS > 0)) {
+  console.log('HIDE_GUEST_FROZEN=1 needs HIDE_GUEST_MS > 0');
   process.exit(1);
 }
 if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
@@ -357,7 +373,7 @@ const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAu
 
 const host = await mkPage(hostBrowser, 'host');
 const guest = await mkPage(guestBrowser, 'guest', {
-  throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS ? 1 : 0,
+  throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS && !HIDE_GUEST_FROZEN ? 1 : 0,
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
 });
@@ -639,19 +655,32 @@ if (inBattle) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else if (HIDE_GUEST_MS > 0) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
-    console.log('hiding guest tab for', HIDE_GUEST_MS, 'ms');
-    await guest.evaluate(() => {
-      window.__knHidden = true;
-      window.__knThrottle = true;
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    await host.waitForTimeout(HIDE_GUEST_MS);
-    await guest.evaluate(() => {
-      window.__knHidden = false;
-      window.__knThrottle = false;
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    console.log('guest tab shown again');
+    if (HIDE_GUEST_FROZEN) {
+      console.log('freezing hidden guest tab for', HIDE_GUEST_MS, 'ms');
+      await guest.evaluate((ms) => {
+        window.__knHidden = true;
+        document.dispatchEvent(new Event('visibilitychange'));
+        const t = performance.now();
+        while (performance.now() - t < ms);
+        window.__knHidden = false;
+        document.dispatchEvent(new Event('visibilitychange'));
+      }, HIDE_GUEST_MS);
+      console.log('guest tab thawed');
+    } else {
+      console.log('hiding guest tab for', HIDE_GUEST_MS, 'ms');
+      await guest.evaluate(() => {
+        window.__knHidden = true;
+        window.__knThrottle = true;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await host.waitForTimeout(HIDE_GUEST_MS);
+      await guest.evaluate(() => {
+        window.__knHidden = false;
+        window.__knThrottle = false;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      console.log('guest tab shown again');
+    }
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
@@ -747,7 +776,7 @@ const INTEGRITY =
 const bad = (log) => count(log, INTEGRITY);
 const delayOf = (log) => (log.match(/kn_rollback_init: max=\d+ delay=(\d+)/) || [])[1]; // what the engine uses
 
-// HIDE_GUEST_MS mode (issue #64): unlike FREEZE mode, there is no exclusion
+// HIDE_GUEST_MS mode (issues #64/#69): unlike FREEZE mode, there is no exclusion
 // window — a backgrounded-then-returned guest must never desync the match,
 // so any of these events anywhere in either peer's sync log is a failure.
 const tickStuckErrorsOf = (log) => count(log, /TICK-STUCK severity=error/g);
@@ -756,11 +785,12 @@ const rbInputStallTimeoutsOf = (log) => count(log, /RB-INPUT-STALL-TIMEOUT/g);
 // The run must actually exercise the fix, not just avoid tripping on a
 // no-op path: the guest's sync log must show it went through the real
 // bg-return handler ("tab visible (was background") and that
-// _requestLifecycleFullResync took the in-step skip ("rollback in step").
+// _requestLifecycleFullResync skipped fast-forward/resync while C rollback
+// was active ("rollback mode — no fast-forward/resync").
 // Their absence means the hide/throttle/visibilitychange plumbing didn't
 // reach netplay-rollback.js, and a pass wouldn't mean anything.
 const guestExercisedTabVisible = (log) => log.includes('tab visible (was background');
-const guestExercisedRollbackInStep = (log) => log.includes('rollback in step');
+const guestExercisedRollbackSkip = (log) => log.includes('rollback mode — no fast-forward/resync');
 // Same reasoning for SUSPEND_GUEST_AUDIO: a pass where the guest never hit
 // the boot-audio-stall watchdog at all (fix path unexercised) wouldn't mean
 // anything either.
@@ -906,11 +936,12 @@ const summary = {
     ? {
         hideGuest: {
           hideGuestMs: HIDE_GUEST_MS,
+          frozen: HIDE_GUEST_FROZEN,
           tickStuckErrors: { host: tickStuckErrorsOf(H.sync), guest: tickStuckErrorsOf(G.sync) },
           peerPhantoms: { host: peerPhantomsOf(H.sync), guest: peerPhantomsOf(G.sync) },
           rbInputStallTimeouts: { host: rbInputStallTimeoutsOf(H.sync), guest: rbInputStallTimeoutsOf(G.sync) },
           guestExercisedTabVisible: guestExercisedTabVisible(G.sync),
-          guestExercisedRollbackInStep: guestExercisedRollbackInStep(G.sync),
+          guestExercisedRollbackSkip: guestExercisedRollbackSkip(G.sync),
         },
       }
     : {}),
@@ -1008,7 +1039,7 @@ const hideGuestFailed =
     summary.hideGuest.rbInputStallTimeouts.host > 0 ||
     summary.hideGuest.rbInputStallTimeouts.guest > 0 ||
     !summary.hideGuest.guestExercisedTabVisible ||
-    !summary.hideGuest.guestExercisedRollbackInStep);
+    !summary.hideGuest.guestExercisedRollbackSkip);
 if (hideGuestFailed) {
   console.log('HIDE_GUEST_MS: desync-indicating events or unexercised fix path:', JSON.stringify(summary.hideGuest));
 }
