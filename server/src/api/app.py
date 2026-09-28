@@ -126,6 +126,8 @@ async def cleanup_old_data() -> None:
                 # so they need their own retention sweep or they'd outlive
                 # every other table here.
                 "session_log_chunks",
+                # Until the tiered retention sweep replaces this task.
+                "match_retention",
             ):
                 await db.execute_write(
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",

@@ -354,14 +354,26 @@ _UPLOAD_WINDOW_WITHOUT_END = "-4 hours"
 _UPLOAD_CHECK_TTL_SEC = 60.0
 _UPLOAD_CHECK_CACHE_MAX = 10_000
 _upload_check_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+_registered_matches: set[str] = set()
 
 
 async def register_match(match_id: str, room: str) -> None:
-    """Record a match at start-game. Idempotent."""
+    """Record a match. Idempotent, and writes at most once per process.
+
+    Called at start-game and again from every Socket.IO log flush for the
+    room's live match, which covers matches started before a deploy and
+    start-game registrations that failed.
+    """
+    if match_id in _registered_matches:
+        return
     await _require().execute(
         "INSERT OR IGNORE INTO match_retention (match_id, room) VALUES (?, ?)",
         (match_id, room),
     )
+    if len(_registered_matches) >= _UPLOAD_CHECK_CACHE_MAX:
+        _registered_matches.clear()
+    _registered_matches.add(match_id)
+    _upload_check_cache.pop((match_id, room), None)
 
 
 async def match_accepts_uploads(match_id: str, room: str) -> bool:

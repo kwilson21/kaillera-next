@@ -20,8 +20,10 @@ def _clear_cache():
     import src.db as db
 
     db._upload_check_cache.clear()
+    db._registered_matches.clear()
     yield
     db._upload_check_cache.clear()
+    db._registered_matches.clear()
 
 
 async def _open(tmp_path, d1):
@@ -139,6 +141,44 @@ def test_upload_check_is_cached(tmp_path):
             with patch.object(db._require(), "query", side_effect=counting_query):
                 for _ in range(5):
                     await db.match_accepts_uploads("bogus", "ROOM1")
+            return len(calls)
+        finally:
+            await db.close_db()
+
+    assert run_async(scenario()) == 1
+
+
+def test_registering_clears_a_cached_refusal(tmp_path):
+    """Lazy registration from a live flush must take effect at once."""
+
+    async def scenario():
+        db = await _open(tmp_path, False)
+        try:
+            before = await db.match_accepts_uploads("m1", "ROOM1")
+            await db.register_match("m1", "ROOM1")
+            return before, await db.match_accepts_uploads("m1", "ROOM1")
+        finally:
+            await db.close_db()
+
+    assert run_async(scenario()) == (False, True)
+
+
+def test_register_match_writes_once_per_process(tmp_path):
+    """Every Socket.IO flush calls it; only the first may reach D1."""
+
+    async def scenario():
+        db = await _open(tmp_path, False)
+        try:
+            calls = []
+            real_execute = db._require().execute
+
+            async def counting_execute(sql, params=()):
+                calls.append(sql)
+                return await real_execute(sql, params)
+
+            with patch.object(db._require(), "execute", side_effect=counting_execute):
+                for _ in range(5):
+                    await db.register_match("m1", "ROOM1")
             return len(calls)
         finally:
             await db.close_db()

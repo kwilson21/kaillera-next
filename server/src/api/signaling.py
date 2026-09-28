@@ -1010,6 +1010,11 @@ async def start_game(sid: str, payload: StartGamePayload) -> str | None:
         return await _start_game_locked(sid, payload)
 
 
+# register_match runs under the global room lock; D1 must not hold it long.
+# A registration that times out is retried by the next log flush.
+_REGISTER_TIMEOUT_SEC = 2.0
+
+
 async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     result = _get_room(sid)
     if result is None:
@@ -1045,7 +1050,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     # are accepted. Logging never blocks a game: a failed write is logged and
     # only HTTP-fallback uploads for this match will be refused.
     try:
-        await db.register_match(room.match_id, session_id)
+        await asyncio.wait_for(db.register_match(room.match_id, session_id), _REGISTER_TIMEOUT_SEC)
     except Exception as exc:
         log.warning("Match %s not registered; its HTTP log uploads will be refused: %s", room.match_id[:8], exc)
     room.started_at = time.time()
@@ -1750,6 +1755,13 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
 
     if not payload.matchId or payload.matchId != room.match_id:
         return None
+    # The live match is registered here too (no-op after the first time), so
+    # matches started before a deploy or whose start-game registration failed
+    # still accept HTTP-fallback uploads.
+    try:
+        await db.register_match(payload.matchId, session_id)
+    except Exception as exc:
+        log.warning("Match %s not registered from a log flush: %s", payload.matchId[:8], exc)
 
     pid_to_slot = {pid: s for s, pid in room.slots.items()}
     slot = pid_to_slot.get(player_id)

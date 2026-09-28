@@ -596,3 +596,53 @@ def test_screenshot_claiming_another_players_slot_is_dropped():
     _screenshot_room()
     insert = _send_screenshot("sid-guest", 0)
     insert.assert_not_awaited()
+
+
+def _flush(register):
+    append = AsyncMock(return_value=0)
+    patches = [
+        patch.object(signaling, "check", new=lambda sid, event: True),
+        patch.object(signaling.db, "register_match", new=register),
+        patch.object(signaling.db, "append_session_log", new=append),
+    ]
+    _run_with(patches, signaling.session_log_handler("sid-host", {"matchId": "match-1", "entries": []}))
+    return append
+
+
+def test_session_log_flush_registers_the_live_match():
+    """Covers matches started before this deploy and failed start-game registrations."""
+    _host_room().match_id = "match-1"
+    register = AsyncMock()
+    _flush(register)
+    register.assert_awaited_once_with("match-1", "ROOM1")
+
+
+def test_session_log_flush_survives_register_failure():
+    _host_room().match_id = "match-1"
+    append = _flush(AsyncMock(side_effect=RuntimeError("D1 down")))
+    append.assert_awaited_once()
+
+
+def test_start_game_gives_up_on_a_slow_registration():
+    """The room lock is global: D1 must not hold it for long."""
+    import time as _time
+
+    from src.api.payloads import StartGamePayload
+    from src.api.signaling import _start_game_locked
+
+    room = _host_room()
+
+    async def slow_register(*args):
+        await asyncio.sleep(10)
+
+    patches = _patched_start(
+        [
+            patch.object(signaling.db, "register_match", new=slow_register),
+            patch.object(signaling, "_REGISTER_TIMEOUT_SEC", new=0.05),
+        ]
+    )
+    started = _time.monotonic()
+    assert _run_with(patches, _start_game_locked("sid-host", StartGamePayload(mode="rollback"))) is None
+    assert _time.monotonic() - started < 2
+    assert room.status == "playing"
+
