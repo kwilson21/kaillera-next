@@ -34,7 +34,7 @@ recovered.
 | Stall | Constant | Action | Event | Spec |
 |-------|----------|----------|-------|------|
 | `_rbPendingInit` (guest defers rollback init on host's `rb-delay:` broadcast) | `RB_INIT_TIMEOUT_MS = 3000` | Fall back to local delay and init anyway | `RB-INIT-TIMEOUT` | §MF2 |
-| `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
+| `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply; also a non-coordinated state 1-2 frames ahead of the guest, `sync held`) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame; in rollback mode also waits until its state is confirmed — no replay pending, every live peer's consumed input real) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |
 | PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS`, repeat every `RESEND_TIMEOUT_MS` | Keep waiting; phase packets already rebroadcast at `PHASE_BROADCAST_INTERVAL_MS` | `PHASE-LOCK-WAIT` | rollback health audit 2026-04-27, corrected 2026-04-30 |
@@ -49,6 +49,7 @@ recovered.
 | `_framePacingActive` (pacing throttle skipping frame advance) | `PACING_THROTTLE_TIMEOUT_MS = 5000` | Force-phantom slowest peer, release pacing | `PACING-THROTTLE-TIMEOUT` | match f0566d95 |
 | Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
 | Menu-start barrier (Smash Remix: suppress input until all peers confirm controllable scene) | `MENU_START_BARRIER_SETTLE_MS = 500` (via `_menuStartReleaseAt = nowMs + MENU_START_BARRIER_SETTLE_MS`) | Set `_menuStartBarrierReleased = true`, release barrier | `MENU-BARRIER released` | commit 2 (feat(rollback): menu-start barrier) |
+| Initial state from a guest's own cache (IndexedDB or server) waits for the host's save-state, which carries the host's save RAM | `HOST_INITIAL_STATE_WAIT_MS = 10000` | Start from the cached copy without the host's save RAM | `HOST-STATE-WAIT-TIMEOUT` | — |
 
 ## I2 — Reconnect starts clean
 

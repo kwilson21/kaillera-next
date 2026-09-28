@@ -1,5 +1,45 @@
 [
   {
+    "version": "0.59.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep the newest session-log entries, not the first 4096 (#40)"
+      }
+    ]
+  },
+  {
+    "version": "0.59.0",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "run rollback through Smash Remix menus instead of strict lockstep (#39)"
+      }
+    ]
+  },
+  {
+    "version": "0.58.2",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "sync the host's save RAM at game start; accept 16MB late-join states (#37)"
+      }
+    ]
+  },
+  {
+    "version": "0.58.1",
+    "date": "2026-09-28",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "apply resync states at their own frame, never one frame off (#38)"
+      }
+    ]
+  },
+  {
     "version": "0.58.0",
     "date": "2026-09-27",
     "changes": [

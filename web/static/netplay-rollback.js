@@ -561,6 +561,9 @@
       // peers did; they don't send it, so pairing with one is refused.
       inputModel: KN_INPUT_MODEL,
       stateBackend,
+      // Smash Remix only: rollback runs through the menus. Tabs from before
+      // this field kept Remix menus in lockstep and don't send it.
+      remixMenuRollback: RB_REMIX_MENU_ROLLBACK,
     };
   };
 
@@ -1582,6 +1585,25 @@
     } catch (_) {}
     return 'split-rdram';
   })();
+  // Smash Remix used to run its menus in strict lockstep: C rollback started
+  // only at MENU→GAMEPLAY and shut down again at match end, with a scene
+  // phase-lock on top. At a rollback-sized delay that capped the menus at
+  // ~35fps over ~100ms RTT (room 5AB4NK8U). It was added for a WASM abort
+  // under retro_serialize-per-frame in Remix menus; rollback now snapshots
+  // with split-rdram. Remix runs rollback from the start, like SSB64;
+  // ?remixMenuLockstep=1 (or localStorage kn-remix-menu-lockstep=1) brings
+  // the old behaviour back. Peers must agree: see remixMenuRollback in
+  // _localRollbackCaps.
+  const RB_REMIX_MENU_LOCKSTEP = (() => {
+    try {
+      const raw = _urlParams.get('remixMenuLockstep') ?? localStorage.getItem('kn-remix-menu-lockstep');
+      return raw === '1';
+    } catch (_) {}
+    return false;
+  })();
+  // The retro backend is the one that aborted in Remix menus: keep it deferred.
+  const RB_REMIX_MENU_ROLLBACK = !RB_REMIX_MENU_LOCKSTEP && RB_ROLLBACK_STATE_BACKEND === 'split-rdram';
+  const _remixMenuLockstep = () => !RB_REMIX_MENU_ROLLBACK && _isSmashRemix();
   const RB_VISUAL_FADE_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('replayVisualFadeDuring') ?? localStorage.getItem('kn-replay-visual-fade-during');
@@ -4990,6 +5012,7 @@
   let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
+  let _guestStateSaveRam = null; // host's cartridge save memory; no state format carries it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
   let _frameNum = 0; // current logical frame number
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
@@ -5557,7 +5580,12 @@
     const inControllableMenu = _isControllableMenuScene(sceneCurr);
     const inBattleTransition = sceneCurr === 22 && gameStatus === 0;
     const gameplay = sceneCurr === 22 && gameStatus === 1;
-    const strictInputLockstep = !inBattleTransition && (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
+    // Without the C engine (no kn_pre_tick, or disabled after repeated
+    // throws) nothing can roll a menu frame back, so the strict gate stays.
+    const strictInputLockstep =
+      (_remixMenuLockstep() || !_useCRollback) &&
+      !inBattleTransition &&
+      (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
     return {
       gameStatus,
       sceneCurr,
@@ -5565,7 +5593,7 @@
       inBattleTransition,
       gameplay,
       strictInputLockstep,
-      active: _isSmashRemix() && (inControllableMenu || (!!enabled && gameStatus >= 0 && gameStatus !== 1)),
+      active: _remixMenuLockstep() && (inControllableMenu || (!!enabled && gameStatus >= 0 && gameStatus !== 1)),
     };
   };
 
@@ -5577,7 +5605,7 @@
       if (!phaseMismatchSlots.includes(slot)) phaseMismatchSlots.push(slot);
     };
 
-    if (_isSmashRemix() && !!enabled) {
+    if (_remixMenuLockstep() && !!enabled) {
       const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;
       const nowMs = performance.now();
       for (const p of getActivePeers()) {
@@ -6259,6 +6287,112 @@
     return true;
   };
 
+  // Cartridge save memory (EEPROM/SRAM/flash/mempak). Neither kn_sync nor
+  // retro_serialize carries it, so without this sidecar every peer keeps the
+  // save file from its own browser under the host's RDRAM. Smash Remix reads
+  // settings back from save memory in the menus: room 5AB4NK8U (2026-09-27)
+  // went through the same stage-select inputs on both peers and landed on
+  // Peach's Castle for the host and Flat Zone for the guest.
+  const _saveRamRegion = (mod) => {
+    if (!mod?._get_memory_data || !mod.stringToNewUTF8 || !mod.HEAPU8) return null;
+    const key = mod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
+    const res = mod._get_memory_data(key);
+    mod._free(key);
+    if (!res) return null;
+    const [size, ptr] = mod.UTF8ToString(res).split('|').map(Number);
+    return size > 0 && ptr > 0 ? { size, ptr } : null;
+  };
+  const _captureSaveRam = (mod) => {
+    try {
+      const region = _saveRamRegion(mod);
+      return region ? mod.HEAPU8.slice(region.ptr, region.ptr + region.size) : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const _writeSaveRam = (mod, bytes, reason) => {
+    if (!bytes?.length) return false;
+    try {
+      const region = _saveRamRegion(mod);
+      if (!region) {
+        _syncLog(`${reason}: save RAM not writable (no RETRO_MEMORY_SAVE_RAM)`);
+        return false;
+      }
+      _protectLocalSaveFile(mod);
+      mod.HEAPU8.set(bytes.subarray(0, Math.min(bytes.length, region.size)), region.ptr);
+      return true;
+    } catch (e) {
+      _syncLog(`${reason}: save RAM write failed: ${e?.message || e}`);
+      return false;
+    }
+  };
+  // Once a guest runs on the host's save memory, EmulatorJS would flush it
+  // into this browser's save file (every 5 min by default, and on exit) and
+  // overwrite the player's own progress and settings. Keep it in memory only
+  // for the match; stop() puts the player's own save back. Kept on the
+  // gameManager, which outlives the engine (the emulator hibernates between
+  // games).
+  const _protectLocalSaveFile = (mod) => {
+    const ejs = window.EJS_emulator;
+    const gm = ejs?.gameManager;
+    if (!gm || gm._knOwnSaveRam) return;
+    gm._knOwnSaveRam = _captureSaveRam(mod) || new Uint8Array(0);
+    gm._knSaveInterval = ejs.saveSaveInterval ? ejs.getSettingValue?.('save-save-interval') || '300' : null;
+    gm.saveSaveFiles = () => {};
+    if (ejs.saveSaveInterval) {
+      clearInterval(ejs.saveSaveInterval);
+      ejs.saveSaveInterval = null;
+    }
+    _syncLog("local save file protected: host's save RAM stays in memory");
+  };
+  const _restoreLocalSaveFile = () => {
+    const ejs = window.EJS_emulator;
+    const gm = ejs?.gameManager;
+    if (!gm?._knOwnSaveRam) return;
+    const own = gm._knOwnSaveRam;
+    const interval = gm._knSaveInterval;
+    gm._knOwnSaveRam = null;
+    gm._knSaveInterval = null;
+    try {
+      const mod = gm.Module;
+      const region = own.length ? _saveRamRegion(mod) : null;
+      if (region) mod.HEAPU8.set(own.subarray(0, Math.min(own.length, region.size)), region.ptr);
+      delete gm.saveSaveFiles; // back to the EmulatorJS method
+      if (interval) ejs.menuOptionChanged?.('save-save-interval', interval);
+      _syncLog(`local save file restored (${own.length} bytes)`);
+    } catch (e) {
+      _syncLog(`local save file restore failed: ${e?.message || e}`);
+    }
+  };
+  // The initial state goes to players only: spectators never load it
+  // (handleSaveStateMsg), and it carries the host's save RAM. The server fans
+  // it out (toPlayers), so the host uploads it once whatever the player count.
+  const _emitSaveStateToPlayers = (msg) => {
+    socket.emit('data-message', { ...msg, toPlayers: true });
+  };
+  // The sidecar is gzipped: RETRO_MEMORY_SAVE_RAM is every save type at once
+  // (~290KB, mostly zeros), and the late-join message already carries a
+  // ~3.5MB state against the server's 4MB relay limit.
+  const _encodeSaveRam = async (mod) => {
+    const bytes = _captureSaveRam(mod);
+    if (!bytes) return null;
+    try {
+      return (await compressAndEncode(bytes)).data;
+    } catch (e) {
+      _syncLog(`save RAM encode failed: ${e?.message || e}`);
+      return null;
+    }
+  };
+  const _decodeSaveRam = async (msg) => {
+    try {
+      if (msg?.saveRam) return await decodeAndDecompress(msg.saveRam);
+      if (msg?.saveData) return base64ToUint8(msg.saveData); // pre-gzip late-join senders
+    } catch (e) {
+      _syncLog(`save RAM decode failed: ${e?.message || e}`);
+    }
+    return null;
+  };
+
   // 2026-04-29 audio-diag helpers. Capture cp0+AI state plus the
   // AI-controller invariant probe (BUSY ⇒ AI_INT scheduled) at restore
   // stages and around kn_normalize_event_queue. Includes the signed-rel
@@ -6393,6 +6527,10 @@
   let _syncTargetFrame = -1; // guest: hold incoming state until this frame, then apply (or stall)
   let _syncTargetDeadlineAt = 0; // I1 (MF3): wall-clock deadline for _syncTargetFrame
   const SYNC_COORD_TIMEOUT_MS = 3000;
+  // A resync state at most this many frames ahead of the guest is held until the
+  // guest reaches its frame instead of applying at once (see tick()). Larger
+  // gaps (boot sync) realign the guest's frame counter in applySyncState.
+  const SYNC_HOLD_MAX_FRAMES = 2;
   let _scheduledSyncRequests = []; // host: [{targetFrame, targetSid, forceFull}] pending coord captures
   // host: in-flight state pushes don't requeue after the queue was cleared,
   // per sid (resetPeerState) or for the whole match (stop).
@@ -9001,6 +9139,17 @@
         _config?.onToast?.('Core version mismatch -- reload both players');
         return;
       }
+      // One peer deferring rollback to gameplay while the other runs it from
+      // the start would split their timelines at the first menu input.
+      if (_isSmashRemix() && !!peerCaps.remixMenuRollback !== localCaps.remixMenuRollback) {
+        _syncLog(
+          `CORE-CAP-MISMATCH sid=${sid} localRemixMenuRollback=${localCaps.remixMenuRollback ? 1 : 0} ` +
+            `peerRemixMenuRollback=${peerCaps.remixMenuRollback ? 1 : 0} — refusing rollback start`,
+        );
+        setStatus('Version mismatch -- reload both players');
+        _config?.onToast?.('Version mismatch -- reload both players');
+        return;
+      }
     }
 
     // Negotiate delay: ceiling of all players.
@@ -9090,6 +9239,7 @@
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
       _syncLog('synthetic demo: starting from live boot state (no state capture/load)');
       if (_config?.disableStandardCheats === true) {
@@ -9110,6 +9260,7 @@
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
         _syncLog('host using own state (authoritative)');
       } else {
@@ -9204,10 +9355,15 @@
       _restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load');
       _postStateLoadCleanup(readyMod, 'initial-sync-load');
     }
+    // After the state load so nothing in it can overwrite the host's save.
+    if (_guestStateSaveRam && _writeSaveRam(readyMod, _guestStateSaveRam, 'initial-sync-load')) {
+      _syncLog(`initial-sync-load: host save RAM applied (${_guestStateSaveRam.length} bytes)`);
+    }
     _guestStateBytes = null;
     _guestStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
 
@@ -9392,6 +9548,39 @@
     }
   };
 
+  // A guest whose own cache (IndexedDB or the server) had the starting state
+  // still waits for the host's save-state: the host sends one on every path,
+  // and only it carries the host's save RAM, and the state the host itself
+  // starts from (a live capture when the host had no cache). Past the deadline
+  // the guest starts from its cached copy without the host's save RAM.
+  const HOST_INITIAL_STATE_WAIT_MS = 10000;
+  let _hostInitialStateWaitTimer = null;
+  const _clearHostInitialStateWait = () => {
+    if (_hostInitialStateWaitTimer) clearTimeout(_hostInitialStateWaitTimer);
+    _hostInitialStateWaitTimer = null;
+  };
+  const _markInitialStateReady = () => {
+    _clearHostInitialStateWait();
+    _phase = PHASE_LOCKSTEP_READY;
+    if (_rttComplete) broadcastLockstepReady();
+    checkAllLockstepReady();
+  };
+  const _cachedInitialStateReady = (source) => {
+    if (_playerSlot === 0) {
+      _markInitialStateReady();
+      return;
+    }
+    _clearHostInitialStateWait();
+    _syncLog(`${source} copy loaded; waiting up to ${HOST_INITIAL_STATE_WAIT_MS}ms for the host's state and save RAM`);
+    const sid = _sessionId;
+    _hostInitialStateWaitTimer = setTimeout(() => {
+      _hostInitialStateWaitTimer = null;
+      if (sid !== _sessionId || _phase >= PHASE_LOCKSTEP_READY) return;
+      _syncLog(`HOST-STATE-WAIT-TIMEOUT: starting from the ${source} copy without the host's save RAM`);
+      _markInitialStateReady();
+    }, HOST_INITIAL_STATE_WAIT_MS);
+  };
+
   const fetchCachedState = async (romHash) => {
     _syncLog(`checking for cached state: ${romHash.substring(0, 16)}...`);
 
@@ -9407,34 +9596,37 @@
     // 1. Check local IndexedDB first — instant, no network
     try {
       const idbBytes = await _getStateFromIDB(romHash);
+      // The host's save-state already arrived and was loaded: keep it.
+      if (_playerSlot !== 0 && _phase >= PHASE_LOCKSTEP_READY) return;
       if (idbBytes && idbBytes.length > 1000) {
         _syncLog(`cached state loaded from IndexedDB (${idbBytes.length} bytes)`);
         _guestStateBytes = idbBytes instanceof Uint8Array ? idbBytes : new Uint8Array(idbBytes);
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
 
         if (_playerSlot === 0) {
           compressAndEncode(new Uint8Array(_guestStateBytes))
-            .then((encoded) => {
+            .then(async (encoded) => {
+              const saveRam = await _encodeSaveRam(window.EJS_emulator?.gameManager?.Module);
               _syncLog(
                 `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
               );
-              socket.emit('data-message', {
+              _emitSaveStateToPlayers({
                 type: 'save-state',
                 frame: 0,
                 stateFormat: 'savestate',
                 sourceRuntimeFamily: _getRuntimeFamily(),
                 data: encoded.data,
+                saveRam,
               });
             })
             .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
         }
 
-        _phase = PHASE_LOCKSTEP_READY;
-        if (_rttComplete) broadcastLockstepReady();
-        checkAllLockstepReady();
+        _cachedInitialStateReady('IndexedDB');
         return;
       }
     } catch (e) {
@@ -9452,11 +9644,13 @@
       const raw = await resp.arrayBuffer();
       const bytes = new Uint8Array(raw);
       if (bytes.length < 1000) throw new Error(`cached state too small: ${bytes.length}`);
+      if (_playerSlot !== 0 && _phase >= PHASE_LOCKSTEP_READY) return;
       _syncLog(`cached state loaded from server (${bytes.length} bytes)`);
       _guestStateBytes = bytes;
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
 
       // Persist to local IDB for next time
@@ -9464,24 +9658,24 @@
 
       if (_playerSlot === 0) {
         compressAndEncode(new Uint8Array(bytes))
-          .then((encoded) => {
+          .then(async (encoded) => {
+            const saveRam = await _encodeSaveRam(window.EJS_emulator?.gameManager?.Module);
             _syncLog(
               `sending cached state to guests via Socket.IO (${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
             );
-            socket.emit('data-message', {
+            _emitSaveStateToPlayers({
               type: 'save-state',
               frame: 0,
               stateFormat: 'savestate',
               sourceRuntimeFamily: _getRuntimeFamily(),
               data: encoded.data,
+              saveRam,
             });
           })
           .catch((e) => _syncLog(`cached state relay failed: ${e.message || e}`));
       }
 
-      _phase = PHASE_LOCKSTEP_READY;
-      if (_rttComplete) broadcastLockstepReady();
-      checkAllLockstepReady();
+      _cachedInitialStateReady('server cache');
     } catch (e) {
       const reason = e?.name === 'AbortError' ? 'fetch timed out' : e?.message || 'unknown';
       _syncLog(`no cached state — ${reason}, using live capture`);
@@ -9503,13 +9697,15 @@
       // Copy before compressAndEncode — worker transfer detaches the buffer
       const cacheBytes = new Uint8Array(bytes);
       const encoded = await compressAndEncode(bytes);
+      const saveRam = await _encodeSaveRam(gm.Module);
       _syncLog(
-        `sending initial state via Socket.IO (${captured.kind}, ${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip)`,
+        `sending initial state via Socket.IO (${captured.kind}, ${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip` +
+          `${saveRam ? `, save RAM ${Math.round(saveRam.length / 1024)}KB` : ', no save RAM'})`,
       );
 
       // Send via Socket.IO -- save state is ~1.5MB which crashes WebRTC
       // data channels (SCTP limit with maxRetransmits).
-      socket.emit('data-message', {
+      _emitSaveStateToPlayers({
         type: 'save-state',
         frame: 0,
         stateFormat: captured.kind,
@@ -9517,6 +9713,7 @@
         hiddenWords: captured.hiddenWords,
         audioFifo: captured.audioFifo,
         data: encoded.data,
+        saveRam,
       });
 
       // Use local state immediately so the host isn't blocked by the
@@ -9554,28 +9751,31 @@
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
-    if (_phase >= PHASE_LOCKSTEP_READY) return; // already loaded (e.g. from cache)
+    // Already loaded: a cached copy that stopped waiting for this message.
+    if (_phase >= PHASE_LOCKSTEP_READY) return;
     _syncLog('received initial state');
     setStatus('Loading initial state...');
 
     try {
       const bytes = await decodeAndDecompress(msg.data);
+      const saveRam = await _decodeSaveRam(msg);
+      if (_phase >= PHASE_LOCKSTEP_READY) return; // HOST-STATE-WAIT-TIMEOUT fired meanwhile
       _guestStateBytes = bytes;
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
+      _guestStateSaveRam = saveRam;
       _guestStateCapturedLocally = false;
-      _syncLog(`initial state decompressed (${_guestStateKind}, ${bytes.length} bytes)`);
+      _syncLog(
+        `initial state decompressed (${_guestStateKind}, ${bytes.length} bytes, ` +
+          `save RAM ${_guestStateSaveRam ? `${_guestStateSaveRam.length} bytes` : 'none'})`,
+      );
 
       // Cache locally for next time
       const romHash = _config?.romHash;
       if (romHash && !_isSmashRemix()) _putStateToIDB(romHash, new Uint8Array(bytes)).catch(() => {});
 
-      _phase = PHASE_LOCKSTEP_READY;
-      if (_rttComplete) {
-        broadcastLockstepReady();
-      }
-      checkAllLockstepReady();
+      _markInitialStateReady();
     } catch (err) {
       _syncLog(`failed to decompress initial state: ${err}`);
     }
@@ -9667,7 +9867,6 @@
 
       // Read game-specific RNG/settings values from RDRAM (while paused)
       let rngValues = null;
-      let saveData = null;
       let hiddenWords = null;
       let audioFifo = null;
       const hMod = gm.Module;
@@ -9694,22 +9893,14 @@
                 globalGameMode: hMod.HEAPU32[u32 + (0x004f756c >> 2)] >>> 0,
               };
             }
-            // SAVE_RAM (EEPROM/SRAM) — generic, works for any game
-            const sk = hMod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
-            const sr = hMod._get_memory_data(sk);
-            hMod._free(sk);
-            if (sr) {
-              const [ss, sp] = hMod.UTF8ToString(sr).split('|').map(Number);
-              if (ss > 0 && sp > 0) {
-                saveData = uint8ToBase64(hMod.HEAPU8.slice(sp, sp + ss));
-              }
-            }
           }
         } catch (_) {}
       }
+      const saveRamBytes = _captureSaveRam(hMod);
 
       // Async compression is safe now — tick loop is frozen
       const encoded = await compressAndEncode(bytes);
+      const saveRam = saveRamBytes ? (await compressAndEncode(saveRamBytes)).data : null;
       // I1 (MF5): late-join pause must have a wall-clock deadline.
       // If the joiner's ready signal never arrives (their DC dies
       // mid-transfer, worker hangs on decompression, etc.) we need
@@ -9758,7 +9949,7 @@
         effectiveDelay: DELAY_FRAMES,
         rbTransport: _rbTransport,
         rngValues,
-        saveData,
+        saveRam,
         hiddenWords,
         audioFifo,
       });
@@ -9832,26 +10023,18 @@
 
       // Write SAVE_RAM before enterManualMode so boot frame reads host's EEPROM
       const mod = gm.Module;
-      if (msg.saveData && mod?._get_memory_data && mod.HEAPU8) {
-        try {
-          const saveBytes = base64ToUint8(msg.saveData);
-          const sk = mod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
-          const sr = mod._get_memory_data(sk);
-          mod._free(sk);
-          if (sr) {
-            const [ss, sp] = mod.UTF8ToString(sr).split('|').map(Number);
-            if (ss > 0 && sp > 0) mod.HEAPU8.set(saveBytes.subarray(0, Math.min(saveBytes.length, ss)), sp);
-          }
-        } catch (_) {}
-      }
+      const saveRam = await _decodeSaveRam(msg);
+      _writeSaveRam(mod, saveRam, 'late-join-state');
 
       // Bounds-check the late-join blob before writing into WASM memory.
       // A malicious host could ship a truncated/oversized state that crashes
-      // the load path or scribbles past expected limits. The legitimate
-      // mupen64plus save state is well under 8MB; reject anything outside
-      // a sane range as malformed.
+      // the load path or scribbles past expected limits. Reject anything
+      // outside a sane range as malformed. With the 8MB Expansion Pak the
+      // savestate is ~16MB (Smash Remix: 16400KB); an 8MB cap rejected every
+      // Remix late join, so the joiner timed out and retried in a loop
+      // (room 5AB4NK8U, 2026-09-27).
       const _LATE_JOIN_STATE_MIN = 1024; // 1KB — anything smaller can't be valid
-      const _LATE_JOIN_STATE_MAX = 8 * 1024 * 1024; // 8MB — server caches up to 20MB but real states are ≤4MB
+      const _LATE_JOIN_STATE_MAX = 24 * 1024 * 1024;
       if (
         !(bytes instanceof Uint8Array) ||
         bytes.length < _LATE_JOIN_STATE_MIN ||
@@ -9922,17 +10105,8 @@
       }
 
       // Write SAVE_RAM again after loadState (in case loadState overwrote it)
-      if (msg.saveData && mod?._get_memory_data && mod.HEAPU8) {
-        try {
-          const saveBytes = base64ToUint8(msg.saveData);
-          const sk = mod.stringToNewUTF8('RETRO_MEMORY_SAVE_RAM');
-          const sr = mod._get_memory_data(sk);
-          mod._free(sk);
-          if (sr) {
-            const [ss, sp] = mod.UTF8ToString(sr).split('|').map(Number);
-            if (ss > 0 && sp > 0) mod.HEAPU8.set(saveBytes.subarray(0, Math.min(saveBytes.length, ss)), sp);
-          }
-        } catch (_) {}
+      if (_writeSaveRam(mod, saveRam, 'late-join-state')) {
+        _syncLog(`late-join: host save RAM applied (${saveRam.length} bytes)`);
       }
 
       // Start at host's current frame (host is paused at msg.frame)
@@ -11722,7 +11896,7 @@
       };
 
       if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
-        if (_isSmashRemix()) {
+        if (_remixMenuLockstep()) {
           // Smash Remix's title/menu code path triggers a WASM `unreachable`
           // abort when the rollback engine's per-frame retro_serialize runs
           // concurrently — observed at host f=908 in match 85d7a6c8 after
@@ -12933,6 +13107,19 @@
       if (_frameNum >= _syncTargetFrame) {
         if (_pendingResyncState && syncApplyBlocked) {
           // Replay in flight: apply on a later tick (bounded, see above).
+        } else if (
+          _pendingResyncState &&
+          _pendingResyncState.frame > _frameNum &&
+          _pendingResyncState.frame - _frameNum <= SYNC_HOLD_MAX_FRAMES
+        ) {
+          // The state is from a later frame than the target (a newer push
+          // replaced a held one, or the capture ran late): move the target to
+          // it, as the non-coordinated branch below does. Same deadline.
+          _pendingResyncState.held = true;
+          _syncTargetFrame = _pendingResyncState.frame;
+          if (!_syncTargetDeadlineAt) _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+          if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+          _syncLog(`sync held: state frame ${_syncTargetFrame} is past target, f=${_frameNum}`);
         } else if (_pendingResyncState) {
           // State arrived on time — apply at the agreed frame
           const pending = _pendingResyncState;
@@ -12952,11 +13139,27 @@
       }
       // _frameNum < _syncTargetFrame: keep running, hold buffered state until target
     } else if (_pendingResyncState && !syncApplyBlocked) {
-      // Non-coordinated (proactive push, reconnect, visibility/network-change): apply now
+      // Non-coordinated (proactive push, reconnect, visibility/network-change).
+      // A state from a frame this peer hasn't reached yet is held until it
+      // gets there, as a coordinated sync would be. Applied early, the loaded
+      // state was a frame ahead of the counter, which the counter never caught
+      // up with: `sync #N applied (frame X+1 -> X)` started a permanent desync
+      // in the two-player run on PR #37. Jumping the counter forward instead
+      // would skip this peer's input for the frames in between, which the
+      // other peers have predicted. The deadline is the coordinated one
+      // (COORD-SYNC-TIMEOUT above), after which the state applies here.
       const pending = _pendingResyncState;
-      _pendingResyncState = null;
-      if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-      applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      const ahead = pending.frame != null ? pending.frame - _frameNum : 0;
+      if (!pending.held && ahead > 0 && ahead <= SYNC_HOLD_MAX_FRAMES) {
+        pending.held = true;
+        _syncTargetFrame = pending.frame;
+        _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+        _syncLog(`sync held: state frame ${pending.frame} is ${ahead} ahead of f=${_frameNum}, applying there`);
+      } else {
+        _pendingResyncState = null;
+        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+      }
     }
 
     _chk('post-sync-target');
@@ -13485,7 +13688,7 @@
         // irreversible menu edges are never predicted.
         const menuPhase = _readStrictPhaseLock(_bootDoneForSync);
         const { gameStatus, sceneCurr, strictInputLockstep } = menuPhase;
-        const localGameplay = !_isSmashRemix() || menuPhase.gameplay;
+        const localGameplay = !_remixMenuLockstep() || menuPhase.gameplay;
         const localInMenu = !!menuPhase.localActive;
         // game_status: 0=wait (CSS/menus or battle loading), 1=ongoing, 2=paused, 5=end.
         // Status 0 is dangerous only in controllable menus; scene=22/status=0
@@ -16677,10 +16880,9 @@
   const applySyncState = (bytes, frame, fromProactive = false) => {
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
-    // never fires mid-tick or mid-input-processing.
-    //
-    // KEY INSIGHT: The frame counter is only used for input synchronization.
-    // By keeping _frameNum where it is, input buffers stay valid and no stall.
+    // never fires mid-tick or mid-input-processing. The kn_sync path moves
+    // _frameNum to the state's frame (see below); the loadState fallback
+    // keeps it where it is.
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
 
@@ -16763,12 +16965,14 @@
         }
       }
 
-      // For boot sync (first alignment from divergent boot state), reset
-      // frame counter to the host's frame. Without this, the guest keeps
-      // its old _frameNum while the emulator state is from the host's frame,
-      // causing input mapping mismatch. Only done when the frame gap is
-      // large (boot sync) — not for normal resyncs where frames are close.
-      if (frame != null && mod._kn_set_frame && Math.abs(_frameNum - frame) > 2) {
+      // The loaded state is at the host's `frame`, so the counter must be
+      // too, whatever the gap. Without this the guest keeps its old _frameNum
+      // under the host's state and applies each frame's inputs to the wrong
+      // frame. Small gaps used to keep the old counter, a permanent desync
+      // one frame off; a state ahead of the guest is now held in tick() until
+      // the guest reaches it, so a forward gap only lands here after that
+      // hold timed out. Backward gaps replay frames whose inputs were sent.
+      if (frame != null && mod._kn_set_frame && _frameNum !== frame) {
         const oldFrame = _frameNum;
         _frameNum = frame;
         KNState.frameNum = frame;
@@ -16782,7 +16986,7 @@
         _resetStrictMenuResends();
         _clearStrictMenuWait();
         _bootStallRecoveryFired = false;
-        _syncLog(`sync frame reset: ${oldFrame} → ${frame} (large gap)`);
+        _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
         // Arm post-sync diagnostic burst: log full state hash for 10 frames
         window._knPostSyncDiagFrames = 10;
       }
@@ -16932,6 +17136,9 @@
   };
 
   const stop = () => {
+    // Before the final log flush, so its log line reaches the server.
+    _clearHostInitialStateWait();
+    _restoreLocalSaveFile();
     _flushSyncLog();
     _resetInputAudit();
     _cachedMatchId = null;
@@ -17056,6 +17263,7 @@
     _lockstepStartStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _knownPlayers = {};
     _lastRemoteFrame = -1;

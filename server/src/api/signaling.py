@@ -1408,13 +1408,23 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     result = _get_room(sid)
     if result is None:
         return
-    session_id, _room = result
+    session_id, room = result
 
     target_sid = data.get("targetSid")
     if isinstance(target_sid, str) and target_sid:
         target_entry = _sid_to_room.get(target_sid)
         if target_entry and target_entry[0] == session_id:
             await sio.emit(event, data, to=target_sid)
+        return
+
+    # Players only, not spectators: one upload from the sender, fanned out
+    # here, so a 4-player initial state doesn't cost the sender three uploads
+    # against its byte budget.
+    if data.get("toPlayers") is True:
+        for player in list(room.players.values()):
+            player_sid = player.get("socketId")
+            if isinstance(player_sid, str) and player_sid and player_sid != sid:
+                await sio.emit(event, data, to=player_sid)
         return
 
     await sio.emit(event, data, room=session_id, skip_sid=sid)
@@ -1595,10 +1605,9 @@ async def game_screenshot(sid: str, data: dict) -> None:
     await db.insert_screenshot(match_id, slot, frame, img_bytes)
 
 
-_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap for log_data — sized to hold the
-# full client ring (SYNC_LOG_MAX=60000 entries × ~150 B/entry ≈ 9 MB) so a 60-min
-# match's boot/menu/init events survive to the server. The drop-oldest-half
-# fallback below kicks in only on pathologically verbose matches.
+_SESSION_LOG_MAX = 12 * 1024 * 1024  # 12MB cap on one flush's entries. Clients send
+# only the entries the server hasn't acked (at most SYNC_LOG_FLUSH_MAX_ENTRIES),
+# so this only bounds a stale pre-delta client resending its whole ring.
 
 _LOG_BLOB_MAX_DEPTH = 6
 _LOG_BLOB_MAX_KEYS = 256
@@ -1623,6 +1632,10 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
     if isinstance(obj, (int, float)):
         return obj
     if isinstance(obj, str):
+        # Printable ASCII holds no control characters: skip the per-character
+        # scan, which costs ~0.8s for a full 60k-entry log.
+        if obj.isascii() and obj.isprintable():
+            return obj[:_LOG_BLOB_MAX_STR]
         cleaned = "".join(ch for ch in obj if ch == "\n" or ch == "\t" or unicodedata.category(ch)[0] != "C")
         return cleaned[:_LOG_BLOB_MAX_STR]
     if isinstance(obj, list):
@@ -1640,6 +1653,32 @@ def _sanitize_log_blob(obj: object, depth: int = 0) -> object:
             out[key] = _sanitize_log_blob(v, depth + 1)
         return out
     return None
+
+
+# Size of the client's sync-log ring (SYNC_LOG_MAX in netplay-rollback.js): the
+# most one flush can legitimately carry.
+_SESSION_LOG_MAX_ENTRIES = 60_000
+
+
+def _session_log_entries(entries_raw: object, max_bytes: int) -> list:
+    """A session log flush's entries: the newest ones whose JSON fits `max_bytes`.
+
+    Entries are sanitized one by one. Passing the whole list through
+    _sanitize_log_blob capped it at _LOG_BLOB_MAX_LIST_LEN (4096) and kept the
+    oldest, so a verbose match's log stopped about 90s in (match 1cd13296).
+    """
+    if not isinstance(entries_raw, list):
+        return []
+    entries = [_sanitize_log_blob(e, 1) for e in entries_raw[-_SESSION_LOG_MAX_ENTRIES:]]
+    # Drop the oldest until the list fits: each entry costs its JSON plus the
+    # ", " separator, the list its brackets.
+    sizes = [len(json.dumps(e)) + 2 for e in entries]
+    total = sum(sizes) + 2
+    start = 0
+    while total > max_bytes and start < len(entries):
+        total -= sizes[start]
+        start += 1
+    return entries[start:]
 
 
 @sio.on("session-log")
@@ -1690,17 +1729,8 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
         if len(context_str) > _SUMMARY_MAX:
             context_str = "{}"
 
-    entries_raw = payload.entries if isinstance(payload.entries, list) else []
-    entries = _sanitize_log_blob(entries_raw)
-    if not isinstance(entries, list):
-        entries = []
-    entries_json = json.dumps(entries)
-    while len(entries_json) > _SESSION_LOG_MAX and entries:
-        # Keep LATEST entries (drop oldest) — a safety net for oversized
-        # single flushes (e.g. a stale pre-delta client resending its whole
-        # ring). append_session_log's seq dedupe handles the normal case.
-        entries = entries[len(entries) // 2 :]
-        entries_json = json.dumps(entries)
+    # Newest entries win, so reconnect/desync events near the end survive.
+    entries = _session_log_entries(payload.entries, _SESSION_LOG_MAX)
 
     last_seq = await db.append_session_log(
         {
