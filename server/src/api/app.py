@@ -112,8 +112,8 @@ async def cleanup_old_data() -> None:
     Screenshots are the bulk consumer — at ~5KB/frame and SCREENSHOT_INTERVAL=300
     (~5s) per player, an unbounded table grows fast once captures are default-on
     in prod."""
+    await asyncio.sleep(60)  # Render restarts and naps long before 24 h
     while True:
-        await asyncio.sleep(86400)  # daily
         try:
             days = int(os.environ.get("LOG_RETENTION_DAYS", "14"))
             cutoff = (f"-{days} days",)
@@ -126,6 +126,8 @@ async def cleanup_old_data() -> None:
                 # so they need their own retention sweep or they'd outlive
                 # every other table here.
                 "session_log_chunks",
+                # Until the tiered retention sweep replaces this task.
+                "match_retention",
             ):
                 await db.execute_write(
                     f"DELETE FROM {table} WHERE created_at < datetime('now', ?)",
@@ -135,6 +137,7 @@ async def cleanup_old_data() -> None:
             log.info("DB cleanup complete (retention: %d days)", days)
         except Exception as e:
             log.warning("DB cleanup error: %s", e)
+        await asyncio.sleep(86400)  # daily
 
 
 def _client_ip(request: Request) -> str:
@@ -1068,11 +1071,23 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid JSON") from exc
 
         match_id = data.get("matchId", "")
+        # Match ids are server-issued UUIDs; anything else (it becomes a cache key) is refused.
+        if not isinstance(match_id, str) or len(match_id) > 64:
+            raise HTTPException(status_code=400, detail="Invalid matchId")
         if not match_id:
             raise HTTPException(status_code=400, detail="Missing matchId")
 
         room_id = request.query_params.get("room", "")
+        # Rooms hold at most 4 players (OpenRoomPayload.maxPlayers), slots 0-3.
         slot = data.get("slot")
+        if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot <= 3:
+            raise HTTPException(status_code=400, detail="Invalid slot")
+        # The room's live match is accepted in memory (covers matches running
+        # across a deploy, or whose registration failed); otherwise the match
+        # must be registered and within its upload window.
+        live = rooms.get(room_id)
+        if not (live and live.match_id == match_id) and not await db.match_accepts_uploads(match_id, room_id):
+            raise HTTPException(status_code=403, detail="Unknown or closed match")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
         epoch = str(data.get("epoch", ""))[:64]

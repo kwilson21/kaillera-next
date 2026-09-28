@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from src.blobstore import BlobStore, BlobStoreError, blobstore_from_env
@@ -35,6 +36,8 @@ async def init_db(
     SQLite file.
     """
     global _backend, _blobs
+    _upload_check_cache.clear()
+    _registered_matches.clear()
     local_root = Path(db_path or os.environ.get("DB_PATH", DEFAULT_DB_PATH)).parent / "blobs"
     _blobs = blobs or blobstore_from_env(local_root)
     backend = backend or backend_from_env(db_path)
@@ -346,6 +349,60 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
     return entries
 
 
+# Log uploads for a match are accepted until 30 min after game-end, or 4 h
+# after start when no end was recorded (crash, restart, room closed): spec §5.
+_UPLOAD_GRACE_AFTER_END = "-30 minutes"
+_UPLOAD_WINDOW_WITHOUT_END = "-4 hours"
+_UPLOAD_CHECK_TTL_SEC = 60.0
+_UPLOAD_CHECK_CACHE_MAX = 10_000
+_upload_check_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+_registered_matches: set[str] = set()
+
+
+async def register_match(match_id: str, room: str) -> None:
+    """Record a match. Idempotent, and writes at most once per process.
+
+    Called at start-game and again from every Socket.IO log flush for the
+    room's live match, which covers matches started before a deploy and
+    start-game registrations that failed.
+    """
+    if match_id in _registered_matches:
+        return
+    await _require().execute(
+        "INSERT OR IGNORE INTO match_retention (match_id, room) VALUES (?, ?)",
+        (match_id, room),
+    )
+    if len(_registered_matches) >= _UPLOAD_CHECK_CACHE_MAX:
+        _registered_matches.clear()
+    _registered_matches.add(match_id)
+    _upload_check_cache.pop((match_id, room), None)
+
+
+async def match_accepts_uploads(match_id: str, room: str) -> bool:
+    """Whether log uploads for `match_id` from `room` are still accepted.
+
+    Cached per (match, room) for 60 s, hits and misses alike, so uploads
+    quoting made-up match ids cost at most one query a minute each.
+    """
+    key = (match_id, room)
+    now = time.monotonic()
+    cached = _upload_check_cache.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+    rows = await _require().query(
+        """SELECT 1 AS ok FROM match_retention
+           WHERE match_id = ? AND room = ? AND deleting_at IS NULL
+             AND ((ended_at IS NOT NULL AND ended_at > datetime('now', ?))
+                  OR (ended_at IS NULL AND created_at > datetime('now', ?)))""",
+        (match_id, room, _UPLOAD_GRACE_AFTER_END, _UPLOAD_WINDOW_WITHOUT_END),
+    )
+    accepted = bool(rows)
+    if len(_upload_check_cache) >= _UPLOAD_CHECK_CACHE_MAX:
+        _upload_check_cache.clear()
+    _upload_check_cache[key] = (accepted, now + _UPLOAD_CHECK_TTL_SEC)
+    return accepted
+
+
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:
     """Mark how a session ended."""
     backend = _require()
@@ -355,10 +412,19 @@ async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> N
             (ended_by, match_id, slot),
         )
     else:
-        # Only update rows without an existing ended_by (don't overwrite leave/disconnect with game-end)
-        await backend.execute(
-            "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND ended_by IS NULL",
-            (ended_by, match_id),
+        # Game end: mark sessions without an existing ended_by (don't overwrite
+        # leave/disconnect) and record when the match ended.
+        await backend.batch(
+            [
+                (
+                    "UPDATE session_logs SET ended_by=?, updated_at=datetime('now') WHERE match_id=? AND ended_by IS NULL",
+                    (ended_by, match_id),
+                ),
+                (
+                    "UPDATE match_retention SET ended_at=datetime('now') WHERE match_id=? AND ended_at IS NULL",
+                    (match_id,),
+                ),
+            ]
         )
 
 

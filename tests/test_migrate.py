@@ -143,6 +143,11 @@ EXPECTED_COLUMNS = {
         "id", "match_id", "frame", "field", "slot", "trigger", "hashes_json", "vision_verdict_json",
         "vision_equal", "vision_confidence", "replay_meta_json", "created_at",
     ],
+    "match_retention": [
+        "match_id", "room", "created_at", "ended_at", "tier", "flag_reasons", "auto_flag_capped",
+        "resolved_at", "resolved_note", "last_touched_at", "deleting_at", "archived_at",
+        "archived_max_chunk_id", "archived_updated_at", "archive_bytes", "evicted_at",
+    ],
 }
 # fmt: on
 
@@ -152,6 +157,7 @@ EXPECTED_INDEXES = {
     "idx_match_metrics_created_at": ("match_metrics", 0),
     "idx_desync_events_match_frame": ("desync_events", 0),
     "idx_session_log_chunks_match_slot": ("session_log_chunks", 0),
+    "idx_match_retention_created_at": ("match_retention", 0),
 }
 
 
@@ -213,7 +219,7 @@ def test_baseline_upgrades_existing_alembic_database(tmp_path):
             await backend.close()
 
     applied, feedback, leftover = run_async(scenario())
-    assert applied == ["0001", "0002", "0003"]
+    assert applied == ["0001", "0002", "0003", "0004"]
     assert feedback == [{"message": "kept"}]
     assert leftover == []
 
@@ -261,8 +267,8 @@ def test_alembic_0008_database_skips_session_log_chunks_migration(tmp_path):
             await backend.close()
 
     applied, recorded, chunks = run_async(scenario())
-    assert applied == ["0001", "0003"]
-    assert recorded == ["0001", "0002", "0003"]
+    assert applied == ["0001", "0003", "0004"]
+    assert recorded == ["0001", "0002", "0003", "0004"]
     assert chunks == [{"n": 1}]
 
 
@@ -294,5 +300,5 @@ def test_screenshot_rows_keep_their_bytes_through_0003(tmp_path):
             await backend.close()
 
     applied, rows = run_async(scenario())
-    assert applied == ["0003"]
+    assert applied == ["0003", "0004"]
     assert rows == [{"match_id": "m", "slot": 0, "frame": 60, "data": b"\xff\xd8old", "blob_key": None, "size": 5}]
