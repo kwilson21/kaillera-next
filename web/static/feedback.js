@@ -32,6 +32,8 @@
     const ks = window.KNState;
     if (ks) {
       if (ks.room) ctx.roomCode = ks.room;
+      // Links the report to its match so the server keeps that match's logs.
+      if (ks.matchId) ctx.matchId = ks.matchId;
       if (ks.slot != null) ctx.playerSlot = ks.slot;
       if (ks.peers) {
         const peers = Object.values(ks.peers);

@@ -35,7 +35,8 @@ async def init_db(
     fakes). Without R2 configured, blobs go in a `blobs` folder next to the
     SQLite file.
     """
-    global _backend, _blobs
+    global _backend, _blobs, _flag_lock
+    _flag_lock = asyncio.Lock()  # bound to the event loop that opens the database
     _upload_check_cache.clear()
     _registered_matches.clear()
     local_root = Path(db_path or os.environ.get("DB_PATH", DEFAULT_DB_PATH)).parent / "blobs"
@@ -401,6 +402,70 @@ async def match_accepts_uploads(match_id: str, room: str) -> bool:
         _upload_check_cache.clear()
     _upload_check_cache[key] = (accepted, now + _UPLOAD_CHECK_TTL_SEC)
     return accepted
+
+
+async def find_recent_match(room: str) -> str | None:
+    """The room's most recent match still inside its upload window, or None.
+
+    Links feedback that carries only a room code to the match it's about.
+    """
+    rows = await _require().query(
+        """SELECT match_id FROM match_retention
+           WHERE room = ? AND deleting_at IS NULL
+             AND ((ended_at IS NOT NULL AND ended_at > datetime('now', ?))
+                  OR (ended_at IS NULL AND created_at > datetime('now', ?)))
+           ORDER BY created_at DESC LIMIT 1""",
+        (room, _UPLOAD_GRACE_AFTER_END, _UPLOAD_WINDOW_WITHOUT_END),
+    )
+    return rows[0]["match_id"] if rows else None
+
+
+async def flag_match(match_id: str, reasons: list[dict]) -> None:
+    """Mark a match flagged (kept until resolved) and merge `reasons` into it.
+
+    Idempotent: a reason whose signal is already stored keeps the larger
+    count and the earliest frame, so classifying the same logs again doesn't
+    double-count. Only an existing row is flagged: callers pass client-chosen
+    ids, and creating a row would reopen uploads for them (a match from
+    before registration is registered by rotation first). Matches being
+    deleted are left alone.
+    """
+    if not reasons:
+        return
+    async with _flag_lock:
+        await _flag_match_locked(match_id, reasons)
+
+
+# flag_match reads, merges and rewrites flag_reasons; concurrent calls for
+# the same match would overwrite each other. Flags are rare, so one lock.
+_flag_lock = asyncio.Lock()
+
+
+async def _flag_match_locked(match_id: str, reasons: list[dict]) -> None:
+    backend = _require()
+    rows = await backend.query("SELECT flag_reasons, deleting_at FROM match_retention WHERE match_id = ?", (match_id,))
+    if not rows or rows[0]["deleting_at"]:
+        return
+    try:
+        stored = json.loads(rows[0]["flag_reasons"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        stored = []
+    by_signal = {r.get("signal"): dict(r) for r in stored if isinstance(r, dict)}
+    for reason in reasons:
+        old = by_signal.get(reason.get("signal"))
+        if old is None:
+            by_signal[reason.get("signal")] = dict(reason)
+            continue
+        old["count"] = max(int(old.get("count") or 0), int(reason.get("count") or 0))
+        frame = reason.get("first_f")
+        if isinstance(frame, int | float) and (old.get("first_f") is None or frame < old["first_f"]):
+            old["first_f"] = frame
+    await backend.execute(
+        """UPDATE match_retention
+           SET tier = 'flagged', flag_reasons = ?, last_touched_at = datetime('now')
+           WHERE match_id = ? AND deleting_at IS NULL""",
+        (json.dumps(list(by_signal.values())), match_id),
+    )
 
 
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:

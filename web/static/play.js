@@ -559,6 +559,22 @@
     KNEvent('unhandled', String(e.reason)?.slice(0, 500), { stack: e.reason?.stack?.slice(0, 500) });
   });
 
+  // Uncaught errors, e.g. a WASM abort (`RuntimeError: unreachable`) thrown
+  // from the frame loop. KNEvent adds match_id, and the server keeps a match
+  // that reports a crash until someone resolves it.
+  // Each distinct error is reported once per page: one thrown every frame
+  // would otherwise send an event per frame.
+  const _reportedErrors = new Set();
+  window.addEventListener('error', (e) => {
+    const err = e.error;
+    const msg = String(err || e.message)?.slice(0, 500);
+    if (_reportedErrors.has(msg) || _reportedErrors.size >= 20) return;
+    _reportedErrors.add(msg);
+    const type =
+      typeof WebAssembly !== 'undefined' && err instanceof WebAssembly.RuntimeError ? 'wasm-fail' : 'unhandled';
+    KNEvent(type, msg, { stack: err?.stack?.slice(0, 500), source: e.filename });
+  });
+
   // ── Clean tab close ───────────────────────────────────────────────────
 
   window.addEventListener('pagehide', () => {

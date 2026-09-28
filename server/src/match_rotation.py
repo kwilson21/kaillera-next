@@ -46,7 +46,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import db
+from src import db, retention
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +293,15 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     metrics = _compute_metrics(match_id, rows, merged, parquet_path, parquet_bytes)
     await _upsert_metrics(metrics)
 
+    reasons = retention.classify_entries(merged)
+    if reasons:
+        try:
+            # Matches from before registration existed have no row yet.
+            await db.register_match(match_id, rows[0].get("room") or "")
+            await db.flag_match(match_id, reasons)
+        except Exception as exc:
+            log.warning("rotate_match: flagging %s failed: %s", match_id[:8], exc)
+
     log.info(
         "rotated match=%s peers=%d entries=%d mismatches=%d parquet=%s",
         match_id[:8],
@@ -370,7 +379,8 @@ async def _upsert_metrics(m: MatchMetrics) -> None:
 
 
 async def sweep_pending(limit: int = 50) -> int:
-    """Rotate any ended matches that don't yet have a match_metrics row.
+    """Rotate ended matches without a match_metrics row, and rotate once more
+    those whose upload window has closed since their last rotation.
 
     Returns the number of matches rotated. Caps the batch so one sweep
     tick can't stall the event loop if a backfill is in progress.
@@ -385,6 +395,23 @@ async def sweep_pending(limit: int = 50) -> int:
         LEFT JOIN match_metrics m ON m.match_id = s.match_id
         WHERE s.ended_by IS NOT NULL
           AND m.match_id IS NULL
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    # The first rotation can run on partial logs (one player leaving sets
+    # ended_by mid-match), so a match is rotated once more after its upload
+    # window closes: 30 min after game-end, or 4 h after start if it never
+    # ended. That final pass re-runs the retention classifier on every log.
+    rows += await db.query(
+        """
+        SELECT m.match_id
+        FROM match_metrics m
+        JOIN match_retention r ON r.match_id = m.match_id
+        WHERE r.deleting_at IS NULL
+          AND r.created_at > datetime('now', '-1 day')  -- every window closes within 4 h; keeps the scan on the index
+          AND COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours')) < datetime('now')
+          AND m.rotated_at < COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours'))
         LIMIT ?
         """,
         (limit,),

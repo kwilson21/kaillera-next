@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 from collections import defaultdict
 from typing import Any
@@ -20,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from .. import db
 from . import desync_prompts
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -130,11 +133,23 @@ async def _do_vision_call(req: VisionRequest) -> dict[str, Any]:
         ),
     )
 
+    await _flag_if_desynced(req.match_id, req.frame, verdict)
+
     if len(_CACHE) >= _CACHE_MAX:
         _CACHE.pop(next(iter(_CACHE)))
     _CACHE[content_hash] = {"verdict": verdict, "match_id": req.match_id, "frame": req.frame}
 
     return {"cached": False, "verdict": verdict, "match_id": req.match_id, "frame": req.frame}
+
+
+async def _flag_if_desynced(match_id: str, frame: int, verdict: dict) -> None:
+    """A vision verdict of 'not equal' keeps the match until resolved (retention)."""
+    if verdict.get("equal") is not False:
+        return
+    try:
+        await db.flag_match(match_id, [{"signal": "vision-desync", "count": 1, "first_f": frame}])
+    except Exception as exc:
+        log.warning("Flagging %s for a vision desync failed: %s", match_id[:8], exc)
 
 
 async def _fire_vision(key: tuple) -> dict[str, Any] | None:
