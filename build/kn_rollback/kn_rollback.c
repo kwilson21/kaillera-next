@@ -3345,9 +3345,14 @@ int kn_rollback_self_test(void) {
  *
  * Hashes are written to out_hashes[0]=B, out_hashes[1]=B'.
  *
- * Sets kn_headless during the test so GL state isn't perturbed. The EJS
- * main loop should be paused around this call (set EJS_PAUSED true) so
- * the canvas isn't rendering frames mid-test. */
+ * Sets kn_headless during the test so presentation (buffer swap /
+ * video_cb) is suspended and the canvas doesn't flash n_frames worth of
+ * scratch-buffer replay output. GLideN64 still issues its normal GL
+ * calls on every retro_run() here (kn_headless never skips those — see
+ * #43), so this does not, and never did, insulate real GL state from
+ * the test; it only keeps the result off the canvas. The EJS main loop
+ * should be paused around this call (set EJS_PAUSED true) so the canvas
+ * isn't rendering frames mid-test. */
 extern int kn_headless;
 extern void kn_set_headless(int enable);
 

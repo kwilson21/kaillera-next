@@ -470,11 +470,17 @@ open('mupen64plus-rsp-hle/src/hle.c','w').write(src)
             echo "    WARN: FPU trace patch failed"
     fi
 
-    # headless tick: skip GL + video_cb in retro_run() for rollback benchmarking.
+    # headless tick: skip video_cb presentation in retro_run() during rollback
+    # replay, while still running GLSM bind/unbind so GLideN64's GL calls
+    # (issued during replay regardless of headless) stay inside the bracket
+    # that keeps real GL state and glsm's shadow cache in sync (#43). A
+    # silent WARN here would leave that bracket split again and reintroduce
+    # the corruption, so a failed apply is fatal, same as the GLideN64
+    # vertex-bounds patch above.
     if [ -f "${PATCHES_DIR}/mupen64plus-headless-tick.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-headless-tick.patch" && \
             echo "    Applied mupen64plus headless tick patch (libretro.c)" || \
-            echo "    WARN: headless tick patch failed"
+            { echo "FATAL: headless tick patch failed"; exit 1; }
     fi
 
     # Replay RDP skip: keep RSP/core/GL cadence alive, but skip GLideN64
