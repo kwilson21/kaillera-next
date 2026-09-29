@@ -1011,6 +1011,15 @@
     return 'emulated';
   };
 
+  // Every AudioContext the core's OpenAL layer currently holds. Shared by
+  // netplay-rollback.js's boot-audio-stall watchdog and stand-in-clock
+  // teardown, and by netplay-streaming.js's boot-audio-stall tap-prompt
+  // recovery (#63).
+  const coreAlAudioCtxs = () =>
+    Object.values(window.EJS_emulator?.gameManager?.Module?.AL?.contexts || {})
+      .map((c) => c?.audioCtx)
+      .filter(Boolean);
+
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
     SSB64_HASH: SSB64_HASH,
@@ -1039,5 +1048,6 @@
     decodeInput,
     createSyncLogRing,
     classifyRunnerStep,
+    coreAlAudioCtxs,
   };
 })();

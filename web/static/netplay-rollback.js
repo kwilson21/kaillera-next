@@ -8778,13 +8778,9 @@
     window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot } }));
   };
 
-  // Every AudioContext the core's OpenAL layer currently holds. Shared by
-  // the boot-audio-stall watchdog below and by stop()'s stand-in-clock
-  // teardown further down the file (outside startGameSequence's scope).
-  const coreAlAudioCtxs = () =>
-    Object.values(window.EJS_emulator?.gameManager?.Module?.AL?.contexts || {})
-      .map((c) => c?.audioCtx)
-      .filter(Boolean);
+  // Alias of KNShared.coreAlAudioCtxs; used by the boot-audio-stall watchdog
+  // below and stop()'s stand-in-clock teardown.
+  const coreAlAudioCtxs = KNShared.coreAlAudioCtxs;
   // Boot-audio-stall recovery (I1, #63/#65 follow-up): Emscripten's OpenAL
   // layer decides a queued buffer is "processed" solely from
   // audioCtx.currentTime (AL.updateSourceTime in the patched core — see

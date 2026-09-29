@@ -22,11 +22,15 @@
  * and the core context ends up running (real audio, no stand-in clock).
  * Pass, SUSPEND=0 (control): same boot with no tap and no
  * BOOT-AUDIO-STALL (no false positive).
+ * Pass, SUSPEND=1 GATE_RESUME=0: the context is suspended but resume() is
+ * not gesture-gated, so the watchdog's own resume() recovers it. This run
+ * never taps; the host must boot, capture, end with the core context
+ * running and the prompt hidden (it must not stay over the game).
  * Fail (exit 1) otherwise — before the fix, the host sits at f=6 forever
  * with no log and no prompt.
  *
  *   just serve        # the real server on :27888, in another terminal
- *   KN_ROM=/path/ssb64-us.z64 [WAIT_SECONDS=30] [SUSPEND=1] [HEADED=1] \
+ *   KN_ROM=/path/ssb64-us.z64 [WAIT_SECONDS=30] [SUSPEND=1] [GATE_RESUME=1] [HEADED=1] \
  *     [OUT=/tmp/streaming-audio-stall] node tests/streaming-host-audio-stall.mjs
  */
 import { chromium } from 'playwright';
@@ -36,6 +40,7 @@ const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const WAIT_SECONDS = Number(process.env.WAIT_SECONDS || 30);
 const SUSPEND = process.env.SUSPEND !== '0';
+const GATE_RESUME = process.env.GATE_RESUME !== '0';
 const OUT = process.env.OUT || '/tmp/streaming-audio-stall';
 if (!ROM) {
   console.log('KN_ROM is required');
@@ -52,7 +57,7 @@ const browser = await chromium.launch({
 
 // Same model as suspendAudioInitScript in rb-two-player.mjs: gesture-gated
 // resume() plus a real suspend() of each core OpenAL context on first sight.
-const suspendAudioInitScript = () => {
+const suspendAudioInitScript = (gateResume) => {
   let lastGestureAt = -Infinity;
   for (const type of ['pointerdown', 'mousedown', 'click', 'touchend']) {
     window.addEventListener(
@@ -73,8 +78,10 @@ const suspendAudioInitScript = () => {
     };
     Real.prototype.__knResumePatched = true;
   };
-  patchResume('AudioContext');
-  if (window.webkitAudioContext) patchResume('webkitAudioContext');
+  if (gateResume) {
+    patchResume('AudioContext');
+    if (window.webkitAudioContext) patchResume('webkitAudioContext');
+  }
   const AC = window.AudioContext || window.webkitAudioContext;
   const realSuspend = AC?.prototype?.suspend;
   const suspended = new WeakSet();
@@ -95,7 +102,7 @@ const suspendAudioInitScript = () => {
 
 const mkPage = async (name, suspendAudio) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
-  if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
+  if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript, GATE_RESUME);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
@@ -128,7 +135,7 @@ const t0 = Date.now();
 while (Date.now() - t0 < WAIT_SECONDS * 1000) {
   const s = { t: Math.round((Date.now() - t0) / 1000), ...(await sample()) };
   samples.push(s);
-  if (s.gesturePrompt) {
+  if (s.gesturePrompt && GATE_RESUME) {
     hostTaps++;
     await host
       .locator('#gesture-prompt')
@@ -150,6 +157,7 @@ const summary = {
   status: last.status,
   hosting: hostSync.includes('capturing stream'),
   hostTaps,
+  promptVisibleAtEnd: last.gesturePrompt,
   audioStallLogged: hostSync.includes('BOOT-AUDIO-STALL'),
   samples,
 };
@@ -159,9 +167,14 @@ await browser.close();
 const problems = [];
 if (!summary.hosting) problems.push('host never started capturing (boot stalled)');
 if (summary.framesAdvancedLast10s <= 0) problems.push('host frame count not advancing');
-if (SUSPEND) {
+if (SUSPEND && !GATE_RESUME) {
+  if (!summary.audioStallLogged) problems.push('no BOOT-AUDIO-STALL logged (watchdog never fired)');
+  if (summary.audio !== 'running') problems.push(`core audio context ${summary.audio || 'missing'}, not running`);
+  if (summary.promptVisibleAtEnd) problems.push('tap prompt still covering the game after boot recovered on its own');
+} else if (SUSPEND) {
   if (!summary.audioStallLogged) problems.push('no BOOT-AUDIO-STALL logged (watchdog never fired)');
   if (hostTaps !== 1) problems.push(`host needed ${hostTaps} taps (expected 1)`);
+  if (summary.promptVisibleAtEnd) problems.push('tap prompt still visible at the end');
   if (summary.audio !== 'running') problems.push(`core audio context ${summary.audio || 'missing'}, not running`);
 } else {
   if (summary.audioStallLogged) problems.push('BOOT-AUDIO-STALL logged without a suspended context');
