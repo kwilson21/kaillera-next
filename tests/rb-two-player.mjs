@@ -116,11 +116,13 @@
  *     on the host first and then the guest ~2s later, clicks through the
  *     toolbar "more" menu into the feedback form (`#toolbar-more` →
  *     `.kn-feedback-toolbar-item` → a `.kn-feedback-cat` button) and closes
- *     it via `.kn-feedback-close` — the exact click path that moves DOM
- *     focus and, per the measured #62 signature (no runner rescheduled,
- *     CP0 Count unchanged), can leave a captured runner emulating nothing
- *     (see docs/netplay-invariants.md §R2). Fire-and-forget via setTimeout
- *     so it doesn't block the battle-length wait or change BATTLE_SECONDS.
+ *     it via `.kn-feedback-close` — the exact click path whose own
+ *     `requestAnimationFrame` call (feedback.js's `_openModal`) used to
+ *     hijack rollback's rAF interceptor and strand the captured Emscripten
+ *     runner, per the measured #62 signature (no runner rescheduled, CP0
+ *     Count unchanged) (see docs/netplay-invariants.md §R2).
+ *     Fire-and-forget via setTimeout so it doesn't block the
+ *     battle-length wait or change BATTLE_SECONDS.
  *     Each round is logged. Before the #62 fix this makes the
  *     gameplay-hash compare below fail (hundreds of finalized
  *     gameplay-hash mismatches observed before the fix, 0 after); after

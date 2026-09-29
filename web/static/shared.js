@@ -986,14 +986,14 @@
   };
 
   // Decide whether a stepOneFrame() runner invocation actually emulated the
-  // frame it was called for (#62 — click-during-match desync). #62 found
-  // that after a DOM focus change (e.g. clicking the toolbar or feedback
-  // form), the runner call can return immediately without calling the
-  // mainloop func and without scheduling its successor via
-  // requestAnimationFrame. The mechanism wasn't isolated: plausibly a
-  // stale MainLoop runner (MainLoop.pause()/resume() bumps
-  // currentlyRunningMainloop so checkIsRunning() returns early) or
-  // RetroArch's own runloop pause. Two independent signals catch this:
+  // frame it was called for (#62 — click-during-match desync). Root cause:
+  // rollback's rAF interceptor used to capture ANY callback passed to
+  // requestAnimationFrame, so a UI callback firing rAF during a match (e.g.
+  // clicking the toolbar or feedback form) would overwrite the captured
+  // Emscripten runner, stranding it — no mainloop func call, no rescheduled
+  // successor. Fixed by having the interceptor capture only the runner
+  // (KNShared.isMainLoopRunner). This classifier stays as a safety net for
+  // any other cause of a stale runner. Two independent signals catch it:
   //   - `rescheduled`: whether a fresh runner got captured via the
   //     overrideRAF interceptor during the call (a real step always
   //     schedules its own next frame).
@@ -1010,6 +1010,19 @@
     if (!rescheduled && cycleAfter === cycleBefore) return 'stale';
     return 'emulated';
   };
+
+  // Is `cb` Emscripten's main-loop runner (the one stepOneFrame() must
+  // capture), as opposed to a UI requestAnimationFrame callback (#62 —
+  // rollback's rAF interceptor used to capture ANY callback passed to
+  // requestAnimationFrame, so a page UI callback — e.g. toggleMoreDropdown
+  // in play.js, _openModal in feedback.js — firing rAF during a match would
+  // overwrite the captured runner and strand the emulator). All four
+  // patched cores served in rollback mode (mupen64plus_next / parallel_n64,
+  // normal and legacy) define `function MainLoop_runner()`, and rollback
+  // always loads a patched core via core-redirector.js, so name-matching it
+  // is reliable. Pure so it's testable without a WASM/DOM harness — see
+  // tests/main-loop-runner-filter.test.mjs.
+  const isMainLoopRunner = (cb) => typeof cb === 'function' && cb.name === 'MainLoop_runner';
 
   window.KNShared = {
     SSB64_ONLINE_CHEATS: SSB64_ONLINE_CHEATS,
@@ -1039,5 +1052,6 @@
     decodeInput,
     createSyncLogRing,
     classifyRunnerStep,
+    isMainLoopRunner,
   };
 })();

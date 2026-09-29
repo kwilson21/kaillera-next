@@ -1,14 +1,15 @@
 // KNShared.classifyRunnerStep: the "did stepOneFrame's runner actually
 // emulate the frame?" decision (#62 — clicking the toolbar/feedback form
-// during a rollback match desyncs peers). After the focus change, the
-// runner call can return immediately without emulating the frame or
-// scheduling its successor — plausibly a stale MainLoop runner (a bumped
-// currentlyRunningMainloop) or RetroArch's own runloop pause; the cause
-// wasn't isolated. stepOneFrame used to count that frame anyway, leaving
-// this peer one tick behind. The fix samples two signals around the
-// runner call — whether a fresh runner got rescheduled, and whether CP0
-// Count (kn_get_cycle_time_ms) moved — and this function turns them into
-// the emulated/stale/unknown verdict.
+// during a rollback match desyncs peers). Root cause: rollback's rAF
+// interceptor used to capture ANY callback passed to requestAnimationFrame,
+// so a UI callback firing rAF during the click would overwrite the captured
+// Emscripten runner, stranding it — no emulation, no rescheduled successor
+// — while stepOneFrame counted the frame anyway. Fixed via
+// KNShared.isMainLoopRunner filtering the interceptor; this classifier
+// stays as a safety net, sampling two signals around the runner call —
+// whether a fresh runner got rescheduled, and whether CP0 Count
+// (kn_get_cycle_time_ms) moved — and turning them into the
+// emulated/stale/unknown verdict.
 //
 //   node --test tests/step-runner-classify.test.mjs
 import { test } from 'node:test';

@@ -71,8 +71,9 @@
  *     - APISandbox saves native browser APIs (rAF, getGamepads,
  *       performance.now) at page load before any scripts can override them
  *     - overrideRAF() replaces window.requestAnimationFrame with an
- *       interceptor that captures the callback (_pendingRunner) instead
- *       of scheduling it
+ *       interceptor that captures only Emscripten's main-loop runner
+ *       (_pendingRunner) by name; every other callback (UI code calling
+ *       rAF during a match) is passed through to the native rAF (#62)
  *     - Module.resumeMainLoop() registers Emscripten's runner through
  *       our interceptor, giving us the callback
  *     - stepOneFrame() calls _pendingRunner(frameTimeMs), advancing the
@@ -10774,8 +10775,11 @@
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
-    // Replace rAF with interceptor that captures the runner
+    // Replace rAF with interceptor that captures only Emscripten's runner;
+    // every other callback (UI code calling requestAnimationFrame during a
+    // match) goes to the native rAF instead (#62).
     APISandbox.overrideRAF((cb) => {
+      if (!KNShared.isMainLoopRunner(cb)) return APISandbox.nativeRAF(cb);
       _pendingRunner = cb;
       return -999;
     });
@@ -11103,17 +11107,19 @@
   let _staleRunnerLastLogAt = 0;
 
   // Run the currently-captured _pendingRunner once for `frameTimeMs` and
-  // report whether it actually emulated the frame. See #62: after a
-  // click moves DOM focus (e.g. toolbar or feedback form), the runner
-  // call can emulate nothing — no mainloop func call, no reschedule —
-  // while stepOneFrame still counted the frame as stepped. Plausible
-  // causes (not isolated): a stale runner after MainLoop.pause()/
-  // resume() bumps currentlyRunningMainloop so checkIsRunning() returns
-  // early, or RetroArch's own runloop pause makes emscripten_mainloop
-  // return without running the core. KNShared.classifyRunnerStep()
-  // makes the emulated/stale decision from two signals sampled around
-  // the call: did a fresh runner get rescheduled, and did CP0 Count
-  // (kn_get_cycle_time_ms) move at all.
+  // report whether it actually emulated the frame. See #62: after a click
+  // moved DOM focus (e.g. toolbar or feedback form), the runner call could
+  // emulate nothing — no mainloop func call, no reschedule — while
+  // stepOneFrame still counted the frame as stepped. Root cause: the
+  // overrideRAF interceptor used to capture ANY callback passed to
+  // requestAnimationFrame, so the page UI code's own rAF call (fired by the
+  // click) overwrote _pendingRunner with a UI callback, stranding the real
+  // runner. Fixed by having the interceptor capture only Emscripten's
+  // runner (KNShared.isMainLoopRunner) and pass everything else to the
+  // native rAF. The detection below (KNShared.classifyRunnerStep, from two
+  // signals sampled around the call — did a fresh runner get rescheduled,
+  // and did CP0 Count (kn_get_cycle_time_ms) move at all) stays as a safety
+  // net for any other cause of a stale runner.
   const _runCapturedRunner = (frameTimeMs) => {
     const runner = _pendingRunner;
     _pendingRunner = null;
@@ -12538,8 +12544,11 @@
         // and returns without scheduling next rAF, so our overrideRAF never
         // re-captures and _pendingRunner stays null. toggleMainLoop(1) only
         // resumes if EJS_MAINLOOP_PAUSED is true at that moment, which can
-        // miss this case (e.g., toolbar/popover clicks that briefly toggled
-        // EJS pause). Force-recapture so the next stepOneFrame() runs.
+        // miss this case (e.g., toolbar/popover clicks whose own UI rAF
+        // calls used to steal the runner before #62 was filtered; now that
+        // isMainLoopRunner keeps those out of _pendingRunner, this is a
+        // narrower fallback for EJS pause toggling around the click).
+        // Force-recapture so the next stepOneFrame() runs.
         if (_manualMode && !_pendingRunner) {
           recaptureManualRunner(mod, `unpause-no-runner:${reason}`);
         }
