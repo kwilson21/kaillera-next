@@ -10,11 +10,8 @@ ROLLBACK_JS = ROOT / "web/static/netplay-rollback.js"
 
 
 def test_stall_threshold_formula_is_not_duplicated():
-    # The tick loop's RB-INPUT-STALL gameplay stall and
-    # _requestLifecycleFullResync must agree on exactly how far ahead of a
-    # peer the C rollback engine can run before its prediction budget is
-    # exhausted. A second, independently-maintained copy of the formula is
-    # how the two drift apart.
+    # The tick loop's RB-INPUT-STALL gameplay stall uses the shared threshold
+    # formula so it cannot drift from the rollback budget.
     src = ROLLBACK_JS.read_text()
     collapsed = re.sub(r"\s+", " ", src)
 
@@ -41,11 +38,10 @@ def test_background_return_skips_resync_only_while_c_rollback_is_active():
 const calls = {{ setLastSyncState: [], guards: [], socket: [], logs: [] }};
 let _useCRollback = true;
 let _frameNum = 100;
-let _lastRemoteFrame = 104;
+let _lastRemoteFrame = 400;
 let _playerSlot = 1;
 let _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
 let _localInputs = {{ 100: {{ buttons: 2 }} }};
-let _rbInitFrame = -1;
 let _consecutiveResyncs = 0;
 let _syncCheckInterval = 10;
 let _resyncRequestInFlight = false;
@@ -56,17 +52,13 @@ const DELAY_FRAMES = 2;
 const KNState = {{ frameNum: 100 }};
 const KNShared = {{ ZERO_INPUT: {{ buttons: 0 }} }};
 const _peers = {{}};
-const _peerPhantom = {{}};
-const _peerLastAdvanceTime = {{ 0: 1 }};
-const MAX_STALL_MS = 5000;
-const _rbInputStallThreshold = () => 20;
-const getInputPeers = () => [{{ slot: 0 }}];
+const _peerLastAdvanceTime = {{ 0: -1e9 }};
 const _setLastSyncState = (...args) => calls.setLastSyncState.push(args);
 const _beginLifecycleResyncGuard = (...args) => calls.guards.push(args);
 const _requestSocketFullResync = (...args) => {{ calls.socket.push(args); return true; }};
 const _syncLog = (message) => calls.logs.push(message);
 eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
-const rollback = {{ frame: _frameNum, inputs: _remoteInputs, calls: JSON.parse(JSON.stringify(calls)) }};
+const rollback = {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls: JSON.parse(JSON.stringify(calls)) }};
 
 _useCRollback = false;
 _frameNum = 100;
@@ -83,11 +75,12 @@ process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, 
 
     rollback = output["rollback"]
     assert rollback["frame"] == 100
-    assert rollback["inputs"]["0"]["100"] == {"buttons": 1}
+    assert rollback["inputs"] == {"0": {"100": {"buttons": 1}}}
+    assert rollback["localInputs"] == {"100": {"buttons": 2}}
     assert rollback["calls"]["setLastSyncState"] == []
     assert rollback["calls"]["guards"] == []
     assert rollback["calls"]["socket"] == []
-    assert "bg-return: rollback mode — no fast-forward/resync (behind=4)" in rollback["calls"]["logs"]
+    assert "bg-return: rollback mode — no fast-forward/resync (behind=300)" in rollback["calls"]["logs"]
 
     lockstep = output["lockstep"]
     assert lockstep["frame"] == 104

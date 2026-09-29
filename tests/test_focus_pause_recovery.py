@@ -255,7 +255,8 @@ def test_local_input_is_zeroed_while_emulator_resume_is_guarded():
     assert "? KNShared.ZERO_INPUT" in source
 
 
-def test_background_return_requests_full_sync_and_guards_input_until_apply():
+def test_lockstep_background_return_requests_full_sync_and_guards_input_until_apply():
+    # C rollback return skips this path; see test_bg_return_source.py.
     source = LOCKSTEP_JS.read_text()
 
     assert "_lifecycleResyncStartedAt + LIFECYCLE_RESYNC_INPUT_GUARD_MS" in source

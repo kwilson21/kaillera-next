@@ -1607,11 +1607,8 @@
     } catch (_) {}
     return true;
   })();
-  // Shared with the tick loop's RB-INPUT-STALL gameplay stall (see the
-  // prediction-window comment above it): how far ahead of a peer's last
-  // received frame we can run before the C engine's rollback budget is
-  // exhausted and we have to stall. Keep the formula in sync with the
-  // tick loop's `stallThreshold` — don't duplicate it.
+  // RB-INPUT-STALL threshold: how far ahead of a peer's last input the C
+  // engine can run before its rollback budget is exhausted. Defined once.
   const _rbInputStallThreshold = () =>
     RB_TRUE_ROLLBACK ? DELAY_FRAMES + KN_MAX_VISIBLE_ROLLBACK_DEPTH + 1 : DELAY_FRAMES + 4;
   const RB_ROLLBACK_STATE_BACKEND = (() => {
@@ -12595,11 +12592,8 @@
 
       // Fast-forward _frameNum to catch up with peers. Background throttling
       // means we fell behind — peers have moved far ahead.
-      // BF2: during boot convergence, this skips the 300-frame pure-lockstep
-      // window that would take 5+ minutes at background-throttled 1fps.
       if (_lastRemoteFrame > _frameNum) {
-        const wasBoot = _rbInitFrame >= 0 && _frameNum - _rbInitFrame <= 300;
-        _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}${wasBoot ? ' (boot-skip)' : ''}`);
+        _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);
         _frameNum = _lastRemoteFrame;
         KNState.frameNum = _frameNum;
         _localInputs = {};
