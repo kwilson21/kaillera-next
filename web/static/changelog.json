@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.14",
+    "date": "2026-09-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "never fast-forward or resync on tab return while C rollback is active (#76)"
+      }
+    ]
+  },
+  {
     "version": "0.63.13",
     "date": "2026-09-29",
     "changes": [
