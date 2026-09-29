@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.63.13",
+    "date": "2026-09-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "capture only Emscripten's runner in the rollback rAF interceptor (#74)"
+      }
+    ]
+  },
+  {
     "version": "0.63.12",
     "date": "2026-09-28",
     "changes": [
