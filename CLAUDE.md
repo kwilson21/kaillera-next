@@ -81,6 +81,7 @@ kaillera-next/
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
 │       ├── shared.js            # input encoding/decoding, cheats, wire format
 │       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
+│       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-state.js          # cross-module shared state (KNState)

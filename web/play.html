@@ -129,7 +129,9 @@
           <div id="gamepad-status">No controller detected</div>
           <div id="gamepad-controls">
             <button id="overlay-settings-btn" class="small-btn">Configure Controller</button>
+            <button id="switch2-connect-btn" class="small-btn" hidden>Connect Switch 2 Pro</button>
           </div>
+          <div id="switch2-status" aria-live="polite" hidden></div>
           <div id="remap-wizard" style="display: none">
             <span id="remap-prompt"></span>
             <span id="remap-progress"></span>
@@ -515,6 +517,9 @@
 
     <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
     <script src="/static/gamepad-manager.js"></script>
+
+    <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->
+    <script src="/static/switch2-usb.js"></script>
 
     <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
     <script src="/static/shared.js"></script>

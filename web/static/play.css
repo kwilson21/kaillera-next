@@ -531,10 +531,18 @@ body {
   flex-wrap: wrap;
 }
 
-#gamepad-status {
+#gamepad-status,
+#switch2-status {
   font-size: 12px;
   color: #8a8a8a;
+}
+
+#gamepad-status {
   flex: 1;
+}
+
+#switch2-status {
+  flex-basis: 100%;
 }
 
 #gamepad-controls {
