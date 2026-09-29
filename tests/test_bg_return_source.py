@@ -52,7 +52,6 @@ const DELAY_FRAMES = 2;
 const KNState = {{ frameNum: 100 }};
 const KNShared = {{ ZERO_INPUT: {{ buttons: 0 }} }};
 const _peers = {{}};
-const _peerLastAdvanceTime = {{ 0: -1e9 }};
 const _setLastSyncState = (...args) => calls.setLastSyncState.push(args);
 const _beginLifecycleResyncGuard = (...args) => calls.guards.push(args);
 const _requestSocketFullResync = (...args) => {{ calls.socket.push(args); return true; }};
@@ -67,7 +66,7 @@ _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
 _localInputs = {{ 100: {{ buttons: 2 }} }};
 calls.setLastSyncState.length = calls.guards.length = calls.socket.length = calls.logs.length = 0;
 eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
-process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, inputs: _remoteInputs, calls }} }}));
+process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls }} }}));
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
@@ -86,4 +85,6 @@ process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, 
     assert lockstep["frame"] == 104
     assert lockstep["inputs"] == {}
     assert lockstep["calls"]["setLastSyncState"] == [[None, "bg-return"]]
+    assert lockstep["localInputs"] == {"104": {"buttons": 0}, "105": {"buttons": 0}}
+    assert lockstep["calls"]["guards"] == [["bg-return"]]
     assert lockstep["calls"]["socket"] == [["bg-return"]]
