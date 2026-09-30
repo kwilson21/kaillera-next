@@ -92,7 +92,7 @@
   }
 
   const _CLAIM_HINT =
-    'Another app may be using the controller — quit it and replug. On Windows the WinUSB driver may be needed; on Linux a udev rule.';
+    'Another app may be using the controller — quit it and replug. On Windows the WinUSB driver may be needed, and on Linux a udev rule.';
   const _CLAIM_ERRORS = ['SecurityError', 'NetworkError', 'InvalidStateError'];
 
   // ── Handshake ────────────────────────────────────────────────────────

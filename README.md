@@ -27,23 +27,23 @@ Both modes support:
 
 ### Controller support
 
-Gamepads work alongside keyboard controls; phones and tablets also get on-screen touch controls (an Xbox controller over Bluetooth works on a phone too).
+Gamepads work alongside keyboard controls; phones and tablets also get on-screen touch controls.
 
 - **Tested:** a modern Xbox controller.
 - **Should work, untested:** gamepads your browser recognizes with the standard layout (PlayStation, original Switch Pro, 8BitDo, or any generic pad that reports it).
-- **Switch 2 Pro Controller (experimental):** tested on macOS in Chrome over USB-C (buttons and both sticks). Chrome or Edge only, wired only. Windows and Linux are untested.
+- **Switch 2 Pro Controller (experimental):** tested on macOS in Chrome over USB-C (buttons and both sticks). Wired only. Only macOS with Chrome has been tested.
 
 If a controller's buttons land in the wrong place, open **Configure Controller** in the room, before the game starts, and press **Quick Setup** to remap them one at a time. Mappings are saved in your browser, and the same panel has stick deadzone and sensitivity settings.
 
 To use a Switch 2 Pro Controller:
 
 1. Plug it in with a USB-C cable
-2. In the room, before the game starts, click **Connect Switch 2 Pro** (next to **Configure Controller**) and choose the controller in Chrome's dialog
+2. In the room, before the game starts, click **Connect Switch 2 Pro** (next to **Configure Controller**) and choose the controller in the browser's dialog
 3. Press any button
 
-You only do this once. After that first permission grant the controller is re-enabled automatically each time it is plugged in, and the Connect button hides itself while it is; press any button to wake it, as with any controller.
+You only do this once. After that first permission grant the controller is re-enabled automatically each time it is plugged in, and the Connect button hides itself while a granted controller is plugged in; press any button to wake it, as with any controller.
 
-Limits: this needs WebUSB, so Safari and Firefox are out. Bluetooth is not supported (the controller uses a custom BLE protocol). On Windows the browser may need the WinUSB driver to open the controller (for example installed with Zadig), and on Linux a udev rule; neither is tested.
+Limits: this needs a browser with WebUSB (Chrome; Edge should work), so Safari and Firefox are out. Bluetooth is not supported (the controller uses a custom BLE protocol). On Windows the browser may need the WinUSB driver to open the controller (for example installed with Zadig), and on Linux it may need a udev rule; neither is tested.
 
 ## Quick start
 
