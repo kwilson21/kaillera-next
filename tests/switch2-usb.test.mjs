@@ -24,8 +24,15 @@ test('Switch 2 Pro is picked for Chrome- and Firefox-style ids only', () => {
   assert.equal(name('Nintendo Co., Ltd. Switch 2 Pro Controller (Vendor: 057e Product: 2069)'), 'Switch 2 Pro');
   assert.equal(name('057e-2069-Switch 2 Pro Controller'), 'Switch 2 Pro');
   assert.equal(name('57e-2069-Switch 2 Pro Controller'), 'Switch 2 Pro'); // Firefox on macOS drops the leading zero
-  // A browser that maps the pad natively as a standard gamepad must not get the raw HID layout.
-  assert.equal(name('Switch 2 Pro Controller (STANDARD GAMEPAD Vendor: 057e Product: 2069)'), 'Standard');
+  // A browser that maps the pad natively as a standard gamepad (its own `mapping` flag) must not get the raw HID layout.
+  assert.equal(
+    GamepadManager.getDefaultProfile('Switch 2 Pro Controller (Vendor: 057e Product: 2069)', 'standard').name,
+    'Standard',
+  );
+  assert.equal(
+    GamepadManager.getDefaultProfile('Switch 2 Pro Controller (Vendor: 057e Product: 2069)', '').name,
+    'Switch 2 Pro',
+  );
   assert.equal(name('Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)'), 'Standard');
   assert.equal(name('057e-2009-Pro Controller'), 'Standard'); // Switch 1 Pro works natively
 });
@@ -51,7 +58,7 @@ const CONFIGURATION = {
 
 // transferIn never resolves on its own, like a controller that stays silent;
 // close() aborts the pending reads, like a real USBDevice.
-function mockDevice({ configuration = null, claimError = null, transferIn = null } = {}) {
+function mockDevice({ configuration = null, claimError = null, transferIn = null, stallAt = null } = {}) {
   const calls = [];
   const pending = [];
   const device = {
@@ -74,7 +81,11 @@ function mockDevice({ configuration = null, claimError = null, transferIn = null
     },
     transferOut: async (endpoint) => {
       calls.push(['transferOut', endpoint]);
-      return { status: 'ok' };
+      // A stalled endpoint resolves with status 'stall' rather than rejecting.
+      return { status: calls.filter((c) => c[0] === 'transferOut').length === stallAt ? 'stall' : 'ok' };
+    },
+    clearHalt: async (direction, endpoint) => {
+      calls.push(['clearHalt', direction, endpoint]);
     },
     transferIn:
       transferIn ??
@@ -172,6 +183,23 @@ test('a claim failure rejects, shows the verbatim error, and still closes the de
   });
   assert.equal(count(device, 'transferOut'), 0);
   assert.equal(count(device, 'close'), 1);
+});
+
+test('a stalled write fails the handshake instead of reporting the controller as enabled', async () => {
+  const device = mockDevice({ configuration: CONFIGURATION, stallAt: 3 });
+  await withStatusElement(async (status) => {
+    await assert.rejects(Switch2USB.enable(device, FAST), /handshake command 3 of \d+: stall/);
+    assert.match(status.textContent, /stall/);
+    assert.doesNotMatch(status.textContent, /enabled/);
+  });
+  assert.equal(count(device, 'transferOut'), 3); // stopped at the stall
+  assert.deepEqual(
+    device.calls.find((c) => c[0] === 'clearHalt'),
+    ['clearHalt', 'out', 4],
+  );
+  assert.deepEqual(names(device).slice(-2), ['releaseInterface', 'close']);
+  // Not stuck "in flight": a retry runs the whole handshake again.
+  assert.equal(await Switch2USB.enable(device, FAST), true);
 });
 
 // ── Ready feedback ───────────────────────────────────────────────────

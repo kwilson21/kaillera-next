@@ -149,8 +149,13 @@
       const endpoints = _findEndpoints(device);
       await device.claimInterface(INTERFACE);
       claimed = true;
-      for (const command of _COMMANDS) {
-        await device.transferOut(endpoints.out, command);
+      for (const [n, command] of _COMMANDS.entries()) {
+        // A stalled endpoint resolves with status 'stall' instead of rejecting.
+        const result = await device.transferOut(endpoints.out, command);
+        if (result.status !== 'ok') {
+          await device.clearHalt('out', endpoints.out).catch(() => {}); // so a retry starts clean
+          throw new Error(`handshake command ${n + 1} of ${_COMMANDS.length}: ${result.status}`);
+        }
         if (endpoints.in !== undefined) await _readReply(device, endpoints.in, replyTimeoutMs);
         await _sleep(gapMs);
       }

@@ -33,10 +33,16 @@ function poll() {
 }
 
 // Make a mock pad gamepad 0 (resting at `axes`) and poll it once.
-function attach(id, buttonCount, axisCount, axes = Array(axisCount).fill(0)) {
+function attach(
+  id,
+  buttonCount,
+  axisCount,
+  axes = Array(axisCount).fill(0),
+  mapping = id === XBOX_ID ? 'standard' : '',
+) {
   const pad = {
     id,
-    mapping: id === XBOX_ID ? 'standard' : '',
+    mapping,
     buttons: Array.from({ length: buttonCount }, () => ({ pressed: false, value: 0 })),
     axes,
   };
@@ -190,6 +196,20 @@ test('Switch 2 Pro: a stick held away from rest is never taken as the centre', (
   assert.equal(GamepadManager.axisCenter(0, 1), 0);
   poll();
   assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+});
+
+test('the Gamepad API mapping flag decides whether the raw Switch 2 Pro profile applies', () => {
+  detach();
+  attach(SWITCH2_ID, 21, 6, undefined, '');
+  assert.equal(GamepadManager.getDetected()[0].profileName, 'Switch 2 Pro');
+  assert.equal(GamepadManager.getDefaultProfile(SWITCH2_ID).name, 'Switch 2 Pro');
+
+  // Same id, but the browser maps the pad natively as a standard gamepad (whatever its id text says).
+  detach();
+  attach(SWITCH2_ID, 17, 4, undefined, 'standard');
+  assert.equal(GamepadManager.getDetected()[0].profileName, 'Standard');
+  assert.equal(GamepadManager.getDefaultProfile(SWITCH2_ID).name, 'Standard'); // taken from the detected pad
+  detach();
 });
 
 test('Switch 2 Pro: a pad that has not reported yet (all zeros) is not taken as the centre', () => {

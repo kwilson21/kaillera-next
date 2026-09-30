@@ -61,8 +61,9 @@
     {
       name: 'Switch 2 Pro',
       // Chrome: "... (Vendor: 057e Product: 2069)"; Firefox: "057e-2069-..." ("57e-2069-..." on macOS).
-      // A browser that maps it natively as a standard gamepad gets the Standard profile instead.
-      match: (id) => /\b0?57e\b/i.test(id) && /\b2069\b/.test(id) && !/STANDARD GAMEPAD/.test(id),
+      // `mapping` is the Gamepad API's own flag: a browser that maps this pad natively as a standard
+      // gamepad gets the Standard profile instead.
+      match: (id, mapping) => /\b0?57e\b/i.test(id) && /\b2069\b/.test(id) && mapping !== 'standard',
       // Raw (non-standard) HID layout, buttons in HID usage order; positional like Standard:
       // bottom face (B) → N64 A, right face (A) → N64 B. X/Y, stick clicks, Home, Capture,
       // GR/GL, C are left unmapped (like Standard leaves X/Y). ZL/ZR are digital.
@@ -216,7 +217,7 @@
 
   // ── Profile Resolution ───────────────────────────────────────────────
 
-  function resolveProfile(id) {
+  function resolveProfile(id, mapping) {
     // Check localStorage for custom profile
     try {
       const saved = KNState.safeGet('localStorage', `gamepad-profile:${id}`);
@@ -229,7 +230,7 @@
     } catch (_) {}
 
     // Fall through to built-in profiles
-    return PROFILES.find((p) => p.match(id)) ?? PROFILES[PROFILES.length - 1];
+    return PROFILES.find((p) => p.match(id, mapping)) ?? PROFILES[PROFILES.length - 1];
   }
 
   // Rest position of an axis (0 until sampled, or for profiles without axisCenter: 'auto').
@@ -291,8 +292,8 @@
 
       // New or changed gamepad
       if (!_detected[i] || _prevIds[i] !== gp.id) {
-        const profile = resolveProfile(gp.id);
-        _detected[i] = { id: gp.id, profileName: profile.name, profile: profile };
+        const profile = resolveProfile(gp.id, gp.mapping);
+        _detected[i] = { id: gp.id, mapping: gp.mapping, profileName: profile.name, profile: profile };
         delete _centers[i];
         delete _centerCandidates[i];
         changed = true;
@@ -477,7 +478,7 @@
       // Re-resolve profile for this gamepad
       for (const entry of Object.values(_detected)) {
         if (entry.id === gamepadId) {
-          const resolved = resolveProfile(gamepadId);
+          const resolved = resolveProfile(gamepadId, entry.mapping);
           entry.profile = resolved;
           entry.profileName = resolved.name;
         }
@@ -491,7 +492,7 @@
       } catch (_) {}
       for (const entry of Object.values(_detected)) {
         if (entry.id === gamepadId) {
-          const resolved = resolveProfile(gamepadId);
+          const resolved = resolveProfile(gamepadId, entry.mapping);
           entry.profile = resolved;
           entry.profileName = resolved.name;
         }
@@ -499,8 +500,9 @@
       if (_onUpdate) _onUpdate();
     },
 
-    getDefaultProfile: (gamepadId) => {
-      return PROFILES.find((p) => p.match(gamepadId)) ?? PROFILES[PROFILES.length - 1];
+    // `mapping` defaults to that of the detected gamepad with this id, when there is one.
+    getDefaultProfile: (gamepadId, mapping = Object.values(_detected).find((e) => e.id === gamepadId)?.mapping) => {
+      return PROFILES.find((p) => p.match(gamepadId, mapping)) ?? PROFILES[PROFILES.length - 1];
     },
 
     hasCustomProfile: (gamepadId) => {
