@@ -126,15 +126,16 @@ earlier ones to have set up their `window.*` exports:
 3. `storage.js` — safe localStorage/sessionStorage wrapper
 4. `kn-state.js` — shared state namespace
 5. `gamepad-manager.js` — gamepad profiles and mapping
-6. `shared.js` — input encoding/decoding, cheats, wire format
-7. `virtual-gamepad.js` — touch controls for mobile
-8. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-9. `netplay-lockstep.js` — deprecated 16-line compat shim that warns once; loaded after rollback so cached `play.html` requests don't 404
-10. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-11. `controller-settings.js` — in-game controller settings panel
-12. `play.js` — page orchestrator (connects everything)
-13. `version.js` — version display + changelog modal
-14. `feedback.js` — in-app feedback collection
+6. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
+7. `shared.js` — input encoding/decoding, cheats, wire format
+8. `virtual-gamepad.js` — touch controls for mobile
+9. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+10. `netplay-lockstep.js` — deprecated 16-line compat shim that warns once; loaded after rollback so cached `play.html` requests don't 404
+11. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+12. `controller-settings.js` — in-game controller settings panel
+13. `play.js` — page orchestrator (connects everything)
+14. `version.js` — version display + changelog modal
+15. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
@@ -160,7 +161,8 @@ The Python server is small (~3,400 lines across 8 files):
 | `netplay-lockstep.js` | ~16 | Deprecated compat shim — emits a `console.warn` and exists only so cached `play.html` requests don't 404. Remove in a follow-up deploy. | (none) |
 | `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
 | `shared.js` | ~880 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
-| `gamepad-manager.js` | ~420 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
+| `gamepad-manager.js` | ~500 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
+| `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~600 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |

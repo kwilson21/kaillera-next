@@ -25,6 +25,26 @@ Both modes support:
 - Virtual gamepad for mobile/touch devices
 - Mode switching between games without page reload (WASM module hibernates between sessions)
 
+### Controller support
+
+Gamepads work alongside keyboard controls; phones and tablets also get on-screen touch controls.
+
+- **Tested:** a modern Xbox controller.
+- **Should work, untested:** gamepads your browser recognizes with the standard layout (PlayStation, original Switch Pro, 8BitDo, or any generic pad that reports it).
+- **Switch 2 Pro Controller (experimental):** tested on macOS in Chrome over USB-C (buttons and both sticks). Wired only. Only macOS with Chrome has been tested.
+
+If a controller's buttons land in the wrong place, open **Configure Controller** in the room, before the game starts, and press **Quick Setup** to remap them one at a time. Mappings are saved in your browser, and the same panel has stick deadzone and sensitivity settings.
+
+To use a Switch 2 Pro Controller:
+
+1. Plug it in with a USB-C cable
+2. In the room, before the game starts, click **Connect Switch 2 Pro** (next to **Configure Controller**) and choose the controller in the browser's dialog
+3. Press any button
+
+You only do this once. After that first permission grant the controller is re-enabled automatically each time it is plugged in, and the Connect button hides itself while a granted controller is plugged in; press any button to wake it, as with any controller.
+
+Limits: this needs a browser with WebUSB (Chrome; Edge should work), so Safari and Firefox are out. Bluetooth is not supported (the controller uses a custom BLE protocol). On Windows the browser may need the WinUSB driver to open the controller (for example installed with Zadig), and on Linux it may need a udev rule; neither is tested.
+
 ## Quick start
 
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just).
@@ -169,6 +189,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     netplay-lockstep.js    Deprecated 16-line compat shim (loads window.NetplayLockstep alias for cached pages)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
+    switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM

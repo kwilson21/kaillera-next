@@ -591,7 +591,8 @@
     { x: 60, y: 60 },
   ];
 
-  // Read raw hardware stick axes (bypasses the analog pipeline)
+  // Read hardware stick axes with polarity, rest position and axisRange applied (see GamepadManager.axisTransform),
+  // but before deadzone/range/sensitivity, so the dot moves the way the stick does
   const readRawAxes = () => {
     const activeProfile = GamepadManager.getActiveProfile(0);
     if (!activeProfile) return null;
@@ -617,11 +618,15 @@
     if (cxIdx < 0) cxIdx = 2;
     if (cyIdx < 0) cyIdx = 3;
 
+    const read = (name, index) =>
+      index < gp.axes.length
+        ? GamepadManager.axisTransform(profile, name)(gp.axes[index], GamepadManager.axisCenter(gpIndex, index))
+        : 0;
     return {
-      lx: axes.stickX && axes.stickX.index < gp.axes.length ? gp.axes[axes.stickX.index] : 0,
-      ly: axes.stickY && axes.stickY.index < gp.axes.length ? gp.axes[axes.stickY.index] : 0,
-      cx: cxIdx < gp.axes.length ? gp.axes[cxIdx] : 0,
-      cy: cyIdx < gp.axes.length ? gp.axes[cyIdx] : 0,
+      lx: axes.stickX ? read('lx', axes.stickX.index) : 0,
+      ly: axes.stickY ? read('ly', axes.stickY.index) : 0,
+      cx: read('cx', cxIdx),
+      cy: read('cy', cyIdx),
     };
   };
 
@@ -881,7 +886,7 @@
     // Gamepad status indicator
     const activeProfile = GamepadManager.getActiveProfile(0);
     const statusText = activeProfile
-      ? `${activeProfile.id.substring(0, 36)} (${activeProfile.profileName})`
+      ? `${GamepadManager.displayName(activeProfile.id).substring(0, 36)} (${activeProfile.profileName})`
       : 'No controller detected';
     const statusColor = activeProfile ? '#6f6' : '#475569';
     _panel.appendChild(
@@ -889,6 +894,18 @@
         'div',
         { style: { fontSize: '11px', color: statusColor, marginBottom: '12px', textAlign: 'center' } },
         statusText,
+      ),
+    );
+
+    // Controller support note
+    _panel.appendChild(
+      el(
+        'div',
+        { style: { fontSize: '11px', color: '#64748b', lineHeight: '1.4', marginBottom: '12px', textAlign: 'center' } },
+        'Tested: a modern Xbox controller. Other gamepads your browser recognizes should work; if buttons land in the wrong place, use Quick Setup below.' +
+          (window.Switch2USB?.isSupported()
+            ? ' Switch 2 Pro (experimental): USB-C cable only; the first time, press Connect Switch 2 Pro in the room, before the game starts.'
+            : ''),
       ),
     );
 

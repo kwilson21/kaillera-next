@@ -1178,7 +1178,7 @@
       el.classList.remove('is-detected');
       return;
     }
-    const name = detected[0].id?.replace(/\s*\(Vendor:.*$/, '').trim() || 'Gamepad';
+    const name = GamepadManager.displayName(detected[0].id) || 'Gamepad';
     const more = detected.length > 1 ? ` (+${detected.length - 1} more)` : '';
     el.textContent = `Gamepad detected: ${name}${more}. Open Controls to remap.`;
     el.classList.add('is-detected');

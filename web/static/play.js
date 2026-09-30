@@ -4528,7 +4528,7 @@
     if (statusEl && !_wizardActive) {
       if (detected.length > 0) {
         const primary = detected[0];
-        statusEl.textContent = `${primary.id.substring(0, 40)} (${primary.profileName})`;
+        statusEl.textContent = `${GamepadManager.displayName(primary.id).substring(0, 40)} (${primary.profileName})`;
         statusEl.className = 'gamepad-detected';
       } else {
         statusEl.textContent = 'No controller — press any button to detect';
@@ -4636,6 +4636,8 @@
         buttons: { ...current.buttons },
         axes: JSON.parse(JSON.stringify(current.axes)),
         axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
+        axisRange: current.axisRange,
+        axisCenter: current.axisCenter,
         deadzone: current.deadzone || 0.3,
       };
     } else {
