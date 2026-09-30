@@ -26,18 +26,29 @@ const { GamepadManager } = globalThis;
 const XBOX_ID = 'Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)';
 const SWITCH2_ID = 'Switch 2 Pro Controller (Vendor: 057e Product: 2069)';
 
-// Make a mock pad gamepad 0. start() polls once; stop() right away leaves no timer running.
-function attach(id, buttonCount, axisCount) {
+// One poll, as GamepadManager.start() runs it; stop() right away leaves no timer running.
+function poll() {
+  GamepadManager.start({ playerSlot: 0 });
+  GamepadManager.stop();
+}
+
+// Make a mock pad gamepad 0 (resting at `axes`) and poll it once.
+function attach(id, buttonCount, axisCount, axes = Array(axisCount).fill(0)) {
   const pad = {
     id,
     mapping: id === XBOX_ID ? 'standard' : '',
     buttons: Array.from({ length: buttonCount }, () => ({ pressed: false, value: 0 })),
-    axes: Array(axisCount).fill(0),
+    axes,
   };
   pads[0] = pad;
-  GamepadManager.start({ playerSlot: 0 });
-  GamepadManager.stop();
+  poll();
   return pad;
+}
+
+// Unplug gamepad 0 and let a poll notice.
+function detach() {
+  pads[0] = null;
+  poll();
 }
 
 const press = (pad, index) => {
@@ -114,6 +125,167 @@ test('Switch 2 Pro sticks move the way they are pushed, to full N64 range', () =
 
   press(pad, 6); // "+" → Start (Standard would read this as Z)
   assert.equal(GamepadManager.readGamepad(0).buttons, 1 << 3);
+});
+
+// ── Switch 2 Pro: the resting position is sampled once per connection and subtracted ──
+
+// Measured resting position of a real pad (Chrome, macOS): [LX, LY, unused, RX, unused, RY].
+// LY at rest is 0.105 / 0.8 = 0.131 of full deflection, only just under the 0.15 deadzone.
+const REST = [-0.006, 0.105, 0, 0.075, 0, 0];
+const NEUTRAL = { lx: 0, ly: 0, cx: 0, cy: 0 };
+
+test('Switch 2 Pro: the rest position is captured on the second matching poll and subtracted', () => {
+  detach();
+  const pad = attach(SWITCH2_ID, 21, 6, REST);
+  assert.equal(GamepadManager.axisCenter(0, 1), 0); // one poll: not yet
+  // 0.11 past rest is 0.1375 of full deflection, inside the 0.15 deadzone, but 0.215 raw is not.
+  const nudged = REST.with(1, REST[1] + 0.11);
+  assert.ok(readSticks(pad, nudged).ly < 0, 'without a centre the offset counts');
+
+  pad.axes = REST;
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+  assert.equal(readSticks(pad, nudged).ly, 0);
+});
+
+test('Switch 2 Pro: every stick reads exactly neutral at rest', () => {
+  const restsAt = (axes) => {
+    detach();
+    const pad = attach(SWITCH2_ID, 21, 6, axes);
+    const uncentred = readSticks(pad, axes);
+    poll();
+    return [uncentred, readSticks(pad, axes)];
+  };
+  assert.deepEqual(restsAt(REST)[1], NEUTRAL);
+
+  // A worse unit (still inside the 0.15 capture limit): a phantom input without centring.
+  const [uncentred, centred] = restsAt([0.02, 0.13, 0, -0.14, 0, 0.12]);
+  assert.notDeepEqual(uncentred, NEUTRAL);
+  assert.deepEqual(centred, NEUTRAL);
+});
+
+test('Switch 2 Pro: full deflection still reaches the full N64 range after centring', () => {
+  detach();
+  const pad = attach(SWITCH2_ID, 21, 6, REST);
+  poll();
+  // 0.8 either side of the rest position is full deflection (+Y is up, so up reads negative).
+  assert.equal(readSticks(pad, REST.with(1, REST[1] + 0.8)).ly, -83);
+  assert.equal(readSticks(pad, REST.with(1, REST[1] - 0.8)).ly, 83);
+  assert.equal(readSticks(pad, REST.with(0, REST[0] + 0.8)).lx, 83);
+  assert.equal(readSticks(pad, REST.with(3, REST[3] - 0.8)).cx, -83);
+});
+
+test('Switch 2 Pro: a stick held away from rest is never taken as the centre', () => {
+  detach();
+  const held = [0, 0.4, 0, 0, 0, 0]; // pushed up, well past the 0.15 capture limit
+  const pad = attach(SWITCH2_ID, 21, 6, held);
+  poll();
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  assert.equal(readSticks(pad, held).ly, -34); // 0.4 / 0.8 = 0.5 of the way: (0.5 - 0.15) / 0.85 * 83
+
+  // Released: it takes two matching polls at rest to capture it.
+  pad.axes = REST;
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+});
+
+test('Switch 2 Pro: a pad that has not reported yet (all zeros) is not taken as the centre', () => {
+  detach();
+  const pad = attach(SWITCH2_ID, 21, 6); // every axis exactly 0, as before its first report
+  poll();
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+
+  // Its first real report arrives.
+  pad.axes = REST;
+  poll();
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+});
+
+test('Switch 2 Pro: a resting offset past the capture limit is never captured, on any axis', () => {
+  detach();
+  const pad = attach(SWITCH2_ID, 21, 6, REST.with(1, 0.2));
+  poll();
+  poll();
+  for (const axis of [0, 1, 3, 5]) assert.equal(GamepadManager.axisCenter(0, axis), 0, `axis ${axis}`);
+  assert.deepEqual(readSticks(pad, REST.with(1, 0.2)), { ...NEUTRAL, ly: -10 }); // read as before
+});
+
+test('Switch 2 Pro: a stick still moving between polls is not captured until it settles', () => {
+  detach();
+  const pad = attach(SWITCH2_ID, 21, 6, REST.with(1, 0.05));
+  pad.axes = REST.with(1, 0.1); // 0.05 apart, both inside the capture limit
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0.1);
+});
+
+test('Switch 2 Pro: only the stick axes count, the unused axes are neither read nor captured', () => {
+  detach();
+  attach(SWITCH2_ID, 21, 6, REST.with(2, 1).with(4, -1));
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+  assert.equal(GamepadManager.axisCenter(0, 2), 0);
+  assert.equal(GamepadManager.axisCenter(0, 4), 0);
+});
+
+test('a standard-mapping pad resting off-centre is never centred', () => {
+  detach();
+  const axes = [0.1, 0.1, 0.1, 0.1];
+  // Shrink the deadzone so that 0.1 is live: centring would change these readings.
+  for (const stick of ['lx', 'ly', 'cx', 'cy']) store.set(`kn-deadzone-${stick}`, '0.05');
+  try {
+    const pad = attach(XBOX_ID, 17, 4, axes);
+    const first = readSticks(pad, axes);
+    poll();
+    poll();
+    assert.equal(GamepadManager.axisCenter(0, 0), 0);
+    assert.equal(GamepadManager.axisCenter(0, 1), 0);
+    assert.deepEqual(readSticks(pad, axes), first);
+    assert.deepEqual(first, { lx: 4, ly: 4, cx: 83, cy: 83 }); // (0.1 - 0.05) / 0.95 * 83; C stick snaps
+  } finally {
+    for (const stick of ['lx', 'ly', 'cx', 'cy']) store.delete(`kn-deadzone-${stick}`);
+  }
+});
+
+test('Switch 2 Pro: a replugged or different pad is sampled again', () => {
+  detach();
+  attach(SWITCH2_ID, 21, 6, REST);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), REST[1]);
+
+  detach(); // unplugged: the old rest position is forgotten
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  const other = REST.with(1, -0.09).with(3, 0.02);
+  const pad = attach(SWITCH2_ID, 21, 6, other);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), -0.09);
+  assert.deepEqual(readSticks(pad, other), NEUTRAL);
+
+  // Another pad in the same slot without an unplug in between: the id changes.
+  const again = REST.with(1, 0.06);
+  attach(`${SWITCH2_ID} #2`, 21, 6, again);
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0.06);
+});
+
+test('axisCenter is 0 for pads and axes nothing was captured for', () => {
+  detach();
+  assert.equal(GamepadManager.axisCenter(0, 1), 0);
+  assert.equal(GamepadManager.axisCenter(3, 1), 0);
+  attach(SWITCH2_ID, 21, 6, REST);
+  poll();
+  assert.equal(GamepadManager.axisCenter(0, 0), REST[0]);
+  assert.equal(GamepadManager.axisCenter(0, 3), REST[3]);
+  assert.equal(GamepadManager.axisCenter(0, 5), 0); // captured, and resting at exactly 0
+  assert.equal(GamepadManager.axisCenter(0, 9), 0);
+  assert.equal(GamepadManager.axisCenter(3, 1), 0);
 });
 
 // ── Saved profiles: what the remap wizard records is honored ─────────

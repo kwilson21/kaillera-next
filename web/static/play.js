@@ -4637,6 +4637,7 @@
         axes: JSON.parse(JSON.stringify(current.axes)),
         axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
         axisRange: current.axisRange,
+        axisCenter: current.axisCenter,
         deadzone: current.deadzone || 0.3,
       };
     } else {

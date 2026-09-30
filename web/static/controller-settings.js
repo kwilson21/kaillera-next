@@ -591,7 +591,7 @@
     { x: 60, y: 60 },
   ];
 
-  // Read hardware stick axes with polarity and axisRange applied (see GamepadManager.axisTransform),
+  // Read hardware stick axes with polarity, rest position and axisRange applied (see GamepadManager.axisTransform),
   // but before deadzone/range/sensitivity, so the dot moves the way the stick does
   const readRawAxes = () => {
     const activeProfile = GamepadManager.getActiveProfile(0);
@@ -619,7 +619,9 @@
     if (cyIdx < 0) cyIdx = 3;
 
     const read = (name, index) =>
-      index < gp.axes.length ? GamepadManager.axisTransform(profile, name)(gp.axes[index]) : 0;
+      index < gp.axes.length
+        ? GamepadManager.axisTransform(profile, name)(gp.axes[index], GamepadManager.axisCenter(gpIndex, index))
+        : 0;
     return {
       lx: axes.stickX ? read('lx', axes.stickX.index) : 0,
       ly: axes.stickY ? read('ly', axes.stickY.index) : 0,
