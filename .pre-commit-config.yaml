@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.8
+    rev: v0.16.10
     hooks:
       - id: ruff-check
         args: [--fix, --config, server/pyproject.toml]
@@ -15,7 +15,7 @@ repos:
   # found" on every JS file even with absolute paths. rbubley tracks
   # stable prettier 3.x releases.
   - repo: https://github.com/rbubley/mirrors-prettier
-    rev: v3.3.3
+    rev: v3.9.9
     hooks:
       - id: prettier
         types_or: [javascript, css, json, yaml, html]

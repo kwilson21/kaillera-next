@@ -9,7 +9,7 @@ dependencies = [
     "python-socketio>=5.11.0",
     "python-dotenv>=1.0.0",
     "redis[hiredis]>=5.0.0",
-    "aiosqlite==0.20.0",
+    "aiosqlite==0.22.1",
     # Parquet rotation (src/match_rotation.py) — turns finished matches
     # into Parquet files + precomputed metrics so admin queries and
     # analyze_match.py don't re-parse the session_logs JSON blob.
@@ -34,7 +34,7 @@ dev = [
     # The runtime server has no browser dependency.
     "playwright>=1.40.0",
     "pytest-playwright>=0.5",
-    "ruff>=0.8.0",
+    "ruff>=0.16.10",
 ]
 analysis = [
     # tools/analyze_match.py — DuckDB for scanning rotated Parquet files

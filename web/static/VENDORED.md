@@ -3,24 +3,23 @@
 Single source of truth for every third-party file checked into this repo.
 Update this file whenever you re-import, replace, or remove a vendored asset.
 
-Last updated: 2026-04-27
+Last updated: 2026-10-05
 
 ---
 
 ## Frontend (`web/static/`)
 
 ### `socket.io.min.js`
-- **Version:** 4.8.3
-- **Source:** https://github.com/socketio/socket.io-client (banner inside file)
+- **Version:** 4.8.4
+- **Source:** https://registry.npmjs.org/socket.io-client — `dist/socket.io.min.js` from the official npm tarball
 - **Used by:** all pages — Socket.IO client
-- **Pairs with:** server `python-socketio 5.16.x` (compatible with v4 protocol)
+- **Pairs with:** server `python-socketio 5.17.x` (compatible with v4 protocol; EIO4, unchanged from 5.16.x)
 
 ### `vendor/fflate.min.js`
-- **Version:** unknown — banner was stripped before import
-- **Source:** https://github.com/101arrowz/fflate
-- **First imported:** commit `74ecaba` ("harden security, add Pydantic validation, dedup WebRTC, adopt fflate")
-- **Used by:** `play.js` (`fflate.unzipSync` for ROM `.zip` extraction)
-- **TODO:** at next opportunity, replace with a tagged upstream release and record version + SHA here.
+- **Version:** 0.8.3
+- **Source:** https://registry.npmjs.org/fflate — `umd/index.js` from the official npm tarball (the same file published as `unpkg`/`jsdelivr` for this package; fflate does not ship a separately-named minified bundle)
+- **Used by:** `play.js` (`fflate.unzipSync` for ROM `.zip` extraction) — verified `unzipSync`/`zipSync`/`strFromU8` round-trip after replacement
+- **First imported:** commit `74ecaba`; replaced unknown-version banner-stripped copy with this tagged release on 2026-10-05
 
 ### `ejs/emulator.min.js` + `ejs/emulator.min.css`
 - **Version:** 4.2.3 (also recorded in `ejs/version.json`)

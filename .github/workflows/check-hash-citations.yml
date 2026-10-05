@@ -9,6 +9,6 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify all kn_hash_* exports have citation blocks
         run: bash scripts/check-hash-citations.sh
