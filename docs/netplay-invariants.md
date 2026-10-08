@@ -44,7 +44,7 @@ recovered.
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiner loads state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Resume, broadcast roster, `hardDisconnectPeer()` the joining peer | `LATE-JOIN-TIMEOUT` | §MF5 |
 | Late-join worker round-trip (joiner decompresses initial state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Abort late-join; host's timeout cleans up the joiner | `WORKER-STALL` | §MF5 |
-| BOOT-LOCKSTEP stall (pure-lockstep boot convergence) | 3000ms (in tick loop) | Guest requests immediate `sync-request-full` | `BOOT-DEADLOCK-RECOVERY` | commit 788add0 |
+| BOOT-LOCKSTEP stall (pre-menu boot convergence, before `_menuLockstepActive`) | `max(33, min(250, rttMedian*2))`ms (in tick loop) | Fabricate zero input for the missing slot and continue | `BOOT-LOCKSTEP` | commit 788add0 |
 | `_awaitingResync` (guest waiting for state after coord stall) | 3000ms | Resume without corrected state (known livelock, see SF5) | (timeout log only) | spec SF5 |
 | `_framePacingActive` (pacing throttle skipping frame advance) | `PACING_THROTTLE_TIMEOUT_MS = 5000` | Force-phantom slowest peer, release pacing | `PACING-THROTTLE-TIMEOUT` | match f0566d95 |
 | Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
@@ -56,8 +56,9 @@ recovered.
 ## I2 — Reconnect starts clean
 
 A single function `resetPeerState(slot, reason, opts)` owns all
-per-peer state cleanup. Every disconnect, reconnect, phantom clear,
-tab-visibility reset, and game-stop path routes through it.
+per-peer state cleanup. Every disconnect, reconnect, and phantom-clear
+path routes through it. `stop()` (whole-match teardown) is a deliberately
+separate path that discards all peer state at once instead.
 
 ### Fields cleared
 
@@ -68,9 +69,14 @@ tab-visibility reset, and game-stop path routes through it.
 - `_lastRemoteFramePerSlot[slot]` — highest received frame
 - `_peerLastAdvanceTime[slot]` — wall-clock of last new frame
 - `_peerPhantom[slot]` — dead-peer flag
+- `_peerPhases[slot]` — last menu/gameplay phase broadcast
+- `_phaseMismatchGrace[slot]` — phase transition grace window
 - `_consecutiveFabrications[slot]` — fabrication counter
 - `_inputLateLogTime[slot]` — rate-limit timestamp
 - `_auditRemoteInputs[slot]` — audit log buffer
+- `_auditLastRemote[slot]` — last audited remote input
+- `_lateJoinActivatedAtFrame[slot]` — post-activation grace window
+- `_lateJoinSeededInputFrames[slot]` — seeded late-join input frames
 
 **Per-peer-object ack state** (on `_peers[sid]`):
 
@@ -100,6 +106,9 @@ dropping `_remoteInputs[slot]` or phase history.
 | `hardDisconnectPeer` (host path) | `hard-disconnect` |
 | `hardDisconnectPeer` (non-host, roster-gated) | `hard-disconnect-non-host` |
 | Reconnect resync (after DC close + rebuild) | `reconnect` |
+| Stale peer evicted when roster shows a new sid for its slot | `zombie-eviction` |
+| Late-join peer replaced by a reconnect | `late-join-reconnect-replace` |
+| Mesh-heal re-adds a peer missing from the roster | `mesh-heal` |
 
 **Code-review rule:** adding new per-peer state without updating
 `resetPeerState` is a review-level violation. The function's
@@ -235,10 +244,13 @@ hashes and throw in dev (RF5).
 
 If `rb.replay_depth > 0` after `kn_pre_tick` returns, the return
 value must equal 2 (replay frame). A return value of 0 with
-`replay_depth > 0` logs `RB-INVARIANT-VIOLATION` and throws in dev
-(RF3). This is the smallest defense-in-depth check and ships first
-as an insurance policy that would have caught the B190OHFY bug on
-the first run regardless of root cause.
+`replay_depth > 0` logs `R5-DIAG` on the C side (which also clears
+the stale `replay_depth` so JS doesn't false-positive) and
+`RB-INVARIANT-FIXUP` on the JS side, which forces `catchingUp = 2`
+so the replay step still runs (RF3). This is the smallest
+defense-in-depth check and ships first as an insurance policy that
+would have caught the B190OHFY bug on the first run regardless of
+root cause.
 
 ### R6 — Audio/video state survives restore
 
@@ -261,7 +273,7 @@ invariants held.
 | Event | Invariant | Spec RF |
 |-------|-----------|---------|
 | `REPLAY-NORUN` | R2 | RF2 |
-| `RB-INVARIANT-VIOLATION` | R5 | RF3 |
+| `RB-INVARIANT-FIXUP` | R5 | RF3 |
 | `FATAL-RING-STALE` | R3 | RF7 |
 | `RB-LIVE-MISMATCH` | R4 | RF5 |
 | `AUDIO-DEATH` (enriched) | R6 diagnostic | RF6 Part A |

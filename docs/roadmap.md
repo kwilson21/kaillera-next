@@ -20,9 +20,11 @@ automatically on all clients when netplay starts -- no host configuration requir
 **Cheats applied (N64 GameShark format, sourced from smashboards/smash64.net):**
 - `810A4938 0FF0` -- Have All Characters (Captain Falcon, Ness, Jigglypuff, Luigi)
 - `800A4937 00FF` -- Have Mushroom Kingdom + Item Switch menu access
-- `800A4B25 0000` -- Items off group 1 (Bumper, Shell, Poke Ball)
-- `800A4B26 0000` -- Items off group 2 (Hammer, Motion-Sensor Bomb, Bob-omb, Fire Flower)
-- `800A4B27 0000` -- Items off group 3 (Bat, Fan, Ray Gun, Star Rod)
+- `800A4D0B 0002` -- Stock Mode
+- `800A4D0F 0004` -- 5 Stocks
+- `800A4D11 0001` -- Timer On
+- `800A4D24 0000` -- Items Off
+- `810BA9F1 0000+800BA9F3 0000` -- No Wind
 
 **Files:** `web/static/netplay-rollback.js`. No server changes.
 
@@ -88,7 +90,7 @@ boundary via `_kn_sync_write()`. No mid-frame stall — gameplay continues durin
 tracking, exportable CSV logs via `debug-sync` Socket.IO event.
 
 **Files:** `web/static/netplay-rollback.js`, `server/src/api/signaling.py` (debug-sync,
-debug-logs events), `server/src/api/app.py` (POST /api/sync-logs).
+debug-logs events), `server/src/api/app.py` (POST /api/session-log).
 
 ---
 
@@ -126,5 +128,5 @@ desync. Rollback activates automatically when the WASM core exports `kn_pre_tick
 `build/patches/gliden64-rdram-taint.patch`, `build/patches/mupen64plus-static-save-scratch.patch`,
 `web/static/netplay-rollback.js` (deferred init, RB-CHECK, input audit, knDiag).
 
-**Followup:** WebRTC DC reconnect when Socket.IO signaling survives — today a DC drop
-ends the match even though room state is still alive. Tracked separately.
+**Followup:** WebRTC DC reconnect when Socket.IO signaling survives — shipped: a 30s
+server-side disconnect grace period plus client-side reconnect retries (see CHANGELOG.md).

@@ -54,11 +54,20 @@ kaillera-next/
 │   └── src/
 │       ├── main.py          # entry point (FastAPI + Socket.IO + uvloop)
 │       ├── state.py         # Redis-backed room persistence
+│       ├── state_cache.py   # Redis-backed save-state cache for late joiners
 │       ├── ratelimit.py     # per-IP rate limiting
 │       ├── db.py            # database: SQLite or Cloudflare D1 backend (src/dbbackend/), SQL migrations in server/migrations/
+│       ├── migrate.py       # plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
+│       ├── blobstore.py     # blob storage for screenshots (R2 in prod, local folder in dev)
+│       ├── retention.py     # flags matches with a crash/freeze/desync; sweeps expired ones
+│       ├── match_rotation.py # rolls up ended session logs into Parquet + match_metrics rows
+│       ├── stats.py         # "matches started in last 7 days" counter for the front page
+│       ├── landing_build.py # content-hash build id shared by the server and the landing Worker
 │       └── api/
 │           ├── app.py       # FastAPI app (REST + security middleware)
-│           ├── og.py        # OG card image generation (Playwright HTML screenshots)
+│           ├── og.py        # OG meta-tag injection + build-time-rendered OG cards
+│           ├── og_card.py   # live per-room invite card composed from the host's latest frame (PIL)
+│           ├── turn.py      # Cloudflare Realtime TURN credentials for /ice-servers
 │           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
 │           ├── payloads.py  # Pydantic v2 payload models for Socket.IO validation
 │           ├── desync_vision.py  # Claude/GPT-4o vision endpoint for screenshot diff
@@ -67,7 +76,7 @@ kaillera-next/
 │   ├── index.html           # front page: open-rooms board, create/join (static, no framework)
 │   ├── join.html            # invite page (/join?room=CODE): who invited you, Join vs Watch, waking
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
-│   ├── admin.html           # sync log management page
+│   ├── admin.html           # admin dashboard: session logs, client events, feedback, desync events, stats
 │   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
@@ -95,11 +104,13 @@ kaillera-next/
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
+│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
+│       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
-├── docs/            # roadmap and MVP plan
+├── docs/            # roadmap, netplay invariants, and design/research notes
 ├── Dockerfile       # production Docker image
 └── CHANGELOG.md     # version history
 ```
@@ -129,36 +140,36 @@ All events go through the default Socket.IO namespace (`/`).
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}}` | Join/spectate |
+| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, password, maxPlayers}` | Create room |
+| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}, password}` | Join/spectate |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
-| `start-game` | client→server | `{mode, resyncEnabled, romHash}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
+| `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
-| `webrtc-signal` | bidirectional | `{target, offer/answer/candidate}` | WebRTC relay |
+| `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
+| `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
 | `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (64KB max) |
+| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max) |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
 | `set-listed` | client→server | `{listed}` | Host lists the room on the front-page board (never with a password) |
-| `rom-ready` | client→server | `{ready}` | Player signals ROM loaded |
+| `rom-ready` | client→server | `{ready, hash, name, size}` | Player signals ROM loaded (hash/name/size establish or check ROM identity) |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
-| `session-log` | client→server | `{matchId, epoch, entries, summary, context}` | Periodic sync log flush: only entries the server hasn't acked; acks `{lastSeq}` |
+| `session-log` | client→server | `{matchId, epoch, entries, summary, context, inputAudit}` | Periodic sync log flush: only entries the server hasn't acked; acks `{lastSeq}` |
 | `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
 | `debug-logs` | client→server | `{...}` | Upload debug console log |
 | `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |
-| `users-updated` | server→room | `{players, spectators, owner}` | Room state broadcast |
+| `users-updated` | server→room | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}` | Room state broadcast |
 | `upload-token` | server→client | `{token}` | HMAC token for upload endpoints |
 | `reconnect-token` | server→client | `{token}` | HMAC token for session reconnection |
 | `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
-| `game-started` | server→room | `{mode, resyncEnabled, romHash, matchId}` | Game started |
-| `game-ended` | server→room | `{}` | Back to lobby |
-| `room-closed` | server→room | `{reason}` | Room force-closed |
+| `game-started` | server→room | `{mode, resyncEnabled, romHash, romName, romSize, hostRom, gameId, matchId}` | Game started |
+| `game-ended` | server→room | `{matchId}` | Back to lobby |
 
 ## Key decisions
 
@@ -175,8 +186,10 @@ All events go through the default Socket.IO namespace (`/`).
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel.
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
-- **Rooms are ephemeral:** No persistent database. Rooms live in memory (with optional
-  Redis persistence for zero-downtime deploys and reconnect survival).
+- **Rooms are ephemeral:** Live room state (players, slots, mode) stays in memory, with
+  optional Redis persistence for zero-downtime deploys and reconnect survival — no SQL
+  row per room. A separate database (SQLite or Cloudflare D1, `src/db.py`) persists
+  session logs, match metrics, desync events and feedback for diagnostics and retention.
 - **Patched WASM core:** mupen64plus-next compiled with deterministic timing patches
   (`kn_set_deterministic`, `kn_set_frame_time`), SoftFloat FPU, and rollback engine
   exports (`kn_pre_tick`, `kn_post_tick`, etc.). Falls back to stock CDN core with
@@ -195,7 +208,7 @@ Two codified invariants govern the netplay tick loop. See
   `resetPeerState` is a review-level violation.
 - **Rollback integrity** (R1-R6): the C rollback engine must produce
   bit-correct state or fail loudly. Dev builds throw on violation;
-  production logs `REPLAY-NORUN`, `RB-INVARIANT-VIOLATION`,
+  production logs `REPLAY-NORUN`, `RB-INVARIANT-FIXUP`,
   `FATAL-RING-STALE`, or `RB-LIVE-MISMATCH`. No mid-match auto-resync
   from these events — fix the root cause instead. See
   [docs/netplay-invariants.md §Rollback Integrity](docs/netplay-invariants.md).
@@ -208,7 +221,8 @@ invariants doc before proposing any watchdog that *acts* on stalls.
 
 ## Versioning
 
-- **Auto-versioning** via post-commit hook (`scripts/bump-version.sh`)
+- **Auto-versioning** via a GitHub Actions workflow (`.github/workflows/version-bump.yml`)
+  that runs `scripts/bump-version.sh` on push to `main` (also runnable locally via `just deploy`)
 - Commit messages use **conventional commits**: `feat:` → minor bump, `fix:` → patch bump, anything else → no bump
 - Only runs on the `main` branch
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
@@ -271,4 +285,14 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   listed. Unset = never trusted
 - `IP_HASH_SALT`: salts IP hashes and also derives the room-token signing key,
   so reconnect tokens stay valid across restarts (random per process if unset)
+- `REDIS_URL` (or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`): backs the
+  Redis room persistence above; unset falls back to `redis:6379`
+- `DB_PATH`: SQLite file location for the persistent database (`src/db.py`)
+- `D1_DATABASE_ID`, `D1_API_TOKEN` (with `CF_ACCOUNT_ID`): switches `src/db.py` to the
+  Cloudflare D1 backend instead of SQLite
+- `ADMIN_KEY`: required to use the admin dashboard/API
+- `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN`: Cloudflare Realtime TURN credentials for
+  `/ice-servers`
+- `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude/GPT-4o
+  desync-vision endpoint
 - `.env` file supported via python-dotenv

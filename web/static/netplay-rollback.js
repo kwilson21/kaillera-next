@@ -8421,7 +8421,9 @@
    *   - _consecutiveFabrications[slot] (fabrication counter)
    *   - _inputLateLogTime[slot]        (rate-limit timestamp)
    *   - _auditRemoteInputs[slot]       (audit log buffer)
+   *   - _auditLastRemote[slot]         (last audited remote input)
    *   - _lateJoinActivatedAtFrame[slot] (post-activation grace window)
+   *   - _lateJoinSeededInputFrames[slot] (seeded late-join input frames)
    *
    * Fields reset for per-peer-object state (if peer provided):
    *   - peer.lastAckFromPeer
@@ -16128,7 +16130,7 @@
         // success criterion) are preserved; the demo just stops trying to
         // run new C rollbacks. This is a SAFETY VALVE for unrecoverable
         // WASM traps, NOT a routine path: legitimate rollback bugs are
-        // caught by RB-CHECK / RB-INVARIANT-VIOLATION mechanisms upstream
+        // caught by RB-CHECK / RB-INVARIANT-FIXUP mechanisms upstream
         // before throwing.
         if (!window.__knCRollbackThrowFrame || window.__knCRollbackThrowFrame !== _frameNum) {
           window.__knCRollbackThrowFrame = _frameNum;

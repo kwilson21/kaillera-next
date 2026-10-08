@@ -130,7 +130,7 @@ earlier ones to have set up their `window.*` exports:
 7. `shared.js` — input encoding/decoding, cheats, wire format
 8. `virtual-gamepad.js` — touch controls for mobile
 9. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-10. `netplay-lockstep.js` — deprecated 16-line compat shim that warns once; loaded after rollback so cached `play.html` requests don't 404
+10. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 11. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
 12. `controller-settings.js` — in-game controller settings panel
 13. `play.js` — page orchestrator (connects everything)
@@ -139,7 +139,8 @@ earlier ones to have set up their `window.*` exports:
 
 #### Server structure
 
-The Python server is small (~3,400 lines across 8 files):
+The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
+`server/src/dbbackend/`:
 
 | File | Purpose |
 |---|---|
@@ -147,24 +148,30 @@ The Python server is small (~3,400 lines across 8 files):
 | `api/app.py` | REST endpoints, security headers (COOP/COEP/CSP), admin API |
 | `api/signaling.py` | Socket.IO event handlers — rooms, WebRTC relay, game data |
 | `api/payloads.py` | Pydantic v2 payload models + `@validated` decorator for Socket.IO events |
-| `api/og.py` | Open Graph image generation (Playwright HTML screenshots) |
+| `api/og.py` | Open Graph meta-tag injection + build-time-rendered OG cards |
+| `api/og_card.py` | Live per-room invite card composed from the host's latest frame (PIL) |
+| `api/turn.py` | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `state.py` | Redis-backed room persistence for zero-downtime deploys |
 | `ratelimit.py` | Per-IP rolling-window rate limiting |
-| `db.py` | SQLite database (aiosqlite), Alembic migrations, session/feedback storage |
+| `db.py` | SQLite/D1 database (aiosqlite/D1 via `dbbackend/`), session/feedback/retention storage |
+| `migrate.py` | Plain-SQL schema migrations in `server/migrations/` (replaced Alembic) |
+| `retention.py` | Flags matches with a crash/freeze/desync for retention; sweeps expired ones |
+| `match_rotation.py` | Rolls up ended session logs into Parquet + `match_metrics` rows |
+| `blobstore.py` | Blob storage for screenshots (R2 in prod, local folder in dev) |
 
 #### Frontend file map
 
 | File | Lines | What it does | Talks to |
 |---|---|---|---|
 | `play.js` | ~5,330 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
-| `netplay-rollback.js` | ~11,700 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
-| `netplay-lockstep.js` | ~16 | Deprecated compat shim — emits a `console.warn` and exists only so cached `play.html` requests don't 404. Remove in a follow-up deploy. | (none) |
+| `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
+| `netplay-lockstep.js` | ~52 | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none) |
 | `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
 | `shared.js` | ~880 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~500 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
-| `virtual-gamepad.js` | ~600 | On-screen touch controls for mobile | KNState |
+| `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
@@ -177,7 +184,8 @@ The Python server is small (~3,400 lines across 8 files):
 | `version.js` | ~350 | Version display + changelog modal | play.js |
 | `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
-| `lobby.js` | ~175 | Room creation and join form on index.html | — |
+| `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
+| `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 
 ### Conventions
@@ -191,7 +199,8 @@ The Python server is small (~3,400 lines across 8 files):
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):
   `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. This drives auto-versioning.
 - Pre-commit hooks handle formatting automatically.
-- A **post-commit hook** auto-bumps the version on `feat:`/`fix:` commits to main.
+- A **GitHub Actions workflow** (`.github/workflows/version-bump.yml`) auto-bumps the
+  version on `feat:`/`fix:` pushes to main (also runnable locally via `just deploy`).
 
 ### Docs layout
 
@@ -229,8 +238,8 @@ just check          # Run pre-commit on all files
 ### Tests
 
 ```bash
-cd server && uv run pytest          # Unit tests
-cd server && uv run pytest tests/   # E2E (needs Playwright browsers)
+cd server && uv run pytest -m unit  # Unit tests
+cd server && uv run pytest -m e2e   # E2E (needs Playwright browsers)
 ```
 
 #### Virtual Gamepad visual regression (100 devices × 4 variants)
