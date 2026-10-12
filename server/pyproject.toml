@@ -34,7 +34,7 @@ dev = [
     # The runtime server has no browser dependency.
     "playwright>=1.40.0",
     "pytest-playwright>=0.5",
-    "ruff>=0.16.10",
+    "ruff>=0.17.0",
 ]
 analysis = [
     # tools/analyze_match.py — DuckDB for scanning rotated Parquet files
