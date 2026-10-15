@@ -285,8 +285,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   listed. Unset = never trusted
 - `IP_HASH_SALT`: salts IP hashes and also derives the room-token signing key,
   so reconnect tokens stay valid across restarts (random per process if unset)
-- `REDIS_URL` (or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`/`REDIS_DB`): backs the
-  Redis room persistence above; unset falls back to `redis:6379`
+- `REDIS_URL` (or `REDIS_PASSWORD` plus `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB`): backs the
+  Redis room persistence above. Without `REDIS_URL`, `REDIS_PASSWORD` is required;
+  host/port then default to `redis:6379`. With neither set, Redis is disabled and
+  rooms stay in memory only
 - `DB_PATH`: SQLite file location for the persistent database (`src/db.py`)
 - `D1_DATABASE_ID`, `D1_API_TOKEN` (with `CF_ACCOUNT_ID`): switches `src/db.py` to the
   Cloudflare D1 backend instead of SQLite

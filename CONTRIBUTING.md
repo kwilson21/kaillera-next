@@ -238,8 +238,7 @@ just check          # Run pre-commit on all files
 ### Tests
 
 ```bash
-cd server && uv run pytest -m unit  # Unit tests
-cd server && uv run pytest -m e2e   # E2E (needs Playwright browsers)
+cd server && uv run --extra dev pytest   # full suite; many tests need Playwright browsers
 ```
 
 #### Virtual Gamepad visual regression (100 devices × 4 variants)

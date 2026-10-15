@@ -243,12 +243,17 @@ hashes and throw in dev (RF5).
 ### R5 — Pre-tick return value consistency
 
 If `rb.replay_depth > 0` after `kn_pre_tick` returns, the return
-value must equal 2 (replay frame). A return value of 0 with
-`replay_depth > 0` logs `R5-DIAG` on the C side (which also clears
-the stale `replay_depth` so JS doesn't false-positive) and
-`RB-INVARIANT-FIXUP` on the JS side, which forces `catchingUp = 2`
-so the replay step still runs (RF3). This is the smallest
-defense-in-depth check and ships first as an insurance policy that
+value must equal 2 (replay frame). Two independent checks guard this.
+On the C side, if the return-0 path is reached with `rb.replay_depth`
+still set, it logs `R5-DIAG` and clears the stale value before
+returning — so JS's own `replay_depth` read comes back 0 for that
+frame, and the frame proceeds as a normal tick rather than a replay.
+On the JS side, if `kn_get_replay_depth()` reports `replay_depth > 0`
+while `catchingUp !== 2`, JS logs `RB-INVARIANT-FIXUP` and forces
+`catchingUp = 2` so the replay step still runs (RF3) — this catches a
+different corruption pattern, where C's state genuinely still wants a
+replay but didn't return the replay code. These are the smallest
+defense-in-depth checks and shipped first as an insurance policy that
 would have caught the B190OHFY bug on the first run regardless of
 root cause.
 
