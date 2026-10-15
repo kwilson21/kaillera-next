@@ -35,7 +35,7 @@ _ANY_TAGS = frozenset(
 )
 # ...and any tag with one of these prefixes: the C engine's FATAL lines
 # (FATAL, FATAL-RING-STALE, ...) and rollback-invariant events
-# (RB-INVARIANT-FIXUP, RB-INVARIANT-VIOLATION).
+# (RB-INVARIANT-FIXUP).
 _ANY_PREFIXES = ("FATAL", "RB-INVARIANT-")
 # Out-of-range inputs from one peer this many times in a match is a storm.
 _INPUT_OOR_STORM = 20

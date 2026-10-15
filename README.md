@@ -183,10 +183,11 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    lobby.js           Lobby controller (room creation, invite links)
+    landing.js         Front-page board controller (room creation, open-rooms board)
+    join.js            Invite-page controller (room lookup, join/watch states)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
-    netplay-lockstep.js    Deprecated 16-line compat shim (loads window.NetplayLockstep alias for cached pages)
+    netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
@@ -236,8 +237,10 @@ docker build -t emulatorjs-builder build/
 # 2. Compile the patched core (~5-15 min depending on CPU)
 docker run --rm -v $(pwd)/build:/build emulatorjs-builder bash /build/build.sh
 
-# 3. Deploy to web/static/ejs/cores/
+# 3. Deploy to web/static/ejs/cores/ (all three must come from the same build)
 cp build/output/mupen64plus_next-wasm.data web/static/ejs/cores/
+cp build/output/mupen64plus_next_libretro.js web/static/ejs/cores/
+cp build/output/mupen64plus_next_libretro.wasm web/static/ejs/cores/
 ```
 
 The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, applies patches from `build/patches/`, compiles to LLVM bitcode, links through RetroArch with asyncify, and packages into a 7z `.data` archive that EmulatorJS loads at runtime.
@@ -295,7 +298,8 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `POST /api/client-event` | Client event logging |
 | `POST /api/feedback` | Feedback submission |
 | `GET /api/rom-hashes` | Known ROM hashes |
-| `GET /og-image/{room_id}.png` | Open Graph card image for social sharing |
+| `GET /room/{room_id}/card.jpg` | Invite card image (room name + live frame) for social sharing |
+| `GET /room/{room_id}/frame.jpg` | Latest board frame for a listed, in-game room |
 
 **Admin** (requires `ADMIN_KEY`):
 
