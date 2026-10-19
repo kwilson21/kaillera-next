@@ -623,6 +623,36 @@ def test_session_log_flush_survives_register_failure():
     append.assert_awaited_once()
 
 
+def test_session_log_burst_waits_on_registration_only_with_a_place():
+    """The first flushes after a restart await D1 registration, each holding its
+    decoded flush; a burst must be turned away first, not pile up there."""
+    _host_room().match_id = "match-1"
+    waiting = peak = 0
+
+    async def slow(*args):
+        nonlocal waiting, peak
+        waiting += 1
+        peak = max(peak, waiting)
+        await asyncio.sleep(0.05)
+        waiting -= 1
+        return 0
+
+    patches = [
+        patch.object(signaling, "check", new=lambda sid, event: True),
+        patch.object(signaling.db, "_require", new=lambda: None),
+        patch.object(signaling.db, "register_match", new=slow),
+        patch.object(signaling.db, "_append_session_log_locked", new=slow),
+    ]
+
+    async def burst():
+        flushes = [signaling.session_log_handler("sid-host", {"matchId": "match-1", "entries": []}) for _ in range(10)]
+        return await asyncio.gather(*flushes)
+
+    results = _run_with(patches, burst())
+    assert sum(r is not None for r in results) == 2
+    assert peak <= 2
+
+
 def test_start_game_gives_up_on_a_slow_registration():
     """The room lock is global: D1 must not hold it for long."""
     import time as _time
