@@ -1729,6 +1729,24 @@ def _session_log_entries(entries_raw: object, max_bytes: int) -> list:
     return entries[start:]
 
 
+# Bytes of input audit records kept from one flush; clients send at most
+# 5,000 (AUDIT_FLUSH_MAX in netplay-rollback.js), about 350 KB.
+_SESSION_LOG_AUDIT_MAX = 1024 * 1024
+
+
+def _session_log_audit(audit_raw: object) -> tuple[str, list]:
+    """A flush's input audit epoch and records, the newest that fit _SESSION_LOG_AUDIT_MAX.
+
+    Records without an epoch are dropped: they couldn't be deduped.
+    """
+    if not isinstance(audit_raw, dict):
+        return "", []
+    epoch = audit_raw.get("epoch")
+    if not isinstance(epoch, str) or not epoch:
+        return "", []
+    return epoch[:64], _session_log_entries(audit_raw.get("entries"), _SESSION_LOG_AUDIT_MAX)
+
+
 @sio.on("session-log")
 @validated(SessionLogPayload)
 async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | None:
@@ -1737,8 +1755,9 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
     `payload.entries` is a delta — only entries newer than the seq the
     server last acked — so this appends into `session_log_chunks` instead
     of rewriting the whole `session_logs.log_data` blob (see db.append_session_log).
-    Returns `{"lastSeq": ...}` as the socket ack so the client can advance
-    its flush cursor; the client resends anything the server hasn't acked.
+    Returns `{"lastSeq": ..., "auditLastSeq": ...}` as the socket ack so the
+    client can advance its flush cursors; the client resends anything the
+    server hasn't acked. No ack data when the flush was turned away.
     """
     if not check(sid, "session-log"):
         return None
@@ -1775,8 +1794,9 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
 
     # Newest entries win, so reconnect/desync events near the end survive.
     entries = _session_log_entries(payload.entries, _SESSION_LOG_MAX)
+    audit_epoch, audit_entries = _session_log_audit(payload.audit)
 
-    last_seq = await db.append_session_log(
+    return await db.append_session_flush(
         {
             "match_id": payload.matchId,
             "room": session_id,
@@ -1788,11 +1808,10 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "summary": summary_str,
             "context": context_str,
             "ip_hash": ip_hash_for_sid(sid),
+            "audit_epoch": audit_epoch,
+            "audit_entries": audit_entries,
         }
     )
-    if last_seq is None:
-        return None
-    return {"lastSeq": last_seq}
 
 
 # Log-flush match registrations in flight, one per match (see _register_match_soon).

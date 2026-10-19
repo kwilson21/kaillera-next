@@ -22,9 +22,9 @@ def client(monkeypatch):
     from src.api import app as appmod
 
     monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
-    append = AsyncMock(return_value=7)
+    append = AsyncMock(return_value={"lastSeq": 7, "auditLastSeq": -1})
     accepts = AsyncMock(return_value=True)
-    monkeypatch.setattr(db, "append_session_log", append)
+    monkeypatch.setattr(db, "append_session_flush", append)
     monkeypatch.setattr(db, "match_accepts_uploads", accepts)
     return TestClient(appmod.create_app()), append, accepts
 
@@ -85,3 +85,22 @@ def test_live_match_in_this_room_is_accepted_without_a_db_check(client, monkeypa
     r = _post(http, BODY)
     assert r.status_code == 200
     accepts.assert_not_awaited()
+
+
+def test_admin_input_audit_is_assembled_from_streamed_records(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+
+    def rec(seq, s, f):
+        return {"seq": seq, "s": s, "f": f, "b": 0, "lx": f, "ly": 0, "cx": 0, "cy": 0}
+
+    records = {0: [rec(0, "L", 1), rec(1, 1, 1)], 1: [rec(0, "L", 1), rec(1, 0, 1)]}
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    assert {d["verdict"] for d in r.json()["diffs"]} == {"IDENTICAL"}

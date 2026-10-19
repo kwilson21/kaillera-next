@@ -73,7 +73,6 @@ separate path that discards all peer state at once instead.
 - `_phaseMismatchGrace[slot]` — phase transition grace window
 - `_consecutiveFabrications[slot]` — fabrication counter
 - `_inputLateLogTime[slot]` — rate-limit timestamp
-- `_auditRemoteInputs[slot]` — audit log buffer
 - `_auditLastRemote[slot]` — last audited remote input
 - `_lateJoinActivatedAtFrame[slot]` — post-activation grace window
 - `_lateJoinSeededInputFrames[slot]` — seeded late-join input frames
