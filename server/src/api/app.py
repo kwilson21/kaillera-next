@@ -1623,6 +1623,11 @@ def create_app(lifespan=None) -> FastAPI:
                 "audit": audit,
             }
 
+        def frame_of(e):
+            # Records come from clients: a non-integer frame counts as 0.
+            f = e.get("f")
+            return f if isinstance(f, int) else 0
+
         def inputs_eq(a, b):
             return (
                 a.get("f") == b.get("f")
@@ -1646,9 +1651,9 @@ def create_app(lifespan=None) -> FastAPI:
                 # The server caps each peer's audit by dropping its oldest
                 # chunks, so two histories can start at different frames:
                 # compare them from the later start.
-                from_frame = max((h[0].get("f") or 0 for h in (sender_local, receiver_remote) if h), default=0)
-                sender_cmp = [e for e in sender_local if (e.get("f") or 0) >= from_frame]
-                receiver_cmp = [e for e in receiver_remote if (e.get("f") or 0) >= from_frame]
+                from_frame = max((frame_of(h[0]) for h in (sender_local, receiver_remote) if h), default=0)
+                sender_cmp = [e for e in sender_local if frame_of(e) >= from_frame]
+                receiver_cmp = [e for e in receiver_remote if frame_of(e) >= from_frame]
                 min_len = min(len(sender_cmp), len(receiver_cmp))
                 mismatches = []
                 for i in range(min_len):

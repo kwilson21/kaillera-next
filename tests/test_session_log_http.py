@@ -132,3 +132,19 @@ def test_admin_input_audit_compares_trimmed_histories_from_the_later_start(clien
     assert diffs[(0, 1)]["from_frame"] == 5
     assert diffs[(0, 1)]["compared"] == 2
     assert diffs[(1, 0)]["verdict"] == "IDENTICAL"
+
+
+def test_admin_input_audit_tolerates_non_integer_frames(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+    bad = {"seq": 0, "s": "L", "f": "5", "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0}
+    good = {"seq": 0, "s": 0, "f": 3, "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0}
+    records = {0: [bad], 1: [good]}
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
