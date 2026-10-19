@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.65.1",
+    "date": "2026-10-19",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "diff input audits by frame, not arrival order (#89)"
+      }
+    ]
+  },
+  {
     "version": "0.65.0",
     "date": "2026-10-19",
     "changes": [
