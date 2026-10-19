@@ -6151,7 +6151,9 @@
         ...(keepalive ? { keepalive: true } : {}),
       })
         .then((res) => (res.ok ? res.json() : null))
-        .then((json) => _ackSyncLogFlush(json, payload))
+        // Ack against what was sent: a keepalive body has no audit, so its
+        // auditLastSeq (the server's stored position) must not move ours.
+        .then((json) => _ackSyncLogFlush(json, body))
         .catch(() => {});
     } catch (_) {}
   };

@@ -124,6 +124,7 @@ def test_lockstep_input_audit_resets_between_matches_and_flush_sends_unacked_rec
     assert "_auditEpoch = KNShared.genEpoch();" in source
     assert "for (const slot of Object.keys(_auditLastRemote)) delete _auditLastRemote[slot];" in source
     assert "audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) }," in source
+    assert ".then((json) => _ackSyncLogFlush(json, body))" in source
     assert "inputAudit:" not in source
 
     init_idx = source.find("const init = (config) => {")
