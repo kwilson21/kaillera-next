@@ -127,10 +127,25 @@ _append_locks: dict[tuple[str, int | None], asyncio.Lock] = {}
 _append_lock_refcounts: dict[tuple[str, int | None], int] = {}
 _append_locks_guard = asyncio.Lock()
 
+# At most one running and one waiting append per (match_id, slot); later
+# flushes are turned away. Every waiter holds its decoded flush (~15 MB late
+# in a match, mostly the input audit), and a desync's burst of critical-log
+# flushes once queued 32 of them and ran a 512 MB instance out of memory.
+# A turned-away flush loses nothing: the client resends unacked entries.
+_APPEND_MAX_PENDING = 2
 
-async def _acquire_append_lock(key: tuple[str, int | None]) -> asyncio.Lock:
+
+def session_log_busy(match_id: str, slot: int | None) -> bool:
+    """True when append_session_log would turn a flush for this key away."""
+    return _append_lock_refcounts.get((match_id, slot), 0) >= _APPEND_MAX_PENDING
+
+
+async def _acquire_append_lock(key: tuple[str, int | None]) -> asyncio.Lock | None:
     async with _append_locks_guard:
-        _append_lock_refcounts[key] = _append_lock_refcounts.get(key, 0) + 1
+        count = _append_lock_refcounts.get(key, 0)
+        if count >= _APPEND_MAX_PENDING:
+            return None
+        _append_lock_refcounts[key] = count + 1
         return _append_locks.setdefault(key, asyncio.Lock())
 
 
@@ -144,7 +159,7 @@ async def _release_append_lock(key: tuple[str, int | None]) -> None:
             _append_lock_refcounts[key] = remaining
 
 
-async def append_session_log(data: dict) -> int:
+async def append_session_log(data: dict) -> int | None:
     """Append new, deduped log entries as a chunk and update session metadata.
 
     This never rewrites the `log_data` blob: new entries land in
@@ -167,13 +182,16 @@ async def append_session_log(data: dict) -> int:
     Concurrent flushes for the same (match_id, slot) are serialized by
     `_acquire_append_lock` so two overlapping calls can't both read the same
     `last_seq` and both insert a chunk for entries the other has already
-    covered.
+    covered. Returns None, storing nothing, when one append is already
+    running and another waiting for the key (see _APPEND_MAX_PENDING).
     """
     _require()
     match_id = data["match_id"]
     slot = data.get("slot")
     epoch = data.get("epoch") or ""
     lock = await _acquire_append_lock((match_id, slot))
+    if lock is None:
+        return None
     async with lock:
         try:
             return await _append_session_log_locked(data, match_id, slot, epoch)

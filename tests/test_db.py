@@ -623,6 +623,43 @@ async def _run_concurrent_appends(tmp_db):
     await close_db()
 
 
+# A burst of flushes for one (match_id, slot) must not queue without bound:
+# each waiter holds its whole decoded flush, and a desync's burst once ran a
+# 512 MB instance out of memory. One runs, one waits, the rest are turned away.
+
+
+def test_append_session_log_turns_away_flushes_past_one_waiting(tmp_db):
+    _run_async(_run_append_burst(tmp_db))
+
+
+async def _run_append_burst(tmp_db):
+    import asyncio
+
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db, session_log_busy
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-burst", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+    }
+
+    def flush(n):
+        return append_session_log({**base, "entries": [{"seq": i, "t": i, "f": i, "msg": f"a{i}"} for i in range(n)]})
+
+    tasks = [asyncio.create_task(flush(n)) for n in (2, 3, 4, 5)]
+    await asyncio.sleep(0)
+    assert session_log_busy("m-burst", 0)
+    results = await asyncio.gather(*tasks)
+    assert results == [1, 2, None, None]
+    assert not session_log_busy("m-burst", 0)
+
+    # The turned-away entries arrive with the client's next flush.
+    assert await flush(5) == 4
+    full = await get_full_log_entries("m-burst", 0, None)
+    assert sorted(e["seq"] for e in full) == [0, 1, 2, 3, 4]
+    await close_db()
+
+
 # ── retention sweep (cleanup_old_data) ───────────────────────────────────────
 
 
