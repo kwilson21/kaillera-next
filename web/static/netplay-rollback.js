@@ -6819,7 +6819,7 @@
       _resyncRequestInFlight = true;
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
-      socket.emit('data-message', {
+      _signalSocket.emit('data-message', {
         type: 'sync-request-full-socket',
         targetSid: hostSid,
         requesterSid: socket.id,
@@ -6898,7 +6898,7 @@
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
-    const requesterSid = msg.requesterSid;
+    const requesterSid = _peerKey(msg.requesterSid);
     if (!requesterSid) return;
     const now = performance.now();
     const last = _lateJoinLastSentAt.get(requesterSid) || 0;
@@ -7103,24 +7103,29 @@
     for (const [key, info] of Object.entries(prevKnown)) {
       if (info.persistentId !== pid || key === sid) continue;
       const peer = _peers[key];
-      if (peer && peer.slot === p.slot && _peerConnectionLive(peer)) {
-        if (info.socketId !== sid) {
-          _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
-        }
+      if (!peer || peer.slot !== p.slot) continue;
+      // Already mapped to this id: keep it, even while the connection
+      // recovers (an ICE reconnect isn't connected yet).
+      if (info.socketId === sid) return key;
+      if (_peerConnectionLive(peer)) {
+        _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
         return key;
       }
     }
     return sid;
   };
 
-  // Socket stand-in for WebRTC signaling: sends each signal to the player's
-  // current Socket.IO id rather than the _peers key it is addressed to.
+  // Socket stand-in for messages addressed to a peer: WebRTC signals
+  // (`target`) and targeted data messages (`targetSid`) go to the player's
+  // current Socket.IO id rather than the _peers key they are addressed to.
+  // The server delivers them only to an id that is connected now.
+  const _currentSid = (key) => _knownPlayers[key]?.socketId || key;
   const _signalSocket = {
-    emit: (event, data) =>
-      socket.emit(
-        event,
-        event === 'webrtc-signal' ? { ...data, target: _knownPlayers[data.target]?.socketId || data.target } : data,
-      ),
+    emit: (event, data) => {
+      if (event === 'webrtc-signal') data = { ...data, target: _currentSid(data.target) };
+      else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
+      return socket.emit(event, data);
+    },
   };
 
   const _evictPeer = (sid, reason) => {
@@ -10286,7 +10291,7 @@
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
       );
 
-      socket.emit('data-message', {
+      _signalSocket.emit('data-message', {
         type: 'late-join-state',
         targetSid: remoteSid,
         frame: capturedFrame,
@@ -17189,7 +17194,7 @@
         const b64KB = Math.round(encoded.data.length / 1024);
         const wireKB = Math.round(encoded.compressedSize / 1024);
         if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
-          socket.emit('data-message', {
+          _signalSocket.emit('data-message', {
             type: 'sync-state-socket',
             targetSid,
             senderSid: socket.id,
