@@ -62,6 +62,7 @@ from src.api.signaling import (
     MAX_ROOMS,
     MAX_SPECTATORS,
     _sanitize_log_blob,
+    _session_log_audit,
     _session_log_context,
     _session_log_entries,
     connected_players,
@@ -1095,18 +1096,19 @@ def create_app(lifespan=None) -> FastAPI:
 
         # Newest entries win, as in the Socket.IO handler.
         entries = _session_log_entries(data.get("entries", []), _SESSION_LOG_HTTP_MAX)
+        audit_epoch, audit_entries = _session_log_audit(data.get("audit"))
 
         summary = _sanitize_log_blob(data.get("summary", {}) if isinstance(data.get("summary"), dict) else {})
-        # context carries inputAudit (Option G: the delta-encoded local +
-        # remote input histories used for cross-peer diffing), capped to fit
-        # a D1 row as in the Socket.IO handler.
+        # context carries an older client's whole inputAudit, capped to fit
+        # a D1 row as in the Socket.IO handler. Current clients send audit
+        # deltas in `audit` instead.
         context_str = _session_log_context(data.get("context"), data.get("inputAudit"))
         summary_str = json.dumps(summary) if isinstance(summary, dict) else "{}"
         if len(summary_str) > 4096:
             summary_str = "{}"
 
         hashed_ip = ip_hash(_client_ip(request))
-        last_seq = await db.append_session_log(
+        acks = await db.append_session_flush(
             {
                 "match_id": match_id,
                 "room": room_id,
@@ -1118,12 +1120,14 @@ def create_app(lifespan=None) -> FastAPI:
                 "summary": summary_str,
                 "context": context_str,
                 "ip_hash": hashed_ip,
+                "audit_epoch": audit_epoch,
+                "audit_entries": audit_entries,
             }
         )
-        if last_seq is None:
+        if acks is None:
             raise HTTPException(status_code=429, detail="Session log busy")
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
-        return {"status": "saved", "lastSeq": last_seq}
+        return {"status": "saved", **acks}
 
     # ── ROM hash table ──────────────────────────────────────────────────
 
@@ -1568,15 +1572,32 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Admin input-audit diff (Option G) ────────────────────────────────
     # Pulls the delta-encoded input history from both peers of a given match
-    # and diffs them. Each peer uploads:
-    #   context.inputAudit.local  = array of { f, b, lx, ly, cx, cy }
-    #   context.inputAudit.remote = { slot: [ ... ] }
+    # and diffs them. Each peer's history is assembled as
+    #   local  = array of { f, b, lx, ly, cx, cy }
+    #   remote = { slot: [ ... ] }
+    # from its streamed audit records (db.get_input_audit), or, for matches
+    # uploaded by older clients, from the whole audit in context.inputAudit.
     # "local" = inputs this peer generated. "remote" = inputs this peer
     # received from each other peer. For a 2-player match, peer 0's local
     # should equal peer 1's remote[0], and peer 1's local should equal
     # peer 0's remote[1]. If they don't match, the input protocol is
     # dropping or reordering packets — the emulator determinism hypothesis
     # is wrong.
+    def _audit_from_records(records: list) -> dict | None:
+        """The {local, remote} audit shape from streamed records (s='L' or a slot)."""
+        if not records:
+            return None
+        audit: dict = {"local": [], "remote": {}}
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            entry = {k: r.get(k) for k in ("f", "b", "lx", "ly", "cx", "cy")}
+            if r.get("s") == "L":
+                audit["local"].append(entry)
+            else:
+                audit["remote"].setdefault(str(r.get("s")), []).append(entry)
+        return audit
+
     @app.get("/admin/api/input-audit/{match_id}")
     async def admin_input_audit(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query(
@@ -1594,11 +1615,18 @@ def create_app(lifespan=None) -> FastAPI:
                     ctx = json.loads(ctx)
                 except json.JSONDecodeError:
                     ctx = {}
-            audit = ctx.get("inputAudit") if isinstance(ctx, dict) else None
+            audit = _audit_from_records(await db.get_input_audit(match_id, row["slot"]))
+            if audit is None:
+                audit = ctx.get("inputAudit") if isinstance(ctx, dict) else None
             peers[row["slot"]] = {
                 "player_name": row.get("player_name"),
                 "audit": audit,
             }
+
+        def frame_of(e):
+            # Records come from clients: a non-integer frame counts as 0.
+            f = e.get("f")
+            return f if isinstance(f, int) else 0
 
         def inputs_eq(a, b):
             return (
@@ -1620,15 +1648,21 @@ def create_app(lifespan=None) -> FastAPI:
                 receiver_audit = receiver.get("audit") or {}
                 remote_map = receiver_audit.get("remote") or {}
                 receiver_remote = remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or []
-                min_len = min(len(sender_local), len(receiver_remote))
+                # The server caps each peer's audit by dropping its oldest
+                # chunks, so two histories can start at different frames:
+                # compare them from the later start.
+                from_frame = max((frame_of(h[0]) for h in (sender_local, receiver_remote) if h), default=0)
+                sender_cmp = [e for e in sender_local if frame_of(e) >= from_frame]
+                receiver_cmp = [e for e in receiver_remote if frame_of(e) >= from_frame]
+                min_len = min(len(sender_cmp), len(receiver_cmp))
                 mismatches = []
                 for i in range(min_len):
-                    if not inputs_eq(sender_local[i], receiver_remote[i]):
+                    if not inputs_eq(sender_cmp[i], receiver_cmp[i]):
                         mismatches.append(
                             {
                                 "index": i,
-                                "sender": sender_local[i],
-                                "receiver": receiver_remote[i],
+                                "sender": sender_cmp[i],
+                                "receiver": receiver_cmp[i],
                             }
                         )
                         if len(mismatches) >= 20:
@@ -1636,7 +1670,7 @@ def create_app(lifespan=None) -> FastAPI:
                 verdict = "IDENTICAL"
                 if mismatches:
                     verdict = "MISMATCH"
-                elif len(sender_local) != len(receiver_remote):
+                elif len(sender_cmp) != len(receiver_cmp):
                     verdict = "PARTIAL"
                 diffs.append(
                     {
@@ -1644,6 +1678,7 @@ def create_app(lifespan=None) -> FastAPI:
                         "receiver_slot": receiver_slot,
                         "sender_entries": len(sender_local),
                         "receiver_entries": len(receiver_remote),
+                        "from_frame": from_frame,
                         "compared": min_len,
                         "mismatch_count": len(mismatches),
                         "first_mismatches": mismatches[:20],

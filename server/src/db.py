@@ -93,6 +93,16 @@ _SESSION_LOG_CHUNK_CAP = 12 * 1024 * 1024  # 12MB per (match_id, slot) — same 
 # the old single-blob rewrite used. Enforced by deleting the oldest chunks
 # first so the latest entries (reconnect/desync events) survive.
 
+# Input audit chunks (kind = 'audit') get their own budget, so a long match's
+# audit can't push its log entries out. A busy player's audit (own inputs plus
+# the opponent's) grows ~4-5 KB/s, so this holds about half an hour of play.
+_SESSION_LOG_AUDIT_CAP = 8 * 1024 * 1024
+
+
+def _chunk_cap(kind: str) -> int:
+    return _SESSION_LOG_AUDIT_CAP if kind == "audit" else _SESSION_LOG_CHUNK_CAP
+
+
 # Largest chunk written in one row. A reconnect re-sends the whole ring (MBs)
 # in one flush, and a Cloudflare D1 row holds at most 2 MB, so a flush is
 # split into chunks of at most this many bytes of JSON.
@@ -160,14 +170,20 @@ async def _release_append_lock(key: tuple[str, int | None]) -> None:
 
 
 async def append_session_log(data: dict) -> int | None:
+    """append_session_flush's log `last_seq` alone (None when turned away)."""
+    acks = await append_session_flush(data)
+    return None if acks is None else acks["lastSeq"]
+
+
+async def append_session_flush(data: dict) -> dict | None:
     """Append new, deduped log entries as a chunk and update session metadata.
 
     This never rewrites the `log_data` blob: new entries land in
     `session_log_chunks`, keyed by the client's monotonic `seq`. Entries
     with `seq` <= the stored `last_seq` are dropped — this dedupes resends
     and old cached clients that still send their entire ring on every
-    flush. Returns the new `last_seq` so the caller can ack it back to the
-    client.
+    flush. Returns `{"lastSeq": ..., "auditLastSeq": ...}` so the caller can
+    ack both back to the client.
 
     `data["epoch"]` identifies the client's in-memory ring instance (see
     migration 0002_session_log_chunks.sql). When it differs from the epoch
@@ -178,6 +194,11 @@ async def append_session_log(data: dict) -> int | None:
     would have every entry look like a dup of stale state and get silently
     dropped. A missing/empty epoch (legacy caller) skips this check
     entirely, preserving the old dedupe-by-last_seq-only behavior.
+
+    `data["audit_entries"]` are the flush's input audit records, appended
+    the same way as `kind = 'audit'` chunks under their own seq and
+    `data["audit_epoch"]` (migration 0005_audit_chunks.sql). A flush with no
+    audit epoch (an older client) leaves the stored audit position as is.
 
     Concurrent flushes for the same (match_id, slot) are serialized by
     `_acquire_append_lock` so two overlapping calls can't both read the same
@@ -199,10 +220,10 @@ async def append_session_log(data: dict) -> int | None:
             await _release_append_lock((match_id, slot))
 
 
-async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> int:
+async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> dict:
     backend = _require()
     rows = await backend.query(
-        "SELECT last_seq, log_epoch FROM session_logs WHERE match_id = ? AND slot IS ?",
+        "SELECT last_seq, log_epoch, audit_last_seq, audit_epoch FROM session_logs WHERE match_id = ? AND slot IS ?",
         (match_id, slot),
     )
     row = rows[0] if rows else None
@@ -214,52 +235,36 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     # -1 means "no entries acked yet" (client seqs start at 0).
     current_last_seq = row["last_seq"] if row and row["last_seq"] is not None and same_epoch else -1
 
-    entries = data.get("entries") or []
-    new_entries = []
-    max_seq = current_last_seq
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        seq = _valid_seq(e.get("seq"))
-        if seq is not None:
-            if seq <= current_last_seq:
-                continue
-            max_seq = max(max_seq, seq)
-        # An entry without a usable seq can't be deduped safely, so it's
-        # always kept rather than silently dropped — see _valid_seq.
-        new_entries.append(e)
-
     # The chunk inserts, cap enforcement and metadata upsert commit together.
-    statements: list[tuple[str, tuple]] = []
-    if new_entries:
-        high_seq = current_last_seq
-        new_bytes = 0
-        for group in _split_entries(new_entries):
-            entries_json = json.dumps(group)
-            seqs = [s for s in (_valid_seq(e.get("seq")) for e in group) if s is not None]
-            first_seq = min(seqs) if seqs else high_seq
-            high_seq = max([high_seq, *seqs])
-            new_bytes += len(entries_json)
-            statements.append(
-                (
-                    "INSERT INTO session_log_chunks (match_id, slot, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?)",
-                    (match_id, slot, first_seq, high_seq, entries_json, len(entries_json)),
-                )
-            )
-        if await _stored_chunk_bytes(match_id, slot) + new_bytes > _SESSION_LOG_CHUNK_CAP:
-            statements.append(_chunk_cap_statement(match_id, slot))
+    new_entries, max_seq = _entries_past(data.get("entries") or [], current_last_seq)
+    statements = await _chunk_statements(match_id, slot, "log", new_entries, current_last_seq)
+
+    stored_audit_epoch = row["audit_epoch"] if row and row["audit_epoch"] is not None else ""
+    stored_audit_seq = row["audit_last_seq"] if row and row["audit_last_seq"] is not None else -1
+    audit_epoch = data.get("audit_epoch") or ""
+    if audit_epoch:
+        audit_last_seq = stored_audit_seq if audit_epoch == stored_audit_epoch else -1
+        new_audit, audit_max_seq = _entries_past(data.get("audit_entries") or [], audit_last_seq)
+        statements += await _chunk_statements(match_id, slot, "audit", new_audit, audit_last_seq)
+    else:
+        audit_epoch, audit_max_seq = stored_audit_epoch, stored_audit_seq
 
     statements.append(
         (
-            """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash, last_seq, log_epoch, updated_at)
-           VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, datetime('now'))
+            """INSERT INTO session_logs (match_id, room, slot, player_name, mode, log_data, summary, context, ip_hash,
+                                         last_seq, log_epoch, audit_last_seq, audit_epoch, updated_at)
+           VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, datetime('now'))
            ON CONFLICT(match_id, slot) DO UPDATE SET
              summary=excluded.summary, context=excluded.context,
              ip_hash=excluded.ip_hash, updated_at=datetime('now'),
              last_seq=CASE WHEN session_logs.log_epoch = excluded.log_epoch
                             THEN MAX(session_logs.last_seq, excluded.last_seq)
                             ELSE excluded.last_seq END,
-             log_epoch=excluded.log_epoch""",
+             log_epoch=excluded.log_epoch,
+             audit_last_seq=CASE WHEN session_logs.audit_epoch = excluded.audit_epoch
+                                 THEN MAX(session_logs.audit_last_seq, excluded.audit_last_seq)
+                                 ELSE excluded.audit_last_seq END,
+             audit_epoch=excluded.audit_epoch""",
             (
                 match_id,
                 data["room"],
@@ -271,11 +276,57 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
                 data.get("ip_hash"),
                 max_seq,
                 epoch,
+                audit_max_seq,
+                audit_epoch,
             ),
         )
     )
     await backend.batch(statements)
-    return max_seq
+    return {"lastSeq": max_seq, "auditLastSeq": audit_max_seq}
+
+
+def _entries_past(entries: list, last_seq: int) -> tuple[list[dict], int]:
+    """The entries with a seq past `last_seq`, and the highest seq seen."""
+    new_entries = []
+    max_seq = last_seq
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        seq = _valid_seq(e.get("seq"))
+        if seq is not None:
+            if seq <= last_seq:
+                continue
+            max_seq = max(max_seq, seq)
+        # An entry without a usable seq can't be deduped safely, so it's
+        # always kept rather than silently dropped — see _valid_seq.
+        new_entries.append(e)
+    return new_entries, max_seq
+
+
+async def _chunk_statements(
+    match_id: str, slot: int | None, kind: str, new_entries: list[dict], last_seq: int
+) -> list[tuple[str, tuple]]:
+    """INSERTs storing `new_entries` as `kind` chunks, plus the cap DELETE when needed."""
+    statements: list[tuple[str, tuple]] = []
+    if not new_entries:
+        return statements
+    high_seq = last_seq
+    new_bytes = 0
+    for group in _split_entries(new_entries):
+        entries_json = json.dumps(group)
+        seqs = [s for s in (_valid_seq(e.get("seq")) for e in group) if s is not None]
+        first_seq = min(seqs) if seqs else high_seq
+        high_seq = max([high_seq, *seqs])
+        new_bytes += len(entries_json)
+        statements.append(
+            (
+                "INSERT INTO session_log_chunks (match_id, slot, kind, first_seq, last_seq, entries, size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (match_id, slot, kind, first_seq, high_seq, entries_json, len(entries_json)),
+            )
+        )
+    if await _stored_chunk_bytes(match_id, slot, kind) + new_bytes > _chunk_cap(kind):
+        statements.append(_chunk_cap_statement(match_id, slot, kind))
+    return statements
 
 
 def _split_entries(entries: list[dict]) -> list[list[dict]]:
@@ -298,21 +349,21 @@ def _split_entries(entries: list[dict]) -> list[list[dict]]:
     return groups
 
 
-async def _stored_chunk_bytes(match_id: str, slot: int | None) -> int:
-    """Total size of the chunks already stored for (match_id, slot).
+async def _stored_chunk_bytes(match_id: str, slot: int | None, kind: str = "log") -> int:
+    """Total size of the `kind` chunks already stored for (match_id, slot).
 
     Uses the `size` column recorded at insert time instead of re-reading
     `length(entries)` for every stored chunk on every flush.
     """
     rows = await _require().query(
-        "SELECT COALESCE(SUM(size), 0) AS total FROM session_log_chunks WHERE match_id = ? AND slot IS ?",
-        (match_id, slot),
+        "SELECT COALESCE(SUM(size), 0) AS total FROM session_log_chunks WHERE match_id = ? AND slot IS ? AND kind = ?",
+        (match_id, slot, kind),
     )
     return int(rows[0]["total"]) if rows else 0
 
 
-def _chunk_cap_statement(match_id: str, slot: int | None) -> tuple[str, tuple]:
-    """DELETE the oldest chunks for (match_id, slot) until the total fits the cap.
+def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> tuple[str, tuple]:
+    """DELETE the oldest `kind` chunks for (match_id, slot) until the total fits its cap.
 
     Keeps the newest chunks whose cumulative size (counted from the newest
     backwards) still fits, in one statement rather than a per-row DELETE.
@@ -320,17 +371,17 @@ def _chunk_cap_statement(match_id: str, slot: int | None) -> tuple[str, tuple]:
     return (
         """
         DELETE FROM session_log_chunks
-        WHERE match_id = ? AND slot IS ?
+        WHERE match_id = ? AND slot IS ? AND kind = ?
           AND id NOT IN (
               SELECT id FROM (
                   SELECT id, SUM(size) OVER (ORDER BY id DESC) AS running_total
                   FROM session_log_chunks
-                  WHERE match_id = ? AND slot IS ?
+                  WHERE match_id = ? AND slot IS ? AND kind = ?
               )
               WHERE running_total <= ?
           )
         """,
-        (match_id, slot, match_id, slot, _SESSION_LOG_CHUNK_CAP),
+        (match_id, slot, kind, match_id, slot, kind, _chunk_cap(kind)),
     )
 
 
@@ -355,7 +406,7 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
         return entries
 
     rows = await _backend.query(
-        "SELECT entries FROM session_log_chunks WHERE match_id = ? AND slot IS ? ORDER BY id",
+        "SELECT entries FROM session_log_chunks WHERE match_id = ? AND slot IS ? AND kind = 'log' ORDER BY id",
         (match_id, slot),
     )
     for r in rows:
@@ -366,6 +417,23 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
         if isinstance(chunk, list):
             entries.extend(chunk)
     return entries
+
+
+async def get_input_audit(match_id: str, slot: int | None) -> list[dict]:
+    """Every input audit record stored for (match_id, slot), oldest first."""
+    rows = await _require().query(
+        "SELECT entries FROM session_log_chunks WHERE match_id = ? AND slot IS ? AND kind = 'audit' ORDER BY id",
+        (match_id, slot),
+    )
+    records: list = []
+    for r in rows:
+        try:
+            chunk = json.loads(r["entries"])
+        except (json.JSONDecodeError, TypeError):
+            chunk = []
+        if isinstance(chunk, list):
+            records.extend(chunk)
+    return records
 
 
 # Log uploads for a match are accepted until 30 min after game-end, or 4 h

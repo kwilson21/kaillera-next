@@ -878,7 +878,7 @@
   // max_http_buffer_size on its own — SYNC_LOG_FLUSH_MAX_ENTRIES caps the
   // *count*, but a run of unusually verbose lines could still blow the byte
   // budget well before that cap is reached. 1MB leaves ample room for the
-  // summary/context/inputAudit fields also riding in the same payload.
+  // summary/context/audit fields also riding in the same payload.
   const _ENTRIES_AFTER_DEFAULT_MAX_BYTES = 1024 * 1024;
 
   const createSyncLogRing = (maxSize) => {
@@ -1043,6 +1043,7 @@
     resetBootState: resetBootState,
     readLocalInput: readLocalInput,
     createStickDeadband,
+    genEpoch: _genRingEpoch,
     disableEJSInput: disableEJSInput,
     applyInputToWasm: applyInputToWasm,
     N64_MAX,

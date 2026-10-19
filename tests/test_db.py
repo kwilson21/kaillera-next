@@ -728,7 +728,7 @@ async def _run_init_twice(tmp_db):
     await close_db()
     await init_db(tmp_db)
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
-    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004"]
+    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005"]
     await close_db()
 
 
@@ -790,3 +790,75 @@ async def _run_cleanup_sleep_order():
             pass
     assert sleeps == [60, 6 * 3600]
     sweep.assert_awaited_once()
+
+
+# ── input audit deltas ───────────────────────────────────────────────────────
+#
+# Audit records stream in like log entries: only records past the stored
+# audit position are kept, as kind = 'audit' chunks under their own seq and
+# epoch (migration 0005), invisible to the log readers.
+
+
+def _audit_record(i):
+    return {"seq": i, "s": "L", "f": i * 10, "b": 0, "lx": i, "ly": 0, "cx": 0, "cy": 0}
+
+
+_AUDIT_BASE = {
+    "match_id": "m-audit", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+    "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1", "audit_epoch": "a1",
+}
+
+
+def test_append_session_flush_streams_audit_records(tmp_db):
+    _run_async(_run_audit_flushes(tmp_db))
+
+
+async def _run_audit_flushes(tmp_db):
+    from src.db import append_session_flush, close_db, get_full_log_entries, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    base = _AUDIT_BASE
+    acks = await append_session_flush(
+        {**base, "entries": [{"seq": 0, "msg": "x"}], "audit_entries": [_audit_record(0), _audit_record(1)]}
+    )
+    assert acks == {"lastSeq": 0, "auditLastSeq": 1}
+
+    # A resend of acked records plus a new one stores only the new one.
+    acks = await append_session_flush({**base, "entries": [], "audit_entries": [_audit_record(1), _audit_record(2)]})
+    assert acks == {"lastSeq": 0, "auditLastSeq": 2}
+    assert [r["seq"] for r in await get_input_audit("m-audit", 0)] == [0, 1, 2]
+    assert [e["msg"] for e in await get_full_log_entries("m-audit", 0, None)] == ["x"]
+
+    # A new audit epoch (the client reset its audit) starts again from seq 0.
+    acks = await append_session_flush({**base, "entries": [], "audit_epoch": "a2", "audit_entries": [_audit_record(0)]})
+    assert acks["auditLastSeq"] == 0
+    assert len(await get_input_audit("m-audit", 0)) == 4
+
+    # A flush with no audit epoch (an older client) leaves the audit position alone.
+    acks = await append_session_flush({**base, "entries": [], "audit_epoch": "", "audit_entries": []})
+    assert acks["auditLastSeq"] == 0
+    await close_db()
+
+
+def test_audit_chunk_cap_keeps_the_newest_and_leaves_the_log_alone(tmp_db):
+    _run_async(_run_audit_cap(tmp_db))
+
+
+async def _run_audit_cap(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, get_full_log_entries, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    original_cap = db_mod._SESSION_LOG_AUDIT_CAP
+    db_mod._SESSION_LOG_AUDIT_CAP = 300
+    try:
+        for i in range(10):
+            await append_session_flush(
+                {**_AUDIT_BASE, "entries": [{"seq": i, "msg": "log"}], "audit_entries": [_audit_record(i)]}
+            )
+        audit = await get_input_audit("m-audit", 0)
+        assert 0 < len(audit) < 10 and audit[-1]["seq"] == 9
+        assert len(await get_full_log_entries("m-audit", 0, None)) == 10
+    finally:
+        db_mod._SESSION_LOG_AUDIT_CAP = original_cap
+    await close_db()
