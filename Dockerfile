@@ -11,7 +11,7 @@ WORKDIR /app
 # build if the lock is out of date with pyproject.toml). Resolving from
 # pyproject.toml alone picked up whatever was newest on build day.
 COPY server/pyproject.toml server/uv.lock server/
-RUN pip install --no-cache-dir uv==0.13.0 \
+RUN pip install --no-cache-dir uv==0.13.1 \
     && uv export --quiet --project server --locked --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt \
     && pip install --no-cache-dir -r /tmp/requirements.txt \
     && pip uninstall -y uv && rm /tmp/requirements.txt
