@@ -1643,15 +1643,21 @@ def create_app(lifespan=None) -> FastAPI:
                 receiver_audit = receiver.get("audit") or {}
                 remote_map = receiver_audit.get("remote") or {}
                 receiver_remote = remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or []
-                min_len = min(len(sender_local), len(receiver_remote))
+                # The server caps each peer's audit by dropping its oldest
+                # chunks, so two histories can start at different frames:
+                # compare them from the later start.
+                from_frame = max((h[0].get("f") or 0 for h in (sender_local, receiver_remote) if h), default=0)
+                sender_cmp = [e for e in sender_local if (e.get("f") or 0) >= from_frame]
+                receiver_cmp = [e for e in receiver_remote if (e.get("f") or 0) >= from_frame]
+                min_len = min(len(sender_cmp), len(receiver_cmp))
                 mismatches = []
                 for i in range(min_len):
-                    if not inputs_eq(sender_local[i], receiver_remote[i]):
+                    if not inputs_eq(sender_cmp[i], receiver_cmp[i]):
                         mismatches.append(
                             {
                                 "index": i,
-                                "sender": sender_local[i],
-                                "receiver": receiver_remote[i],
+                                "sender": sender_cmp[i],
+                                "receiver": receiver_cmp[i],
                             }
                         )
                         if len(mismatches) >= 20:
@@ -1659,7 +1665,7 @@ def create_app(lifespan=None) -> FastAPI:
                 verdict = "IDENTICAL"
                 if mismatches:
                     verdict = "MISMATCH"
-                elif len(sender_local) != len(receiver_remote):
+                elif len(sender_cmp) != len(receiver_cmp):
                     verdict = "PARTIAL"
                 diffs.append(
                     {
@@ -1667,6 +1673,7 @@ def create_app(lifespan=None) -> FastAPI:
                         "receiver_slot": receiver_slot,
                         "sender_entries": len(sender_local),
                         "receiver_entries": len(receiver_remote),
+                        "from_frame": from_frame,
                         "compared": min_len,
                         "mismatch_count": len(mismatches),
                         "first_mismatches": mismatches[:20],

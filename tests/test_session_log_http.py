@@ -104,3 +104,31 @@ def test_admin_input_audit_is_assembled_from_streamed_records(client, monkeypatc
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
     assert r.status_code == 200
     assert {d["verdict"] for d in r.json()["diffs"]} == {"IDENTICAL"}
+
+
+def test_admin_input_audit_compares_trimmed_histories_from_the_later_start(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+
+    def rec(seq, s, f):
+        return {"seq": seq, "s": s, "f": f, "b": 0, "lx": f, "ly": 0, "cx": 0, "cy": 0}
+
+    # Slot 1's oldest chunk was dropped by the cap: its copy of slot 0's
+    # inputs starts at frame 5, slot 0's own record at frame 1.
+    records = {
+        0: [rec(0, "L", 1), rec(1, "L", 5), rec(2, "L", 9), rec(3, 1, 5), rec(4, 1, 9)],
+        1: [rec(10, 0, 5), rec(11, 0, 9), rec(12, "L", 5), rec(13, "L", 9)],
+    }
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    diffs = {(d["sender_slot"], d["receiver_slot"]): d for d in r.json()["diffs"]}
+    assert diffs[(0, 1)]["verdict"] == "IDENTICAL"
+    assert diffs[(0, 1)]["from_frame"] == 5
+    assert diffs[(0, 1)]["compared"] == 2
+    assert diffs[(1, 0)]["verdict"] == "IDENTICAL"
