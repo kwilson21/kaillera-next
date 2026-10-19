@@ -1575,9 +1575,11 @@ def create_app(lifespan=None) -> FastAPI:
     # received from each other peer. For a 2-player match, peer 0's local
     # should equal peer 1's remote[0], and peer 1's local should equal
     # peer 0's remote[1]. Both streams are normalized first (see
-    # normalize below), so arrival order doesn't count; if they still
-    # don't match, the input protocol is dropping or corrupting inputs —
-    # the emulator determinism hypothesis is wrong.
+    # normalize below) and each received change may land anywhere in the
+    # sender's run of that value (see the diff loop), so arrival order
+    # doesn't count; if they still don't match, the input protocol is
+    # dropping or corrupting inputs — the emulator determinism hypothesis
+    # is wrong.
     @app.get("/admin/api/input-audit/{match_id}")
     async def admin_input_audit(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query(
@@ -1601,15 +1603,11 @@ def create_app(lifespan=None) -> FastAPI:
                 "audit": audit,
             }
 
-        def inputs_eq(a, b):
-            return (
-                a.get("f") == b.get("f")
-                and a.get("b") == b.get("b")
-                and a.get("lx") == b.get("lx")
-                and a.get("ly") == b.get("ly")
-                and a.get("cx") == b.get("cx")
-                and a.get("cy") == b.get("cy")
-            )
+        value_keys = ("b", "lx", "ly", "cx", "cy")
+
+        def frame(e):
+            f = e.get("f")
+            return f if isinstance(f, int) else -1
 
         def normalize(entries):
             # Receivers record remote inputs in arrival order, deduped only
@@ -1619,13 +1617,10 @@ def create_app(lifespan=None) -> FastAPI:
             # every later index. Sort by frame (stable) and drop records that
             # repeat the previous value: one record per real change. The
             # sender's stream goes through the same step.
-            ordered = sorted(
-                (e for e in entries if isinstance(e, dict)),
-                key=lambda e: e["f"] if isinstance(e.get("f"), int) else -1,
-            )
+            ordered = sorted((e for e in entries if isinstance(e, dict)), key=frame)
             out = []
             for e in ordered:
-                if out and all(out[-1].get(k) == e.get(k) for k in ("b", "lx", "ly", "cx", "cy")):
+                if out and all(out[-1].get(k) == e.get(k) for k in value_keys):
                     continue
                 out.append(e)
             return out
@@ -1642,17 +1637,27 @@ def create_app(lifespan=None) -> FastAPI:
                 receiver_remote = normalize(remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or [])
                 min_len = min(len(sender_local), len(receiver_remote))
                 mismatches = []
+                late_matches = 0
                 for i in range(min_len):
-                    if not inputs_eq(sender_local[i], receiver_remote[i]):
-                        mismatches.append(
-                            {
-                                "index": i,
-                                "sender": sender_local[i],
-                                "receiver": receiver_remote[i],
-                            }
-                        )
-                        if len(mismatches) >= 20:
-                            break
+                    sent, got = sender_local[i], receiver_remote[i]
+                    # Values must match exactly; the frame may land anywhere
+                    # in the sender's run of that value, from its change
+                    # frame up to the next change. When the change frame's
+                    # packet arrives after a later one with the same value,
+                    # the client drops it as a repeat and records the later
+                    # frame, though the input applied was the sender's. A
+                    # change that really reached the receiver late (old value
+                    # still at the change frame) leaves the same records, so
+                    # matches past the change frame are counted, not hidden.
+                    run_end = frame(sender_local[i + 1]) if i + 1 < len(sender_local) else None
+                    in_run = frame(sent) <= frame(got) and (run_end is None or frame(got) < run_end)
+                    if in_run and all(sent.get(k) == got.get(k) for k in value_keys):
+                        if frame(got) > frame(sent):
+                            late_matches += 1
+                        continue
+                    mismatches.append({"index": i, "sender": sent, "receiver": got})
+                    if len(mismatches) >= 20:
+                        break
                 verdict = "IDENTICAL"
                 if mismatches:
                     verdict = "MISMATCH"
@@ -1666,6 +1671,7 @@ def create_app(lifespan=None) -> FastAPI:
                         "receiver_entries": len(receiver_remote),
                         "compared": min_len,
                         "mismatch_count": len(mismatches),
+                        "late_matches": late_matches,
                         "first_mismatches": mismatches[:20],
                         "verdict": verdict,
                     }

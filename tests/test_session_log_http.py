@@ -148,8 +148,38 @@ def test_input_audit_ignores_a_late_arriving_packet(audit_client):
     d = _diff(http, 0, 1)
     assert d["verdict"] == "IDENTICAL"
     assert d["sender_entries"] == d["receiver_entries"] == d["compared"] == len(HOST_LOCAL)
-    assert d["first_mismatches"] == []
+    assert d["first_mismatches"] == [] and d["late_matches"] == 0
     assert _diff(http, 1, 0)["verdict"] == "IDENTICAL"
+
+
+def test_input_audit_accepts_a_change_frame_overtaken_by_a_later_packet(audit_client):
+    """Frame 105's packet (same lx -70) beat frame 104's, so the client dropped
+    104 as a repeat and recorded the change at 105. Still within the sender's
+    lx -70 run, so it matches, and is counted as late."""
+    http, query = audit_client
+    overtaken = [_rec(0), _rec(105, lx=-70), _rec(120), _rec(130, b=16), _rec(140)]
+    _audit(query, GUEST_LOCAL, overtaken)
+    d = _diff(http, 0, 1)
+    assert d["verdict"] == "IDENTICAL"
+    assert d["mismatch_count"] == 0 and d["late_matches"] == 1
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [103, 120],
+    ids=["before-the-sender-changed", "after-the-sender-changed-again"],
+)
+def test_input_audit_reports_a_change_outside_the_senders_run(audit_client, frame):
+    """The host held lx -70 for frames 104-119; the guest receiving it at a
+    frame outside that run is a real divergence."""
+    http, query = audit_client
+    shifted = [_rec(0), _rec(frame, lx=-70), _rec(121), _rec(130, b=16), _rec(140)]
+    _audit(query, GUEST_LOCAL, shifted)
+    d = _diff(http, 0, 1)
+    assert d["verdict"] == "MISMATCH"
+    assert d["mismatch_count"] == 1
+    m = d["first_mismatches"][0]
+    assert m["index"] == 1 and m["sender"]["f"] == 104 and m["receiver"]["f"] == frame
 
 
 def test_input_audit_still_reports_a_different_input(audit_client):
