@@ -160,7 +160,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `rom-ready` | client→server | `{ready, hash, name, size}` | Player signals ROM loaded (hash/name/size establish or check ROM identity) |
 | `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
 | `device-type` | client→server | `{type}` | Player reports device type |
-| `session-log` | client→server | `{matchId, epoch, entries, summary, context, inputAudit}` | Periodic sync log flush: only entries the server hasn't acked; acks `{lastSeq}` |
+| `session-log` | client→server | `{matchId, epoch, entries, summary, context, audit}` | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}` |
 | `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
 | `debug-logs` | client→server | `{...}` | Upload debug console log |
 | `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |

@@ -23,9 +23,9 @@ def client(monkeypatch):
     from src.api import app as appmod
 
     monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
-    append = AsyncMock(return_value=7)
+    append = AsyncMock(return_value={"lastSeq": 7, "auditLastSeq": -1})
     accepts = AsyncMock(return_value=True)
-    monkeypatch.setattr(db, "append_session_log", append)
+    monkeypatch.setattr(db, "append_session_flush", append)
     monkeypatch.setattr(db, "match_accepts_uploads", accepts)
     return TestClient(appmod.create_app()), append, accepts
 
@@ -102,6 +102,8 @@ def audit_client(monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "k")
     query = AsyncMock()
     monkeypatch.setattr(db, "query", query)
+    # No streamed records: each peer's audit comes from context.inputAudit.
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(return_value=[]))
     return TestClient(appmod.create_app()), query
 
 
@@ -202,3 +204,93 @@ def test_input_audit_reports_a_missing_tail_as_partial(audit_client):
     d = _diff(http, 0, 1)
     assert d["verdict"] == "PARTIAL"
     assert (d["sender_entries"], d["receiver_entries"], d["compared"]) == (5, 3, 3)
+
+
+def test_admin_input_audit_is_assembled_from_streamed_records(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+
+    def rec(seq, s, f):
+        return {"seq": seq, "s": s, "f": f, "b": 0, "lx": f, "ly": 0, "cx": 0, "cy": 0}
+
+    records = {0: [rec(0, "L", 1), rec(1, 1, 1)], 1: [rec(0, "L", 1), rec(1, 0, 1)]}
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    assert {d["verdict"] for d in r.json()["diffs"]} == {"IDENTICAL"}
+
+
+def test_admin_input_audit_compares_trimmed_histories_from_the_later_start(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+
+    def rec(seq, s, f):
+        return {"seq": seq, "s": s, "f": f, "b": 0, "lx": f, "ly": 0, "cx": 0, "cy": 0}
+
+    # Slot 1's oldest chunk was dropped by the cap: its copy of slot 0's
+    # inputs starts at frame 5, slot 0's own record at frame 1.
+    records = {
+        0: [rec(0, "L", 1), rec(1, "L", 5), rec(2, "L", 9), rec(3, 1, 5), rec(4, 1, 9)],
+        1: [rec(10, 0, 5), rec(11, 0, 9), rec(12, "L", 5), rec(13, "L", 9)],
+    }
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    diffs = {(d["sender_slot"], d["receiver_slot"]): d for d in r.json()["diffs"]}
+    assert diffs[(0, 1)]["verdict"] == "IDENTICAL"
+    assert diffs[(0, 1)]["from_frame"] == 5
+    assert diffs[(0, 1)]["compared"] == 2
+    assert diffs[(1, 0)]["verdict"] == "IDENTICAL"
+
+
+def test_admin_input_audit_keeps_the_senders_run_at_a_trimmed_start(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+
+    def rec(seq, s, f, lx):
+        return {"seq": seq, "s": s, "f": f, "b": 0, "lx": lx, "ly": 0, "cx": 0, "cy": 0}
+
+    # Slot 1's capped copy of slot 0's inputs starts at frame 6: frame 5's
+    # packet (the change to lx 5) arrived after frame 6's, so the change was
+    # recorded at 6. Slot 0's own change at 5 must stay in the comparison.
+    records = {
+        0: [rec(0, "L", 1, 1), rec(1, "L", 5, 5), rec(2, "L", 9, 9), rec(3, 1, 6, 6)],
+        1: [rec(10, 0, 6, 5), rec(11, 0, 9, 9), rec(12, "L", 6, 6)],
+    }
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    d = next(d for d in r.json()["diffs"] if (d["sender_slot"], d["receiver_slot"]) == (0, 1))
+    assert d["verdict"] == "IDENTICAL"
+    assert (d["from_frame"], d["compared"], d["late_matches"]) == (6, 2, 1)
+
+
+def test_admin_input_audit_tolerates_non_integer_frames(client, monkeypatch):
+    import src.db as db
+
+    http, _append, _accepts = client
+    monkeypatch.setenv("ADMIN_KEY", "k")
+    bad = {"seq": 0, "s": "L", "f": "5", "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0}
+    good = {"seq": 0, "s": 0, "f": 3, "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0}
+    records = {0: [bad], 1: [good]}
+    rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
+    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
+
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200

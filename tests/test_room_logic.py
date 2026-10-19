@@ -599,11 +599,11 @@ def test_screenshot_claiming_another_players_slot_is_dropped():
 
 
 def _flush(register):
-    append = AsyncMock(return_value=0)
+    append = AsyncMock(return_value={"lastSeq": 0, "auditLastSeq": -1})
     patches = [
         patch.object(signaling, "check", new=lambda sid, event: True),
         patch.object(signaling.db, "register_match", new=register),
-        patch.object(signaling.db, "append_session_log", new=append),
+        patch.object(signaling.db, "append_session_flush", new=append),
     ]
 
     async def flush():
@@ -644,7 +644,7 @@ def test_session_log_flushes_never_wait_on_a_slow_registration():
 
     async def append(*args):
         await asyncio.sleep(0.05)
-        return 0
+        return {"lastSeq": 0, "auditLastSeq": -1}
 
     patches = [
         patch.object(signaling, "check", new=lambda sid, event: True),

@@ -5072,20 +5072,28 @@
   let _funnelMilestoneSent = false; // P0-1 funnel: fire milestone_reached once per session
   let _localInputs = {}; // frame -> input object
   let _remoteInputs = {}; // slot -> {frame -> input object} (nested for multi-peer)
-  // ── Input audit buffers (Option G) ─────────────────────────────────
-  // Delta-encoded grow-only log of inputs. A new entry is recorded ONLY
-  // when the input differs from the previously recorded value for that
-  // stream. Both peers run identical encoding logic, so if their input
-  // histories are truly equivalent, their delta sequences will be
-  // byte-identical and trivially comparable. Uploaded at match end as
-  // part of the session-log flush.
+  // ── Input audit (Option G) ─────────────────────────────────────────
+  // Delta-encoded log of inputs. A record is made ONLY when the input
+  // differs from the previous one on its stream: s='L' for this peer's own
+  // inputs, s=<slot> for inputs received from that peer. Both peers run
+  // identical encoding logic, so if their input histories are truly
+  // equivalent, their records are byte-identical and trivially comparable.
   //
-  // Format: array of { f, b, lx, ly, cx, cy } — "f" is the frame at
-  // which the input CHANGED to these values (it remains this value until
-  // the next entry's frame). Typical match produces ~2-5k entries (10
-  // minutes × ~300 transitions/min), well under the 2 MB log cap.
-  const _auditLocalInputs = [];
-  const _auditRemoteInputs = {}; // slot -> entry array
+  // Format: { seq, s, f, b, lx, ly, cx, cy } — "f" is the frame at which
+  // the input CHANGED to these values (it remains this value until the
+  // stream's next record).
+  //
+  // Streamed: records wait in _auditPending until a session-log flush is
+  // acked past their seq, so each flush carries only new records instead of
+  // the whole match. _auditEpoch changes on every reset, like the sync-log
+  // ring's epoch, so the server never dedupes a new run's records against
+  // an old one's.
+  const AUDIT_PENDING_MAX = 20000; // unacked records kept, newest win
+  const AUDIT_FLUSH_MAX = 5000; // records per flush
+  let _auditPending = [];
+  let _auditSeq = 0;
+  let _auditAckedSeq = -1;
+  let _auditEpoch = KNShared.genEpoch();
   const _auditLastLocal = { b: null, lx: null, ly: null, cx: null, cy: null };
   const _auditLastRemote = {}; // slot -> last-value object
   const _inputButtons = (x) => (x?.buttons !== undefined ? x.buttons : x?.b);
@@ -5105,8 +5113,10 @@
     cy: input?.cy | 0,
   });
   const _resetInputAudit = () => {
-    _auditLocalInputs.length = 0;
-    for (const slot of Object.keys(_auditRemoteInputs)) delete _auditRemoteInputs[slot];
+    _auditPending = [];
+    _auditSeq = 0;
+    _auditAckedSeq = -1;
+    _auditEpoch = KNShared.genEpoch();
     _auditLastLocal.b = null;
     _auditLastLocal.lx = null;
     _auditLastLocal.ly = null;
@@ -5114,42 +5124,27 @@
     _auditLastLocal.cy = null;
     for (const slot of Object.keys(_auditLastRemote)) delete _auditLastRemote[slot];
   };
-  const _cloneAuditEntries = (entries) =>
-    entries.map((entry) => ({
-      f: entry.f | 0,
-      b: entry.b | 0,
-      lx: entry.lx | 0,
-      ly: entry.ly | 0,
-      cx: entry.cx | 0,
-      cy: entry.cy | 0,
-    }));
-  const _buildInputAuditPayload = () => {
-    const remote = {};
-    for (const [slot, entries] of Object.entries(_auditRemoteInputs)) {
-      remote[slot] = _cloneAuditEntries(entries);
-    }
-    return {
-      localCount: _auditLocalInputs.length,
-      remoteCount: Object.fromEntries(Object.entries(_auditRemoteInputs).map(([s, a]) => [s, a.length])),
-      local: _cloneAuditEntries(_auditLocalInputs),
-      remote,
-    };
+  const _auditPush = (stream, frame, input, last) => {
+    _auditPending.push({
+      seq: _auditSeq++,
+      s: stream,
+      f: frame | 0,
+      b: input.buttons | 0,
+      lx: input.lx | 0,
+      ly: input.ly | 0,
+      cx: input.cx | 0,
+      cy: input.cy | 0,
+    });
+    if (_auditPending.length > AUDIT_PENDING_MAX) _auditPending.splice(0, _auditPending.length - AUDIT_PENDING_MAX);
+    last.b = input.buttons;
+    last.lx = input.lx;
+    last.ly = input.ly;
+    last.cx = input.cx;
+    last.cy = input.cy;
   };
   const _auditRecordLocal = (frame, input) => {
-    if (_auditLocalInputs.length > 0 && _inputEq(input, _auditLastLocal)) return;
-    _auditLocalInputs.push({
-      f: frame,
-      b: input.buttons,
-      lx: input.lx,
-      ly: input.ly,
-      cx: input.cx,
-      cy: input.cy,
-    });
-    _auditLastLocal.b = input.buttons;
-    _auditLastLocal.lx = input.lx;
-    _auditLastLocal.ly = input.ly;
-    _auditLastLocal.cx = input.cx;
-    _auditLastLocal.cy = input.cy;
+    if (_inputEq(input, _auditLastLocal)) return;
+    _auditPush('L', frame, input, _auditLastLocal);
     if (input.buttons || input.lx || input.ly || input.cx || input.cy) {
       _syncLog(
         `LOCAL-INPUT slot=${_playerSlot} f=${frame} b=${input.buttons} lx=${input.lx} ly=${input.ly} cx=${input.cx} cy=${input.cy}`,
@@ -5157,25 +5152,9 @@
     }
   };
   const _auditRecordRemote = (slot, frame, input) => {
-    if (!_auditRemoteInputs[slot]) {
-      _auditRemoteInputs[slot] = [];
-      _auditLastRemote[slot] = { b: null, lx: null, ly: null, cx: null, cy: null };
-    }
-    if (_auditRemoteInputs[slot].length > 0 && _inputEq(input, _auditLastRemote[slot])) return;
-    _auditRemoteInputs[slot].push({
-      f: frame,
-      b: input.buttons,
-      lx: input.lx,
-      ly: input.ly,
-      cx: input.cx,
-      cy: input.cy,
-    });
-    const last = _auditLastRemote[slot];
-    last.b = input.buttons;
-    last.lx = input.lx;
-    last.ly = input.ly;
-    last.cx = input.cx;
-    last.cy = input.cy;
+    if (!_auditLastRemote[slot]) _auditLastRemote[slot] = { b: null, lx: null, ly: null, cx: null, cy: null };
+    if (_inputEq(input, _auditLastRemote[slot])) return;
+    _auditPush(slot, frame, input, _auditLastRemote[slot]);
   };
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
@@ -5403,7 +5382,7 @@
   const _dropPendingLateJoinPeersMissingFromRoster = (players) => {
     const liveSids = new Set(
       Object.values(players)
-        .map((p) => p.socketId)
+        .map((p) => _peerKey(p.socketId))
         .filter(Boolean),
     );
     const liveSlots = new Set(
@@ -6106,28 +6085,34 @@
       // session log analyzer can group matches by mode without parsing logs.
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
     },
-    // Input audit (Option G). Included in every flush so we always have
-    // something to compare even if the match ends abruptly. Delta-encoded
-    // to keep size reasonable — we only record the count here and the full
-    // data in a separate field that the server stores as log context.
-    inputAudit: _buildInputAuditPayload(),
+    // Input audit records the server hasn't acked yet (see _auditPending).
+    audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) },
   });
 
   // Advance the flush cursor only from a server-confirmed lastSeq — never
   // optimistically. An unacked or rate-limited flush is simply resent
   // (entriesAfter re-sends anything still above the cursor) next interval.
   //
-  // `sentEpoch` is the ring epoch captured when the flush that produced this
-  // ack was *sent*. If the ring has since been cleared (new epoch — a stop()
-  // cycle overlapping with an in-flight flush), this ack describes a
+  // `payload.epoch` is the ring epoch captured when the flush that produced
+  // this ack was *sent*. If the ring has since been cleared (new epoch — a
+  // stop() cycle overlapping with an in-flight flush), this ack describes a
   // last_seq under the OLD epoch and must not be applied to the new one's
   // cursor: the seq spaces aren't comparable, so "advancing" would actually
-  // skip entries the new ring hasn't sent yet.
-  const _ackSyncLogFlush = (ack, sentEpoch) => {
-    if (!ack || typeof ack.lastSeq !== 'number') return;
-    if (sentEpoch !== _syncLogRing.epoch) return;
-    if (ack.lastSeq > _syncLogAckedSeq) {
+  // skip entries the new ring hasn't sent yet. The input audit follows the
+  // same rule under its own epoch, and drops the records the ack covers.
+  const _ackSyncLogFlush = (ack, payload) => {
+    if (!ack) return;
+    if (typeof ack.lastSeq === 'number' && payload.epoch === _syncLogRing.epoch && ack.lastSeq > _syncLogAckedSeq) {
       _syncLogAckedSeq = ack.lastSeq;
+    }
+    if (
+      typeof ack.auditLastSeq === 'number' &&
+      payload.audit?.epoch === _auditEpoch &&
+      ack.auditLastSeq > _auditAckedSeq
+    ) {
+      _auditAckedSeq = ack.auditLastSeq;
+      const keep = _auditPending.findIndex((r) => r.seq > _auditAckedSeq);
+      _auditPending = keep < 0 ? [] : _auditPending.slice(keep);
     }
   };
 
@@ -6136,10 +6121,12 @@
   // fallback (used while the socket is connected-but-failing) can carry a
   // full flush without keepalive; only the pagehide/hidden safety-net flush
   // needs keepalive (socket is already gone), so only that call site caps
-  // entries to fit the 64KB limit.
+  // entries to fit the 64KB limit. It leaves out the input audit records,
+  // which wouldn't fit beside the log entries.
   const _KEEPALIVE_ENTRY_BUDGET = 60 * 1024;
   const _capPayloadEntriesForKeepalive = (payload) => {
-    const entries = payload.entries || [];
+    const { audit: _audit, ...rest } = payload;
+    const entries = rest.entries || [];
     let bytes = 0;
     let start = entries.length;
     while (start > 0) {
@@ -6148,7 +6135,7 @@
       bytes += size;
       start--;
     }
-    return start > 0 ? { ...payload, entries: entries.slice(start) } : payload;
+    return start > 0 ? { ...rest, entries: entries.slice(start) } : rest;
   };
 
   const _flushViaHttp = (payload, { keepalive = false } = {}) => {
@@ -6164,7 +6151,9 @@
         ...(keepalive ? { keepalive: true } : {}),
       })
         .then((res) => (res.ok ? res.json() : null))
-        .then((json) => _ackSyncLogFlush(json, payload.epoch))
+        // Ack against what was sent: a keepalive body has no audit, so its
+        // auditLastSeq (the server's stored position) must not move ours.
+        .then((json) => _ackSyncLogFlush(json, body))
         .catch(() => {});
     } catch (_) {}
   };
@@ -6211,7 +6200,7 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
-          _ackSyncLogFlush(ack, payload.epoch);
+          _ackSyncLogFlush(ack, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
@@ -6819,7 +6808,7 @@
       _resyncRequestInFlight = true;
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
-      socket.emit('data-message', {
+      _signalSocket.emit('data-message', {
         type: 'sync-request-full-socket',
         targetSid: hostSid,
         requesterSid: socket.id,
@@ -6843,13 +6832,13 @@
     if (msg.type === 'sync-request-full-socket') handleSocketSyncRequest(msg);
     if (msg.type === 'sync-state-socket') handleSocketSyncState(msg);
     if (msg.type === 'late-join-ready') {
-      finishLateJoinReady('Socket.IO', msg.senderSid || null);
+      finishLateJoinReady('Socket.IO', _peerKey(msg.senderSid) || null);
     }
   };
 
   const handleSocketSyncRequest = (msg) => {
     if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
-    const requesterSid = typeof msg.requesterSid === 'string' ? msg.requesterSid : '';
+    const requesterSid = _peerKey(typeof msg.requesterSid === 'string' ? msg.requesterSid : '');
     if (!requesterSid || !_peers[requesterSid]) {
       _syncLog(`socket sync-request-full ignored — unknown requester ${requesterSid || 'null'}`);
       return;
@@ -6861,7 +6850,7 @@
 
   const handleSocketSyncState = async (msg) => {
     if (_playerSlot === 0 || _isSpectator || _phase !== PHASE_RUNNING) return;
-    if (msg.targetSid && socket?.id && msg.targetSid !== socket.id) return;
+    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     const frame = Number.parseInt(msg.frame, 10);
     if (!Number.isFinite(frame)) {
       _syncLog('socket sync-state ignored — invalid frame');
@@ -6898,7 +6887,7 @@
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
-    const requesterSid = msg.requesterSid;
+    const requesterSid = _peerKey(msg.requesterSid);
     if (!requesterSid) return;
     const now = performance.now();
     const last = _lateJoinLastSentAt.get(requesterSid) || 0;
@@ -7072,13 +7061,92 @@
 
   // -- users-updated ---------------------------------------------------------
 
+  // A player's Socket.IO id changes whenever their signaling socket
+  // reconnects (a server restart or deploy, a network blip) while their page,
+  // emulator and WebRTC connection keep running. Peers stay keyed by the id
+  // they connected under: _knownPlayers keeps that key, with the player's
+  // current id in .socketId, so signals still reach them.
+  const _ownSids = new Set();
+  let _lastUsersUpdated = null;
+
+  // The _peers key for a player's current Socket.IO id.
+  const _peerKey = (sid) => {
+    if (!sid || _peers[sid]) return sid;
+    for (const [key, info] of Object.entries(_knownPlayers)) {
+      if (info.socketId === sid) return key;
+    }
+    return sid;
+  };
+
+  const _isOwnSid = (sid) => !!sid && (sid === socket?.id || _ownSids.has(sid));
+
+  const _peerConnectionLive = (peer) =>
+    peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
+
+  // The _peers key for a roster player: their current id, unless the same
+  // player (persistentId) in the same slot is still connected to us under an
+  // earlier id, in which case that connection is kept.
+  const _rosterKey = (pid, p, prevKnown) => {
+    const sid = p.socketId;
+    if (sid === socket?.id || _peers[sid]) return sid;
+    for (const [key, info] of Object.entries(prevKnown)) {
+      if (info.persistentId !== pid || key === sid) continue;
+      const peer = _peers[key];
+      if (!peer || peer.slot !== p.slot) continue;
+      // Already mapped to this id: keep it, even while the connection
+      // recovers (an ICE reconnect isn't connected yet).
+      if (info.socketId === sid) return key;
+      if (_peerConnectionLive(peer)) {
+        _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
+        return key;
+      }
+    }
+    return sid;
+  };
+
+  // Socket stand-in for messages addressed to a peer: WebRTC signals
+  // (`target`) and targeted data messages (`targetSid`) go to the player's
+  // current Socket.IO id rather than the _peers key they are addressed to.
+  // The server delivers them only to an id that is connected now.
+  const _currentSid = (key) => _knownPlayers[key]?.socketId || key;
+  const _signalSocket = {
+    emit: (event, data) => {
+      if (event === 'webrtc-signal') data = { ...data, target: _currentSid(data.target) };
+      else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
+      return socket.emit(event, data);
+    },
+  };
+
+  const _evictPeer = (sid, reason) => {
+    const peer = _peers[sid];
+    if (!peer) return;
+    try {
+      peer.pc?.close();
+    } catch (_) {}
+    if (peer._reconnectTimeout) clearTimeout(peer._reconnectTimeout);
+    if (peer._disconnectTimer) clearTimeout(peer._disconnectTimer);
+    // I2: route per-peer cleanup through resetPeerState before
+    // dropping the _peers entry.
+    resetPeerState(peer.slot, reason, { peer, sid });
+    delete _peers[sid];
+    delete _lockstepReadyPeers[sid];
+  };
+
   const onUsersUpdated = (data) => {
     const { players = {}, spectators = {} } = data;
+    _lastUsersUpdated = data;
+    if (socket?.id) _ownSids.add(socket.id);
 
-    // Rebuild known players map
+    // Rebuild known players map, keyed by each player's _peers key
+    const prevKnown = _knownPlayers;
     _knownPlayers = {};
-    for (const p of Object.values(players)) {
-      _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
+    for (const [pid, p] of Object.entries(players)) {
+      _knownPlayers[_rosterKey(pid, p, prevKnown)] = {
+        slot: p.slot,
+        playerName: p.playerName,
+        socketId: p.socketId,
+        persistentId: pid,
+      };
     }
     _restoreSyntheticKnownPlayers();
     _dropPendingLateJoinPeersMissingFromRoster(players);
@@ -7115,34 +7183,27 @@
         _isValidPlayerSlot(p.slot) &&
         !_slotAlreadyActive(p.slot);
 
-      if (_peers[p.socketId]) {
-        _syncLog(`onUsersUpdated: peer ${p.socketId} (slot ${p.slot}) already exists, skipping`);
-        _peers[p.socketId].slot = p.slot;
+      const key = _peerKey(p.socketId);
+      if (_peers[key]) {
+        _syncLog(`onUsersUpdated: peer ${key} (slot ${p.slot}) already exists, skipping`);
+        _peers[key].slot = p.slot;
         if (shouldHoldForLateJoin) {
-          _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated existing running peer');
+          _markPendingLateJoinPeer(key, p.slot, 'users-updated existing running peer');
         } else if (_activeRoster?.has(p.slot)) {
-          _clearPendingLateJoinPeer(p.socketId, p.slot, 'users-updated active roster');
+          _clearPendingLateJoinPeer(key, p.slot, 'users-updated active roster');
         }
         continue;
       }
 
       // Evict zombie peers: if another SID already holds this slot, the old
-      // connection is stale (player reconnected with a new Socket.IO ID).
-      // Clean up the old entry so _peers never has duplicate slots.
+      // connection is stale (the player reloaded, or reconnected with a new
+      // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
+      // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
-            try {
-              oldPeer.pc?.close();
-            } catch (_) {}
-            if (oldPeer._reconnectTimeout) clearTimeout(oldPeer._reconnectTimeout);
-            if (oldPeer._disconnectTimer) clearTimeout(oldPeer._disconnectTimer);
-            // I2: route per-peer cleanup through resetPeerState before
-            // dropping the _peers entry.
-            resetPeerState(oldPeer.slot, 'zombie-eviction', { peer: oldPeer, sid: oldSid });
-            delete _peers[oldSid];
-            delete _lockstepReadyPeers[oldSid];
+            _evictPeer(oldSid, 'zombie-eviction');
           }
         }
       }
@@ -7281,7 +7342,7 @@
     setStatus(`Peer connection stalled — retrying (${nextAttempt}/${STARTUP_CONNECT_MAX_ATTEMPTS})...`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
+    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
       _syncLog(`startup retry peer ${remoteSid} connection-state: ${s}`);
@@ -7300,7 +7361,7 @@
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peerGuard = (p) => _peers[remoteSid] === p;
-    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, socket, peerGuard);
+    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.slot = remoteSlot;
     peer.ready = false;
     peer.emuReady = false;
@@ -7398,7 +7459,7 @@
     );
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
+    _signalSocket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
     armStartupConnectWatchdog(remoteSid);
   }
 
@@ -7406,29 +7467,41 @@
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
+    let key = _peerKey(senderSid);
     const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
     _syncLog(
-      `onWebRTCSignal: ${sigType} from ${senderSid}, hasPeer=${!!_peers[senderSid]}, knownPlayer=${!!_knownPlayers[senderSid]}`,
+      `onWebRTCSignal: ${sigType} from ${senderSid}${key !== senderSid ? ` (peer ${key})` : ''}, ` +
+        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}`,
     );
 
-    // Create peer on demand if offer arrives before users-updated
-    if (data.offer && !_peers[senderSid]) {
-      const known = _knownPlayers[senderSid];
-      _syncLog(`onWebRTCSignal: on-demand createPeer for ${senderSid}, slot=${known?.slot ?? 'null'}`);
-      createPeer(senderSid, known ? known.slot : null, false);
+    // A fresh offer from a player whose connection was kept across their
+    // Socket.IO reconnect means their page reloaded: that connection is a
+    // leftover. Drop it, then let the roster set them up as a new peer.
+    if (data.offer && !data.reconnect && key !== senderSid) {
+      _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
+      _evictPeer(key, 'replaced-by-new-page');
+      if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
+      key = _peerKey(senderSid);
     }
 
-    let peer = _peers[senderSid];
+    // Create peer on demand if offer arrives before users-updated
+    if (data.offer && !_peers[key]) {
+      const known = _knownPlayers[key];
+      _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
+      createPeer(key, known ? known.slot : null, false);
+    }
+
+    let peer = _peers[key];
     if (!peer) {
-      _syncLog(`onWebRTCSignal: no peer for ${senderSid}, dropping ${sigType}`);
+      _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
       return;
     }
 
     try {
       if (data.offer) {
         // Reconnect: if peer exists and reconnect flag set, replace old PC
-        if (data.reconnect && _peers[senderSid]) {
-          const existingPeer = _peers[senderSid];
+        if (data.reconnect && _peers[key]) {
+          const existingPeer = _peers[key];
           const startupReconnect = !!data.startupReconnect || _phase < PHASE_GAME_STARTED;
           _syncLog(`received ${startupReconnect ? 'startup ' : ''}reconnect offer from ${senderSid}`);
           // Mark gameplay reconnects so the DC open handler triggers resync.
@@ -7437,8 +7510,8 @@
           existingPeer.reconnecting = !startupReconnect;
           existingPeer.startupReconnecting = startupReconnect;
 
-          const peerGuard = (p) => _peers[senderSid] === p;
-          KNShared.resetPeerConnection(existingPeer, _getIceServers(), senderSid, socket, peerGuard);
+          const peerGuard = (p) => _peers[key] === p;
+          KNShared.resetPeerConnection(existingPeer, _getIceServers(), key, _signalSocket, peerGuard);
           existingPeer.ready = false;
           existingPeer.emuReady = false;
 
@@ -7459,14 +7532,14 @@
               clearTimeout(_reconnectTimer);
             }
           };
-          installPeerDataChannelHandlers(senderSid, existingPeer);
+          installPeerDataChannelHandlers(key, existingPeer);
 
           peer = existingPeer;
         }
 
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
+        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key);
       } else if (data.answer) {
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
@@ -8443,7 +8516,6 @@
    *   - _phaseMismatchGrace[slot]      (phase transition grace window)
    *   - _consecutiveFabrications[slot] (fabrication counter)
    *   - _inputLateLogTime[slot]        (rate-limit timestamp)
-   *   - _auditRemoteInputs[slot]       (audit log buffer)
    *   - _auditLastRemote[slot]         (last audited remote input)
    *   - _lateJoinActivatedAtFrame[slot] (post-activation grace window)
    *   - _lateJoinSeededInputFrames[slot] (seeded late-join input frames)
@@ -8482,7 +8554,6 @@
     delete _phaseMismatchGrace[slot];
     delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
-    delete _auditRemoteInputs[slot];
     delete _auditLastRemote[slot];
     delete _lateJoinActivatedAtFrame[slot];
     delete _lateJoinSeededInputFrames[slot];
@@ -8650,7 +8721,7 @@
     setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
+    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.ready = false;
 
     const retryOrGiveUp = () => {
@@ -8719,7 +8790,7 @@
     try {
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', {
+      _signalSocket.emit('webrtc-signal', {
         target: remoteSid,
         offer: peer.pc.localDescription,
         reconnect: true,
@@ -10207,7 +10278,7 @@
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
       );
 
-      socket.emit('data-message', {
+      _signalSocket.emit('data-message', {
         type: 'late-join-state',
         targetSid: remoteSid,
         frame: capturedFrame,
@@ -10231,7 +10302,7 @@
   }
 
   const handleLateJoinState = async (msg) => {
-    if (msg.targetSid && msg.targetSid !== socket.id) return;
+    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     if (_isSpectator) return;
     if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
     // Reject duplicate state packets while a load is in-flight: the body
@@ -10592,7 +10663,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     try {
-      await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
+      await KNShared.createAndSendOffer(peer.pc, _signalSocket, remoteSid);
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
     }
@@ -17110,7 +17181,7 @@
         const b64KB = Math.round(encoded.data.length / 1024);
         const wireKB = Math.round(encoded.compressedSize / 1024);
         if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
-          socket.emit('data-message', {
+          _signalSocket.emit('data-message', {
             type: 'sync-state-socket',
             targetSid,
             senderSid: socket.id,

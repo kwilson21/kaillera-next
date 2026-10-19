@@ -116,16 +116,16 @@ def test_socket_session_log_accepts_and_persists_input_audit():
     assert "_session_log_context(payload.context, payload.inputAudit)" in SIGNALING_PY.read_text()
 
 
-def test_lockstep_input_audit_resets_between_matches_and_flush_clones_payload():
+def test_lockstep_input_audit_resets_between_matches_and_flush_sends_unacked_records():
     source = LOCKSTEP_JS.read_text()
 
     assert "const _resetInputAudit = () => {" in source
-    assert "_auditLocalInputs.length = 0;" in source
-    assert "for (const slot of Object.keys(_auditRemoteInputs)) delete _auditRemoteInputs[slot];" in source
+    assert "_auditPending = [];" in source
+    assert "_auditEpoch = KNShared.genEpoch();" in source
     assert "for (const slot of Object.keys(_auditLastRemote)) delete _auditLastRemote[slot];" in source
-    assert "const _buildInputAuditPayload = () => {" in source
-    assert "local: _cloneAuditEntries(_auditLocalInputs)" in source
-    assert "inputAudit: _buildInputAuditPayload()" in source
+    assert "audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) }," in source
+    assert ".then((json) => _ackSyncLogFlush(json, body))" in source
+    assert "inputAudit:" not in source
 
     init_idx = source.find("const init = (config) => {")
     assert init_idx != -1

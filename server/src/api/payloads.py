@@ -184,7 +184,12 @@ class SessionLogPayload(BaseModel):
     epoch: str = Field(default="", max_length=64)
     summary: dict = Field(default_factory=dict)
     context: dict = Field(default_factory=dict)
+    # The whole input audit, as clients sent it before audit deltas: still
+    # stored in context for cached older pages.
     inputAudit: dict = Field(default_factory=dict)
+    # {epoch, entries}: the input audit records the server hasn't acked
+    # (see db.append_session_flush).
+    audit: dict = Field(default_factory=dict)
 
 
 # ── feedback ────────────────────────────────────────────────────────────────
