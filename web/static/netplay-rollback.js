@@ -5403,7 +5403,7 @@
   const _dropPendingLateJoinPeersMissingFromRoster = (players) => {
     const liveSids = new Set(
       Object.values(players)
-        .map((p) => p.socketId)
+        .map((p) => _peerKey(p.socketId))
         .filter(Boolean),
     );
     const liveSlots = new Set(
@@ -6820,13 +6820,13 @@
     if (msg.type === 'sync-request-full-socket') handleSocketSyncRequest(msg);
     if (msg.type === 'sync-state-socket') handleSocketSyncState(msg);
     if (msg.type === 'late-join-ready') {
-      finishLateJoinReady('Socket.IO', msg.senderSid || null);
+      finishLateJoinReady('Socket.IO', _peerKey(msg.senderSid) || null);
     }
   };
 
   const handleSocketSyncRequest = (msg) => {
     if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
-    const requesterSid = typeof msg.requesterSid === 'string' ? msg.requesterSid : '';
+    const requesterSid = _peerKey(typeof msg.requesterSid === 'string' ? msg.requesterSid : '');
     if (!requesterSid || !_peers[requesterSid]) {
       _syncLog(`socket sync-request-full ignored — unknown requester ${requesterSid || 'null'}`);
       return;
@@ -6838,7 +6838,7 @@
 
   const handleSocketSyncState = async (msg) => {
     if (_playerSlot === 0 || _isSpectator || _phase !== PHASE_RUNNING) return;
-    if (msg.targetSid && socket?.id && msg.targetSid !== socket.id) return;
+    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     const frame = Number.parseInt(msg.frame, 10);
     if (!Number.isFinite(frame)) {
       _syncLog('socket sync-state ignored — invalid frame');
@@ -7049,13 +7049,87 @@
 
   // -- users-updated ---------------------------------------------------------
 
+  // A player's Socket.IO id changes whenever their signaling socket
+  // reconnects (a server restart or deploy, a network blip) while their page,
+  // emulator and WebRTC connection keep running. Peers stay keyed by the id
+  // they connected under: _knownPlayers keeps that key, with the player's
+  // current id in .socketId, so signals still reach them.
+  const _ownSids = new Set();
+  let _lastUsersUpdated = null;
+
+  // The _peers key for a player's current Socket.IO id.
+  const _peerKey = (sid) => {
+    if (!sid || _peers[sid]) return sid;
+    for (const [key, info] of Object.entries(_knownPlayers)) {
+      if (info.socketId === sid) return key;
+    }
+    return sid;
+  };
+
+  const _isOwnSid = (sid) => !!sid && (sid === socket?.id || _ownSids.has(sid));
+
+  const _peerConnectionLive = (peer) =>
+    peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
+
+  // The _peers key for a roster player: their current id, unless the same
+  // player (persistentId) in the same slot is still connected to us under an
+  // earlier id, in which case that connection is kept.
+  const _rosterKey = (pid, p, prevKnown) => {
+    const sid = p.socketId;
+    if (sid === socket?.id || _peers[sid]) return sid;
+    for (const [key, info] of Object.entries(prevKnown)) {
+      if (info.persistentId !== pid || key === sid) continue;
+      const peer = _peers[key];
+      if (peer && peer.slot === p.slot && _peerConnectionLive(peer)) {
+        if (info.socketId !== sid) {
+          _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
+        }
+        return key;
+      }
+    }
+    return sid;
+  };
+
+  // Socket stand-in for WebRTC signaling: sends each signal to the player's
+  // current Socket.IO id rather than the _peers key it is addressed to.
+  const _signalSocket = {
+    emit: (event, data) =>
+      socket.emit(
+        event,
+        event === 'webrtc-signal' ? { ...data, target: _knownPlayers[data.target]?.socketId || data.target } : data,
+      ),
+  };
+
+  const _evictPeer = (sid, reason) => {
+    const peer = _peers[sid];
+    if (!peer) return;
+    try {
+      peer.pc?.close();
+    } catch (_) {}
+    if (peer._reconnectTimeout) clearTimeout(peer._reconnectTimeout);
+    if (peer._disconnectTimer) clearTimeout(peer._disconnectTimer);
+    // I2: route per-peer cleanup through resetPeerState before
+    // dropping the _peers entry.
+    resetPeerState(peer.slot, reason, { peer, sid });
+    delete _peers[sid];
+    delete _lockstepReadyPeers[sid];
+  };
+
   const onUsersUpdated = (data) => {
     const { players = {}, spectators = {} } = data;
+    _lastUsersUpdated = data;
+    if (socket?.id) _ownSids.add(socket.id);
 
-    // Rebuild known players map
+    // Rebuild known players map, keyed by each player's _peers key
+    const prevKnown = _knownPlayers;
     _knownPlayers = {};
-    for (const p of Object.values(players)) {
-      _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
+    for (const [pid, p] of Object.entries(players)) {
+      _knownPlayers[_rosterKey(pid, p, prevKnown)] = {
+        slot: p.slot,
+        playerName: p.playerName,
+        socketId: p.socketId,
+        persistentId: pid,
+      };
     }
     _restoreSyntheticKnownPlayers();
     _dropPendingLateJoinPeersMissingFromRoster(players);
@@ -7092,34 +7166,27 @@
         _isValidPlayerSlot(p.slot) &&
         !_slotAlreadyActive(p.slot);
 
-      if (_peers[p.socketId]) {
-        _syncLog(`onUsersUpdated: peer ${p.socketId} (slot ${p.slot}) already exists, skipping`);
-        _peers[p.socketId].slot = p.slot;
+      const key = _peerKey(p.socketId);
+      if (_peers[key]) {
+        _syncLog(`onUsersUpdated: peer ${key} (slot ${p.slot}) already exists, skipping`);
+        _peers[key].slot = p.slot;
         if (shouldHoldForLateJoin) {
-          _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated existing running peer');
+          _markPendingLateJoinPeer(key, p.slot, 'users-updated existing running peer');
         } else if (_activeRoster?.has(p.slot)) {
-          _clearPendingLateJoinPeer(p.socketId, p.slot, 'users-updated active roster');
+          _clearPendingLateJoinPeer(key, p.slot, 'users-updated active roster');
         }
         continue;
       }
 
       // Evict zombie peers: if another SID already holds this slot, the old
-      // connection is stale (player reconnected with a new Socket.IO ID).
-      // Clean up the old entry so _peers never has duplicate slots.
+      // connection is stale (the player reloaded, or reconnected with a new
+      // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
+      // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
-            try {
-              oldPeer.pc?.close();
-            } catch (_) {}
-            if (oldPeer._reconnectTimeout) clearTimeout(oldPeer._reconnectTimeout);
-            if (oldPeer._disconnectTimer) clearTimeout(oldPeer._disconnectTimer);
-            // I2: route per-peer cleanup through resetPeerState before
-            // dropping the _peers entry.
-            resetPeerState(oldPeer.slot, 'zombie-eviction', { peer: oldPeer, sid: oldSid });
-            delete _peers[oldSid];
-            delete _lockstepReadyPeers[oldSid];
+            _evictPeer(oldSid, 'zombie-eviction');
           }
         }
       }
@@ -7258,7 +7325,7 @@
     setStatus(`Peer connection stalled — retrying (${nextAttempt}/${STARTUP_CONNECT_MAX_ATTEMPTS})...`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
+    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
       _syncLog(`startup retry peer ${remoteSid} connection-state: ${s}`);
@@ -7277,7 +7344,7 @@
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peerGuard = (p) => _peers[remoteSid] === p;
-    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, socket, peerGuard);
+    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.slot = remoteSlot;
     peer.ready = false;
     peer.emuReady = false;
@@ -7375,7 +7442,7 @@
     );
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    socket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
+    _signalSocket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
     armStartupConnectWatchdog(remoteSid);
   }
 
@@ -7383,29 +7450,41 @@
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
+    let key = _peerKey(senderSid);
     const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
     _syncLog(
-      `onWebRTCSignal: ${sigType} from ${senderSid}, hasPeer=${!!_peers[senderSid]}, knownPlayer=${!!_knownPlayers[senderSid]}`,
+      `onWebRTCSignal: ${sigType} from ${senderSid}${key !== senderSid ? ` (peer ${key})` : ''}, ` +
+        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}`,
     );
 
-    // Create peer on demand if offer arrives before users-updated
-    if (data.offer && !_peers[senderSid]) {
-      const known = _knownPlayers[senderSid];
-      _syncLog(`onWebRTCSignal: on-demand createPeer for ${senderSid}, slot=${known?.slot ?? 'null'}`);
-      createPeer(senderSid, known ? known.slot : null, false);
+    // A fresh offer from a player whose connection was kept across their
+    // Socket.IO reconnect means their page reloaded: that connection is a
+    // leftover. Drop it, then let the roster set them up as a new peer.
+    if (data.offer && !data.reconnect && key !== senderSid) {
+      _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
+      _evictPeer(key, 'replaced-by-new-page');
+      if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
+      key = _peerKey(senderSid);
     }
 
-    let peer = _peers[senderSid];
+    // Create peer on demand if offer arrives before users-updated
+    if (data.offer && !_peers[key]) {
+      const known = _knownPlayers[key];
+      _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
+      createPeer(key, known ? known.slot : null, false);
+    }
+
+    let peer = _peers[key];
     if (!peer) {
-      _syncLog(`onWebRTCSignal: no peer for ${senderSid}, dropping ${sigType}`);
+      _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
       return;
     }
 
     try {
       if (data.offer) {
         // Reconnect: if peer exists and reconnect flag set, replace old PC
-        if (data.reconnect && _peers[senderSid]) {
-          const existingPeer = _peers[senderSid];
+        if (data.reconnect && _peers[key]) {
+          const existingPeer = _peers[key];
           const startupReconnect = !!data.startupReconnect || _phase < PHASE_GAME_STARTED;
           _syncLog(`received ${startupReconnect ? 'startup ' : ''}reconnect offer from ${senderSid}`);
           // Mark gameplay reconnects so the DC open handler triggers resync.
@@ -7414,8 +7493,8 @@
           existingPeer.reconnecting = !startupReconnect;
           existingPeer.startupReconnecting = startupReconnect;
 
-          const peerGuard = (p) => _peers[senderSid] === p;
-          KNShared.resetPeerConnection(existingPeer, _getIceServers(), senderSid, socket, peerGuard);
+          const peerGuard = (p) => _peers[key] === p;
+          KNShared.resetPeerConnection(existingPeer, _getIceServers(), key, _signalSocket, peerGuard);
           existingPeer.ready = false;
           existingPeer.emuReady = false;
 
@@ -7436,14 +7515,14 @@
               clearTimeout(_reconnectTimer);
             }
           };
-          installPeerDataChannelHandlers(senderSid, existingPeer);
+          installPeerDataChannelHandlers(key, existingPeer);
 
           peer = existingPeer;
         }
 
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
+        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key);
       } else if (data.answer) {
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
@@ -8627,7 +8706,7 @@
     setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
 
     const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, socket, peerGuard);
+    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
     peer.ready = false;
 
     const retryOrGiveUp = () => {
@@ -8696,7 +8775,7 @@
     try {
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', {
+      _signalSocket.emit('webrtc-signal', {
         target: remoteSid,
         offer: peer.pc.localDescription,
         reconnect: true,
@@ -10208,7 +10287,7 @@
   }
 
   const handleLateJoinState = async (msg) => {
-    if (msg.targetSid && msg.targetSid !== socket.id) return;
+    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     if (_isSpectator) return;
     if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
     // Reject duplicate state packets while a load is in-flight: the body
@@ -10569,7 +10648,7 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     try {
-      await KNShared.createAndSendOffer(peer.pc, socket, remoteSid);
+      await KNShared.createAndSendOffer(peer.pc, _signalSocket, remoteSid);
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
     }
