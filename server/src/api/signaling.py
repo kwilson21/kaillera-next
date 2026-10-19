@@ -1755,16 +1755,15 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
 
     if not payload.matchId or payload.matchId != room.match_id:
         return None
-    # The live match is registered here too (no-op after the first time), so
-    # matches started before a deploy or whose start-game registration failed
-    # still accept HTTP-fallback uploads.
-    try:
-        await db.register_match(payload.matchId, session_id)
-    except Exception as exc:
-        log.warning("Match %s not registered from a log flush: %s", payload.matchId[:8], exc)
+    _register_match_soon(payload.matchId, session_id)
 
     pid_to_slot = {pid: s for s, pid in room.slots.items()}
     slot = pid_to_slot.get(player_id)
+    # Turned away before sanitizing: the client resends unacked entries.
+    # Nothing awaits between here and append_session_log taking its place, so
+    # a burst can't pile up past this check holding decoded flushes.
+    if db.session_log_busy(payload.matchId, slot):
+        return None
 
     _SUMMARY_MAX = 4096
     summary_clean = _sanitize_log_blob(payload.summary if isinstance(payload.summary, dict) else {})
@@ -1791,7 +1790,35 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "ip_hash": ip_hash_for_sid(sid),
         }
     )
+    if last_seq is None:
+        return None
     return {"lastSeq": last_seq}
+
+
+# Log-flush match registrations in flight, one per match (see _register_match_soon).
+_registering: dict[str, asyncio.Task] = {}
+
+
+def _register_match_soon(match_id: str, session_id: str) -> None:
+    """Register the live match from a log flush (no-op after the first time),
+    so matches started before a deploy or whose start-game registration failed
+    still accept HTTP-fallback uploads.
+
+    Runs in the background: the first flushes after a restart would otherwise
+    wait on D1 holding their decoded payloads, outside append_session_log's cap.
+    """
+    if match_id in _registering:
+        return
+
+    async def register() -> None:
+        try:
+            await db.register_match(match_id, session_id)
+        except Exception as exc:
+            log.warning("Match %s not registered from a log flush: %s", match_id[:8], exc)
+        finally:
+            _registering.pop(match_id, None)
+
+    _registering[match_id] = asyncio.create_task(register())
 
 
 @sio.event

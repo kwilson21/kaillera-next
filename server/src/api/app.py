@@ -1079,6 +1079,9 @@ def create_app(lifespan=None) -> FastAPI:
         live = rooms.get(room_id)
         if not (live and live.match_id == match_id) and not await db.match_accepts_uploads(match_id, room_id):
             raise HTTPException(status_code=403, detail="Unknown or closed match")
+        # Turned away before sanitizing; the client resends unacked entries.
+        if db.session_log_busy(match_id, slot):
+            raise HTTPException(status_code=429, detail="Session log busy")
         player_name = str(data.get("playerName", ""))[:32]
         mode = str(data.get("mode", ""))[:16]
         epoch = str(data.get("epoch", ""))[:64]
@@ -1110,6 +1113,8 @@ def create_app(lifespan=None) -> FastAPI:
                 "ip_hash": hashed_ip,
             }
         )
+        if last_seq is None:
+            raise HTTPException(status_code=429, detail="Session log busy")
         log.info("Session log (HTTP fallback): match=%s room=%s slot=%s", match_id[:8], room_id, slot)
         return {"status": "saved", "lastSeq": last_seq}
 
