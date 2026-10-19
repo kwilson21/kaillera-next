@@ -595,3 +595,9 @@ def test_static_preview_block_is_replaced_not_duplicated(client, sig):
         html = client.get(path).text
         assert html.count('property="og:title"') == 1, path
         assert "__KN_HOST__" not in html and "og:static" not in html, path
+
+
+def test_admin_redirects_to_the_dashboard(client):
+    for path in ("/admin", "/admin/"):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/admin.html"
