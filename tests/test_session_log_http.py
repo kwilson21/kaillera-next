@@ -1,4 +1,5 @@
-"""POST /api/session-log (the HTTP fallback) only accepts registered, open matches.
+"""POST /api/session-log (the HTTP fallback) only accepts registered, open matches;
+GET /admin/api/input-audit diffs the input history those logs carry.
 
 Run: cd server && uv run --extra dev pytest ../tests/test_session_log_http.py -q
 """
@@ -85,3 +86,89 @@ def test_live_match_in_this_room_is_accepted_without_a_db_check(client, monkeypa
     r = _post(http, BODY)
     assert r.status_code == 200
     accepts.assert_not_awaited()
+
+
+# ── GET /admin/api/input-audit/{match_id} ─────────────────────────────────────
+
+
+@pytest.fixture
+def audit_client(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import src.db as db
+    from src.api import app as appmod
+
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
+    monkeypatch.setenv("ADMIN_KEY", "k")
+    query = AsyncMock()
+    monkeypatch.setattr(db, "query", query)
+    return TestClient(appmod.create_app()), query
+
+
+def _rec(f, b=0, lx=0):
+    return {"f": f, "b": b, "lx": lx, "ly": 0, "cx": 0, "cy": 0}
+
+
+# Host (slot 0) input changes, as the host recorded them.
+HOST_LOCAL = [_rec(0), _rec(104, lx=-70), _rec(120), _rec(130, b=16), _rec(140)]
+# Guest (slot 1) changes; the host received them in order.
+GUEST_LOCAL = [_rec(0), _rec(200, b=1), _rec(210)]
+
+
+def _audit(query, host_remote_of_guest, guest_remote_of_host):
+    import json
+
+    query.return_value = [
+        {
+            "slot": 0,
+            "player_name": "host",
+            "context": json.dumps({"inputAudit": {"local": HOST_LOCAL, "remote": {"1": host_remote_of_guest}}}),
+        },
+        {
+            "slot": 1,
+            "player_name": "guest",
+            "context": json.dumps({"inputAudit": {"local": GUEST_LOCAL, "remote": {"0": guest_remote_of_host}}}),
+        },
+    ]
+
+
+def _diff(http, sender, receiver):
+    r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    return next(d for d in r.json()["diffs"] if d["sender_slot"] == sender and d["receiver_slot"] == receiver)
+
+
+def test_input_audit_ignores_a_late_arriving_packet(audit_client):
+    """The guest got frame 103's packet after 104's, so its arrival-order
+    stream has a stale change back to lx 0 and then lx -70 again. The inputs
+    applied were the same; the verdict must say so."""
+    http, query = audit_client
+    late = [_rec(0), _rec(104, lx=-70), _rec(103), _rec(105, lx=-70), _rec(120), _rec(130, b=16), _rec(140)]
+    _audit(query, GUEST_LOCAL, late)
+    d = _diff(http, 0, 1)
+    assert d["verdict"] == "IDENTICAL"
+    assert d["sender_entries"] == d["receiver_entries"] == d["compared"] == len(HOST_LOCAL)
+    assert d["first_mismatches"] == []
+    assert _diff(http, 1, 0)["verdict"] == "IDENTICAL"
+
+
+def test_input_audit_still_reports_a_different_input(audit_client):
+    """Normalizing arrival order must not hide an input that really differs,
+    even when a late packet is also in the stream."""
+    http, query = audit_client
+    wrong = [_rec(0), _rec(104, lx=-70), _rec(103), _rec(105, lx=-70), _rec(120), _rec(130, b=32), _rec(140)]
+    _audit(query, GUEST_LOCAL, wrong)
+    d = _diff(http, 0, 1)
+    assert d["verdict"] == "MISMATCH"
+    assert d["mismatch_count"] == 1
+    m = d["first_mismatches"][0]
+    assert m["index"] == 3 and m["sender"]["b"] == 16 and m["receiver"]["b"] == 32
+    assert _diff(http, 1, 0)["verdict"] == "IDENTICAL"
+
+
+def test_input_audit_reports_a_missing_tail_as_partial(audit_client):
+    http, query = audit_client
+    _audit(query, GUEST_LOCAL, HOST_LOCAL[:3])
+    d = _diff(http, 0, 1)
+    assert d["verdict"] == "PARTIAL"
+    assert (d["sender_entries"], d["receiver_entries"], d["compared"]) == (5, 3, 3)

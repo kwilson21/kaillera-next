@@ -1574,9 +1574,10 @@ def create_app(lifespan=None) -> FastAPI:
     # "local" = inputs this peer generated. "remote" = inputs this peer
     # received from each other peer. For a 2-player match, peer 0's local
     # should equal peer 1's remote[0], and peer 1's local should equal
-    # peer 0's remote[1]. If they don't match, the input protocol is
-    # dropping or reordering packets — the emulator determinism hypothesis
-    # is wrong.
+    # peer 0's remote[1]. Both streams are normalized first (see
+    # normalize below), so arrival order doesn't count; if they still
+    # don't match, the input protocol is dropping or corrupting inputs —
+    # the emulator determinism hypothesis is wrong.
     @app.get("/admin/api/input-audit/{match_id}")
     async def admin_input_audit(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.query(
@@ -1610,16 +1611,35 @@ def create_app(lifespan=None) -> FastAPI:
                 and a.get("cy") == b.get("cy")
             )
 
+        def normalize(entries):
+            # Receivers record remote inputs in arrival order, deduped only
+            # against the last recorded value. Inputs also ride the unordered
+            # rollback-input DC, so one late packet adds a stale "change"
+            # back to the older value and then the newer one again, shifting
+            # every later index. Sort by frame (stable) and drop records that
+            # repeat the previous value: one record per real change. The
+            # sender's stream goes through the same step.
+            ordered = sorted(
+                (e for e in entries if isinstance(e, dict)),
+                key=lambda e: e["f"] if isinstance(e.get("f"), int) else -1,
+            )
+            out = []
+            for e in ordered:
+                if out and all(out[-1].get(k) == e.get(k) for k in ("b", "lx", "ly", "cx", "cy")):
+                    continue
+                out.append(e)
+            return out
+
         diffs = []
         for sender_slot, sender in peers.items():
             sender_audit = sender.get("audit") or {}
-            sender_local = sender_audit.get("local") or []
+            sender_local = normalize(sender_audit.get("local") or [])
             for receiver_slot, receiver in peers.items():
                 if receiver_slot == sender_slot:
                     continue
                 receiver_audit = receiver.get("audit") or {}
                 remote_map = receiver_audit.get("remote") or {}
-                receiver_remote = remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or []
+                receiver_remote = normalize(remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or [])
                 min_len = min(len(sender_local), len(receiver_remote))
                 mismatches = []
                 for i in range(min_len):
