@@ -704,6 +704,13 @@ def create_app(lifespan=None) -> FastAPI:
     async def favicon_redirect() -> RedirectResponse:
         return RedirectResponse(url="/static/favicon.svg", status_code=302)
 
+    # The static mount only maps directories to index.html, so the dashboard
+    # is otherwise reachable only as /admin.html.
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/", include_in_schema=False)
+    async def admin_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/admin.html", status_code=302)
+
     @app.get("/health")
     async def health() -> dict:
         redis_ok = await state.ping()
