@@ -1765,6 +1765,9 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
 
     pid_to_slot = {pid: s for s, pid in room.slots.items()}
     slot = pid_to_slot.get(player_id)
+    # Turned away before sanitizing: the client resends unacked entries.
+    if db.session_log_busy(payload.matchId, slot):
+        return None
 
     _SUMMARY_MAX = 4096
     summary_clean = _sanitize_log_blob(payload.summary if isinstance(payload.summary, dict) else {})
@@ -1791,6 +1794,8 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "ip_hash": ip_hash_for_sid(sid),
         }
     )
+    if last_seq is None:
+        return None
     return {"lastSeq": last_seq}
 
 

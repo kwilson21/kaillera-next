@@ -5851,6 +5851,27 @@
       text.includes('STUCK')
     );
   };
+  // Critical lines flush at most once per CRITICAL_FLUSH_MIN_MS, the rest
+  // coalescing into one trailing flush. One drifting RB-CHECK logs several in a
+  // row (STATE-DRIFT, GP-DRIFT, GP-DUMP, RB-REGION-DIFF), each flush carries
+  // the whole input audit (megabytes late in a match), and flushing per line
+  // ran the server out of memory.
+  const CRITICAL_FLUSH_MIN_MS = 3000;
+  let _lastCriticalFlushAt = -Infinity;
+  let _criticalFlushTimer = null;
+  const _flushSyncLogCritical = () => {
+    if (_criticalFlushTimer) return;
+    const flush = () => {
+      _criticalFlushTimer = null;
+      _lastCriticalFlushAt = performance.now();
+      try {
+        _flushSyncLog();
+      } catch (_) {}
+    };
+    const wait = _lastCriticalFlushAt + CRITICAL_FLUSH_MIN_MS - performance.now();
+    if (wait <= 0) flush();
+    else _criticalFlushTimer = setTimeout(flush, wait);
+  };
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     if (_knVerboseSyncConsole || _isConsoleCriticalSyncLog(msg)) {
@@ -5869,10 +5890,12 @@
       msg.includes('reconnect') ||
       msg.includes('RECOVERY') ||
       msg.includes('STUCK');
-    if (critical || (_isLocalDev && _knLiveFlush)) {
+    if (_isLocalDev && _knLiveFlush) {
       try {
         _flushSyncLog();
       } catch (_) {}
+    } else if (critical) {
+      _flushSyncLogCritical();
     }
   };
   window._knSyncLog = _syncLog;
@@ -17552,6 +17575,9 @@
     // Before the final log flush, so its log line reaches the server.
     _clearHostInitialStateWait();
     _restoreLocalSaveFile();
+    // The final flush covers anything a pending critical flush would send.
+    clearTimeout(_criticalFlushTimer);
+    _criticalFlushTimer = null;
     _flushSyncLog();
     _resetInputAudit();
     _cachedMatchId = null;
