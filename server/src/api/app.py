@@ -1580,8 +1580,11 @@ def create_app(lifespan=None) -> FastAPI:
     # "local" = inputs this peer generated. "remote" = inputs this peer
     # received from each other peer. For a 2-player match, peer 0's local
     # should equal peer 1's remote[0], and peer 1's local should equal
-    # peer 0's remote[1]. If they don't match, the input protocol is
-    # dropping or reordering packets — the emulator determinism hypothesis
+    # peer 0's remote[1]. Both streams are normalized first (see
+    # normalize below) and each received change may land anywhere in the
+    # sender's run of that value (see the diff loop), so arrival order
+    # doesn't count; if they still don't match, the input protocol is
+    # dropping or corrupting inputs — the emulator determinism hypothesis
     # is wrong.
     def _audit_from_records(records: list) -> dict | None:
         """The {local, remote} audit shape from streamed records (s='L' or a slot)."""
@@ -1623,50 +1626,71 @@ def create_app(lifespan=None) -> FastAPI:
                 "audit": audit,
             }
 
+        value_keys = ("b", "lx", "ly", "cx", "cy")
+
         def frame_of(e):
             # Records come from clients: a non-integer frame counts as 0.
             f = e.get("f")
             return f if isinstance(f, int) else 0
 
-        def inputs_eq(a, b):
-            return (
-                a.get("f") == b.get("f")
-                and a.get("b") == b.get("b")
-                and a.get("lx") == b.get("lx")
-                and a.get("ly") == b.get("ly")
-                and a.get("cx") == b.get("cx")
-                and a.get("cy") == b.get("cy")
-            )
+        def normalize(entries):
+            # Receivers record remote inputs in arrival order, deduped only
+            # against the last recorded value. Inputs also ride the unordered
+            # rollback-input DC, so one late packet adds a stale "change"
+            # back to the older value and then the newer one again, shifting
+            # every later index. Sort by frame (stable) and drop records that
+            # repeat the previous value: one record per real change. The
+            # sender's stream goes through the same step.
+            ordered = sorted((e for e in entries if isinstance(e, dict)), key=frame_of)
+            out = []
+            for e in ordered:
+                if out and all(out[-1].get(k) == e.get(k) for k in value_keys):
+                    continue
+                out.append(e)
+            return out
 
         diffs = []
         for sender_slot, sender in peers.items():
             sender_audit = sender.get("audit") or {}
-            sender_local = sender_audit.get("local") or []
+            sender_local = normalize(sender_audit.get("local") or [])
             for receiver_slot, receiver in peers.items():
                 if receiver_slot == sender_slot:
                     continue
                 receiver_audit = receiver.get("audit") or {}
                 remote_map = receiver_audit.get("remote") or {}
-                receiver_remote = remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or []
+                receiver_remote = normalize(remote_map.get(str(sender_slot)) or remote_map.get(sender_slot) or [])
                 # The server caps each peer's audit by dropping its oldest
                 # chunks, so two histories can start at different frames:
-                # compare them from the later start.
+                # compare them from the later start. The sender keeps the
+                # record in effect at that frame, so a receiver change
+                # recorded past the sender's change frame still has its run.
                 from_frame = max((frame_of(h[0]) for h in (sender_local, receiver_remote) if h), default=0)
-                sender_cmp = [e for e in sender_local if frame_of(e) >= from_frame]
+                run_start = max((frame_of(e) for e in sender_local if frame_of(e) <= from_frame), default=from_frame)
+                sender_cmp = [e for e in sender_local if frame_of(e) >= run_start]
                 receiver_cmp = [e for e in receiver_remote if frame_of(e) >= from_frame]
                 min_len = min(len(sender_cmp), len(receiver_cmp))
                 mismatches = []
+                late_matches = 0
                 for i in range(min_len):
-                    if not inputs_eq(sender_cmp[i], receiver_cmp[i]):
-                        mismatches.append(
-                            {
-                                "index": i,
-                                "sender": sender_cmp[i],
-                                "receiver": receiver_cmp[i],
-                            }
-                        )
-                        if len(mismatches) >= 20:
-                            break
+                    sent, got = sender_cmp[i], receiver_cmp[i]
+                    # Values must match exactly; the frame may land anywhere
+                    # in the sender's run of that value, from its change
+                    # frame up to the next change. When the change frame's
+                    # packet arrives after a later one with the same value,
+                    # the client drops it as a repeat and records the later
+                    # frame, though the input applied was the sender's. A
+                    # change that really reached the receiver late (old value
+                    # still at the change frame) leaves the same records, so
+                    # matches past the change frame are counted, not hidden.
+                    run_end = frame_of(sender_cmp[i + 1]) if i + 1 < len(sender_cmp) else None
+                    in_run = frame_of(sent) <= frame_of(got) and (run_end is None or frame_of(got) < run_end)
+                    if in_run and all(sent.get(k) == got.get(k) for k in value_keys):
+                        if frame_of(got) > frame_of(sent):
+                            late_matches += 1
+                        continue
+                    mismatches.append({"index": i, "sender": sent, "receiver": got})
+                    if len(mismatches) >= 20:
+                        break
                 verdict = "IDENTICAL"
                 if mismatches:
                     verdict = "MISMATCH"
@@ -1681,6 +1705,7 @@ def create_app(lifespan=None) -> FastAPI:
                         "from_frame": from_frame,
                         "compared": min_len,
                         "mismatch_count": len(mismatches),
+                        "late_matches": late_matches,
                         "first_mismatches": mismatches[:20],
                         "verdict": verdict,
                     }
