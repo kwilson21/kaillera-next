@@ -290,7 +290,8 @@ def test_lockstep_stop_pauses_main_loop_before_restoring_raf():
 
     stop_idx = source.find("const stopSync = () => {")
     assert stop_idx != -1
-    stop_window = source[stop_idx : stop_idx + 7000]
+    # The whole stopSync() body: a fixed-size window broke as the function grew.
+    stop_window = source[stop_idx : source.find("\n  };", stop_idx)]
 
     pause_idx = stop_window.find("paused EJS main loop before restoring native rAF")
     restore_idx = stop_window.find("APISandbox.restoreAll()")

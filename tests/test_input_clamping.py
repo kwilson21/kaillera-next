@@ -136,7 +136,9 @@ def test_lockstep_input_audit_resets_between_matches_and_flush_sends_unacked_rec
 
     stop_idx = source.find("const stop = () => {")
     assert stop_idx != -1
-    stop_window = source[stop_idx : stop_idx + 300]
+    # The whole stop() body: a fixed-size window broke when lines were added
+    # ahead of the final flush.
+    stop_window = source[stop_idx : source.find("\n  };", stop_idx)]
     flush_idx = stop_window.find("_flushSyncLog();")
     stop_reset_idx = stop_window.find("_resetInputAudit();")
     assert flush_idx != -1
