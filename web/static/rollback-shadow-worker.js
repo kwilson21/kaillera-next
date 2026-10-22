@@ -1,8 +1,12 @@
-// Experimental rollback presentation worker.
+// Experimental rollback shadow worker.
 //
 // This worker owns an OffscreenCanvas overlay and runs a second mupen64plus
-// instance strictly forward. The authoritative emulator never reads from this
-// worker; it is presentation-only and may be killed at any time.
+// instance strictly forward. In Mode 1 (default) the authoritative emulator
+// never reads from it — presentation-only, may be killed at any time. In
+// Mode 2 (?workerCoproc=1 / ?rollbackMode=2) it also acts as a replay
+// coprocessor: main hands mispredicted replays to it and adopts the
+// corrected state via kn_apply_split_state_partial_with_aux (see
+// netplay-rollback.js's "Worker-as-replay-coprocessor" section).
 (() => {
   'use strict';
 

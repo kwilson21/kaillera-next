@@ -175,7 +175,7 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
       app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
       payloads.py      Pydantic v2 payload models + @validated decorator
-      og.py            Open Graph image generation (Playwright HTML screenshots)
+      og.py            Open Graph meta-tag injection + build-time-rendered OG cards (no runtime browser)
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
   play.html            Game page — overlay, EmulatorJS embed, toolbar
@@ -187,6 +187,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     join.js            Invite-page controller (room lookup, join/watch states)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
+    rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
@@ -197,7 +198,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
     kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
-    kn-vision-client.js    Claude / GPT-4o vision client for screenshot-diff desync analysis
+    kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
@@ -207,7 +208,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     version.js             Version display + changelog modal
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    socket.io.min.js       Self-hosted Socket.IO client (v4.8.3)
+    socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)
@@ -270,16 +271,25 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | — | Redis password |
 | `ADMIN_KEY` | — | Admin API key for management endpoints |
-| `LOG_RETENTION_DAYS` | `14` | Auto-delete old session data after N days |
+| `LOG_RETENTION_DAYS` | `7` | Auto-delete old session data after N days |
+| `FLAGGED_STALE_DAYS` | `180` | Auto-delete unresolved flagged matches after N days |
 | `DB_PATH` | `data/kn.db` | SQLite database file path |
+| `D1_DATABASE_ID`, `D1_API_TOKEN`, `CF_ACCOUNT_ID` | — | Switch to the Cloudflare D1 backend instead of SQLite |
 | `IP_HASH_SALT` | random | Salt for IP address hashing (random per restart if unset) |
+| `KN_PROXY_SECRET` | — | Shared secret trusting the landing Worker's forwarded client IP |
+| `PUBLIC_ORIGINS` | — | Extra origins allowed to read `/health`, `/list`, `/room/*`, `/api/stats/public` |
 | `TRUSTED_PROXY_IPS` | — | Comma-separated trusted proxy IPs for X-Forwarded-For |
 | `TURN_SECRET` | — | HMAC secret for time-limited TURN credentials |
 | `TURN_SERVERS` | — | Comma-separated TURN server URLs |
 | `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
+| `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
+| `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
+| `ROM_SHARING_ENABLED` | `true` | Enable host ROM P2P sharing |
+| `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
+| `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
 | `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
-| `DEBUG_MODE` | — | Enable debug endpoints and local log files |
+| `DEBUG_MODE` | — | Enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset |
 | `GIT_VERSION` | — | Override version string (set automatically in Docker) |
 
 ## REST endpoints
@@ -298,6 +308,10 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `POST /api/client-event` | Client event logging |
 | `POST /api/feedback` | Feedback submission |
 | `GET /api/rom-hashes` | Known ROM hashes |
+| `GET /api/core-info` | Content-hashed WASM core build info |
+| `GET /api/version` | Static asset version |
+| `GET /api/landing-build` | Content-hash build id shared with the landing Worker |
+| `GET /api/stats/public` | Matches-started-this-week counter for the front page |
 | `GET /room/{room_id}/card.jpg` | Invite card image (room name + live frame) for social sharing |
 | `GET /room/{room_id}/frame.jpg` | Latest board frame for a listed, in-game room |
 
@@ -314,6 +328,12 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /admin/api/feedback/{feedback_id}` | Feedback detail |
 | `GET /admin/api/screenshots/{match_id}` | List screenshots for a match |
 | `GET /admin/api/screenshots/img/{screenshot_id}` | Serve screenshot image |
+| `GET /admin/api/session-logs/{log_id}/export` | Stream a session log's entries as newline-delimited JSON |
+| `GET /admin/api/matches` | List recently-rotated matches with precomputed metrics |
+| `GET /admin/api/matches/{match_id}` | One match's precomputed metrics row |
+| `GET /admin/api/input-audit/{match_id}` | Per-slot input audit for a match |
+| `GET /admin/api/session-timeline` | Session timeline; requires `match_id` or `room` query parameter |
+| `GET /admin/api/desync-events` | List vision-validated desync events; requires `match_id` query parameter |
 
 ## Current status
 
