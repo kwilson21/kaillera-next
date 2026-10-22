@@ -300,11 +300,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude/GPT-4o
   desync-vision endpoint
 - `PER_IP_SPECTATOR_CAP` (default 3): max spectator slots one IP can hold in a room
-- `ROM_SHARING_ENABLED` (default `true`), `GAME_IMAGES_ENABLED` (default `true`):
-  toggle host ROM P2P sharing and OG-card game images, respectively
+- `ROM_SHARING_ENABLED` (default `true`): toggle host ROM P2P sharing
+- `GAME_IMAGES_ENABLED` (default `true`): read into `og.py`'s `_GAME_IMAGES_RAW`
+  but not currently wired to anything — OG-card game images are always on
 - `LOG_RETENTION_DAYS` (default 7): how long a normal (non-flagged) match's
   session logs are kept before the retention sweep deletes them
 - `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
   logs are kept before the retention sweep deletes them
-- `DEBUG_MODE`: enables the `debug-sync`/`debug-logs` upload endpoints and local log files
+- `DEBUG_MODE`: enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset
 - `.env` file supported via python-dotenv

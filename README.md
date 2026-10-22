@@ -285,11 +285,11 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
 | `ROM_SHARING_ENABLED` | `true` | Enable host ROM P2P sharing |
-| `GAME_IMAGES_ENABLED` | `true` | Enable OG-card game images |
+| `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
 | `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude/GPT-4o desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
 | `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
-| `DEBUG_MODE` | — | Enable debug endpoints and local log files |
+| `DEBUG_MODE` | — | Enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset |
 | `GIT_VERSION` | — | Override version string (set automatically in Docker) |
 
 ## REST endpoints
@@ -332,8 +332,8 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /admin/api/matches` | List recently-rotated matches with precomputed metrics |
 | `GET /admin/api/matches/{match_id}` | One match's precomputed metrics row |
 | `GET /admin/api/input-audit/{match_id}` | Per-slot input audit for a match |
-| `GET /admin/api/session-timeline` | Session timeline for a match or room |
-| `GET /admin/api/desync-events` | List vision-validated desync events for a match |
+| `GET /admin/api/session-timeline` | Session timeline; requires `match_id` or `room` query parameter |
+| `GET /admin/api/desync-events` | List vision-validated desync events; requires `match_id` query parameter |
 
 ## Current status
 
