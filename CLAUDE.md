@@ -70,7 +70,7 @@ kaillera-next/
 │           ├── turn.py      # Cloudflare Realtime TURN credentials for /ice-servers
 │           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
 │           ├── payloads.py  # Pydantic v2 payload models for Socket.IO validation
-│           ├── desync_vision.py  # Claude/GPT-4o vision endpoint for screenshot diff
+│           ├── desync_vision.py  # Claude vision endpoint for screenshot diff
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
 │   ├── index.html           # front page: open-rooms board, create/join (static, no framework)
@@ -86,7 +86,7 @@ kaillera-next/
 │       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
-│       ├── rollback-shadow-worker.js # experimental presentation-only shadow worker used by netplay-rollback.js
+│       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
 │       ├── shared.js            # input encoding/decoding, cheats, wire format
@@ -98,7 +98,7 @@ kaillera-next/
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-desync-detector.js # field-granular cross-peer desync detection
 │       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
-│       ├── kn-vision-client.js  # Claude/GPT-4o vision API client for screenshot diff
+│       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
 │       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
@@ -297,7 +297,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `ADMIN_KEY`: required to use the admin dashboard/API
 - `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN`: Cloudflare Realtime TURN credentials for
   `/ice-servers`
-- `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude/GPT-4o
+- `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude
   desync-vision endpoint
 - `PER_IP_SPECTATOR_CAP` (default 3): max spectator slots one IP can hold in a room
 - `ROM_SHARING_ENABLED` (default `true`): toggle host ROM P2P sharing

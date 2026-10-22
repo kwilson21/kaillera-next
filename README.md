@@ -187,7 +187,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     join.js            Invite-page controller (room lookup, join/watch states)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
-    rollback-shadow-worker.js  Experimental presentation-only shadow worker used by netplay-rollback.js
+    rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
@@ -198,7 +198,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
     kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
-    kn-vision-client.js    Claude / GPT-4o vision client for screenshot-diff desync analysis
+    kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
@@ -286,7 +286,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
 | `ROM_SHARING_ENABLED` | `true` | Enable host ROM P2P sharing |
 | `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
-| `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude/GPT-4o desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
+| `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
 | `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
 | `DEBUG_MODE` | — | Enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset |

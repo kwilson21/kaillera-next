@@ -165,7 +165,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 |---|---|---|---|
 | `play.js` | ~5,820 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
 | `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
-| `rollback-shadow-worker.js` | — | Experimental presentation-only shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance) | netplay-rollback.js |
+| `rollback-shadow-worker.js` | — | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2 | netplay-rollback.js |
 | `netplay-lockstep.js` | ~52 | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none) |
 | `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
 | `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
@@ -176,7 +176,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
-| `kn-vision-client.js` | — | Claude / GPT-4o vision client for screenshot-diff desync analysis | rollback |
+| `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
