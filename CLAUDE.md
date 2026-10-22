@@ -86,6 +86,7 @@ kaillera-next/
 │       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
+│       ├── rollback-shadow-worker.js # experimental presentation-only shadow worker used by netplay-rollback.js
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
 │       ├── shared.js            # input encoding/decoding, cheats, wire format
@@ -101,6 +102,7 @@ kaillera-next/
 │       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
+│       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
@@ -297,4 +299,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   `/ice-servers`
 - `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude/GPT-4o
   desync-vision endpoint
+- `PER_IP_SPECTATOR_CAP` (default 3): max spectator slots one IP can hold in a room
+- `ROM_SHARING_ENABLED` (default `true`), `GAME_IMAGES_ENABLED` (default `true`):
+  toggle host ROM P2P sharing and OG-card game images, respectively
+- `LOG_RETENTION_DAYS` (default 7): how long a normal (non-flagged) match's
+  session logs are kept before the retention sweep deletes them
+- `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
+  logs are kept before the retention sweep deletes them
+- `DEBUG_MODE`: enables the `debug-sync`/`debug-logs` upload endpoints and local log files
 - `.env` file supported via python-dotenv
