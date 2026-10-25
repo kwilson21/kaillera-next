@@ -29,7 +29,8 @@ const env = {
     fetch: async (req) => {
       const p = new URL(req.url).pathname;
       const og = p === '/join.html' ? ' <meta property="og:url" content="https://__KN_HOST__/join" />' : '';
-      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' + og : ''), { status: 200 });
+      const canonical = p === '/index.html' ? '<link rel="canonical" href="https://__KN_HOST__/" />' : '';
+      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' + og + canonical : ''), { status: 200 });
     },
   },
 };
@@ -53,6 +54,9 @@ const ctx = { waitUntil: (p) => waits.push(p) };
 const cases = [
   ['/', 'GET', ''],
   ['/index.html', 'GET', ''],
+  ['/robots.txt', 'GET', ''],
+  ['/sitemap.xml', 'GET', ''],
+  ['/robots.txt', 'HEAD', ''],
   ['/join?room=ABC', 'GET', ''],
   ['/join?room=ABC', 'GET', 'Discordbot/2.0'],
   ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
@@ -85,6 +89,7 @@ for (const [path, method, ua] of cases) {
     body: await res.text(),
     csp: res.headers.get('Content-Security-Policy'),
     cache: res.headers.get('Cache-Control'),
+    contentType: res.headers.get('Content-Type'),
   });
 }
 await Promise.all(waits);
@@ -120,6 +125,7 @@ def test_pages_and_their_files_come_from_assets():
         assert r[(page, "GET", "")]["cache"] == "no-store"
         # The static preview tags get the public host.
         assert " og=https://kn.example/og" in _body(r, page)
+    assert '<link rel="canonical" href="https://kn.example/" />' in _body(r, "/")
     assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
     assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
@@ -133,6 +139,21 @@ def test_version_and_changelog_prefer_origin_and_fall_back_to_assets():
     down = _run(origin_up=False)
     assert _body(down, "/static/version.json") == "asset:/static/version.json"
     assert _body(down, "/static/changelog.json") == "asset:/static/changelog.json"
+
+
+def test_robots_and_sitemap_are_deliberate_static_metadata():
+    r = _run(origin_up=False)
+    robots = _body(r, "/robots.txt")
+    assert r[("/robots.txt", "GET", "")]["contentType"] == "text/plain; charset=utf-8"
+    assert "Allow: /" in robots
+    assert "Disallow: /join" in robots and "Disallow: /play.html" in robots
+    assert "Disallow: /room/" in robots and "Disallow: /api/" in robots
+    assert "Sitemap: https://kaillera-next.thesuperhuman.us/sitemap.xml" in robots
+    sitemap = _body(r, "/sitemap.xml")
+    assert r[("/sitemap.xml", "GET", "")]["contentType"] == "application/xml; charset=utf-8"
+    assert "<loc>https://kaillera-next.thesuperhuman.us/</loc>" in sitemap
+    assert "/join" not in sitemap and "/play.html" not in sitemap
+    assert _body(r, "/robots.txt", "HEAD") == ""
 
 
 def test_everything_else_goes_to_the_game_server_untouched():
@@ -651,7 +672,10 @@ globalThis.fetch = async (req, init) => {
       headers: { 'Content-Type': 'application/json' },
     });
   }
-  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+  const body = scenario === 'stale' && new URL(url).pathname === '/'
+    ? '<link rel="canonical" href="https://__KN_HOST__/" />'
+    : 'origin-page';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/html' } });
 };
 
 const env = { ORIGIN: 'https://game.example', ASSETS: assets };
@@ -707,7 +731,7 @@ def test_freshness_fresh_keeps_serving_assets():
 
 def test_freshness_stale_proxies_pages_and_landing_assets():
     out = _run_freshness("stale")
-    assert out["secondPage"] == "origin-page"
+    assert out["secondPage"] == '<link rel="canonical" href="https://kn.example/" />'
     assert out["secondAsset"] == "origin-page"
 
 

@@ -33,6 +33,8 @@
 // but deliberately excluded from the landing build id because CI rewrites
 // them on nearly every merge (server/src/landing_build.py has the reason).
 const PAGES = { '/': '/index.html', '/index.html': '/index.html', '/join': '/join.html' };
+const ROBOTS = 'User-agent: *\nAllow: /\nDisallow: /join\nDisallow: /play.html\nDisallow: /demo.html\nDisallow: /room/\nDisallow: /api/\nDisallow: /admin/\nDisallow: /socket.io/\nDisallow: /list\nDisallow: /health\nDisallow: /ice-servers\nSitemap: https://kaillera-next.thesuperhuman.us/sitemap.xml\n';
+const SITEMAP = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://kaillera-next.thesuperhuman.us/</loc></url></urlset>\n';
 const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',
@@ -75,6 +77,17 @@ function withHeaders(res, isPage) {
     out.headers.set('Cache-Control', 'no-cache'); // revalidate: same files the game server would send
   }
   return out;
+}
+
+function metadataResponse(request, body, contentType) {
+  return new Response(request.method === 'HEAD' ? null : body, {
+    status: 200,
+    headers: {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=3600',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 }
 
 // The static pages carry generic preview tags with a host placeholder. On
@@ -179,7 +192,9 @@ async function rewriteOriginHost(res, env, url, method) {
   const contentType = res.headers.get('Content-Type') || '';
   if (!contentType.toLowerCase().includes('text/html')) return res;
   const originHost = new URL(env.ORIGIN).host;
-  const html = (await res.text()).replaceAll(`https://${originHost}`, `https://${url.host}`);
+  const html = (await res.text())
+    .replaceAll('https://__KN_HOST__', `https://${url.host}`)
+    .replaceAll(`https://${originHost}`, `https://${url.host}`);
   const out = new Response(html, res);
   out.headers.delete('Content-Length'); // length changed (and may not have been set at all)
   return out;
@@ -368,6 +383,10 @@ async function currentVerdict(env, ctx, isPageRequest) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      if (url.pathname === '/robots.txt') return metadataResponse(request, ROBOTS, 'text/plain; charset=utf-8');
+      if (url.pathname === '/sitemap.xml') return metadataResponse(request, SITEMAP, 'application/xml; charset=utf-8');
+    }
     const page = PAGES[url.pathname];
     const method = request.method;
     const isAsset = ASSET_FILES.has(url.pathname) || ASSET_PREFIXES.some((p) => url.pathname.startsWith(p));
@@ -408,4 +427,4 @@ export default {
   },
 };
 
-export { PAGES, ASSET_FILES, CRAWLER };
+export { PAGES, ASSET_FILES, CRAWLER, ROBOTS, SITEMAP };
