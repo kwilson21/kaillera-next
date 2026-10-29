@@ -17,9 +17,9 @@ import hashlib
 import re
 from pathlib import Path
 
-# The two pages the landing Worker serves from assets, and extra files it
+# The pages the landing Worker serves from assets, and extra files it
 # needs that aren't referenced by a `src=`/`href=` in either page's HTML.
-PAGES = ["index.html", "join.html"]
+PAGES = ["index.html", "join.html", "privacy.html"]
 EXTRA = [
     "static/og/home.png",  # the generic link-preview image (og:image)
     "static/kn-logo.svg",  # reusable large logo for previews and community pages

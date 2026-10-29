@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy · kaillera-next</title>
+    <meta
+      name="description"
+      content="How kaillera-next handles gameplay images, diagnostics, feedback, and peer connections."
+    />
+    <meta name="theme-color" content="#0e1218" />
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/landing.css" />
+  </head>
+  <body>
+    <main class="hero">
+      <div class="wrap narrow">
+        <a class="brand-sm" href="/">kaillera<span class="hy">-</span>next</a>
+        <h1 class="name sm">Privacy</h1>
+        <p class="m">Last updated October 29, 2026</p>
+        <p>
+          kaillera-next uses session diagnostics to investigate connection, emulator, and synchronization problems.
+          Gameplay images are enabled by default and can be turned off. This notice explains the app's behavior and the
+          limits of its image controls.
+        </p>
+
+        <section class="sec" aria-labelledby="image-controls">
+          <h2 id="image-controls">Your gameplay-image choice</h2>
+          <p>
+            On the play page, turn off <strong>Share gameplay images for diagnostics</strong> to stop new diagnostic
+            canvas captures and image uploads from this browser. This includes periodic screenshots, images attached to
+            freeze reports, and desync-vision captures. The choice is saved in this browser when browser storage is
+            available. Opening the game with <code>screenshots=off</code> or <code>knperf=light</code> in its URL also
+            forces these captures off.
+          </p>
+          <p>
+            Images show the <strong>gameplay canvas, not your desktop</strong>. Turning images off does not turn off
+            non-image session diagnostics, change another participant's settings, or delete images already sent. It also
+            does not stop the gameplay video streams used for streaming play and spectators.
+          </p>
+          <p>
+            Public-room listing is a separate host choice: its checkbox explicitly allows the live gameplay preview on
+            the public room board and invite cards. Password-protected rooms cannot be publicly listed. Turning off
+            diagnostic images also stops new preview-frame uploads from this browser, but does not unlist the room or
+            immediately remove an existing preview. Enabling diagnostic images alone does not list a room.
+          </p>
+        </section>
+
+        <section class="sec" aria-labelledby="diagnostics">
+          <h2 id="diagnostics">What the service receives</h2>
+          <p>
+            Session diagnostics can include your nickname, room and match identifiers, player slot, browser user-agent
+            information, timing and connection statistics, gameplay-input audit records, synchronization hashes, errors,
+            and diagnostic events. The server stores salted IP-address hashes with certain records for correlation and
+            abuse prevention. A hash is not a guarantee of anonymity: records can still be associated with a nickname or
+            session. Servers necessarily receive network addresses when handling requests.
+          </p>
+          <p>
+            When gameplay images are enabled, the service can receive periodic gameplay screenshots and images for
+            freeze or desync investigation. Diagnostic records and images are available to service administrators; the
+            separately enabled public-room preview is public.
+          </p>
+          <p>
+            If you submit feedback, the service receives your category and message, an optional email address, the page
+            you are on, and automatically attached context. That context can include the page URL, browser user-agent,
+            timestamp, nickname, room or match, player slot, peer connection states, and session statistics. Feedback
+            also has a salted IP-address hash. Avoid including secrets or other information you do not want the service
+            operator to receive.
+          </p>
+        </section>
+
+        <section class="sec" aria-labelledby="connections">
+          <h2 id="connections">Peer connections and providers</h2>
+          <p>
+            Multiplayer uses WebRTC. Other participants may learn your network address as part of establishing a direct
+            connection. The browser contacts STUN services to discover connectivity; the default list includes
+            Cloudflare and Google. If configured and needed, TURN services relay the connection. Those providers receive
+            network-connection information, including IP addresses. The operator may configure different STUN or TURN
+            services. Disabling gameplay images does not disable these connections.
+          </p>
+          <p>
+            The app includes optional Anthropic Claude image analysis for desync investigations. The server sends
+            selected gameplay images with diagnostic prompts and player-slot labels to Anthropic only when the operator
+            has set both <code>DESYNC_VISION_ENABLED=1</code> and an <code>ANTHROPIC_API_KEY</code>. Its verdict can be
+            stored with the match diagnostics. This describes a conditional feature, not a claim that it is enabled on
+            the current deployment. Turning gameplay images off prevents new images from this browser being submitted
+            for that feature; it does not recall previously uploaded images.
+          </p>
+          <p>
+            The service uses its configured database and image/blob storage, which support local storage or Cloudflare
+            D1 and R2. Hosting, network, storage, and any enabled AI providers process data needed to provide their
+            services. Their own retention practices are not set by the game's image checkbox.
+          </p>
+        </section>
+
+        <section class="sec" aria-labelledby="retention">
+          <h2 id="retention">Storage and retention</h2>
+          <p>
+            The app's automatic match-cleanup defaults are <strong>7 days</strong> after an ordinary match ends (or
+            starts, if no end was recorded), and <strong>7 days</strong> after a flagged match is resolved. Unresolved
+            flagged matches default to cleanup after <strong>180 days without being touched</strong>. Crashes, freezes,
+            desyncs, and feedback can flag a match for investigation. These windows are configurable by the operator;
+            they describe cleanup eligibility, not a promise of immediate deletion.
+          </p>
+          <p>
+            Match cleanup covers associated session logs, stored screenshots, desync records, metrics, and linked client
+            events. Feedback records are not removed by that match-cleanup routine. A retention period for feedback or
+            hosting/provider logs has not been established in this notice, and the match windows should not be read as
+            applying to those records or to provider-held copies.
+          </p>
+          <p>
+            The browser also stores preferences and may cache ROMs locally for your convenience. Clearing site data
+            removes local preferences and caches, not records already sent to the service.
+          </p>
+        </section>
+        <p><a href="/">Back to kaillera-next</a></p>
+      </div>
+    </main>
+  </body>
+</html>

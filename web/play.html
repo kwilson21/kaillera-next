@@ -141,6 +141,16 @@
           </div>
         </div>
 
+        <div class="card-section capture-options">
+          <label><input type="checkbox" id="opt-diagnostic-images" /> Share gameplay images for diagnostics</label>
+          <p class="opt-hint">
+            Game canvas only, not your desktop. Off stops new image uploads, including live-preview frames; basic
+            diagnostics and gameplay video continue. Room listing is a separate choice.
+            <a href="/privacy" target="_blank" rel="noopener">Privacy notice</a>
+          </p>
+          <p id="diagnostic-images-status" class="opt-hint" role="status" hidden></p>
+        </div>
+
         <div class="card-section" id="host-controls" style="display: none">
           <div class="host-options-row">
             <label for="mode-select" class="mode-label">Mode:</label>
@@ -296,6 +306,10 @@
           <button id="toolbar-info" class="more-option" role="menuitem">Info</button>
           <button id="toolbar-remap" class="more-option" role="menuitem">Remap</button>
           <button id="toolbar-settings" class="more-option" role="menuitem">Controller Settings</button>
+          <button id="toolbar-diagnostic-images" class="more-option" role="menuitemcheckbox" aria-checked="false">
+            Diagnostic images: Off
+          </button>
+          <a href="/privacy" target="_blank" rel="noopener" class="more-option" role="menuitem">Privacy notice</a>
           <button id="toolbar-logs" class="more-option" role="menuitem" style="display: none">Dump Logs</button>
           <button id="toolbar-end" class="more-option more-end" role="menuitem" style="display: none">End Game</button>
         </div>
@@ -511,6 +525,7 @@
 
     <!-- Safe storage (in-memory fallback for privacy browsers) -->
     <script src="/static/storage.js"></script>
+    <script src="/static/kn-capture.js"></script>
 
     <!-- Centralized cross-module state -->
     <script src="/static/kn-state.js"></script>

@@ -54,6 +54,8 @@ const cases = [
   ['/', 'GET', ''],
   ['/index.html', 'GET', ''],
   ['/join?room=ABC', 'GET', ''],
+  ['/privacy', 'GET', ''],
+  ['/privacy.html', 'GET', ''],
   ['/join?room=ABC', 'GET', 'Discordbot/2.0'],
   ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=Case30X&spectate=1', 'GET', 'Discordbot/2.0'],
@@ -115,7 +117,7 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/").startswith("asset:/index.html")
     assert _body(r, "/index.html").startswith("asset:/index.html")
     assert _body(r, "/join?room=ABC").startswith("asset:/join.html")
-    for page in ["/", "/join?room=ABC"]:
+    for page in ["/", "/join?room=ABC", "/privacy", "/privacy.html"]:
         assert "script-src 'self'" in r[(page, "GET", "")]["csp"]
         assert r[(page, "GET", "")]["cache"] == "no-store"
         # The static preview tags get the public host.
@@ -123,6 +125,15 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
     assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
+
+
+def test_privacy_notice_is_available_without_the_game_server():
+    for origin_up in (True, False):
+        r = _run(origin_up=origin_up)
+        for path in ("/privacy", "/privacy.html"):
+            assert _body(r, path).startswith("asset:/privacy.html")
+            assert r[(path, "GET", "")]["cache"] == "no-store"
+            assert "script-src 'self'" in r[(path, "GET", "")]["csp"]
 
 
 def test_version_and_changelog_prefer_origin_and_fall_back_to_assets():
@@ -179,6 +190,7 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert res.returncode == 0, res.stderr + res.stdout
     dist = REPO / "dist-landing"
     assert (dist / "index.html").is_file() and (dist / "join.html").is_file()
+    assert (dist / "privacy.html").read_bytes() == (REPO / "web" / "privacy.html").read_bytes()
     assert (dist / "static" / "join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
     assert (dist / "static" / "version.json").is_file()
@@ -253,6 +265,8 @@ def test_real_runtime_serves_the_pages_without_redirects():
             ("/", 'id="board"'),
             ("/index.html", 'id="board"'),
             ("/join?room=ROOM1&spectate=1", 'id="inv-main"'),
+            ("/privacy", 'id="image-controls"'),
+            ("/privacy.html", 'id="image-controls"'),
         ]:
             status, ctype, body = get(path)
             assert status == 200, (path, status)

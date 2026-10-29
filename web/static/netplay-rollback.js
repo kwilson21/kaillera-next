@@ -299,11 +299,8 @@
   const _knTraceDiagnostics = _urlParams.get('kntrace') === '1';
   const _knDeepDiagnostics = _urlParams.get('kndiag') === 'deep' || _urlParams.get('desync') === 'deep';
   const _knRuntimeDiagnostics = !_knPerfLight && _knDeepDiagnostics;
-  // Screenshots are default-on (cheap: ~5KB JPEG every 5s/player) so the
-  // admin panel always has visual ground truth for desync triage. Opt out
-  // with ?screenshots=off; ?knperf=light also disables them. Independent
-  // from the heavier _knRuntimeDiagnostics gate.
-  const _knScreenshots = !_knPerfLight && _urlParams.get('screenshots') !== 'off';
+  // Read the shared preference at capture time so live toggles take effect.
+  const _knScreenshots = () => window.KNCapture?.allowed() === true;
   const _knLiveFlush = _urlParams.get('knflush') === 'live';
   // Local-dev-only: synthesize an Emscripten RuntimeError abort at a selected frame.
   const _forceAbortFrame = (() => {
@@ -1315,7 +1312,7 @@
   let _probeHashCanvas = null;
   let _probeHashCtx = null;
   const _probeCanvasHash = () => {
-    if (!RB_PROBE) return 0;
+    if (!RB_PROBE || !window.KNCapture?.allowed()) return 0;
     try {
       const src = _findRollbackVisualCanvas?.();
       if (!src) return 0;
@@ -11273,9 +11270,8 @@
       return false;
     }
 
-    // Cheap visual ground-truth capture — default-on in prod so the admin
-    // panel always has frames for desync triage. Opt out with ?screenshots=off.
-    if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+    // Periodic gameplay images honor the shared preference and URL opt-outs.
+    if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
       _diag.captureAndSendScreenshot();
     }
     // Heavier per-frame readbacks (event-queue hash, interrupt trace) are
@@ -16208,7 +16204,7 @@
             dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
           }
         }
-        if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+        if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
           _diag.captureAndSendScreenshot();
         }
         _markTickReturn('end:c-rollback');

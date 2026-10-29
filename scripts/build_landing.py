@@ -1,7 +1,7 @@
-"""Build the static front page + invite page into dist-landing/ for the
+"""Build the static front, invite, and privacy pages into dist-landing/ for the
 landing Worker (hosting option A, deploy/static/README.md).
 
-    dist-landing/index.html, join.html      web/index.html, web/join.html
+    dist-landing/{index,join,privacy}.html  corresponding web/ pages
     dist-landing/static/...                 only the files those pages load
     dist-landing/static/landing-build.json  {"id": <landing build id>}
 

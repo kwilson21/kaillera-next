@@ -48,6 +48,7 @@
   let _solidPaleLogged = false;
 
   function captureCanvasHash() {
+    if (!window.KNCapture?.allowed()) return 0;
     const canvas = document.querySelector('#game canvas');
     if (!canvas || !canvas.width || !canvas.height) return 0;
     try {
@@ -133,6 +134,7 @@
   }
 
   function sampleCanvasHealth() {
+    if (!window.KNCapture?.allowed()) return null;
     const canvas = document.querySelector('#game canvas');
     if (!canvas || !canvas.width || !canvas.height) return null;
     try {
@@ -386,15 +388,15 @@
 
   function checkFreeze(localInput) {
     const frameNum = _getFrame();
-    // Canvas readbacks are GPU sync points; ?knperf=light skips them all.
-    if (!window._knPerfLight && frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
+    // All diagnostic canvas reads share the image preference, including URL opt-outs.
+    if (window.KNCapture?.allowed() && frameNum > 0 && frameNum <= 300 && frameNum % 60 === 0) {
       checkCanvasHealth(frameNum, 'early');
     }
     if (frameNum % 60 !== 0 || frameNum <= 300) return;
 
     // 1. RENDER-STALL: canvas pixel hash unchanged for 180+ frames.
     // WebGL readPixels is a GPU sync point, so determinism stress runs opt out.
-    if (!window._knPerfLight) {
+    if (window.KNCapture?.allowed()) {
       const renderHash = captureCanvasHash();
       if (renderHash !== 0) {
         if (renderHash !== _renderLastHash) {
@@ -466,7 +468,7 @@
   let _screenshotDebugLogged = false;
 
   function captureAndSendScreenshot() {
-    if (!_sendScreenshot) return;
+    if (!window.KNCapture?.allowed() || !_sendScreenshot) return;
     const capturedFrame = _getFrame();
     if (capturedFrame === _lastScreenshotFrame) return;
     _lastScreenshotFrame = capturedFrame;
@@ -530,6 +532,22 @@
       }
     }
   }
+
+  window.addEventListener('kn-capture-change', () => {
+    _glCtxCache = null;
+    _glPixelBuf = null;
+    _offscreenCanvas = null;
+    _offscreenCtx = null;
+    _healthCanvas = null;
+    _healthCtx = null;
+    _screenshotCanvas = null;
+    _screenshotCtx = null;
+    _lastScreenshotFrame = -1;
+    _renderLastHash = 0;
+    _renderLastChangeFrame = 0;
+    _renderStallLogged = false;
+    _solidPaleLogged = false;
+  });
 
   // -- Cleanup --
 

@@ -1,0 +1,23 @@
+name: Capture privacy
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/capture-privacy.yml'
+      - 'web/static/kn-capture.js'
+      - 'web/static/kn-diagnostics.js'
+      - 'web/static/kn-vision-client.js'
+      - 'web/static/netplay-rollback.js'
+      - 'web/play.html'
+      - 'web/demo.html'
+      - 'tests/capture-privacy.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  capture-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test image opt-outs and async cancellation
+        run: node --test tests/capture-privacy.test.mjs
