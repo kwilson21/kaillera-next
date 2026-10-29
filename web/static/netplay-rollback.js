@@ -1312,10 +1312,10 @@
   let _probeHashCanvas = null;
   let _probeHashCtx = null;
   const _probeCanvasHash = () => {
-    if (!RB_PROBE || !window.KNCapture?.allowed()) return 0;
+    if (!RB_PROBE || !window.KNCapture?.allowed()) return null;
     try {
       const src = _findRollbackVisualCanvas?.();
-      if (!src) return 0;
+      if (!src) return null;
       if (!_probeHashCanvas) {
         _probeHashCanvas = document.createElement('canvas');
         _probeHashCanvas.width = 8;
@@ -1329,7 +1329,7 @@
       for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 16777619);
       return h | 0;
     } catch (_) {
-      return 0;
+      return null;
     }
   };
   const _pushRbProbe = (path) => {
@@ -1375,27 +1375,31 @@
           dt: prev ? +(r.t - prev.t).toFixed(1) : 0,
           d_jsF: prev ? r.jsF - prev.jsF : 0,
           d_rbF: prev ? r.rbF - prev.rbF : 0,
-          hashChanged: prev ? r.hash !== prev.hash : false,
+          hashChanged: prev && r.hash !== null && prev.hash !== null ? r.hash !== prev.hash : null,
           relTick: i - rbStart,
         };
       });
       // Summary: during the replay streak, did hash change? did rbF advance?
       const replayTicks = out.filter((r) => r.path === 'replay');
       const replayDuration = replayTicks.length ? replayTicks[replayTicks.length - 1].t - replayTicks[0].t : 0;
-      const replayHashChanges = replayTicks.filter((r) => r.hashChanged).length;
+      const replayCanvasAvailable = replayTicks.length > 0 && replayTicks.every((r) => r.hashChanged !== null);
+      const replayHashChanges = replayTicks.filter((r) => r.hashChanged === true).length;
       const replayRbAdvance = replayTicks.reduce((s, r) => s + (r.d_rbF || 0), 0);
       // Post-replay: track when canvas finally paints a fresh frame.
       const postReplay = out.filter((r) => r.relTick >= replayTicks.length && r.relTick < replayTicks.length + 10);
-      const firstPostHashChange = postReplay.find((r) => r.hashChanged);
+      const postCanvasAvailable = postReplay.length > 0 && postReplay.every((r) => r.hashChanged !== null);
+      const firstPostHashChange = postReplay.find((r) => r.hashChanged === true);
       return {
         rollbackBoundary: { tickIdx: rbIdx, depth: replayTicks.length },
         replayWindow: {
           ticks: replayTicks.length,
           wallClockMs: +replayDuration.toFixed(1),
           gameFrameAdvance: replayRbAdvance,
-          canvasHashChanges: replayHashChanges,
-          interpretation:
-            replayHashChanges === 0 && replayRbAdvance > 0
+          canvasSamplesAvailable: replayCanvasAvailable,
+          canvasHashChanges: replayCanvasAvailable ? replayHashChanges : null,
+          interpretation: !replayCanvasAvailable
+            ? 'Canvas sampling unavailable — no paint verdict'
+            : replayHashChanges === 0 && replayRbAdvance > 0
               ? 'Sim advanced but canvas frozen — RDP/headless path is suppressing paint'
               : replayHashChanges === 0 && replayRbAdvance === 0
                 ? 'Sim stalled AND canvas frozen — engine pacing or stall'
@@ -1404,10 +1408,17 @@
                   : '?',
         },
         postReplay: {
-          firstPaintAfterRelTick: firstPostHashChange ? firstPostHashChange.relTick - replayTicks.length : -1,
-          firstPaintAfterMs: firstPostHashChange
-            ? +(firstPostHashChange.t - (replayTicks[replayTicks.length - 1]?.t ?? 0)).toFixed(1)
-            : -1,
+          canvasSamplesAvailable: postCanvasAvailable,
+          firstPaintAfterRelTick: !postCanvasAvailable
+            ? null
+            : firstPostHashChange
+              ? firstPostHashChange.relTick - replayTicks.length
+              : -1,
+          firstPaintAfterMs: !postCanvasAvailable
+            ? null
+            : firstPostHashChange
+              ? +(firstPostHashChange.t - (replayTicks[replayTicks.length - 1]?.t ?? 0)).toFixed(1)
+              : -1,
         },
         timeline: out,
       };

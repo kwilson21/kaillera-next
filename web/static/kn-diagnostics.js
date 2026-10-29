@@ -133,8 +133,9 @@
     }
   }
 
+  // Local-only startup renderer repair needs this even when image sharing is
+  // off. It returns numeric health data, never encodes or uploads an image.
   function sampleCanvasHealth() {
-    if (!window.KNCapture?.allowed()) return null;
     const canvas = document.querySelector('#game canvas');
     if (!canvas || !canvas.width || !canvas.height) return null;
     try {
@@ -217,6 +218,7 @@
   }
 
   function checkCanvasHealth(frameNum, reason) {
+    if (!window.KNCapture?.allowed()) return;
     const health = sampleCanvasHealth();
     if (!health) return;
     const mod = window.EJS_emulator?.gameManager?.Module;

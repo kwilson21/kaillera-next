@@ -157,7 +157,6 @@ for (const options of [
     h.context.KNDiag.checkCanvasHealth(60, 'error');
     h.context.KNDiag.checkFreeze(input);
     assert.equal(h.context.KNDiag.captureCanvasHash(), 0);
-    assert.equal(h.context.KNDiag.sampleCanvasHealth(), null);
     h.setFrame(600);
     h.context.KNDiag.checkFreeze(input);
     await h.context.KNVision._onSuspect(suspect);
@@ -316,7 +315,7 @@ test('optional rollback diagnostic probe also honors image opt-outs', () => {
   const engine = read('static/netplay-rollback.js');
   assert.match(
     engine,
-    /const _probeCanvasHash = \(\) => {\s*if \(!RB_PROBE \|\| !window.KNCapture\?\.allowed\(\)\) return 0;/,
+    /const _probeCanvasHash = \(\) => {\s*if \(!RB_PROBE \|\| !window.KNCapture\?\.allowed\(\)\) return null;/,
   );
 });
 
@@ -329,4 +328,84 @@ test('stale cross-tab on event cannot override a newer local opt-out', () => {
   assert.equal(h.storage.get(key), 'off');
   h.context.KNDiag.captureAndSendScreenshot();
   assert.equal(h.counts.draws, 0);
+});
+
+for (const options of [{ saved: 'off' }, { search: '?screenshots=off' }, { search: '?knperf=light' }]) {
+  test(`local startup renderer health remains available without image sharing: ${JSON.stringify(options)}`, () => {
+    const h = harness(options);
+    const health = h.context.KNDiag.sampleCanvasHealth();
+    assert.equal(health.solidPale, true);
+    assert.ok(h.counts.draws > 0);
+    assert.equal(h.counts.encodes, 0);
+    assert.equal(h.counts.uploads, 0);
+    assert.equal(h.counts.fetches, 0);
+    assert.equal(h.logs.length, 0);
+    const reads = h.counts.draws;
+    h.context.KNDiag.checkCanvasHealth(60, 'diagnostic');
+    h.context.KNDiag.captureAndSendScreenshot();
+    assert.equal(h.counts.draws, reads);
+    assert.equal(h.counts.uploads, 0);
+    // Both functional startup callers still use this local-only health API.
+    const streaming = read('static/netplay-streaming.js');
+    const recoveryStart = streaming.indexOf('  const recoverSolidCanvasIfNeeded =');
+    const recoveryEnd = streaming.indexOf('\n  };', recoveryStart) + 5;
+    let repairs = 0;
+    h.context.KNRecoverSolidCanvas = ({ health }) => {
+      assert.equal(health.solidPale, true);
+      repairs++;
+      return { profile: 'safe' };
+    };
+    vm.runInContext(
+      `const _syncLog = () => {}; const setStatus = () => {};\n${streaming.slice(recoveryStart, recoveryEnd)}\nwindow.recover = recoverSolidCanvasIfNeeded;`,
+      h.context,
+    );
+    assert.equal(h.context.recover('synthetic-boot').profile, 'safe');
+    assert.equal(repairs, 1);
+    assert.equal(h.counts.encodes, 0);
+    assert.equal(h.counts.uploads, 0);
+    assert.match(read('static/netplay-rollback.js'), /_diag\.sampleCanvasHealth\?\.\(\)/);
+  });
+}
+
+function probeHarness(hashes) {
+  const h = harness({ saved: 'off' });
+  const engine = read('static/netplay-rollback.js');
+  const start = engine.indexOf('  const RB_PROBE =');
+  const end = engine.indexOf('  // Console helper: window.knTickProfileSummary()', start);
+  vm.runInContext(
+    `const _urlParams = new URLSearchParams('?rbProbe=1');
+${engine.slice(start, end)}
+window.probeHash = _probeCanvasHash;`,
+    h.context,
+  );
+  h.context.__knRbProbe = hashes.map((hash, i) => ({
+    t: i * 16,
+    jsF: i,
+    rbF: i,
+    rep: i === 1 ? 1 : 0,
+    path: i === 1 ? 'replay' : 'normal',
+    hash,
+  }));
+  return h;
+}
+
+test('disabled rollback image samples are unavailable, not frozen or newly painted', () => {
+  const h = probeHarness([null, null, null]);
+  assert.equal(h.context.probeHash(), null);
+  const result = h.context.knProbeRollback();
+  assert.equal(result.replayWindow.canvasSamplesAvailable, false);
+  assert.equal(result.replayWindow.canvasHashChanges, null);
+  assert.match(result.replayWindow.interpretation, /unavailable/);
+  assert.equal(result.postReplay.firstPaintAfterMs, null);
+  assert.equal(h.counts.draws, 0);
+});
+
+test('probe still diagnoses real unchanged samples and rejects partial capture windows', () => {
+  const sampled = probeHarness([7, 7, 8]).context.knProbeRollback();
+  assert.equal(sampled.replayWindow.canvasSamplesAvailable, true);
+  assert.match(sampled.replayWindow.interpretation, /canvas frozen/);
+  assert.equal(sampled.postReplay.firstPaintAfterMs, 16);
+  const partial = probeHarness([7, null, 8]).context.knProbeRollback();
+  assert.equal(partial.replayWindow.canvasHashChanges, null);
+  assert.equal(partial.postReplay.firstPaintAfterMs, null);
 });
