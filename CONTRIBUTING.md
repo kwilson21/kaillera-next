@@ -121,21 +121,29 @@ To trace data flow between modules, grep for the `KNState` property name.
 Scripts are loaded in `play.html` in dependency order. Later scripts expect
 earlier ones to have set up their `window.*` exports:
 
-1. `api-sandbox.js` — saves native browser APIs before anything overrides them
-2. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
-3. `storage.js` — safe localStorage/sessionStorage wrapper
-4. `kn-state.js` — shared state namespace
-5. `gamepad-manager.js` — gamepad profiles and mapping
-6. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
-7. `shared.js` — input encoding/decoding, cheats, wire format
-8. `virtual-gamepad.js` — touch controls for mobile
-9. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-10. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
-11. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-12. `controller-settings.js` — in-game controller settings panel
-13. `play.js` — page orchestrator (connects everything)
-14. `version.js` — version display + changelog modal
-15. `feedback.js` — in-app feedback collection
+1. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys)
+2. `api-sandbox.js` — saves native browser APIs before anything overrides them
+3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
+4. `socket.io.min.js` — self-hosted Socket.IO client
+5. `vendor/fflate.min.js` — compression lib used by save-state transfer
+6. `storage.js` — safe localStorage/sessionStorage wrapper
+7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
+8. `kn-state.js` — shared state namespace
+9. `gamepad-manager.js` — gamepad profiles and mapping
+10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
+11. `shared.js` — input encoding/decoding, cheats, wire format
+12. `virtual-gamepad.js` — touch controls for mobile
+13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
+14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
+15. `kn-desync-detector.js` — field-granular cross-peer desync detection
+16. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+17. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+18. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
+19. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+20. `controller-settings.js` — in-game controller settings panel
+21. `play.js` — page orchestrator (connects everything)
+22. `version.js` — version display + changelog modal
+23. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
@@ -181,6 +189,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
 | `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
+| `kn-capture.js` | — | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag) | rollback, streaming |
 | `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
 | `version.js` | ~350 | Version display + changelog modal | play.js |
 | `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |

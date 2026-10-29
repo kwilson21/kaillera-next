@@ -264,9 +264,10 @@ explicitly re-initialized in the restore sequence. RF6 Part A adds
 `lastRb`/`rbDelta`/`resetAudioCalls`/`ctxState`/`workletPort` fields
 to the `audio-empty`/`audio-silent` log so the analyzer can infer
 whether a cluster of audio-death events correlates with a recent
-rollback. RF6 Part B (explicit `kn_reset_audio` in the rollback
-restore path) is contingent: ships only if real-session playtesting
-shows residual AUDIO-DEATH after RF1-RF5 are in the field.
+rollback. RF6 Part B has shipped: `kn_reset_audio()` is called
+explicitly on each replay step in the restore path
+(`netplay-rollback.js` ~line 11441), tracked via the `resetAudioCalls`
+field in the RF6 Part A log.
 
 ### Detection events
 

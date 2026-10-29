@@ -178,14 +178,22 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
       og.py            Open Graph meta-tag injection + build-time-rendered OG cards (no runtime browser)
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
+  join.html            Invite page (/join?room=CODE) — who invited you, Join vs Watch, waking
   play.html            Game page — overlay, EmulatorJS embed, toolbar
   admin.html           Admin dashboard (session logs, events, feedback, screenshots)
+  privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
+  demo.html            Interactive rollback demo (no ROM required)
+  lag-test.html        Standalone dev harness for lagviz.js
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     landing.js         Front-page board controller (room creation, open-rooms board)
+    landing.css        Front-page styles (direction A tokens)
     join.js            Invite-page controller (room lookup, join/watch states)
+    lagviz.js          Waking-state lag visualizer (front page + invite page)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
+    admin.css          Admin dashboard styles
+    play.css           Play page styles (room overlay tokens, direction A)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
@@ -196,6 +204,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM
     kn-audio.js            AudioWorklet pump + rollback audio capture
+    kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
     kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
     kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
@@ -208,7 +217,12 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     version.js             Version display + changelog modal
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
+    demo.js                Demo page orchestrator (fake peer + menu autopilot)
+    fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
+    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
+    rollback-timeline.js   Demo page's live rollback-metrics HUD
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
+    vendor/fflate.min.js   Self-hosted compression lib used by save-state transfer
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)
@@ -291,6 +305,10 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |
 | `DEBUG_MODE` | — | Enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset |
 | `GIT_VERSION` | — | Override version string (set automatically in Docker) |
+| `KEEPALIVE_SECONDS` | `0` (off) | How often play pages ping `/health` |
+| `RENDER_EXTERNAL_URL`, `RENDER` | — | Render.com-provided external URL / platform flag (CORS origin, trusted-proxy behavior) |
+| `BUDGET_AUTO_FLAGGED_BYTES` | `200 MiB` | Byte budget for auto-flagged match blob retention |
+| `PARQUET_DIR` | `data/parquet` | Output dir for rolled-up match-log Parquet files |
 
 ## REST endpoints
 
@@ -314,6 +332,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /api/stats/public` | Matches-started-this-week counter for the front page |
 | `GET /room/{room_id}/card.jpg` | Invite card image (room name + live frame) for social sharing |
 | `GET /room/{room_id}/frame.jpg` | Latest board frame for a listed, in-game room |
+| `GET /privacy`, `GET /privacy.html` | Privacy notice page |
 
 **Admin** (requires `ADMIN_KEY`):
 
