@@ -89,7 +89,7 @@ function harness({
     KNState: { slot: 0, boardFrame: false },
     KNAudio: { ctx: { state: 'running' } },
     location: { search },
-    localStorage: {},
+    localStorage: { getItem: (key) => storage.get(key) ?? null },
     KNStorage: {
       get: () => {
         if (storageFails) throw new Error('blocked');
@@ -244,6 +244,7 @@ test('storage-unavailable mode still honors the current tab opt-out', () => {
 
 test('another tab updates the live setting and controls', () => {
   const h = harness();
+  h.storage.set(key, 'off');
   h.context.dispatchEvent({ type: 'storage', storageArea: h.context.localStorage, key, newValue: 'off' });
   assert.equal(h.context.KNCapture.allowed(), false);
   assert.equal(h.controls['opt-diagnostic-images'].checked, false);
@@ -317,4 +318,15 @@ test('optional rollback diagnostic probe also honors image opt-outs', () => {
     engine,
     /const _probeCanvasHash = \(\) => {\s*if \(!RB_PROBE \|\| !window.KNCapture\?\.allowed\(\)\) return 0;/,
   );
+});
+
+test('stale cross-tab on event cannot override a newer local opt-out', () => {
+  const h = harness();
+  h.context.KNCapture.setEnabled(false);
+  h.context.dispatchEvent({ type: 'storage', storageArea: h.context.localStorage, key, newValue: 'on' });
+  assert.equal(h.context.KNCapture.allowed(), false);
+  assert.equal(h.controls['opt-diagnostic-images'].checked, false);
+  assert.equal(h.storage.get(key), 'off');
+  h.context.KNDiag.captureAndSendScreenshot();
+  assert.equal(h.counts.draws, 0);
 });

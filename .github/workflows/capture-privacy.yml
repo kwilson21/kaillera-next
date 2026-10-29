@@ -10,6 +10,19 @@ on:
       - 'web/play.html'
       - 'web/demo.html'
       - 'tests/capture-privacy.test.mjs'
+      - 'tests/test_capture_privacy_ui.py'
+      - 'tests/test_privacy_page.py'
+      - 'tests/test_landing_build.py'
+      - 'tests/test_landing_worker.py'
+      - 'web/privacy.html'
+      - 'web/static/play.css'
+      - 'web/index.html'
+      - 'web/join.html'
+      - 'deploy/static/worker.js'
+      - 'scripts/build_landing.py'
+      - 'server/**'
+      - 'package.json'
+      - 'wrangler.landing.jsonc'
 
 permissions:
   contents: read
@@ -21,3 +34,29 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test image opt-outs and async cancellation
         run: node --test tests/capture-privacy.test.mjs
+
+  privacy-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install locked Python dependencies and local Worker runtime
+        run: |
+          python -m pip install uv
+          uv sync --directory server --frozen --extra dev
+          npm install --ignore-scripts --no-package-lock
+      - name: Install Chromium for actual UI checks
+        run: uv run --directory server --frozen --extra dev python -m playwright install --with-deps chromium
+      - name: Test privacy UI, real Worker routes, and existing server safeguards
+        run: |
+          uv run --directory server --frozen --extra dev pytest \
+            ../tests/test_capture_privacy_ui.py \
+            ../tests/test_privacy_page.py \
+            ../tests/test_landing_build.py \
+            ../tests/test_landing_worker.py \
+            ../tests/test_screenshots.py \
+            ../tests/test_retention.py \
+            ../tests/test_retention_sweep.py \
+            ../tests/test_landing_board.py -q

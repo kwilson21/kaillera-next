@@ -31,11 +31,14 @@
   window.addEventListener('storage', (event) => {
     if (event.key !== KEY && event.key !== null) return;
     try {
-      if (event.storageArea !== window.localStorage) return;
+      const storage = window.localStorage;
+      if (event.storageArea !== storage) return;
+      // Storage events can be queued behind a newer change in this tab.
+      // Never revive capture from an old 'on' event after a newer opt-out.
+      update(storage.getItem(KEY) !== 'off');
     } catch (_) {
       return;
     }
-    update(event.key === null || event.newValue !== 'off');
   });
 
   window.KNCapture = {
