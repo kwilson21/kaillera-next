@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.65.2",
+    "date": "2026-10-29",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "honor gameplay image opt-outs and add a privacy notice (#94)"
+      }
+    ]
+  },
+  {
     "version": "0.65.1",
     "date": "2026-10-19",
     "changes": [
