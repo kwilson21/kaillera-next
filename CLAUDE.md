@@ -323,5 +323,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `TURN_SECRET`, `TURN_SERVERS` (default `""`): HMAC time-limited TURN credential fallback when Cloudflare TURN isn't configured
 - `BUDGET_AUTO_FLAGGED_BYTES` (default 200 MiB): byte budget for auto-flagged match blob retention
 - `PARQUET_DIR` (default `data/parquet`): output dir for rolled-up match-log Parquet files
-- `DISABLE_RATE_LIMIT` (`=1`): disables all rate limiting (dev/test only)
+- `DISABLE_RATE_LIMIT` (`=1`): disables all rate limiting (dev/test only); read at
+  import time by `ratelimit.py`, before `.env` is loaded, so it must be set in
+  the actual process environment, not just `.env`
 - `.env` file supported via python-dotenv

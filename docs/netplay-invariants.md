@@ -266,8 +266,11 @@ to the `audio-empty`/`audio-silent` log so the analyzer can infer
 whether a cluster of audio-death events correlates with a recent
 rollback. RF6 Part B has shipped: `kn_reset_audio()` is called
 explicitly on each replay step in the restore path
-(`netplay-rollback.js` ~line 11441), tracked via the `resetAudioCalls`
-field in the RF6 Part A log.
+(`netplay-rollback.js` ~line 11441). The replay-step calls themselves
+aren't visible in the RF6 Part A log — `resetAudioCalls` is zeroed at
+the end of replay before any `audio-empty`/`audio-silent` log can
+observe it — so that field only evidences resets on frames after
+replay completes.
 
 ### Detection events
 
