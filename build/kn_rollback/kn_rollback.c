@@ -818,7 +818,7 @@ static int rb_save_slot(int idx, int frame, int mark_last) {
          *     (which always holds a current full snapshot), write only dirty
          *     blocks to slot[idx] + update baseline. ~80% bandwidth reduction.
          *     Slot becomes a sparse store — readers must use chain-walk
-         *     reconstruction or kn_reconstruct_slot_full_into().
+         *     reconstruction or kn_reconstruct_slot_full().
          *   - Full mode (default): diff live vs prev_slot (which is full),
          *     write the dirty mask, then full memcpy slot = live. The dirty
          *     mask is consumed at restore time to avoid copying clean blocks.
