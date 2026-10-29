@@ -409,3 +409,16 @@ test('probe still diagnoses real unchanged samples and rejects partial capture w
   assert.equal(partial.replayWindow.canvasHashChanges, null);
   assert.equal(partial.postReplay.firstPaintAfterMs, null);
 });
+
+test('queued cross-tab off/on events still discard an overlapping pending image', async () => {
+  const h = harness({ delayedBlob: true });
+  const pending = h.context.KNVision._onSuspect(suspect);
+  // Both writes have completed in the other tab before either event is handled.
+  h.storage.set(key, 'on');
+  h.context.dispatchEvent({ type: 'storage', storageArea: h.context.localStorage, key, newValue: 'off' });
+  h.context.dispatchEvent({ type: 'storage', storageArea: h.context.localStorage, key, newValue: 'on' });
+  assert.equal(h.context.KNCapture.allowed(), true);
+  h.blobCallbacks[0]();
+  await pending;
+  assert.equal(h.counts.fetches, 0);
+});

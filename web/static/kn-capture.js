@@ -33,6 +33,9 @@
     try {
       const storage = window.localStorage;
       if (event.storageArea !== storage) return;
+      // Even if another tab has since re-enabled images, its queued opt-out
+      // must invalidate images that were already being encoded here.
+      if (event.newValue === 'off') revision++;
       // Storage events can be queued behind a newer change in this tab.
       // Never revive capture from an old 'on' event after a newer opt-out.
       update(storage.getItem(KEY) !== 'off');
