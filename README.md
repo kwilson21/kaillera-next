@@ -182,7 +182,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   play.html            Game page — overlay, EmulatorJS embed, toolbar
   admin.html           Admin dashboard (session logs, events, feedback, screenshots)
   privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
-  demo.html            Interactive rollback demo (no ROM required)
+  demo.html            Interactive rollback demo (user-supplied ROM required)
   lag-test.html        Standalone dev harness for lagviz.js
   error.html           Error/fallback page
   static/
@@ -222,7 +222,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
     rollback-timeline.js   Demo page's live rollback-metrics HUD
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
-    vendor/fflate.min.js   Self-hosted compression lib used by save-state transfer
+    vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
 build/               WASM core build system (Docker + C patches)

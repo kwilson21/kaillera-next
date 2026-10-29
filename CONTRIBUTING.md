@@ -125,7 +125,7 @@ earlier ones to have set up their `window.*` exports:
 2. `api-sandbox.js` — saves native browser APIs before anything overrides them
 3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
 4. `socket.io.min.js` — self-hosted Socket.IO client
-5. `vendor/fflate.min.js` — compression lib used by save-state transfer
+5. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
 6. `storage.js` — safe localStorage/sessionStorage wrapper
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `kn-state.js` — shared state namespace

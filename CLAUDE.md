@@ -78,7 +78,7 @@ kaillera-next/
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # admin dashboard: session logs, client events, feedback, desync events, stats
 │   ├── privacy.html         # privacy notice: what's collected (diagnostics, screenshots), opt-out
-│   ├── demo.html            # interactive rollback demo (no ROM required)
+│   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
