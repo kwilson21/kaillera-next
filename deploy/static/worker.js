@@ -2,7 +2,7 @@
  * Landing Worker (hosting option A, deploy/static/README.md).
  *
  * One domain, two hosts behind it:
- *   - the front page (/) and the invite page (/join) come from this Worker's
+ *   - the front page (/), invite page (/join), and privacy notice (/privacy) come from this Worker's
  *     static assets, so they load instantly even while the game server naps;
  *   - everything else (the game page, the API, Socket.IO) is passed through
  *     to the game server at env.ORIGIN, WebSocket upgrades included.
@@ -25,14 +25,20 @@
  * Build: python scripts/build_landing.py   Deploy: npx wrangler deploy -c wrangler.landing.jsonc
  */
 
-// Every file the two pages load. Serving all of them here matters: the
+// Every file the static pages load. Serving all of them here matters: the
 // pages' scripts are `defer`, so one proxied script behind a napping server
 // would hold up the waking screen itself.
 //
 // version.json and changelog.json are packaged for instant footer fallback,
 // but deliberately excluded from the landing build id because CI rewrites
 // them on nearly every merge (server/src/landing_build.py has the reason).
-const PAGES = { '/': '/index.html', '/index.html': '/index.html', '/join': '/join.html' };
+const PAGES = {
+  '/': '/index.html',
+  '/index.html': '/index.html',
+  '/join': '/join.html',
+  '/privacy': '/privacy.html',
+  '/privacy.html': '/privacy.html',
+};
 const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',

@@ -177,9 +177,9 @@ class SecurityHeadersMiddleware:
     # The front page adds one thing: its click-to-play videos
     # (youtube-nocookie, loaded only when a visitor presses play).
     _CSP_LANDING = _CSP_STRICT + "; frame-src https://www.youtube-nocookie.com"
-    # The front page and the invite page: landing CSP, and no COEP (only the
+    # The front, invite, and privacy pages: landing CSP, and no COEP (only the
     # game page needs isolation). The landing Worker sends the same.
-    _LANDING_PATHS = frozenset({"/", "/index.html", "/join"})
+    _LANDING_PATHS = frozenset({"/", "/index.html", "/join", "/privacy", "/privacy.html"})
 
     def __init__(self, app, allow_cache: bool = False) -> None:  # noqa: FBT001, FBT002
         self.app = app
@@ -1933,6 +1933,11 @@ def create_app(lifespan=None) -> FastAPI:
             if p.get("socketId") == room.owner:
                 return p.get("playerName", room.room_name)
         return room.room_name
+
+    @app.get("/privacy")
+    @app.get("/privacy.html")
+    def privacy_page() -> Response:
+        return Response(content=(_web_dir / "privacy.html").read_text(), media_type="text/html")
 
     @app.get("/play.html")
     def play_page(request: Request) -> Response:

@@ -299,11 +299,8 @@
   const _knTraceDiagnostics = _urlParams.get('kntrace') === '1';
   const _knDeepDiagnostics = _urlParams.get('kndiag') === 'deep' || _urlParams.get('desync') === 'deep';
   const _knRuntimeDiagnostics = !_knPerfLight && _knDeepDiagnostics;
-  // Screenshots are default-on (cheap: ~5KB JPEG every 5s/player) so the
-  // admin panel always has visual ground truth for desync triage. Opt out
-  // with ?screenshots=off; ?knperf=light also disables them. Independent
-  // from the heavier _knRuntimeDiagnostics gate.
-  const _knScreenshots = !_knPerfLight && _urlParams.get('screenshots') !== 'off';
+  // Read the shared preference at capture time so live toggles take effect.
+  const _knScreenshots = () => window.KNCapture?.allowed() === true;
   const _knLiveFlush = _urlParams.get('knflush') === 'live';
   // Local-dev-only: synthesize an Emscripten RuntimeError abort at a selected frame.
   const _forceAbortFrame = (() => {
@@ -1315,10 +1312,10 @@
   let _probeHashCanvas = null;
   let _probeHashCtx = null;
   const _probeCanvasHash = () => {
-    if (!RB_PROBE) return 0;
+    if (!RB_PROBE || !window.KNCapture?.allowed()) return null;
     try {
       const src = _findRollbackVisualCanvas?.();
-      if (!src) return 0;
+      if (!src) return null;
       if (!_probeHashCanvas) {
         _probeHashCanvas = document.createElement('canvas');
         _probeHashCanvas.width = 8;
@@ -1332,7 +1329,7 @@
       for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 16777619);
       return h | 0;
     } catch (_) {
-      return 0;
+      return null;
     }
   };
   const _pushRbProbe = (path) => {
@@ -1378,27 +1375,31 @@
           dt: prev ? +(r.t - prev.t).toFixed(1) : 0,
           d_jsF: prev ? r.jsF - prev.jsF : 0,
           d_rbF: prev ? r.rbF - prev.rbF : 0,
-          hashChanged: prev ? r.hash !== prev.hash : false,
+          hashChanged: prev && r.hash !== null && prev.hash !== null ? r.hash !== prev.hash : null,
           relTick: i - rbStart,
         };
       });
       // Summary: during the replay streak, did hash change? did rbF advance?
       const replayTicks = out.filter((r) => r.path === 'replay');
       const replayDuration = replayTicks.length ? replayTicks[replayTicks.length - 1].t - replayTicks[0].t : 0;
-      const replayHashChanges = replayTicks.filter((r) => r.hashChanged).length;
+      const replayCanvasAvailable = replayTicks.length > 0 && replayTicks.every((r) => r.hashChanged !== null);
+      const replayHashChanges = replayTicks.filter((r) => r.hashChanged === true).length;
       const replayRbAdvance = replayTicks.reduce((s, r) => s + (r.d_rbF || 0), 0);
       // Post-replay: track when canvas finally paints a fresh frame.
       const postReplay = out.filter((r) => r.relTick >= replayTicks.length && r.relTick < replayTicks.length + 10);
-      const firstPostHashChange = postReplay.find((r) => r.hashChanged);
+      const postCanvasAvailable = postReplay.length > 0 && postReplay.every((r) => r.hashChanged !== null);
+      const firstPostHashChange = postReplay.find((r) => r.hashChanged === true);
       return {
         rollbackBoundary: { tickIdx: rbIdx, depth: replayTicks.length },
         replayWindow: {
           ticks: replayTicks.length,
           wallClockMs: +replayDuration.toFixed(1),
           gameFrameAdvance: replayRbAdvance,
-          canvasHashChanges: replayHashChanges,
-          interpretation:
-            replayHashChanges === 0 && replayRbAdvance > 0
+          canvasSamplesAvailable: replayCanvasAvailable,
+          canvasHashChanges: replayCanvasAvailable ? replayHashChanges : null,
+          interpretation: !replayCanvasAvailable
+            ? 'Canvas sampling unavailable — no paint verdict'
+            : replayHashChanges === 0 && replayRbAdvance > 0
               ? 'Sim advanced but canvas frozen — RDP/headless path is suppressing paint'
               : replayHashChanges === 0 && replayRbAdvance === 0
                 ? 'Sim stalled AND canvas frozen — engine pacing or stall'
@@ -1407,10 +1408,17 @@
                   : '?',
         },
         postReplay: {
-          firstPaintAfterRelTick: firstPostHashChange ? firstPostHashChange.relTick - replayTicks.length : -1,
-          firstPaintAfterMs: firstPostHashChange
-            ? +(firstPostHashChange.t - (replayTicks[replayTicks.length - 1]?.t ?? 0)).toFixed(1)
-            : -1,
+          canvasSamplesAvailable: postCanvasAvailable,
+          firstPaintAfterRelTick: !postCanvasAvailable
+            ? null
+            : firstPostHashChange
+              ? firstPostHashChange.relTick - replayTicks.length
+              : -1,
+          firstPaintAfterMs: !postCanvasAvailable
+            ? null
+            : firstPostHashChange
+              ? +(firstPostHashChange.t - (replayTicks[replayTicks.length - 1]?.t ?? 0)).toFixed(1)
+              : -1,
         },
         timeline: out,
       };
@@ -11273,9 +11281,8 @@
       return false;
     }
 
-    // Cheap visual ground-truth capture — default-on in prod so the admin
-    // panel always has frames for desync triage. Opt out with ?screenshots=off.
-    if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+    // Periodic gameplay images honor the shared preference and URL opt-outs.
+    if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
       _diag.captureAndSendScreenshot();
     }
     // Heavier per-frame readbacks (event-queue hash, interrupt trace) are
@@ -16208,7 +16215,7 @@
             dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} delay:${DELAY_FRAMES} rb:${rb} pred:${pred} correct:${correct} maxD:${maxD}`;
           }
         }
-        if (_knScreenshots && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
+        if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
           _diag.captureAndSendScreenshot();
         }
         _markTickReturn('end:c-rollback');
