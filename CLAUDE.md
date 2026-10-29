@@ -77,6 +77,8 @@ kaillera-next/
 │   ├── join.html            # invite page (/join?room=CODE): who invited you, Join vs Watch, waking
 │   ├── play.html            # game page: overlay + EmulatorJS + toolbar
 │   ├── admin.html           # admin dashboard: session logs, client events, feedback, desync events, stats
+│   ├── privacy.html         # privacy notice: what's collected (diagnostics, screenshots), opt-out
+│   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
@@ -96,6 +98,7 @@ kaillera-next/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-state.js          # cross-module shared state (KNState)
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
+│       ├── kn-capture.js        # diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
 │       ├── kn-desync-detector.js # field-granular cross-peer desync detection
 │       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
 │       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
@@ -104,6 +107,10 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
+│       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
+│       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
+│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
+│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
@@ -308,4 +315,15 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
   logs are kept before the retention sweep deletes them
 - `DEBUG_MODE`: enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset
+- `DISABLE_HTTPS`: skip local dev TLS even when cert files are present
+- `TRUSTED_PROXY_IPS`: proxy IPs trusted for forwarded headers (default: loopback only)
+- `RENDER_EXTERNAL_URL`, `RENDER`: Render.com-provided external URL / platform flag; feed CORS origin and trusted-proxy behavior
+- `GIT_VERSION` (default `""`): build-time git SHA/tag exposed by the server
+- `ICE_SERVERS`: legacy static JSON ICE server list, used before Cloudflare TURN is checked
+- `TURN_SECRET`, `TURN_SERVERS` (default `""`): HMAC time-limited TURN credential fallback when Cloudflare TURN isn't configured
+- `BUDGET_AUTO_FLAGGED_BYTES` (default 200 MiB): byte budget for auto-flagged match blob retention
+- `PARQUET_DIR` (default `data/parquet`): output dir for rolled-up match-log Parquet files
+- `DISABLE_RATE_LIMIT` (`=1`): disables all rate limiting (dev/test only); read at
+  import time by `ratelimit.py`, before `.env` is loaded, so it must be set in
+  the actual process environment, not just `.env`
 - `.env` file supported via python-dotenv
