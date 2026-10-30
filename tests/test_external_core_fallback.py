@@ -62,10 +62,11 @@ def test_mobile_streaming_core_choice_is_redirected_to_the_bundled_core():
         browser.close()
 
 
-def test_missing_local_emulator_core_returns_failure_without_external_retry():
+def test_missing_local_core_shows_error_without_retry_startup_or_cache_write():
     from playwright.sync_api import sync_playwright
 
     local_core_requests = []
+    report_requests = []
     unexpected_cdn_requests = []
 
     with sync_playwright() as playwright:
@@ -79,6 +80,13 @@ def test_missing_local_emulator_core_returns_failure_without_external_retry():
             url = route.request.url
             if url == "http://local.test/":
                 return route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>")
+            if "/static/ejs/cores/reports/parallel_n64.json" in url:
+                report_requests.append(url)
+                return route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body='{"buildStart":1,"options":{}}',
+                )
             if "/static/ejs/cores/parallel_n64-wasm.data" in url:
                 local_core_requests.append(url)
                 return route.fulfill(status=404, body="missing local fixture")
@@ -93,14 +101,35 @@ def test_missing_local_emulator_core_returns_failure_without_external_retry():
         result = page.evaluate(
             """async () => {
               const emulator = Object.create(window.EmulatorJS.prototype);
-              emulator.config = { dataPath: '/static/ejs/' };
+              let coreStarts = 0;
+              let cacheWrites = 0;
+              emulator.config = { dataPath: '/static/ejs/', threads: false };
+              emulator.debug = false;
+              emulator.supportsWebgl2 = true;
+              emulator.webgl2Enabled = true;
+              emulator.textElem = { innerText: '' };
+              emulator.getCore = () => 'parallel_n64';
+              emulator.requiresThreads = () => false;
+              emulator.requiresWebGL2 = () => false;
+              emulator.preGetSetting = () => null;
               emulator.toData = () => null;
-              return emulator.downloadFile('cores/parallel_n64-wasm.data', null, false, {
-                method: 'GET', responseType: 'arraybuffer'
+              emulator.downloadFile = window.EmulatorJS.prototype.downloadFile.bind(emulator);
+              emulator.storage = { core: { get: async () => null, put: async () => { cacheWrites++; } } };
+              emulator.checkCompression = () => { coreStarts++; };
+              emulator.initGameCore = () => { coreStarts++; };
+              return new Promise((resolve, reject) => {
+                emulator.startGameError = (message) => resolve({ message, coreStarts, cacheWrites });
+                emulator.downloadGameCore();
+                setTimeout(() => reject(new Error('downloadGameCore did not report the missing core')), 5000);
               });
             }"""
         )
-        assert result == -1
+        assert result == {
+            "message": "Error downloading core (parallel_n64-wasm.data)",
+            "coreStarts": 0,
+            "cacheWrites": 0,
+        }
+        assert len(report_requests) == 1
         assert len(local_core_requests) == 1
         assert unexpected_cdn_requests == []
         browser.close()
