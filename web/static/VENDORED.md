@@ -52,6 +52,14 @@ keep these pinned so future builds are reproducible.
 - **Branch:** `develop`
 - **Pinned SHA:** `4a3925d2861f17719586dffb178c1dd5339d3a68`
 - **HEAD message:** `Merge branch 'libretro:develop' into develop`
+- **Build-time security backport:** `build/patches/mupen64plus-is-viewer-bounds.patch`
+  applies the operand bounds checks from canonical mupen64plus-core commit
+  [`3984137fc0c44110f1ef876adb008885b05a6e18`](https://github.com/mupen64plus/mupen64plus-core/commit/3984137fc0c44110f1ef876adb008885b05a6e18)
+  for CVE-2025-9688. The build fails if the patch is missing or cannot apply.
+  **Source-only change:** checked-in core binaries have not been rebuilt with this
+  backport. Rebuild and validate before replacing all three core artifacts together.
+  Run the ROM-free native regression with
+  `python3 tests/test_is_viewer_bounds.py` after cloning the pinned build source.
 
 ### `RetroArch`
 - **Repo:** https://github.com/EmulatorJS/RetroArch
