@@ -162,7 +162,7 @@ section before writing the PR.
 - **Spec:** [superpowers/specs/2026-04-11-netplay-deadlock-audit.md](superpowers/specs/2026-04-11-netplay-deadlock-audit.md)
 - **Plan:** [superpowers/plans/2026-04-11-netplay-deadlock-audit.md](superpowers/plans/2026-04-11-netplay-deadlock-audit.md)
 - **Trigger:** commit `788add0` "fix(rollback): eliminate BOOT-LOCKSTEP + coord-sync deadlock"
-- **Diagnostic tool:** `tools/analyze_match.py` (see `reference_analyze_match.md`) — section 8d surfaces all I1/I2/MF6 recovery events
+- **Diagnostic tool:** `tools/analyze_match.py` — section 8d surfaces all I1/I2/MF6 recovery events
 
 ## Rollback Integrity (R1-R6)
 

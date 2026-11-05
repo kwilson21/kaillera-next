@@ -169,13 +169,24 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
   src/
     main.py            Entry point — serves API, Socket.IO, and static frontend
     state.py           Redis-backed room persistence
+    state_cache.py     Redis-backed save-state cache for late joiners
     ratelimit.py       Per-IP rolling-window rate limiting
     db.py              Database: SQLite or Cloudflare D1 backend, SQL migrations in server/migrations/
+    migrate.py         Plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
+    retention.py       Flags matches with a crash/freeze/desync; sweeps expired ones
+    match_rotation.py  Rolls up ended session logs into Parquet + match_metrics rows
+    blobstore.py       Blob storage for screenshots (R2 in prod, local folder in dev)
+    stats.py           "Matches started in last 7 days" counter for the front page
+    landing_build.py   Content-hash build id shared by the server and the landing Worker
     api/
       app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
       payloads.py      Pydantic v2 payload models + @validated decorator
       og.py            Open Graph meta-tag injection + build-time-rendered OG cards (no runtime browser)
+      og_card.py       Live per-room invite card composed from the host's latest frame (PIL)
+      turn.py          Cloudflare Realtime TURN credentials for /ice-servers
+      desync_vision.py   Claude vision endpoint for screenshot diff
+      desync_prompts.py  Prompt templates for vision-based desync analysis
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
   join.html            Invite page (/join?room=CODE) — who invited you, Join vs Watch, waking
@@ -289,6 +300,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `FLAGGED_STALE_DAYS` | `180` | Auto-delete unresolved flagged matches after N days |
 | `DB_PATH` | `data/kn.db` | SQLite database file path |
 | `D1_DATABASE_ID`, `D1_API_TOKEN`, `CF_ACCOUNT_ID` | — | Switch to the Cloudflare D1 backend instead of SQLite |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (with `CF_ACCOUNT_ID`) | — | Switch screenshot blob storage to Cloudflare R2 instead of a local folder |
 | `IP_HASH_SALT` | random | Salt for IP address hashing (random per restart if unset) |
 | `KN_PROXY_SECRET` | — | Shared secret trusting the landing Worker's forwarded client IP |
 | `PUBLIC_ORIGINS` | — | Extra origins allowed to read `/health`, `/list`, `/room/*`, `/api/stats/public` |
