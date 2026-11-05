@@ -276,10 +276,20 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | Patch | Description |
 |---|---|
 | `mupen64plus-kn-all.patch` | Core exports: deterministic timing, resync hash/read/write, audio capture |
+| `audio-backend-skip-output.patch` | Bypasses the libretro audio output path (sinc resampler + `audio_batch_cb`) during netplay — confirmed cross-engine noisy |
 | `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
 | `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
 | `mupen64plus-ai-determinism.patch` | AI DMA deterministic audio interface timing |
+| `mupen64plus-cheat-set-overflow.patch` | Fixes a one-byte stack buffer overflow in `retro_cheat_set`'s hex parsing |
 | `mupen64plus-fpu-trace.patch` | FPU operation tracing for cross-platform determinism verification |
+| `mupen64plus-headless-tick.patch` | Skips `video_cb` presentation in `retro_run()` during rollback replay while keeping GLSM/GL state in sync |
+| `mupen64plus-glsm-uniform-bounds.patch` | Bounds-checks GLSM uniform/program-id lookups (Emscripten GL ids pass 1024 within a match) |
+| `mupen64plus-rdp-replay-skip.patch` | Skips GLideN64 raster submission and framebuffer/depth copybacks during masked replay |
+| `mupen64plus-static-save-scratch.patch` | Static reusable buffer for `savestates_save_m64p` instead of malloc/free; records the RDRAM offset for taint-aware hashing |
+| `mupen64plus-rsp-taint.patch` | Taints RDRAM blocks written by direct RSP HLE memcpys so `kn_game_state_hash` can skip them |
+| `gliden64-rdram-taint.patch` | Taints RDRAM blocks written by GLideN64's color/depth buffer readback |
+| `gliden64-pbo-scope.patch` | Keeps GLideN64's `GL_PIXEL_PACK_BUFFER` binding scoped to its own readback calls |
+| `gliden64-vertex-bounds.patch` | Backports two upstream GLideN64 fixes for out-of-bounds vertex-buffer indexing from malformed display lists |
 | `mupen64plus-softfloat.patch` | SoftFloat FPU for bit-exact cross-platform floating point |
 | `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override + AUDIO_FLAG_SUSPENDED bypass |
 
@@ -295,6 +305,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `REDIS_HOST` | `redis` | Redis host (used if REDIS_URL not set) |
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | — | Redis password |
+| `REDIS_DB` | `0` | Redis logical DB index (used if REDIS_URL not set) |
 | `ADMIN_KEY` | — | Admin API key for management endpoints |
 | `LOG_RETENTION_DAYS` | `7` | Auto-delete old session data after N days |
 | `FLAGGED_STALE_DAYS` | `180` | Auto-delete unresolved flagged matches after N days |
