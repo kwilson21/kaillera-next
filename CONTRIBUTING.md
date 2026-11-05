@@ -160,12 +160,17 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `api/og_card.py` | Live per-room invite card composed from the host's latest frame (PIL) |
 | `api/turn.py` | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `state.py` | Redis-backed room persistence for zero-downtime deploys |
+| `state_cache.py` | Redis-backed save-state cache for late joiners |
 | `ratelimit.py` | Per-IP rolling-window rate limiting |
 | `db.py` | SQLite/D1 database (aiosqlite/D1 via `dbbackend/`), session/feedback/retention storage |
 | `migrate.py` | Plain-SQL schema migrations in `server/migrations/` (replaced Alembic) |
 | `retention.py` | Flags matches with a crash/freeze/desync for retention; sweeps expired ones |
 | `match_rotation.py` | Rolls up ended session logs into Parquet + `match_metrics` rows |
 | `blobstore.py` | Blob storage for screenshots (R2 in prod, local folder in dev) |
+| `stats.py` | "Matches started in last 7 days" counter for the front page |
+| `landing_build.py` | Content-hash build id shared by the server and the landing Worker |
+| `api/desync_vision.py` | Claude vision endpoint for screenshot diff |
+| `api/desync_prompts.py` | Prompt templates for vision-based desync analysis |
 
 #### Frontend file map
 
@@ -185,6 +190,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
 | `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
+| `audio-worklet-processor.js` | ~85 | AudioWorklet ring buffer for rollback audio | kn-audio.js |
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
@@ -196,7 +202,12 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
 | `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
+| `lagviz.js` | ~81 | Waking-state lag visualizer | index.html, join.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
+| `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
+| `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |
+| `ssb64-menu-autopilot.js` | ~308 | Closed-loop menu driver for the demo (reads RDRAM menu state) | demo.js |
+| `rollback-timeline.js` | ~229 | Demo page's live rollback-metrics HUD | demo.js |
 
 ### Conventions
 
@@ -218,6 +229,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 docs/
   roadmap.md                 — V1 feature roadmap (all phases complete)
   mvp-plan.md                — MVP implementation plan (all items shipped or cut)
+  netplay-invariants.md      — Codified tick-loop and rollback-integrity invariants
   superpowers/
     specs/YYYY-MM-DD-*.md    — Design specs
     plans/YYYY-MM-DD-*.md    — Implementation plans
