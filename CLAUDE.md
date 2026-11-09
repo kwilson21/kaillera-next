@@ -85,6 +85,9 @@ kaillera-next/
 │       ├── join.js              # invite page: room lookup, full/closed/in-app states
 │       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
 │       ├── landing.css          # front page styles (direction A tokens)
+│       ├── play.css             # play page styles (room overlay tokens, direction A)
+│       ├── admin.css            # admin dashboard styles
+│       ├── socket.io.min.js     # self-hosted Socket.IO client (v4.8.4)
 │       ├── fonts/               # self-hosted Barlow Condensed + IBM Plex Sans (OFL)
 │       ├── play.js              # play page orchestrator
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
@@ -301,6 +304,8 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `DB_PATH`: SQLite file location for the persistent database (`src/db.py`)
 - `D1_DATABASE_ID`, `D1_API_TOKEN` (with `CF_ACCOUNT_ID`): switches `src/db.py` to the
   Cloudflare D1 backend instead of SQLite
+- `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (with `CF_ACCOUNT_ID`):
+  switch `blobstore.py` to Cloudflare R2 for screenshots instead of a local folder
 - `ADMIN_KEY`: required to use the admin dashboard/API
 - `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN`: Cloudflare Realtime TURN credentials for
   `/ice-servers`
