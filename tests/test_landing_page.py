@@ -197,14 +197,14 @@ def test_waking_sends_one_direct_origin_wake_request(page, server_url):
 def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_url, origin):
     _mock(page, health=False)
     page.route("**/", lambda route: _landing_with_origin(route, origin.format(page_origin=server_url)))
-    page.add_init_script("""() => {
+    page.add_init_script("""
       window.__directWakes = [];
       const originalFetch = window.fetch;
       window.fetch = function(input, options) {
         if (options?.mode === 'no-cors') window.__directWakes.push(String(input));
         return originalFetch.apply(this, arguments);
       };
-    }""")
+    """)
     page.goto(server_url)
     expect(page.locator("#board")).to_have_attribute("data-state", "waking")
     page.wait_for_timeout(500)
@@ -213,7 +213,7 @@ def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_
 
 def _landing_with_origin(route, origin):
     response = route.fetch()
-    body = response.text().replace("</head>", f'<meta name="kn-origin" content="{origin}"></head>')
+    body = response.text().replace('content="__KN_ORIGIN__"', f'content="{origin}"')
     headers = {k: v for k, v in response.headers.items() if k.lower() != "content-security-policy"}
     headers.pop("content-length", None)
     route.fulfill(response=response, body=body, headers=headers)

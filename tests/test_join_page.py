@@ -156,14 +156,14 @@ def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_
         f"{server_url}/join*",
         lambda route: _landing_with_origin(route, origin.format(page_origin=server_url)),
     )
-    page.add_init_script("""() => {
+    page.add_init_script("""
       window.__directWakes = [];
       const originalFetch = window.fetch;
       window.fetch = function(input, options) {
         if (options?.mode === 'no-cors') window.__directWakes.push(String(input));
         return originalFetch.apply(this, arguments);
       };
-    }""")
+    """)
     page.goto(f"{server_url}/join?room=KAZ12345")
     expect(page.locator("#inv-waking")).to_be_visible()
     page.wait_for_timeout(500)
@@ -172,7 +172,7 @@ def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_
 
 def _landing_with_origin(route, origin):
     response = route.fetch()
-    body = response.text().replace("</head>", f'<meta name="kn-origin" content="{origin}"></head>')
+    body = response.text().replace('content="__KN_ORIGIN__"', f'content="{origin}"')
     headers = {k: v for k, v in response.headers.items() if k.lower() != "content-security-policy"}
     headers.pop("content-length", None)
     route.fulfill(response=response, body=body, headers=headers)
