@@ -626,9 +626,8 @@ class ErrorPageMiddleware:
                     await send({"type": "http.response.body", "body": body})
                     return
                 await send(message)
-            elif message["type"] == "http.response.body":
-                if not intercepted:
-                    await send(message)
+            elif message["type"] == "http.response.body" and not intercepted:
+                await send(message)
 
         await self.app(scope, receive, capture_send)
 
