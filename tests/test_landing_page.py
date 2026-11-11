@@ -176,6 +176,49 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     expect(page.locator("#create-btn")).to_be_enabled()
 
 
+def test_waking_sends_one_direct_origin_wake_request(page, server_url):
+    _mock(page, health=False)
+    page.route("**/", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
+    direct_wakes = []
+    page.route(
+        "**://wake-origin.example/health*",
+        lambda route: (direct_wakes.append(route.request.url), route.fulfill(status=204)),
+    )
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "waking")
+    page.wait_for_timeout(500)
+    assert len(direct_wakes) == 1
+    page.wait_for_timeout(3500)
+    assert len(direct_wakes) == 1
+    assert _state(page) == "waking"  # same-origin health still controls the page state
+
+
+@pytest.mark.parametrize("origin", ["", "__KN_ORIGIN__", "{page_origin}"])
+def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_url, origin):
+    _mock(page, health=False)
+    page.route("**/", lambda route: _landing_with_origin(route, origin.format(page_origin=server_url)))
+    page.add_init_script("""() => {
+      window.__directWakes = [];
+      const originalFetch = window.fetch;
+      window.fetch = function(input, options) {
+        if (options?.mode === 'no-cors') window.__directWakes.push(String(input));
+        return originalFetch.apply(this, arguments);
+      };
+    }""")
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "waking")
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__directWakes") == []
+
+
+def _landing_with_origin(route, origin):
+    response = route.fetch()
+    body = response.text().replace("</head>", f'<meta name="kn-origin" content="{origin}"></head>')
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-security-policy"}
+    headers.pop("content-length", None)
+    route.fulfill(response=response, body=body, headers=headers)
+
+
 def test_list_failure_shows_error_and_keeps_create(landing):
     page = landing(list_ok=False)
     assert _state(page) == "error"

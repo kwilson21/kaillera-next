@@ -134,6 +134,50 @@ def test_waking_then_the_room(page, server_url):
     expect(page.locator("#inv-waking")).to_be_hidden()
 
 
+def test_waking_sends_one_direct_origin_wake_request(page, server_url):
+    direct_wakes = []
+    page.route("**/health", lambda route: route.abort())
+    page.route(f"{server_url}/join*", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
+    page.route(
+        "**://wake-origin.example/health*",
+        lambda route: (direct_wakes.append(route.request.url), route.fulfill(status=204)),
+    )
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-waking")).to_be_visible()
+    page.wait_for_timeout(3500)
+    assert direct_wakes == ["https://wake-origin.example/health"]
+    expect(page.locator("#inv-waking")).to_be_visible()  # same-origin health still controls the page state
+
+
+@pytest.mark.parametrize("origin", ["", "__KN_ORIGIN__", "{page_origin}"])
+def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_url, origin):
+    page.route("**/health", lambda route: route.abort())
+    page.route(
+        f"{server_url}/join*",
+        lambda route: _landing_with_origin(route, origin.format(page_origin=server_url)),
+    )
+    page.add_init_script("""() => {
+      window.__directWakes = [];
+      const originalFetch = window.fetch;
+      window.fetch = function(input, options) {
+        if (options?.mode === 'no-cors') window.__directWakes.push(String(input));
+        return originalFetch.apply(this, arguments);
+      };
+    }""")
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-waking")).to_be_visible()
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__directWakes") == []
+
+
+def _landing_with_origin(route, origin):
+    response = route.fetch()
+    body = response.text().replace("</head>", f'<meta name="kn-origin" content="{origin}"></head>')
+    headers = {k: v for k, v in response.headers.items() if k.lower() != "content-security-policy"}
+    headers.pop("content-length", None)
+    route.fulfill(response=response, body=body, headers=headers)
+
+
 def test_in_app_browser_banner(browser, server_url):
     ctx = browser.new_context(
         user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Discord/231.0"

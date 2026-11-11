@@ -83,6 +83,12 @@ def test_privacy_notice_is_packaged_and_changes_the_landing_build_id(tmp_path):
     assert landing_build.landing_build_id(tmp_path) != before
 
 
+def test_landing_pages_keep_the_worker_origin_marker():
+    for page in ("index.html", "join.html"):
+        html = (REPO / "web" / page).read_text()
+        assert '<meta name="kn-origin" content="__KN_ORIGIN__"' in html
+
+
 def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
     """Frequently rewritten footer metadata must not make landing stale."""
     _copy_landing_source(tmp_path)

@@ -68,13 +68,14 @@ const CRAWLER =
   /Discordbot|Twitterbot|facebookexternalhit|Facebot|Slackbot|WhatsApp|TelegramBot|LinkedInBot|SkypeUriPreview|Applebot|redditbot|Embedly|Iframely/i;
 const PREVIEW_TIMEOUT_MS = 1500;
 
-function withHeaders(res, isPage) {
+function withHeaders(res, isPage, connectOrigin = '') {
   const out = new Response(res.body, res);
   out.headers.set('X-Content-Type-Options', 'nosniff');
   out.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   out.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
   if (isPage) {
-    out.headers.set('Content-Security-Policy', CSP);
+    const csp = connectOrigin ? CSP.replace("connect-src 'self';", `connect-src 'self' ${connectOrigin};`) : CSP;
+    out.headers.set('Content-Security-Policy', csp);
     out.headers.set('X-Frame-Options', 'SAMEORIGIN');
     out.headers.set('Cache-Control', 'no-store');
   } else {
@@ -86,8 +87,12 @@ function withHeaders(res, isPage) {
 // The static pages carry generic preview tags with a host placeholder. On
 // /join the canonical link keeps the invite (only a room ID that fits the
 // server's pattern goes in; anything else is left out).
-async function staticPage(res, url) {
-  let html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
+async function staticPage(res, url, env) {
+  const origin = new URL(env.ORIGIN).origin;
+  const connectOrigin = origin === url.origin ? '' : origin;
+  let html = (await res.text())
+    .replaceAll('https://__KN_HOST__', `https://${url.host}`)
+    .replaceAll('__KN_ORIGIN__', connectOrigin);
   const raw = url.searchParams.get('room') || '';
   const room = /^[A-Za-z0-9]{3,16}$/.test(raw) ? raw : ''; // case-sensitive, like the server
   if (url.pathname === '/join' && room) {
@@ -97,7 +102,7 @@ async function staticPage(res, url) {
       `property="og:url" content="https://${url.host}/join?room=${room}${spectate}"`,
     );
   }
-  return withHeaders(new Response(html, res), true);
+  return withHeaders(new Response(html, res), true, connectOrigin);
 }
 
 async function previewPage(request, env, url) {
@@ -389,10 +394,10 @@ export default {
       const verdict = await currentVerdict(env, ctx, true);
       if (verdict === 'stale' && !previewFailed) {
         const proxied = await proxyLanding(request, env, url);
-        if (proxied) return proxied;
+        if (proxied) return staticPage(proxied, url, env);
       }
       const res = await env.ASSETS.fetch(new Request(new URL(page, url), request));
-      return staticPage(res, url);
+      return staticPage(res, url, env);
     }
     if (isAsset) {
       if (url.pathname === '/static/landing-build.json') {
